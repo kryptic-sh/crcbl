@@ -4,12 +4,13 @@ use core::ops::Range;
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindGroupLayoutHandle, BindingKind, BindingResource, BufferDesc, BufferHandle, ClearValue,
-    ColorAttachment, ComputePipelineDesc, ComputePipelineHandle, DepthStencilAttachment,
-    DeviceDesc, Extent3d, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange,
-    ImageViewDesc, ImageViewHandle, PipelineLayoutDesc, PipelineLayoutHandle, Rect2d,
-    RenderPassDesc, SamplerDesc, SamplerHandle, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
-    SurfaceHandle,
+    BindGroupLayoutHandle, BindingKind, BindingResource, BlendState, BufferDesc, BufferHandle,
+    ClearValue, ColorAttachment, ColorTargetState, ComputePipelineDesc, ComputePipelineHandle,
+    DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d, GraphicsPipelineDesc,
+    GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange, ImageViewDesc,
+    ImageViewHandle, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
+    Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, ShaderModuleDesc, ShaderModuleHandle,
+    ShaderStages, StencilFaceState, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -145,6 +146,118 @@ impl ByteWriter {
         self.put_u8(tag::load_op_code(attachment.stencil_load));
         self.put_u8(tag::store_op_code(attachment.stencil_store));
         self.put_clear_value(attachment.clear);
+    }
+
+    /// One [`PrimitiveState`], in the order the struct declares its fields.
+    ///
+    /// Four leaf enums and a `bool`, all leaf codes: the topology, the winding,
+    /// the cull mode and the fill mode each go over as their own table's code, so
+    /// a byte read out of position lands on a real variant of the wrong field
+    /// rather than on an error — which is what makes the field order load-bearing
+    /// and why it is spelled out one line at a time.
+    fn put_primitive_state(&mut self, primitive: &PrimitiveState) {
+        self.put_u8(tag::primitive_topology_code(primitive.topology));
+        self.put_u8(tag::front_face_code(primitive.front_face));
+        self.put_u8(tag::cull_mode_code(primitive.cull_mode));
+        self.put_u8(tag::polygon_mode_code(primitive.polygon_mode));
+        self.put_bool(primitive.depth_clamp);
+    }
+
+    /// One [`StencilFaceState`]: its compare op, then its three [`StencilOp`]s in
+    /// the order the struct declares them — `fail_op`, `depth_fail_op`, `pass_op`.
+    ///
+    /// The three ops are the same table three times in a row, so their order is
+    /// pinned here the way the sampler's three filters are: any two read in the
+    /// wrong order still decodes to a face state that writes the stencil buffer
+    /// the wrong way.
+    fn put_stencil_face_state(&mut self, face: &StencilFaceState) {
+        self.put_u8(tag::compare_op_code(face.compare));
+        self.put_u8(tag::stencil_op_code(face.fail_op));
+        self.put_u8(tag::stencil_op_code(face.depth_fail_op));
+        self.put_u8(tag::stencil_op_code(face.pass_op));
+    }
+
+    /// One [`DepthStencilState`], in the order the struct declares its fields.
+    ///
+    /// **The deepest optional chain on the seam.** The stencil rides a presence
+    /// byte — the house rule for an optional field that is not a handle — and,
+    /// when present, its `front` and `back` faces go over in that order, distinct
+    /// so a front/back swap is visible, followed by the three masks. The bias's
+    /// three floats cross as bit patterns through [`f32::to_le_bytes`], as every
+    /// float on this stream does.
+    ///
+    /// **The stencil `reference` crosses whole**, even though it is not a WebGPU
+    /// pipeline field — it is set per-pass through `setStencilReference`, and the
+    /// replayer drops it there, the way `workgroup_size` is dropped. Carrying it
+    /// keeps the HAL struct round-tripping and lets a transposition among the
+    /// three masks be caught.
+    fn put_depth_stencil_state(&mut self, state: &DepthStencilState) {
+        self.put_u8(tag::format_code(state.format));
+        self.put_bool(state.depth_write);
+        self.put_u8(tag::compare_op_code(state.depth_compare));
+        match &state.stencil {
+            None => self.put_u8(tag::ABSENT),
+            Some(stencil) => {
+                self.put_u8(tag::PRESENT);
+                self.put_stencil_face_state(&stencil.front);
+                self.put_stencil_face_state(&stencil.back);
+                self.put_u32(stencil.read_mask);
+                self.put_u32(stencil.write_mask);
+                self.put_u32(stencil.reference);
+            }
+        }
+        self.put_f32(state.bias.constant);
+        self.put_f32(state.bias.slope_scale);
+        self.put_f32(state.bias.clamp);
+    }
+
+    /// One [`MultisampleState`], in the order the struct declares its fields.
+    ///
+    /// `samples` and `mask` are both `u32` and adjacent, which is why they are
+    /// written one at a time: the replayer refuses a `samples` count that is
+    /// neither `1` nor `4`, so a body that read the mask where the count goes
+    /// would turn a legal `mask` into an illegal count and vice versa.
+    fn put_multisample_state(&mut self, multisample: &MultisampleState) {
+        self.put_u32(multisample.samples);
+        self.put_u32(multisample.mask);
+        self.put_bool(multisample.alpha_to_coverage);
+    }
+
+    /// One [`BlendState`]: colour source/dest/op, then alpha source/dest/op.
+    ///
+    /// Four [`BlendFactor`](crcbl_hal::BlendFactor) codes and two
+    /// [`BlendOp`](crcbl_hal::BlendOp) codes interleaved, all from tables whose
+    /// unclaimed codes the reader refuses. The order is the struct's, and it is
+    /// load-bearing for the same reason the sampler's is: every one of the six is
+    /// a value the other five could hold, so the *colour* half read as the
+    /// *alpha* half still builds a target that blends with the wrong equation.
+    fn put_blend_state(&mut self, blend: &BlendState) {
+        self.put_u8(tag::blend_factor_code(blend.color_src));
+        self.put_u8(tag::blend_factor_code(blend.color_dst));
+        self.put_u8(tag::blend_op_code(blend.color_op));
+        self.put_u8(tag::blend_factor_code(blend.alpha_src));
+        self.put_u8(tag::blend_factor_code(blend.alpha_dst));
+        self.put_u8(tag::blend_op_code(blend.alpha_op));
+    }
+
+    /// One [`ColorTargetState`]: format, an optional blend, and the write mask.
+    ///
+    /// The blend rides a presence byte — the house rule — so `None` (blending
+    /// disabled) is a distinct, shorter body than a `Some` and cannot be confused
+    /// with an all-zero [`BlendState`]. `write_mask` crosses as its
+    /// [`ColorWrites`](crcbl_hal::ColorWrites) bits, the way every bitflags field
+    /// on this stream does, so a bit no channel claims is refused rather than
+    /// truncated.
+    fn put_color_target_state(&mut self, target: &ColorTargetState) {
+        self.put_u8(tag::format_code(target.format));
+        match &target.blend {
+            None => self.put_u8(tag::ABSENT),
+            Some(blend) => {
+                self.put_u8(tag::PRESENT);
+                self.put_blend_state(blend);
+            }
+        }
+        self.put_u32(target.write_mask.bits());
     }
 }
 
@@ -617,6 +730,76 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_graphics_pipeline`](crcbl_hal::Device::create_graphics_pipeline),
+    /// with the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow the descriptor's declaration order for
+    /// [`create_image`](Self::create_image)'s. **The largest descriptor on the
+    /// seam**, and the one whose depth-stencil chain
+    /// `docs/plan/41-webgpu-stream.md` names as the deepest: the whole tree is
+    /// written out through the field writers above, so a stride wrong by a byte
+    /// anywhere in it lands the cursor inside the next field rather than
+    /// truncating.
+    ///
+    /// **The vertex stage is a module handle and an entry point and nothing
+    /// else** — no vertex-buffer layout, because the engine pulls geometry from
+    /// storage buffers, so `GPUVertexState.buffers` is the empty array and there
+    /// is nothing on the wire for it. The fragment stage rides a presence byte:
+    /// `None` is a depth-only pass and writes just [`ABSENT`](tag::ABSENT), a
+    /// `Some` writes its module and entry point. The four state blocks —
+    /// primitive, the optional depth-stencil, multisample, and the counted list
+    /// of colour targets — follow.
+    ///
+    /// **Nothing is resolved and nothing is validated**, which is
+    /// [`create_image`](Self::create_image)'s rule met by the deepest descriptor.
+    /// A [`PolygonMode::Line`](crcbl_hal::PolygonMode::Line), a
+    /// [`depth_clamp`](crcbl_hal::PrimitiveState::depth_clamp) the device cannot
+    /// serve, a `samples` count WebGPU forbids, a fractional
+    /// [`DepthBias.constant`](crcbl_hal::DepthBias::constant), the stencil
+    /// [`reference`](crcbl_hal::StencilState::reference) WebGPU sets per-pass — all
+    /// cross verbatim, because each is a value the wire form claims and the
+    /// replayer is the half that faces WebGPU. See
+    /// [`Command::CreateGraphicsPipeline`](crate::Command::CreateGraphicsPipeline).
+    pub fn create_graphics_pipeline(
+        &mut self,
+        pipeline: GraphicsPipelineHandle,
+        desc: &GraphicsPipelineDesc<'_>,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_GRAPHICS_PIPELINE_TAG);
+        self.bytes.put_handle(pipeline);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_handle(desc.layout);
+        self.bytes.put_handle(desc.vertex.module);
+        self.bytes.put_bytes(desc.vertex.entry_point.as_bytes());
+        // A presence byte, because a fragment stage is an optional field that is
+        // not a handle — the house rule, exactly as `create_sampler`'s `compare`
+        // uses. `None` is a depth-only pass and the replayer omits the whole
+        // `GPUFragmentState` member.
+        match &desc.fragment {
+            None => self.bytes.put_u8(tag::ABSENT),
+            Some(fragment) => {
+                self.bytes.put_u8(tag::PRESENT);
+                self.bytes.put_handle(fragment.module);
+                self.bytes.put_bytes(fragment.entry_point.as_bytes());
+            }
+        }
+        self.bytes.put_primitive_state(&desc.primitive);
+        match &desc.depth_stencil {
+            None => self.bytes.put_u8(tag::ABSENT),
+            Some(depth_stencil) => {
+                self.bytes.put_u8(tag::PRESENT);
+                self.bytes.put_depth_stencil_state(depth_stencil);
+            }
+        }
+        self.bytes.put_multisample_state(&desc.multisample);
+        self.bytes.put_count(desc.color_targets.len());
+        for target in desc.color_targets {
+            self.bytes.put_color_target_state(target);
+        }
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -725,6 +908,20 @@ impl StreamWriter {
     /// behind it every time that happens.
     pub fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_COMPUTE_PIPELINE_TAG);
+        self.bytes.put_handle(pipeline);
+        sequence
+    }
+
+    /// [`Device::destroy_graphics_pipeline`](crcbl_hal::Device::destroy_graphics_pipeline).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason, and — like the compute-pipeline destroy — the one whose **empty
+    /// slot is ordinary rather than exceptional**: the replayer refuses a pipeline
+    /// it cannot build (a `Line` polygon mode, an unresolvable layout or module, a
+    /// forbidden `samples` count), so the handle the caller pre-allocated is
+    /// destroyed with nothing behind it every time that happens.
+    pub fn destroy_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_GRAPHICS_PIPELINE_TAG);
         self.bytes.put_handle(pipeline);
         sequence
     }

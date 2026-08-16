@@ -688,6 +688,19 @@ const PROBE_PIPELINE_LAYOUT_LABEL = 'crcbl-webgpu probe pipeline layout';
 const PROBE_COMPUTE_PIPELINE_LABEL = 'crcbl-webgpu probe compute pipeline';
 
 /**
+ * The label `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_GRAPHICS_PIPELINE_DESC`
+ * sets.
+ *
+ * A `GPURenderPipeline` reports its `label` and answers `getBindGroupLayout(n)`
+ * exactly as a compute pipeline does, so group R has the same two pieces of
+ * evidence — but it is the *largest* descriptor on the seam, so what group R
+ * really puts in front of the device is a whole nested tree: the primitive
+ * state, the reversed-Z depth-stencil, the multisample state, and a blended
+ * colour target, all of which a real `createRenderPipeline` must accept.
+ */
+const PROBE_GRAPHICS_PIPELINE_LABEL = 'crcbl-webgpu probe raster pipeline';
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -4316,6 +4329,119 @@ try {
         ? `an instance of this browser's GPUComputePipeline labelled ${JSON.stringify(computePipelineProbe.label)}, its getBindGroupLayout(0) a real GPUBindGroupLayout, of ${computePipelineProbe.held} held, and the device reported nothing`
         : `instanceof GPUComputePipeline: ${computePipelineProbe?.isRealPipeline}, getBindGroupLayout(0) real: ${computePipelineProbe?.derivedLayout}, label ${JSON.stringify(computePipelineProbe?.label)}` +
           `${computePipelineReport?.error ? ` — ${computePipelineReport.error}` : ''}`
+  );
+
+  // A `GPURenderPipeline` answers `getBindGroupLayout(0)` like a compute pipeline
+  // — but it is the *largest* descriptor on the seam, so group R is what puts its
+  // whole nested tree (a `TriangleList` primitive, a reversed-Z depth-stencil, a
+  // single-sampled multisample state, and a blended `Rgba8Unorm` target) in front
+  // of a real device. `gpu-replay.mjs` proves the descriptor and every "WebGPU
+  // cannot express it" refusal against a stub; only this asks a real device to
+  // build the pipeline from a real vertex and fragment shader. Beyond
+  // `instanceof GPURenderPipeline` — which no stub can satisfy, node having no
+  // such binding — the gate calls `getBindGroupLayout(0)` and reads the device's
+  // error queue after a settle.
+  group('R — a graphics pipeline is built on the real device');
+
+  const graphicsPipelineStart = await evaluate(
+    page,
+    `(async () => {
+       const { startGraphicsPipelineProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startGraphicsPipelineProbe({ exports }),
+         replayed: before.replayed,
+       };
+     })()`
+  );
+  const graphicsPipelineProbe = graphicsPipelineStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const { gpu } = globalThis.crcbl;
+             const stats = gpu.stats();
+             if (stats.replayed <= ${graphicsPipelineStart.replayed} && !stats.failure) {
+               return null;
+             }
+             const entries = [...gpu.replayer.graphicsPipelines.entries()];
+             const last = entries[entries.length - 1];
+             const pipeline = last ? last[1] : undefined;
+             let derivedLayout = false;
+             try {
+               // The call no stub and no half-built pipeline can answer: a real
+               // GPURenderPipeline hands back a GPUBindGroupLayout for group 0,
+               // because a pipeline is where the shaders and their layout are bound.
+               derivedLayout =
+                 typeof GPUBindGroupLayout === 'function' &&
+                 pipeline?.getBindGroupLayout(0) instanceof GPUBindGroupLayout;
+             } catch (error) {
+               derivedLayout = false;
+             }
+             return {
+               commands: stats.commands,
+               failure: stats.failure,
+               handle: last ? last[0] : null,
+               held: entries.length,
+               // The browser's own class. Node has no \`GPURenderPipeline\`
+               // binding at all, so this is what a silent fall back to a stub
+               // cannot survive.
+               isRealPipeline:
+                 typeof GPURenderPipeline === 'function' &&
+                 pipeline instanceof GPURenderPipeline,
+               derivedLayout,
+               label: pipeline?.label,
+             };
+           })()`
+        )
+      )
+    : null;
+
+  // Read the device error queue a moment after the replay, for group Q's reason:
+  // `createRenderPipeline` reports a bad shader/layout or an unexpressible field
+  // through `uncapturederror` a task later, so a queue read in the evaluation that
+  // saw the replay finish is empty whatever happened.
+  const graphicsPipelineReport = graphicsPipelineProbe
+    ? await evaluate(
+        page,
+        `(async () => {
+           await new Promise((settle) =>
+             requestAnimationFrame(() => requestAnimationFrame(settle))
+           );
+           return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
+         })()`
+      )
+    : null;
+  check(
+    'R',
+    'wasm encoded a graphics pipeline creation and the demo loop replayed it',
+    graphicsPipelineProbe?.commands?.join(',') ===
+      'CreateShaderModule,CreatePipelineLayout,CreateGraphicsPipeline' &&
+      Number.isInteger(graphicsPipelineProbe.handle),
+    graphicsPipelineProbe
+      ? `the loop replayed [${graphicsPipelineProbe.commands.join(', ')}] for graphics pipeline ${graphicsPipelineProbe.handle}` +
+          `${graphicsPipelineProbe.failure ? ` — ${graphicsPipelineProbe.failure}` : ''}`
+      : graphicsPipelineStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'R',
+    'a real GPURenderPipeline came back from the device and answered getBindGroupLayout',
+    graphicsPipelineProbe?.isRealPipeline === true &&
+      graphicsPipelineProbe?.derivedLayout === true &&
+      graphicsPipelineProbe?.label === PROBE_GRAPHICS_PIPELINE_LABEL &&
+      graphicsPipelineReport?.waited === true &&
+      graphicsPipelineReport?.error === null,
+    graphicsPipelineReport?.waited !== true
+      ? 'the page never got as far as reading the device error queue'
+      : graphicsPipelineProbe?.isRealPipeline &&
+          graphicsPipelineProbe?.derivedLayout &&
+          graphicsPipelineReport.error === null
+        ? `an instance of this browser's GPURenderPipeline labelled ${JSON.stringify(graphicsPipelineProbe.label)}, its getBindGroupLayout(0) a real GPUBindGroupLayout, of ${graphicsPipelineProbe.held} held, and the device reported nothing`
+        : `instanceof GPURenderPipeline: ${graphicsPipelineProbe?.isRealPipeline}, getBindGroupLayout(0) real: ${graphicsPipelineProbe?.derivedLayout}, label ${JSON.stringify(graphicsPipelineProbe?.label)}` +
+          `${graphicsPipelineReport?.error ? ` — ${graphicsPipelineReport.error}` : ''}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

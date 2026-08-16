@@ -10,11 +10,14 @@ mod corpus;
 
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage,
-    CompareOp, ComputePipelineDesc, DeviceDesc, Extent3d, Features, FilterMode, Format,
-    ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewType, MemoryLocation, PipelineLayoutDesc, PushConstantRange, SampleType,
-    SamplerAddressMode, SamplerDesc, ShaderEntry, ShaderModuleDesc, ShaderStages,
+    BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp,
+    BlendState, BufferDesc, BufferUsage, ColorTargetState, ColorWrites, CompareOp,
+    ComputePipelineDesc, CullMode, DepthBias, DepthStencilState, DeviceDesc, Extent3d, Features,
+    FilterMode, Format, FrontFace, GraphicsPipelineDesc, ImageAspect, ImageDesc,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, MemoryLocation,
+    MultisampleState, PipelineLayoutDesc, PolygonMode, PrimitiveState, PrimitiveTopology,
+    PushConstantRange, SampleType, SamplerAddressMode, SamplerDesc, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, StencilFaceState, StencilOp, StencilState,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -1636,10 +1639,11 @@ fn every_command_has_its_own_name() {
     // `every_command` holds three CreateBuffers, three CreateImages, six
     // CreateImageViews, four CreateSamplers, six CreateBindGroupLayouts, two
     // CreateBindGroups, three CreateShaderModules, two CreatePipelineLayouts, one
-    // CreateComputePipeline and its DestroyComputePipeline, and two each of
+    // CreateComputePipeline and its DestroyComputePipeline, one
+    // CreateGraphicsPipeline and its DestroyGraphicsPipeline, and two each of
     // BeginRenderPass, BindGroup and RequestDevice, so the distinct-name count is
     // what the writer has methods for.
-    assert_eq!(names.len(), 29);
+    assert_eq!(names.len(), 31);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -2188,6 +2192,381 @@ fn a_compute_pipelines_label_keeps_some_empty_apart_from_none() {
             assert_eq!(*absent, None);
         }
         _ => panic!("expected two CreateComputePipelines"),
+    }
+}
+
+// ── Graphics pipelines ────────────────────────────────────────────────────────
+
+/// A rich, non-default graphics pipeline: a `Some` fragment, a `Some`
+/// depth-stencil with a `Some` stencil whose `front` and `back` differ in every
+/// field, a non-trivial bias, MSAA 4, and two colour targets with distinct
+/// formats — one blended, one not. The one every graphics-pipeline test below
+/// varies a field of.
+fn rich_graphics_pipeline() -> GraphicsPipelineDesc<'static> {
+    GraphicsPipelineDesc {
+        label: Some("gbuffer"),
+        layout: handle(121, 122),
+        vertex: ShaderEntry {
+            module: handle(113, 114),
+            entry_point: "vertexMain",
+        },
+        fragment: Some(ShaderEntry {
+            module: handle(115, 116),
+            entry_point: "fragmentMain",
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleStrip,
+            front_face: FrontFace::Cw,
+            cull_mode: CullMode::Back,
+            polygon_mode: PolygonMode::Fill,
+            depth_clamp: false,
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: Format::D32FloatS8Uint,
+            depth_write: false,
+            depth_compare: CompareOp::GreaterOrEqual,
+            stencil: Some(StencilState {
+                front: StencilFaceState {
+                    compare: CompareOp::Less,
+                    fail_op: StencilOp::Keep,
+                    depth_fail_op: StencilOp::IncrementWrap,
+                    pass_op: StencilOp::Replace,
+                },
+                back: StencilFaceState {
+                    compare: CompareOp::Greater,
+                    fail_op: StencilOp::Zero,
+                    depth_fail_op: StencilOp::DecrementClamp,
+                    pass_op: StencilOp::Invert,
+                },
+                read_mask: 0x0F,
+                write_mask: 0xF0,
+                reference: 0x2A,
+            }),
+            bias: DepthBias {
+                constant: -2.0,
+                slope_scale: 0.1,
+                clamp: 0.25,
+            },
+        }),
+        multisample: MultisampleState {
+            samples: 4,
+            mask: 0x0000_00FF,
+            alpha_to_coverage: true,
+        },
+        color_targets: &TWO_TARGETS,
+    }
+}
+
+/// The two colour targets `rich_graphics_pipeline` names, held out so the slice
+/// outlives the descriptor a `'static` return needs.
+static TWO_TARGETS: [ColorTargetState; 2] = [
+    ColorTargetState {
+        format: Format::Rgba16Float,
+        blend: Some(BlendState {
+            color_src: BlendFactor::SrcAlpha,
+            color_dst: BlendFactor::OneMinusSrcAlpha,
+            color_op: BlendOp::Add,
+            alpha_src: BlendFactor::One,
+            alpha_dst: BlendFactor::OneMinusSrcAlpha,
+            alpha_op: BlendOp::Add,
+        }),
+        write_mask: ColorWrites::ALL,
+    },
+    ColorTargetState {
+        format: Format::Rg16Float,
+        blend: None,
+        write_mask: ColorWrites::R.union(ColorWrites::G),
+    },
+];
+
+/// **The whole nested tree survives a round trip field for field.**
+///
+/// The claims that cost the most, stated as assertions at the end: the stencil's
+/// `front` and `back` differ in every field so a swap goes red, the bias floats
+/// are bit-exact including one no short decimal names, and the two colour targets
+/// stay in order with distinct formats.
+#[test]
+fn a_graphics_pipeline_carries_its_whole_nested_tree_field_for_field() {
+    let desc = rich_graphics_pipeline();
+    let mut stream = StreamWriter::new();
+    stream.create_graphics_pipeline(handle(131, 132), &desc);
+    stream.destroy_graphics_pipeline(handle(133, 134));
+
+    let decoded = decode_stream(stream.bytes()).expect("a stream this crate wrote decodes");
+    assert_eq!(decoded.len(), 2);
+    let Command::CreateGraphicsPipeline {
+        pipeline,
+        label,
+        layout,
+        vertex_module,
+        vertex_entry_point,
+        fragment,
+        primitive,
+        depth_stencil,
+        multisample,
+        color_targets,
+    } = &decoded[0]
+    else {
+        panic!("expected CreateGraphicsPipeline, got {}", decoded[0].name());
+    };
+    assert_eq!(*pipeline, handle(131, 132));
+    assert_eq!(label.as_deref(), Some("gbuffer"));
+    assert_eq!(*layout, handle(121, 122));
+    assert_eq!(*vertex_module, handle(113, 114));
+    assert_eq!(vertex_entry_point, "vertexMain");
+    assert_eq!(
+        *fragment,
+        Some((handle(115, 116), "fragmentMain".to_string()))
+    );
+    assert_eq!(*primitive, desc.primitive);
+    assert_eq!(*depth_stencil, desc.depth_stencil);
+    assert_eq!(*multisample, desc.multisample);
+    assert_eq!(color_targets.as_slice(), desc.color_targets);
+    assert_eq!(
+        decoded[1],
+        Command::DestroyGraphicsPipeline {
+            pipeline: handle(133, 134),
+        }
+    );
+
+    // The claims worth stating out loud, so the test cannot pass with them
+    // quietly untrue.
+    let stencil = depth_stencil
+        .as_ref()
+        .and_then(|ds| ds.stencil.as_ref())
+        .expect("the rich pipeline has a stencil");
+    assert_ne!(
+        stencil.front, stencil.back,
+        "front and back are equal, so the test would not notice them swapped"
+    );
+    assert_ne!(
+        stencil.read_mask, stencil.write_mask,
+        "the masks are equal, so the test would not notice them swapped"
+    );
+    let bias = depth_stencil.as_ref().map(|ds| ds.bias).expect("a bias");
+    assert_eq!(
+        bias.slope_scale, 0.1_f32,
+        "the awkward decimal is bit-exact"
+    );
+    assert_eq!(bias.constant, -2.0_f32);
+    assert_eq!(color_targets.len(), 2);
+    assert_ne!(
+        color_targets[0].format, color_targets[1].format,
+        "the two targets share a format, so a reversal would not be noticed"
+    );
+    assert!(color_targets[0].blend.is_some() && color_targets[1].blend.is_none());
+}
+
+/// **An absent fragment is a depth-only pass and a distinct, shorter body** — the
+/// `Some("")`/`None` distinction that decides a WGSL truncation elsewhere, applied
+/// to the whole fragment stage.
+#[test]
+fn a_graphics_pipelines_absent_fragment_is_a_shorter_body_than_a_present_one() {
+    let present = rich_graphics_pipeline();
+    let absent = GraphicsPipelineDesc {
+        fragment: None,
+        ..rich_graphics_pipeline()
+    };
+    let mut with = StreamWriter::new();
+    with.create_graphics_pipeline(handle(1, 1), &present);
+    let mut without = StreamWriter::new();
+    without.create_graphics_pipeline(handle(1, 1), &absent);
+    assert_ne!(with.bytes(), without.bytes());
+    // The absent one is shorter by the fragment module handle and its entry
+    // point (its length prefix plus the string), which the present one writes and
+    // the absent one does not.
+    let fragment_bytes = 8 + 4 + "fragmentMain".len();
+    assert_eq!(without.bytes().len() + fragment_bytes, with.bytes().len());
+
+    match decode_stream(without.bytes()).expect("decodes").remove(0) {
+        Command::CreateGraphicsPipeline { fragment, .. } => assert_eq!(fragment, None),
+        other => panic!("expected CreateGraphicsPipeline, got {}", other.name()),
+    }
+}
+
+/// **A `None` depth-stencil and an empty colour-target list round-trip** — the
+/// two optional/counted fields at their empty extreme, which a reader most easily
+/// mistakes for "read until something stops you".
+#[test]
+fn a_graphics_pipeline_with_no_depth_and_no_targets_round_trips() {
+    let desc = GraphicsPipelineDesc {
+        depth_stencil: None,
+        color_targets: &[],
+        ..rich_graphics_pipeline()
+    };
+    let mut stream = StreamWriter::new();
+    stream.create_graphics_pipeline(handle(1, 1), &desc);
+    stream.enumerate_adapters();
+
+    let decoded = decode_stream(stream.bytes()).expect("decodes");
+    match &decoded[0] {
+        Command::CreateGraphicsPipeline {
+            depth_stencil,
+            color_targets,
+            ..
+        } => {
+            assert_eq!(*depth_stencil, None);
+            assert!(color_targets.is_empty());
+        }
+        other => panic!("expected CreateGraphicsPipeline, got {}", other.name()),
+    }
+    // The command after it survives: an empty target list ends at the count, not
+    // at the next tag.
+    assert_eq!(decoded[1], Command::EnumerateAdapters);
+}
+
+/// Every nested enum in the tree refuses a code no variant claims, naming the
+/// field it belongs to — one red per table — and a `ColorWrites` bit no channel
+/// claims is refused rather than truncated.
+///
+/// The offsets are computed from the wire layout of `rich_graphics_pipeline`
+/// behind an absent-then-present body, so each corruption lands on exactly one
+/// leaf.
+#[test]
+fn every_nested_graphics_pipeline_enum_refuses_an_unclaimed_code() {
+    let mut stream = StreamWriter::new();
+    stream.create_graphics_pipeline(handle(1, 1), &rich_graphics_pipeline());
+    let whole = stream.bytes().to_vec();
+
+    // Walk the body to name every leaf's offset. Header, tag, pipeline handle,
+    // present label ("gbuffer"), layout handle, vertex module, vertex entry
+    // ("vertexMain"), fragment presence + module + entry ("fragmentMain").
+    let mut at = tag::HEADER_BYTES + 1; // past the opcode
+    at += 8; // pipeline handle
+    at += 1 + 4 + "gbuffer".len(); // present label
+    at += 8; // layout
+    at += 8; // vertex module
+    at += 4 + "vertexMain".len(); // vertex entry point
+    at += 1; // fragment presence byte (present)
+    at += 8; // fragment module
+    at += 4 + "fragmentMain".len(); // fragment entry point
+    let topology_at = at;
+    let front_face_at = topology_at + 1;
+    let cull_at = front_face_at + 1;
+    let polygon_at = cull_at + 1;
+    let depth_clamp_at = polygon_at + 1;
+    // depth_stencil: presence, format, depth_write, depth_compare, stencil
+    // presence, then front (compare + 3 ops), back (compare + 3 ops).
+    let ds_present_at = depth_clamp_at + 1;
+    let ds_format_at = ds_present_at + 1;
+    let ds_depth_compare_at = ds_format_at + 1 + 1; // + format + depth_write bool
+    let stencil_present_at = ds_depth_compare_at + 1;
+    let front_compare_at = stencil_present_at + 1;
+    let front_fail_at = front_compare_at + 1;
+    let back_compare_at = front_compare_at + 4;
+
+    // One leaf per table, each a code no variant claims (0x7F is past every one).
+    for (offset, field) in [
+        (topology_at, "PrimitiveState::topology"),
+        (front_face_at, "PrimitiveState::front_face"),
+        (cull_at, "PrimitiveState::cull_mode"),
+        (polygon_at, "PrimitiveState::polygon_mode"),
+        (ds_format_at, "DepthStencilState::format"),
+        (ds_depth_compare_at, "DepthStencilState::depth_compare"),
+        (front_compare_at, "StencilFaceState::compare"),
+        (front_fail_at, "StencilFaceState::fail_op"),
+        (back_compare_at, "StencilFaceState::compare"),
+    ] {
+        let mut bytes = whole.clone();
+        bytes[offset] = 0x7F;
+        assert_eq!(
+            decode_stream(&bytes),
+            Err(DecodeError::InvalidEnum { field, code: 0x7F }),
+            "{field} at offset {offset} was not refused",
+        );
+    }
+
+    // The depth-clamp and stencil presence bytes are presence fields, so a byte
+    // that is neither canonical value is refused naming them.
+    for (offset, field) in [
+        (depth_clamp_at, "PrimitiveState::depth_clamp"),
+        (stencil_present_at, "DepthStencilState::stencil"),
+    ] {
+        let mut bytes = whole.clone();
+        bytes[offset] = 2;
+        assert_eq!(
+            decode_stream(&bytes),
+            Err(DecodeError::InvalidEnum { field, code: 2 }),
+            "{field} presence byte at offset {offset} was not refused",
+        );
+    }
+
+    // The colour target's blend factors and ops, and its write mask, are past the
+    // multisample block and the target count. Find the first target's format by
+    // decoding the untouched stream and locating it relative to the end.
+    // multisample is samples(4) + mask(4) + alpha_to_coverage(1); then the u32
+    // target count; then target 0: format(1), blend presence(1), blend body
+    // (6 bytes), write_mask(4); then target 1.
+    let stencil_body = 1 + (1 + 3) * 2 + 4 + 4 + 4; // present + two faces + 3 masks
+    let bias = 4 + 4 + 4;
+    let ms_at = stencil_present_at + stencil_body + bias;
+    let target_count_at = ms_at + 4 + 4 + 1;
+    let target0_format_at = target_count_at + 4;
+    let target0_blend_present_at = target0_format_at + 1;
+    let target0_color_src_at = target0_blend_present_at + 1;
+    let target0_color_op_at = target0_color_src_at + 2;
+    let target0_write_mask_at = target0_color_src_at + 6;
+
+    for (offset, field) in [
+        (target0_format_at, "ColorTargetState::format"),
+        (target0_color_src_at, "BlendState::color_src"),
+        (target0_color_op_at, "BlendState::color_op"),
+    ] {
+        let mut bytes = whole.clone();
+        bytes[offset] = 0x7F;
+        assert_eq!(
+            decode_stream(&bytes),
+            Err(DecodeError::InvalidEnum { field, code: 0x7F }),
+            "{field} at offset {offset} was not refused",
+        );
+    }
+
+    // A ColorWrites bit no channel claims — one past ALL — is refused rather than
+    // truncated.
+    let unclaimed = ColorWrites::all().bits() + 1;
+    let mut bytes = whole.clone();
+    bytes[target0_write_mask_at..target0_write_mask_at + 4]
+        .copy_from_slice(&unclaimed.to_le_bytes());
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "ColorTargetState::write_mask",
+            code: unclaimed.into(),
+        })
+    );
+
+    // …and the code one past the last claimed topology, where an off-by-one in
+    // the table lands and where 0x7F would not.
+    let mut bytes = whole;
+    bytes[topology_at] = tag::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP + 1;
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "PrimitiveState::topology",
+            ..
+        })
+    ));
+}
+
+/// **The stencil `reference` is carried on the wire and round-trips**, even
+/// though it is not a WebGPU pipeline field — it is set per-pass through
+/// `setStencilReference`, and the replayer drops it there. A writer that resolved
+/// it away would still decode, so this pins it to the byte: the value survives.
+#[test]
+fn a_graphics_pipelines_stencil_reference_is_carried_rather_than_resolved() {
+    let desc = rich_graphics_pipeline();
+    let mut stream = StreamWriter::new();
+    stream.create_graphics_pipeline(handle(1, 1), &desc);
+
+    match decode_stream(stream.bytes()).expect("decodes").remove(0) {
+        Command::CreateGraphicsPipeline { depth_stencil, .. } => {
+            let reference = depth_stencil
+                .and_then(|ds| ds.stencil)
+                .map(|s| s.reference)
+                .expect("the rich pipeline has a stencil");
+            assert_eq!(reference, 0x2A, "the reference crossed verbatim");
+        }
+        other => panic!("expected CreateGraphicsPipeline, got {}", other.name()),
     }
 }
 

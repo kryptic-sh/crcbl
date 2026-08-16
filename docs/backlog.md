@@ -39,6 +39,29 @@ either. Written down so a green group M is not read as covering them.
   does not catch a lost visibility word. That mapping is held by
   `gpu-replay.mjs`'s bit-by-bit table and by the fixture instead.
 
+### WebGPU cannot carry a fractional depth-bias constant
+
+`crcbl_hal::DepthBias::constant` is an `f32`, and the field's own doc tunes the
+reversed-Z shadow-acne bias as a float against a float depth buffer. **WebGPU's
+`GPUDepthBias` is an `i32`.** The two slope fields (`slope_scale`, `clamp`) are
+floats and map directly, but the constant cannot: WebIDL's `[EnforceRange] long`
+conversion throws on a non-integer, so a fractional constant cannot reach
+`createRenderPipeline` at all.
+
+The WebGPU replayer refuses a fractional or out-of-`i32` constant loudly, naming
+it, rather than truncating — `1.9` silently becoming `1` would change a tuned
+bias invisibly. So an integer constant works and a fractional one is rejected on
+this backend only; the other three carry the float.
+
+The decision this needs is not the backend's to make: either
+`DepthBias.constant` becomes an integer on the seam (matching WebGPU and D3D12's
+`DepthBias`, which is also an `INT`, while Vulkan's `depthBiasConstantFactor` is
+a float), or WebGPU is documented as a lower-fidelity target for depth bias and
+the engine keeps its shadow constants integral. `pipeline.rs`'s `DepthBias` doc
+discusses sign and magnitude as floats and does not mention that a quarter of
+the backends cannot carry a fractional one — that is where the outcome belongs
+once it is decided.
+
 ### The stream decoder caps a SPIR-V module at 65 536 words
 
 `crcbl-webgpu`'s decoder bounds `ShaderModuleDesc::spirv` by `MAX_ELEMENT_COUNT`

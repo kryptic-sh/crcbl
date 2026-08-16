@@ -27,8 +27,9 @@
 //! error instead of a silently dropped one.
 
 use crcbl_hal::{
-    BindingKind, BindingResource, CompareOp, CompositeAlpha, DeviceType, FilterMode, Format,
-    ImageType, ImageViewType, LoadOp, MemoryLocation, PresentMode, SampleType, SamplerAddressMode,
+    BindingKind, BindingResource, BlendFactor, BlendOp, CompareOp, CompositeAlpha, CullMode,
+    DeviceType, FilterMode, Format, FrontFace, ImageType, ImageViewType, LoadOp, MemoryLocation,
+    PolygonMode, PresentMode, PrimitiveTopology, SampleType, SamplerAddressMode, StencilOp,
     StoreOp,
 };
 
@@ -267,6 +268,11 @@ pub const CREATE_PIPELINE_LAYOUT_TAG: u8 = 0x08;
 /// Written out rather than as `FAMILY_CREATE + 9`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const CREATE_COMPUTE_PIPELINE_TAG: u8 = 0x09;
+/// [`Command::CreateGraphicsPipeline`](crate::Command::CreateGraphicsPipeline).
+///
+/// Written out rather than as `FAMILY_CREATE + 10`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const CREATE_GRAPHICS_PIPELINE_TAG: u8 = 0x0A;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -305,6 +311,11 @@ pub const DESTROY_PIPELINE_LAYOUT_TAG: u8 = 0x28;
 /// Written out rather than as `FAMILY_DESTROY + 9`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const DESTROY_COMPUTE_PIPELINE_TAG: u8 = 0x29;
+/// [`Command::DestroyGraphicsPipeline`](crate::Command::DestroyGraphicsPipeline).
+///
+/// Written out rather than as `FAMILY_DESTROY + 10`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const DESTROY_GRAPHICS_PIPELINE_TAG: u8 = 0x2A;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -753,6 +764,343 @@ pub const fn compare_op_from_code(code: u8) -> Option<CompareOp> {
         COMPARE_OP_NOT_EQUAL => Some(CompareOp::NotEqual),
         COMPARE_OP_GREATER_OR_EQUAL => Some(CompareOp::GreaterOrEqual),
         COMPARE_OP_ALWAYS => Some(CompareOp::Always),
+        _ => None,
+    }
+}
+
+// ── PrimitiveTopology ─────────────────────────────────────────────────────────
+//
+// The first of the graphics-pipeline enums, all of them reached only through
+// [`Command::CreateGraphicsPipeline`](crate::Command::CreateGraphicsPipeline)'s
+// [`PrimitiveState`](crcbl_hal::PrimitiveState). Written out for the module
+// header's reason — declaration order is not a wire contract — and read on the
+// far side into `GPUPrimitiveState.topology`.
+
+/// [`PrimitiveTopology::PointList`].
+pub const PRIMITIVE_TOPOLOGY_POINT_LIST: u8 = 0x00;
+/// [`PrimitiveTopology::LineList`].
+pub const PRIMITIVE_TOPOLOGY_LINE_LIST: u8 = 0x01;
+/// [`PrimitiveTopology::LineStrip`].
+pub const PRIMITIVE_TOPOLOGY_LINE_STRIP: u8 = 0x02;
+/// [`PrimitiveTopology::TriangleList`] — the engine's default under vertex
+/// pulling.
+pub const PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: u8 = 0x03;
+/// [`PrimitiveTopology::TriangleStrip`].
+pub const PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: u8 = 0x04;
+
+/// The wire code for a [`PrimitiveTopology`].
+#[must_use]
+pub const fn primitive_topology_code(topology: PrimitiveTopology) -> u8 {
+    match topology {
+        PrimitiveTopology::PointList => PRIMITIVE_TOPOLOGY_POINT_LIST,
+        PrimitiveTopology::LineList => PRIMITIVE_TOPOLOGY_LINE_LIST,
+        PrimitiveTopology::LineStrip => PRIMITIVE_TOPOLOGY_LINE_STRIP,
+        PrimitiveTopology::TriangleList => PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        PrimitiveTopology::TriangleStrip => PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+    }
+}
+
+/// The [`PrimitiveTopology`] a wire code names, or `None` if it names none.
+///
+/// **Never a neighbour**, and here a neighbour costs a *strip* read as a *list*
+/// or the reverse: `LineStrip` folded into `LineList` connects segments that
+/// were meant to be independent, or breaks a connected outline into disjoint
+/// pieces, and the primitive assembles either way — nothing downstream refuses
+/// it, so this table answering `None` for an unclaimed code is the only place
+/// the difference is caught.
+#[must_use]
+pub const fn primitive_topology_from_code(code: u8) -> Option<PrimitiveTopology> {
+    match code {
+        PRIMITIVE_TOPOLOGY_POINT_LIST => Some(PrimitiveTopology::PointList),
+        PRIMITIVE_TOPOLOGY_LINE_LIST => Some(PrimitiveTopology::LineList),
+        PRIMITIVE_TOPOLOGY_LINE_STRIP => Some(PrimitiveTopology::LineStrip),
+        PRIMITIVE_TOPOLOGY_TRIANGLE_LIST => Some(PrimitiveTopology::TriangleList),
+        PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP => Some(PrimitiveTopology::TriangleStrip),
+        _ => None,
+    }
+}
+
+// ── FrontFace ─────────────────────────────────────────────────────────────────
+
+/// [`FrontFace::Ccw`].
+pub const FRONT_FACE_CCW: u8 = 0x00;
+/// [`FrontFace::Cw`].
+pub const FRONT_FACE_CW: u8 = 0x01;
+
+/// The wire code for a [`FrontFace`].
+#[must_use]
+pub const fn front_face_code(front_face: FrontFace) -> u8 {
+    match front_face {
+        FrontFace::Ccw => FRONT_FACE_CCW,
+        FrontFace::Cw => FRONT_FACE_CW,
+    }
+}
+
+/// The [`FrontFace`] a wire code names, or `None` if it names none.
+///
+/// **`None` rather than a default winding**, tempting though it is for a
+/// two-variant enum: `front_face` and [`cull_mode`](cull_mode_from_code) decide
+/// together which triangles survive, so a winding read as its opposite culls
+/// exactly the faces that should have been kept — a mesh inside-out, with the
+/// draw succeeding and nothing reporting it.
+#[must_use]
+pub const fn front_face_from_code(code: u8) -> Option<FrontFace> {
+    match code {
+        FRONT_FACE_CCW => Some(FrontFace::Ccw),
+        FRONT_FACE_CW => Some(FrontFace::Cw),
+        _ => None,
+    }
+}
+
+// ── CullMode ──────────────────────────────────────────────────────────────────
+
+/// [`CullMode::None`].
+pub const CULL_MODE_NONE: u8 = 0x00;
+/// [`CullMode::Front`].
+pub const CULL_MODE_FRONT: u8 = 0x01;
+/// [`CullMode::Back`].
+pub const CULL_MODE_BACK: u8 = 0x02;
+
+/// The wire code for a [`CullMode`].
+#[must_use]
+pub const fn cull_mode_code(cull_mode: CullMode) -> u8 {
+    match cull_mode {
+        CullMode::None => CULL_MODE_NONE,
+        CullMode::Front => CULL_MODE_FRONT,
+        CullMode::Back => CULL_MODE_BACK,
+    }
+}
+
+/// The [`CullMode`] a wire code names, or `None` if it names none.
+///
+/// **The pair that costs the most is [`CULL_MODE_FRONT`] and [`CULL_MODE_BACK`]**:
+/// they agree on how much is discarded and disagree only on *which* half, so a
+/// fold shows the far side of every object and hides the near one, which reads
+/// as geometry turned inside out rather than as an error. `None` folded into
+/// either instead drops culling entirely, doubling the work with no visible
+/// wrong — so the unclaimed code answers `None` and nothing folds.
+#[must_use]
+pub const fn cull_mode_from_code(code: u8) -> Option<CullMode> {
+    match code {
+        CULL_MODE_NONE => Some(CullMode::None),
+        CULL_MODE_FRONT => Some(CullMode::Front),
+        CULL_MODE_BACK => Some(CullMode::Back),
+        _ => None,
+    }
+}
+
+// ── PolygonMode ───────────────────────────────────────────────────────────────
+//
+// Two variants, and [`PolygonMode::Line`] is the one WebGPU cannot express at
+// all — wireframe is `Features::POLYGON_MODE_LINE`, native-only — so, like a
+// mesh stage or a push-constant range, it crosses verbatim and the replayer
+// refuses it. The code table is still written out: a `Line` read as `Fill`
+// would silently fill a wireframe pass the caller meant to see through.
+
+/// [`PolygonMode::Fill`].
+pub const POLYGON_MODE_FILL: u8 = 0x00;
+/// [`PolygonMode::Line`] — wireframe, which WebGPU has no core expression for.
+pub const POLYGON_MODE_LINE: u8 = 0x01;
+
+/// The wire code for a [`PolygonMode`].
+#[must_use]
+pub const fn polygon_mode_code(polygon_mode: PolygonMode) -> u8 {
+    match polygon_mode {
+        PolygonMode::Fill => POLYGON_MODE_FILL,
+        PolygonMode::Line => POLYGON_MODE_LINE,
+    }
+}
+
+/// The [`PolygonMode`] a wire code names, or `None` if it names none.
+///
+/// **`None` rather than [`PolygonMode::Fill`] as a default**: `Line` is what the
+/// replayer refuses (WebGPU has no wireframe fill mode), so folding an unclaimed
+/// code into `Fill` would turn a wireframe pass into a solid one silently — the
+/// opposite of the loud refusal the seam owes it.
+#[must_use]
+pub const fn polygon_mode_from_code(code: u8) -> Option<PolygonMode> {
+    match code {
+        POLYGON_MODE_FILL => Some(PolygonMode::Fill),
+        POLYGON_MODE_LINE => Some(PolygonMode::Line),
+        _ => None,
+    }
+}
+
+// ── StencilOp ─────────────────────────────────────────────────────────────────
+//
+// Carried four at a time on the wire — a [`StencilState`](crcbl_hal::StencilState)
+// holds two [`StencilFaceState`](crcbl_hal::StencilFaceState)s, each with three
+// `StencilOp`s (`fail_op`, `depth_fail_op`, `pass_op`) — so this table has
+// [`FilterMode`]'s hazard with eight variants and six reads back to back: an op
+// read out of position lands on a real op rather than an error, and a stencil
+// buffer written the wrong way is visible only as the second pass it drives.
+
+/// [`StencilOp::Keep`].
+pub const STENCIL_OP_KEEP: u8 = 0x00;
+/// [`StencilOp::Zero`].
+pub const STENCIL_OP_ZERO: u8 = 0x01;
+/// [`StencilOp::Replace`].
+pub const STENCIL_OP_REPLACE: u8 = 0x02;
+/// [`StencilOp::Invert`].
+pub const STENCIL_OP_INVERT: u8 = 0x03;
+/// [`StencilOp::IncrementClamp`].
+pub const STENCIL_OP_INCREMENT_CLAMP: u8 = 0x04;
+/// [`StencilOp::DecrementClamp`].
+pub const STENCIL_OP_DECREMENT_CLAMP: u8 = 0x05;
+/// [`StencilOp::IncrementWrap`].
+pub const STENCIL_OP_INCREMENT_WRAP: u8 = 0x06;
+/// [`StencilOp::DecrementWrap`].
+pub const STENCIL_OP_DECREMENT_WRAP: u8 = 0x07;
+
+/// The wire code for a [`StencilOp`].
+#[must_use]
+pub const fn stencil_op_code(op: StencilOp) -> u8 {
+    match op {
+        StencilOp::Keep => STENCIL_OP_KEEP,
+        StencilOp::Zero => STENCIL_OP_ZERO,
+        StencilOp::Replace => STENCIL_OP_REPLACE,
+        StencilOp::Invert => STENCIL_OP_INVERT,
+        StencilOp::IncrementClamp => STENCIL_OP_INCREMENT_CLAMP,
+        StencilOp::DecrementClamp => STENCIL_OP_DECREMENT_CLAMP,
+        StencilOp::IncrementWrap => STENCIL_OP_INCREMENT_WRAP,
+        StencilOp::DecrementWrap => STENCIL_OP_DECREMENT_WRAP,
+    }
+}
+
+/// The [`StencilOp`] a wire code names, or `None` if it names none.
+///
+/// **The clamp/wrap pairs are the adjacent ones a fold costs the most**:
+/// `IncrementClamp` and `IncrementWrap` differ only at the value's extreme, so
+/// a stencil counter written with the wrong one agrees everywhere until it
+/// saturates and then silently disagrees — exactly the kind of difference no
+/// draw reports.
+#[must_use]
+pub const fn stencil_op_from_code(code: u8) -> Option<StencilOp> {
+    match code {
+        STENCIL_OP_KEEP => Some(StencilOp::Keep),
+        STENCIL_OP_ZERO => Some(StencilOp::Zero),
+        STENCIL_OP_REPLACE => Some(StencilOp::Replace),
+        STENCIL_OP_INVERT => Some(StencilOp::Invert),
+        STENCIL_OP_INCREMENT_CLAMP => Some(StencilOp::IncrementClamp),
+        STENCIL_OP_DECREMENT_CLAMP => Some(StencilOp::DecrementClamp),
+        STENCIL_OP_INCREMENT_WRAP => Some(StencilOp::IncrementWrap),
+        STENCIL_OP_DECREMENT_WRAP => Some(StencilOp::DecrementWrap),
+        _ => None,
+    }
+}
+
+// ── BlendFactor ───────────────────────────────────────────────────────────────
+//
+// Carried four at a time per colour target — a [`BlendState`](crcbl_hal::BlendState)
+// has `color_src`, `color_dst`, `alpha_src`, `alpha_dst` — with two [`BlendOp`]s
+// interleaved between them, so, like the sampler's filters, a factor read out of
+// position decodes to another factor rather than to an error and a target blends
+// with the wrong equation, visible only as the wrong colour.
+
+/// [`BlendFactor::Zero`].
+pub const BLEND_FACTOR_ZERO: u8 = 0x00;
+/// [`BlendFactor::One`].
+pub const BLEND_FACTOR_ONE: u8 = 0x01;
+/// [`BlendFactor::Src`].
+pub const BLEND_FACTOR_SRC: u8 = 0x02;
+/// [`BlendFactor::OneMinusSrc`].
+pub const BLEND_FACTOR_ONE_MINUS_SRC: u8 = 0x03;
+/// [`BlendFactor::SrcAlpha`].
+pub const BLEND_FACTOR_SRC_ALPHA: u8 = 0x04;
+/// [`BlendFactor::OneMinusSrcAlpha`].
+pub const BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: u8 = 0x05;
+/// [`BlendFactor::Dst`].
+pub const BLEND_FACTOR_DST: u8 = 0x06;
+/// [`BlendFactor::OneMinusDst`].
+pub const BLEND_FACTOR_ONE_MINUS_DST: u8 = 0x07;
+/// [`BlendFactor::DstAlpha`].
+pub const BLEND_FACTOR_DST_ALPHA: u8 = 0x08;
+/// [`BlendFactor::OneMinusDstAlpha`].
+pub const BLEND_FACTOR_ONE_MINUS_DST_ALPHA: u8 = 0x09;
+
+/// The wire code for a [`BlendFactor`].
+#[must_use]
+pub const fn blend_factor_code(factor: BlendFactor) -> u8 {
+    match factor {
+        BlendFactor::Zero => BLEND_FACTOR_ZERO,
+        BlendFactor::One => BLEND_FACTOR_ONE,
+        BlendFactor::Src => BLEND_FACTOR_SRC,
+        BlendFactor::OneMinusSrc => BLEND_FACTOR_ONE_MINUS_SRC,
+        BlendFactor::SrcAlpha => BLEND_FACTOR_SRC_ALPHA,
+        BlendFactor::OneMinusSrcAlpha => BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        BlendFactor::Dst => BLEND_FACTOR_DST,
+        BlendFactor::OneMinusDst => BLEND_FACTOR_ONE_MINUS_DST,
+        BlendFactor::DstAlpha => BLEND_FACTOR_DST_ALPHA,
+        BlendFactor::OneMinusDstAlpha => BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
+    }
+}
+
+/// The [`BlendFactor`] a wire code names, or `None` if it names none.
+///
+/// **Each factor and its `OneMinus` complement are the adjacent pair a fold
+/// costs the most**: `Src` against `OneMinusSrc` composites in exactly the
+/// opposite direction, so a fold inverts the blend and leaves a valid pipeline
+/// the browser accepts and no draw reports.
+#[must_use]
+pub const fn blend_factor_from_code(code: u8) -> Option<BlendFactor> {
+    match code {
+        BLEND_FACTOR_ZERO => Some(BlendFactor::Zero),
+        BLEND_FACTOR_ONE => Some(BlendFactor::One),
+        BLEND_FACTOR_SRC => Some(BlendFactor::Src),
+        BLEND_FACTOR_ONE_MINUS_SRC => Some(BlendFactor::OneMinusSrc),
+        BLEND_FACTOR_SRC_ALPHA => Some(BlendFactor::SrcAlpha),
+        BLEND_FACTOR_ONE_MINUS_SRC_ALPHA => Some(BlendFactor::OneMinusSrcAlpha),
+        BLEND_FACTOR_DST => Some(BlendFactor::Dst),
+        BLEND_FACTOR_ONE_MINUS_DST => Some(BlendFactor::OneMinusDst),
+        BLEND_FACTOR_DST_ALPHA => Some(BlendFactor::DstAlpha),
+        BLEND_FACTOR_ONE_MINUS_DST_ALPHA => Some(BlendFactor::OneMinusDstAlpha),
+        _ => None,
+    }
+}
+
+// ── BlendOp ───────────────────────────────────────────────────────────────────
+//
+// Two per colour target — `color_op` and `alpha_op` — and the reason `Min`/`Max`
+// ignore their factors while the arithmetic ops do not, so a fold between the two
+// groups also changes whether the factors above even matter.
+
+/// [`BlendOp::Add`].
+pub const BLEND_OP_ADD: u8 = 0x00;
+/// [`BlendOp::Subtract`].
+pub const BLEND_OP_SUBTRACT: u8 = 0x01;
+/// [`BlendOp::ReverseSubtract`].
+pub const BLEND_OP_REVERSE_SUBTRACT: u8 = 0x02;
+/// [`BlendOp::Min`].
+pub const BLEND_OP_MIN: u8 = 0x03;
+/// [`BlendOp::Max`].
+pub const BLEND_OP_MAX: u8 = 0x04;
+
+/// The wire code for a [`BlendOp`].
+#[must_use]
+pub const fn blend_op_code(op: BlendOp) -> u8 {
+    match op {
+        BlendOp::Add => BLEND_OP_ADD,
+        BlendOp::Subtract => BLEND_OP_SUBTRACT,
+        BlendOp::ReverseSubtract => BLEND_OP_REVERSE_SUBTRACT,
+        BlendOp::Min => BLEND_OP_MIN,
+        BlendOp::Max => BLEND_OP_MAX,
+    }
+}
+
+/// The [`BlendOp`] a wire code names, or `None` if it names none.
+///
+/// **`Subtract` and `ReverseSubtract` are the adjacent pair a fold costs the
+/// most**: they swap which operand is subtracted from which, so a target reads
+/// its own colour where it meant the destination's, and the pipeline is valid
+/// either way.
+#[must_use]
+pub const fn blend_op_from_code(code: u8) -> Option<BlendOp> {
+    match code {
+        BLEND_OP_ADD => Some(BlendOp::Add),
+        BLEND_OP_SUBTRACT => Some(BlendOp::Subtract),
+        BLEND_OP_REVERSE_SUBTRACT => Some(BlendOp::ReverseSubtract),
+        BLEND_OP_MIN => Some(BlendOp::Min),
+        BLEND_OP_MAX => Some(BlendOp::Max),
         _ => None,
     }
 }
@@ -1234,7 +1582,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 29] = [
+    const TAGS: [(&str, u8, u8); 31] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1262,8 +1610,18 @@ mod tests {
             FAMILY_CREATE,
         ),
         (
+            "CreateGraphicsPipeline",
+            CREATE_GRAPHICS_PIPELINE_TAG,
+            FAMILY_CREATE,
+        ),
+        (
             "DestroyComputePipeline",
             DESTROY_COMPUTE_PIPELINE_TAG,
+            FAMILY_DESTROY,
+        ),
+        (
+            "DestroyGraphicsPipeline",
+            DESTROY_GRAPHICS_PIPELINE_TAG,
             FAMILY_DESTROY,
         ),
         (
@@ -1535,6 +1893,108 @@ mod tests {
             compare_op_code(CompareOp::Less)
         );
 
+        let topology = [
+            PrimitiveTopology::PointList,
+            PrimitiveTopology::LineList,
+            PrimitiveTopology::LineStrip,
+            PrimitiveTopology::TriangleList,
+            PrimitiveTopology::TriangleStrip,
+        ];
+        let codes: Vec<u8> = topology
+            .iter()
+            .map(|t| primitive_topology_code(*t))
+            .collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two PrimitiveTopologies share a code"
+        );
+        for kind in topology {
+            assert_eq!(
+                primitive_topology_from_code(primitive_topology_code(kind)),
+                Some(kind)
+            );
+        }
+
+        let front_face = [FrontFace::Ccw, FrontFace::Cw];
+        let codes: Vec<u8> = front_face.iter().map(|f| front_face_code(*f)).collect();
+        assert_eq!(distinct(&codes), codes.len(), "two FrontFaces share a code");
+        for face in front_face {
+            assert_eq!(front_face_from_code(front_face_code(face)), Some(face));
+        }
+
+        let cull = [CullMode::None, CullMode::Front, CullMode::Back];
+        let codes: Vec<u8> = cull.iter().map(|c| cull_mode_code(*c)).collect();
+        assert_eq!(distinct(&codes), codes.len(), "two CullModes share a code");
+        for mode in cull {
+            assert_eq!(cull_mode_from_code(cull_mode_code(mode)), Some(mode));
+        }
+
+        let polygon = [PolygonMode::Fill, PolygonMode::Line];
+        let codes: Vec<u8> = polygon.iter().map(|p| polygon_mode_code(*p)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two PolygonModes share a code"
+        );
+        for mode in polygon {
+            assert_eq!(polygon_mode_from_code(polygon_mode_code(mode)), Some(mode));
+        }
+
+        let stencil = [
+            StencilOp::Keep,
+            StencilOp::Zero,
+            StencilOp::Replace,
+            StencilOp::Invert,
+            StencilOp::IncrementClamp,
+            StencilOp::DecrementClamp,
+            StencilOp::IncrementWrap,
+            StencilOp::DecrementWrap,
+        ];
+        let codes: Vec<u8> = stencil.iter().map(|s| stencil_op_code(*s)).collect();
+        assert_eq!(distinct(&codes), codes.len(), "two StencilOps share a code");
+        for op in stencil {
+            assert_eq!(stencil_op_from_code(stencil_op_code(op)), Some(op));
+        }
+
+        let blend_factor = [
+            BlendFactor::Zero,
+            BlendFactor::One,
+            BlendFactor::Src,
+            BlendFactor::OneMinusSrc,
+            BlendFactor::SrcAlpha,
+            BlendFactor::OneMinusSrcAlpha,
+            BlendFactor::Dst,
+            BlendFactor::OneMinusDst,
+            BlendFactor::DstAlpha,
+            BlendFactor::OneMinusDstAlpha,
+        ];
+        let codes: Vec<u8> = blend_factor.iter().map(|f| blend_factor_code(*f)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two BlendFactors share a code"
+        );
+        for factor in blend_factor {
+            assert_eq!(
+                blend_factor_from_code(blend_factor_code(factor)),
+                Some(factor)
+            );
+        }
+
+        let blend_op = [
+            BlendOp::Add,
+            BlendOp::Subtract,
+            BlendOp::ReverseSubtract,
+            BlendOp::Min,
+            BlendOp::Max,
+        ];
+        let codes: Vec<u8> = blend_op.iter().map(|o| blend_op_code(*o)).collect();
+        assert_eq!(distinct(&codes), codes.len(), "two BlendOps share a code");
+        for op in blend_op {
+            assert_eq!(blend_op_from_code(blend_op_code(op)), Some(op));
+        }
+
         let sample_type = [SampleType::Float, SampleType::Depth];
         let codes: Vec<u8> = sample_type.iter().map(|t| sample_type_code(*t)).collect();
         assert_eq!(
@@ -1712,6 +2172,13 @@ mod tests {
         assert_eq!(filter_mode_from_code(0xFF), None);
         assert_eq!(sampler_address_mode_from_code(0xFF), None);
         assert_eq!(compare_op_from_code(0xFF), None);
+        assert_eq!(primitive_topology_from_code(0xFF), None);
+        assert_eq!(front_face_from_code(0xFF), None);
+        assert_eq!(cull_mode_from_code(0xFF), None);
+        assert_eq!(polygon_mode_from_code(0xFF), None);
+        assert_eq!(stencil_op_from_code(0xFF), None);
+        assert_eq!(blend_factor_from_code(0xFF), None);
+        assert_eq!(blend_op_from_code(0xFF), None);
         assert_eq!(sample_type_from_code(0xFF), None);
         assert_eq!(device_type_from_code(0xFF), None);
         assert_eq!(format_from_code(0xFF), None);
@@ -1728,6 +2195,19 @@ mod tests {
             None
         );
         assert_eq!(compare_op_from_code(COMPARE_OP_ALWAYS + 1), None);
+        assert_eq!(
+            primitive_topology_from_code(PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP + 1),
+            None
+        );
+        assert_eq!(front_face_from_code(FRONT_FACE_CW + 1), None);
+        assert_eq!(cull_mode_from_code(CULL_MODE_BACK + 1), None);
+        assert_eq!(polygon_mode_from_code(POLYGON_MODE_LINE + 1), None);
+        assert_eq!(stencil_op_from_code(STENCIL_OP_DECREMENT_WRAP + 1), None);
+        assert_eq!(
+            blend_factor_from_code(BLEND_FACTOR_ONE_MINUS_DST_ALPHA + 1),
+            None
+        );
+        assert_eq!(blend_op_from_code(BLEND_OP_MAX + 1), None);
         assert_eq!(sample_type_from_code(SAMPLE_TYPE_DEPTH + 1), None);
         assert_eq!(device_type_from_code(DEVICE_TYPE_OTHER + 1), None);
         assert_eq!(format_from_code(FORMAT_BC7_RGBA_UNORM_SRGB + 1), None);

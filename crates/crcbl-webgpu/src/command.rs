@@ -19,11 +19,12 @@ use core::ops::Range;
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
-    BufferHandle, BufferUsage, ColorAttachment, CompareOp, ComputePipelineHandle,
-    DepthStencilAttachment, Extent3d, Features, FilterMode, Format, GraphicsPipelineHandle,
-    ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType,
-    MemoryLocation, PipelineLayoutHandle, PushConstantRange, Rect2d, SamplerAddressMode,
-    SamplerHandle, ShaderModuleHandle, ShaderStages, SurfaceHandle,
+    BufferHandle, BufferUsage, ColorAttachment, ColorTargetState, CompareOp, ComputePipelineHandle,
+    DepthStencilAttachment, DepthStencilState, Extent3d, Features, FilterMode, Format,
+    GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewHandle, ImageViewType, MemoryLocation, MultisampleState, PipelineLayoutHandle,
+    PrimitiveState, PushConstantRange, Rect2d, SamplerAddressMode, SamplerHandle,
+    ShaderModuleHandle, ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -428,6 +429,82 @@ pub enum Command {
         /// docs.
         workgroup_size: [u32; 3],
     },
+    /// [`Device::create_graphics_pipeline`](crcbl_hal::Device::create_graphics_pipeline),
+    /// with the handle the caller allocated for it.
+    ///
+    /// The whole of [`GraphicsPipelineDesc`](crcbl_hal::GraphicsPipelineDesc),
+    /// flattened as every other descriptor here is — and **the largest descriptor
+    /// on the seam**, the one `docs/plan/41-webgpu-stream.md` singles out for its
+    /// depth-stencil chain: an `Option<DepthStencilState>` holding an
+    /// `Option<StencilState>` of two `StencilFaceState`s of leaf enums, three
+    /// levels of nesting where a decoder written to a shallower assumption is
+    /// wrong first.
+    ///
+    /// **Two handles and two shader modules cross, into two tables.**
+    /// [`layout`](Self::CreateGraphicsPipeline::layout) is a
+    /// [`PipelineLayoutHandle`] the replayer looks up in the pipeline-layout
+    /// table; [`vertex_module`](Self::CreateGraphicsPipeline::vertex_module) and
+    /// the module inside
+    /// [`fragment`](Self::CreateGraphicsPipeline::fragment) — when present — are
+    /// [`ShaderModuleHandle`]s it looks up in the shader-module table. A handle
+    /// carries no kind, so a miss on any one is a failure the replayer names —
+    /// layout, vertex module, or fragment module — three distinct messages.
+    ///
+    /// **The vertex stage carries no buffer layout**, and that is the descriptor's
+    /// own shape rather than a field dropped here: the engine pulls geometry from
+    /// storage buffers, so `GPUVertexState.buffers` is always the empty array and
+    /// there is nothing on the wire for it. See
+    /// [`GraphicsPipelineDesc`](crcbl_hal::GraphicsPipelineDesc)'s module docs.
+    ///
+    /// **[`fragment: None`](Self::CreateGraphicsPipeline::fragment) is a
+    /// depth-only pass** — a shadow map or a prepass — and the replayer omits the
+    /// `GPUFragmentState` member entirely; a `Some` becomes one with its own
+    /// `targets`.
+    ///
+    /// **Nothing is validated here**, which is [`Command::CreateImage`]'s rule met
+    /// by the deepest descriptor: the "WebGPU cannot express it" refusals —
+    /// [`polygon_mode: Line`](crcbl_hal::PolygonMode::Line),
+    /// [`depth_clamp`](crcbl_hal::PrimitiveState::depth_clamp) without
+    /// `depth-clip-control`, a
+    /// [`samples`](crcbl_hal::MultisampleState::samples) count that is neither `1`
+    /// nor `4`, a fractional
+    /// [`DepthBias.constant`](crcbl_hal::DepthBias::constant), a feature-gated
+    /// [`format`](crcbl_hal::ColorTargetState) — are the replayer's, because only
+    /// it faces WebGPU, and each is a value the wire form claims. The stencil
+    /// [`reference`](crcbl_hal::StencilState::reference) crosses too and the
+    /// replayer drops it: it is not a pipeline field in WebGPU but a per-pass one
+    /// set through `setStencilReference`, so it is dropped like `workgroup_size`
+    /// rather than lost. See `web/engine/gpu-replay.js`.
+    CreateGraphicsPipeline {
+        /// Id the replayer stores the new object at.
+        pipeline: GraphicsPipelineHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Resource layout — an id the replayer looks up in the pipeline-layout
+        /// table, not one it fills in.
+        layout: PipelineLayoutHandle,
+        /// Vertex stage's module — an id the replayer looks up in the
+        /// shader-module table.
+        vertex_module: ShaderModuleHandle,
+        /// Vertex stage's entry point, as it appears in the module.
+        vertex_entry_point: String,
+        /// Fragment stage's module and entry point, `None` for a depth-only pass.
+        /// The two ride together because they are present or absent together;
+        /// `Some` names a module the replayer looks up in the same table as
+        /// [`vertex_module`](Self::CreateGraphicsPipeline::vertex_module).
+        fragment: Option<(ShaderModuleHandle, String)>,
+        /// Rasteriser and primitive-assembly state.
+        primitive: PrimitiveState,
+        /// Depth/stencil state; `None` for a pass with no depth attachment. The
+        /// deepest optional chain on the seam — see the variant docs.
+        depth_stencil: Option<DepthStencilState>,
+        /// Multisampling state.
+        multisample: MultisampleState,
+        /// Colour attachment formats and blend state, **in attachment order**.
+        /// Empty is a real depth-only-ish case a fragment that writes nothing
+        /// still builds.
+        color_targets: Vec<ColorTargetState>,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -522,6 +599,18 @@ pub enum Command {
     DestroyComputePipeline {
         /// Id to release.
         pipeline: ComputePipelineHandle,
+    },
+    /// [`Device::destroy_graphics_pipeline`](crcbl_hal::Device::destroy_graphics_pipeline).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is — and, like the compute-pipeline destroy, the
+    /// empty slot is an *ordinary* case rather than an edge one: a pipeline the
+    /// replayer refused (a `Line` polygon mode, an unresolvable layout or module,
+    /// a `samples` count WebGPU forbids) still has its handle destroyed by the
+    /// caller that pre-allocated it.
+    DestroyGraphicsPipeline {
+        /// Id to release.
+        pipeline: GraphicsPipelineHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -649,6 +738,7 @@ impl Command {
             Self::CreateShaderModule { .. } => "CreateShaderModule",
             Self::CreatePipelineLayout { .. } => "CreatePipelineLayout",
             Self::CreateComputePipeline { .. } => "CreateComputePipeline",
+            Self::CreateGraphicsPipeline { .. } => "CreateGraphicsPipeline",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
             Self::DestroyImage { .. } => "DestroyImage",
@@ -659,6 +749,7 @@ impl Command {
             Self::DestroyShaderModule { .. } => "DestroyShaderModule",
             Self::DestroyPipelineLayout { .. } => "DestroyPipelineLayout",
             Self::DestroyComputePipeline { .. } => "DestroyComputePipeline",
+            Self::DestroyGraphicsPipeline { .. } => "DestroyGraphicsPipeline",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",

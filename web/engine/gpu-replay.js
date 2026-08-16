@@ -1012,6 +1012,87 @@ const SAMPLER_COMPARE_FUNCTION = Object.freeze({
 });
 
 /**
+ * `crcbl_hal::PrimitiveTopology` as `GPUPrimitiveTopology`.
+ *
+ * One to one, and the only translation is the punctuation — `TriangleList` is
+ * `'triangle-list'`. A string WebGPU does not have is a `TypeError` out of
+ * `createRenderPipeline` rather than a silent default.
+ */
+const PRIMITIVE_TOPOLOGY = Object.freeze({
+  PointList: 'point-list',
+  LineList: 'line-list',
+  LineStrip: 'line-strip',
+  TriangleList: 'triangle-list',
+  TriangleStrip: 'triangle-strip',
+});
+
+/** `crcbl_hal::FrontFace` as `GPUFrontFace`. */
+const FRONT_FACE = Object.freeze({ Ccw: 'ccw', Cw: 'cw' });
+
+/**
+ * `crcbl_hal::CullMode` as `GPUCullMode`. `None` is `'none'` — the string, not
+ * the absence — which is why this is a table rather than an omitted member.
+ */
+const CULL_MODE = Object.freeze({ None: 'none', Front: 'front', Back: 'back' });
+
+/** `crcbl_hal::StencilOp` as `GPUStencilOperation`. */
+const STENCIL_OPERATION = Object.freeze({
+  Keep: 'keep',
+  Zero: 'zero',
+  Replace: 'replace',
+  Invert: 'invert',
+  IncrementClamp: 'increment-clamp',
+  DecrementClamp: 'decrement-clamp',
+  IncrementWrap: 'increment-wrap',
+  DecrementWrap: 'decrement-wrap',
+});
+
+/** `crcbl_hal::BlendFactor` as `GPUBlendFactor`. */
+const BLEND_FACTOR = Object.freeze({
+  Zero: 'zero',
+  One: 'one',
+  Src: 'src',
+  OneMinusSrc: 'one-minus-src',
+  SrcAlpha: 'src-alpha',
+  OneMinusSrcAlpha: 'one-minus-src-alpha',
+  Dst: 'dst',
+  OneMinusDst: 'one-minus-dst',
+  DstAlpha: 'dst-alpha',
+  OneMinusDstAlpha: 'one-minus-dst-alpha',
+});
+
+/** `crcbl_hal::BlendOp` as `GPUBlendOperation`. */
+const BLEND_OPERATION = Object.freeze({
+  Add: 'add',
+  Subtract: 'subtract',
+  ReverseSubtract: 'reverse-subtract',
+  Min: 'min',
+  Max: 'max',
+});
+
+/**
+ * Each `crcbl_hal::ColorWrites` channel as its `GPUColorWrite` bit.
+ *
+ * `gpu-stream.js` decodes the mask to a list of channel names in ascending bit
+ * order; this maps each back to the flag WebGPU's `writeMask` is a bitmask of.
+ * The seam's `ALL` is `R | G | B | A`, which reduces to `0xF` here rather than
+ * needing its own row.
+ */
+const COLOR_WRITE_BIT = Object.freeze({ R: 1, G: 2, B: 4, A: 8 });
+
+/**
+ * The largest integer a `GPUDepthBias` (`[EnforceRange] long`, an `i32`) holds.
+ *
+ * `crcbl_hal::DepthBias::constant` is an `f32` on the seam but WebGPU's
+ * `depthBias` is an integer, so a value outside `i32` — or a fractional one —
+ * cannot be passed as-is: WebIDL's `[EnforceRange]` conversion of either throws
+ * a `TypeError` synchronously out of `createRenderPipeline`. Refused here with
+ * the value named instead. See {@link Replayer#createGraphicsPipeline}.
+ */
+const MAX_DEPTH_BIAS = 0x7fff_ffff;
+const MIN_DEPTH_BIAS = -0x8000_0000;
+
+/**
  * The largest `maxAnisotropy` a `GPUSize32` carries.
  *
  * WebIDL converts a `double` to an `unsigned long` **modularly** unless the
@@ -2131,6 +2212,19 @@ export class Replayer {
    */
   #computePipelines = new HandleTable();
   /**
+   * Graphics (render) pipelines, by handle.
+   *
+   * Its own table for {@link Replayer#computePipelines}'s reason — a handle
+   * carries no kind — and the one whose creation reads the most other tables: a
+   * `CreateGraphicsPipeline` resolves its layout out of
+   * {@link Replayer#pipelineLayouts} and both its vertex and fragment modules out
+   * of {@link Replayer#shaderModules}. The probe's `PROBE_GRAPHICS_PIPELINE`
+   * carries the same bits as its layout and its module deliberately.
+   *
+   * @type {HandleTable<GPURenderPipeline>}
+   */
+  #graphicsPipelines = new HandleTable();
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -2313,6 +2407,24 @@ export class Replayer {
     return this.#computePipelines;
   }
 
+  /**
+   * The graphics (render) pipelines that are live right now, on
+   * {@link Replayer#surfaces}'s terms.
+   *
+   * **A `GPURenderPipeline` reports its `label` and — like a compute pipeline —
+   * `getBindGroupLayout(n)`**, the derived layout only a genuinely-built pipeline
+   * can answer, because a pipeline is where the shaders and their layout are
+   * validated against each other. So this table's contents, that call, and the
+   * device's error queue are what a reader can learn.
+   * `web/tools/browser-e2e.mjs` reads `getBindGroupLayout`; `web/tools/gpu-replay.mjs`
+   * proves the descriptor against a stub.
+   *
+   * @type {HandleTable<GPURenderPipeline>}
+   */
+  get graphicsPipelines() {
+    return this.#graphicsPipelines;
+  }
+
   /** How many out-of-band errors are waiting to be taken. */
   get pendingErrors() {
     return this.#errors.length;
@@ -2473,6 +2585,12 @@ export class Replayer {
           break;
         case 'DestroyComputePipeline':
           this.#destroyComputePipeline(command);
+          break;
+        case 'CreateGraphicsPipeline':
+          this.#createGraphicsPipeline(sequence, command);
+          break;
+        case 'DestroyGraphicsPipeline':
+          this.#destroyGraphicsPipeline(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -3809,6 +3927,282 @@ export class Replayer {
    */
   #destroyComputePipeline(command) {
     this.#computePipelines.remove(command.pipeline);
+  }
+
+  /**
+   * Creates a render pipeline on the open device and files it under the handle
+   * wasm allocated.
+   *
+   * **The largest descriptor on the seam**, and the one whose imperfect mappings
+   * are the substance of this slice. `#createComputePipeline`'s shape once more —
+   * synchronous, no reply, every failure into {@link Replayer#takeError} — with
+   * *three* handles resolved and several fields WebGPU cannot take as the seam
+   * spells them.
+   *
+   *   * **Three handles, three distinct misses.** `layout` resolves against
+   *     {@link Replayer#pipelineLayouts}; `vertexModule` and — when the fragment
+   *     is present — the fragment module against {@link Replayer#shaderModules}. A
+   *     handle carries no kind, so a miss names *which* — the layout, the vertex
+   *     module, or the fragment module — never a throw, for `#createImageView`'s
+   *     reason: a stale handle is a far side that got its ordering wrong mid-frame.
+   *   * **`vertex.buffers` is always `[]`.** The engine pulls geometry from
+   *     storage buffers — there is no vertex-buffer layout on this seam — so there
+   *     is nothing to describe and the empty array is the faithful translation.
+   *   * **`fragment: null` omits the whole `GPUFragmentState`** — a depth-only
+   *     pass (a shadow map, a prepass) — rather than passing an empty one.
+   *   * **`PolygonMode::Line` is refused.** Wireframe is `Features::POLYGON_MODE_LINE`,
+   *     native-only, and WebGPU has no core expression for it: there is no
+   *     `GPUPrimitiveState` member and a fill mode is the only one. `Fill`
+   *     proceeds; `Line` is refused by name, as `#createPipelineLayout` refuses a
+   *     push-constant range.
+   *   * **`depth_clamp` is `primitive.unclippedDepth`, feature-gated.** `true`
+   *     needs `depth-clip-control`; a device that did not enable it refuses `true`,
+   *     the way {@link webgpuTextureFormatFor} refuses a gated format against the
+   *     device's own features. `false` proceeds and sets nothing.
+   *   * **The stencil `reference` is DROPPED, not lost.** WebGPU has no
+   *     `stencilReference` in the pipeline — it is set per-pass through
+   *     `GPURenderPassEncoder.setStencilReference` — so it is dropped here the way
+   *     `workgroupSize` is, and its round trip in Rust is what keeps it carried.
+   *   * **`DepthBias.constant` is `f32` on the seam and `GPUDepthBias` is an
+   *     integer.** A non-integer (or out-of-`i32`) value would make WebIDL's
+   *     `[EnforceRange] long` conversion throw synchronously, so it is refused by
+   *     name rather than silently truncated — `1.9` must not become `1`. **This is
+   *     a seam/WebGPU precision mismatch worth a backlog entry:** the engine's
+   *     reversed-Z bias is tuned as a float, and an integer bias may not reproduce
+   *     it. `depthBiasSlopeScale` and `depthBiasClamp` are floats and map directly.
+   *   * **`samples` must be 1 or 4.** WebGPU allows no other `count`; any other is
+   *     refused by name.
+   *   * **Each format goes through {@link webgpuTextureFormatFor}** — the
+   *     depth-stencil's and every colour target's — so a device-gated or unknown
+   *     format is refused here, at the command that asked, exactly as `#createImage`
+   *     does. An empty `targets` list with a fragment stage is a real
+   *     writes-nothing pass and proceeds.
+   *   * **`createRenderPipeline` errors are async**, exactly as
+   *     `#createComputePipeline` and `#createShaderModule`: built synchronously,
+   *     not awaited, a bad pipeline surfacing through the device's
+   *     `uncapturederror` listener rather than through `createRenderPipelineAsync`,
+   *     the machinery this family does without.
+   *
+   * @param {bigint} sequence
+   * @param {{ pipeline: { index: number, generation: number },
+   *           label: string | null,
+   *           layout: { index: number, generation: number },
+   *           vertexModule: { index: number, generation: number },
+   *           vertexEntryPoint: string,
+   *           fragment: { module: { index: number, generation: number },
+   *                       entryPoint: string } | null,
+   *           primitive: object, depthStencil: object | null,
+   *           multisample: object, colorTargets: object[] }} command
+   */
+  #createGraphicsPipeline(sequence, command) {
+    const named = `graphics pipeline ${command.pipeline.index}.${command.pipeline.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    const layout = this.#pipelineLayouts.get(command.layout);
+    if (layout === undefined) {
+      this.#deviceError(
+        `${named} names pipeline layout ${command.layout.index}.${command.layout.generation} as its layout, ` +
+          'which this replayer holds no live pipeline layout under'
+      );
+      return;
+    }
+    const vertexModule = this.#shaderModules.get(command.vertexModule);
+    if (vertexModule === undefined) {
+      this.#deviceError(
+        `${named} names shader module ${command.vertexModule.index}.${command.vertexModule.generation} as its vertex stage, ` +
+          'which this replayer holds no live shader module under'
+      );
+      return;
+    }
+    let fragmentModule;
+    if (command.fragment !== null) {
+      fragmentModule = this.#shaderModules.get(command.fragment.module);
+      if (fragmentModule === undefined) {
+        this.#deviceError(
+          `${named} names shader module ${command.fragment.module.index}.${command.fragment.module.generation} as its fragment stage, ` +
+            'which this replayer holds no live shader module under'
+        );
+        return;
+      }
+    }
+
+    // PolygonMode::Line has no core WebGPU expression — wireframe is native-only.
+    if (command.primitive.polygonMode === 'Line') {
+      this.#deviceError(
+        `${named} asks for PolygonMode::Line, and WebGPU has no wireframe fill mode: ` +
+          'a line polygon mode is Features::POLYGON_MODE_LINE, which is native-only, ' +
+          'and a GPUPrimitiveState has no member for it'
+      );
+      return;
+    }
+    // depth_clamp maps to primitive.unclippedDepth, which is feature-gated.
+    let unclippedDepth = false;
+    if (command.primitive.depthClamp) {
+      if (!this.#device.features?.has('depth-clip-control')) {
+        this.#deviceError(
+          `${named} sets depth_clamp, which WebGPU spells primitive.unclippedDepth and gates ` +
+            'behind the depth-clip-control feature this device did not enable'
+        );
+        return;
+      }
+      unclippedDepth = true;
+    }
+    const primitive = {
+      topology: PRIMITIVE_TOPOLOGY[command.primitive.topology],
+      frontFace: FRONT_FACE[command.primitive.frontFace],
+      cullMode: CULL_MODE[command.primitive.cullMode],
+      ...(unclippedDepth ? { unclippedDepth: true } : {}),
+    };
+
+    let depthStencil;
+    if (command.depthStencil !== null) {
+      const ds = command.depthStencil;
+      const format = webgpuTextureFormatFor(ds.format, this.#device.features);
+      if (format.reason !== null) {
+        this.#deviceError(`${named} depth-stencil ${format.reason}`);
+        return;
+      }
+      const constant = ds.bias.constant;
+      if (
+        !Number.isInteger(constant) ||
+        constant < MIN_DEPTH_BIAS ||
+        constant > MAX_DEPTH_BIAS
+      ) {
+        // A seam/WebGPU precision mismatch: DepthBias.constant is an f32 and
+        // GPUDepthBias is an i32. Refused rather than silently truncated (`1.9`
+        // must not become `1`), and worth a backlog entry — the reversed-Z bias
+        // is tuned as a float and an integer bias may not reproduce it.
+        this.#deviceError(
+          `${named} sets a depthBias constant of ${constant}, and GPUDepthBias is an integer (i32): ` +
+            "WebGPU's [EnforceRange] long conversion throws on a non-integer or out-of-range value, " +
+            'so the seam refuses it rather than rounding the float the engine tuned'
+        );
+        return;
+      }
+      depthStencil = {
+        format: format.name,
+        depthWriteEnabled: ds.depthWrite,
+        depthCompare: SAMPLER_COMPARE_FUNCTION[ds.depthCompare],
+        depthBias: constant,
+        depthBiasSlopeScale: ds.bias.slopeScale,
+        depthBiasClamp: ds.bias.clamp,
+      };
+      if (ds.stencil !== null) {
+        // One GPUStencilFaceState per facing. `reference` is NOT a pipeline field
+        // in WebGPU — it is set per-pass via setStencilReference — so it is
+        // dropped here, the way workgroupSize is, and named as belonging to the
+        // pass.
+        const faceToGpu = (face) => ({
+          compare: SAMPLER_COMPARE_FUNCTION[face.compare],
+          failOp: STENCIL_OPERATION[face.failOp],
+          depthFailOp: STENCIL_OPERATION[face.depthFailOp],
+          passOp: STENCIL_OPERATION[face.passOp],
+        });
+        depthStencil.stencilFront = faceToGpu(ds.stencil.front);
+        depthStencil.stencilBack = faceToGpu(ds.stencil.back);
+        depthStencil.stencilReadMask = ds.stencil.readMask;
+        depthStencil.stencilWriteMask = ds.stencil.writeMask;
+      }
+    }
+
+    const samples = command.multisample.samples;
+    if (samples !== 1 && samples !== 4) {
+      this.#deviceError(
+        `${named} asks for ${samples} samples, and WebGPU's multisample count must be 1 or 4`
+      );
+      return;
+    }
+    const multisample = {
+      count: samples,
+      mask: command.multisample.mask,
+      alphaToCoverageEnabled: command.multisample.alphaToCoverage,
+    };
+
+    const targets = [];
+    for (const [at, target] of command.colorTargets.entries()) {
+      const format = webgpuTextureFormatFor(
+        target.format,
+        this.#device.features
+      );
+      if (format.reason !== null) {
+        this.#deviceError(`${named} colour target ${at} ${format.reason}`);
+        return;
+      }
+      let writeMask = 0;
+      for (const channel of target.writeMask)
+        writeMask |= COLOR_WRITE_BIT[channel];
+      const entry = { format: format.name, writeMask };
+      if (target.blend !== null) {
+        entry.blend = {
+          color: {
+            srcFactor: BLEND_FACTOR[target.blend.colorSrc],
+            dstFactor: BLEND_FACTOR[target.blend.colorDst],
+            operation: BLEND_OPERATION[target.blend.colorOp],
+          },
+          alpha: {
+            srcFactor: BLEND_FACTOR[target.blend.alphaSrc],
+            dstFactor: BLEND_FACTOR[target.blend.alphaDst],
+            operation: BLEND_OPERATION[target.blend.alphaOp],
+          },
+        };
+      }
+      targets.push(entry);
+    }
+
+    let pipeline;
+    try {
+      pipeline = this.#device.createRenderPipeline({
+        // No label rather than an empty one, as `#createBuffer` passes it.
+        ...(command.label === null ? {} : { label: command.label }),
+        layout,
+        // Empty buffers, always: vertex pulling is the only geometry path, so
+        // there is no vertex-buffer layout to describe. See the method docs.
+        vertex: {
+          module: vertexModule,
+          entryPoint: command.vertexEntryPoint,
+          buffers: [],
+        },
+        primitive,
+        ...(depthStencil === undefined ? {} : { depthStencil }),
+        multisample,
+        // Omit the fragment member entirely for a depth-only pass.
+        ...(command.fragment === null
+          ? {}
+          : {
+              fragment: {
+                module: fragmentModule,
+                entryPoint: command.fragment.entryPoint,
+                targets,
+              },
+            }),
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#graphicsPipelines.insert(command.pipeline, pipeline);
+  }
+
+  /**
+   * Lets go of a graphics pipeline.
+   *
+   * **LETTING GO IS THE WHOLE OF THE RELEASE**, as it is for a compute pipeline: a
+   * `GPURenderPipeline` has no `destroy()` — it holds no allocation this side can
+   * free — so there is nothing to call.
+   *
+   * A destroy naming nothing live is a no-op in both of its ways — a stale
+   * generation and an empty slot — and, like the compute-pipeline's, the empty
+   * slot is the *ordinary* case: every pipeline `#createGraphicsPipeline` refuses
+   * above (a `Line` polygon mode, an unresolvable layout or module, a forbidden
+   * `samples` count) leaves its handle empty, and the caller that pre-allocated it
+   * destroys it all the same.
+   *
+   * @param {{ pipeline: { index: number, generation: number } }} command
+   */
+  #destroyGraphicsPipeline(command) {
+    this.#graphicsPipelines.remove(command.pipeline);
   }
 
   /**

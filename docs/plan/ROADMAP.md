@@ -2258,7 +2258,18 @@ something trusted, and in a browser the only trusted renderer today is
      and — unlike push constants — deliberately not refused: WebGPU reads the
      authoritative size from the shader's `@workgroup_size`, so the descriptor's
      copy is redundant rather than lost, and dropping it changes nothing.
-   - 6d — graphics pipelines, the large descriptor.
+   - ~~6d — graphics pipelines, the large descriptor.~~ — **shipped.** Group R
+     proves a real `GPURenderPipeline` from the deepest descriptor on the seam —
+     the whole nested tree of primitive, depth-stencil (with a nested optional
+     stencil), multisample and per-target blend state, front/back stencil kept
+     distinct so a swap goes red. Seven new enum tables, `CompareOp` and
+     `Format` reused. The refusals: `polygon_mode: Line` (no core WebGPU
+     wireframe), `depth_clamp` without `depth-clip-control`, `samples` not in
+     {1, 4}, and a **fractional `DepthBias.constant`** — WebGPU's bias is an
+     `i32`, a seam mismatch now in the backlog. Stencil `reference` is carried
+     and dropped like a compute pipeline's workgroup size: it is a per-pass
+     value, not a pipeline field. Slice 6 is complete — a frame is now drawable
+     object by object.
 7. Command encoding, render and compute passes.
 8. Surface, swapchain, present.
 9. Replace `getrandom` with the 32-byte export shim, and empty

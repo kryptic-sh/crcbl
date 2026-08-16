@@ -48,6 +48,7 @@
 //! | [`__crcbl_web_gpu_probe_shader_module`](shim::__crcbl_web_gpu_probe_shader_module) | `() -> i32` | Encode one [`CreateShaderModule`](crate::Command::CreateShaderModule) against [`PROBE_SHADER_MODULE`] with [`PROBE_SHADER_MODULE_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_pipeline_layout`](shim::__crcbl_web_gpu_probe_pipeline_layout) | `() -> i32` | Encode one frame — a bind-group layout and a [`CreatePipelineLayout`](crate::Command::CreatePipelineLayout) against [`PROBE_PIPELINE_LAYOUT`] built from it. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_compute_pipeline`](shim::__crcbl_web_gpu_probe_compute_pipeline) | `() -> i32` | Encode one frame — a compute shader module, a pipeline layout, and a [`CreateComputePipeline`](crate::Command::CreateComputePipeline) against [`PROBE_COMPUTE_PIPELINE`] built from both. `1`, or `0` on the same three conditions. |
+//! | [`__crcbl_web_gpu_probe_graphics_pipeline`](shim::__crcbl_web_gpu_probe_graphics_pipeline) | `() -> i32` | Encode one frame — a vertex-plus-fragment shader module, an empty pipeline layout, and a [`CreateGraphicsPipeline`](crate::Command::CreateGraphicsPipeline) against [`PROBE_GRAPHICS_PIPELINE`] built from both. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `() -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) and register its wait. `1`, or `0` if there was no room or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
@@ -289,12 +290,14 @@ use std::rc::Rc;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
     BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
-    BufferDesc, BufferHandle, BufferUsage, CompareOp, ComputePipelineDesc, ComputePipelineHandle,
-    DeviceDesc, Extent3d, Features, FilterMode, Format, ImageDesc, ImageHandle,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, SampleType, SamplerAddressMode,
-    SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
-    SurfaceCaps, SurfaceHandle,
+    BlendState, BufferDesc, BufferHandle, BufferUsage, ColorTargetState, ColorWrites, CompareOp,
+    ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias, DepthStencilState, DeviceDesc,
+    Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
+    GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewDesc, ImageViewHandle, ImageViewType, MemoryLocation, MultisampleState,
+    PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PrimitiveState, PrimitiveTopology,
+    SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -996,6 +999,147 @@ pub const PROBE_COMPUTE_PIPELINE_DESC: ComputePipelineDesc<'static> = ComputePip
     workgroup_size: [1, 1, 1],
 };
 
+/// The graphics pipeline [`shim::__crcbl_web_gpu_probe_graphics_pipeline`]
+/// creates, every time.
+///
+/// The same bits a tenth time, on [`PROBE_COMPUTE_PIPELINE`]'s terms: a handle
+/// carries no kind, so a page filing ten kinds under one key would be a replayer
+/// with one table where the crate docs require ten. Its bits are
+/// [`PROBE_SHADER_MODULE`]'s and [`PROBE_PIPELINE_LAYOUT`]'s too — and, as for the
+/// compute pipeline, the sharing is the *point*: the pipeline resolves those two
+/// into two different tables in the same frame, and the module twice more (once
+/// for the vertex stage, once for the fragment), so a replayer with one table
+/// would resolve the pipeline's own id as its layout or one of its stages.
+pub const PROBE_GRAPHICS_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits(1 << 32) {
+        Some(pipeline) => pipeline,
+        // Generation `1`, as above.
+        None => panic!("generation 1 is not zero"),
+    };
+
+/// A trivial vertex-plus-fragment WGSL module — valid WGSL a software adapter
+/// compiles into a real render pipeline.
+///
+/// **One module with both entry points**, rather than two: it is the smaller
+/// thing SwiftShader accepts and still exercises the two-lookup path the replayer
+/// takes, since the pipeline names this same module for its vertex stage and its
+/// fragment stage. The vertex entry writes a fixed clip-space position and the
+/// fragment entry a fixed colour at location 0 — the smallest pair that builds a
+/// pipeline with a colour target, and unambiguously non-empty. `vsMain` and
+/// `fsMain` are the entry points [`PROBE_GRAPHICS_PIPELINE_DESC`] names.
+pub const PROBE_GRAPHICS_PIPELINE_WGSL: &str = concat!(
+    "@vertex fn vsMain() -> @builtin(position) vec4<f32> ",
+    "{ return vec4<f32>(0.0, 0.0, 0.0, 1.0); } ",
+    "@fragment fn fsMain() -> @location(0) vec4<f32> ",
+    "{ return vec4<f32>(1.0, 1.0, 1.0, 1.0); }"
+);
+
+/// The shader module the graphics-pipeline probe's frame creates just before the
+/// pipeline.
+///
+/// **Its own descriptor rather than [`PROBE_SHADER_MODULE_DESC`]**, because that
+/// one carries a vertex entry alone and a raster pipeline needs a fragment entry
+/// too. WGSL alone, on [`PROBE_SHADER_MODULE_DESC`]'s terms: a browser consumes
+/// only WGSL, so the other three artifacts are absent. It is filed at
+/// [`PROBE_SHADER_MODULE`] — the shader-module table, which the pipeline then
+/// resolves against for both stages.
+pub const PROBE_GRAPHICS_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu probe raster shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_GRAPHICS_PIPELINE_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The pipeline layout the graphics-pipeline probe's frame creates just before
+/// the pipeline.
+///
+/// **Empty**, like [`PROBE_COMPUTE_PIPELINE_LAYOUT_DESC`] — no bind-group
+/// layouts, no push constants — because the shaders bind nothing, and an empty
+/// pipeline layout is what a shader with no `@group` declarations wants. It is
+/// filed at [`PROBE_PIPELINE_LAYOUT`], one of the two tables the pipeline resolves
+/// against.
+pub const PROBE_GRAPHICS_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu probe raster pipeline layout"),
+    bind_group_layouts: &[],
+    push_constants: None,
+};
+
+/// The one colour target [`PROBE_GRAPHICS_PIPELINE_DESC`] writes to.
+///
+/// [`Format::Rgba8Unorm`] because it is core WebGPU, which is what makes the
+/// pipeline buildable on the software adapter the browser gate uses. A `Some`
+/// blend rather than opaque, so the `GPUBlendState` mapping — six factors and two
+/// ops across two components — is exercised at a real `createRenderPipeline`
+/// rather than only in the corpus. [`BlendState::alpha`] is a mode `Rgba8Unorm`
+/// can blend.
+pub const PROBE_GRAPHICS_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTargetState {
+    format: Format::Rgba8Unorm,
+    blend: Some(BlendState::alpha()),
+    write_mask: ColorWrites::ALL,
+}];
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_graphics_pipeline`] asks with.
+///
+/// A `const` rather than a function for [`PROBE_IMAGE_VIEW_DESC`]'s reason: there
+/// is nothing for a caller to pass. **A `GPURenderPipeline` reports its `label`,
+/// and — like a compute pipeline — `getBindGroupLayout(0)`**, which only a
+/// genuinely-built pipeline answers, because it is where the shaders and the
+/// layout are bound together. So beyond `instanceof GPURenderPipeline` the gate
+/// has that call and the device's silent error queue.
+///
+/// **Genuinely rich, not the minimum.** `layout` is the empty
+/// [`PROBE_PIPELINE_LAYOUT`]; `vertex` and `fragment` both name
+/// [`PROBE_SHADER_MODULE`] with the two entry points its WGSL declares — the
+/// fragment present, so this is not a depth-only pass. The primitive is a plain
+/// [`PrimitiveTopology::TriangleList`] with counter-clockwise winding and no
+/// culling so it builds; the depth-stencil is the engine's own reversed-Z default
+/// ([`Format::D32Float`], [`CompareOp::Greater`], writes on, no stencil), which
+/// exercises `depthCompare`, `depthWriteEnabled` and the depth-format mapping;
+/// and the one colour target carries a `Some` blend. The multisample is
+/// single-sampled so no attachment needs to be multisampled for it to build.
+///
+/// **`depth_clamp` is `false`.** `true` maps to `unclippedDepth`, which is
+/// feature-gated and would be refused on a device that did not enable
+/// `depth-clip-control`; keeping it `false` builds, and the refusal is driven
+/// through `web/tools/gpu-replay.mjs` instead.
+pub const PROBE_GRAPHICS_PIPELINE_DESC: GraphicsPipelineDesc<'static> = GraphicsPipelineDesc {
+    label: Some("crcbl-webgpu probe raster pipeline"),
+    layout: PROBE_PIPELINE_LAYOUT,
+    vertex: ShaderEntry {
+        module: PROBE_SHADER_MODULE,
+        entry_point: "vsMain",
+    },
+    fragment: Some(ShaderEntry {
+        module: PROBE_SHADER_MODULE,
+        entry_point: "fsMain",
+    }),
+    primitive: PrimitiveState {
+        topology: PrimitiveTopology::TriangleList,
+        front_face: FrontFace::Ccw,
+        cull_mode: CullMode::None,
+        polygon_mode: PolygonMode::Fill,
+        depth_clamp: false,
+    },
+    depth_stencil: Some(DepthStencilState {
+        format: Format::D32Float,
+        depth_write: true,
+        depth_compare: CompareOp::Greater,
+        stencil: None,
+        bias: DepthBias {
+            constant: 0.0,
+            slope_scale: 0.0,
+            clamp: 0.0,
+        },
+    }),
+    multisample: MultisampleState {
+        samples: 1,
+        mask: !0,
+        alpha_to_coverage: false,
+    },
+    color_targets: &PROBE_GRAPHICS_COLOR_TARGETS,
+};
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -1463,6 +1607,51 @@ impl Probe {
                     &PROBE_COMPUTE_PIPELINE_LAYOUT_DESC,
                 );
                 stream.create_compute_pipeline(PROBE_COMPUTE_PIPELINE, &PROBE_COMPUTE_PIPELINE_DESC)
+            })
+            .is_some()
+    }
+
+    /// Encode one [`CreateGraphicsPipeline`](crate::Command::CreateGraphicsPipeline)
+    /// against [`PROBE_GRAPHICS_PIPELINE`], built from a shader module and a
+    /// pipeline layout the same frame creates.
+    ///
+    /// **Three commands in one frame**, like the compute pipeline. A raster
+    /// pipeline names a live shader module and a live pipeline layout, so this
+    /// records the shader ([`PROBE_GRAPHICS_SHADER_MODULE_DESC`], both entry
+    /// points) and the empty pipeline layout
+    /// ([`PROBE_GRAPHICS_PIPELINE_LAYOUT_DESC`]) before the pipeline — one export,
+    /// because a creation is answered by nothing and there is no reply to poll for
+    /// at any step.
+    ///
+    /// [`request_sampler`](Self::request_sampler)'s ordering rule and wait rule
+    /// both apply — `create_graphics_pipeline` is a device method, so it refuses
+    /// until a device has opened, and nothing answers a creation.
+    ///
+    /// **It cannot check that its handles will resolve, and does not pretend
+    /// to**: the module and the layout live in the page's replayer and nothing
+    /// here holds one. A pipeline naming a stale one, or a descriptor field WebGPU
+    /// cannot express, is reported through `Device::take_error`, exactly as the
+    /// compute pipeline's is. `web/engine/gpu-replay.js` argues that where it is
+    /// made.
+    fn request_graphics_pipeline(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| {
+                stream
+                    .create_shader_module(PROBE_SHADER_MODULE, &PROBE_GRAPHICS_SHADER_MODULE_DESC);
+                stream.create_pipeline_layout(
+                    PROBE_PIPELINE_LAYOUT,
+                    &PROBE_GRAPHICS_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_graphics_pipeline(
+                    PROBE_GRAPHICS_PIPELINE,
+                    &PROBE_GRAPHICS_PIPELINE_DESC,
+                )
             })
             .is_some()
     }
@@ -2017,6 +2206,35 @@ pub mod shim {
         })
     }
 
+    /// Ask the page to make a render pipeline on the device it opened.
+    ///
+    /// `1` when the frame — a vertex-plus-fragment shader module, an empty
+    /// pipeline layout, and the
+    /// [`CreateGraphicsPipeline`](crate::Command::CreateGraphicsPipeline) built
+    /// from both — is on the stream; `0` on
+    /// [`__crcbl_web_gpu_probe_compute_pipeline`]'s three conditions.
+    ///
+    /// **No `state` beside it and no arguments either**, exactly as its neighbours
+    /// have none and for the same two reasons: nothing answers a creation, and a
+    /// `GPURenderPipeline` reports its `label` and — like a compute pipeline —
+    /// `getBindGroupLayout(n)`, neither of which a page could have chosen. The
+    /// descriptor is fixed in `crates/crcbl-webgpu/src/probe.rs`.
+    ///
+    /// **It is the largest descriptor on the seam**, and the point of this export
+    /// is to put its whole nested tree — the primitive state, the reversed-Z
+    /// depth-stencil, the multisample state, and the blended colour target — in
+    /// front of a real `createRenderPipeline`, where a stride wrong by a byte
+    /// anywhere in it would build a different pipeline or none.
+    /// `crcbl.gpu.replayer.graphicsPipelines` is the table the `GPURenderPipeline`
+    /// lands in.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_graphics_pipeline() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_graphics_pipeline()),
+            Err(_) => 0,
+        })
+    }
+
     /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
     /// legal value for each of these, so they are read only once
     /// [`__crcbl_web_gpu_probe_device_state`] has answered
@@ -2213,13 +2431,13 @@ mod tests {
         __crcbl_web_gpu_probe_device_features_lo, __crcbl_web_gpu_probe_device_max_image_2d,
         __crcbl_web_gpu_probe_device_reason_len, __crcbl_web_gpu_probe_device_reason_ptr,
         __crcbl_web_gpu_probe_device_state, __crcbl_web_gpu_probe_features_hi,
-        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_image,
-        __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_max_image_2d,
-        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_sampler,
-        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_graphics_pipeline,
+        __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
+        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -3146,6 +3364,85 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_device(), 1);
         assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
         assert_eq!(__crcbl_web_gpu_probe_compute_pipeline(), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The graphics pipeline names the same handle bits as everything else, for
+    /// the compute pipeline's reason: it, its shader module and its pipeline
+    /// layout are alive at once and a page filing them under one key would be a
+    /// replayer with one table where the crate docs require several.
+    #[test]
+    fn the_probes_graphics_pipeline_names_the_same_handle_bits_as_everything_else() {
+        assert_eq!(
+            PROBE_GRAPHICS_PIPELINE.to_bits(),
+            PROBE_PIPELINE_LAYOUT.to_bits()
+        );
+        assert_eq!(
+            PROBE_GRAPHICS_PIPELINE.to_bits(),
+            PROBE_SHADER_MODULE.to_bits()
+        );
+    }
+
+    /// The graphics-pipeline half: **one export, a whole frame.** A raster
+    /// pipeline names a live shader module and a live pipeline layout, so the
+    /// export records the vertex-plus-fragment shader and the empty pipeline
+    /// layout before the pipeline — and the pipeline names its layout once and its
+    /// module twice (vertex and fragment), all resolving out of tables the two
+    /// creations before it fill.
+    #[test]
+    fn the_graphics_pipeline_export_encodes_the_shader_layout_and_the_pipeline() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_graphics_pipeline(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateShaderModule",
+                "CreatePipelineLayout",
+                "CreateGraphicsPipeline",
+            ],
+            "the frame builds the shader module and pipeline layout before the pipeline"
+        );
+        assert_eq!(
+            commands.last(),
+            Some(&Command::CreateGraphicsPipeline {
+                pipeline: PROBE_GRAPHICS_PIPELINE,
+                label: Some("crcbl-webgpu probe raster pipeline".into()),
+                layout: PROBE_PIPELINE_LAYOUT,
+                vertex_module: PROBE_SHADER_MODULE,
+                vertex_entry_point: "vsMain".into(),
+                fragment: Some((PROBE_SHADER_MODULE, "fsMain".into())),
+                primitive: PROBE_GRAPHICS_PIPELINE_DESC.primitive,
+                depth_stencil: PROBE_GRAPHICS_PIPELINE_DESC.depth_stencil,
+                multisample: PROBE_GRAPHICS_PIPELINE_DESC.multisample,
+                color_targets: PROBE_GRAPHICS_COLOR_TARGETS.to_vec(),
+            })
+        );
+    }
+
+    /// **Nothing waits on the frame**, for the compute pipeline's reason: every
+    /// command in it is a creation, and a creation is answered by nothing.
+    #[test]
+    fn the_graphics_pipeline_request_registers_no_wait_because_nothing_answers_it() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_graphics_pipeline(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(take_frame().len(), 3);
+    }
+
+    /// **A device has to have opened first**, for the compute pipeline's reason:
+    /// every command the frame carries is a device method.
+    #[test]
+    fn a_graphics_pipeline_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_graphics_pipeline(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_graphics_pipeline(), 0);
         assert_eq!(take_frame().len(), 1);
     }
 

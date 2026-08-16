@@ -80,6 +80,7 @@ const CREATE_BIND_GROUP_TAG = 0x06;
 const CREATE_SHADER_MODULE_TAG = 0x07;
 const CREATE_PIPELINE_LAYOUT_TAG = 0x08;
 const CREATE_COMPUTE_PIPELINE_TAG = 0x09;
+const CREATE_GRAPHICS_PIPELINE_TAG = 0x0a;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
@@ -90,6 +91,7 @@ const DESTROY_BIND_GROUP_TAG = 0x26;
 const DESTROY_SHADER_MODULE_TAG = 0x27;
 const DESTROY_PIPELINE_LAYOUT_TAG = 0x28;
 const DESTROY_COMPUTE_PIPELINE_TAG = 0x29;
+const DESTROY_GRAPHICS_PIPELINE_TAG = 0x2a;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -202,6 +204,102 @@ const COMPARE_OP = [
   'GreaterOrEqual',
   'Always',
 ];
+
+/**
+ * `tag::PRIMITIVE_TOPOLOGY_*` — how vertices assemble into primitives.
+ *
+ * A gap costs a *strip* read as a *list* or the reverse: `LineStrip` folded into
+ * `LineList` connects segments meant to be independent, and the primitive
+ * assembles either way with nothing downstream refusing it. Read into
+ * `GPUPrimitiveState.topology` by `gpu-replay.js`.
+ */
+const PRIMITIVE_TOPOLOGY = [
+  'PointList',
+  'LineList',
+  'LineStrip',
+  'TriangleList',
+  'TriangleStrip',
+];
+
+/**
+ * `tag::FRONT_FACE_*` — which winding is front-facing.
+ *
+ * Two rows, and folded with {@link CULL_MODE} it decides which triangles
+ * survive, so a winding read as its opposite culls exactly the faces that should
+ * have been kept — a mesh inside-out, with the draw succeeding.
+ */
+const FRONT_FACE = ['Ccw', 'Cw'];
+
+/**
+ * `tag::CULL_MODE_*` — which faces to discard.
+ *
+ * `Front` and `Back` are the pair a gap costs the most: they discard the same
+ * amount and disagree only on which half, so a fold shows the far side of every
+ * object and hides the near one — geometry turned inside out rather than an
+ * error.
+ */
+const CULL_MODE = ['None', 'Front', 'Back'];
+
+/**
+ * `tag::POLYGON_MODE_*` — fill or wireframe.
+ *
+ * `Line` is the one WebGPU cannot express — wireframe is `POLYGON_MODE_LINE`,
+ * native-only — so it crosses verbatim and `gpu-replay.js` refuses it by name.
+ * A gap folded into `Fill` would silently fill a wireframe pass the caller meant
+ * to see through, the opposite of that loud refusal.
+ */
+const POLYGON_MODE = ['Fill', 'Line'];
+
+/**
+ * `tag::STENCIL_OP_*` — a stencil operation on a test outcome.
+ *
+ * Read **six times per pipeline** — two `StencilFaceState`s, three ops each — so
+ * an op out of position lands on a real op rather than an error. The clamp/wrap
+ * pairs (`IncrementClamp`/`IncrementWrap`) agree until the value saturates and
+ * then silently disagree, which no draw reports.
+ */
+const STENCIL_OP = [
+  'Keep',
+  'Zero',
+  'Replace',
+  'Invert',
+  'IncrementClamp',
+  'DecrementClamp',
+  'IncrementWrap',
+  'DecrementWrap',
+];
+
+/**
+ * `tag::BLEND_FACTOR_*` — a blend factor.
+ *
+ * Read four times per colour target with two {@link BLEND_OP}s interleaved, so a
+ * factor out of position decodes to another factor. Each factor and its
+ * `OneMinus` complement composite in exactly opposite directions, so a fold
+ * inverts the blend and leaves a valid pipeline the browser accepts.
+ */
+const BLEND_FACTOR = [
+  'Zero',
+  'One',
+  'Src',
+  'OneMinusSrc',
+  'SrcAlpha',
+  'OneMinusSrcAlpha',
+  'Dst',
+  'OneMinusDst',
+  'DstAlpha',
+  'OneMinusDstAlpha',
+];
+
+/**
+ * `tag::BLEND_OP_*` — how blended terms combine.
+ *
+ * `Subtract` and `ReverseSubtract` swap which operand is subtracted from which,
+ * so a target reads its own colour where it meant the destination's, and the
+ * pipeline is valid either way. `Min`/`Max` ignore their factors while the
+ * arithmetic ops do not, so a fold across the two groups also changes whether
+ * the factors above matter at all.
+ */
+const BLEND_OP = ['Add', 'Subtract', 'ReverseSubtract', 'Min', 'Max'];
 
 /**
  * `tag::SAMPLE_TYPE_*` — what a sampled image's texels mean to the shader.
@@ -341,6 +439,18 @@ const IMAGE_USAGE = [
 
 /** `crcbl_hal::ImageAspect` — which planes of an image a view touches. */
 const IMAGE_ASPECT = ['COLOR', 'DEPTH', 'STENCIL'];
+
+/**
+ * `crcbl_hal::ColorWrites` — which channels a colour target writes.
+ *
+ * A bitflags word like the two above, decoded to flag names in ascending bit
+ * order and strict against an unclaimed bit — `from_bits`, never
+ * `from_bits_truncate` — so a channel the encoder meant is never dropped. Each
+ * bit maps to a `GPUColorWrite` bit in `gpu-replay.js`; the fixture carries one
+ * `ALL` target and one `R | G` target, so a table narrower than Rust's refuses
+ * the fixture.
+ */
+const COLOR_WRITES = ['R', 'G', 'B', 'A'];
 
 /**
  * Every bit `crcbl_hal::Features` claims — `Features::all().bits()`.
@@ -1001,6 +1111,134 @@ class ByteReader {
       clear: this.readClearValue(),
     };
   }
+
+  /**
+   * A `crcbl_hal::PrimitiveState`: four leaf enums and a `bool`, in the struct's
+   * order. Each is named for its own field, so a byte out of position is an error
+   * against the field it belongs to rather than a valid variant of the wrong one.
+   *
+   * @returns {{ topology: string, frontFace: string, cullMode: string, polygonMode: string, depthClamp: boolean }}
+   */
+  readPrimitiveState() {
+    return {
+      topology: this.readEnum('PrimitiveState::topology', PRIMITIVE_TOPOLOGY),
+      frontFace: this.readEnum('PrimitiveState::front_face', FRONT_FACE),
+      cullMode: this.readEnum('PrimitiveState::cull_mode', CULL_MODE),
+      polygonMode: this.readEnum('PrimitiveState::polygon_mode', POLYGON_MODE),
+      depthClamp: this.readPresent('PrimitiveState::depth_clamp'),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::StencilFaceState`: compare, then the three `StencilOp`s in the
+   * struct's order — `fail_op`, `depth_fail_op`, `pass_op`. Spelled out because
+   * the three ops are the same table three times and any two read in the wrong
+   * order still decodes to a face state.
+   *
+   * @returns {{ compare: string, failOp: string, depthFailOp: string, passOp: string }}
+   */
+  readStencilFaceState() {
+    return {
+      compare: this.readEnum('StencilFaceState::compare', COMPARE_OP),
+      failOp: this.readEnum('StencilFaceState::fail_op', STENCIL_OP),
+      depthFailOp: this.readEnum('StencilFaceState::depth_fail_op', STENCIL_OP),
+      passOp: this.readEnum('StencilFaceState::pass_op', STENCIL_OP),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::DepthStencilState` — the deepest optional chain on the seam.
+   *
+   * The stencil rides a presence byte and, when present, its `front` and `back`
+   * faces come in that order — distinct in the fixture so a front/back swap goes
+   * red — followed by the three masks. `reference` is decoded here even though it
+   * is not a WebGPU pipeline field: it is a per-pass value `gpu-replay.js` drops
+   * to `setStencilReference`, so it round-trips but does not reach
+   * `createRenderPipeline`. The three bias floats close it out.
+   *
+   * @returns {{ format: string, depthWrite: boolean, depthCompare: string,
+   *   stencil: object | null, bias: { constant: number, slopeScale: number, clamp: number } }}
+   */
+  readDepthStencilState() {
+    const format = this.readEnum('DepthStencilState::format', IMAGE_FORMAT);
+    const depthWrite = this.readPresent('DepthStencilState::depth_write');
+    const depthCompare = this.readEnum(
+      'DepthStencilState::depth_compare',
+      COMPARE_OP
+    );
+    let stencil = null;
+    if (this.readPresent('DepthStencilState::stencil')) {
+      stencil = {
+        front: this.readStencilFaceState(),
+        back: this.readStencilFaceState(),
+        readMask: this.readU32(),
+        writeMask: this.readU32(),
+        reference: this.readU32(),
+      };
+    }
+    return {
+      format,
+      depthWrite,
+      depthCompare,
+      stencil,
+      bias: {
+        constant: this.readF32(),
+        slopeScale: this.readF32(),
+        clamp: this.readF32(),
+      },
+    };
+  }
+
+  /**
+   * A `crcbl_hal::MultisampleState`. `samples` and `mask` are adjacent `u32`s the
+   * replayer reads different rules from — it refuses a `samples` count that is
+   * neither 1 nor 4 — so they are read one at a time.
+   *
+   * @returns {{ samples: number, mask: number, alphaToCoverage: boolean }}
+   */
+  readMultisampleState() {
+    return {
+      samples: this.readU32(),
+      mask: this.readU32(),
+      alphaToCoverage: this.readPresent('MultisampleState::alpha_to_coverage'),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::BlendState`: colour source/dest/op, then alpha source/dest/op,
+   * in the struct's order — six leaf codes any two of which read in the wrong
+   * order still decodes to a blend state, which is why the order is pinned here.
+   *
+   * @returns {{ colorSrc: string, colorDst: string, colorOp: string,
+   *   alphaSrc: string, alphaDst: string, alphaOp: string }}
+   */
+  readBlendState() {
+    return {
+      colorSrc: this.readEnum('BlendState::color_src', BLEND_FACTOR),
+      colorDst: this.readEnum('BlendState::color_dst', BLEND_FACTOR),
+      colorOp: this.readEnum('BlendState::color_op', BLEND_OP),
+      alphaSrc: this.readEnum('BlendState::alpha_src', BLEND_FACTOR),
+      alphaDst: this.readEnum('BlendState::alpha_dst', BLEND_FACTOR),
+      alphaOp: this.readEnum('BlendState::alpha_op', BLEND_OP),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::ColorTargetState`: a format, an optional blend behind a
+   * presence byte, and the `ColorWrites` mask. `None` for the blend is a shorter
+   * body than a `Some` and stays distinct from an all-zero blend.
+   *
+   * @returns {{ format: string, blend: object | null, writeMask: string[] }}
+   */
+  readColorTargetState() {
+    return {
+      format: this.readEnum('ColorTargetState::format', IMAGE_FORMAT),
+      blend: this.readPresent('ColorTargetState::blend')
+        ? this.readBlendState()
+        : null,
+      writeMask: this.readFlags('ColorTargetState::write_mask', COLOR_WRITES),
+    };
+  }
 }
 
 // ── StreamReader ─────────────────────────────────────────────────────────────
@@ -1367,6 +1605,62 @@ function decodeCommand(r) {
         workgroupSize,
       };
     }
+    case CREATE_GRAPHICS_PIPELINE_TAG: {
+      // **The largest descriptor on the seam, and the deepest.** The vertex stage
+      // is a module handle and an entry point and no buffer layout — vertex
+      // pulling, so `GPUVertexState.buffers` is the empty array — and the fragment
+      // stage rides a presence byte, `null` for a depth-only pass. `layout`,
+      // `vertexModule` and the fragment module all resolve out of different tables
+      // by their wire position, since a handle carries no kind. The four state
+      // blocks that follow are read through the field readers above, deepest of
+      // them the depth-stencil chain. Nothing is validated: every "WebGPU cannot
+      // express it" refusal is `gpu-replay.js`'s, which can only refuse what it
+      // was told.
+      const pipeline = r.readHandle('CreateGraphicsPipeline::pipeline');
+      const label = r.readOptString('GraphicsPipelineDesc::label');
+      const layout = r.readHandle('GraphicsPipelineDesc::layout');
+      const vertexModule = r.readHandle('ShaderEntry::module');
+      const vertexEntryPoint = r.readString('ShaderEntry::entry_point');
+      const fragment = r.readPresent('GraphicsPipelineDesc::fragment')
+        ? {
+            module: r.readHandle('ShaderEntry::module'),
+            entryPoint: r.readString('ShaderEntry::entry_point'),
+          }
+        : null;
+      const primitive = r.readPrimitiveState();
+      const depthStencil = r.readPresent('GraphicsPipelineDesc::depth_stencil')
+        ? r.readDepthStencilState()
+        : null;
+      const multisample = r.readMultisampleState();
+      const count = r.readCount('GraphicsPipelineDesc::color_targets');
+      const colorTargets = [];
+      for (let i = 0; i < count; i += 1) {
+        colorTargets.push(r.readColorTargetState());
+      }
+      return {
+        name: 'CreateGraphicsPipeline',
+        pipeline,
+        label,
+        layout,
+        vertexModule,
+        vertexEntryPoint,
+        fragment,
+        primitive,
+        depthStencil,
+        multisample,
+        colorTargets,
+      };
+    }
+    case DESTROY_GRAPHICS_PIPELINE_TAG:
+      // Its own tag and its own table again: a graphics pipeline's id is allowed
+      // to be the same eight bytes as anything else's, and — like the
+      // compute-pipeline destroy — the one whose empty slot is the *ordinary*
+      // case, since the replayer refuses a pipeline it cannot build and the caller
+      // destroys the pre-allocated handle regardless.
+      return {
+        name: 'DestroyGraphicsPipeline',
+        pipeline: r.readHandle('DestroyGraphicsPipeline::pipeline'),
+      };
     case DESTROY_COMPUTE_PIPELINE_TAG:
       // Its own tag and its own table again: a compute pipeline's id is allowed to
       // be the same eight bytes as anything else's, and — like the pipeline-layout

@@ -65,6 +65,7 @@ const DRAW_TAG = 0x60;
 const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
 const CREATE_BIND_GROUP_TAG = 0x06;
 const CREATE_PIPELINE_LAYOUT_TAG = 0x08;
+const CREATE_GRAPHICS_PIPELINE_TAG = 0x0a;
 const REQUEST_DEVICE_TAG = 0x91;
 
 /** @type {string[]} */
@@ -777,6 +778,73 @@ const EXPECTED = [
     entryPoint: 'computeMain',
     workgroupSize: [8, 4, 2],
   },
+  // The largest descriptor on the seam, and the deepest. `layout`, `vertexModule`
+  // and the fragment module resolve into three different tables by wire position;
+  // the fragment stage is present (a colour pass, not depth-only). Every enum
+  // differs from the ones beside it, so a transposition anywhere goes red. The
+  // depth-stencil chain is `Some(Some(..))` with `front` and `back` distinct in
+  // every field, so a front/back swap is caught; the bias `slopeScale` is the
+  // nearest f32 to 0.1, so an encoding that went through a decimal string would
+  // land on a different number. Two colour targets with distinct formats, one
+  // blended and one not.
+  {
+    name: 'CreateGraphicsPipeline',
+    pipeline: handle(131, 132),
+    label: 'gbuffer',
+    layout: handle(121, 122),
+    vertexModule: handle(113, 114),
+    vertexEntryPoint: 'vertexMain',
+    fragment: { module: handle(115, 116), entryPoint: 'fragmentMain' },
+    primitive: {
+      topology: 'TriangleStrip',
+      frontFace: 'Cw',
+      cullMode: 'Back',
+      polygonMode: 'Fill',
+      depthClamp: false,
+    },
+    depthStencil: {
+      format: 'D32_FLOAT_S8_UINT',
+      depthWrite: false,
+      depthCompare: 'GreaterOrEqual',
+      stencil: {
+        front: {
+          compare: 'Less',
+          failOp: 'Keep',
+          depthFailOp: 'IncrementWrap',
+          passOp: 'Replace',
+        },
+        back: {
+          compare: 'Greater',
+          failOp: 'Zero',
+          depthFailOp: 'DecrementClamp',
+          passOp: 'Invert',
+        },
+        readMask: 0x0f,
+        writeMask: 0xf0,
+        reference: 0x2a,
+      },
+      // `slopeScale` is the nearest f32 to 0.1 — the bit pattern the wire carries
+      // — computed with `Math.fround` rather than written as `0.1`, which is a
+      // different double. `constant` and `clamp` are exact.
+      bias: { constant: -2, slopeScale: Math.fround(0.1), clamp: 0.25 },
+    },
+    multisample: { samples: 4, mask: 0xff, alphaToCoverage: true },
+    colorTargets: [
+      {
+        format: 'RGBA16_FLOAT',
+        blend: {
+          colorSrc: 'SrcAlpha',
+          colorDst: 'OneMinusSrcAlpha',
+          colorOp: 'Add',
+          alphaSrc: 'One',
+          alphaDst: 'OneMinusSrcAlpha',
+          alphaOp: 'Add',
+        },
+        writeMask: ['R', 'G', 'B', 'A'],
+      },
+      { format: 'RG16_FLOAT', blend: null, writeMask: ['R', 'G'] },
+    ],
+  },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
   { name: 'DestroySurface', surface: handle(47, 48) },
   // A view and the image it views are separate objects in separate tables, so
@@ -807,6 +875,10 @@ const EXPECTED = [
   // destroy — the one whose empty slot is the ordinary case, since the replayer
   // refuses a pipeline it cannot build and the caller destroys the handle anyway.
   { name: 'DestroyComputePipeline', pipeline: handle(129, 130) },
+  // Its own command and its own table again, and — like the compute-pipeline
+  // destroy — the one whose empty slot is the ordinary case: the replayer refuses
+  // a pipeline it cannot build and the caller destroys the handle anyway.
+  { name: 'DestroyGraphicsPipeline', pipeline: handle(133, 134) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',
@@ -1761,6 +1833,87 @@ async function main() {
     },
     "a push-constant range's presence byte of 2 is refused rather than read as truthy"
   );
+
+  // ---- the graphics pipeline's nested tree is read in the right order -----
+  // The deepest descriptor on the seam, hand-built with the fragment and
+  // depth-stencil absent so the primitive block, the multisample block and one
+  // blended colour target are the last bytes and each leaf sits at a named
+  // offset. Corrupting one leaf at a time is what says the reader walks the tree
+  // rather than landing a field one along — a decoder that read the blend's alpha
+  // factors before its colour factors would name `color_src` where this expects
+  // `alpha_src`.
+  const graphicsPipelineBody = (mut = (b) => b) => {
+    const body = [
+      CREATE_GRAPHICS_PIPELINE_TAG,
+      ...someHandle, // the pipeline's own id
+      0, // label, absent
+      ...someHandle, // layout
+      ...someHandle, // vertex module
+      ...u32le(2), // vertex entry point length
+      0x76,
+      0x73, // "vs"
+      0, // fragment, absent
+      // primitive: topology, front_face, cull_mode, polygon_mode, depth_clamp
+      3, // TriangleList
+      1, // Cw
+      2, // Back
+      0, // Fill
+      0, // depth_clamp false
+      0, // depth_stencil, absent
+      // multisample: samples, mask, alpha_to_coverage
+      ...u32le(4),
+      ...u32le(0xff),
+      0,
+      ...u32le(1), // one colour target
+      // target 0: format, blend present, blend body, write mask
+      0x0a, // Format::Rgba16Float
+      PRESENT, // blend present
+      4, // color_src  SrcAlpha
+      5, // color_dst  OneMinusSrcAlpha
+      0, // color_op   Add
+      1, // alpha_src  One
+      5, // alpha_dst  OneMinusSrcAlpha
+      0, // alpha_op   Add
+      ...u32le(0x0f), // write mask R|G|B|A
+    ];
+    return mut(body.slice());
+  };
+  // The colour-target block starts after the primitive (5), the absent
+  // depth-stencil (1) and the multisample block (9) and target count (4).
+  const targetAt = 1 + 8 + 1 + 8 + 8 + (4 + 2) + 1 + 5 + 1 + 9 + 4; // from the tag byte
+  const formatAt = HEADER_BYTES + targetAt;
+  const blendColorSrcAt = formatAt + 2; // past format + blend presence
+  const blendAlphaSrcAt = blendColorSrcAt + 3; // past color src/dst/op
+  const topologyAt = HEADER_BYTES + 1 + 8 + 1 + 8 + 8 + (4 + 2) + 1;
+
+  for (const [at, field, code] of [
+    [topologyAt, 'PrimitiveState::topology', 0x7f],
+    [formatAt, 'ColorTargetState::format', 0x7f],
+    [blendColorSrcAt, 'BlendState::color_src', 0x7f],
+    [blendAlphaSrcAt, 'BlendState::alpha_src', 0x7f],
+  ]) {
+    checkRefused(
+      streamOf(
+        header,
+        graphicsPipelineBody((b) => ((b[at - HEADER_BYTES] = code), b))
+      ),
+      { kind: 'InvalidEnum', field, code },
+      `a graphics pipeline's ${field} code no variant claims is refused, not folded`
+    );
+  }
+  // The whole tree decodes when nothing is corrupted, so the sweep is refusing a
+  // real command rather than a body that never decoded.
+  {
+    const [command] = decodeStream(streamOf(header, graphicsPipelineBody()));
+    check(
+      command.name === 'CreateGraphicsPipeline' &&
+        command.fragment === null &&
+        command.depthStencil === null &&
+        command.colorTargets.length === 1 &&
+        command.colorTargets[0].blend.alphaSrc === 'One',
+      'the hand-built graphics pipeline decodes, so the sweep refuses a real one'
+    );
+  }
 
   // ---- a failed reader stays failed rather than resyncing mid-body --------
   // After a throw the cursor is somewhere inside a command body, so the next

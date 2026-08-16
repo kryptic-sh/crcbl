@@ -649,6 +649,26 @@ function stubComputePipeline(desc) {
 }
 
 /**
+ * A `GPURenderPipeline` as `createRenderPipeline` answers one.
+ *
+ * {@link stubComputePipeline}'s shape for the same reason: a real one reports its
+ * `label` and answers `getBindGroupLayout(n)`, the derived layout only a
+ * genuinely-built pipeline can hand back. `of` is the `GPURenderPipelineDescriptor`
+ * it was made from, kept for the checks that need to say *what* the pipeline was
+ * built with — the empty `vertex.buffers`, the omitted or present `fragment`, the
+ * depth-stencil with no `stencilReference`.
+ *
+ * @param {{ label?: string }} desc
+ */
+function stubRenderPipeline(desc) {
+  return {
+    label: desc.label ?? '',
+    of: desc,
+    getBindGroupLayout: (index) => ({ label: `derived ${index}` }),
+  };
+}
+
+/**
  * A `GPUShaderModule` as `createShaderModule` answers one.
  *
  * {@link stubSampler}'s shape and for its reason: a real one reports its `label`,
@@ -711,6 +731,7 @@ function stubDevice(
     refuseShaderModules,
     refusePipelineLayouts,
     refuseComputePipelines,
+    refuseRenderPipelines,
   } = {}
 ) {
   const device = {
@@ -744,6 +765,11 @@ function stubDevice(
      *   order.
      */
     createdComputePipelines: [],
+    /**
+     * @type {object[]} Every `GPURenderPipelineDescriptor` it was handed, in
+     *   order.
+     */
+    createdRenderPipelines: [],
     /** @type {Array<[string, Function]>} */
     listeners: [],
     /**
@@ -811,6 +837,12 @@ function stubDevice(
       device.createdComputePipelines.push(desc);
       if (refuseComputePipelines !== undefined) throw refuseComputePipelines;
       return stubComputePipeline(desc);
+    },
+    /** @param {object} desc */
+    createRenderPipeline(desc) {
+      device.createdRenderPipelines.push(desc);
+      if (refuseRenderPipelines !== undefined) throw refuseRenderPipelines;
+      return stubRenderPipeline(desc);
     },
   };
   return device;
@@ -1312,6 +1344,17 @@ async function main() {
     `the committed stream carries a CreateComputePipeline and a DestroyComputePipeline (${computePipeline ? 'found' : 'missing'})`
   );
 
+  const graphicsPipeline = commands.find(
+    (command) => command.name === 'CreateGraphicsPipeline'
+  );
+  const destroyGraphicsPipeline = commands.find(
+    (command) => command.name === 'DestroyGraphicsPipeline'
+  );
+  check(
+    graphicsPipeline !== undefined && destroyGraphicsPipeline !== undefined,
+    `the committed stream carries a CreateGraphicsPipeline and a DestroyGraphicsPipeline (${graphicsPipeline ? 'found' : 'missing'})`
+  );
+
   const [flatImage, volumeImage, lutImage] = images;
   const [
     cascadeView,
@@ -1515,6 +1558,8 @@ async function main() {
       'DestroyPipelineLayout',
       'CreateComputePipeline',
       'DestroyComputePipeline',
+      'CreateGraphicsPipeline',
+      'DestroyGraphicsPipeline',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -4683,6 +4728,287 @@ async function main() {
     check(
       replayer.computePipelines.get(computePipeline.pipeline) === undefined,
       'and destroying the pipeline by its own handle releases it'
+    );
+  }
+
+  // ---- the graphics pipeline: the largest descriptor on the seam ----------
+  //
+  // The corpus `CreateGraphicsPipeline` names `fullShader`'s module for its
+  // vertex stage, `emptyWgslShader`'s for its fragment stage, and a pipeline
+  // layout at its own `layout` handle — three ids into two tables — and its depth
+  // format is `D32_FLOAT_S8_UINT`, which is gated behind `depth32float-stencil8`.
+  // So the frame that builds it opens a device with that feature and creates the
+  // two shaders and the layout first.
+  const rasterReady = () =>
+    readyWithDevice({ device: stubDevice(['depth32float-stencil8']) });
+  const rasterFrame = (replayer) => {
+    replayer.replay(frameOf(fullShader, 500n));
+    replayer.replay(frameOf(emptyWgslShader, 501n));
+    replayer.replay(
+      frameOf(emptyPipelineLayoutAt(graphicsPipeline.layout), 502n)
+    );
+  };
+  {
+    // **The happy path: three handles resolve and the pipeline builds.** The
+    // descriptor the device is handed is what proves the imperfect mappings: the
+    // vertex stage carries an empty `buffers` array (vertex pulling has no
+    // vertex-buffer layout), the fragment is present with its two targets, the
+    // depth-stencil carries `stencilFront`/`stencilBack` but no `stencilReference`
+    // — that is a per-pass value, dropped like the workgroup size — and the
+    // multisample count is the 4 the corpus asked for.
+    const { replayer, device } = await rasterReady();
+    rasterFrame(replayer);
+    replayer.replay(frameOf(graphicsPipeline, 503n));
+    const pd = device.createdRenderPipelines[0];
+    const built =
+      device.createdRenderPipelines.length === 1 &&
+      pd.label === 'gbuffer' &&
+      pd.layout === replayer.pipelineLayouts.get(graphicsPipeline.layout) &&
+      pd.vertex.module ===
+        replayer.shaderModules.get(graphicsPipeline.vertexModule) &&
+      pd.vertex.entryPoint === 'vertexMain' &&
+      Array.isArray(pd.vertex.buffers) &&
+      pd.vertex.buffers.length === 0 &&
+      pd.fragment.module ===
+        replayer.shaderModules.get(graphicsPipeline.fragment.module) &&
+      pd.fragment.entryPoint === 'fragmentMain' &&
+      pd.fragment.targets.length === 2 &&
+      pd.multisample.count === 4;
+    check(
+      built,
+      built
+        ? 'a CreateGraphicsPipeline reaches the device with its layout and two shader stages resolved, and vertex.buffers empty'
+        : `the built render pipeline is not what was asked for (${JSON.stringify(pd, (_, v) => (typeof v === 'bigint' ? String(v) : v))})`
+    );
+    // **The stencil reference is carried in Rust but not passed to WebGPU** — it
+    // belongs to the pass. Asserted on the descriptor: the depth-stencil has
+    // stencil faces but no `stencilReference` and no bare `reference` anywhere.
+    const referenceDropped =
+      pd.depthStencil !== undefined &&
+      pd.depthStencil.stencilFront !== undefined &&
+      pd.depthStencil.stencilBack !== undefined &&
+      !('stencilReference' in pd.depthStencil) &&
+      !('reference' in pd.depthStencil) &&
+      !('reference' in pd.depthStencil.stencilFront);
+    check(
+      referenceDropped,
+      referenceDropped
+        ? 'the stencil reference is carried on the wire and dropped rather than passed to createRenderPipeline (it is a per-pass value)'
+        : `a stencil reference reached the descriptor (${JSON.stringify(pd.depthStencil)})`
+    );
+    check(
+      replayer.graphicsPipelines.get(graphicsPipeline.pipeline) !== undefined &&
+        !replayer.hasReplies &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `and the render pipeline lands in its table, queues no reply and reports no error (queued ${replayer.hasReplies})`
+    );
+  }
+  {
+    // **Three handle misses, three DISTINCT messages** — the layout, the vertex
+    // module, and the fragment module. Each case builds everything but the one
+    // handle it is isolating, so the message names exactly which could not be
+    // resolved and none reads like another.
+    const layoutCase = await rasterReady();
+    layoutCase.replayer.replay(frameOf(fullShader, 510n));
+    layoutCase.replayer.replay(frameOf(emptyWgslShader, 511n));
+    layoutCase.replayer.replay(frameOf(graphicsPipeline, 512n));
+    const layoutReason = layoutCase.replayer.takeError();
+
+    const vertexCase = await rasterReady();
+    vertexCase.replayer.replay(frameOf(emptyWgslShader, 520n));
+    vertexCase.replayer.replay(
+      frameOf(emptyPipelineLayoutAt(graphicsPipeline.layout), 521n)
+    );
+    vertexCase.replayer.replay(frameOf(graphicsPipeline, 522n));
+    const vertexReason = vertexCase.replayer.takeError();
+
+    const fragmentCase = await rasterReady();
+    fragmentCase.replayer.replay(frameOf(fullShader, 530n));
+    fragmentCase.replayer.replay(
+      frameOf(emptyPipelineLayoutAt(graphicsPipeline.layout), 531n)
+    );
+    fragmentCase.replayer.replay(frameOf(graphicsPipeline, 532n));
+    const fragmentReason = fragmentCase.replayer.takeError();
+
+    const distinct =
+      layoutCase.device.createdRenderPipelines.length === 0 &&
+      vertexCase.device.createdRenderPipelines.length === 0 &&
+      fragmentCase.device.createdRenderPipelines.length === 0 &&
+      String(layoutReason).includes('as its layout') &&
+      String(vertexReason).includes('as its vertex stage') &&
+      String(fragmentReason).includes('as its fragment stage') &&
+      new Set([
+        String(layoutReason),
+        String(vertexReason),
+        String(fragmentReason),
+      ]).size === 3;
+    check(
+      distinct,
+      distinct
+        ? 'an unresolvable layout, vertex module and fragment module each go to the error queue naming which, in three distinct messages'
+        : `the three failures are not distinct (layout ${JSON.stringify(layoutReason)}, vertex ${JSON.stringify(vertexReason)}, fragment ${JSON.stringify(fragmentReason)})`
+    );
+  }
+  {
+    // **Every "WebGPU cannot express it" refusal fires and is named**, each on a
+    // device where the pipeline would otherwise build. Nothing throws; each is a
+    // device error, and nothing is filed.
+    const cases = [
+      [
+        {
+          ...graphicsPipeline,
+          primitive: { ...graphicsPipeline.primitive, polygonMode: 'Line' },
+        },
+        'PolygonMode::Line',
+        () => rasterReady(),
+      ],
+      [
+        {
+          ...graphicsPipeline,
+          primitive: { ...graphicsPipeline.primitive, depthClamp: true },
+        },
+        'depth-clip-control',
+        () => rasterReady(),
+      ],
+      [
+        {
+          ...graphicsPipeline,
+          multisample: { ...graphicsPipeline.multisample, samples: 3 },
+        },
+        'must be 1 or 4',
+        () => rasterReady(),
+      ],
+      [
+        {
+          ...graphicsPipeline,
+          depthStencil: {
+            ...graphicsPipeline.depthStencil,
+            bias: { ...graphicsPipeline.depthStencil.bias, constant: 1.5 },
+          },
+        },
+        'GPUDepthBias is an integer',
+        () => rasterReady(),
+      ],
+      // The depth format is gated, so the same command is a refusal on a device
+      // without the feature — the pipeline the happy path built.
+      [graphicsPipeline, 'depth32float-stencil8', () => readyWithDevice()],
+    ];
+    /** @type {string[]} */
+    const wrong = [];
+    for (const [command, needle, ready] of cases) {
+      const { replayer, device } = await ready();
+      // Build the two shaders and the layout so the refusal is about the field
+      // and not a missing handle.
+      replayer.replay(frameOf(fullShader, 540n));
+      replayer.replay(frameOf(emptyWgslShader, 541n));
+      replayer.replay(
+        frameOf(emptyPipelineLayoutAt(graphicsPipeline.layout), 542n)
+      );
+      let thrown = null;
+      try {
+        replayer.replay(frameOf(command, 543n));
+      } catch (error) {
+        thrown = error;
+      }
+      const reason = replayer.takeError();
+      if (
+        thrown !== null ||
+        device.createdRenderPipelines.length !== 0 ||
+        replayer.graphicsPipelines.size !== 0 ||
+        !String(reason).includes(needle)
+      ) {
+        wrong.push(
+          `${needle}: thrown ${String(thrown)}, reason ${JSON.stringify(reason)}`
+        );
+      }
+    }
+    check(
+      wrong.length === 0,
+      wrong[0] ??
+        'PolygonMode::Line, depth_clamp without the feature, a bad sample count, a fractional depthBias and a gated depth format are each refused by name, none thrown'
+    );
+  }
+  {
+    // **The gated depth format builds on a device that DID enable the feature** —
+    // the half that keeps the refusal above honest, so it is refusing what the
+    // device lacks rather than everything.
+    const { replayer, device } = await rasterReady();
+    rasterFrame(replayer);
+    replayer.replay(frameOf(graphicsPipeline, 550n));
+    check(
+      device.createdRenderPipelines.length === 1 &&
+        replayer.graphicsPipelines.get(graphicsPipeline.pipeline) !== undefined,
+      'the D32_FLOAT_S8_UINT depth format builds on a device that enabled depth32float-stencil8'
+    );
+  }
+  {
+    // **A depth-only pass: fragment None omits the whole GPUFragmentState.** The
+    // vertex stage still resolves; the descriptor carries no `fragment` member.
+    const depthOnly = { ...graphicsPipeline, fragment: null, colorTargets: [] };
+    const { replayer, device } = await rasterReady();
+    replayer.replay(frameOf(fullShader, 560n));
+    replayer.replay(
+      frameOf(emptyPipelineLayoutAt(graphicsPipeline.layout), 561n)
+    );
+    replayer.replay(frameOf(depthOnly, 562n));
+    const pd = device.createdRenderPipelines[0];
+    check(
+      pd !== undefined &&
+        !('fragment' in pd) &&
+        replayer.graphicsPipelines.get(graphicsPipeline.pipeline) !==
+          undefined &&
+        replayer.takeError() === null,
+      `a fragment: null pipeline omits the GPUFragmentState member entirely (${pd ? JSON.stringify(Object.keys(pd)) : 'not built'})`
+    );
+  }
+  {
+    // **A graphics pipeline before any device is refused, like every device
+    // method** — recorded rather than thrown.
+    const bare = new Replayer({ gpu: stubGpu(async () => null) });
+    bare.replay(frameOf(graphicsPipeline, 570n));
+    const early = bare.takeError();
+    check(
+      typeof early === 'string' && early.includes('before any device opened'),
+      `a graphics pipeline before a device is a device error, not a throw (${JSON.stringify(early)})`
+    );
+  }
+  {
+    // **Destroys: a stale generation leaves the live occupant, and an empty slot
+    // does not throw** — the ordinary case here, since every refused pipeline
+    // leaves its handle empty for the caller to destroy anyway.
+    const { replayer } = await rasterReady();
+    rasterFrame(replayer);
+    replayer.replay(frameOf(graphicsPipeline, 580n));
+    const live = replayer.graphicsPipelines.get(graphicsPipeline.pipeline);
+    const stale = handle(
+      graphicsPipeline.pipeline.index,
+      graphicsPipeline.pipeline.generation + 1
+    );
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf({ ...destroyGraphicsPipeline, pipeline: stale }, 581n)
+      );
+      replayer.replay(frameOf(destroyGraphicsPipeline, 582n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        live !== undefined &&
+        replayer.graphicsPipelines.get(graphicsPipeline.pipeline) === live,
+      `a stale-generation destroy leaves the live graphics pipeline and an empty-slot destroy does not throw (${String(thrown)})`
+    );
+    replayer.replay(
+      frameOf(
+        { ...destroyGraphicsPipeline, pipeline: graphicsPipeline.pipeline },
+        583n
+      )
+    );
+    check(
+      replayer.graphicsPipelines.get(graphicsPipeline.pipeline) === undefined,
+      'and destroying the render pipeline by its own handle releases it'
     );
   }
 

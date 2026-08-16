@@ -19,9 +19,12 @@
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource,
-    BufferUsage, ClearValue, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d,
-    FilterMode, Format, ImageAspect, ImageSubresourceRange, ImageType, ImageUsage, ImageViewType,
-    LoadOp, PushConstantRange, Rect2d, SampleType, SamplerAddressMode, ShaderStages, StoreOp,
+    BlendFactor, BlendOp, BlendState, BufferUsage, ClearValue, ColorAttachment, ColorTargetState,
+    ColorWrites, CompareOp, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
+    Extent3d, FilterMode, Format, FrontFace, ImageAspect, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewType, LoadOp, MultisampleState, PolygonMode, PrimitiveState,
+    PrimitiveTopology, PushConstantRange, Rect2d, SampleType, SamplerAddressMode, ShaderStages,
+    StencilFaceState, StencilOp, StencilState, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -380,6 +383,194 @@ impl ByteReader<'_> {
             clear: self.read_clear_value()?,
         })
     }
+
+    fn read_compare_op(&mut self, field: &'static str) -> Result<CompareOp, DecodeError> {
+        let code = self.read_u8()?;
+        tag::compare_op_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_primitive_topology(
+        &mut self,
+        field: &'static str,
+    ) -> Result<PrimitiveTopology, DecodeError> {
+        let code = self.read_u8()?;
+        tag::primitive_topology_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_front_face(&mut self, field: &'static str) -> Result<FrontFace, DecodeError> {
+        let code = self.read_u8()?;
+        tag::front_face_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_cull_mode(&mut self, field: &'static str) -> Result<CullMode, DecodeError> {
+        let code = self.read_u8()?;
+        tag::cull_mode_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_polygon_mode(&mut self, field: &'static str) -> Result<PolygonMode, DecodeError> {
+        let code = self.read_u8()?;
+        tag::polygon_mode_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_stencil_op(&mut self, field: &'static str) -> Result<StencilOp, DecodeError> {
+        let code = self.read_u8()?;
+        tag::stencil_op_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_blend_factor(&mut self, field: &'static str) -> Result<BlendFactor, DecodeError> {
+        let code = self.read_u8()?;
+        tag::blend_factor_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_blend_op(&mut self, field: &'static str) -> Result<BlendOp, DecodeError> {
+        let code = self.read_u8()?;
+        tag::blend_op_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    /// A [`ColorWrites`] word, through `from_bits` and never `from_bits_truncate`
+    /// — the rule every bitflags field on this stream follows. A channel bit no
+    /// flag claims is a build that knows a write mask this one does not, and
+    /// dropping it would open a channel the caller meant closed, or close one it
+    /// meant open.
+    fn read_color_writes(&mut self, field: &'static str) -> Result<ColorWrites, DecodeError> {
+        let bits = self.read_u32()?;
+        ColorWrites::from_bits(bits).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: bits.into(),
+        })
+    }
+
+    /// One [`PrimitiveState`], in the order the struct declares its fields.
+    ///
+    /// Four leaf enums and a `bool`, each named for its own field so a byte read
+    /// out of position is an error against the field it belongs to rather than a
+    /// silently valid variant of the wrong one.
+    fn read_primitive_state(&mut self) -> Result<PrimitiveState, DecodeError> {
+        Ok(PrimitiveState {
+            topology: self.read_primitive_topology("PrimitiveState::topology")?,
+            front_face: self.read_front_face("PrimitiveState::front_face")?,
+            cull_mode: self.read_cull_mode("PrimitiveState::cull_mode")?,
+            polygon_mode: self.read_polygon_mode("PrimitiveState::polygon_mode")?,
+            depth_clamp: self.read_bool("PrimitiveState::depth_clamp")?,
+        })
+    }
+
+    /// One [`StencilFaceState`]: compare, then the three [`StencilOp`]s in the
+    /// struct's order. Spelled out because the three ops are the same table three
+    /// times, and any two read in the wrong order still decodes to a face state.
+    fn read_stencil_face_state(&mut self) -> Result<StencilFaceState, DecodeError> {
+        Ok(StencilFaceState {
+            compare: self.read_compare_op("StencilFaceState::compare")?,
+            fail_op: self.read_stencil_op("StencilFaceState::fail_op")?,
+            depth_fail_op: self.read_stencil_op("StencilFaceState::depth_fail_op")?,
+            pass_op: self.read_stencil_op("StencilFaceState::pass_op")?,
+        })
+    }
+
+    /// One [`DepthStencilState`] — the deepest optional chain on the seam.
+    ///
+    /// The stencil is behind a presence byte, and its `front` and `back` are read
+    /// in that order so a front/back swap is visible; the three masks and the
+    /// three bias floats follow. `reference` is read here — it round-trips in Rust
+    /// — even though it is a per-pass value the WebGPU replayer drops.
+    fn read_depth_stencil_state(&mut self) -> Result<DepthStencilState, DecodeError> {
+        let format = self.read_format("DepthStencilState::format")?;
+        let depth_write = self.read_bool("DepthStencilState::depth_write")?;
+        let depth_compare = self.read_compare_op("DepthStencilState::depth_compare")?;
+        let stencil = if self.read_present("DepthStencilState::stencil")? {
+            let front = self.read_stencil_face_state()?;
+            let back = self.read_stencil_face_state()?;
+            let read_mask = self.read_u32()?;
+            let write_mask = self.read_u32()?;
+            let reference = self.read_u32()?;
+            Some(StencilState {
+                front,
+                back,
+                read_mask,
+                write_mask,
+                reference,
+            })
+        } else {
+            None
+        };
+        let bias = DepthBias {
+            constant: self.read_f32()?,
+            slope_scale: self.read_f32()?,
+            clamp: self.read_f32()?,
+        };
+        Ok(DepthStencilState {
+            format,
+            depth_write,
+            depth_compare,
+            stencil,
+            bias,
+        })
+    }
+
+    /// One [`MultisampleState`], `samples` and `mask` read one at a time because
+    /// they are adjacent `u32`s the replayer reads different rules from.
+    fn read_multisample_state(&mut self) -> Result<MultisampleState, DecodeError> {
+        Ok(MultisampleState {
+            samples: self.read_u32()?,
+            mask: self.read_u32()?,
+            alpha_to_coverage: self.read_bool("MultisampleState::alpha_to_coverage")?,
+        })
+    }
+
+    /// One [`BlendState`]: colour source/dest/op, then alpha source/dest/op, in
+    /// the struct's order — six leaf codes any two of which read in the wrong
+    /// order still decodes to a blend state.
+    fn read_blend_state(&mut self) -> Result<BlendState, DecodeError> {
+        Ok(BlendState {
+            color_src: self.read_blend_factor("BlendState::color_src")?,
+            color_dst: self.read_blend_factor("BlendState::color_dst")?,
+            color_op: self.read_blend_op("BlendState::color_op")?,
+            alpha_src: self.read_blend_factor("BlendState::alpha_src")?,
+            alpha_dst: self.read_blend_factor("BlendState::alpha_dst")?,
+            alpha_op: self.read_blend_op("BlendState::alpha_op")?,
+        })
+    }
+
+    /// One [`ColorTargetState`]: format, an optional blend behind a presence
+    /// byte, and the [`ColorWrites`] mask.
+    fn read_color_target_state(&mut self) -> Result<ColorTargetState, DecodeError> {
+        let format = self.read_format("ColorTargetState::format")?;
+        let blend = if self.read_present("ColorTargetState::blend")? {
+            Some(self.read_blend_state()?)
+        } else {
+            None
+        };
+        let write_mask = self.read_color_writes("ColorTargetState::write_mask")?;
+        Ok(ColorTargetState {
+            format,
+            blend,
+            write_mask,
+        })
+    }
 }
 
 // ── StreamReader ──────────────────────────────────────────────────────────────
@@ -678,8 +869,57 @@ impl<'a> StreamReader<'a> {
                     workgroup_size,
                 })
             }
+            tag::CREATE_GRAPHICS_PIPELINE_TAG => {
+                // The largest descriptor on the seam. The vertex stage is a
+                // module and an entry point and no buffer layout — vertex pulling
+                // — and the fragment stage rides a presence byte, `None` for a
+                // depth-only pass. The four state blocks that follow are read
+                // through the field readers above, deepest of them the
+                // depth-stencil chain. Nothing is validated: `workgroup_size`'s
+                // rule holds here for the whole tree, and every refusal is the
+                // replayer's. See `Command::CreateGraphicsPipeline`.
+                let pipeline = r.read_handle("CreateGraphicsPipeline::pipeline")?;
+                let label = r.read_opt_string("GraphicsPipelineDesc::label")?;
+                let layout = r.read_handle("GraphicsPipelineDesc::layout")?;
+                let vertex_module = r.read_handle("ShaderEntry::module")?;
+                let vertex_entry_point = r.read_string("ShaderEntry::entry_point")?;
+                let fragment = if r.read_present("GraphicsPipelineDesc::fragment")? {
+                    let module = r.read_handle("ShaderEntry::module")?;
+                    let entry_point = r.read_string("ShaderEntry::entry_point")?;
+                    Some((module, entry_point))
+                } else {
+                    None
+                };
+                let primitive = r.read_primitive_state()?;
+                let depth_stencil = if r.read_present("GraphicsPipelineDesc::depth_stencil")? {
+                    Some(r.read_depth_stencil_state()?)
+                } else {
+                    None
+                };
+                let multisample = r.read_multisample_state()?;
+                let count = r.read_count("GraphicsPipelineDesc::color_targets")?;
+                let mut color_targets = Vec::with_capacity(count);
+                for _ in 0..count {
+                    color_targets.push(r.read_color_target_state()?);
+                }
+                Ok(Command::CreateGraphicsPipeline {
+                    pipeline,
+                    label,
+                    layout,
+                    vertex_module,
+                    vertex_entry_point,
+                    fragment,
+                    primitive,
+                    depth_stencil,
+                    multisample,
+                    color_targets,
+                })
+            }
             tag::DESTROY_COMPUTE_PIPELINE_TAG => Ok(Command::DestroyComputePipeline {
                 pipeline: r.read_handle("DestroyComputePipeline::pipeline")?,
+            }),
+            tag::DESTROY_GRAPHICS_PIPELINE_TAG => Ok(Command::DestroyGraphicsPipeline {
+                pipeline: r.read_handle("DestroyGraphicsPipeline::pipeline")?,
             }),
             tag::DESTROY_SHADER_MODULE_TAG => Ok(Command::DestroyShaderModule {
                 module: r.read_handle("DestroyShaderModule::module")?,

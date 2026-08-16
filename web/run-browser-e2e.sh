@@ -537,6 +537,25 @@ if [ -z "$COMPUTE_PIPELINE_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the graphics pipeline, which is group R and is the largest
+# descriptor on the seam — the whole nested tree of a raster pipeline: a primitive
+# state, a reversed-Z depth-stencil, a multisample state, and a blended colour
+# target, all of which a real `createRenderPipeline` has to accept together. A
+# `GPURenderPipeline` answers `getBindGroupLayout(0)` like a compute pipeline, so
+# that call plus the silent error queue are the browser's evidence. The node suite
+# proves the descriptor — the empty `vertex.buffers`, the dropped stencil
+# reference — and every "WebGPU cannot express it" refusal (a `Line` polygon mode,
+# a feature-gated depth clamp, a bad sample count, a fractional depth bias) against
+# a stub whose `createRenderPipeline` returns a plain object; only this asks a real
+# device to build it from a real vertex and fragment shader. Its absence means that
+# stopped happening rather than that this demo has no device.
+GRAPHICS_PIPELINE_TRIP="$(grep -F 'a real GPURenderPipeline came back from the device and answered getBindGroupLayout' "${OUTPUT}.plain" || true)"
+if [ -z "$GRAPHICS_PIPELINE_TRIP" ]; then
+    echo "crcbl web e2e: the driver never built a graphics pipeline on a real device;" >&2
+    echo "               crcbl-webgpu's CreateGraphicsPipeline is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

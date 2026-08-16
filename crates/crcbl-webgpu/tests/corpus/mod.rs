@@ -13,12 +13,15 @@
 use crcbl_core::Handle;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage, ClearValue,
-    ColorAttachment, CompareOp, ComputePipelineDesc, DepthStencilAttachment, DeviceDesc, Extent3d,
-    Features, FilterMode, Format, ImageAspect, ImageDesc, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
-    PushConstantRange, Rect2d, RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, depth,
+    BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp, BlendState, BufferDesc,
+    BufferUsage, ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CompareOp,
+    ComputePipelineDesc, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
+    DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
+    ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewType, LoadOp, MemoryLocation, MultisampleState, PipelineLayoutDesc, PolygonMode,
+    PrimitiveState, PrimitiveTopology, PushConstantRange, Rect2d, RenderPassDesc, SampleType,
+    SamplerAddressMode, SamplerDesc, ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState,
+    StencilOp, StencilState, StoreOp, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -732,6 +735,94 @@ pub fn every_command() -> Vec<Command> {
             entry_point: "computeMain".into(),
             workgroup_size: [8, 4, 2],
         },
+        // **The largest descriptor on the seam, and the deepest.** Every field is
+        // non-default and every enum differs from the ones beside it, so a
+        // transposition anywhere in the tree changes the decode rather than
+        // reproducing it. `layout`, `vertex_module` and the fragment module all
+        // name objects created above, into three different tables; a handle
+        // carries no kind, so which table each indexes is its position and the
+        // opcode.
+        //
+        // **The depth-stencil chain is `Some(Some(..))` with distinct front and
+        // back faces** — every field of `front` differs from `back` — so a
+        // front/back swap goes red, and its three masks differ so a transposition
+        // among them does too. The bias floats include one no short decimal names
+        // (`slope_scale: 0.1`), so an encoding that went through a string lands on
+        // a different number. `constant` is integer-valued (`-2.0`) so a browser
+        // *can* build it: the fractional-constant refusal is driven separately.
+        //
+        // **Two colour targets with distinct formats, one `Some` blend and one
+        // `None`**, so both the present and absent blend bodies are on the wire
+        // and a target read in the other order answers a different format. MSAA
+        // `samples: 4` — the one non-1 count WebGPU accepts. `polygon_mode` is
+        // `Fill` and `depth_clamp` is `false` so the pipeline builds; the `Line`
+        // and depth-clamp refusals are driven separately.
+        Command::CreateGraphicsPipeline {
+            pipeline: handle(131, 132),
+            label: Some("gbuffer".into()),
+            layout: handle(121, 122),
+            vertex_module: handle(113, 114),
+            vertex_entry_point: "vertexMain".into(),
+            fragment: Some((handle(115, 116), "fragmentMain".into())),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                front_face: FrontFace::Cw,
+                cull_mode: CullMode::Back,
+                polygon_mode: PolygonMode::Fill,
+                depth_clamp: false,
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: Format::D32FloatS8Uint,
+                depth_write: false,
+                depth_compare: CompareOp::GreaterOrEqual,
+                stencil: Some(StencilState {
+                    front: StencilFaceState {
+                        compare: CompareOp::Less,
+                        fail_op: StencilOp::Keep,
+                        depth_fail_op: StencilOp::IncrementWrap,
+                        pass_op: StencilOp::Replace,
+                    },
+                    back: StencilFaceState {
+                        compare: CompareOp::Greater,
+                        fail_op: StencilOp::Zero,
+                        depth_fail_op: StencilOp::DecrementClamp,
+                        pass_op: StencilOp::Invert,
+                    },
+                    read_mask: 0x0F,
+                    write_mask: 0xF0,
+                    reference: 0x2A,
+                }),
+                bias: DepthBias {
+                    constant: -2.0,
+                    slope_scale: 0.1,
+                    clamp: 0.25,
+                },
+            }),
+            multisample: MultisampleState {
+                samples: 4,
+                mask: 0x0000_00FF,
+                alpha_to_coverage: true,
+            },
+            color_targets: vec![
+                ColorTargetState {
+                    format: Format::Rgba16Float,
+                    blend: Some(BlendState {
+                        color_src: BlendFactor::SrcAlpha,
+                        color_dst: BlendFactor::OneMinusSrcAlpha,
+                        color_op: BlendOp::Add,
+                        alpha_src: BlendFactor::One,
+                        alpha_dst: BlendFactor::OneMinusSrcAlpha,
+                        alpha_op: BlendOp::Add,
+                    }),
+                    write_mask: ColorWrites::ALL,
+                },
+                ColorTargetState {
+                    format: Format::Rg16Float,
+                    blend: None,
+                    write_mask: ColorWrites::R.union(ColorWrites::G),
+                },
+            ],
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
         },
@@ -785,6 +876,14 @@ pub fn every_command() -> Vec<Command> {
         // caller.
         Command::DestroyComputePipeline {
             pipeline: handle(129, 130),
+        },
+        // Its own command and its own table again, and — like the compute-pipeline
+        // destroy — the one whose empty slot is the *ordinary* case: a graphics
+        // pipeline the replayer refused (a `Line` polygon mode, an unresolvable
+        // layout or module, a forbidden `samples` count) still has its
+        // pre-allocated handle destroyed by the caller.
+        Command::DestroyGraphicsPipeline {
+            pipeline: handle(133, 134),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -1077,7 +1176,40 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 workgroup_size: *workgroup_size,
             },
         ),
+        Command::CreateGraphicsPipeline {
+            pipeline,
+            label,
+            layout,
+            vertex_module,
+            vertex_entry_point,
+            fragment,
+            primitive,
+            depth_stencil,
+            multisample,
+            color_targets,
+        } => stream.create_graphics_pipeline(
+            *pipeline,
+            &GraphicsPipelineDesc {
+                label: label.as_deref(),
+                layout: *layout,
+                vertex: ShaderEntry {
+                    module: *vertex_module,
+                    entry_point: vertex_entry_point,
+                },
+                fragment: fragment.as_ref().map(|(module, entry_point)| ShaderEntry {
+                    module: *module,
+                    entry_point,
+                }),
+                primitive: *primitive,
+                depth_stencil: *depth_stencil,
+                multisample: *multisample,
+                color_targets,
+            },
+        ),
         Command::DestroyComputePipeline { pipeline } => stream.destroy_compute_pipeline(*pipeline),
+        Command::DestroyGraphicsPipeline { pipeline } => {
+            stream.destroy_graphics_pipeline(*pipeline)
+        }
         Command::DestroyPipelineLayout { layout } => stream.destroy_pipeline_layout(*layout),
         Command::DestroyBindGroupLayout { layout } => stream.destroy_bind_group_layout(*layout),
         Command::DestroyBindGroup { group } => stream.destroy_bind_group(*group),
