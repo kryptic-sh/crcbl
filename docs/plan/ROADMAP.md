@@ -2320,8 +2320,18 @@ something trusted, and in a browser the only trusted renderer today is
    the OutOfDate/suboptimal returns of `acquire_next_frame` — are not stream
    commands and belong to the HAL `Device` impl, which does not exist yet:
    `crcbl-webgpu` is stream + replay + probe only.
-9. Replace `getrandom` with the 32-byte export shim, and empty
-   `ALLOWED_IMPORT_MODULES`.
+9. ~~Replace `getrandom` with the 32-byte export shim, and empty
+   `ALLOWED_IMPORT_MODULES`.~~ — **shipped, and it grew into a proper seam.**
+   Rather than a bare shim, a new `crcbl-rand` crate holds the workspace's
+   randomness: a deterministic ChaCha8 `Rng` (byte-identical across all four
+   platforms, golden-tested on the mac/windows CI runners) for procgen/noise,
+   and `entropy()` — the OS through `getrandom` on native, a host-seeded
+   ChaCha20 CSPRNG on wasm32 (the 32-byte export shim, fail-closed until
+   seeded). `crcbl-server` draws resume tokens through it, so `getrandom` leaves
+   the wasm32 graph entirely — **one of the two wasm-bindgen roots gone**, the
+   other being `wgpu`. `ALLOWED_IMPORT_MODULES` is NOT emptied yet: `wgpu`'s
+   glue is still imported until slice 11, so that step moves there. The `Rng`
+   ships tested but unwired — procgen/noise consume it later.
 10. **Parity gate**: every `render_e2e` scene drawn through the new backend in a
     browser, checked against the shared references. This is the exit criterion,
     and it is what makes the switch a measurement rather than a hope. **It needs
@@ -2332,4 +2342,6 @@ something trusted, and in a browser the only trusted renderer today is
     it unlocks.
 11. Flip the browser default, delete `crcbl-wgpu` and
     `run-cross-backend-e2e.sh`, drop the `wgpu` and `wasm-bindgen` dependencies,
-    and correct the `crcbl-mtl` and `crcbl-dx12` manifest comments.
+    empty `ALLOWED_IMPORT_MODULES` (deferred from slice 9 — the last
+    wasm-bindgen glue import goes with `wgpu`), and correct the `crcbl-mtl` and
+    `crcbl-dx12` manifest comments.
