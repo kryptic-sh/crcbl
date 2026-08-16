@@ -10,11 +10,11 @@ use crcbl_hal::{
     ComputePipelineDesc, ComputePipelineHandle, DepthStencilAttachment, DepthStencilState,
     DeviceDesc, Extent3d, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageBarrier, ImageCopy,
     ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc,
-    ImageViewHandle, MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle,
-    PresentInfo, PrimitiveState, QueueTransfer, ReadbackDesc, ReadbackHandle, Rect2d,
-    RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle, SwapchainDesc,
-    SwapchainHandle,
+    ImageViewHandle, IndexFormat, MultisampleState, Offset3d, PipelineLayoutDesc,
+    PipelineLayoutHandle, PresentInfo, PrimitiveState, QueueTransfer, ReadbackDesc, ReadbackHandle,
+    Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait,
+    ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo,
+    SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
 };
 
 use crate::bytes::ByteWriter;
@@ -1063,6 +1063,46 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`set_viewport`](crcbl_hal::CommandEncoder::set_viewport), on the open
+    /// render pass — the whole of [`Viewport`] in declaration order: the
+    /// rectangle's four floats, then the depth range's two. See
+    /// [`Command::SetViewport`](crate::Command::SetViewport).
+    pub fn set_viewport(&mut self, viewport: &Viewport) -> u64 {
+        let sequence = self.push_tag(tag::SET_VIEWPORT_TAG);
+        self.bytes.put_f32(viewport.x);
+        self.bytes.put_f32(viewport.y);
+        self.bytes.put_f32(viewport.width);
+        self.bytes.put_f32(viewport.height);
+        self.bytes.put_f32(viewport.depth_min);
+        self.bytes.put_f32(viewport.depth_max);
+        sequence
+    }
+
+    /// [`set_scissor`](crcbl_hal::CommandEncoder::set_scissor), on the open render
+    /// pass — the whole of [`Rect2d`], the same primitive `begin_render_pass`'
+    /// `render_area` uses. See [`Command::SetScissor`](crate::Command::SetScissor).
+    pub fn set_scissor(&mut self, rect: &Rect2d) -> u64 {
+        let sequence = self.push_tag(tag::SET_SCISSOR_TAG);
+        self.bytes.put_rect(*rect);
+        sequence
+    }
+
+    /// [`bind_index_buffer`](crcbl_hal::CommandEncoder::bind_index_buffer), on the
+    /// open render pass — the buffer, its byte offset, then the index-format code.
+    /// See [`Command::BindIndexBuffer`](crate::Command::BindIndexBuffer).
+    pub fn bind_index_buffer(
+        &mut self,
+        buffer: BufferHandle,
+        offset: u64,
+        format: IndexFormat,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::BIND_INDEX_BUFFER_TAG);
+        self.bytes.put_handle(buffer);
+        self.bytes.put_u64(offset);
+        self.bytes.put_u8(tag::index_format_code(format));
+        sequence
+    }
+
     /// [`bind_group`](crcbl_hal::CommandEncoder::bind_group).
     ///
     /// Fields go on the wire in the order the HAL call takes them, `layout`
@@ -1281,6 +1321,22 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::write_buffer`](crcbl_hal::Device::write_buffer) — a host→buffer
+    /// upload: the buffer, its byte offset, then the bytes.
+    ///
+    /// Not an encoder command — `write_buffer` is a [`Device`](crcbl_hal::Device)
+    /// method, and the replayer submits it to the queue rather than recording it
+    /// on the implicit-current encoder. The bytes cross whole, as
+    /// [`push_constants`](Self::push_constants)' do. See
+    /// [`Command::WriteBuffer`](crate::Command::WriteBuffer).
+    pub fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> u64 {
+        let sequence = self.push_tag(tag::WRITE_BUFFER_TAG);
+        self.bytes.put_handle(buffer);
+        self.bytes.put_u64(offset);
+        self.bytes.put_bytes(data);
+        sequence
+    }
+
     /// [`pipeline_barrier`](crcbl_hal::CommandEncoder::pipeline_barrier), on the
     /// implicit-current encoder — the documented no-op.
     ///
@@ -1311,6 +1367,26 @@ impl StreamWriter {
         let sequence = self.push_tag(tag::DRAW_TAG);
         self.bytes.put_u32(vertices.start);
         self.bytes.put_u32(vertices.end);
+        self.bytes.put_u32(instances.start);
+        self.bytes.put_u32(instances.end);
+        sequence
+    }
+
+    /// [`draw_indexed`](crcbl_hal::CommandEncoder::draw_indexed), on the open
+    /// render pass — the index range's start and end, the signed `base_vertex`,
+    /// then the instance range's start and end. `base_vertex` sits between the two
+    /// ranges exactly as the HAL call takes it. See
+    /// [`Command::DrawIndexed`](crate::Command::DrawIndexed).
+    pub fn draw_indexed(
+        &mut self,
+        indices: Range<u32>,
+        base_vertex: i32,
+        instances: Range<u32>,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::DRAW_INDEXED_TAG);
+        self.bytes.put_u32(indices.start);
+        self.bytes.put_u32(indices.end);
+        self.bytes.put_i32(base_vertex);
         self.bytes.put_u32(instances.start);
         self.bytes.put_u32(instances.end);
         sequence

@@ -118,7 +118,16 @@ const BIND_COMPUTE_PIPELINE_TAG = 0x4a;
 // The documented no-op: it carries the barrier lists for wire fidelity, but the
 // replayer records nothing because WebGPU tracks resource state itself.
 const PIPELINE_BARRIER_TAG = 0x4b;
+// The dynamic viewport and scissor the render graph sets on every pass, recorded
+// on the open render pass as `setViewport` / `setScissorRect`.
+const SET_VIEWPORT_TAG = 0x4c;
+const SET_SCISSOR_TAG = 0x4d;
+// The index buffer for the UI pass's indexed draw, recorded on the open render
+// pass as `setIndexBuffer`.
+const BIND_INDEX_BUFFER_TAG = 0x4e;
 const DRAW_TAG = 0x60;
+// The indexed draw the UI pass records, on the open render pass as `drawIndexed`.
+const DRAW_INDEXED_TAG = 0x61;
 // The dispatch family: the workgroup counts for a compute dispatch.
 const DISPATCH_TAG = 0x70;
 const COPY_IMAGE_TO_BUFFER_TAG = 0x78;
@@ -130,6 +139,10 @@ const COPY_BUFFER_TO_BUFFER_TAG = 0x79;
 const COPY_BUFFER_TO_IMAGE_TAG = 0x7a;
 const COPY_IMAGE_TO_IMAGE_TAG = 0x7b;
 const FILL_BUFFER_TAG = 0x7c;
+// The host→buffer upload — `queue.writeBuffer` on the replayer, not an encoder
+// op. In the copy-and-fill family because it is a queue-side data transfer, the
+// upload counterpart of the copies.
+const WRITE_BUFFER_TAG = 0x7d;
 // The presentation family: configuring a canvas swapchain, acquiring its frame,
 // presenting (a no-op the browser composites on rAF), unconfiguring, and
 // reconfiguring an already-configured swapchain in place.
@@ -187,6 +200,14 @@ const RESOURCE_STATE = [
 
 /** `tag::STORE_OP_*`. */
 const STORE_OP = ['Store', 'Discard'];
+
+/**
+ * `tag::INDEX_FORMAT_*`.
+ *
+ * Carried by a `BindIndexBuffer`. The two widths cross as their own code — a
+ * fold between them is an index buffer read at the wrong stride, not a refusal.
+ */
+const INDEX_FORMAT = ['Uint16', 'Uint32'];
 
 /** `tag::MEMORY_*`. */
 const MEMORY_LOCATION = ['DeviceLocal', 'HostUpload', 'HostReadback'];
@@ -1977,6 +1998,33 @@ function decodeCommand(r) {
         data: r.readField('PushConstants::data'),
         layout: r.readHandle('PushConstants::layout'),
       };
+    case SET_VIEWPORT_TAG: {
+      // `Viewport` in declaration order: the rectangle's four floats, then the
+      // depth range's two. See `gpu-replay.js`.
+      const x = r.readF32();
+      const y = r.readF32();
+      const width = r.readF32();
+      const height = r.readF32();
+      const depthMin = r.readF32();
+      const depthMax = r.readF32();
+      return {
+        name: 'SetViewport',
+        viewport: { x, y, width, height, depthMin, depthMax },
+      };
+    }
+    case SET_SCISSOR_TAG:
+      // `Rect2d`, the same shape `render_area` carries. `x`/`y` are signed on
+      // the wire; `setScissorRect` takes unsigned, so a negative is the
+      // replayer's to refuse. See `gpu-replay.js`.
+      return { name: 'SetScissor', rect: r.readRect() };
+    case BIND_INDEX_BUFFER_TAG: {
+      // The buffer, its byte offset (`u64`, `BigInt`), then the index-format
+      // code. See `gpu-replay.js`.
+      const buffer = r.readHandle('BindIndexBuffer::buffer');
+      const offset = r.readU64();
+      const format = r.readEnum('BindIndexBuffer::format', INDEX_FORMAT);
+      return { name: 'BindIndexBuffer', buffer, offset, format };
+    }
     case CREATE_COMMAND_ENCODER_TAG:
       // No handle: the encoder is the replayer's implicit-current one, as
       // `crcbl-hal`'s recording methods assume no receiver. `queue` crosses and
@@ -2118,6 +2166,15 @@ function decodeCommand(r) {
       const value = r.readU32();
       return { name: 'FillBuffer', buffer, offset, size, value };
     }
+    case WRITE_BUFFER_TAG: {
+      // A host→buffer upload: the buffer, its byte offset (`u64`, `BigInt`),
+      // then the bytes. The payload arrives as its own `Uint8Array`, exactly as
+      // `PushConstants::data` does. See `gpu-replay.js`.
+      const buffer = r.readHandle('WriteBuffer::buffer');
+      const offset = r.readU64();
+      const data = r.readField('WriteBuffer::data');
+      return { name: 'WriteBuffer', buffer, offset, data };
+    }
     case CREATE_SWAPCHAIN_TAG: {
       // `SwapchainDesc` in declaration order behind the caller-allocated handle:
       // the surface, the format, the extent's two components, the image count,
@@ -2242,6 +2299,22 @@ function decodeCommand(r) {
       return {
         name: 'Draw',
         vertices: { start: firstVertex, end: lastVertex },
+        instances: { start: firstInstance, end: lastInstance },
+      };
+    }
+    case DRAW_INDEXED_TAG: {
+      // The index range's start and end, the signed `baseVertex`, then the
+      // instance range's start and end — spelled out for `DRAW_TAG`'s reason.
+      // See `gpu-replay.js`.
+      const firstIndex = r.readU32();
+      const lastIndex = r.readU32();
+      const baseVertex = r.readI32();
+      const firstInstance = r.readU32();
+      const lastInstance = r.readU32();
+      return {
+        name: 'DrawIndexed',
+        indices: { start: firstIndex, end: lastIndex },
+        baseVertex,
         instances: { start: firstInstance, end: lastInstance },
       };
     }

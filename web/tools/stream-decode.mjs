@@ -941,10 +941,46 @@ const EXPECTED = [
     data: new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
     layout: handle(41, 42),
   },
+  // The dynamic viewport and scissor the render graph sets on every pass. All
+  // six viewport floats are distinct and the depth range is non-default, so a
+  // transposition among them shows; the scissor carries a negative origin the
+  // signed wire preserves.
+  {
+    name: 'SetViewport',
+    viewport: {
+      x: 1,
+      y: 2,
+      width: 640,
+      height: 480,
+      depthMin: 0.25,
+      depthMax: 0.75,
+    },
+  },
+  {
+    name: 'SetScissor',
+    rect: { x: -3, y: 4, width: 320, height: 200 },
+  },
+  // The index buffer for the UI pass's indexed draw. Distinct handle and a
+  // non-zero `BigInt` offset, `Uint16` so the format pairs with a `Uint32`
+  // nowhere else.
+  {
+    name: 'BindIndexBuffer',
+    buffer: handle(202, 203),
+    offset: 48n,
+    format: 'Uint16',
+  },
   {
     name: 'Draw',
     vertices: { start: 6, end: 9 },
     instances: { start: 1, end: 5 },
+  },
+  // The indexed draw — its two ranges and the negative `baseVertex` between them
+  // are five distinct values so a transposition among them shows.
+  {
+    name: 'DrawIndexed',
+    indices: { start: 12, end: 30 },
+    baseVertex: -7,
+    instances: { start: 2, end: 6 },
   },
   // The compute-pass commands. `BeginComputePass` is a label only — compute has
   // no attachments — with its `None` twin below; the dispatch's three counts are
@@ -1019,6 +1055,15 @@ const EXPECTED = [
     offset: 64n,
     size: 256n,
     value: 0xdeadbeef,
+  },
+  // The host→buffer upload — `queue.writeBuffer` on the replayer, not an encoder
+  // op. Buffer, offset and payload are all distinct so a transposition shows;
+  // `offset` is `BigInt` and `data` is its own `Uint8Array`.
+  {
+    name: 'WriteBuffer',
+    buffer: handle(200, 201),
+    offset: 96n,
+    data: new Uint8Array([0x12, 0x34, 0x56, 0x78, 0x9a]),
   },
   // The pipeline barrier, the documented no-op — carried whole for wire fidelity
   // though the replayer records nothing. The empty case first: a global-only

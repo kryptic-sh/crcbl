@@ -23,11 +23,11 @@ use crcbl_hal::{
     ColorTargetState, CommandBufferHandle, CompareOp, CompositeAlpha, ComputePipelineHandle,
     DepthStencilAttachment, DepthStencilState, Extent3d, Features, FilterMode, Format,
     GraphicsPipelineHandle, ImageBarrier, ImageCopy, ImageHandle, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation,
-    MultisampleState, Offset3d, PipelineLayoutHandle, PresentMode, PrimitiveState,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, IndexFormat,
+    MemoryLocation, MultisampleState, Offset3d, PipelineLayoutHandle, PresentMode, PrimitiveState,
     PushConstantRange, QueueHandle, ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle,
     SemaphoreHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleHandle, ShaderStages,
-    SurfaceHandle, SwapchainHandle,
+    SurfaceHandle, SwapchainHandle, Viewport,
 };
 
 /// A command decoded out of a stream buffer.
@@ -659,11 +659,69 @@ pub enum Command {
         /// Layout the write is against; see [`Command::BindGroup::layout`].
         layout: PipelineLayoutHandle,
     },
+    /// [`set_viewport`](crcbl_hal::CommandEncoder::set_viewport) — dynamic
+    /// viewport state on the open render pass.
+    ///
+    /// **Set by the render graph on every pass**, not baked into a pipeline, so a
+    /// resize never rebuilds one. It becomes WebGPU's `setViewport(x, y, w, h,
+    /// minDepth, maxDepth)` on the current pass encoder. The whole of
+    /// [`Viewport`] crosses — the six floats in declaration order — so a
+    /// transposition among them is visible; the corpus picks distinct values for
+    /// each.
+    SetViewport {
+        /// Viewport rectangle and depth range.
+        viewport: Viewport,
+    },
+    /// [`set_scissor`](crcbl_hal::CommandEncoder::set_scissor) — dynamic scissor
+    /// state on the open render pass.
+    ///
+    /// The companion of [`SetViewport`](Self::SetViewport), recorded by the graph
+    /// alongside it, and it becomes `setScissorRect(x, y, w, h)`. The whole of
+    /// [`Rect2d`] crosses; `x`/`y` are signed on the wire — WebGPU's
+    /// `setScissorRect` takes unsigned coordinates, so the narrowing (and any
+    /// refusal of a negative) is the replayer's.
+    SetScissor {
+        /// Scissor rectangle.
+        rect: Rect2d,
+    },
+    /// [`bind_index_buffer`](crcbl_hal::CommandEncoder::bind_index_buffer) — the
+    /// index buffer for subsequent indexed draws, on the open render pass.
+    ///
+    /// It becomes WebGPU's `setIndexBuffer(buffer, format, offset)`. The
+    /// [`IndexFormat`] is a byte on the wire — folding its two values is not a
+    /// refusal but an index buffer read at the wrong stride, so it crosses as its
+    /// own code. See [`Command::BindIndexBuffer`](Self::BindIndexBuffer) and
+    /// [`tag::index_format_from_code`](crate::tag::index_format_from_code).
+    BindIndexBuffer {
+        /// Index buffer bound.
+        buffer: BufferHandle,
+        /// Byte offset the indices start at.
+        offset: u64,
+        /// Index width.
+        format: IndexFormat,
+    },
     /// [`draw`](crcbl_hal::CommandEncoder::draw).
     Draw {
         /// Vertex range.
         vertices: Range<u32>,
         /// Instance range.
+        instances: Range<u32>,
+    },
+    /// [`draw_indexed`](crcbl_hal::CommandEncoder::draw_indexed) — an indexed
+    /// draw on the open render pass, the path the UI pass takes.
+    ///
+    /// It becomes `drawIndexed(indexCount, instanceCount, firstIndex, baseVertex,
+    /// firstInstance)`: the index range's span and start, the instance range's
+    /// span and start, and the `base_vertex` between them. **`base_vertex` is
+    /// signed** — an index buffer shared by meshes at different vertex offsets
+    /// subtracts — so it crosses as `i32`, and the corpus picks distinct values
+    /// for every field so a transposition among the five is visible.
+    DrawIndexed {
+        /// Index range: `indexCount` is its span, `firstIndex` its start.
+        indices: Range<u32>,
+        /// Value added to each index before the vertex fetch. Signed.
+        base_vertex: i32,
+        /// Instance range: `instanceCount` is its span, `firstInstance` its start.
         instances: Range<u32>,
     },
     /// [`begin_compute_pass`](crcbl_hal::CommandEncoder::begin_compute_pass).
@@ -834,6 +892,28 @@ pub enum Command {
         size: u64,
         /// The `u32` written into each word; only `0` is expressible on WebGPU.
         value: u32,
+    },
+    /// [`Device::write_buffer`](crcbl_hal::Device::write_buffer) — a host→buffer
+    /// upload, which becomes WebGPU's `queue.writeBuffer(buffer, offset, data)`.
+    ///
+    /// **Not an encoder command**: `write_buffer` is a [`Device`](crcbl_hal::Device)
+    /// method, not a [`CommandEncoder`](crcbl_hal::CommandEncoder) one, and the
+    /// replayer submits it straight to the queue rather than recording it on the
+    /// implicit-current encoder. It sits in the copy-and-fill family because it is
+    /// a queue-side data transfer, the upload counterpart of the copies.
+    ///
+    /// **The bytes cross whole**, exactly as [`PushConstants`](Self::PushConstants)'
+    /// do — a replayer needs them — and the `buffer` and `offset` are chosen
+    /// distinct from the payload in the corpus so a transposition is visible.
+    WriteBuffer {
+        /// Buffer written into. Must be
+        /// [`MemoryLocation::HostUpload`], but this decoder does not enforce it —
+        /// the replayer faces WebGPU and is where such a refusal belongs.
+        buffer: BufferHandle,
+        /// Byte offset the write starts at.
+        offset: u64,
+        /// Bytes uploaded.
+        data: Vec<u8>,
     },
     /// [`pipeline_barrier`](crcbl_hal::CommandEncoder::pipeline_barrier) — the
     /// documented no-op, recorded on the implicit-current encoder.
@@ -1184,7 +1264,11 @@ impl Command {
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",
             Self::BindGroup { .. } => "BindGroup",
             Self::PushConstants { .. } => "PushConstants",
+            Self::SetViewport { .. } => "SetViewport",
+            Self::SetScissor { .. } => "SetScissor",
+            Self::BindIndexBuffer { .. } => "BindIndexBuffer",
             Self::Draw { .. } => "Draw",
+            Self::DrawIndexed { .. } => "DrawIndexed",
             Self::BeginComputePass { .. } => "BeginComputePass",
             Self::BindComputePipeline { .. } => "BindComputePipeline",
             Self::Dispatch { .. } => "Dispatch",
@@ -1196,6 +1280,7 @@ impl Command {
             Self::CopyBufferToImage { .. } => "CopyBufferToImage",
             Self::CopyImageToImage { .. } => "CopyImageToImage",
             Self::FillBuffer { .. } => "FillBuffer",
+            Self::WriteBuffer { .. } => "WriteBuffer",
             Self::PipelineBarrier { .. } => "PipelineBarrier",
             Self::Finish { .. } => "Finish",
             Self::Submit { .. } => "Submit",

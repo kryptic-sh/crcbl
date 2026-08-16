@@ -2834,8 +2834,20 @@ export class Replayer {
         case 'PushConstants':
           this.#pushConstants(sequence, command);
           break;
+        case 'SetViewport':
+          this.#setViewport(sequence, command);
+          break;
+        case 'SetScissor':
+          this.#setScissor(sequence, command);
+          break;
+        case 'BindIndexBuffer':
+          this.#bindIndexBuffer(sequence, command);
+          break;
         case 'Draw':
           this.#draw(sequence, command);
+          break;
+        case 'DrawIndexed':
+          this.#drawIndexed(sequence, command);
           break;
         case 'BeginComputePass':
           this.#beginComputePass(sequence, command);
@@ -2863,6 +2875,9 @@ export class Replayer {
           break;
         case 'FillBuffer':
           this.#fillBuffer(sequence, command);
+          break;
+        case 'WriteBuffer':
+          this.#writeBuffer(sequence, command);
           break;
         case 'PipelineBarrier':
           this.#pipelineBarrier(sequence, command);
@@ -4987,6 +5002,117 @@ export class Replayer {
   }
 
   /**
+   * Binds the index buffer for subsequent indexed draws on the open render pass —
+   * `BindIndexBuffer` → `setIndexBuffer(buffer, format, offset)`.
+   *
+   * ON THE PASS, for {@link Replayer#draw}'s reason: `setIndexBuffer` is a
+   * `GPURenderPassEncoder` method. The decoded `'Uint16'`/`'Uint32'` — the HAL
+   * enum's own spelling — becomes WebGPU's `'uint16'`/`'uint32'`, and the `u64`
+   * offset is narrowed with `Number`. With no pass open, or an unresolvable
+   * buffer, the reason goes to the error queue rather than throwing.
+   *
+   * @param {bigint} sequence
+   * @param {{ buffer: { index: number, generation: number }, offset: bigint,
+   *   format: string }} command
+   */
+  #bindIndexBuffer(sequence, command) {
+    const named = `index buffer bind (command ${sequence})`;
+    if (!this.#currentPass) {
+      this.#deviceError(`${named} was recorded with no render pass open`);
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
+      this.#deviceError(
+        `${named} binds buffer ${command.buffer.index}.${command.buffer.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    const format = command.format === 'Uint16' ? 'uint16' : 'uint32';
+    this.#currentPass.setIndexBuffer(buffer, format, Number(command.offset));
+  }
+
+  /**
+   * Records an indexed draw on the open render pass — `DrawIndexed` →
+   * `drawIndexed(indexCount, instanceCount, firstIndex, baseVertex,
+   * firstInstance)`.
+   *
+   * The two ranges become spans-and-firsts exactly as {@link Replayer#draw} does,
+   * with the signed `baseVertex` passed through between them. ON THE PASS, and a
+   * draw with none open goes to the error queue.
+   *
+   * @param {bigint} sequence
+   * @param {{ indices: { start: number, end: number }, baseVertex: number,
+   *   instances: { start: number, end: number } }} command
+   */
+  #drawIndexed(sequence, command) {
+    if (!this.#currentPass) {
+      this.#deviceError(
+        `an indexed draw was recorded (command ${sequence}) with no render pass open`
+      );
+      return;
+    }
+    const { indices, baseVertex, instances } = command;
+    this.#currentPass.drawIndexed(
+      indices.end - indices.start,
+      instances.end - instances.start,
+      indices.start,
+      baseVertex,
+      instances.start
+    );
+  }
+
+  /**
+   * Sets the viewport on the open render pass — `Viewport` → `setViewport(x, y,
+   * width, height, minDepth, maxDepth)`.
+   *
+   * ON THE PASS, not the encoder: WebGPU's `setViewport` is a
+   * `GPURenderPassEncoder` method, so this needs {@link #currentPass}. With none
+   * open the viewport belongs to nothing, which goes to the error queue rather
+   * than throwing — {@link Replayer#draw}'s judgement.
+   *
+   * @param {bigint} sequence
+   * @param {{ viewport: { x: number, y: number, width: number, height: number,
+   *   depthMin: number, depthMax: number } }} command
+   */
+  #setViewport(sequence, command) {
+    if (!this.#currentPass) {
+      this.#deviceError(
+        `a viewport was set (command ${sequence}) with no render pass open`
+      );
+      return;
+    }
+    const { x, y, width, height, depthMin, depthMax } = command.viewport;
+    this.#currentPass.setViewport(x, y, width, height, depthMin, depthMax);
+  }
+
+  /**
+   * Sets the scissor rectangle on the open render pass — `Rect2d` →
+   * `setScissorRect(x, y, width, height)`.
+   *
+   * ON THE PASS, for {@link Replayer#setViewport}'s reason. The wire `x`/`y` are
+   * signed; `setScissorRect` takes unsigned coordinates and the browser rejects a
+   * scissor that runs outside the attachment, so a negative origin surfaces there
+   * as a device error rather than being clamped here — the seam carries what the
+   * caller gave. With no pass open it goes to the error queue.
+   *
+   * @param {bigint} sequence
+   * @param {{ rect: { x: number, y: number, width: number, height: number } }}
+   *   command
+   */
+  #setScissor(sequence, command) {
+    if (!this.#currentPass) {
+      this.#deviceError(
+        `a scissor was set (command ${sequence}) with no render pass open`
+      );
+      return;
+    }
+    const { x, y, width, height } = command.rect;
+    this.#currentPass.setScissorRect(x, y, width, height);
+  }
+
+  /**
    * Opens a compute pass on the implicit-current encoder.
    *
    * `ComputePassDesc` is only a label — compute has no attachments — so the whole
@@ -5345,6 +5471,46 @@ export class Replayer {
       buffer,
       Number(command.offset),
       Number(command.size)
+    );
+  }
+
+  /**
+   * Uploads bytes into a buffer through the queue — `Device::write_buffer`.
+   *
+   * ON THE QUEUE, NOT AN ENCODER. `write_buffer` is a `Device` method, not a
+   * `CommandEncoder` one, so this needs {@link #device} rather than an open
+   * encoder — `queue.writeBuffer` submits its own copy directly, between frames
+   * and without a command buffer. A write before any device opened, or of an
+   * unresolvable buffer, goes to the error queue naming the handle rather than
+   * throwing — {@link Replayer#fillBuffer}'s judgement.
+   *
+   * The `u64` offset arrives as `BigInt` and is narrowed with `Number` for the
+   * WebGPU call, exactly as {@link Replayer#fillBuffer}'s is: an offset past
+   * `Number.MAX_SAFE_INTEGER` is not one this seam produces. The bytes are the
+   * `Uint8Array` the decoder read them into.
+   *
+   * @param {bigint} sequence
+   * @param {{ buffer: { index: number, generation: number }, offset: bigint,
+   *   data: Uint8Array }} command
+   */
+  #writeBuffer(sequence, command) {
+    const named = `buffer write (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} ran before any device opened`);
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
+      this.#deviceError(
+        `${named} writes buffer ${command.buffer.index}.${command.buffer.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    this.#device.queue.writeBuffer(
+      buffer,
+      Number(command.offset),
+      command.data
     );
   }
 

@@ -127,12 +127,14 @@ impl CommandEncoder for WebGpuCommandEncoder {
             .with(|c| c.encode(crate::StreamWriter::end_render_pass));
     }
 
-    fn set_viewport(&mut self, _viewport: &Viewport) {
-        self.record_unsupported("set_viewport is not yet wired into the WebGPU stream");
+    fn set_viewport(&mut self, viewport: &Viewport) {
+        self.channel
+            .with(|c| c.encode(|stream| stream.set_viewport(viewport)));
     }
 
-    fn set_scissor(&mut self, _rect: &Rect2d) {
-        self.record_unsupported("set_scissor is not yet wired into the WebGPU stream");
+    fn set_scissor(&mut self, rect: &Rect2d) {
+        self.channel
+            .with(|c| c.encode(|stream| stream.set_scissor(rect)));
     }
 
     fn set_stencil_reference(&mut self, _reference: u32) {
@@ -144,8 +146,9 @@ impl CommandEncoder for WebGpuCommandEncoder {
             .with(|c| c.encode(|stream| stream.bind_graphics_pipeline(pipeline)));
     }
 
-    fn bind_index_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _format: IndexFormat) {
-        self.record_unsupported("bind_index_buffer is not yet wired into the WebGPU stream");
+    fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat) {
+        self.channel
+            .with(|c| c.encode(|stream| stream.bind_index_buffer(buffer, offset, format)));
     }
 
     // --- bindings, shared by both scopes ---
@@ -182,8 +185,9 @@ impl CommandEncoder for WebGpuCommandEncoder {
             .with(|c| c.encode(|stream| stream.draw(vertices, instances)));
     }
 
-    fn draw_indexed(&mut self, _indices: Range<u32>, _base_vertex: i32, _instances: Range<u32>) {
-        self.record_unsupported("draw_indexed is not yet wired into the WebGPU stream");
+    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.channel
+            .with(|c| c.encode(|stream| stream.draw_indexed(indices, base_vertex, instances)));
     }
 
     fn draw_indirect(&mut self, _draw: &DrawIndirect) {

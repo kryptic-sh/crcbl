@@ -238,6 +238,45 @@ fn a_buffer_encoder_draw_finish_submit_encodes_the_expected_commands() {
     let _ = buffer;
 }
 
+// ── write_buffer: the host→buffer upload ───────────────────────────────────
+
+#[test]
+fn write_buffer_encodes_a_write_buffer_command() {
+    let (channel, device) = device_on_fresh_channel();
+
+    let buffer = device
+        .create_buffer(&buffer_desc())
+        .expect("a buffer handle");
+    device
+        .write_buffer(buffer, 8, &[0xCA, 0xFE, 0xBA, 0xBE])
+        .expect("write_buffer is wired");
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert_eq!(
+        commands.last().map(crate::Command::name),
+        Some("WriteBuffer"),
+        "the upload encodes a WriteBuffer command",
+    );
+    let Some(crate::Command::WriteBuffer {
+        buffer: encoded,
+        offset,
+        data,
+    }) = commands.last()
+    else {
+        panic!("the last command is a WriteBuffer");
+    };
+    assert_eq!(*encoded, buffer, "the write names the created buffer");
+    assert_eq!(*offset, 8, "the byte offset crosses");
+    assert_eq!(
+        data.as_slice(),
+        &[0xCA, 0xFE, 0xBA, 0xBE],
+        "the bytes cross"
+    );
+}
+
 // ── (e) readback ───────────────────────────────────────────────────────────
 
 #[test]
@@ -282,14 +321,14 @@ fn finish_fails_loudly_after_recording_an_unwired_op() {
         .expect("the graphics queue");
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
 
-    // `draw_indexed` has no stream command yet; recording it must make finish
-    // refuse rather than replay a command buffer missing the draw.
-    encoder.draw_indexed(0..3, 0, 0..1);
+    // `set_stencil_reference` has no stream command yet; recording it must make
+    // finish refuse rather than replay a command buffer missing the state.
+    encoder.set_stencil_reference(0);
     let Err(HalError::Unsupported { what, .. }) = encoder.finish() else {
         panic!("finish must refuse a recorded unwired op");
     };
     assert!(
-        what.contains("draw_indexed"),
+        what.contains("set_stencil_reference"),
         "the error names the op: {what}"
     );
 }
@@ -299,11 +338,6 @@ fn finish_fails_loudly_after_recording_an_unwired_op() {
 #[test]
 fn needed_but_unwired_device_methods_refuse_loudly() {
     let (_channel, device) = device_on_fresh_channel();
-    let buffer: BufferHandle = Handle::from_bits((1 << 32) | 1).expect("a real handle");
-    assert!(matches!(
-        device.write_buffer(buffer, 0, &[0u8; 4]),
-        Err(HalError::Unsupported { .. })
-    ));
     assert!(matches!(
         device.query_results(
             Handle::from_bits((1 << 32) | 2).expect("a real handle"),

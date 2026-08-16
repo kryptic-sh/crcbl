@@ -28,9 +28,9 @@
 
 use crcbl_hal::{
     BindingKind, BindingResource, BlendFactor, BlendOp, CompareOp, CompositeAlpha, CullMode,
-    DeviceType, FilterMode, Format, FrontFace, ImageType, ImageViewType, LoadOp, MemoryLocation,
-    PolygonMode, PresentMode, PrimitiveTopology, ResourceState, SampleType, SamplerAddressMode,
-    StencilOp, StoreOp,
+    DeviceType, FilterMode, Format, FrontFace, ImageType, ImageViewType, IndexFormat, LoadOp,
+    MemoryLocation, PolygonMode, PresentMode, PrimitiveTopology, ResourceState, SampleType,
+    SamplerAddressMode, StencilOp, StoreOp,
 };
 
 use crate::reply::SurfaceCapsFailure;
@@ -395,8 +395,23 @@ pub const BIND_COMPUTE_PIPELINE_TAG: u8 = 0x4A;
 /// documented no-op. It carries the barrier lists for wire fidelity, but WebGPU
 /// tracks resource state itself so the replayer records nothing.
 pub const PIPELINE_BARRIER_TAG: u8 = 0x4B;
+/// [`Command::SetViewport`](crate::Command::SetViewport) — dynamic viewport
+/// state on the open render pass, which becomes `setViewport(x, y, w, h,
+/// minDepth, maxDepth)`.
+pub const SET_VIEWPORT_TAG: u8 = 0x4C;
+/// [`Command::SetScissor`](crate::Command::SetScissor) — dynamic scissor state
+/// on the open render pass, which becomes `setScissorRect(x, y, w, h)`.
+pub const SET_SCISSOR_TAG: u8 = 0x4D;
+/// [`Command::BindIndexBuffer`](crate::Command::BindIndexBuffer) — binds the
+/// index buffer for subsequent indexed draws, which becomes
+/// `setIndexBuffer(buffer, format, offset)`.
+pub const BIND_INDEX_BUFFER_TAG: u8 = 0x4E;
 /// [`Command::Draw`](crate::Command::Draw).
 pub const DRAW_TAG: u8 = 0x60;
+/// [`Command::DrawIndexed`](crate::Command::DrawIndexed) — an indexed draw,
+/// which becomes `drawIndexed(indexCount, instanceCount, firstIndex, baseVertex,
+/// firstInstance)`.
+pub const DRAW_INDEXED_TAG: u8 = 0x61;
 /// [`Command::Dispatch`](crate::Command::Dispatch) — the first tag of the
 /// dispatch family, [`FAMILY_DISPATCH`].
 pub const DISPATCH_TAG: u8 = 0x70;
@@ -417,6 +432,15 @@ pub const COPY_IMAGE_TO_IMAGE_TAG: u8 = 0x7B;
 /// WebGPU can perform only for the value zero (`clearBuffer`); any other value
 /// is refused by the replayer.
 pub const FILL_BUFFER_TAG: u8 = 0x7C;
+/// [`Command::WriteBuffer`](crate::Command::WriteBuffer) — a host→buffer upload,
+/// which becomes WebGPU's `queue.writeBuffer(buffer, offset, data)`.
+///
+/// In the copy-and-fill family rather than the device one: it is a queue-side
+/// data transfer, the upload counterpart of the copies above, even though the
+/// HAL declares it on [`Device`](crcbl_hal::Device) rather than on the encoder.
+/// It makes no object and is not recorded on the implicit-current encoder — the
+/// replayer submits it straight to the queue.
+pub const WRITE_BUFFER_TAG: u8 = 0x7D;
 /// [`Command::CreateSwapchain`](crate::Command::CreateSwapchain) — the first tag
 /// of the presentation family, [`FAMILY_PRESENT`]. It configures a canvas's
 /// context; see the command for why `image_count` and `present_mode` are carried
@@ -671,6 +695,38 @@ pub const fn store_op_from_code(code: u8) -> Option<StoreOp> {
     match code {
         STORE_OP_STORE => Some(StoreOp::Store),
         STORE_OP_DISCARD => Some(StoreOp::Discard),
+        _ => None,
+    }
+}
+
+// ── IndexFormat ───────────────────────────────────────────────────────────────
+//
+// Carried by [`Command::BindIndexBuffer`](crate::Command::BindIndexBuffer) and
+// written out for the module header's reason. The two variants are the same
+// bandwidth trade Vulkan and WebGPU both draw, and a fold between them is not a
+// refusal but a misread index buffer — every index read at twice or half its
+// stride — so this table answers `None` for a code it does not claim.
+
+/// [`IndexFormat::Uint16`].
+pub const INDEX_FORMAT_UINT16: u8 = 0x00;
+/// [`IndexFormat::Uint32`].
+pub const INDEX_FORMAT_UINT32: u8 = 0x01;
+
+/// The wire code for an [`IndexFormat`].
+#[must_use]
+pub const fn index_format_code(format: IndexFormat) -> u8 {
+    match format {
+        IndexFormat::Uint16 => INDEX_FORMAT_UINT16,
+        IndexFormat::Uint32 => INDEX_FORMAT_UINT32,
+    }
+}
+
+/// The [`IndexFormat`] a wire code names, or `None` if it names none.
+#[must_use]
+pub const fn index_format_from_code(code: u8) -> Option<IndexFormat> {
+    match code {
+        INDEX_FORMAT_UINT16 => Some(IndexFormat::Uint16),
+        INDEX_FORMAT_UINT32 => Some(IndexFormat::Uint32),
         _ => None,
     }
 }
@@ -1775,7 +1831,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 54] = [
+    const TAGS: [(&str, u8, u8); 59] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1869,13 +1925,18 @@ mod tests {
             FAMILY_ENCODER,
         ),
         ("PipelineBarrier", PIPELINE_BARRIER_TAG, FAMILY_ENCODER),
+        ("SetViewport", SET_VIEWPORT_TAG, FAMILY_ENCODER),
+        ("SetScissor", SET_SCISSOR_TAG, FAMILY_ENCODER),
+        ("BindIndexBuffer", BIND_INDEX_BUFFER_TAG, FAMILY_ENCODER),
         ("Draw", DRAW_TAG, FAMILY_DRAW),
+        ("DrawIndexed", DRAW_INDEXED_TAG, FAMILY_DRAW),
         ("Dispatch", DISPATCH_TAG, FAMILY_DISPATCH),
         ("CopyImageToBuffer", COPY_IMAGE_TO_BUFFER_TAG, FAMILY_COPY),
         ("CopyBufferToBuffer", COPY_BUFFER_TO_BUFFER_TAG, FAMILY_COPY),
         ("CopyBufferToImage", COPY_BUFFER_TO_IMAGE_TAG, FAMILY_COPY),
         ("CopyImageToImage", COPY_IMAGE_TO_IMAGE_TAG, FAMILY_COPY),
         ("FillBuffer", FILL_BUFFER_TAG, FAMILY_COPY),
+        ("WriteBuffer", WRITE_BUFFER_TAG, FAMILY_COPY),
         ("CreateSwapchain", CREATE_SWAPCHAIN_TAG, FAMILY_PRESENT),
         ("AcquireNextFrame", ACQUIRE_NEXT_FRAME_TAG, FAMILY_PRESENT),
         ("Present", PRESENT_TAG, FAMILY_PRESENT),

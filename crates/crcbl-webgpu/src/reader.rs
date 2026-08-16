@@ -23,10 +23,10 @@ use crcbl_hal::{
     ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CompareOp, CompositeAlpha,
     CullMode, DepthBias, DepthStencilAttachment, DepthStencilState, Extent3d, FilterMode, Format,
     FrontFace, ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewType, LoadOp, MultisampleState, Offset3d, PolygonMode,
-    PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QueueTransfer, Rect2d,
-    ResourceState, SampleType, SamplerAddressMode, SemaphoreSignal, SemaphoreWait, ShaderStages,
-    StencilFaceState, StencilOp, StencilState, StoreOp,
+    ImageType, ImageUsage, ImageViewType, IndexFormat, LoadOp, MultisampleState, Offset3d,
+    PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QueueTransfer,
+    Rect2d, ResourceState, SampleType, SamplerAddressMode, SemaphoreSignal, SemaphoreWait,
+    ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp, Viewport,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -43,6 +43,14 @@ impl ByteReader<'_> {
     fn read_load_op(&mut self, field: &'static str) -> Result<LoadOp, DecodeError> {
         let code = self.read_u8()?;
         tag::load_op_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_index_format(&mut self, field: &'static str) -> Result<IndexFormat, DecodeError> {
+        let code = self.read_u8()?;
+        tag::index_format_from_code(code).ok_or(DecodeError::InvalidEnum {
             field,
             code: code.into(),
         })
@@ -1075,6 +1083,41 @@ impl<'a> StreamReader<'a> {
             tag::BIND_GRAPHICS_PIPELINE_TAG => Ok(Command::BindGraphicsPipeline {
                 pipeline: r.read_handle("BindGraphicsPipeline::pipeline")?,
             }),
+            tag::SET_VIEWPORT_TAG => {
+                // `Viewport` in declaration order: the rectangle's four floats,
+                // then the depth range's two. See `Command::SetViewport`.
+                let x = r.read_f32()?;
+                let y = r.read_f32()?;
+                let width = r.read_f32()?;
+                let height = r.read_f32()?;
+                let depth_min = r.read_f32()?;
+                let depth_max = r.read_f32()?;
+                Ok(Command::SetViewport {
+                    viewport: Viewport {
+                        x,
+                        y,
+                        width,
+                        height,
+                        depth_min,
+                        depth_max,
+                    },
+                })
+            }
+            tag::SET_SCISSOR_TAG => Ok(Command::SetScissor {
+                rect: r.read_rect()?,
+            }),
+            tag::BIND_INDEX_BUFFER_TAG => {
+                // The buffer, its byte offset, then the index-format code. See
+                // `Command::BindIndexBuffer`.
+                let buffer = r.read_handle("BindIndexBuffer::buffer")?;
+                let offset = r.read_u64()?;
+                let format = r.read_index_format("BindIndexBuffer::format")?;
+                Ok(Command::BindIndexBuffer {
+                    buffer,
+                    offset,
+                    format,
+                })
+            }
             tag::BIND_GROUP_TAG => {
                 let slot = r.read_u32()?;
                 let group = r.read_handle("BindGroup::group")?;
@@ -1114,6 +1157,21 @@ impl<'a> StreamReader<'a> {
                 let last_instance = r.read_u32()?;
                 Ok(Command::Draw {
                     vertices: first_vertex..last_vertex,
+                    instances: first_instance..last_instance,
+                })
+            }
+            tag::DRAW_INDEXED_TAG => {
+                // The index range's start and end, the signed `base_vertex`, then
+                // the instance range's start and end — spelled out for `DRAW_TAG`'s
+                // reason. See `Command::DrawIndexed`.
+                let first_index = r.read_u32()?;
+                let last_index = r.read_u32()?;
+                let base_vertex = r.read_i32()?;
+                let first_instance = r.read_u32()?;
+                let last_instance = r.read_u32()?;
+                Ok(Command::DrawIndexed {
+                    indices: first_index..last_index,
+                    base_vertex,
                     instances: first_instance..last_instance,
                 })
             }
@@ -1344,6 +1402,19 @@ impl<'a> StreamReader<'a> {
                     offset,
                     size,
                     value,
+                })
+            }
+            tag::WRITE_BUFFER_TAG => {
+                // A host→buffer upload: the buffer, its byte offset, then the
+                // bytes. The payload is owned, as `PushConstants::data` is. See
+                // `Command::WriteBuffer`.
+                let buffer = r.read_handle("WriteBuffer::buffer")?;
+                let offset = r.read_u64()?;
+                let data = r.read_field("WriteBuffer::data")?.to_vec();
+                Ok(Command::WriteBuffer {
+                    buffer,
+                    offset,
+                    data,
                 })
             }
             tag::PIPELINE_BARRIER_TAG => {

@@ -1648,11 +1648,14 @@ fn every_command_has_its_own_name() {
     // PollReadback, DestroyReadback, DestroyCommandBuffer) and of the compute pass
     // (BindComputePipeline, Dispatch, EndComputePass, CopyBufferToBuffer), the
     // remaining copies and fill (CopyBufferToImage, CopyImageToImage, FillBuffer),
-    // the no-op barrier (PipelineBarrier, twice but one name), and the presentation
+    // the host→buffer upload (WriteBuffer), the dynamic viewport and scissor the
+    // graph sets on every pass (SetViewport, SetScissor), the UI pass's indexed
+    // draw (BindIndexBuffer, DrawIndexed), the no-op barrier
+    // (PipelineBarrier, twice but one name), and the presentation
     // family (CreateSwapchain, AcquireNextFrame, DestroySwapchain and
     // ReconfigureSwapchain) — so the distinct-name count is what the writer has
     // methods for.
-    assert_eq!(names.len(), 54);
+    assert_eq!(names.len(), 59);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

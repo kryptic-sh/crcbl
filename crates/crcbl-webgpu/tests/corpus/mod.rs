@@ -19,12 +19,12 @@ use crcbl_hal::{
     ComputePipelineDesc, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
     DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
     ImageAspect, ImageBarrier, ImageCopy, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, MultisampleState,
-    Offset3d, PipelineLayoutDesc, PolygonMode, PresentInfo, PresentMode, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, QueueTransfer, ReadbackDesc, Rect2d, RenderPassDesc,
-    ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp, StencilState,
-    StoreOp, SubmitInfo, SwapchainDesc, depth,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
+    MultisampleState, Offset3d, PipelineLayoutDesc, PolygonMode, PresentInfo, PresentMode,
+    PrimitiveState, PrimitiveTopology, PushConstantRange, QueueTransfer, ReadbackDesc, Rect2d,
+    RenderPassDesc, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal,
+    SemaphoreWait, ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp,
+    StencilState, StoreOp, SubmitInfo, SwapchainDesc, Viewport, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -961,9 +961,49 @@ pub fn every_command() -> Vec<Command> {
             data: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
             layout: handle(41, 42),
         },
+        // The dynamic viewport and scissor the render graph sets on every pass.
+        // All six viewport floats are distinct so a transposition among them is
+        // visible, and the depth range is a non-default one so `depth_min`/
+        // `depth_max` are not confused with the rectangle. The scissor's four
+        // fields are likewise distinct, with a negative origin the signed wire
+        // carries.
+        Command::SetViewport {
+            viewport: Viewport {
+                x: 1.0,
+                y: 2.0,
+                width: 640.0,
+                height: 480.0,
+                depth_min: 0.25,
+                depth_max: 0.75,
+            },
+        },
+        Command::SetScissor {
+            rect: Rect2d {
+                x: -3,
+                y: 4,
+                width: 320,
+                height: 200,
+            },
+        },
+        // The index buffer for the UI pass's indexed draw. Distinct handle and a
+        // non-zero offset, and `Uint16` here so the format pairs with the `Uint32`
+        // no other command carries — a fold to the other width would show.
+        Command::BindIndexBuffer {
+            buffer: handle(202, 203),
+            offset: 48,
+            format: IndexFormat::Uint16,
+        },
         Command::Draw {
             vertices: 6..9,
             instances: 1..5,
+        },
+        // The indexed draw. Its two ranges and the signed `base_vertex` between
+        // them are five distinct values — with a NEGATIVE base_vertex so the sign
+        // is carried — so a transposition among the five is visible.
+        Command::DrawIndexed {
+            indices: 12..30,
+            base_vertex: -7,
+            instances: 2..6,
         },
         // The compute-pass commands. `BeginComputePass` carries only a label —
         // compute has no attachments — and its labelled form is paired with the
@@ -1059,6 +1099,15 @@ pub fn every_command() -> Vec<Command> {
             offset: 64,
             size: 256,
             value: 0xDEAD_BEEF,
+        },
+        // The host→buffer upload — `queue.writeBuffer` on the replayer, not an
+        // encoder op. Its buffer, offset and payload are all distinct so a
+        // transposition among the three is visible, and the payload's bytes are
+        // themselves distinct so a truncation shows.
+        Command::WriteBuffer {
+            buffer: handle(200, 201),
+            offset: 96,
+            data: vec![0x12, 0x34, 0x56, 0x78, 0x9A],
         },
         // The pipeline barrier, the documented no-op — carried whole for wire
         // fidelity though the replayer records nothing. The empty case first: a
@@ -1522,10 +1571,22 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             data,
             layout,
         } => stream.push_constants(*stages, *offset, data, *layout),
+        Command::SetViewport { viewport } => stream.set_viewport(viewport),
+        Command::SetScissor { rect } => stream.set_scissor(rect),
+        Command::BindIndexBuffer {
+            buffer,
+            offset,
+            format,
+        } => stream.bind_index_buffer(*buffer, *offset, *format),
         Command::Draw {
             vertices,
             instances,
         } => stream.draw(vertices.clone(), instances.clone()),
+        Command::DrawIndexed {
+            indices,
+            base_vertex,
+            instances,
+        } => stream.draw_indexed(indices.clone(), *base_vertex, instances.clone()),
         Command::BeginComputePass { label } => stream.begin_compute_pass(&ComputePassDesc {
             label: label.as_deref(),
         }),
@@ -1541,6 +1602,11 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             size,
             value,
         } => stream.fill_buffer(*buffer, *offset, *size, *value),
+        Command::WriteBuffer {
+            buffer,
+            offset,
+            data,
+        } => stream.write_buffer(*buffer, *offset, data),
         Command::PipelineBarrier {
             buffers,
             images,

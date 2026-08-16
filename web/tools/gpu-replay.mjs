@@ -748,6 +748,27 @@ function stubRenderPass() {
      *   firstVertex: number, firstInstance: number }>} Every `draw`, in order.
      */
     draws: [],
+    /**
+     * @type {Array<{ x: number, y: number, width: number, height: number,
+     *   minDepth: number, maxDepth: number }>} Every `setViewport`, in order.
+     */
+    viewports: [],
+    /**
+     * @type {Array<{ x: number, y: number, width: number, height: number }>}
+     *   Every `setScissorRect`, in order.
+     */
+    scissors: [],
+    /**
+     * @type {Array<{ buffer: object, format: string, offset: number }>} Every
+     *   `setIndexBuffer`, in order.
+     */
+    indexBuffers: [],
+    /**
+     * @type {Array<{ indexCount: number, instanceCount: number,
+     *   firstIndex: number, baseVertex: number, firstInstance: number }>} Every
+     *   `drawIndexed`, in order.
+     */
+    indexedDraws: [],
     ended: 0,
     /** @param {object} pipeline */
     setPipeline(pipeline) {
@@ -772,6 +793,56 @@ function stubRenderPass() {
         vertexCount,
         instanceCount,
         firstVertex,
+        firstInstance,
+      });
+    },
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @param {number} width
+     * @param {number} height
+     * @param {number} minDepth
+     * @param {number} maxDepth
+     */
+    setViewport(x, y, width, height, minDepth, maxDepth) {
+      pass.viewports.push({ x, y, width, height, minDepth, maxDepth });
+    },
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @param {number} width
+     * @param {number} height
+     */
+    setScissorRect(x, y, width, height) {
+      pass.scissors.push({ x, y, width, height });
+    },
+    /**
+     * @param {object} buffer
+     * @param {string} format
+     * @param {number} offset
+     */
+    setIndexBuffer(buffer, format, offset) {
+      pass.indexBuffers.push({ buffer, format, offset });
+    },
+    /**
+     * @param {number} indexCount
+     * @param {number} instanceCount
+     * @param {number} firstIndex
+     * @param {number} baseVertex
+     * @param {number} firstInstance
+     */
+    drawIndexed(
+      indexCount,
+      instanceCount,
+      firstIndex,
+      baseVertex,
+      firstInstance
+    ) {
+      pass.indexedDraws.push({
+        indexCount,
+        instanceCount,
+        firstIndex,
+        baseVertex,
         firstInstance,
       });
     },
@@ -941,6 +1012,27 @@ function stubDevice(
       for (const [type, listener] of device.listeners) {
         if (type === 'uncapturederror') listener({ error: { message } });
       }
+    },
+    /**
+     * @type {Array<{ buffer: object, offset: number, data: Uint8Array }>} Every
+     *   `queue.writeBuffer`, in order.
+     */
+    bufferWrites: [],
+    /**
+     * The device's single implicit queue. `writeBuffer` records each upload at
+     * `device.bufferWrites` so a `WriteBuffer` scenario can read back what the
+     * replayer submitted — `Device::write_buffer` is a queue op, not an encoder
+     * one.
+     */
+    queue: {
+      /**
+       * @param {object} buffer
+       * @param {number} offset
+       * @param {Uint8Array} data
+       */
+      writeBuffer(buffer, offset, data) {
+        device.bufferWrites.push({ buffer, offset, data });
+      },
     },
     /** @param {{ label?: string, size: number, usage: number }} desc */
     createBuffer(desc) {
@@ -1842,7 +1934,11 @@ async function main() {
       'BindGraphicsPipeline',
       'BindGroup',
       'PushConstants',
+      'SetViewport',
+      'SetScissor',
+      'BindIndexBuffer',
       'Draw',
+      'DrawIndexed',
       'BeginComputePass',
       'EndComputePass',
       'BindComputePipeline',
@@ -1852,6 +1948,7 @@ async function main() {
       'CopyBufferToImage',
       'CopyImageToImage',
       'FillBuffer',
+      'WriteBuffer',
       'PipelineBarrier',
       'Finish',
       'Submit',
@@ -5598,6 +5695,211 @@ async function main() {
     );
   }
   {
+    // **A SetViewport records setViewport with the six floats in order.** All six
+    // are distinct so a transposition among them shows, and the depth range is a
+    // non-default one so it is not confused with the rectangle.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'SetViewport',
+          viewport: {
+            x: 1,
+            y: 2,
+            width: 640,
+            height: 480,
+            depthMin: 0.25,
+            depthMax: 0.75,
+          },
+        },
+        602n
+      )
+    );
+    checkEqual(
+      pass.viewports,
+      [{ x: 1, y: 2, width: 640, height: 480, minDepth: 0.25, maxDepth: 0.75 }],
+      'a SetViewport records setViewport(x, y, width, height, minDepth, maxDepth)'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid SetViewport leaves the error queue empty'
+    );
+  }
+  {
+    // **A SetViewport with no pass open is a mid-frame ordering fault** — the
+    // error queue, not a throw.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'SetViewport',
+          viewport: {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            depthMin: 0,
+            depthMax: 1,
+          },
+        },
+        602n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no render pass open'),
+      `a SetViewport with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A SetScissor records setScissorRect with the four fields in order**, the
+    // negative origin the signed wire carries passed straight through.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        { name: 'SetScissor', rect: { x: -3, y: 4, width: 320, height: 200 } },
+        602n
+      )
+    );
+    checkEqual(
+      pass.scissors,
+      [{ x: -3, y: 4, width: 320, height: 200 }],
+      'a SetScissor records setScissorRect(x, y, width, height)'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid SetScissor leaves the error queue empty'
+    );
+  }
+  {
+    // **A SetScissor with no pass open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        { name: 'SetScissor', rect: { x: 0, y: 0, width: 1, height: 1 } },
+        602n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no render pass open'),
+      `a SetScissor with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A BindIndexBuffer reaches the pass with the buffer resolved, the format
+    // lowercased to WebGPU's spelling, and the u64 offset narrowed.** `Uint16`
+    // becomes `'uint16'` — the case that fails if the arm passed the HAL spelling
+    // straight through.
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(80, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    const buffer = replayer.buffers.get(bufH);
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'BindIndexBuffer',
+          buffer: bufH,
+          offset: 48n,
+          format: 'Uint16',
+        },
+        602n
+      )
+    );
+    checkEqual(
+      pass.indexBuffers,
+      [{ buffer, format: 'uint16', offset: 48 }],
+      'a BindIndexBuffer records setIndexBuffer(buffer, format, offset) with the buffer resolved'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid BindIndexBuffer leaves the error queue empty'
+    );
+  }
+  {
+    // **A BindIndexBuffer of an unresolvable buffer is named on the error queue.**
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'BindIndexBuffer',
+          buffer: handle(80, 1),
+          offset: 0n,
+          format: 'Uint32',
+        },
+        602n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('80.1') &&
+        pass.indexBuffers.length === 0,
+      `a BindIndexBuffer of an unresolvable buffer names it and binds nothing (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A DrawIndexed's two ranges become five WebGPU counts with the signed
+    // baseVertex between them.** `12..30`/`2..6` with baseVertex `-7` is eighteen
+    // indices of four instances, from index 12 and instance 2, minus seven
+    // vertices — the non-zero, negative case that fails if the arm mixed the
+    // firsts, the spans or the sign.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'DrawIndexed',
+          indices: { start: 12, end: 30 },
+          baseVertex: -7,
+          instances: { start: 2, end: 6 },
+        },
+        602n
+      )
+    );
+    checkEqual(
+      pass.indexedDraws,
+      [
+        {
+          indexCount: 18,
+          instanceCount: 4,
+          firstIndex: 12,
+          baseVertex: -7,
+          firstInstance: 2,
+        },
+      ],
+      'a DrawIndexed records drawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance)'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid DrawIndexed leaves the error queue empty'
+    );
+  }
+  {
+    // **A DrawIndexed with no pass open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'DrawIndexed',
+          indices: { start: 0, end: 3 },
+          baseVertex: 0,
+          instances: { start: 0, end: 1 },
+        },
+        602n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no render pass open'),
+      `a DrawIndexed with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
     // **A bound pipeline reaches the pass as the resolved GPURenderPipeline.**
     // The corpus pipeline is built first, exactly as the section above does, so
     // its handle resolves; the pass then gets that same object.
@@ -6414,6 +6716,58 @@ async function main() {
     check(
       error !== null && error.includes('80.1'),
       `a fill of an unresolvable buffer names it on the error queue (${JSON.stringify(error)})`
+    );
+  }
+
+  // ---- the host→buffer upload: queue.writeBuffer ---------------------------
+  //
+  // `WriteBuffer` is a `Device` method, NOT an encoder one — it submits through
+  // `queue.writeBuffer` (spied by `bufferWrites`) with no encoder open, between
+  // frames. Its refusals are a write before any device opened and an
+  // unresolvable buffer, each named on the error queue rather than thrown.
+  {
+    // **A write reaches queue.writeBuffer with the buffer resolved, the u64
+    // offset narrowed to Number, and the payload passed through.** No encoder is
+    // opened first — the write is a queue op.
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(80, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    const buffer = replayer.buffers.get(bufH);
+    const data = new Uint8Array([0x12, 0x34, 0x56, 0x78, 0x9a]);
+    replayer.replay(
+      frameOf({ name: 'WriteBuffer', buffer: bufH, offset: 96n, data }, 701n)
+    );
+    const writes = device.bufferWrites;
+    check(
+      writes.length === 1 &&
+        writes[0].buffer === buffer &&
+        writes[0].offset === 96 &&
+        writes[0].data === data &&
+        replayer.pendingErrors === 0,
+      'WriteBuffer records queue.writeBuffer(buffer, offset, data) with the buffer resolved'
+    );
+  }
+  {
+    // **A write of an unresolvable buffer is named on the error queue and
+    // submits nothing.**
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'WriteBuffer',
+          buffer: handle(80, 1),
+          offset: 0n,
+          data: new Uint8Array([0]),
+        },
+        701n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('80.1') &&
+        device.bufferWrites.length === 0,
+      `a write of an unresolvable buffer names it and submits nothing (${JSON.stringify(error)})`
     );
   }
 

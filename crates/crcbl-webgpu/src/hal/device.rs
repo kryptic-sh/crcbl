@@ -261,20 +261,13 @@ impl Device for WebGpuDevice {
             .with(|channel| channel.encode(|stream| stream.destroy_buffer(buffer)));
     }
 
-    fn write_buffer(
-        &self,
-        _buffer: BufferHandle,
-        _offset: u64,
-        _data: &[u8],
-    ) -> Result<(), HalError> {
-        // Needed, but the stream has no `write_buffer` command yet — a later
-        // slice adds one. Refuse loudly rather than drop the write: a caller
-        // that mistook silence for success would upload nothing and render a
-        // buffer of stale bytes.
-        Err(HalError::Unsupported {
-            backend: BackendKind::WebGpu,
-            what: "write_buffer is not yet wired into the WebGPU stream",
-        })
+    fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
+        // Wired: the upload becomes `queue.writeBuffer(buffer, offset, data)` on
+        // the replayer. The bytes cross whole on the stream — see
+        // `StreamWriter::write_buffer`.
+        self.channel
+            .with(|channel| channel.encode(|stream| stream.write_buffer(buffer, offset, data)));
+        Ok(())
     }
 
     fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
