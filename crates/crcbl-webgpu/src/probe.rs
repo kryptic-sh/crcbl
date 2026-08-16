@@ -44,6 +44,7 @@
 //! | [`__crcbl_web_gpu_probe_image_view`](shim::__crcbl_web_gpu_probe_image_view) | `() -> i32` | Encode one [`CreateImageView`](crate::Command::CreateImageView) against [`PROBE_IMAGE_VIEW`], viewing [`PROBE_IMAGE`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_sampler`](shim::__crcbl_web_gpu_probe_sampler) | `() -> i32` | Encode one [`CreateSampler`](crate::Command::CreateSampler) against [`PROBE_SAMPLER`], with [`PROBE_SAMPLER_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_bind_group_layout`](shim::__crcbl_web_gpu_probe_bind_group_layout) | `() -> i32` | Encode one [`CreateBindGroupLayout`](crate::Command::CreateBindGroupLayout) against [`PROBE_BIND_GROUP_LAYOUT`], with [`PROBE_BIND_GROUP_LAYOUT_DESC`]. `1`, or `0` on the same three conditions. |
+//! | [`__crcbl_web_gpu_probe_bind_group`](shim::__crcbl_web_gpu_probe_bind_group) | `() -> i32` | Encode one frame — a layout, its resources, and a [`CreateBindGroup`](crate::Command::CreateBindGroup) against [`PROBE_BIND_GROUP`] with [`PROBE_BIND_GROUP_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `() -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) and register its wait. `1`, or `0` if there was no room or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
@@ -283,11 +284,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crcbl_hal::{
-    AdapterId, BindGroupLayoutDesc, BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags,
-    BindingKind, BufferDesc, BufferHandle, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features,
-    FilterMode, Format, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewDesc, ImageViewHandle, ImageViewType, MemoryLocation, SampleType, SamplerAddressMode,
-    SamplerDesc, SamplerHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
+    AdapterId, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
+    BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
+    BufferDesc, BufferHandle, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features, FilterMode,
+    Format, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewHandle, ImageViewType, MemoryLocation, SampleType, SamplerAddressMode, SamplerDesc,
+    SamplerHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -685,6 +687,127 @@ pub const PROBE_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> = BindGroup
     entries: &PROBE_BIND_GROUP_LAYOUT_ENTRIES,
 };
 
+/// The bind group [`shim::__crcbl_web_gpu_probe_bind_group`] creates, every time.
+///
+/// The same bits a sixth time, on [`PROBE_BIND_GROUP_LAYOUT`]'s terms: a handle
+/// carries no kind, so a page filing six kinds under one key would be a replayer
+/// with one table where the crate docs require six — and this is the kind whose
+/// entries make the point concrete, since each of them *also* names a handle that
+/// only its discriminant says the table for.
+pub const PROBE_BIND_GROUP: BindGroupHandle = match BindGroupHandle::from_bits(1 << 32) {
+    Some(group) => group,
+    // Generation `1`, as above.
+    None => panic!("generation 1 is not zero"),
+};
+
+/// The binding slots of the layout the probe's bind group is built against.
+///
+/// **Not [`PROBE_BIND_GROUP_LAYOUT_ENTRIES`]**, and the difference is what the
+/// two commands are for. Those four are chosen to exercise the *layout* command's
+/// members, and a bind group filling them would need a dynamic-offset uniform
+/// buffer and a *filtering* sampler this observation point has no resources for.
+/// These three match the three resources the group binds — one of each
+/// [`BindingResource`] shape — so the group is a valid one a browser can build
+/// rather than one it must refuse. The sampler slot is a *comparison* one because
+/// [`PROBE_SAMPLER`] is a comparison sampler ([`PROBE_SAMPLER_DESC`]'s
+/// `compare` is [`CompareOp::Greater`]); binding a comparison `GPUSampler` to a
+/// comparison slot is what a browser accepts, and the two bindings are validated
+/// independently of the float texture beside them.
+pub const PROBE_GROUP_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 3] = [
+    // binding 0 <- the whole of PROBE_BUFFER, a read-only storage buffer.
+    BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::COMPUTE,
+        kind: BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+    // binding 1 <- PROBE_IMAGE_VIEW, a float 2D sampled image.
+    BindGroupLayoutEntry {
+        binding: 1,
+        visibility: ShaderStages::FRAGMENT,
+        kind: BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+    // binding 2 <- PROBE_SAMPLER, a comparison sampler.
+    BindGroupLayoutEntry {
+        binding: 2,
+        visibility: ShaderStages::FRAGMENT,
+        kind: BindingKind::Sampler { comparison: true },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+];
+
+/// The layout the probe's bind group conforms to.
+///
+/// Built at [`PROBE_BIND_GROUP_LAYOUT`] in the same frame as the group, just
+/// before it — a bind group names a live layout, so the layout has to exist first,
+/// which is why this probe records several commands where every other records
+/// one. See [`shim::__crcbl_web_gpu_probe_bind_group`].
+pub const PROBE_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> = BindGroupLayoutDesc {
+    label: Some("crcbl-webgpu probe group layout"),
+    entries: &PROBE_GROUP_LAYOUT_ENTRIES,
+};
+
+/// The assignments [`PROBE_BIND_GROUP_DESC`] carries — one per resource shape.
+///
+/// **This is what puts all three resource tables in front of a browser at once.**
+/// binding 0 is a [`BindingResource::Buffer`] into the buffer table, binding 1 an
+/// [`BindingResource::ImageView`] into the image-view table, binding 2 a
+/// [`BindingResource::Sampler`] into the sampler table — and every one of the
+/// three handles is the same eight bytes as the others, so a replayer that
+/// resolved them against one table would bind the wrong kind of object.
+///
+/// binding 0's `size` is [`BindingResource::WHOLE_BUFFER`], the sentinel: it
+/// crosses verbatim and the replayer has to hand WebGPU an *absent*
+/// `GPUBufferBinding.size`, which means "to the end". This probe is what puts
+/// that resolution in front of a real `createBindGroup`.
+pub const PROBE_BIND_GROUP_ENTRIES: [BindGroupEntry; 3] = [
+    BindGroupEntry {
+        binding: 0,
+        array_index: 0,
+        resource: BindingResource::whole_buffer(PROBE_BUFFER),
+    },
+    BindGroupEntry {
+        binding: 1,
+        array_index: 0,
+        resource: BindingResource::ImageView(PROBE_IMAGE_VIEW),
+    },
+    BindGroupEntry {
+        binding: 2,
+        array_index: 0,
+        resource: BindingResource::Sampler(PROBE_SAMPLER),
+    },
+];
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_bind_group`] asks with.
+///
+/// A `const` rather than a function for [`PROBE_IMAGE_VIEW_DESC`]'s reason: there
+/// is nothing for a caller to pass. **A `GPUBindGroup` reports its `label` and
+/// nothing else** — not its layout, not its entries — so this is
+/// [`PROBE_BIND_GROUP_LAYOUT_DESC`]'s situation exactly, and what a browser can be
+/// asked is the same two things: that the object is an instance of this browser's
+/// own `GPUBindGroup`, and that the device reported nothing about the descriptor
+/// afterwards.
+///
+/// `variable_count` is `None`: a `Some` could only pair with a layout carrying a
+/// `VARIABLE_COUNT` binding, which the replayer refuses at layout creation, so it
+/// is the refusal case the corpus drives rather than the creation this observes.
+pub const PROBE_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
+    label: Some("crcbl-webgpu probe bind group"),
+    layout: PROBE_BIND_GROUP_LAYOUT,
+    entries: &PROBE_BIND_GROUP_ENTRIES,
+    variable_count: None,
+};
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -1007,6 +1130,49 @@ impl Probe {
                     PROBE_BIND_GROUP_LAYOUT,
                     &PROBE_BIND_GROUP_LAYOUT_DESC,
                 )
+            })
+            .is_some()
+    }
+
+    /// Encode one [`CreateBindGroup`](crate::Command::CreateBindGroup) against
+    /// [`PROBE_BIND_GROUP`], with [`PROBE_BIND_GROUP_DESC`].
+    ///
+    /// **Several commands in one frame, unlike every probe before it.** A bind
+    /// group names a live layout and live resources, so this encodes the layout
+    /// ([`PROBE_GROUP_LAYOUT_DESC`]), the buffer, the image, its view and the
+    /// sampler the group binds, and then the group — six commands, still one
+    /// export, because a creation is answered by nothing and there is no reply to
+    /// poll for at any step. Reusing [`PROBE_BUFFER`], [`PROBE_IMAGE`],
+    /// [`PROBE_IMAGE_VIEW`] and [`PROBE_SAMPLER`] means the frame files each
+    /// resource in its own table just before the group resolves it.
+    ///
+    /// [`encode`](StreamChannel::encode) and never
+    /// [`encode_awaited`](StreamChannel::encode_awaited), for
+    /// [`request_sampler`](Self::request_sampler)'s reason: nothing answers a
+    /// creation. The ordering rule is the same too — every command in the frame is
+    /// a device method — so it refuses until a device has opened.
+    ///
+    /// **It cannot check that its resources will resolve, and does not pretend
+    /// to**: they live in the page's replayer and nothing here holds one. A
+    /// descriptor whose handles the browser cannot resolve, or whose entries it
+    /// refuses, is reported through `Device::take_error`, exactly as an
+    /// image view naming a missing image is. `web/engine/gpu-replay.js` argues
+    /// that where it is made.
+    fn request_bind_group(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| {
+                stream.create_bind_group_layout(PROBE_BIND_GROUP_LAYOUT, &PROBE_GROUP_LAYOUT_DESC);
+                stream.create_buffer(PROBE_BUFFER, &probe_buffer_desc(256));
+                stream.create_image(PROBE_IMAGE, &probe_image_desc(4, 4, 1));
+                stream.create_image_view(PROBE_IMAGE_VIEW, &PROBE_IMAGE_VIEW_DESC);
+                stream.create_sampler(PROBE_SAMPLER, &PROBE_SAMPLER_DESC);
+                stream.create_bind_group(PROBE_BIND_GROUP, &PROBE_BIND_GROUP_DESC)
             })
             .is_some()
     }
@@ -1450,6 +1616,35 @@ pub mod shim {
         })
     }
 
+    /// Ask the page to make a bind group on the device it opened.
+    ///
+    /// `1` when the frame — a layout, the resources it names, and the
+    /// [`CreateBindGroup`](crate::Command::CreateBindGroup) itself — is on the
+    /// stream; `0` on [`__crcbl_web_gpu_probe_bind_group_layout`]'s three
+    /// conditions.
+    ///
+    /// **No `state` beside it and no arguments either**, exactly as its neighbours
+    /// have none and for the same two reasons: nothing answers a creation, and a
+    /// `GPUBindGroup` reports its `label` and nothing else — not its layout, not
+    /// its entries — so a number chosen by the page could not be read back off the
+    /// object. The descriptor is fixed in `crates/crcbl-webgpu/src/probe.rs`.
+    ///
+    /// **What is new is that it encodes a whole *frame*.** A bind group binds a
+    /// layout and resources that have to exist first, so this records six commands
+    /// where its neighbours record one — and the last of them binds one handle
+    /// into each of three resource tables, which is what puts the
+    /// [`BindingResource`](crate::Command::CreateBindGroup) discriminant in front
+    /// of a real device. `crcbl.gpu.replayer.bindGroups` is the table the
+    /// `GPUBindGroup` lands in, and a descriptor the browser would not have is
+    /// reported through `Device::take_error`.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bind_group() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_bind_group()),
+            Err(_) => 0,
+        })
+    }
+
     /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
     /// legal value for each of these, so they are read only once
     /// [`__crcbl_web_gpu_probe_device_state`] has answered
@@ -1640,7 +1835,8 @@ mod tests {
     };
 
     use super::shim::{
-        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_device,
+        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_bind_group,
+        __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_device,
         __crcbl_web_gpu_probe_device_features_hi, __crcbl_web_gpu_probe_device_features_lo,
         __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
@@ -2577,6 +2773,71 @@ mod tests {
             __crcbl_web_gpu_probe_surface_caps_format(),
             u32::from(tag::format_code(Format::Bgra8Unorm))
         );
+    }
+
+    /// And so does the bind group, which makes six kinds on one set of bits.
+    #[test]
+    fn the_probes_bind_group_names_the_same_handle_bits_as_everything_else() {
+        assert_eq!(PROBE_BIND_GROUP.to_bits(), PROBE_SAMPLER.to_bits());
+    }
+
+    /// The bind-group half: **one export, a whole frame.** A bind group names a
+    /// live layout and live resources, so the export encodes the layout, the
+    /// buffer, the image, its view and the sampler before the group — and the
+    /// group itself carries one handle into each of three resource tables.
+    #[test]
+    fn the_bind_group_export_encodes_the_layout_its_resources_and_the_group() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_bind_group(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateBindGroupLayout",
+                "CreateBuffer",
+                "CreateImage",
+                "CreateImageView",
+                "CreateSampler",
+                "CreateBindGroup",
+            ],
+            "the frame builds the layout and resources before the group"
+        );
+        assert_eq!(
+            commands.last(),
+            Some(&Command::CreateBindGroup {
+                group: PROBE_BIND_GROUP,
+                label: Some("crcbl-webgpu probe bind group".into()),
+                layout: PROBE_BIND_GROUP_LAYOUT,
+                entries: PROBE_BIND_GROUP_ENTRIES.to_vec(),
+                variable_count: None,
+            })
+        );
+    }
+
+    /// **Nothing waits on the frame**, for the image pair's reason: every command
+    /// in it is a creation, and a creation is answered by nothing.
+    #[test]
+    fn the_bind_group_request_registers_no_wait_because_nothing_answers_it() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_bind_group(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(take_frame().len(), 6);
+    }
+
+    /// **A device has to have opened first**, for the sampler export's reason:
+    /// every command the frame carries is a device method.
+    #[test]
+    fn a_bind_group_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_bind_group(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_bind_group(), 0);
+        assert_eq!(take_frame().len(), 1);
     }
 
     /// The probe must not take a channel from an engine that has one, because

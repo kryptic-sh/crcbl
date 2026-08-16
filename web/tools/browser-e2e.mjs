@@ -639,6 +639,18 @@ const PROBE_LAYOUT_LABEL = 'crcbl-webgpu probe layout';
 const PROBE_LAYOUT_ENTRIES = 4;
 
 /**
+ * The label `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_BIND_GROUP_DESC` sets,
+ * and — as with a sampler and a layout — **the only member of the group a browser
+ * reports at all**.
+ *
+ * A `GPUBindGroup` exposes no layout and no entries, so group N's evidence is the
+ * class of what came back and the silence of the device's error queue afterwards.
+ * What the group *bound* is checkable only before it is handed over, which is
+ * `web/tools/gpu-replay.mjs`'s job.
+ */
+const PROBE_BIND_GROUP_LABEL = 'crcbl-webgpu probe bind group';
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -3822,6 +3834,116 @@ try {
         ? `an instance of this browser's GPUBindGroupLayout labelled ${JSON.stringify(layoutProbe.label)}, built from ${PROBE_LAYOUT_ENTRIES} entries, of ${layoutProbe.held} held, and the device reported nothing`
         : `instanceof GPUBindGroupLayout: ${layoutProbe?.isRealLayout}, label ${JSON.stringify(layoutProbe?.label)}` +
           `${layoutReport.error ? ` — ${layoutReport.error}` : ''}`
+  );
+
+  // **THE ONLY GATE ON A COMMAND THAT NAMES OTHER RESOURCES.** Every command
+  // groups G to M put in front of a browser stands alone; this one binds a
+  // layout, a buffer, an image view and a sampler that have to exist first, so
+  // wasm records a whole frame — the layout, the four resources, then the group —
+  // and the group's entries carry one handle into each of three resource tables.
+  // A handle carries no kind, so the entry's discriminant is the only thing that
+  // says which table an id indexes, and the whole-buffer binding's size crosses as
+  // the `u64::MAX` sentinel and has to reach WebGPU as an *absent* member.
+  //
+  // A `GPUBindGroup` reports its `label` and nothing else, exactly as a
+  // `GPUBindGroupLayout` does, so the two things available here are group M's two:
+  // the class of what came back, which `instanceof GPUBindGroup` settles and no
+  // stub can satisfy — node has no such binding — and the device's error queue
+  // being empty afterwards, which is the only thing that can say `createBindGroup`
+  // *accepted* the descriptor, its `WHOLE_BUFFER` binding and all three resource
+  // kinds. `gpu-replay.mjs` proves that descriptor against a stub and proves every
+  // refusal; only a real device can say the browser takes it.
+  group('N — a bind group is created on the real device');
+
+  const bindGroupStart = await evaluate(
+    page,
+    `(async () => {
+       const { startBindGroupProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startBindGroupProbe({ exports }),
+         replayed: before.replayed,
+       };
+     })()`
+  );
+  const bindGroupProbe = bindGroupStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const { gpu } = globalThis.crcbl;
+             const stats = gpu.stats();
+             if (stats.replayed <= ${bindGroupStart.replayed} && !stats.failure) {
+               return null;
+             }
+             const entries = [...gpu.replayer.bindGroups.entries()];
+             const last = entries[entries.length - 1];
+             const group = last ? last[1] : undefined;
+             return {
+               commands: stats.commands,
+               failure: stats.failure,
+               handle: last ? last[0] : null,
+               held: entries.length,
+               // The browser's own class, as groups H, J, K, L and M ask. Node has
+               // no \`GPUBindGroup\` binding at all, so this is what a silent fall
+               // back to a stub cannot survive.
+               isRealGroup:
+                 typeof GPUBindGroup === 'function' &&
+                 group instanceof GPUBindGroup,
+               // Every other member of a \`GPUBindGroup\` is absent by design, so
+               // this is the whole of what the object can be asked.
+               label: group?.label,
+             };
+           })()`
+        )
+      )
+    : null;
+
+  // Read a moment after the replay rather than during it, for the reason groups
+  // K, L and M spell out: WebGPU raises a validation error "in a future task", so
+  // a queue read in the evaluation that saw the replay finish is empty whatever
+  // happened. The failure it guards here is the resolution: a `WHOLE_BUFFER` size
+  // passed on as `18446744073709551615`, a resource resolved against the wrong
+  // table, a layout the group does not match — every one of those is a group the
+  // browser refuses and nothing else reports.
+  const bindGroupReport = bindGroupProbe
+    ? await evaluate(
+        page,
+        `(async () => {
+           await new Promise((settle) =>
+             requestAnimationFrame(() => requestAnimationFrame(settle))
+           );
+           return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
+         })()`
+      )
+    : null;
+  check(
+    'N',
+    'wasm encoded a bind group creation and the demo loop replayed it',
+    bindGroupProbe?.commands?.join(',') ===
+      'CreateBindGroupLayout,CreateBuffer,CreateImage,CreateImageView,CreateSampler,CreateBindGroup' &&
+      Number.isInteger(bindGroupProbe.handle),
+    bindGroupProbe
+      ? `the loop replayed [${bindGroupProbe.commands.join(', ')}] for group ${bindGroupProbe.handle}` +
+          `${bindGroupProbe.failure ? ` — ${bindGroupProbe.failure}` : ''}`
+      : bindGroupStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'N',
+    'a real GPUBindGroup came back from the device with the whole-buffer binding and all three resource kinds accepted',
+    bindGroupProbe?.isRealGroup === true &&
+      bindGroupProbe?.label === PROBE_BIND_GROUP_LABEL &&
+      bindGroupReport?.waited === true &&
+      bindGroupReport?.error === null,
+    bindGroupReport?.waited !== true
+      ? 'the page never got as far as reading the device error queue'
+      : bindGroupProbe?.isRealGroup && bindGroupReport.error === null
+        ? `an instance of this browser's GPUBindGroup labelled ${JSON.stringify(bindGroupProbe.label)}, binding a buffer, a view and a sampler, of ${bindGroupProbe.held} held, and the device reported nothing`
+        : `instanceof GPUBindGroup: ${bindGroupProbe?.isRealGroup}, label ${JSON.stringify(bindGroupProbe?.label)}` +
+          `${bindGroupReport.error ? ` — ${bindGroupReport.error}` : ''}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

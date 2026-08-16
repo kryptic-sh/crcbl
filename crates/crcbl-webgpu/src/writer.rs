@@ -3,11 +3,12 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry, BindGroupLayoutHandle, BindingKind,
-    BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment, DeviceDesc,
-    Extent3d, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange, ImageViewDesc,
-    ImageViewHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
-    ShaderStages, SurfaceHandle,
+    BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BindGroupLayoutHandle, BindingKind, BindingResource, BufferDesc, BufferHandle, ClearValue,
+    ColorAttachment, DepthStencilAttachment, DeviceDesc, Extent3d, GraphicsPipelineHandle,
+    ImageDesc, ImageHandle, ImageSubresourceRange, ImageViewDesc, ImageViewHandle,
+    PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, ShaderStages,
+    SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -99,6 +100,40 @@ impl ByteWriter {
         self.put_binding_kind(entry.kind);
         self.put_u32(entry.count);
         self.put_u32(entry.flags.bits());
+    }
+
+    /// One [`BindingResource`]: its code, then that variant's own fields.
+    ///
+    /// A code plus a body, and the second such shape on this stream after
+    /// [`BindingKind`] — the codes are load-bearing for the *cursor* as well as
+    /// for the meaning, because [`BindingResource::Buffer`] carries sixteen bytes
+    /// the other two do not. See [`tag::binding_resource_code`].
+    fn put_binding_resource(&mut self, resource: BindingResource) {
+        self.put_u8(tag::binding_resource_code(resource));
+        match resource {
+            BindingResource::Buffer {
+                buffer,
+                offset,
+                size,
+            } => {
+                self.put_handle(buffer);
+                self.put_u64(offset);
+                self.put_u64(size);
+            }
+            BindingResource::ImageView(view) => self.put_handle(view),
+            BindingResource::Sampler(sampler) => self.put_handle(sampler),
+        }
+    }
+
+    /// One [`BindGroupEntry`], in the order the struct declares its fields.
+    ///
+    /// `array_index` crosses beside `binding` and is not folded into it: it is the
+    /// bindless write path, and two entries that share a binding and differ only
+    /// in it are two distinct assignments the wire must keep apart.
+    fn put_bind_group_entry(&mut self, entry: &BindGroupEntry) {
+        self.put_u32(entry.binding);
+        self.put_u32(entry.array_index);
+        self.put_binding_resource(entry.resource);
     }
 
     fn put_depth_stencil_attachment(&mut self, attachment: &DepthStencilAttachment) {
@@ -396,6 +431,52 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_bind_group`](crcbl_hal::Device::create_bind_group), with
+    /// the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow the descriptor's declaration order for
+    /// [`create_image`](Self::create_image)'s.
+    ///
+    /// **The entries go over in the descriptor's own order and are not sorted or
+    /// keyed by binding.** [`array_index`](crcbl_hal::BindGroupEntry::array_index)
+    /// is the bindless write path, so two entries may share a
+    /// [`binding`](crcbl_hal::BindGroupEntry::binding) and a decoder that rebuilt
+    /// the list from binding numbers would lose one.
+    ///
+    /// **Nothing is resolved and nothing is validated.** A
+    /// [`BindingResource::Buffer`] whose `size` is
+    /// [`BindingResource::WHOLE_BUFFER`] (`u64::MAX`) is a *sentinel* and crosses
+    /// as itself — the rule
+    /// `docs/plan/41-webgpu-stream.md` sets — because only the replayer can turn
+    /// it into WebGPU's absent `GPUBufferBinding.size`. A non-zero `array_index`,
+    /// and a `Some` [`variable_count`](crcbl_hal::BindGroupDesc::variable_count),
+    /// are both values a `u32` legitimately holds, so refusing them is the
+    /// replayer's job — WebGPU can express neither — not this writer's, which
+    /// asserts only what the reader enforces. See
+    /// [`Command::CreateBindGroup`](crate::Command::CreateBindGroup).
+    pub fn create_bind_group(&mut self, group: BindGroupHandle, desc: &BindGroupDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_BIND_GROUP_TAG);
+        self.bytes.put_handle(group);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_handle(desc.layout);
+        self.bytes.put_count(desc.entries.len());
+        for entry in desc.entries {
+            self.bytes.put_bind_group_entry(entry);
+        }
+        // A presence byte, because `variable_count` is an optional scalar and not
+        // a handle — the house rule for every optional field with no niche to
+        // spare, exactly as `create_sampler`'s `compare` does.
+        match desc.variable_count {
+            None => self.bytes.put_u8(tag::ABSENT),
+            Some(count) => {
+                self.bytes.put_u8(tag::PRESENT);
+                self.bytes.put_u32(count);
+            }
+        }
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -454,6 +535,17 @@ impl StreamWriter {
     pub fn destroy_bind_group_layout(&mut self, layout: BindGroupLayoutHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_BIND_GROUP_LAYOUT_TAG);
         self.bytes.put_handle(layout);
+        sequence
+    }
+
+    /// [`Device::destroy_bind_group`](crcbl_hal::Device::destroy_bind_group).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason: the opcode is what says which table an id indexes, and a bind
+    /// group shares its eight bytes with every other kind quite legitimately.
+    pub fn destroy_bind_group(&mut self, group: BindGroupHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_BIND_GROUP_TAG);
+        self.bytes.put_handle(group);
         sequence
     }
 

@@ -1290,6 +1290,32 @@ const SAMPLE_TYPE = Object.freeze({ Float: 'float', Depth: 'depth' });
 const BINDING_COUNT_DEVICE_MAX = 0xffff_ffff;
 
 /**
+ * `BindingResource::WHOLE_BUFFER`, which is `u64::MAX` on the wire.
+ *
+ * **THE SENTINEL BECOMES AN ABSENCE, AND THIS TIME THAT IS THE RIGHT
+ * RESOLUTION** — the opposite of `lod_max`, which is why the rule
+ * `docs/plan/41-webgpu-stream.md` sets is that the *encoder* never resolves and
+ * the replayer works it out per field. WebGPU's absent `GPUBufferBinding.size`
+ * means "to the end of the buffer", which is exactly what `WHOLE_BUFFER` means,
+ * so omitting the member is the faithful translation. `lodMaxClamp` absent means
+ * a *number* rather than "the rest", so there the sentinel had to be written out;
+ * here writing `18446744073709551615` out would be refused by the browser
+ * outright. A `BigInt` because it is a `u64` and a `Number` would round it.
+ */
+const BUFFER_BINDING_WHOLE = 0xffff_ffff_ffff_ffffn;
+
+/**
+ * The largest byte offset or size a `GPUSize64` carries exactly.
+ *
+ * A buffer binding's `offset` and `size` are `u64` on the wire and
+ * `GPUSize64`s — JavaScript numbers — in WebGPU, so a value past this would be
+ * passed on rounded, binding a range nobody asked for. Refused with the number
+ * written out, which is `#createBuffer`'s judgement about a size no `GPUSize64`
+ * holds exactly.
+ */
+const MAX_BUFFER_BINDING = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
  * The `GPUBindGroupLayoutEntry` member a decoded `BindingKind` becomes, or why
  * it becomes none.
  *
@@ -2053,6 +2079,20 @@ export class Replayer {
    */
   #bindGroupLayouts = new HandleTable();
   /**
+   * The `GPUBindGroup` behind each live bind-group handle.
+   *
+   * Its own table for the reason every table here is its own — and the kind that
+   * *reads* the most: a `CreateBindGroup` looks its layout up in
+   * {@link Replayer#bindGroupLayouts} and each of its entries up in
+   * {@link Replayer#buffers}, {@link Replayer#imageViews} or
+   * {@link Replayer#samplers}, so a bind group's handle and every handle it names
+   * may all carry identical bits and only the opcode and the entry's discriminant
+   * say which table each indexes.
+   *
+   * @type {HandleTable<GPUBindGroup>}
+   */
+  #bindGroups = new HandleTable();
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -2166,6 +2206,21 @@ export class Replayer {
    */
   get bindGroupLayouts() {
     return this.#bindGroupLayouts;
+  }
+
+  /**
+   * The bind groups that are live right now, on the same terms.
+   *
+   * **A `GPUBindGroup` reports its `label` and nothing else** — not its layout,
+   * not its entries — so this table's contents and the device's error queue are
+   * the whole of what a reader can learn, as they are for a sampler and a layout.
+   * What the descriptor bound is checkable only before it is handed over, which is
+   * what `web/tools/gpu-replay.mjs` does.
+   *
+   * @type {HandleTable<GPUBindGroup>}
+   */
+  get bindGroups() {
+    return this.#bindGroups;
   }
 
   /** How many out-of-band errors are waiting to be taken. */
@@ -2304,6 +2359,12 @@ export class Replayer {
           break;
         case 'DestroyBindGroupLayout':
           this.#destroyBindGroupLayout(command);
+          break;
+        case 'CreateBindGroup':
+          this.#createBindGroup(sequence, command);
+          break;
+        case 'DestroyBindGroup':
+          this.#destroyBindGroup(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -3132,6 +3193,201 @@ export class Replayer {
    */
   #destroyBindGroupLayout(command) {
     this.#bindGroupLayouts.remove(command.layout);
+  }
+
+  /**
+   * Creates a bind group on the open device and files it under the handle wasm
+   * allocated.
+   *
+   * `#createBindGroupLayout`'s shape once more — synchronous, no reply, every
+   * failure into {@link Replayer#takeError} — and **the first creation that reads
+   * four tables**: the layout out of {@link Replayer#bindGroupLayouts}, and each
+   * entry's resource out of {@link Replayer#buffers},
+   * {@link Replayer#imageViews} or {@link Replayer#samplers}. A handle carries no
+   * kind, so the entry's discriminant is the only thing that says which table an
+   * id indexes; a stale one, one never created, or one resolved against the wrong
+   * table is a failure named by which resource and which kind.
+   *
+   * Three things WebGPU cannot express are refused rather than smoothed over,
+   * each because the seam can say it and WebGPU cannot:
+   *
+   *   * **a `Some` `variableCount`** — a runtime-sized array. WGSL has none, and a
+   *     `variableCount` could only pair with a `VARIABLE_COUNT` layout, which
+   *     `#createBindGroupLayout` already refuses — so this never reaches a layout
+   *     this replayer holds, and the honest answer is to refuse it here too.
+   *   * **a non-zero `array_index`** — the bindless write path. WebGPU indexes a
+   *     bind group by `binding` only; a `GPUBindGroupEntry` has no array-index
+   *     concept, and slice 5d refused every layout with a `count` above one, so no
+   *     layout this replayer holds could accept an element past the first. This is
+   *     a genuine "WebGPU cannot do it" case, handled like the others.
+   *   * **the whole layout, never one entry** — a bind group missing one of its
+   *     bindings is a different group WebGPU refuses at the draw, so the loop
+   *     returns on the first entry it cannot resolve.
+   *
+   * The `WHOLE_BUFFER` sentinel resolves here, to an *absent*
+   * `GPUBufferBinding.size` — see {@link BUFFER_BINDING_WHOLE} for why that is the
+   * right resolution where `lod_max`'s was not.
+   *
+   * @param {bigint} sequence
+   * @param {{ group: { index: number, generation: number },
+   *           label: string | null,
+   *           layout: { index: number, generation: number },
+   *           entries: Array<{ binding: number, arrayIndex: number,
+   *                            resource: object }>,
+   *           variableCount: number | null }} command
+   */
+  #createBindGroup(sequence, command) {
+    const named = `bind group ${command.group.index}.${command.group.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    if (command.variableCount !== null) {
+      this.#deviceError(
+        `${named} sets variable_count ${command.variableCount}, and WebGPU has no ` +
+          'runtime-sized arrays: a layout that could accept one would carry ' +
+          'BindingFlags::VARIABLE_COUNT, which this backend refuses at layout creation'
+      );
+      return;
+    }
+    const layout = this.#bindGroupLayouts.get(command.layout);
+    if (layout === undefined) {
+      this.#deviceError(
+        `${named} is against layout ${command.layout.index}.${command.layout.generation}, ` +
+          'which this replayer holds no live bind group layout under'
+      );
+      return;
+    }
+    const entries = [];
+    for (const entry of command.entries) {
+      const at = `binding ${entry.binding}`;
+      if (entry.arrayIndex !== 0) {
+        this.#deviceError(
+          `${named} writes array index ${entry.arrayIndex} on ${at}, and WebGPU ` +
+            'indexes a bind group by binding only: a GPUBindGroupEntry has no ' +
+            'array-index concept, and no layout this backend builds has a count above one'
+        );
+        return;
+      }
+      const resource = this.#bindGroupResourceFor(named, at, entry.resource);
+      if (resource === undefined) return;
+      entries.push({ binding: entry.binding, resource });
+    }
+    let made;
+    try {
+      made = this.#device.createBindGroup({
+        // No label rather than an empty one, as `#createBuffer` passes it.
+        ...(command.label === null ? {} : { label: command.label }),
+        layout,
+        entries,
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#bindGroups.insert(command.group, made);
+  }
+
+  /**
+   * The `GPUBindGroupEntry.resource` a decoded `BindingResource` becomes, or
+   * `undefined` after recording why it becomes none.
+   *
+   * The discriminant is what says which table a handle indexes — a buffer, a view
+   * and a sampler may hold identical bits — so each shape resolves against exactly
+   * one of them and a miss names both the resource and its kind. Returning
+   * `undefined` rather than throwing keeps a bind group naming a stale handle to
+   * the error queue, which is `#createImageView`'s judgement applied to three
+   * tables at once.
+   *
+   * @param {string} named The bind group, for the message.
+   * @param {string} at The binding, for the message.
+   * @param {{ name: string, buffer?: object, offset?: bigint, size?: bigint,
+   *           view?: object, sampler?: object }} resource
+   * @returns {object | undefined}
+   */
+  #bindGroupResourceFor(named, at, resource) {
+    switch (resource.name) {
+      case 'Buffer': {
+        const buffer = this.#buffers.get(resource.buffer);
+        if (buffer === undefined) {
+          this.#deviceError(
+            `${named} binds buffer ${resource.buffer.index}.${resource.buffer.generation} on ${at}, ` +
+              'which this replayer holds no live buffer under'
+          );
+          return undefined;
+        }
+        if (resource.offset > MAX_BUFFER_BINDING) {
+          this.#deviceError(
+            `${named} binds ${at} at offset ${resource.offset}, which is past the largest a GPUSize64 carries exactly`
+          );
+          return undefined;
+        }
+        // The sentinel becomes an *absent* size member, which is how WebGPU
+        // spells "to the end" — see BUFFER_BINDING_WHOLE. Spread rather than
+        // assigned, so it is absent and not a member holding `undefined`.
+        if (
+          resource.size !== BUFFER_BINDING_WHOLE &&
+          resource.size > MAX_BUFFER_BINDING
+        ) {
+          this.#deviceError(
+            `${named} binds ${at} with size ${resource.size}, which is past the largest a GPUSize64 carries exactly`
+          );
+          return undefined;
+        }
+        return {
+          buffer,
+          offset: Number(resource.offset),
+          ...(resource.size === BUFFER_BINDING_WHOLE
+            ? {}
+            : { size: Number(resource.size) }),
+        };
+      }
+      case 'ImageView': {
+        const view = this.#imageViews.get(resource.view);
+        if (view === undefined) {
+          this.#deviceError(
+            `${named} binds image view ${resource.view.index}.${resource.view.generation} on ${at}, ` +
+              'which this replayer holds no live image view under'
+          );
+          return undefined;
+        }
+        return view;
+      }
+      // The last shape, spelled out rather than left to a `default`: a variant
+      // added tomorrow must not be bound as a sampler by accident.
+      case 'Sampler': {
+        const sampler = this.#samplers.get(resource.sampler);
+        if (sampler === undefined) {
+          this.#deviceError(
+            `${named} binds sampler ${resource.sampler.index}.${resource.sampler.generation} on ${at}, ` +
+              'which this replayer holds no live sampler under'
+          );
+          return undefined;
+        }
+        return sampler;
+      }
+      default:
+        this.#deviceError(
+          `${named} binds a BindingResource::${resource.name} on ${at}, which this backend has no GPUBindGroupEntry resource for`
+        );
+        return undefined;
+    }
+  }
+
+  /**
+   * Lets go of a bind group.
+   *
+   * **LETTING GO IS THE WHOLE OF THE RELEASE**, as it is for a sampler, a view
+   * and a layout: a `GPUBindGroup` has no `destroy()` — it is a description of a
+   * binding rather than an allocation of its own — so there is nothing to call.
+   *
+   * A destroy naming nothing live is a no-op in both of its ways, exactly as
+   * every other destroy here.
+   *
+   * @param {{ group: { index: number, generation: number } }} command
+   */
+  #destroyBindGroup(command) {
+    this.#bindGroups.remove(command.group);
   }
 
   /**

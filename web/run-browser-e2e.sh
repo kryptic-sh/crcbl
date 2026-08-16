@@ -459,6 +459,26 @@ if [ -z "$LAYOUT_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the bind group, which is group N and is its own thing for a
+# reason none of the above share: it is the only command whose entries name
+# *other* resources — a layout, a buffer, an image view and a sampler that have to
+# exist first — so its export encodes a whole frame, and its entries carry one
+# handle into each of three resource tables where the discriminant is the only
+# thing that says which. A `GPUBindGroup` reports its label and nothing else, so —
+# as with the sampler and the layout — the browser's only way to disagree is the
+# device's error queue, and what it is being asked is whether the whole-buffer
+# binding reached WebGPU as an absent size and all three resource kinds resolved.
+# The node suite proves the descriptor and every refusal against a stub whose
+# `createBindGroup` returns a plain object, so only this asks a real device to
+# accept it. Its absence means that stopped happening rather than that this demo
+# has no device.
+GROUP_TRIP="$(grep -F 'a real GPUBindGroup came back from the device with the whole-buffer binding and all three resource kinds accepted' "${OUTPUT}.plain" || true)"
+if [ -z "$GROUP_TRIP" ]; then
+    echo "crcbl web e2e: the driver never created a bind group on a real device;" >&2
+    echo "               crcbl-webgpu's CreateBindGroup is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

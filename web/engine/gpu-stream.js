@@ -76,12 +76,14 @@ const CREATE_IMAGE_TAG = 0x02;
 const CREATE_IMAGE_VIEW_TAG = 0x03;
 const CREATE_SAMPLER_TAG = 0x04;
 const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
+const CREATE_BIND_GROUP_TAG = 0x06;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
 const DESTROY_IMAGE_VIEW_TAG = 0x23;
 const DESTROY_SAMPLER_TAG = 0x24;
 const DESTROY_BIND_GROUP_LAYOUT_TAG = 0x25;
+const DESTROY_BIND_GROUP_TAG = 0x26;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -231,6 +233,26 @@ const BINDING_KIND = [
   'StorageImage',
   'Sampler',
 ];
+
+/**
+ * `tag::BINDING_RESOURCE_*`, and the second table here whose rows have
+ * **bodies** — `crcbl_hal::BindingResource`'s variants carry data.
+ *
+ * **A fold here is the most dangerous confusion on the seam.** A
+ * `crcbl_core::Handle` carries no kind, so a buffer, a view and a sampler may
+ * hold identical bits, and this byte is the *only* thing that says which of the
+ * replayer's three resource tables a handle indexes: a `Sampler` read as an
+ * `ImageView` binds a sampler where a texture belongs, which the browser refuses
+ * naming the bind group rather than the entry. The bodies are also different
+ * lengths — `Buffer` carries a handle and two `BigInt`s, the other two a bare
+ * handle — so a code read as its neighbour consumes the wrong number of bytes and
+ * lands the cursor inside the next entry.
+ *
+ * The rows are read by {@link ByteReader#readBindingResource}; this table exists
+ * so the code and the name meet in one place and an unclaimed code is `undefined`
+ * rather than a row one along.
+ */
+const BINDING_RESOURCE = ['Buffer', 'ImageView', 'Sampler'];
 
 /**
  * `tag::FORMAT_*`, code-indexed — the inverse of the table `gpu-reply.js`
@@ -634,6 +656,22 @@ class ByteReader {
   }
 
   /**
+   * A presence byte, then a `u32` if there is one.
+   *
+   * The optional-field rule applied to a scalar rather than a string or an enum,
+   * for `BindGroupDesc::variable_count`: a presence byte, because a bare `u32`
+   * has no value to spare for `None` — `Some(0)` is a real variable count, so a
+   * decoder that read the presence byte as the value would turn "no count" into
+   * "a count of zero".
+   *
+   * @param {string} field
+   * @returns {number | null}
+   */
+  readOptU32(field) {
+    return this.readPresent(field) ? this.readU32() : null;
+  }
+
+  /**
    * A bitflags value, as the names of the bits it sets in ascending bit order.
    *
    * Strict, like `from_bits` and unlike `from_bits_truncate`: a bit no flag
@@ -802,6 +840,59 @@ class ByteReader {
       kind: this.readBindingKind('BindGroupLayoutEntry::kind'),
       count: this.readU32(),
       flags: this.readFlags('BindGroupLayoutEntry::flags', BINDING_FLAGS),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::BindingResource`: a discriminant, then that variant's own
+   * fields.
+   *
+   * The second enum on this stream whose rows have bodies, and the reason the
+   * refusal below is not optional is {@link BINDING_RESOURCE}'s: the bodies are
+   * different lengths, so a code this build does not claim cannot be skipped past.
+   *
+   * `offset` and `size` are `BigInt` — they are `u64` on the wire, and `size`
+   * carries `BindingResource::WHOLE_BUFFER` (`u64::MAX`) through verbatim, which a
+   * `Number` would round. The shape it answers with is `{ name, …fields }`, so
+   * `gpu-replay.js` switches on `resource.name` exactly as `replay` switches on
+   * `command.name`.
+   *
+   * @param {string} field
+   * @returns {object}
+   */
+  readBindingResource(field) {
+    const name = this.readEnum(field, BINDING_RESOURCE);
+    switch (name) {
+      case 'Buffer':
+        return {
+          name,
+          buffer: this.readHandle('BindingResource::buffer'),
+          offset: this.readU64(),
+          size: this.readU64(),
+        };
+      case 'ImageView':
+        return { name, view: this.readHandle('BindingResource::view') };
+      // The last row, spelled out rather than left to a `default`, for
+      // {@link ByteReader#readBindingKind}'s reason.
+      default:
+        return { name, sampler: this.readHandle('BindingResource::sampler') };
+    }
+  }
+
+  /**
+   * One `crcbl_hal::BindGroupEntry`, in the order the struct declares its fields.
+   *
+   * `arrayIndex` crosses beside `binding` and is not folded into it: it is the
+   * bindless write path, and two entries that share a `binding` and differ only
+   * in it are two distinct assignments the wire must keep apart.
+   *
+   * @returns {{ binding: number, arrayIndex: number, resource: object }}
+   */
+  readBindGroupEntry() {
+    return {
+      binding: this.readU32(),
+      arrayIndex: this.readU32(),
+      resource: this.readBindingResource('BindGroupEntry::resource'),
     };
   }
 
@@ -1094,6 +1185,35 @@ function decodeCommand(r) {
       }
       return { name: 'CreateBindGroupLayout', layout, label, entries };
     }
+    case CREATE_BIND_GROUP_TAG: {
+      // **The second counted list of structs**, and deeper than the layout's:
+      // each entry carries a `BindingResource` whose variants have
+      // different-length bodies, so a stride out by a byte decodes the next entry
+      // out of the middle of this one.
+      //
+      // The entries are pushed in wire order and NEVER KEYED BY `binding`: an
+      // entry's `arrayIndex` is the bindless write path, so two entries may share
+      // a binding, and a decoder that rebuilt the list from binding numbers would
+      // lose one.
+      const group = r.readHandle('CreateBindGroup::group');
+      const label = r.readOptString('BindGroupDesc::label');
+      const layout = r.readHandle('BindGroupDesc::layout');
+      const count = r.readCount('BindGroupDesc::entries');
+      const entries = [];
+      for (let i = 0; i < count; i += 1) {
+        entries.push(r.readBindGroupEntry());
+      }
+      return {
+        name: 'CreateBindGroup',
+        group,
+        label,
+        layout,
+        entries,
+        // An optional scalar behind a presence byte, as `create_sampler`'s
+        // `compare` is: `Some(0)` and `None` must stay distinct.
+        variableCount: r.readOptU32('BindGroupDesc::variable_count'),
+      };
+    }
     case DESTROY_BIND_GROUP_LAYOUT_TAG:
       // Its own tag and its own table again, and the destroy whose empty slot is
       // the *ordinary* case: the replayer refuses a layout it cannot express —
@@ -1103,6 +1223,13 @@ function decodeCommand(r) {
       return {
         name: 'DestroyBindGroupLayout',
         layout: r.readHandle('DestroyBindGroupLayout::layout'),
+      };
+    case DESTROY_BIND_GROUP_TAG:
+      // Its own tag and its own table again: a bind group's id is allowed to be
+      // the same eight bytes as anything else's.
+      return {
+        name: 'DestroyBindGroup',
+        group: r.readHandle('DestroyBindGroup::group'),
       };
     case DESTROY_BUFFER_TAG:
       return {

@@ -407,10 +407,17 @@ measurement nobody has taken.
   that this payload is absent in the browser — but the decoder still has to
   traverse it, and a deliberate alignment exception is better than a realignment
   copy hidden in the reader.
-- **`BindGroupEntry` is fixed-stride.** `BindingResource` has three variants, no
-  slices, no strings and a fixed maximum body, so entries encode as a flat
-  array. This is the one place the encoding is _simpler_ than expected, and both
-  `BindGroupDesc::entries` and `update_bind_group`'s bare slice benefit.
+- **`BindGroupEntry` carries a tagged `BindingResource`, and it is not
+  fixed-stride** — this bullet predicted it would be, and the implementation
+  chose otherwise for a reason. `BindingResource` has three variants: `Buffer`
+  (a handle and two `u64`s, 25 bytes) and the two bare-handle cases
+  (`ImageView`, `Sampler`, 9 bytes each). A flat array would pad every entry to
+  the widest, and — the load-bearing half — a handle carries no kind, so a
+  sampler id and a view id can hold identical bits. The discriminant byte is the
+  only thing that says which of the replayer's three resource tables to resolve
+  an entry against, and folding one binds the wrong kind of object. So entries
+  are a counted list of variable-length structs, exactly as `BindingKind`'s
+  entries are, rather than a flat array — one shape and one code path, not two.
 - **`BindGroupLayoutDesc::entries` is order-sensitive.** A variable-count entry
   must be both last in the slice and highest-numbered, and the HAL enforces it.
   The decoder must preserve slice order exactly rather than rebuilding the list
@@ -434,15 +441,16 @@ measurement nobody has taken.
   the seam defines, and an encoder that resolves one is answering a question
   only the replayer has the information to answer.
 
-  **Resolving does not always mean omitting a member**, which both examples above
-  happen to make it look like. `SamplerDesc::lod_max` defaults to `f32::MAX`
-  meaning "no limit", and WebGPU's absent `lodMaxClamp` means the number **32** —
-  so the absence spelling that is right for `arrayLayerCount` would silently swap
-  "no limit" for a clamp here, and nothing reports a mip clamp: not the
-  `GPUSampler`, not a draw, not the error channel. The replayer writes the
-  sentinel out as an explicit clamp instead. What the rule fixes is that the
-  *encoder* never decides; what the resolution is remains the replayer's to work
-  out per field.
+  **Resolving does not always mean omitting a member**, which both examples
+  above happen to make it look like. `SamplerDesc::lod_max` defaults to
+  `f32::MAX` meaning "no limit", and WebGPU's absent `lodMaxClamp` means the
+  number **32** — so the absence spelling that is right for `arrayLayerCount`
+  would silently swap "no limit" for a clamp here, and nothing reports a mip
+  clamp: not the `GPUSampler`, not a draw, not the error channel. The replayer
+  writes the sentinel out as an explicit clamp instead. What the rule fixes is
+  that the _encoder_ never decides; what the resolution is remains the
+  replayer's to work out per field.
+
 - **`Range<u32>` is passed by value in four encoder methods and is not `Copy`.**
   On the wire it is two `u32`s and nothing more, but it is not a type that can
   be cast wholesale.

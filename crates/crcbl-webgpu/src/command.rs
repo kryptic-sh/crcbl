@@ -18,11 +18,11 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    AdapterId, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BufferHandle,
-    BufferUsage, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d, Features,
-    FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutHandle, Rect2d,
-    SamplerAddressMode, SamplerHandle, ShaderStages, SurfaceHandle,
+    AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
+    BufferHandle, BufferUsage, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d,
+    Features, FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange,
+    ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutHandle,
+    Rect2d, SamplerAddressMode, SamplerHandle, ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -230,6 +230,50 @@ pub enum Command {
         /// Binding slots, **in the descriptor's own order**.
         entries: Vec<BindGroupLayoutEntry>,
     },
+    /// [`Device::create_bind_group`](crcbl_hal::Device::create_bind_group), with
+    /// the handle the caller allocated for it.
+    ///
+    /// The whole of [`BindGroupDesc`](crcbl_hal::BindGroupDesc), and **the first
+    /// command whose entries carry handles into three different resource
+    /// tables**. Each [`BindGroupEntry`]'s
+    /// [`resource`](crcbl_hal::BindGroupEntry::resource) is one of
+    /// [`BindingResource::Buffer`](crcbl_hal::BindingResource::Buffer),
+    /// [`ImageView`](crcbl_hal::BindingResource::ImageView) or
+    /// [`Sampler`](crcbl_hal::BindingResource::Sampler), and its discriminant is
+    /// the only thing that says which table the replayer resolves the handle
+    /// against — a handle carries no kind, so a sampler id and a view id may hold
+    /// identical bits and folding one into the other would resolve the wrong
+    /// object. See [`tag::binding_resource_code`](crate::tag::binding_resource_code).
+    ///
+    /// **Slice order is preserved exactly.** Entries are the bindless write path
+    /// through their [`array_index`](crcbl_hal::BindGroupEntry::array_index), so
+    /// two entries may share a [`binding`](crcbl_hal::BindGroupEntry::binding) and
+    /// differ only there; a decoder that rebuilt the list from binding numbers
+    /// would lose one.
+    ///
+    /// **Two sentinels cross verbatim**, as everywhere else on this stream.
+    /// [`BindingResource::WHOLE_BUFFER`](crcbl_hal::BindingResource::WHOLE_BUFFER)
+    /// in a buffer entry's `size` is `u64::MAX` and is the replayer's to resolve —
+    /// here to WebGPU's *absent* `GPUBufferBinding.size`, which means the same "to
+    /// the end", unlike `lod_max` whose absence WebGPU reads as a number. And
+    /// nothing in the descriptor is validated: a non-zero `array_index` or a
+    /// `Some` [`variable_count`](crcbl_hal::BindGroupDesc::variable_count) is a
+    /// value the wire form claims, so refusing it is the replayer's job, not this
+    /// decoder's. See `web/engine/gpu-replay.js`.
+    CreateBindGroup {
+        /// Id the replayer stores the new object at.
+        group: BindGroupHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Layout the group conforms to — an id the replayer looks up, not one it
+        /// fills in.
+        layout: BindGroupLayoutHandle,
+        /// Assignments, **in the descriptor's own order**.
+        entries: Vec<BindGroupEntry>,
+        /// Variable descriptor count. `None` is the ordinary value; `Some` names a
+        /// runtime-sized array, which WebGPU cannot express.
+        variable_count: Option<u32>,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -281,6 +325,14 @@ pub enum Command {
     DestroyBindGroupLayout {
         /// Id to release.
         layout: BindGroupLayoutHandle,
+    },
+    /// [`Device::destroy_bind_group`](crcbl_hal::Device::destroy_bind_group).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is.
+    DestroyBindGroup {
+        /// Id to release.
+        group: BindGroupHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -404,12 +456,14 @@ impl Command {
             Self::CreateImageView { .. } => "CreateImageView",
             Self::CreateSampler { .. } => "CreateSampler",
             Self::CreateBindGroupLayout { .. } => "CreateBindGroupLayout",
+            Self::CreateBindGroup { .. } => "CreateBindGroup",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
             Self::DestroyImage { .. } => "DestroyImage",
             Self::DestroyImageView { .. } => "DestroyImageView",
             Self::DestroySampler { .. } => "DestroySampler",
             Self::DestroyBindGroupLayout { .. } => "DestroyBindGroupLayout",
+            Self::DestroyBindGroup { .. } => "DestroyBindGroup",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",

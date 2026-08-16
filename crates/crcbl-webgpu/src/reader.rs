@@ -18,10 +18,10 @@
 //! accepts is one the JS replayer can be held to.
 
 use crcbl_hal::{
-    AdapterId, BindGroupLayoutEntry, BindingFlags, BindingKind, BufferUsage, ClearValue,
-    ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d, FilterMode, Format, ImageAspect,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewType, LoadOp, Rect2d, SampleType,
-    SamplerAddressMode, ShaderStages, StoreOp,
+    AdapterId, BindGroupEntry, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource,
+    BufferUsage, ClearValue, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d,
+    FilterMode, Format, ImageAspect, ImageSubresourceRange, ImageType, ImageUsage, ImageViewType,
+    LoadOp, Rect2d, SampleType, SamplerAddressMode, ShaderStages, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -208,6 +208,60 @@ impl ByteReader<'_> {
             kind,
             count,
             flags,
+        })
+    }
+
+    /// A [`BindingResource`] code and that variant's own fields.
+    ///
+    /// The dispatch lives here rather than in [`crate::tag`] for
+    /// [`read_binding_kind`](Self::read_binding_kind)'s reason — the enum carries
+    /// data, so there is no [`BindingResource`] to answer with until the body has
+    /// been read — and the refusing arm is this function's for the same reason
+    /// with a sharper edge: the bodies are different lengths *and* a
+    /// [`BindingResource::Buffer`] and a
+    /// [`BindingResource::Sampler`] both resolve a handle only the discriminant
+    /// says the table for, so a folded code binds the wrong kind of object as well
+    /// as landing the cursor wrong. See
+    /// [`tag::binding_resource_code`](crate::tag::binding_resource_code).
+    fn read_binding_resource(
+        &mut self,
+        field: &'static str,
+    ) -> Result<BindingResource, DecodeError> {
+        let code = self.read_u8()?;
+        match code {
+            tag::BINDING_RESOURCE_BUFFER => Ok(BindingResource::Buffer {
+                buffer: self.read_handle("BindingResource::buffer")?,
+                offset: self.read_u64()?,
+                size: self.read_u64()?,
+            }),
+            tag::BINDING_RESOURCE_IMAGE_VIEW => Ok(BindingResource::ImageView(
+                self.read_handle("BindingResource::view")?,
+            )),
+            tag::BINDING_RESOURCE_SAMPLER => Ok(BindingResource::Sampler(
+                self.read_handle("BindingResource::sampler")?,
+            )),
+            _ => Err(DecodeError::InvalidEnum {
+                field,
+                code: code.into(),
+            }),
+        }
+    }
+
+    /// One [`BindGroupEntry`], in the order the struct declares its fields.
+    ///
+    /// Spelled out one field at a time rather than built inline for
+    /// [`read_bind_group_layout_entry`](Self::read_bind_group_layout_entry)'s
+    /// reason: `binding` and `array_index` are adjacent `u32`s that both hold
+    /// small numbers, and a body that read them in the other order still decodes
+    /// to an entry.
+    fn read_bind_group_entry(&mut self) -> Result<BindGroupEntry, DecodeError> {
+        let binding = self.read_u32()?;
+        let array_index = self.read_u32()?;
+        let resource = self.read_binding_resource("BindGroupEntry::resource")?;
+        Ok(BindGroupEntry {
+            binding,
+            array_index,
+            resource,
         })
     }
 
@@ -505,8 +559,38 @@ impl<'a> StreamReader<'a> {
                     entries,
                 })
             }
+            tag::CREATE_BIND_GROUP_TAG => {
+                let group = r.read_handle("CreateBindGroup::group")?;
+                let label = r.read_opt_string("BindGroupDesc::label")?;
+                let layout = r.read_handle("BindGroupDesc::layout")?;
+                let count = r.read_count("BindGroupDesc::entries")?;
+                // Pushed in wire order and never keyed by binding: an entry's
+                // `array_index` is the bindless write path, so two entries may
+                // share a binding. See `Command::CreateBindGroup`.
+                let mut entries = Vec::with_capacity(count);
+                for _ in 0..count {
+                    entries.push(r.read_bind_group_entry()?);
+                }
+                // An optional scalar behind a presence byte, exactly as
+                // `create_sampler`'s `compare` is.
+                let variable_count = if r.read_present("BindGroupDesc::variable_count")? {
+                    Some(r.read_u32()?)
+                } else {
+                    None
+                };
+                Ok(Command::CreateBindGroup {
+                    group,
+                    label,
+                    layout,
+                    entries,
+                    variable_count,
+                })
+            }
             tag::DESTROY_BIND_GROUP_LAYOUT_TAG => Ok(Command::DestroyBindGroupLayout {
                 layout: r.read_handle("DestroyBindGroupLayout::layout")?,
+            }),
+            tag::DESTROY_BIND_GROUP_TAG => Ok(Command::DestroyBindGroup {
+                group: r.read_handle("DestroyBindGroup::group")?,
             }),
             tag::DESTROY_BUFFER_TAG => Ok(Command::DestroyBuffer {
                 buffer: r.read_handle("DestroyBuffer::buffer")?,

@@ -213,6 +213,17 @@ const SUBRESOURCE_ALL = 0xffff_ffff;
  */
 const LOD_NO_LIMIT = 3.4028234663852886e38;
 
+/**
+ * `BindingResource::WHOLE_BUFFER`, which is `u64::MAX` on the wire.
+ *
+ * Written out for {@link SUBRESOURCE_ALL}'s reason, and earning it the same way:
+ * what the checks below assert is that this number **does not reach a browser** —
+ * it resolves to an *absent* `GPUBufferBinding.size` — so a constant taken from
+ * the translation that removes it would be the wrong source. A `BigInt` because
+ * it is a `u64`, which is what carries it verbatim.
+ */
+const BUFFER_WHOLE = 0xffff_ffff_ffff_ffffn;
+
 /** @type {string[]} */
 const failures = [];
 
@@ -586,6 +597,22 @@ function stubBindGroupLayout(desc) {
 }
 
 /**
+ * A `GPUBindGroup` as `createBindGroup` answers one.
+ *
+ * {@link stubBindGroupLayout}'s shape and for its reason: a real one reports its
+ * `label` and nothing else — not its layout, not its entries — so every claim
+ * about a group's descriptor below is made against `device.createdBindGroups`
+ * rather than against what came back. `of` is the descriptor it was made from,
+ * kept for the checks that need to say *which* group a table holds, with the same
+ * caveat: no browser offers it.
+ *
+ * @param {{ label?: string }} desc
+ */
+function stubBindGroup(desc) {
+  return { label: desc.label ?? '', of: desc };
+}
+
+/**
  * A `GPUDevice` as `requestDevice()` resolves one: its own features, its own
  * limits, the buffer creation this slice drives, and the error channel WebGPU
  * reports asynchronous failures on.
@@ -604,10 +631,17 @@ function stubBindGroupLayout(desc) {
  * @param {unknown} [options.refuseSamplers] The same for `createSampler`.
  * @param {unknown} [options.refuseLayouts] The same for
  *   `createBindGroupLayout`.
+ * @param {unknown} [options.refuseGroups] The same for `createBindGroup`.
  */
 function stubDevice(
   features = [],
-  { refuseBuffers, refuseTextures, refuseSamplers, refuseLayouts } = {}
+  {
+    refuseBuffers,
+    refuseTextures,
+    refuseSamplers,
+    refuseLayouts,
+    refuseGroups,
+  } = {}
 ) {
   const device = {
     features: new Set(features),
@@ -623,6 +657,8 @@ function stubDevice(
      *   order.
      */
     createdLayouts: [],
+    /** @type {object[]} Every `GPUBindGroupDescriptor` it was handed, in order. */
+    createdGroups: [],
     /** @type {Array<[string, Function]>} */
     listeners: [],
     /**
@@ -666,6 +702,12 @@ function stubDevice(
       device.createdLayouts.push(desc);
       if (refuseLayouts !== undefined) throw refuseLayouts;
       return stubBindGroupLayout(desc);
+    },
+    /** @param {object} desc */
+    createBindGroup(desc) {
+      device.createdGroups.push(desc);
+      if (refuseGroups !== undefined) throw refuseGroups;
+      return stubBindGroup(desc);
     },
   };
   return device;
@@ -1100,6 +1142,23 @@ async function main() {
     storageImageLayout,
   ] = layouts;
 
+  // The bind-group pair, from the fixture for the same reason again. The corpus
+  // carries two: one with a `variable_count` of `None` whose four entries use all
+  // three `BindingResource` shapes and carry the `WHOLE_BUFFER` sentinel, and one
+  // with `variable_count: Some(2)` and a non-zero `array_index` — the two things
+  // WebGPU cannot express, driven as refusals below.
+  const groups = commands.filter(
+    (command) => command.name === 'CreateBindGroup'
+  );
+  const destroyGroup = commands.find(
+    (command) => command.name === 'DestroyBindGroup'
+  );
+  check(
+    groups.length === 2 && destroyGroup !== undefined,
+    `the committed stream carries two CreateBindGroups and a DestroyBindGroup (${groups.length} creates)`
+  );
+  const [materialGroup, bindlessGroup] = groups;
+
   const [flatImage, volumeImage, lutImage] = images;
   const [
     cascadeView,
@@ -1295,6 +1354,8 @@ async function main() {
       'DestroySampler',
       'CreateBindGroupLayout',
       'DestroyBindGroupLayout',
+      'CreateBindGroup',
+      'DestroyBindGroup',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -3655,6 +3716,374 @@ async function main() {
         replayer.bindGroupLayouts.size === 0 &&
         String(refused).includes('too many bind group layouts'),
       `a CreateBindGroupLayout with no device, and a createBindGroupLayout that throws, are both recorded rather than thrown on (${JSON.stringify([early, refused])}, ${String(thrown)})`
+    );
+  }
+
+  // ---- the bind-group pair -------------------------------------------------
+  //
+  // The first creation that reads FOUR tables — its layout, and each entry's
+  // resource out of the buffer, image-view or sampler table — and the first whose
+  // entries carry handles into three different tables at once. A handle carries no
+  // kind, so the entry's discriminant is the only thing that says which table an
+  // id indexes; the checks below drive a group whose handles resolve, three that
+  // name a missing resource of each kind, and the two shapes WebGPU cannot
+  // express. A `GPUBindGroup` reports its `label` and nothing else, so every claim
+  // is made against the `GPUBindGroupDescriptor` the device was *handed*, as the
+  // sampler's and the layout's are.
+  //
+  // The resources a bind group names have to be built first, so these helpers
+  // record a layout and a resource of each kind at a chosen handle. Every
+  // descriptor is one this backend accepts, so what is under test is the group.
+  const emptyLayoutAt = (h) => ({
+    name: 'CreateBindGroupLayout',
+    layout: h,
+    label: null,
+    entries: [],
+  });
+  const storageBufferAt = (h) => ({
+    name: 'CreateBuffer',
+    buffer: h,
+    label: null,
+    size: 4096n,
+    usage: ['STORAGE'],
+    memory: 'DeviceLocal',
+  });
+  const sampledImageAt = (h) => ({
+    name: 'CreateImage',
+    image: h,
+    label: null,
+    imageType: 'D2',
+    extent: { width: 4, height: 4, depthOrLayers: 1 },
+    format: 'RGBA8_UNORM',
+    mipLevels: 1,
+    samples: 1,
+    usage: ['SAMPLED'],
+  });
+  const viewOf = (h, imageHandle) => ({
+    name: 'CreateImageView',
+    view: h,
+    label: null,
+    image: imageHandle,
+    viewType: 'D2',
+    format: 'RGBA8_UNORM',
+    range: {
+      aspect: ['COLOR'],
+      baseMip: 0,
+      mipCount: SUBRESOURCE_ALL,
+      baseLayer: 0,
+      layerCount: SUBRESOURCE_ALL,
+    },
+  });
+  const samplerAt = (h) => ({
+    name: 'CreateSampler',
+    sampler: h,
+    label: null,
+    magFilter: 'Linear',
+    minFilter: 'Linear',
+    mipFilter: 'Linear',
+    addressMode: ['ClampToEdge', 'Repeat', 'MirrorRepeat'],
+    lodMin: 0,
+    lodMax: LOD_NO_LIMIT,
+    anisotropy: 1,
+    compare: null,
+  });
+  {
+    // **THE HAPPY PATH: the fixture's material group, built against resources
+    // created at the handles it names.** Every entry resolves against the right
+    // table, the buffer offset and size reach the descriptor, and — the field
+    // this whole command exists to put in front of a device — the `WHOLE_BUFFER`
+    // sentinel reaches WebGPU as an *absent* `size` member rather than as
+    // `18446744073709551615`, which is how WebGPU spells "to the end".
+    const { replayer, device } = await readyWithDevice();
+    const bufA = materialGroup.entries[0].resource.buffer;
+    const bufB = materialGroup.entries[3].resource.buffer;
+    const view = materialGroup.entries[1].resource.view;
+    const sampler = materialGroup.entries[2].resource.sampler;
+    const image = handle(220, 1);
+    replayer.replay(frameOf(emptyLayoutAt(materialGroup.layout), 200n));
+    replayer.replay(frameOf(storageBufferAt(bufA), 201n));
+    replayer.replay(frameOf(storageBufferAt(bufB), 202n));
+    replayer.replay(frameOf(sampledImageAt(image), 203n));
+    replayer.replay(frameOf(viewOf(view, image), 204n));
+    replayer.replay(frameOf(samplerAt(sampler), 205n));
+    replayer.replay(frameOf(materialGroup, 206n));
+
+    const bd = device.createdGroups[0];
+    const built =
+      device.createdGroups.length === 1 &&
+      bd.layout === replayer.bindGroupLayouts.get(materialGroup.layout) &&
+      bd.entries.length === 4 &&
+      bd.entries[0].binding === 0 &&
+      bd.entries[0].resource.buffer === replayer.buffers.get(bufA) &&
+      bd.entries[0].resource.offset === 256 &&
+      bd.entries[0].resource.size === 1024 &&
+      bd.entries[1].binding === 1 &&
+      bd.entries[1].resource === replayer.imageViews.get(view) &&
+      bd.entries[2].binding === 2 &&
+      bd.entries[2].resource === replayer.samplers.get(sampler) &&
+      bd.entries[3].binding === 3 &&
+      bd.entries[3].resource.buffer === replayer.buffers.get(bufB) &&
+      bd.entries[3].resource.offset === 0;
+    check(
+      built,
+      built
+        ? 'a CreateBindGroup reaches the device as one GPUBindGroupDescriptor, each entry resolved against the right table'
+        : `the built descriptor is not what was asked for (${JSON.stringify(bd, (_, v) => (typeof v === 'bigint' ? String(v) : v))})`
+    );
+    // **The sentinel, on its own line.** A real numbered size passes through and
+    // the sentinel becomes an absent member — a check on both, because a
+    // translation that omitted *every* size, or passed the max integer on, would
+    // fail one half or the other.
+    check(
+      bd.entries[0].resource.size === 1024 &&
+        !('size' in bd.entries[3].resource) &&
+        materialGroup.entries[3].resource.size === BUFFER_WHOLE,
+      `WHOLE_BUFFER resolves to an absent size member while a real size passes through (${'size' in bd.entries[3].resource}, ${materialGroup.entries[3].resource.size})`
+    );
+    check(
+      replayer.bindGroups.get(materialGroup.group) !== undefined &&
+        !replayer.hasReplies &&
+        replayer.takeError() === null,
+      `and the group lands in its table, queues no reply and reports no error (queued ${replayer.hasReplies})`
+    );
+  }
+  {
+    // **A `variable_count` of `Some` is refused — a runtime-sized array WebGPU
+    // has none of.** It could only pair with a `VARIABLE_COUNT` layout, which the
+    // layout command already refuses, so it never reaches a layout this replayer
+    // holds, and refusing it here is the only honest answer. Refused *before* the
+    // layout is even looked up.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(bindlessGroup, 210n));
+    const reason = replayer.takeError();
+    check(
+      device.createdGroups.length === 0 &&
+        replayer.bindGroups.size === 0 &&
+        bindlessGroup.variableCount === 2 &&
+        String(reason).includes('variable_count') &&
+        String(reason).includes('runtime-sized'),
+      `a Some variable_count is refused as a runtime-sized array (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **A non-zero `array_index` is refused — the bindless write path, which
+    // WebGPU cannot express.** A `GPUBindGroupEntry` indexes by `binding` only,
+    // and slice 5d refused every layout with a count above one, so no layout this
+    // replayer holds could accept an element past the first. Driven with the
+    // fixture's bindless group and its `variable_count` cleared. Its layout and
+    // both the views its two entries name are created first, so the refusal is the
+    // `array_index` on the *second* entry and not a missing layout or a missing
+    // resource on the first — which resolves cleanly at `array_index` 0.
+    const { replayer, device } = await readyWithDevice();
+    const image = handle(230, 1);
+    replayer.replay(frameOf(emptyLayoutAt(bindlessGroup.layout), 218n));
+    replayer.replay(frameOf(sampledImageAt(image), 219n));
+    replayer.replay(
+      frameOf(viewOf(bindlessGroup.entries[0].resource.view, image), 220n)
+    );
+    replayer.replay(
+      frameOf(viewOf(bindlessGroup.entries[1].resource.view, image), 220n)
+    );
+    replayer.replay(frameOf({ ...bindlessGroup, variableCount: null }, 221n));
+    const reason = replayer.takeError();
+    check(
+      device.createdGroups.length === 0 &&
+        replayer.bindGroups.size === 0 &&
+        bindlessGroup.entries[1].arrayIndex === 1 &&
+        String(reason).includes('array index') &&
+        String(reason).includes('binding only'),
+      `a non-zero array_index is refused as the bindless write path WebGPU has no syntax for (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **A handle that resolves to nothing goes to the error queue and names which
+    // resource and which kind** — `#createImageView`'s judgement applied to three
+    // tables at once, and never a throw: a bind group naming a stale handle is a
+    // far side that got its ordering wrong, and taking the frame down would
+    // abandon every command after it. One case per table, plus the layout, plus
+    // a discriminant no arm claims.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(emptyLayoutAt(handle(50, 1)), 230n));
+    const against = (resource) => ({
+      name: 'CreateBindGroup',
+      group: handle(60, 1),
+      label: null,
+      layout: handle(50, 1),
+      entries: [{ binding: 0, arrayIndex: 0, resource }],
+      variableCount: null,
+    });
+    let thrown = null;
+    let noBuffer;
+    let noView;
+    let noSampler;
+    let noKind;
+    let noLayout;
+    try {
+      replayer.replay(
+        frameOf(
+          against({
+            name: 'Buffer',
+            buffer: handle(70, 7),
+            offset: 0n,
+            size: 16n,
+          }),
+          231n
+        )
+      );
+      noBuffer = replayer.takeError();
+      replayer.replay(
+        frameOf(against({ name: 'ImageView', view: handle(71, 7) }), 232n)
+      );
+      noView = replayer.takeError();
+      replayer.replay(
+        frameOf(against({ name: 'Sampler', sampler: handle(72, 7) }), 233n)
+      );
+      noSampler = replayer.takeError();
+      // A discriminant no arm claims — the decoder refuses this before replay, so
+      // it can only arrive from a bug, and the arm is here to name it rather than
+      // bind it as a neighbour.
+      replayer.replay(frameOf(against({ name: 'Nonsense' }), 234n));
+      noKind = replayer.takeError();
+      // …and the layout itself missing, which is looked up before any entry.
+      replayer.replay(
+        frameOf(
+          {
+            name: 'CreateBindGroup',
+            group: handle(61, 1),
+            label: null,
+            layout: handle(99, 9),
+            entries: [],
+            variableCount: null,
+          },
+          235n
+        )
+      );
+      noLayout = replayer.takeError();
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        replayer.bindGroups.size === 0 &&
+        String(noBuffer).includes('no live buffer') &&
+        String(noView).includes('no live image view') &&
+        String(noSampler).includes('no live sampler') &&
+        String(noKind).includes('BindingResource::Nonsense') &&
+        String(noLayout).includes('no live bind group layout'),
+      `an unresolvable buffer, view, sampler, discriminant or layout each names itself without throwing (${String(thrown)}, ${JSON.stringify([noBuffer, noView, noSampler, noKind, noLayout])})`
+    );
+  }
+  {
+    // **A bind group may carry its layout's handle bits.** The probe files six
+    // kinds under one set of bits, deliberately, so this is the shape a replayer
+    // with one table would break: the group is built against a layout whose handle
+    // is the same eight bytes, and both tables keep their entry.
+    const { replayer } = await readyWithDevice();
+    const same = handle(1, 1);
+    replayer.replay(frameOf(emptyLayoutAt(same), 240n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CreateBindGroup',
+          group: same,
+          label: null,
+          layout: same,
+          entries: [],
+          variableCount: null,
+        },
+        241n
+      )
+    );
+    check(
+      replayer.bindGroupLayouts.get(same) !== undefined &&
+        replayer.bindGroups.get(same) !== undefined &&
+        replayer.bindGroupLayouts.size === 1 &&
+        replayer.bindGroups.size === 1,
+      `a bind group may carry its layout's handle bits without either table losing an entry (${replayer.bindGroupLayouts.size} layouts, ${replayer.bindGroups.size} groups)`
+    );
+  }
+  {
+    // **A destroy lets go of the group, and there is nothing else to let go of**:
+    // a `GPUBindGroup` has no `destroy()`, so the slot is the whole of the
+    // release. Both no-ops are driven, and the stale one first: the live occupant
+    // of a reissued index must survive.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(emptyLayoutAt(handle(50, 1)), 250n));
+    const group = handle(60, 1);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CreateBindGroup',
+          group,
+          label: null,
+          layout: handle(50, 1),
+          entries: [],
+          variableCount: null,
+        },
+        251n
+      )
+    );
+    const live = replayer.bindGroups.get(group);
+    const reissued = handle(group.index, group.generation + 1);
+    let thrown = null;
+    try {
+      replayer.replay(frameOf({ ...destroyGroup, group: reissued }, 252n));
+      // …and the fixture's own destroy, whose handle no create here ever used.
+      replayer.replay(frameOf(destroyGroup, 253n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        replayer.bindGroups.get(group) === live &&
+        replayer.bindGroups.size === 1,
+      `a DestroyBindGroup naming a stale generation or an empty slot is a no-op (${String(thrown)}, ${replayer.bindGroups.size} held)`
+    );
+    replayer.replay(frameOf({ ...destroyGroup, group }, 254n));
+    check(
+      replayer.bindGroups.get(group) === undefined &&
+        replayer.bindGroups.size === 0,
+      `and one naming the live handle lets go of it (${replayer.bindGroups.size} held)`
+    );
+  }
+  {
+    // **A bind group before any device opened**, and **a `createBindGroup` that
+    // throws** — the two failures every creation here shares.
+    const bare = new Replayer({ gpu: stubGpu(async () => null) });
+    bare.replay(frameOf(materialGroup, 260n));
+    const early = bare.takeError();
+
+    const device = stubDevice([], {
+      refuseGroups: new Error('too many bind groups'),
+    });
+    const { replayer } = await readyWithDevice({ device });
+    replayer.replay(frameOf(emptyLayoutAt(handle(50, 1)), 261n));
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf(
+          {
+            name: 'CreateBindGroup',
+            group: handle(60, 1),
+            label: null,
+            layout: handle(50, 1),
+            entries: [],
+            variableCount: null,
+          },
+          262n
+        )
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    const refused = replayer.takeError();
+    check(
+      bare.bindGroups.size === 0 &&
+        String(early).includes('before any device opened') &&
+        thrown === null &&
+        replayer.bindGroups.size === 0 &&
+        String(refused).includes('too many bind groups'),
+      `a CreateBindGroup with no device, and a createBindGroup that throws, are both recorded rather than thrown on (${JSON.stringify([early, refused])}, ${String(thrown)})`
     );
   }
 

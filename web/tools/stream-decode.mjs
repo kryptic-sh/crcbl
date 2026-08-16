@@ -63,6 +63,7 @@ const BIND_GROUP_TAG = 0x43;
 const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
 const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
+const CREATE_BIND_GROUP_TAG = 0x06;
 const REQUEST_DEVICE_TAG = 0x91;
 
 /** @type {string[]} */
@@ -618,6 +619,76 @@ const EXPECTED = [
       },
     ],
   },
+  // **The first command whose entries carry handles into three different
+  // resource tables.** One of each `BindingResource` shape — a `Buffer` with a
+  // numbered range, an `ImageView`, a `Sampler`, and a `Buffer` whose `size` is
+  // the `WHOLE_BUFFER` sentinel — and the discriminant is the only thing that
+  // says which table each id indexes. `offset` and `size` are `BigInt`: a
+  // `WHOLE_BUFFER` read as a `Number` would round to 18446744073709552000.
+  {
+    name: 'CreateBindGroup',
+    group: handle(107, 108),
+    label: 'material',
+    layout: handle(93, 94),
+    entries: [
+      {
+        binding: 0,
+        arrayIndex: 0,
+        resource: {
+          name: 'Buffer',
+          buffer: handle(11, 12),
+          offset: 256n,
+          size: 1024n,
+        },
+      },
+      {
+        binding: 1,
+        arrayIndex: 0,
+        resource: { name: 'ImageView', view: handle(67, 68) },
+      },
+      {
+        binding: 2,
+        arrayIndex: 0,
+        resource: { name: 'Sampler', sampler: handle(83, 84) },
+      },
+      // `WHOLE_BUFFER` — `u64::MAX` — which crosses verbatim and which only the
+      // replayer resolves, to an absent `GPUBufferBinding.size`.
+      {
+        binding: 3,
+        arrayIndex: 0,
+        resource: {
+          name: 'Buffer',
+          buffer: handle(13, 14),
+          offset: 0n,
+          size: 18446744073709551615n,
+        },
+      },
+    ],
+    // `None`, against the `Some(2)` on the twin below.
+    variableCount: null,
+  },
+  // `variableCount: 2`, and two entries sharing binding 0 that differ only in
+  // `arrayIndex` — the bindless write path, and the pair a decoder that keyed on
+  // binding would collapse.
+  {
+    name: 'CreateBindGroup',
+    group: handle(109, 110),
+    label: null,
+    layout: handle(95, 96),
+    entries: [
+      {
+        binding: 0,
+        arrayIndex: 0,
+        resource: { name: 'ImageView', view: handle(69, 70) },
+      },
+      {
+        binding: 0,
+        arrayIndex: 1,
+        resource: { name: 'ImageView', view: handle(71, 72) },
+      },
+    ],
+    variableCount: 2,
+  },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
   { name: 'DestroySurface', surface: handle(47, 48) },
   // A view and the image it views are separate objects in separate tables, so
@@ -631,6 +702,9 @@ const EXPECTED = [
   // the ordinary case: a layout the replayer refused still has its pre-allocated
   // handle destroyed.
   { name: 'DestroyBindGroupLayout', layout: handle(105, 106) },
+  // Its own command and its own table again: a bind group's id is allowed to be
+  // the same eight bytes as anything else's.
+  { name: 'DestroyBindGroup', group: handle(111, 112) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',
@@ -846,6 +920,35 @@ function layoutBody({
     ...kind,
     ...count,
     ...flags,
+  ];
+}
+
+/**
+ * A hand-built `create_bind_group` body holding one entry.
+ *
+ * The group handle, an absent label, the layout handle, an entry count of one,
+ * then the entry — `binding`, `arrayIndex`, and the `BindingResource`
+ * discriminant with its body — then an absent `variable_count`. The checks below
+ * vary the discriminant, which is what makes them about that one table.
+ *
+ * @param {object} fields
+ * @param {number[]} [fields.resource] The `BindingResource` code and its payload.
+ * @returns {number[]}
+ */
+function bindGroupBody({ resource = [1, ...u32le(2), ...u32le(2)] } = {}) {
+  // The default resource is an `ImageView` (code 1) naming handle (2, 2).
+  return [
+    CREATE_BIND_GROUP_TAG,
+    ...u32le(1), // the group handle's index
+    ...u32le(1), // …and its generation
+    0, // the label, absent
+    ...u32le(9), // the layout handle's index
+    ...u32le(9), // …and its generation
+    ...u32le(1), // one entry
+    ...u32le(0), // binding
+    ...u32le(0), // arrayIndex
+    ...resource,
+    0, // variable_count, absent
   ];
 }
 
@@ -1421,6 +1524,44 @@ async function main() {
       len: 0xffffffff,
     },
     'an entry count past MAX_ELEMENT_COUNT is refused'
+  );
+
+  // ---- a bind group's BindingResource table has no catch-all --------------
+  // The most dangerous fold on the stream: a handle carries no kind, so this
+  // discriminant is the only thing saying which of three resource tables an id
+  // indexes, and the bodies are different lengths besides. One past the last
+  // claimed code, which is where an off-by-one lands and where 0xFF never would.
+  checkRefused(
+    streamOf(
+      header,
+      bindGroupBody({ resource: [3, ...u32le(1), ...u32le(1)] })
+    ),
+    { kind: 'InvalidEnum', field: 'BindGroupEntry::resource', code: 3 },
+    'a BindingResource code no variant claims is refused rather than folded into a neighbour'
+  );
+  // …and each shape's body is read at its own length: a `Buffer` (code 0) is a
+  // handle and two `u64`s, so a stream carrying one and then a second command
+  // decodes both, where an `ImageView`-length read of it would land inside the
+  // next command. Driven through the whole decode rather than a hand-built body,
+  // because what it pins is the *stride*.
+  const twoGroups = decodeStream(
+    streamOf(header, [
+      ...bindGroupBody({
+        resource: [
+          0,
+          ...u32le(11),
+          ...u32le(12),
+          ...u64le(256n),
+          ...u64le(1024n),
+        ],
+      }),
+      ...bindGroupBody(),
+    ])
+  );
+  checkEqual(
+    twoGroups.map((command) => command.entries[0].resource.name),
+    ['Buffer', 'ImageView'],
+    'a Buffer resource is read at its own length, leaving the next command intact'
   );
 
   // ---- every BindingKind row is exercised, not just the fixture's ---------

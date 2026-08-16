@@ -9,10 +9,11 @@
 mod corpus;
 
 use crcbl_hal::{
-    AdapterId, BindGroupLayoutDesc, BindGroupLayoutEntry, BindingFlags, BindingKind, BufferDesc,
-    BufferUsage, CompareOp, DeviceDesc, Extent3d, Features, FilterMode, Format, ImageAspect,
-    ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType,
-    MemoryLocation, SampleType, SamplerAddressMode, SamplerDesc, ShaderStages,
+    AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage, CompareOp, DeviceDesc,
+    Extent3d, Features, FilterMode, Format, ImageAspect, ImageDesc, ImageSubresourceRange,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewType, MemoryLocation, SampleType,
+    SamplerAddressMode, SamplerDesc, ShaderStages,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -1098,6 +1099,254 @@ fn an_empty_entry_list_consumes_nothing_and_a_destroy_for_an_unknown_id_decodes(
     );
 }
 
+// ── Bind groups ─────────────────────────────────────────────────────────────
+
+/// Encodes one unlabelled bind group holding `entries` against layout `handle(9,
+/// 9)`, with `variable_count`.
+fn group_of(entries: &[BindGroupEntry], variable_count: Option<u32>) -> StreamWriter {
+    let mut stream = StreamWriter::new();
+    stream.create_bind_group(
+        handle(1, 1),
+        &BindGroupDesc {
+            label: None,
+            layout: handle(9, 9),
+            entries,
+            variable_count,
+        },
+    );
+    stream
+}
+
+/// The `u32` entry count in an unlabelled `create_bind_group` body: the tag, the
+/// group handle, the absent label's presence byte and the layout handle come
+/// first.
+const GROUP_COUNT_AT: usize = tag::HEADER_BYTES + 1 + 8 + 1 + 8;
+/// The first entry, behind that count.
+const GROUP_ENTRY_AT: usize = GROUP_COUNT_AT + 4;
+/// The first entry's `BindingResource` discriminant, behind `binding` and
+/// `array_index`.
+const GROUP_RESOURCE_CODE_AT: usize = GROUP_ENTRY_AT + 4 + 4;
+
+/// A buffer entry, so a `Buffer` resource is what `GROUP_RESOURCE_CODE_AT` points
+/// at.
+fn buffer_entry() -> BindGroupEntry {
+    BindGroupEntry {
+        binding: 0,
+        array_index: 0,
+        resource: BindingResource::Buffer {
+            buffer: handle(11, 12),
+            offset: 256,
+            size: 1024,
+        },
+    }
+}
+
+/// **A multi-entry bind group survives field for field, entries carrying all
+/// three resource shapes and `variable_count` both ways.**
+///
+/// This is the second counted list of structs on the stream, and the entries are
+/// deeper than a layout's: each carries a [`BindingResource`] whose variants have
+/// different-length bodies, so a stride out by a byte decodes the next entry out
+/// of the middle of this one.
+///
+/// **What turns it red.** An entry field read in the wrong order — every value
+/// below is distinct in the position a neighbour could be read from. A resource
+/// discriminant folded into a neighbour — the three shapes are all present. A
+/// list rebuilt from binding numbers rather than kept in slice order, or
+/// `array_index` dropped — the last two entries share binding 5 and differ only
+/// in `array_index`. `variable_count` dropped — it is `Some` here and `None` in
+/// the byte-distinctness test below.
+#[test]
+fn a_bind_group_carries_a_multi_entry_list_in_the_descriptors_own_order() {
+    let entries = [
+        buffer_entry(),
+        BindGroupEntry {
+            binding: 1,
+            array_index: 0,
+            resource: BindingResource::ImageView(handle(67, 68)),
+        },
+        BindGroupEntry {
+            binding: 2,
+            array_index: 0,
+            resource: BindingResource::Sampler(handle(83, 84)),
+        },
+        // The `WHOLE_BUFFER` sentinel: `u64::MAX`, which crosses verbatim.
+        BindGroupEntry {
+            binding: 3,
+            array_index: 0,
+            resource: BindingResource::whole_buffer(handle(13, 14)),
+        },
+        // Two entries sharing a binding number and differing only in
+        // `array_index` — the bindless write path, and the pair a decoder that
+        // keyed on binding would collapse.
+        BindGroupEntry {
+            binding: 5,
+            array_index: 0,
+            resource: BindingResource::ImageView(handle(69, 70)),
+        },
+        BindGroupEntry {
+            binding: 5,
+            array_index: 1,
+            resource: BindingResource::ImageView(handle(71, 72)),
+        },
+    ];
+    let mut stream = StreamWriter::new();
+    stream.create_bind_group(
+        handle(5, 6),
+        &BindGroupDesc {
+            label: Some("material"),
+            layout: handle(93, 94),
+            entries: &entries,
+            variable_count: Some(2),
+        },
+    );
+    stream.destroy_bind_group(handle(7, 8));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateBindGroup {
+                group: handle(5, 6),
+                label: Some("material".into()),
+                layout: handle(93, 94),
+                entries: entries.to_vec(),
+                variable_count: Some(2),
+            },
+            Command::DestroyBindGroup {
+                group: handle(7, 8)
+            },
+        ])
+    );
+
+    // The two entries sharing binding 5 differ only in `array_index`, so a body
+    // that read it where `binding` goes, or a list keyed on binding, loses one.
+    assert_eq!(entries[4].binding, entries[5].binding);
+    assert_ne!(entries[4].array_index, entries[5].array_index);
+    assert_ne!(entries[4].resource, entries[5].resource);
+}
+
+/// **`WHOLE_BUFFER` in a buffer entry's `size` crosses as `u64::MAX` and is not
+/// resolved here.**
+///
+/// It is [`BindingResource::WHOLE_BUFFER`], and the sentinel rule is `lod_max`'s:
+/// the encoder never resolves one, because only the replayer has the information
+/// to. So this asserts the eight bytes on the wire, not just the decode — a
+/// writer that turned the sentinel into WebGPU's absent member would still
+/// round-trip through this crate's reader while sending a length no browser can
+/// tell from a real one. **It must not cross as `18446744073709551615`**, which
+/// is what a `Number` on the far side would round it to; here it is the max
+/// integer verbatim, and the replayer resolves it to an absent
+/// `GPUBufferBinding.size`.
+#[test]
+fn whole_buffer_in_a_binding_crosses_as_the_max_integer_rather_than_being_resolved() {
+    let entry = BindGroupEntry {
+        binding: 0,
+        array_index: 0,
+        resource: BindingResource::whole_buffer(handle(11, 12)),
+    };
+    let stream = group_of(&[entry], None);
+    let bytes = stream.bytes();
+
+    // The `size` is the last eight bytes of the buffer resource: the code, the
+    // handle, and the `offset` come before it.
+    let size_at = GROUP_RESOURCE_CODE_AT + 1 + 8 + 8;
+    assert_eq!(
+        &bytes[size_at..size_at + 8],
+        &u64::MAX.to_le_bytes(),
+        "the encoder resolved WHOLE_BUFFER instead of carrying it"
+    );
+
+    match &decode_stream(bytes).expect("a stream this crate wrote decodes")[0] {
+        Command::CreateBindGroup { entries, .. } => {
+            let BindingResource::Buffer { size, .. } = entries[0].resource else {
+                panic!("expected a buffer resource");
+            };
+            assert_eq!(size, BindingResource::WHOLE_BUFFER);
+        }
+        other => panic!("expected CreateBindGroup, got {}", other.name()),
+    }
+}
+
+/// **A `BindingResource` discriminant no variant claims is refused**, and this
+/// table's fold is the most dangerous on the stream: a handle carries no kind, so
+/// the discriminant is the only thing saying which resource table an id indexes,
+/// and the bodies are different lengths besides.
+///
+/// **What turns it red.** A catch-all arm in `read_binding_resource`. A table
+/// with a row too many, which the code one past the last claimed one lands on and
+/// which `0xFF` never would.
+#[test]
+fn a_binding_resource_code_no_variant_claims_is_refused_rather_than_folded_into_a_neighbour() {
+    let whole = group_of(&[buffer_entry()], None).bytes().to_vec();
+    assert_eq!(
+        whole[GROUP_RESOURCE_CODE_AT],
+        tag::BINDING_RESOURCE_BUFFER,
+        "the offset this test corrupts has moved"
+    );
+
+    for code in [0x7F, tag::BINDING_RESOURCE_CODES] {
+        let mut bytes = whole.clone();
+        bytes[GROUP_RESOURCE_CODE_AT] = code;
+        assert_eq!(
+            decode_stream(&bytes),
+            Err(DecodeError::InvalidEnum {
+                field: "BindGroupEntry::resource",
+                code: code.into(),
+            }),
+            "code {code:#04x}"
+        );
+    }
+}
+
+/// **A present `variable_count` is not an absent one**, the optional-scalar rule
+/// for the field WebGPU cannot express.
+///
+/// `Some(0)` is the trap: a decoder that read the presence byte as the value
+/// would turn "no variable count" into "a variable count of zero", which the
+/// replayer would then refuse as a runtime-sized array rather than pass on as
+/// the fixed-size layout `None` means.
+#[test]
+fn an_absent_variable_count_is_distinguishable_from_a_present_one() {
+    let absent = group_of(&[buffer_entry()], None);
+    let zero = group_of(&[buffer_entry()], Some(0));
+    assert_ne!(absent.bytes(), zero.bytes());
+    // The absent one is four bytes shorter: the count is not written when there
+    // is nothing to write.
+    assert_eq!(absent.bytes().len() + 4, zero.bytes().len());
+
+    let absent = decode_stream(absent.bytes()).expect("a stream this crate wrote decodes");
+    let zero = decode_stream(zero.bytes()).expect("a stream this crate wrote decodes");
+    match (&absent[0], &zero[0]) {
+        (
+            Command::CreateBindGroup {
+                variable_count: absent,
+                ..
+            },
+            Command::CreateBindGroup {
+                variable_count: zero,
+                ..
+            },
+        ) => {
+            assert_eq!(*absent, None);
+            assert_eq!(*zero, Some(0));
+        }
+        _ => panic!("expected two CreateBindGroups"),
+    }
+
+    // A byte that is neither presence value is refused rather than read as
+    // truthy. The presence byte is the last byte of an absent-count body.
+    let mut wire = group_of(&[buffer_entry()], None).bytes().to_vec();
+    let presence_at = wire.len() - 1;
+    wire[presence_at] = 2;
+    assert_eq!(
+        decode_stream(&wire),
+        Err(DecodeError::InvalidEnum {
+            field: "BindGroupDesc::variable_count",
+            code: 2,
+        })
+    );
+}
+
 /// **Zero `mip_levels` and zero `samples` cross rather than being refused**, and
 /// this is the test that pins the decision.
 ///
@@ -1384,10 +1633,11 @@ fn every_command_has_its_own_name() {
     names.sort_unstable();
     names.dedup();
     // `every_command` holds three CreateBuffers, three CreateImages, six
-    // CreateImageViews, four CreateSamplers, six CreateBindGroupLayouts and two
-    // each of BeginRenderPass, BindGroup and RequestDevice, so the distinct-name
-    // count is what the writer has methods for.
-    assert_eq!(names.len(), 21);
+    // CreateImageViews, four CreateSamplers, six CreateBindGroupLayouts, two
+    // CreateBindGroups and two each of BeginRenderPass, BindGroup and
+    // RequestDevice, so the distinct-name count is what the writer has methods
+    // for.
+    assert_eq!(names.len(), 23);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

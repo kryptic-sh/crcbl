@@ -27,8 +27,9 @@
 //! error instead of a silently dropped one.
 
 use crcbl_hal::{
-    BindingKind, CompareOp, CompositeAlpha, DeviceType, FilterMode, Format, ImageType,
-    ImageViewType, LoadOp, MemoryLocation, PresentMode, SampleType, SamplerAddressMode, StoreOp,
+    BindingKind, BindingResource, CompareOp, CompositeAlpha, DeviceType, FilterMode, Format,
+    ImageType, ImageViewType, LoadOp, MemoryLocation, PresentMode, SampleType, SamplerAddressMode,
+    StoreOp,
 };
 
 use crate::reply::SurfaceCapsFailure;
@@ -246,6 +247,11 @@ pub const CREATE_SAMPLER_TAG: u8 = 0x04;
 /// Written out rather than as `FAMILY_CREATE + 5`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const CREATE_BIND_GROUP_LAYOUT_TAG: u8 = 0x05;
+/// [`Command::CreateBindGroup`](crate::Command::CreateBindGroup).
+///
+/// Written out rather than as `FAMILY_CREATE + 6`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const CREATE_BIND_GROUP_TAG: u8 = 0x06;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -264,6 +270,11 @@ pub const DESTROY_SAMPLER_TAG: u8 = 0x24;
 /// Written out rather than as `FAMILY_DESTROY + 5`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const DESTROY_BIND_GROUP_LAYOUT_TAG: u8 = 0x25;
+/// [`Command::DestroyBindGroup`](crate::Command::DestroyBindGroup).
+///
+/// Written out rather than as `FAMILY_DESTROY + 6`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const DESTROY_BIND_GROUP_TAG: u8 = 0x26;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -811,6 +822,54 @@ pub const fn binding_kind_code(kind: BindingKind) -> u8 {
 /// off-by-one in the table, and this byte does.
 pub const BINDING_KIND_CODES: u8 = 0x05;
 
+// ── BindingResource ─────────────────────────────────────────────────────────────
+//
+// [`BindGroupEntry`](crcbl_hal::BindGroupEntry)'s payload, and the second code
+// table on this seam whose enum carries data — so, like [`BindingKind`], it is a
+// code plus a body rather than a code alone, there is no `binding_resource_from_code`,
+// and the refusing arm lives in [`crate::StreamReader`] with the reads it guards.
+//
+// **What a neighbour costs here is the most dangerous confusion on the seam.** A
+// [`Handle`](crcbl_core::Handle) carries no kind, so a buffer, a view and a
+// sampler may hold identical bits, and this byte is the *only* thing that says
+// which of the replayer's three resource tables a handle indexes. Folding a
+// [`BindingResource::Sampler`](crcbl_hal::BindingResource::Sampler) into a
+// [`BindingResource::ImageView`](crcbl_hal::BindingResource::ImageView) does not
+// mis-set a field — it resolves the same bits against the wrong table and binds a
+// sampler where a texture belongs, which the browser refuses naming the *bind
+// group* rather than the entry that was wrong. The codes are also not
+// symmetrical in *length*:
+// [`Buffer`](crcbl_hal::BindingResource::Buffer) carries a handle and two `u64`s
+// while the other two carry a bare handle, so a code read as its neighbour lands
+// the cursor sixteen bytes off and every entry after it decodes out of noise.
+// `web/engine/gpu-replay.js` is where the routing to each table is written out.
+
+/// [`BindingResource::Buffer`]; a handle then two `u64`s, `offset` and `size`.
+pub const BINDING_RESOURCE_BUFFER: u8 = 0x00;
+/// [`BindingResource::ImageView`]; a bare handle.
+pub const BINDING_RESOURCE_IMAGE_VIEW: u8 = 0x01;
+/// [`BindingResource::Sampler`]; a bare handle.
+pub const BINDING_RESOURCE_SAMPLER: u8 = 0x02;
+
+/// The wire code for a [`BindingResource`], which is followed by that variant's
+/// own fields.
+///
+/// Exhaustive, so a variant added to `crcbl-hal` stops this file compiling —
+/// which is the moment the number beside it, and the body the reader has to grow,
+/// are both impossible to miss.
+#[must_use]
+pub const fn binding_resource_code(resource: BindingResource) -> u8 {
+    match resource {
+        BindingResource::Buffer { .. } => BINDING_RESOURCE_BUFFER,
+        BindingResource::ImageView(_) => BINDING_RESOURCE_IMAGE_VIEW,
+        BindingResource::Sampler(_) => BINDING_RESOURCE_SAMPLER,
+    }
+}
+
+/// One past the last claimed [`BindingResource`] code. What the reader's refusing
+/// arm is checked against, for [`BINDING_KIND_CODES`]'s reason.
+pub const BINDING_RESOURCE_CODES: u8 = 0x03;
+
 // ── DeviceType ────────────────────────────────────────────────────────────────
 //
 // Carried by [`Reply::Adapter`](crate::Reply::Adapter). **A browser never sends
@@ -1145,7 +1204,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 21] = [
+    const TAGS: [(&str, u8, u8); 23] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1156,11 +1215,13 @@ mod tests {
             CREATE_BIND_GROUP_LAYOUT_TAG,
             FAMILY_CREATE,
         ),
+        ("CreateBindGroup", CREATE_BIND_GROUP_TAG, FAMILY_CREATE),
         (
             "DestroyBindGroupLayout",
             DESTROY_BIND_GROUP_LAYOUT_TAG,
             FAMILY_DESTROY,
         ),
+        ("DestroyBindGroup", DESTROY_BIND_GROUP_TAG, FAMILY_DESTROY),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
         ("DestroySurface", DESTROY_SURFACE_TAG, FAMILY_DESTROY),
         ("DestroyImage", DESTROY_IMAGE_TAG, FAMILY_DESTROY),
@@ -1463,6 +1524,45 @@ mod tests {
                 dynamic: true
             }),
             BINDING_KIND_STORAGE_BUFFER
+        );
+
+        // `BindingResource` has no `from_code` for `BindingKind`'s reason — a
+        // code names a variant whose fields have to be read before there is one
+        // to answer with — so what is checked here is that its three codes are
+        // distinct and stop where the reader's refusing arm believes they do. The
+        // round trip is a whole command, in `tests/stream.rs`.
+        let buffer = crcbl_hal::BufferHandle::from_bits(1 << 32).expect("generation 1");
+        let view = crcbl_hal::ImageViewHandle::from_bits(1 << 32).expect("generation 1");
+        let sampler = crcbl_hal::SamplerHandle::from_bits(1 << 32).expect("generation 1");
+        let binding_resource = [
+            BindingResource::whole_buffer(buffer),
+            BindingResource::ImageView(view),
+            BindingResource::Sampler(sampler),
+        ];
+        let codes: Vec<u8> = binding_resource
+            .iter()
+            .map(|r| binding_resource_code(*r))
+            .collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two BindingResources share a code"
+        );
+        assert_eq!(
+            codes.iter().copied().max().map(|top| top + 1),
+            Some(BINDING_RESOURCE_CODES),
+            "BINDING_RESOURCE_CODES is not one past the last claimed code, so the \
+             reader's refusing arm is checked against the wrong byte"
+        );
+        // The buffer's offset and size do not change the code, which is what makes
+        // the byte a *variant* rather than a summary of its fields.
+        assert_eq!(
+            binding_resource_code(BindingResource::Buffer {
+                buffer,
+                offset: 42,
+                size: 99,
+            }),
+            BINDING_RESOURCE_BUFFER
         );
 
         let device_type = [

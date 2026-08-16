@@ -12,11 +12,12 @@
 
 use crcbl_core::Handle;
 use crcbl_hal::{
-    AdapterId, BindGroupLayoutDesc, BindGroupLayoutEntry, BindingFlags, BindingKind, BufferDesc,
-    BufferUsage, ClearValue, ColorAttachment, CompareOp, DepthStencilAttachment, DeviceDesc,
-    Extent3d, Features, FilterMode, Format, ImageAspect, ImageDesc, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, Rect2d,
-    RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc, ShaderStages, StoreOp, depth,
+    AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage, ClearValue,
+    ColorAttachment, CompareOp, DepthStencilAttachment, DeviceDesc, Extent3d, Features, FilterMode,
+    Format, ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewType, LoadOp, MemoryLocation, Rect2d, RenderPassDesc, SampleType, SamplerAddressMode,
+    SamplerDesc, ShaderStages, StoreOp, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -552,6 +553,77 @@ pub fn every_command() -> Vec<Command> {
                 },
             ],
         },
+        // **The first command whose entries carry handles into three different
+        // resource tables.** One of each [`BindingResource`] shape, and the
+        // discriminant is the only thing that says which table each id indexes —
+        // a buffer, a view and a sampler may legitimately hold identical bits. The
+        // buffer entries carry a real `offset`/`size` pair and the `WHOLE_BUFFER`
+        // sentinel, so both a numbered range and the "to the end" sentinel are on
+        // the wire; `layout` names an existing layout handle. `variable_count` is
+        // `None` here — the ordinary value — and `Some` on the twin below.
+        Command::CreateBindGroup {
+            group: handle(107, 108),
+            label: Some("material".into()),
+            layout: handle(93, 94),
+            entries: vec![
+                BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: BindingResource::Buffer {
+                        buffer: handle(11, 12),
+                        offset: 256,
+                        size: 1024,
+                    },
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(handle(67, 68)),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    array_index: 0,
+                    resource: BindingResource::Sampler(handle(83, 84)),
+                },
+                // **`WHOLE_BUFFER`, the sentinel**: `u64::MAX`, which crosses
+                // verbatim and which only the replayer resolves — to WebGPU's
+                // *absent* `GPUBufferBinding.size`, the right resolution here
+                // where the view's range sentinel was absence too, and unlike
+                // `lod_max` whose absence WebGPU reads as a number.
+                BindGroupEntry {
+                    binding: 3,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(handle(13, 14)),
+                },
+            ],
+            variable_count: None,
+        },
+        // **`variable_count: Some`, and two entries differing in exactly one
+        // field.** The two share binding 0 and differ only in `array_index` — the
+        // bindless write path — so a decoder that keyed the list on binding would
+        // collapse them, and a body that read `array_index` where `binding` goes
+        // would not. Both `Some(_)` and a non-zero `array_index` are values a
+        // `u32` claims, so they cross verbatim and the replayer is what refuses
+        // them: WebGPU has no runtime-sized arrays and no per-element array
+        // binding.
+        Command::CreateBindGroup {
+            group: handle(109, 110),
+            label: None,
+            layout: handle(95, 96),
+            entries: vec![
+                BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(handle(69, 70)),
+                },
+                BindGroupEntry {
+                    binding: 0,
+                    array_index: 1,
+                    resource: BindingResource::ImageView(handle(71, 72)),
+                },
+            ],
+            variable_count: Some(2),
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
         },
@@ -577,6 +649,11 @@ pub fn every_command() -> Vec<Command> {
         // its pre-allocated handle destroyed by the caller.
         Command::DestroyBindGroupLayout {
             layout: handle(105, 106),
+        },
+        // Its own command and its own table again: a bind group's id is allowed
+        // to be the same eight bytes as anything else's.
+        Command::DestroyBindGroup {
+            group: handle(111, 112),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -796,7 +873,23 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 entries,
             },
         ),
+        Command::CreateBindGroup {
+            group,
+            label,
+            layout,
+            entries,
+            variable_count,
+        } => stream.create_bind_group(
+            *group,
+            &BindGroupDesc {
+                label: label.as_deref(),
+                layout: *layout,
+                entries,
+                variable_count: *variable_count,
+            },
+        ),
         Command::DestroyBindGroupLayout { layout } => stream.destroy_bind_group_layout(*layout),
+        Command::DestroyBindGroup { group } => stream.destroy_bind_group(*group),
         Command::DestroyBuffer { buffer } => stream.destroy_buffer(*buffer),
         Command::DestroySurface { surface } => stream.destroy_surface(*surface),
         Command::DestroyImage { image } => stream.destroy_image(*image),

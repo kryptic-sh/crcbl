@@ -2219,7 +2219,17 @@ something trusted, and in a browser the only trusted renderer today is
      different asks and a reader has to know which arrived. It also found a live
      defect: `gpu-stream.js`'s stage table was missing `TASK`, so a stream the
      Rust writer produces happily would have been refused.
-   - 5e — bind groups themselves, against those layouts.
+   - ~~5e — bind groups themselves, against those layouts.~~ — **shipped.**
+     Group N proves a real `GPUBindGroup` binding a buffer, an image view and a
+     sampler at once. It is the first command whose entries carry handles into
+     **three** resource tables, and a handle carries no kind — so the
+     `BindingResource` discriminant is what says which table to resolve against,
+     and folding one binds the wrong object. `WHOLE_BUFFER` resolves to an
+     absent `size` (unlike `lod_max`, absence is the faithful reading here); a
+     non-zero `array_index` and a `Some` `variable_count` are both refused,
+     because WebGPU has no per-element array binding and no runtime-sized
+     arrays, and a layout that could accept either was already refused in 5d.
+     Slice 5 is complete.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
 7. Command encoding, render and compute passes.

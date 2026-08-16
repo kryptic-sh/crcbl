@@ -392,6 +392,41 @@ export function startBindGroupLayoutProbe({ exports }) {
 }
 
 /**
+ * Asks wasm to encode a bind-group creation on the device it opened.
+ *
+ * **There is no `readBindGroupProbe`, for {@link startBufferProbe}'s reason:**
+ * `CreateBindGroup` has no entry on the reply channel either.
+ * `globalThis.crcbl.gpu.replayer.bindGroups` is the table the `GPUBindGroup`
+ * lands in, and a group the browser would not have arrives in
+ * `crcbl.gpu.replayer.takeError()`.
+ *
+ * **AND NOTHING TO PASS IN**, on {@link startBindGroupLayoutProbe}'s terms
+ * exactly: a `GPUBindGroup` reports its `label` and nothing else — not its
+ * layout, not its entries — so a number chosen by the page could not be read back
+ * off the object. The descriptor is fixed in
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * **What is new is that this one export encodes a whole FRAME.** A bind group
+ * names a live layout and live resources, so wasm records the layout, a buffer,
+ * an image, its view and a sampler before the group — and the group itself binds
+ * one handle into each of three resource tables, which is what puts the
+ * `BindingResource` discriminant and the `WHOLE_BUFFER` sentinel in front of a
+ * real `createBindGroup`.
+ *
+ * It needs a **device**, as {@link startBufferProbe} does and for the same
+ * reason: `create_bind_group` is a device method, so a `false` right after
+ * {@link startDeviceProbe} is that ordering rather than a failure.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded it, on {@link startImageProbe}'s
+ *   terms.
+ */
+export function startBindGroupProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_bind_group() === 1;
+}
+
+/**
  * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of
