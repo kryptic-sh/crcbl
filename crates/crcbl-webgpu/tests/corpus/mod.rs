@@ -15,16 +15,16 @@ use crcbl_hal::{
     AdapterId, Barriers, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp, BlendState, BufferBarrier,
     BufferCopy, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-    ColorTargetState, ColorWrites, CommandEncoderDesc, CompareOp, CompositeAlpha, ComputePassDesc,
+    ColorTargetState, ColorWrites, CommandEncoderDesc, CompareOp, ComputePassDesc,
     ComputePipelineDesc, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
     DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
     ImageAspect, ImageBarrier, ImageCopy, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
     ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, MultisampleState,
-    Offset3d, PipelineLayoutDesc, PolygonMode, PresentInfo, PresentMode, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, QueueTransfer, ReadbackDesc, Rect2d, RenderPassDesc,
-    ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp, StencilState,
-    StoreOp, SubmitInfo, SwapchainDesc, depth,
+    Offset3d, PipelineLayoutDesc, PolygonMode, PrimitiveState, PrimitiveTopology,
+    PushConstantRange, QueueTransfer, ReadbackDesc, Rect2d, RenderPassDesc, ResourceState,
+    SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry,
+    ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp, SubmitInfo,
+    depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -1214,42 +1214,6 @@ pub fn every_command() -> Vec<Command> {
         Command::DestroyCommandBuffer {
             command_buffer: handle(172, 173),
         },
-        // The presentation family. A NON-DEFAULT present mode and composite alpha
-        // and a NON-SQUARE extent, so a writer that dropped a field or swapped the
-        // two enum bytes decodes to a different value rather than the same one; the
-        // extent's two components differ from each other and from the image count.
-        Command::CreateSwapchain {
-            swapchain: handle(174, 175),
-            label: Some("swapchain".into()),
-            surface: handle(176, 177),
-            format: Format::Bgra8UnormSrgb,
-            extent: (800, 600),
-            image_count: 3,
-            present_mode: PresentMode::Mailbox,
-            composite_alpha: CompositeAlpha::PreMultiplied,
-        },
-        Command::AcquireNextFrame {
-            swapchain: handle(178, 179),
-            image: handle(180, 181),
-            view: handle(182, 183),
-        },
-        // A NON-EMPTY waits list and a `Some(present_id)`, so the refusal-carrying
-        // wire is exercised: the wait handle is distinct and the id is a full `u64`.
-        Command::Present {
-            swapchain: handle(184, 185),
-            waits: vec![handle(186, 187)],
-            present_id: Some(0x0a0b_0c0d_0e0f_1011),
-        },
-        // Its empty-list twin — the only case WebGPU maps — and `present_id: None`,
-        // so both the counted-list boundary at zero and the optional both ways appear.
-        Command::Present {
-            swapchain: handle(188, 189),
-            waits: Vec::new(),
-            present_id: None,
-        },
-        Command::DestroySwapchain {
-            swapchain: handle(190, 191),
-        },
         // **Body-less, and deliberately not last.** Its whole encoding is one
         // byte, so a decoder that read a field that is no longer there would
         // consume the `EnumerateAdapters` below it and end the stream one
@@ -1537,42 +1501,6 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         }),
         Command::EnumerateAdapters => stream.enumerate_adapters(),
         Command::SurfaceCaps => stream.surface_caps(),
-        Command::CreateSwapchain {
-            swapchain,
-            label,
-            surface,
-            format,
-            extent,
-            image_count,
-            present_mode,
-            composite_alpha,
-        } => stream.create_swapchain(
-            *swapchain,
-            &SwapchainDesc {
-                label: label.as_deref(),
-                surface: *surface,
-                format: *format,
-                extent: *extent,
-                image_count: *image_count,
-                present_mode: *present_mode,
-                composite_alpha: *composite_alpha,
-            },
-        ),
-        Command::AcquireNextFrame {
-            swapchain,
-            image,
-            view,
-        } => stream.acquire_next_frame(*swapchain, *image, *view),
-        Command::Present {
-            swapchain,
-            waits,
-            present_id,
-        } => stream.present(&PresentInfo {
-            swapchain: *swapchain,
-            waits,
-            present_id: *present_id,
-        }),
-        Command::DestroySwapchain { swapchain } => stream.destroy_swapchain(*swapchain),
         Command::CreateCommandEncoder { label, queue } => {
             stream.create_command_encoder(&CommandEncoderDesc {
                 label: label.as_deref(),

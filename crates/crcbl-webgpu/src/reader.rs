@@ -20,13 +20,13 @@
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource,
     BlendFactor, BlendOp, BlendState, BufferBarrier, BufferCopy, BufferImageCopy, BufferUsage,
-    ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CompareOp, CompositeAlpha,
-    CullMode, DepthBias, DepthStencilAttachment, DepthStencilState, Extent3d, FilterMode, Format,
-    FrontFace, ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewType, LoadOp, MultisampleState, Offset3d, PolygonMode,
-    PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QueueTransfer, Rect2d,
-    ResourceState, SampleType, SamplerAddressMode, SemaphoreSignal, SemaphoreWait, ShaderStages,
-    StencilFaceState, StencilOp, StencilState, StoreOp,
+    ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CompareOp, CullMode, DepthBias,
+    DepthStencilAttachment, DepthStencilState, Extent3d, FilterMode, Format, FrontFace,
+    ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewType, LoadOp, MultisampleState, Offset3d, PolygonMode, PrimitiveState,
+    PrimitiveTopology, PushConstantRange, QueueTransfer, Rect2d, ResourceState, SampleType,
+    SamplerAddressMode, SemaphoreSignal, SemaphoreWait, ShaderStages, StencilFaceState, StencilOp,
+    StencilState, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -344,22 +344,6 @@ impl ByteReader<'_> {
     fn read_format(&mut self, field: &'static str) -> Result<Format, DecodeError> {
         let code = self.read_u8()?;
         tag::format_from_code(code).ok_or(DecodeError::InvalidEnum {
-            field,
-            code: code.into(),
-        })
-    }
-
-    fn read_present_mode(&mut self, field: &'static str) -> Result<PresentMode, DecodeError> {
-        let code = self.read_u8()?;
-        tag::present_mode_from_code(code).ok_or(DecodeError::InvalidEnum {
-            field,
-            code: code.into(),
-        })
-    }
-
-    fn read_composite_alpha(&mut self, field: &'static str) -> Result<CompositeAlpha, DecodeError> {
-        let code = self.read_u8()?;
-        tag::composite_alpha_from_code(code).ok_or(DecodeError::InvalidEnum {
             field,
             code: code.into(),
         })
@@ -1147,69 +1131,6 @@ impl<'a> StreamReader<'a> {
                 })
             }
             tag::SURFACE_CAPS_TAG => Ok(Command::SurfaceCaps),
-            tag::CREATE_SWAPCHAIN_TAG => {
-                // `SwapchainDesc` in declaration order behind the caller-allocated
-                // handle: the surface, the format, the extent's two components, the
-                // image count, then the present-mode and composite-alpha enum
-                // codes. `image_count` and `present_mode` are carried verbatim
-                // even though the replayer drops them — see `Command::CreateSwapchain`.
-                let swapchain = r.read_handle("CreateSwapchain::swapchain")?;
-                let label = r.read_opt_string("SwapchainDesc::label")?;
-                let surface = r.read_handle("SwapchainDesc::surface")?;
-                let format = r.read_format("SwapchainDesc::format")?;
-                let width = r.read_u32()?;
-                let height = r.read_u32()?;
-                let image_count = r.read_u32()?;
-                let present_mode = r.read_present_mode("SwapchainDesc::present_mode")?;
-                let composite_alpha = r.read_composite_alpha("SwapchainDesc::composite_alpha")?;
-                Ok(Command::CreateSwapchain {
-                    swapchain,
-                    label,
-                    surface,
-                    format,
-                    extent: (width, height),
-                    image_count,
-                    present_mode,
-                    composite_alpha,
-                })
-            }
-            tag::ACQUIRE_NEXT_FRAME_TAG => {
-                // The swapchain, then the two caller-allocated handles the acquired
-                // texture and its view are filed under — three handles that mean
-                // different things, so spelled out one at a time.
-                let swapchain = r.read_handle("AcquireNextFrame::swapchain")?;
-                let image = r.read_handle("AcquireNextFrame::image")?;
-                let view = r.read_handle("AcquireNextFrame::view")?;
-                Ok(Command::AcquireNextFrame {
-                    swapchain,
-                    image,
-                    view,
-                })
-            }
-            tag::PRESENT_TAG => {
-                // The swapchain, the counted waits, then the optional `present_id`
-                // behind a presence byte. The wait list is decoded whole so the
-                // replayer can refuse a non-empty one by name. See `Command::Present`.
-                let swapchain = r.read_handle("PresentInfo::swapchain")?;
-                let wait_count = r.read_count("PresentInfo::waits")?;
-                let mut waits = Vec::with_capacity(wait_count);
-                for _ in 0..wait_count {
-                    waits.push(r.read_handle("PresentInfo::waits")?);
-                }
-                let present_id = if r.read_present("PresentInfo::present_id")? {
-                    Some(r.read_u64()?)
-                } else {
-                    None
-                };
-                Ok(Command::Present {
-                    swapchain,
-                    waits,
-                    present_id,
-                })
-            }
-            tag::DESTROY_SWAPCHAIN_TAG => Ok(Command::DestroySwapchain {
-                swapchain: r.read_handle("DestroySwapchain::swapchain")?,
-            }),
             tag::CREATE_COMMAND_ENCODER_TAG => {
                 // No handle: the encoder is the replayer's implicit-current one,
                 // as `crcbl-hal`'s recording methods assume no receiver. `queue`

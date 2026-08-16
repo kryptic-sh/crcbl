@@ -417,22 +417,6 @@ pub const COPY_IMAGE_TO_IMAGE_TAG: u8 = 0x7B;
 /// WebGPU can perform only for the value zero (`clearBuffer`); any other value
 /// is refused by the replayer.
 pub const FILL_BUFFER_TAG: u8 = 0x7C;
-/// [`Command::CreateSwapchain`](crate::Command::CreateSwapchain) — the first tag
-/// of the presentation family, [`FAMILY_PRESENT`]. It configures a canvas's
-/// context; see the command for why `image_count` and `present_mode` are carried
-/// and dropped by the replayer.
-pub const CREATE_SWAPCHAIN_TAG: u8 = 0x88;
-/// [`Command::AcquireNextFrame`](crate::Command::AcquireNextFrame) — binds the
-/// frame `getCurrentTexture()` hands back under the caller-allocated image and
-/// view handles.
-pub const ACQUIRE_NEXT_FRAME_TAG: u8 = 0x89;
-/// [`Command::Present`](crate::Command::Present) — the documented no-op. The
-/// browser composites the configured canvas on its own `requestAnimationFrame`;
-/// a non-empty `waits` is refused because WebGPU has no semaphores.
-pub const PRESENT_TAG: u8 = 0x8A;
-/// [`Command::DestroySwapchain`](crate::Command::DestroySwapchain) — unconfigures
-/// the canvas context and releases the handle.
-pub const DESTROY_SWAPCHAIN_TAG: u8 = 0x8B;
 /// [`Command::EnumerateAdapters`](crate::Command::EnumerateAdapters).
 pub const ENUMERATE_ADAPTERS_TAG: u8 = 0x90;
 /// [`Command::RequestDevice`](crate::Command::RequestDevice).
@@ -1771,7 +1755,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 53] = [
+    const TAGS: [(&str, u8, u8); 49] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1872,10 +1856,6 @@ mod tests {
         ("CopyBufferToImage", COPY_BUFFER_TO_IMAGE_TAG, FAMILY_COPY),
         ("CopyImageToImage", COPY_IMAGE_TO_IMAGE_TAG, FAMILY_COPY),
         ("FillBuffer", FILL_BUFFER_TAG, FAMILY_COPY),
-        ("CreateSwapchain", CREATE_SWAPCHAIN_TAG, FAMILY_PRESENT),
-        ("AcquireNextFrame", ACQUIRE_NEXT_FRAME_TAG, FAMILY_PRESENT),
-        ("Present", PRESENT_TAG, FAMILY_PRESENT),
-        ("DestroySwapchain", DESTROY_SWAPCHAIN_TAG, FAMILY_PRESENT),
         ("EnumerateAdapters", ENUMERATE_ADAPTERS_TAG, FAMILY_INSTANCE),
         ("RequestDevice", REQUEST_DEVICE_TAG, FAMILY_INSTANCE),
         ("SurfaceCaps", SURFACE_CAPS_TAG, FAMILY_INSTANCE),

@@ -1148,43 +1148,6 @@ const EXPECTED = [
   { name: 'PollReadback', readback: handle(168, 169) },
   { name: 'DestroyReadback', readback: handle(170, 171) },
   { name: 'DestroyCommandBuffer', commandBuffer: handle(172, 173) },
-  // The presentation family. A non-default present mode and composite alpha and a
-  // non-square extent, so a dropped field or a swapped enum byte decodes to a
-  // different value. `presentMode` and `compositeAlpha` are the reply direction's
-  // spelling, which is how `gpu-stream.js` inverts the tables to read them.
-  {
-    name: 'CreateSwapchain',
-    swapchain: handle(174, 175),
-    label: 'swapchain',
-    surface: handle(176, 177),
-    format: 'BGRA8_UNORM_SRGB',
-    extent: { width: 800, height: 600 },
-    imageCount: 3,
-    presentMode: 'MAILBOX',
-    compositeAlpha: 'PRE_MULTIPLIED',
-  },
-  {
-    name: 'AcquireNextFrame',
-    swapchain: handle(178, 179),
-    image: handle(180, 181),
-    view: handle(182, 183),
-  },
-  // A non-empty waits list and a `Some(presentId)`, so the refusal-carrying wire
-  // is exercised; `presentId` is a `u64`, a `BigInt`.
-  {
-    name: 'Present',
-    swapchain: handle(184, 185),
-    waits: [handle(186, 187)],
-    presentId: 0x0a0b0c0d0e0f1011n,
-  },
-  // The empty-list twin — the only case WebGPU maps — and `presentId` absent.
-  {
-    name: 'Present',
-    swapchain: handle(188, 189),
-    waits: [],
-    presentId: null,
-  },
-  { name: 'DestroySwapchain', swapchain: handle(190, 191) },
   // Body-less: the surface and the adapter the HAL call takes are validated
   // against an impl's own tables and never cross. A decoder that still read
   // them would consume the twelve bytes after this tag, which are the command

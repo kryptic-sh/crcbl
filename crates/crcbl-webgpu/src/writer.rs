@@ -11,10 +11,9 @@ use crcbl_hal::{
     DeviceDesc, Extent3d, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageBarrier, ImageCopy,
     ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc,
     ImageViewHandle, MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle,
-    PresentInfo, PrimitiveState, QueueTransfer, ReadbackDesc, ReadbackHandle, Rect2d,
-    RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle, SwapchainDesc,
-    SwapchainHandle,
+    PrimitiveState, QueueTransfer, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc,
+    SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -1448,95 +1447,6 @@ impl StreamWriter {
     /// [`Command::SurfaceCaps`](crate::Command::SurfaceCaps).
     pub fn surface_caps(&mut self) -> u64 {
         self.push_tag(tag::SURFACE_CAPS_TAG)
-    }
-
-    // ── Presentation ─────────────────────────────────────────────────────────
-
-    /// [`Device::create_swapchain`](crcbl_hal::Device::create_swapchain), with the
-    /// handle the caller allocated for it.
-    ///
-    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
-    /// reason, and the descriptor's fields follow its declaration order behind the
-    /// handle — the surface, the format, the extent's two components, the image
-    /// count, then the present-mode and composite-alpha enum codes.
-    ///
-    /// **`image_count` and `present_mode` cross whole and the replayer drops
-    /// them**: a browser only offers `fifo` and manages its own buffering, so the
-    /// canvas configure has no knob for either, but a faithful transposition
-    /// carries what it was told rather than resolving it away. See
-    /// [`Command::CreateSwapchain`](crate::Command::CreateSwapchain).
-    pub fn create_swapchain(
-        &mut self,
-        swapchain: SwapchainHandle,
-        desc: &SwapchainDesc<'_>,
-    ) -> u64 {
-        let sequence = self.push_tag(tag::CREATE_SWAPCHAIN_TAG);
-        self.bytes.put_handle(swapchain);
-        self.bytes.put_opt_str(desc.label);
-        self.bytes.put_handle(desc.surface);
-        self.bytes.put_u8(tag::format_code(desc.format));
-        self.bytes.put_u32(desc.extent.0);
-        self.bytes.put_u32(desc.extent.1);
-        self.bytes.put_u32(desc.image_count);
-        self.bytes.put_u8(tag::present_mode_code(desc.present_mode));
-        self.bytes
-            .put_u8(tag::composite_alpha_code(desc.composite_alpha));
-        sequence
-    }
-
-    /// [`Device::acquire_next_frame`](crcbl_hal::Device::acquire_next_frame) — the
-    /// swapchain, then the two caller-allocated handles the acquired texture and
-    /// its view are filed under.
-    ///
-    /// Positional identity for [`create_surface`](Self::create_surface)'s reason:
-    /// acquire is synchronous and deterministic on WebGPU, so nothing is answered
-    /// and wasm allocates the `image` and `view` ids. See
-    /// [`Command::AcquireNextFrame`](crate::Command::AcquireNextFrame).
-    pub fn acquire_next_frame(
-        &mut self,
-        swapchain: SwapchainHandle,
-        image: ImageHandle,
-        view: ImageViewHandle,
-    ) -> u64 {
-        let sequence = self.push_tag(tag::ACQUIRE_NEXT_FRAME_TAG);
-        self.bytes.put_handle(swapchain);
-        self.bytes.put_handle(image);
-        self.bytes.put_handle(view);
-        sequence
-    }
-
-    /// [`Device::present`](crcbl_hal::Device::present) — the documented no-op.
-    ///
-    /// The whole of [`PresentInfo`]: the swapchain, the counted `waits`, then the
-    /// optional `present_id` behind a presence byte.
-    ///
-    /// **The wait list crosses whole, empty or not.** WebGPU has no semaphores, so
-    /// a non-empty list is what the replayer refuses by name — a dropped wait is a
-    /// synchronisation bug — exactly as a [`submit`](Self::submit)'s waits are. The
-    /// writer carries what the caller gives; the replayer refuses what WebGPU can't
-    /// do. See [`Command::Present`](crate::Command::Present).
-    pub fn present(&mut self, present: &PresentInfo<'_>) -> u64 {
-        let sequence = self.push_tag(tag::PRESENT_TAG);
-        self.bytes.put_handle(present.swapchain);
-        self.bytes.put_count(present.waits.len());
-        for wait in present.waits {
-            self.bytes.put_handle(*wait);
-        }
-        match present.present_id {
-            None => self.bytes.put_u8(tag::ABSENT),
-            Some(present_id) => {
-                self.bytes.put_u8(tag::PRESENT);
-                self.bytes.put_u64(present_id);
-            }
-        }
-        sequence
-    }
-
-    /// [`Device::destroy_swapchain`](crcbl_hal::Device::destroy_swapchain).
-    pub fn destroy_swapchain(&mut self, swapchain: SwapchainHandle) -> u64 {
-        let sequence = self.push_tag(tag::DESTROY_SWAPCHAIN_TAG);
-        self.bytes.put_handle(swapchain);
-        sequence
     }
 
     // ── Header and tags ──────────────────────────────────────────────────────

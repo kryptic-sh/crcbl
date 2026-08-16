@@ -1642,16 +1642,15 @@ fn every_command_has_its_own_name() {
     // CreateBindGroups, three CreateShaderModules, two CreatePipelineLayouts, one
     // CreateComputePipeline and its DestroyComputePipeline, one
     // CreateGraphicsPipeline and its DestroyGraphicsPipeline, two each of
-    // BeginRenderPass, BindGroup, BeginComputePass, RequestDevice, Submit,
-    // RequestReadback and Present, and one each of the rest of the readback path
+    // BeginRenderPass, BindGroup, BeginComputePass, RequestDevice, Submit and
+    // RequestReadback, and one each of the rest of the readback path
     // (CreateCommandEncoder, EndRenderPass, CopyImageToBuffer, Finish,
     // PollReadback, DestroyReadback, DestroyCommandBuffer) and of the compute pass
     // (BindComputePipeline, Dispatch, EndComputePass, CopyBufferToBuffer), the
     // remaining copies and fill (CopyBufferToImage, CopyImageToImage, FillBuffer),
-    // the no-op barrier (PipelineBarrier, twice but one name), and the presentation
-    // family (CreateSwapchain, AcquireNextFrame, DestroySwapchain) — so the
+    // and the no-op barrier (PipelineBarrier, twice but one name) — so the
     // distinct-name count is what the writer has methods for.
-    assert_eq!(names.len(), 53);
+    assert_eq!(names.len(), 49);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

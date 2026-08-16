@@ -322,42 +322,10 @@ function stubGpu(answer, { canvasFormat = 'rgba8unorm' } = {}) {
 function stubCanvas(label, { grants = true } = {}) {
   const context = {
     label,
-    /**
-     * How many times the replayer configured it. Zero until a swapchain is
-     * created — `CreateSurface` must not configure, `CreateSwapchain` must.
-     */
+    /** How many times the replayer configured it. Must stay zero. */
     configures: 0,
-    /** @type {object | null} The last descriptor `configure` was handed. */
-    configured: null,
-    /** @param {object} descriptor */
-    configure(descriptor) {
+    configure() {
       context.configures += 1;
-      context.configured = descriptor;
-    },
-    /** How many times the replayer unconfigured it. */
-    unconfigures: 0,
-    unconfigure() {
-      context.unconfigures += 1;
-      context.configured = null;
-    },
-    /** How many times the replayer acquired a frame from it. */
-    acquires: 0,
-    /**
-     * The frame `getCurrentTexture` hands back. One texture reused across
-     * acquires, as a real context reuses its per-configuration frame, so a test
-     * can compare what the acquire filed against the same object.
-     */
-    frame: {
-      label: `${label} frame`,
-      views: [],
-      createView(viewDesc = {}) {
-        context.frame.views.push(viewDesc);
-        return { label: viewDesc.label ?? '', of: context.frame };
-      },
-    },
-    getCurrentTexture() {
-      context.acquires += 1;
-      return context.frame;
     },
   };
   const canvas = {
@@ -1434,28 +1402,6 @@ async function main() {
   );
   FROM_FIXTURE.surfaceCaps = surfaceCaps;
 
-  // The presentation family, from the fixture for the same reason: the format,
-  // extent, image count, present mode and composite alpha replayed below are the
-  // values the Rust encoder wrote, and the corpus's are deliberately non-default.
-  const createSwapchain = commands.find(
-    (command) => command.name === 'CreateSwapchain'
-  );
-  const acquireNextFrame = commands.find(
-    (command) => command.name === 'AcquireNextFrame'
-  );
-  const presents = commands.filter((command) => command.name === 'Present');
-  const destroySwapchain = commands.find(
-    (command) => command.name === 'DestroySwapchain'
-  );
-  check(
-    createSwapchain !== undefined &&
-      acquireNextFrame !== undefined &&
-      presents.length === 2 &&
-      destroySwapchain !== undefined,
-    `the committed stream carries the presentation family (${presents.length} Presents)`
-  );
-  const [presentWithWaits, presentEmpty] = presents;
-
   // The buffer pair, from the fixture for the same reason again — and here it
   // buys three descriptors rather than one: the corpus carries a labelled
   // device-local buffer, an unlabelled host-upload one, and one whose size is
@@ -1855,14 +1801,6 @@ async function main() {
       'PollReadback',
       'DestroyReadback',
       'DestroyCommandBuffer',
-      // The presentation family. CreateSwapchain configures, AcquireNextFrame
-      // acquires, DestroySwapchain unconfigures; Present is the documented no-op
-      // that neither throws nor touches the encoder or device (its own gate below
-      // observes that), and a non-empty `waits` routes to the error queue.
-      'CreateSwapchain',
-      'AcquireNextFrame',
-      'Present',
-      'DestroySwapchain',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -2268,157 +2206,6 @@ async function main() {
         thrown.canvasId === createSurface.canvasId &&
         replayer.surfaces.size === 0,
       `a canvas with no webgpu context throws rather than recording nothing quietly (${String(thrown)})`
-    );
-  }
-
-  // ---- the presentation family --------------------------------------------
-  //
-  // Swapchain creation on WebGPU is a canvas `configure`, acquire is a
-  // `getCurrentTexture`, present is a no-op the browser composites on rAF, and
-  // destroy is an `unconfigure`. None makes a round trip, so every check reads
-  // what the replayer *did* to the fake context rather than what it queued. The
-  // commands and their descriptor fields are the fixture's, so the format,
-  // extent, image count, present mode and composite alpha are the `u32`s and enum
-  // codes the Rust encoder wrote.
-  //
-  // A replayer with a device open, a canvas registered, and the fixture's surface
-  // created on it — everything a swapchain needs and no more.
-  const readyWithSurface = async ({ device = stubDevice() } = {}) => {
-    const canvas = stubCanvas('present');
-    const adapter = openingAdapter({ device });
-    const replayer = new Replayer({
-      gpu: stubGpu(async () => adapter),
-      canvases: new Map([[createSurface.canvasId, canvas]]),
-    });
-    replayer.replay(frameOf(FROM_FIXTURE.enumerate, 0n));
-    await settle();
-    replayer.clear();
-    replayer.replay(frameOf(FROM_FIXTURE.requestDevice, 1n));
-    await settle();
-    replayer.clear();
-    replayer.replay(frameOf(createSurface, 2n));
-    return { replayer, canvas, device };
-  };
-  // The swapchain command with its surface put onto the one this surface created,
-  // since the fixture's two name different handles on purpose.
-  const swapchainOnSurface = {
-    ...createSwapchain,
-    surface: createSurface.surface,
-  };
-  {
-    // **CreateSwapchain configures the canvas.** The format is the fixture's
-    // `Bgra8UnormSrgb`, the alpha mode its `PreMultiplied`, and the usage is the
-    // load-bearing `RENDER_ATTACHMENT | COPY_SRC` — the superset that lets an
-    // acquired frame be copied from. `imageCount` and `presentMode` are carried
-    // and dropped, so `configure` is handed neither.
-    const { replayer, canvas, device } = await readyWithSurface();
-    replayer.replay(frameOf(swapchainOnSurface, 3n));
-    const configured = canvas.context.configured;
-    check(
-      canvas.context.configures === 1 &&
-        configured?.device === device &&
-        configured?.format === 'bgra8unorm-srgb' &&
-        configured?.alphaMode === 'premultiplied' &&
-        configured?.usage === (0x10 | 0x01),
-      `CreateSwapchain configures the canvas with the open device, the mapped format, RENDER_ATTACHMENT|COPY_SRC and mapped alphaMode (${JSON.stringify({ configures: canvas.context.configures, format: configured?.format, alphaMode: configured?.alphaMode, usage: configured?.usage })})`
-    );
-    check(
-      replayer.swapchains.get(createSwapchain.swapchain)?.context ===
-        canvas.context && replayer.takeError() === null,
-      `and files the context under the swapchain handle with no error (${replayer.swapchains.size} held)`
-    );
-  }
-  {
-    // **AcquireNextFrame acquires and binds.** `getCurrentTexture` is called once,
-    // and the texture and its view are filed under the acquire's image and view
-    // handles — a later `CopyImageToBuffer` resolves them, which is what makes
-    // the binding load-bearing rather than bookkeeping.
-    const { replayer, canvas } = await readyWithSurface();
-    replayer.replay(frameOf(swapchainOnSurface, 3n));
-    replayer.replay(
-      frameOf({ ...acquireNextFrame, swapchain: createSwapchain.swapchain }, 4n)
-    );
-    check(
-      canvas.context.acquires === 1 &&
-        replayer.images.get(acquireNextFrame.image) === canvas.context.frame &&
-        replayer.imageViews.get(acquireNextFrame.view)?.of ===
-          canvas.context.frame &&
-        replayer.takeError() === null,
-      `AcquireNextFrame calls getCurrentTexture once and binds the acquired image and view (${canvas.context.acquires} acquires, image ${replayer.images.get(acquireNextFrame.image) === canvas.context.frame})`
-    );
-  }
-  {
-    // **Present with empty waits is a no-op.** It calls nothing and queues no
-    // error — the browser composites the configured canvas on its own rAF.
-    const { replayer, canvas } = await readyWithSurface();
-    replayer.replay(frameOf(swapchainOnSurface, 3n));
-    let thrown = null;
-    try {
-      replayer.replay(
-        frameOf({ ...presentEmpty, swapchain: createSwapchain.swapchain }, 4n)
-      );
-    } catch (error) {
-      thrown = error;
-    }
-    check(
-      thrown === null &&
-        replayer.takeError() === null &&
-        !replayer.hasReplies &&
-        canvas.context.unconfigures === 0,
-      `Present with empty waits touches nothing and queues no error (${String(thrown)})`
-    );
-  }
-  {
-    // **Present with a non-empty waits is refused by name.** WebGPU has no
-    // semaphores, so a wait cannot be satisfied and dropping it silently would be
-    // a synchronisation bug — the fixture's first Present carries one wait.
-    const { replayer } = await readyWithSurface();
-    replayer.replay(frameOf(swapchainOnSurface, 3n));
-    replayer.replay(
-      frameOf({ ...presentWithWaits, swapchain: createSwapchain.swapchain }, 4n)
-    );
-    const reason = replayer.takeError();
-    check(
-      String(reason).includes('wait') && String(reason).includes('semaphore'),
-      `Present with a non-empty waits is refused and says why (${JSON.stringify(reason)})`
-    );
-  }
-  {
-    // **DestroySwapchain unconfigures.** The counterpart of the configure, and a
-    // destroy of nothing live is a no-op.
-    const { replayer, canvas } = await readyWithSurface();
-    replayer.replay(frameOf(swapchainOnSurface, 3n));
-    replayer.replay(
-      frameOf({ ...destroySwapchain, swapchain: createSwapchain.swapchain }, 4n)
-    );
-    check(
-      canvas.context.unconfigures === 1 &&
-        replayer.swapchains.size === 0 &&
-        replayer.takeError() === null,
-      `DestroySwapchain unconfigures the context and releases the handle (${canvas.context.unconfigures} unconfigures, ${replayer.swapchains.size} held)`
-    );
-  }
-  {
-    // **A swapchain naming an unresolvable surface goes to the error queue.** The
-    // fixture's own CreateSwapchain names a surface handle this replayer never
-    // created — an ordering bug on the far side, refused rather than thrown.
-    const { replayer } = await readyWithSurface();
-    replayer.replay(frameOf(createSwapchain, 3n));
-    const reason = replayer.takeError();
-    check(
-      replayer.swapchains.size === 0 && String(reason).includes('surface'),
-      `CreateSwapchain with no live surface is refused and named (${JSON.stringify(reason)})`
-    );
-  }
-  {
-    // **An acquire naming an unconfigured swapchain goes to the error queue** for
-    // the same reason.
-    const { replayer } = await readyWithSurface();
-    replayer.replay(frameOf(acquireNextFrame, 3n));
-    const reason = replayer.takeError();
-    check(
-      replayer.images.size === 0 && String(reason).includes('swapchain'),
-      `AcquireNextFrame with no configured swapchain is refused and named (${JSON.stringify(reason)})`
     );
   }
 
