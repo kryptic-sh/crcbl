@@ -3,6 +3,29 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### `dispatch_indirect` has no command or replay yet
+
+`CommandEncoder::dispatch_indirect` (`crates/crcbl-hal/src/command.rs`, the HAL
+trait method) is deliberately not wired into the WebGPU command stream: there is
+no `Command` variant, no writer/reader arm, no tag, and no `gpu-replay.js` arm
+for it. Left out of the compute-passes slice (7c) on purpose.
+
+**Why it is blocked, not merely deferred.** An indirect dispatch reads its three
+workgroup counts out of a buffer's contents at replay time. Nothing on this seam
+can yet _write_ those bytes: there is no fill command and no host→buffer upload
+command, so the indirect-args buffer would always hold whatever a fresh WebGPU
+buffer holds — zeros — and the dispatch would be a no-op the gate could not tell
+from a stub. The direct `Dispatch` shipped in 7c takes its counts inline, which
+is exactly why it _could_ be observed (its probe reads back `0xDEADBEEF`).
+
+**Its natural gate.** Add a fill or host→buffer upload command first, write the
+three counts into the args buffer with it, then `dispatch_indirect` off that
+buffer and read back a storage buffer sized/written by those counts — so a wrong
+count is visible. Until those bytes can be written, an indirect-dispatch probe
+would assert nothing. Verified by grep: `dispatch_indirect` appears only in
+`crcbl-hal` and the null/vk backends, with no `crcbl-webgpu` command, tag, or
+replay arm.
+
 ### The probe module-doc export table is missing the readback shims
 
 `crates/crcbl-webgpu/src/probe.rs`'s `# Exports` table lists every shim through

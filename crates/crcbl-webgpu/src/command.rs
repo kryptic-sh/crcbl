@@ -19,9 +19,9 @@ use core::ops::Range;
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
-    BufferHandle, BufferUsage, ColorAttachment, ColorTargetState, CommandBufferHandle, CompareOp,
-    ComputePipelineHandle, DepthStencilAttachment, DepthStencilState, Extent3d, Features,
-    FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceLayers,
+    BufferCopy, BufferHandle, BufferUsage, ColorAttachment, ColorTargetState, CommandBufferHandle,
+    CompareOp, ComputePipelineHandle, DepthStencilAttachment, DepthStencilState, Extent3d,
+    Features, FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceLayers,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation,
     MultisampleState, Offset3d, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
     QueueHandle, ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle, SemaphoreSignal,
@@ -664,6 +664,43 @@ pub enum Command {
         /// Instance range.
         instances: Range<u32>,
     },
+    /// [`begin_compute_pass`](crcbl_hal::CommandEncoder::begin_compute_pass).
+    ///
+    /// The whole of [`ComputePassDesc`](crcbl_hal::ComputePassDesc), which is
+    /// **only a label** — compute has no attachments, so the pass exists to name
+    /// a timestamp boundary and nothing more. On the implicit-current encoder,
+    /// exactly as [`BeginRenderPass`](Self::BeginRenderPass) is.
+    BeginComputePass {
+        /// Pass label, if the caller gave one.
+        label: Option<String>,
+    },
+    /// [`bind_compute_pipeline`](crcbl_hal::CommandEncoder::bind_compute_pipeline).
+    BindComputePipeline {
+        /// Pipeline bound.
+        pipeline: ComputePipelineHandle,
+    },
+    /// [`dispatch`](crcbl_hal::CommandEncoder::dispatch) — the workgroup counts
+    /// for a compute dispatch on the open compute pass.
+    ///
+    /// [`dispatch_indirect`](crcbl_hal::CommandEncoder::dispatch_indirect) has no
+    /// command yet: its dimensions come from buffer contents, which needs a fill
+    /// or host→buffer upload command this slice does not have. See
+    /// `docs/backlog.md`.
+    Dispatch {
+        /// Workgroups in x.
+        x: u32,
+        /// Workgroups in y.
+        y: u32,
+        /// Workgroups in z.
+        z: u32,
+    },
+    /// [`end_compute_pass`](crcbl_hal::CommandEncoder::end_compute_pass).
+    ///
+    /// Body-less, and on the implicit-current encoder: it closes the pass
+    /// [`BeginComputePass`](Self::BeginComputePass) opened. Ending with no open
+    /// pass is a malformed stream the replayer routes to the error queue rather
+    /// than throwing on — see `web/engine/gpu-replay.js`.
+    EndComputePass,
     /// [`Device::create_command_encoder`](crcbl_hal::Device::create_command_encoder).
     ///
     /// **It carries no handle**, unlike every other creation on this stream, and
@@ -732,6 +769,21 @@ pub enum Command {
         image_offset: Offset3d,
         /// Region size in texels.
         image_extent: Extent3d,
+    },
+    /// [`copy_buffer_to_buffer`](crcbl_hal::CommandEncoder::copy_buffer_to_buffer)
+    /// — the buffer→buffer copy, recorded on the implicit-current encoder.
+    ///
+    /// **The only way to observe a dispatch.** A compute shader writes a storage
+    /// buffer, and a storage buffer cannot be `MAP_READ`, so its output is copied
+    /// into a host-readable buffer here before the readback maps it. The whole of
+    /// [`BufferCopy`] crosses as one nested value rather
+    /// than flattened — a small self-contained struct, unlike
+    /// [`CopyImageToBuffer`](Self::CopyImageToBuffer)'s eight scattered fields —
+    /// and the two `u64` offsets and the size are chosen distinct in the corpus so
+    /// a transposition among them is visible.
+    CopyBufferToBuffer {
+        /// Source, destination, their byte offsets, and the size copied.
+        copy: BufferCopy,
     },
     /// [`finish`](crcbl_hal::CommandEncoder::finish) — consumes the
     /// implicit-current encoder and produces the command buffer.
@@ -927,9 +979,14 @@ impl Command {
             Self::BindGroup { .. } => "BindGroup",
             Self::PushConstants { .. } => "PushConstants",
             Self::Draw { .. } => "Draw",
+            Self::BeginComputePass { .. } => "BeginComputePass",
+            Self::BindComputePipeline { .. } => "BindComputePipeline",
+            Self::Dispatch { .. } => "Dispatch",
+            Self::EndComputePass => "EndComputePass",
             Self::CreateCommandEncoder { .. } => "CreateCommandEncoder",
             Self::EndRenderPass => "EndRenderPass",
             Self::CopyImageToBuffer { .. } => "CopyImageToBuffer",
+            Self::CopyBufferToBuffer { .. } => "CopyBufferToBuffer",
             Self::Finish { .. } => "Finish",
             Self::Submit { .. } => "Submit",
             Self::RequestReadback { .. } => "RequestReadback",

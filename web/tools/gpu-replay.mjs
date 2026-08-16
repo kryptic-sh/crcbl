@@ -751,6 +751,60 @@ function stubRenderPass() {
 }
 
 /**
+ * A `GPUComputePassEncoder` as `beginComputePass` answers one, recording every
+ * `setPipeline`, `setBindGroup` and `dispatchWorkgroups` it is handed.
+ *
+ * {@link stubRenderPass}'s compute twin and for its reason: the dispatch arms
+ * have no reply and no browser object to read back, so what a check reads is the
+ * call the replayer made. `setPipelines` is the pipelines passed to
+ * `setPipeline`, `setBindGroups` the `{ slot, group, dynamicOffsets }` triples
+ * (proving the generalized bind arm reaches a compute pass), and `dispatches`
+ * the `{ x, y, z }` workgroup counts. `ended` counts `end` so a pass left open is
+ * visible.
+ */
+function stubComputePass() {
+  const pass = {
+    /** @type {object[]} The pipelines `setPipeline` was handed, in order. */
+    setPipelines: [],
+    /**
+     * @type {Array<{ slot: number, group: object, dynamicOffsets: number[] }>}
+     *   Every `setBindGroup`, in order.
+     */
+    setBindGroups: [],
+    /**
+     * @type {Array<{ x: number, y: number, z: number }>} Every
+     *   `dispatchWorkgroups`, in order.
+     */
+    dispatches: [],
+    ended: 0,
+    /** @param {object} pipeline */
+    setPipeline(pipeline) {
+      pass.setPipelines.push(pipeline);
+    },
+    /**
+     * @param {number} slot
+     * @param {object} group
+     * @param {number[]} dynamicOffsets
+     */
+    setBindGroup(slot, group, dynamicOffsets) {
+      pass.setBindGroups.push({ slot, group, dynamicOffsets });
+    },
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @param {number} z
+     */
+    dispatchWorkgroups(x, y, z) {
+      pass.dispatches.push({ x, y, z });
+    },
+    end() {
+      pass.ended += 1;
+    },
+  };
+  return pass;
+}
+
+/**
  * A `GPUDevice` as `requestDevice()` resolves one: its own features, its own
  * limits, the buffer creation this slice drives, and the error channel WebGPU
  * reports asynchronous failures on.
@@ -912,7 +966,10 @@ function stubDevice(
     },
     /**
      * A `GPUCommandEncoder` whose `beginRenderPass` hands back a
-     * {@link stubRenderPass} and keeps it at `.pass` for a check to read.
+     * {@link stubRenderPass} and keeps it at `.pass`, whose `beginComputePass`
+     * hands back a {@link stubComputePass} at `.computePass`, and whose
+     * `copyBufferToBuffer` records the call at `.bufferCopies` — each for a check
+     * to read.
      *
      * @param {{ label?: string }} [desc]
      */
@@ -923,11 +980,36 @@ function stubDevice(
         beganPasses: [],
         /** @type {object|null} The render pass it last began. */
         pass: null,
+        /** @type {object[]} Every `GPUComputePassDescriptor`, in order. */
+        beganComputePasses: [],
+        /** @type {object|null} The compute pass it last began. */
+        computePass: null,
+        /**
+         * @type {Array<{ src: object, srcOffset: number, dst: object,
+         *   dstOffset: number, size: number }>} Every `copyBufferToBuffer`.
+         */
+        bufferCopies: [],
         /** @param {object} passDesc */
         beginRenderPass(passDesc) {
           encoder.beganPasses.push(passDesc);
           encoder.pass = stubRenderPass();
           return encoder.pass;
+        },
+        /** @param {object} passDesc */
+        beginComputePass(passDesc) {
+          encoder.beganComputePasses.push(passDesc);
+          encoder.computePass = stubComputePass();
+          return encoder.computePass;
+        },
+        /**
+         * @param {object} src
+         * @param {number} srcOffset
+         * @param {object} dst
+         * @param {number} dstOffset
+         * @param {number} size
+         */
+        copyBufferToBuffer(src, srcOffset, dst, dstOffset, size) {
+          encoder.bufferCopies.push({ src, srcOffset, dst, dstOffset, size });
         },
       };
       device.createdEncoders.push(encoder);
@@ -1661,7 +1743,12 @@ async function main() {
       'BindGroup',
       'PushConstants',
       'Draw',
+      'BeginComputePass',
+      'EndComputePass',
+      'BindComputePipeline',
+      'Dispatch',
       'CopyImageToBuffer',
+      'CopyBufferToBuffer',
       'Finish',
       'Submit',
       'RequestReadback',
@@ -5320,7 +5407,9 @@ async function main() {
     );
   }
   {
-    // **Binding a group with no pass open is a mid-frame ordering fault.**
+    // **Binding a group with NEITHER pass open is a mid-frame ordering fault.**
+    // The arm is generalized to bind onto whichever pass is open, so its refusal
+    // names both.
     const { replayer } = await readyWithDevice();
     replayer.replay(
       frameOf(
@@ -5336,7 +5425,7 @@ async function main() {
     );
     const error = replayer.takeError();
     check(
-      error !== null && error.includes('no render pass open'),
+      error !== null && error.includes('no render or compute pass open'),
       `binding a group with no pass open goes to the error queue (${JSON.stringify(error)})`
     );
   }
@@ -5367,6 +5456,284 @@ async function main() {
     check(
       thrown === null && error !== null && error.includes('no push constants'),
       `PushConstants is refused on the error queue without throwing (threw ${String(thrown)}, said ${JSON.stringify(error)})`
+    );
+  }
+
+  // ---- the compute-pass arms: a pipeline bound and a dispatch recorded -----
+  //
+  // `BeginComputePass`, `BindComputePipeline`, `Dispatch` and `EndComputePass`
+  // record onto the compute pass the encoder opened (spied by
+  // `stubComputePass`); `BindGroup` binds onto WHICHEVER pass is open — here the
+  // compute one, which is what proves the generalized arm; and
+  // `CopyBufferToBuffer` records onto the encoder itself. None answers a reply,
+  // so a malformed one — no pass open, an unresolvable handle — leaves a line on
+  // the device's error queue instead of throwing.
+  const beginComputePass = { name: 'BeginComputePass', label: null };
+  /**
+   * Opens an encoder and a compute pass on `replayer` and hands back the compute
+   * pass the device recorded, so a check can read the calls made on it.
+   *
+   * @param {Replayer} replayer
+   * @param {{ createdEncoders: object[] }} device
+   */
+  const openedComputePass = (replayer, device) => {
+    replayer.replay(frameOf(encoderCommand, 700n));
+    replayer.replay(frameOf(beginComputePass, 701n));
+    return device.createdEncoders.at(-1).computePass;
+  };
+  {
+    // **A compute pass opens on the encoder and is kept for the arms that
+    // follow.** The device records the descriptor and hands the pass back.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedComputePass(replayer, device);
+    check(
+      pass !== null &&
+        pass !== undefined &&
+        device.createdEncoders.at(-1).beganComputePasses.length === 1 &&
+        replayer.pendingErrors === 0,
+      'BeginComputePass opens a compute pass on the encoder and queues no error'
+    );
+  }
+  {
+    // **A compute pass with no encoder open is a mid-frame ordering fault** — the
+    // error queue, not a throw.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(beginComputePass, 701n));
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no command encoder open'),
+      `a compute pass begun with no encoder goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A bound compute pipeline reaches the pass as the resolved
+    // GPUComputePipeline.** The corpus compute pipeline is built first — its
+    // shader and layout, then the pipeline — so its handle resolves; the pass
+    // then gets that same object.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(fullShader, 690n));
+    replayer.replay(
+      frameOf(emptyPipelineLayoutAt(computePipeline.layout), 691n)
+    );
+    replayer.replay(frameOf(computePipeline, 692n));
+    const pipeline = replayer.computePipelines.get(computePipeline.pipeline);
+    const pass = openedComputePass(replayer, device);
+    replayer.replay(
+      frameOf(
+        { name: 'BindComputePipeline', pipeline: computePipeline.pipeline },
+        702n
+      )
+    );
+    check(
+      pass.setPipelines.length === 1 &&
+        pass.setPipelines[0] === pipeline &&
+        replayer.pendingErrors === 0,
+      'BindComputePipeline sets the resolved pipeline on the compute pass and queues no error'
+    );
+  }
+  {
+    // **An unresolvable compute pipeline handle is named on the error queue.**
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedComputePass(replayer, device);
+    replayer.replay(
+      frameOf({ name: 'BindComputePipeline', pipeline: handle(9, 4) }, 702n)
+    );
+    const error = replayer.takeError();
+    check(
+      pass.setPipelines.length === 0 && error !== null && error.includes('9.4'),
+      `an unresolvable compute pipeline handle goes to the error queue naming it (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **Binding a compute pipeline with no compute pass open is a mid-frame
+    // ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf({ name: 'BindComputePipeline', pipeline: handle(1, 1) }, 702n)
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no compute pass open'),
+      `binding a compute pipeline with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A dispatch's three counts reach dispatchWorkgroups unchanged.**
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedComputePass(replayer, device);
+    replayer.replay(frameOf({ name: 'Dispatch', x: 4, y: 3, z: 2 }, 702n));
+    checkEqual(
+      pass.dispatches,
+      [{ x: 4, y: 3, z: 2 }],
+      'a Dispatch records dispatchWorkgroups(x, y, z)'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid dispatch leaves the error queue empty'
+    );
+  }
+  {
+    // **A dispatch with no compute pass open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf({ name: 'Dispatch', x: 1, y: 1, z: 1 }, 702n));
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no compute pass open'),
+      `a dispatch with no compute pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A bind group binds onto the OPEN COMPUTE pass** — the whole point of the
+    // generalized arm, which used to guard on a render pass alone. The fixture's
+    // material group is built against resources at the handles it names so its
+    // handle resolves, then a compute pass is opened and the group bound onto it.
+    const { replayer, device } = await readyWithDevice();
+    const bufA = materialGroup.entries[0].resource.buffer;
+    const bufB = materialGroup.entries[3].resource.buffer;
+    const view = materialGroup.entries[1].resource.view;
+    const sampler = materialGroup.entries[2].resource.sampler;
+    const image = handle(220, 1);
+    replayer.replay(frameOf(emptyLayoutAt(materialGroup.layout), 200n));
+    replayer.replay(frameOf(storageBufferAt(bufA), 201n));
+    replayer.replay(frameOf(storageBufferAt(bufB), 202n));
+    replayer.replay(frameOf(sampledImageAt(image), 203n));
+    replayer.replay(frameOf(viewOf(view, image), 204n));
+    replayer.replay(frameOf(samplerAt(sampler), 205n));
+    replayer.replay(frameOf(materialGroup, 206n));
+    const group = replayer.bindGroups.get(materialGroup.group);
+    const pass = openedComputePass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'BindGroup',
+          slot: 1,
+          group: materialGroup.group,
+          dynamicOffsets: [8],
+          layout: handle(7, 7),
+        },
+        702n
+      )
+    );
+    check(
+      pass.setBindGroups.length === 1 &&
+        pass.setBindGroups[0].slot === 1 &&
+        pass.setBindGroups[0].group === group &&
+        replayer.pendingErrors === 0,
+      'BindGroup binds onto the open compute pass — the generalized arm reaches both'
+    );
+    checkEqual(
+      pass.setBindGroups[0].dynamicOffsets,
+      [8],
+      'and the dynamic offsets reach the compute pass setBindGroup as given'
+    );
+  }
+  {
+    // **Ending a compute pass with none open is a malformed stream**, into the
+    // error queue rather than thrown.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf({ name: 'EndComputePass' }, 702n));
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('with none open'),
+      `ending a compute pass with none open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A buffer→buffer copy reaches the encoder with both buffers resolved and
+    // the u64 offsets and size narrowed to Number.** Two buffers are built at the
+    // handles the copy names, then an encoder is opened and the copy recorded.
+    const { replayer, device } = await readyWithDevice();
+    const srcH = handle(80, 1);
+    const dstH = handle(81, 1);
+    replayer.replay(frameOf(storageBufferAt(srcH), 700n));
+    replayer.replay(frameOf(storageBufferAt(dstH), 701n));
+    const src = replayer.buffers.get(srcH);
+    const dst = replayer.buffers.get(dstH);
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CopyBufferToBuffer',
+          copy: {
+            src: srcH,
+            srcOffset: 16n,
+            dst: dstH,
+            dstOffset: 32n,
+            size: 64n,
+          },
+        },
+        703n
+      )
+    );
+    const copies = device.createdEncoders.at(-1).bufferCopies;
+    check(
+      copies.length === 1 &&
+        copies[0].src === src &&
+        copies[0].dst === dst &&
+        copies[0].srcOffset === 16 &&
+        copies[0].dstOffset === 32 &&
+        copies[0].size === 64 &&
+        replayer.pendingErrors === 0,
+      'CopyBufferToBuffer records copyBufferToBuffer(src, srcOffset, dst, dstOffset, size) with resolved buffers'
+    );
+  }
+  {
+    // **An unresolvable source or destination is named on the error queue — two
+    // DISTINCT messages.** The destination is built for the source case and the
+    // source for the destination case, so each isolates the handle that did not
+    // resolve.
+    const copyOf = (src, dst) => ({
+      name: 'CopyBufferToBuffer',
+      copy: { src, srcOffset: 0n, dst, dstOffset: 0n, size: 4n },
+    });
+    const srcCase = await readyWithDevice();
+    srcCase.replayer.replay(frameOf(storageBufferAt(handle(81, 1)), 700n));
+    srcCase.replayer.replay(frameOf(encoderCommand, 701n));
+    srcCase.replayer.replay(
+      frameOf(copyOf(handle(80, 1), handle(81, 1)), 702n)
+    );
+    const srcError = srcCase.replayer.takeError();
+
+    const dstCase = await readyWithDevice();
+    dstCase.replayer.replay(frameOf(storageBufferAt(handle(80, 1)), 700n));
+    dstCase.replayer.replay(frameOf(encoderCommand, 701n));
+    dstCase.replayer.replay(
+      frameOf(copyOf(handle(80, 1), handle(81, 1)), 702n)
+    );
+    const dstError = dstCase.replayer.takeError();
+    check(
+      srcError !== null &&
+        srcError.includes('80.1') &&
+        srcError.includes('from') &&
+        dstError !== null &&
+        dstError.includes('81.1') &&
+        dstError.includes('into'),
+      `an unresolvable copy source names it (from) and a destination names it (into), distinctly (${JSON.stringify([srcError, dstError])})`
+    );
+  }
+  {
+    // **A buffer copy with no encoder open is a mid-frame ordering fault** — the
+    // error queue, not a throw, and refused before either buffer is resolved.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CopyBufferToBuffer',
+          copy: {
+            src: handle(80, 1),
+            srcOffset: 0n,
+            dst: handle(81, 1),
+            dstOffset: 0n,
+            size: 4n,
+          },
+        },
+        702n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no command encoder open'),
+      `a buffer copy with no encoder goes to the error queue (${JSON.stringify(error)})`
     );
   }
 

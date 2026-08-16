@@ -4645,6 +4645,102 @@ try {
           `${draw.error ? ` — ${draw.error}` : ''}`
   );
 
+  // **THE DISPATCH GATE, AND THE FIRST THAT PROVES A COMPUTE SHADER RAN.** Group T
+  // proves a draw overwrites a clear. This proves a `dispatchWorkgroups` writes a
+  // storage buffer: wasm records a compute pipeline whose shader sets every slot
+  // of a 64-`u32` storage buffer to 0xDEADBEEF, a pass that binds and dispatches
+  // it, a buffer→buffer copy into a host buffer, a submit and a readback; the
+  // demo's loop replays it; and the 256 bytes that come back are asserted to be
+  // 0xDEADBEEF in every 4-byte little-endian word. A fresh WebGPU buffer is
+  // zero-initialised, so a stub that skips the dispatch reads back all zeros —
+  // only a dispatch that actually ran writes the pattern. `gpu-replay.mjs` cannot
+  // reach this: only a real device runs a compute shader into a real buffer.
+  group('U — a compute shader’s storage-buffer writes are read back');
+
+  const PROBE_DISPATCH_WORDS = 64;
+  // 0xDEADBEEF as the little-endian bytes a `u32` holds it as.
+  const PROBE_DISPATCH_PATTERN_BYTES = [0xef, 0xbe, 0xad, 0xde];
+
+  const computeStart = await evaluate(
+    page,
+    `(async () => {
+       const { startComputeProbe } = await import('/engine/gpu-probe.js');
+       const { exports } = globalThis.crcbl;
+       return { started: startComputeProbe({ exports }) };
+     })()`
+  );
+  // Poll across frames exactly as group T does: the demo's rAF loop replays the
+  // poll and delivers its reply between these evaluations, and each evaluation
+  // drains what has arrived, then queues another poll while the map is still
+  // resolving. `readComputeProbe` drains first, so a reply delivered since the
+  // last frame is absorbed before another poll is queued.
+  const compute = computeStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+             const { readComputeProbe, pollComputeProbe, COMPUTE } =
+               await import('/engine/gpu-probe.js');
+             const { exports, gpu } = globalThis.crcbl;
+             const r = readComputeProbe({ exports, memory: exports.memory });
+             if (r.state === COMPUTE.UNDECODABLE) {
+               return { done: true, state: r.name, error: gpu.replayer.takeError() };
+             }
+             if (r.state !== COMPUTE.READY) {
+               // Not yet — queue another poll for the loop to replay, and wait.
+               pollComputeProbe({ exports });
+               return null;
+             }
+             // Ready: check every word here rather than shipping 64 numbers out.
+             // \`want\` is 0xDEADBEEF little-endian; a buffer left at zero is a
+             // dispatch that did not happen.
+             const want = ${JSON.stringify(PROBE_DISPATCH_PATTERN_BYTES)};
+             let allMatch = r.bytes.length === ${PROBE_DISPATCH_WORDS} * 4;
+             let firstWrong = -1;
+             for (let i = 0; i < r.bytes.length && allMatch; i += 1) {
+               if (r.bytes[i] !== want[i % 4]) {
+                 allMatch = false;
+                 firstWrong = i;
+               }
+             }
+             return {
+               done: true,
+               state: r.name,
+               len: r.bytes.length,
+               allMatch,
+               firstWrong,
+               // The first two words, for a failure message a human can read.
+               sample: [...r.bytes.slice(0, 8)],
+               error: gpu.replayer.takeError(),
+             };
+           })()`
+        )
+      )
+    : null;
+  check(
+    'U',
+    'wasm encoded the dispatch setup frame — pipeline, pass, bind, dispatch, copy, request',
+    computeStart?.started === true,
+    computeStart?.started
+      ? 'the dispatch-and-read frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'U',
+    'the dispatched storage buffer came back as 0xDEADBEEF, every word',
+    compute?.done === true &&
+      compute.allMatch === true &&
+      compute.len === PROBE_DISPATCH_WORDS * 4,
+    compute?.done !== true
+      ? `no dispatch readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : compute.allMatch
+        ? `${compute.len} bytes, every word 0xDEADBEEF [${PROBE_DISPATCH_PATTERN_BYTES.join(', ')}], not the zero-init a stub reads back`
+        : `state ${compute.state}, ${compute.len ?? 0} bytes, ` +
+          `first wrong at byte ${compute.firstWrong} (sample ${JSON.stringify(compute.sample)} ` +
+          `against [${PROBE_DISPATCH_PATTERN_BYTES.join(', ')}])` +
+          `${compute.error ? ` — ${compute.error}` : ''}`
+  );
+
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.

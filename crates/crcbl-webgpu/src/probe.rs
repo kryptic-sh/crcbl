@@ -62,6 +62,11 @@
 //! | [`__crcbl_web_gpu_probe_draw_state`](shim::__crcbl_web_gpu_probe_draw_state) | `() -> i32` | Drain, and answer one of the `DRAW_*` codes. |
 //! | [`__crcbl_web_gpu_probe_draw_bytes_ptr`](shim::__crcbl_web_gpu_probe_draw_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_draw_state`](shim::__crcbl_web_gpu_probe_draw_state) answers [`DRAW_READY`]. |
 //! | [`__crcbl_web_gpu_probe_draw_bytes_len`](shim::__crcbl_web_gpu_probe_draw_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the draw has not answered. |
+//! | [`__crcbl_web_gpu_probe_compute`](shim::__crcbl_web_gpu_probe_compute) | `() -> i32` | Encode one frame — a compute pipeline that writes [`PROBE_DISPATCH_PATTERN`] into a storage buffer, a pass that binds and dispatches it, the copy to a host buffer, and a `request_readback` against [`PROBE_DISPATCH_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_compute_poll`](shim::__crcbl_web_gpu_probe_compute_poll) | `() -> i32` | Poll the dispatch's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_compute_state`](shim::__crcbl_web_gpu_probe_compute_state) | `() -> i32` | Drain, and answer one of the `COMPUTE_*` codes. |
+//! | [`__crcbl_web_gpu_probe_compute_bytes_ptr`](shim::__crcbl_web_gpu_probe_compute_bytes_ptr) | `() -> i32` | Where the dispatched bytes start, once [`__crcbl_web_gpu_probe_compute_state`](shim::__crcbl_web_gpu_probe_compute_state) answers [`COMPUTE_READY`]. |
+//! | [`__crcbl_web_gpu_probe_compute_bytes_len`](shim::__crcbl_web_gpu_probe_compute_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the dispatch has not answered. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -295,17 +300,17 @@ use std::rc::Rc;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
     BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
-    BlendState, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, ClearValue,
+    BlendState, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, ClearValue,
     ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle, CommandEncoderDesc,
-    CompareOp, ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias, DepthStencilState,
-    DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, ImageAspect, ImageDesc, ImageHandle, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
-    LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle,
-    PolygonMode, PrimitiveState, PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle,
-    Rect2d, RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
-    ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo,
-    SurfaceCaps, SurfaceHandle,
+    CompareOp, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias,
+    DepthStencilState, DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect, ImageDesc, ImageHandle,
+    ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, MultisampleState, Offset3d,
+    PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PrimitiveState, PrimitiveTopology,
+    QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, SampleType,
+    SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -414,6 +419,28 @@ pub const DRAW_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`READBACK_UNDECODABLE`]'s twin.
 pub const DRAW_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const COMPUTE_UNASKED: u32 = 0;
+/// The setup frame — the storage buffer, the host buffer, the pipeline's four
+/// resources, a compute pass that binds and dispatches, the copy, the submit and
+/// the request — is on the stream, and no poll has been issued.
+pub const COMPUTE_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const COMPUTE_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const COMPUTE_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_compute_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_compute_bytes_len`] carry them — 64 `u32`s the
+/// dispatch wrote, which the gate checks are all [`PROBE_DISPATCH_PATTERN`] and
+/// so proves the dispatch ran.
+pub const COMPUTE_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`READBACK_UNDECODABLE`]'s twin.
+pub const COMPUTE_UNDECODABLE: u32 = 5;
 
 /// The side of the square texture the readback probe clears and reads back.
 ///
@@ -1526,6 +1553,241 @@ pub const PROBE_DRAW_PIPELINE_DESC: GraphicsPipelineDesc<'static> = GraphicsPipe
     color_targets: &PROBE_DRAW_COLOR_TARGETS,
 };
 
+// The dispatch probe (group U): a compute shader that writes a known 32-bit
+// pattern into a storage buffer, copied to a host buffer and read back, so the
+// bytes prove a `dispatchWorkgroups` actually ran. Every handle it names is
+// `3 << 32` — a generation past the draw probe's `2 << 32` and the readback
+// probe's `1 << 32` — so its live resources never land in another probe's slot
+// in the shared page. It creates *two* buffers, which the one type that carries
+// two here (storage and host) distinguishes by index; every other resource is a
+// different type, so a shared `3 << 32` is distinct by kind.
+//
+// **Named `PROBE_DISPATCH_*`, not `PROBE_COMPUTE_*`.** The compute-*pipeline*
+// probe (group Q) already owns the `PROBE_COMPUTE_PIPELINE*` names for the
+// pipeline it builds without ever dispatching; this probe is that one's draw-probe
+// analogue — its own pipeline and its own frame that runs the dispatch — so it
+// takes a distinct prefix the way [`PROBE_DRAW_PIPELINE`] is distinct from
+// [`PROBE_GRAPHICS_PIPELINE`].
+
+/// The 32-bit pattern the compute shader writes into every slot of the storage
+/// buffer — `0xDEADBEEF`, a value a zero-initialised buffer cannot hold, so a
+/// readback of it is proof the dispatch ran.
+pub const PROBE_DISPATCH_PATTERN: u32 = 0xDEAD_BEEF;
+
+/// [`PROBE_DISPATCH_PATTERN`] as the four little-endian bytes the storage buffer
+/// holds it as — what the gate checks every 4-byte word against.
+pub const PROBE_DISPATCH_PATTERN_BYTES: [u8; 4] = PROBE_DISPATCH_PATTERN.to_le_bytes();
+
+/// The number of `u32` slots the storage buffer holds and the dispatch fills.
+///
+/// **64, matching the shader's `@workgroup_size(64)`**: one `dispatch(1, 1, 1)`
+/// launches a single 64-invocation workgroup, and `out[gid.x]` fills slots 0..64,
+/// so the whole buffer is written by the one dispatch. `64 * 4 = 256` bytes, which
+/// is also a tightly-packed copy the buffer→buffer path needs no alignment for.
+pub const PROBE_DISPATCH_SLOTS: u32 = 64;
+
+/// The storage buffer the dispatch writes and the copy reads. `3 << 32`,
+/// index `0`.
+pub const PROBE_DISPATCH_STORAGE_BUFFER: BufferHandle = match BufferHandle::from_bits(3 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 3 is not zero"),
+};
+
+/// The storage buffer's descriptor: [`PROBE_DISPATCH_SLOTS`] `u32`s,
+/// [`BufferUsage::STORAGE`] (the dispatch's `read_write` binding) and
+/// [`BufferUsage::TRANSFER_SRC`] (it is copied from), device-local.
+#[must_use]
+pub const fn probe_dispatch_storage_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu dispatch storage buffer"),
+        size: (PROBE_DISPATCH_SLOTS as u64) * 4,
+        usage: BufferUsage::STORAGE.union(BufferUsage::TRANSFER_SRC),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The host buffer the storage buffer is copied into and read back from. A
+/// distinct handle from [`PROBE_DISPATCH_STORAGE_BUFFER`] — both are
+/// [`BufferHandle`]s, so they cannot share bits the way two different kinds can —
+/// at `3 << 32` with index `1`.
+pub const PROBE_DISPATCH_HOST_BUFFER: BufferHandle = match BufferHandle::from_bits((3 << 32) | 1) {
+    Some(buffer) => buffer,
+    None => panic!("generation 3 is not zero"),
+};
+
+/// The host buffer's descriptor — the readback buffer's shape
+/// ([`MemoryLocation::HostReadback`], [`BufferUsage::TRANSFER_DST`]) at
+/// [`PROBE_DISPATCH_SLOTS`] `u32`s, mirroring [`probe_draw_buffer_desc`].
+#[must_use]
+pub const fn probe_dispatch_host_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu dispatch host buffer"),
+        size: (PROBE_DISPATCH_SLOTS as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The compute WGSL: a `read_write` storage buffer whose every slot the shader
+/// sets to [`PROBE_DISPATCH_PATTERN`].
+///
+/// **`@workgroup_size(64)` and `out[gid.x]`**: a single `dispatch(1, 1, 1)` runs
+/// one 64-invocation workgroup, and each invocation writes its own slot, so the
+/// 64-`u32` buffer is filled exactly. `main` is the entry point
+/// [`PROBE_DISPATCH_PIPELINE_DESC`] names.
+pub const PROBE_DISPATCH_WGSL: &str = concat!(
+    "@group(0) @binding(0) var<storage, read_write> out: array<u32>; ",
+    "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) ",
+    "{ out[gid.x] = 0xDEADBEEFu; }"
+);
+
+/// The shader-module handle the dispatch probe's pipeline names. `3 << 32`.
+pub const PROBE_DISPATCH_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(3 << 32) {
+        Some(module) => module,
+        None => panic!("generation 3 is not zero"),
+    };
+
+/// The shader module the dispatch probe's frame creates. WGSL only, on
+/// [`PROBE_GRAPHICS_SHADER_MODULE_DESC`]'s terms, filed at
+/// [`PROBE_DISPATCH_SHADER_MODULE`].
+pub const PROBE_DISPATCH_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu dispatch shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_DISPATCH_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The bind-group-layout handle the dispatch pipeline is built against. `3 << 32`.
+pub const PROBE_DISPATCH_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
+    match BindGroupLayoutHandle::from_bits(3 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 3 is not zero"),
+    };
+
+/// The one binding the dispatch's shader declares: a `read_write` storage buffer
+/// at `@group(0) @binding(0)`, visible to compute. `read_only: false` is the
+/// interesting value — it is what makes the buffer writable by the dispatch.
+pub const PROBE_DISPATCH_BIND_GROUP_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 1] =
+    [BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::COMPUTE,
+        kind: BindingKind::StorageBuffer {
+            read_only: false,
+            dynamic: false,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    }];
+
+/// The bind-group layout the dispatch's frame creates just before the group.
+pub const PROBE_DISPATCH_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> =
+    BindGroupLayoutDesc {
+        label: Some("crcbl-webgpu dispatch layout"),
+        entries: &PROBE_DISPATCH_BIND_GROUP_LAYOUT_ENTRIES,
+    };
+
+/// The bind-group handle the dispatch binds at slot 0. `3 << 32`.
+pub const PROBE_DISPATCH_BIND_GROUP: BindGroupHandle = match BindGroupHandle::from_bits(3 << 32) {
+    Some(group) => group,
+    None => panic!("generation 3 is not zero"),
+};
+
+/// The one assignment the dispatch's bind group carries: the whole of
+/// [`PROBE_DISPATCH_STORAGE_BUFFER`] at binding 0.
+pub const PROBE_DISPATCH_BIND_GROUP_ENTRIES: [BindGroupEntry; 1] = [BindGroupEntry {
+    binding: 0,
+    array_index: 0,
+    resource: BindingResource::whole_buffer(PROBE_DISPATCH_STORAGE_BUFFER),
+}];
+
+/// The descriptor the dispatch's `create_bind_group` asks with: the layout above
+/// and the storage buffer bound whole.
+pub const PROBE_DISPATCH_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
+    label: Some("crcbl-webgpu dispatch bind group"),
+    layout: PROBE_DISPATCH_BIND_GROUP_LAYOUT,
+    entries: &PROBE_DISPATCH_BIND_GROUP_ENTRIES,
+    variable_count: None,
+};
+
+/// The pipeline-layout handle the dispatch pipeline is built against. `3 << 32`.
+pub const PROBE_DISPATCH_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(3 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 3 is not zero"),
+    };
+
+/// The one bind-group layout [`PROBE_DISPATCH_PIPELINE_LAYOUT_DESC`] names.
+pub const PROBE_DISPATCH_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS: [BindGroupLayoutHandle; 1] =
+    [PROBE_DISPATCH_BIND_GROUP_LAYOUT];
+
+/// The pipeline layout the dispatch's frame creates — the one bind-group layout
+/// above, no push constants.
+pub const PROBE_DISPATCH_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu dispatch pipeline layout"),
+    bind_group_layouts: &PROBE_DISPATCH_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS,
+    push_constants: None,
+};
+
+/// The compute-pipeline handle the dispatch binds. `3 << 32`.
+pub const PROBE_DISPATCH_PIPELINE: ComputePipelineHandle =
+    match ComputePipelineHandle::from_bits(3 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 3 is not zero"),
+    };
+
+/// The pipeline the dispatch binds and runs.
+///
+/// **`workgroup_size` is `[64, 1, 1]`, matching the module's
+/// `@workgroup_size(64)`.** The replayer drops the field — WebGPU reads the real
+/// value from the module — so it is chosen to agree with the shader, exactly as
+/// [`PROBE_COMPUTE_PIPELINE_DESC`] does. `compute.module` is
+/// [`PROBE_DISPATCH_SHADER_MODULE`] and `layout` is
+/// [`PROBE_DISPATCH_PIPELINE_LAYOUT`], the two ids resolved into two tables.
+pub const PROBE_DISPATCH_PIPELINE_DESC: ComputePipelineDesc<'static> = ComputePipelineDesc {
+    label: Some("crcbl-webgpu dispatch pipeline"),
+    layout: PROBE_DISPATCH_PIPELINE_LAYOUT,
+    compute: ShaderEntry {
+        module: PROBE_DISPATCH_SHADER_MODULE,
+        entry_point: "main",
+    },
+    workgroup_size: [PROBE_DISPATCH_SLOTS, 1, 1],
+};
+
+/// The queue the dispatch probe names in its command encoder. `3 << 32` —
+/// carried, not used to pick a queue: WebGPU has one implicit queue.
+pub const PROBE_DISPATCH_QUEUE: QueueHandle = match QueueHandle::from_bits(3 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 3 is not zero"),
+};
+
+/// The command buffer the dispatch probe finishes its encoder into. `3 << 32`.
+pub const PROBE_DISPATCH_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(3 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 3 is not zero"),
+    };
+
+/// The in-flight readback the dispatch probe requests and polls. `3 << 32`.
+pub const PROBE_DISPATCH_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(3 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 3 is not zero"),
+};
+
+/// The buffer→buffer copy that moves the dispatch's storage output into the host
+/// buffer — the whole 256 bytes from offset 0 to offset 0.
+#[must_use]
+pub const fn probe_dispatch_copy() -> BufferCopy {
+    BufferCopy {
+        src: PROBE_DISPATCH_STORAGE_BUFFER,
+        src_offset: 0,
+        dst: PROBE_DISPATCH_HOST_BUFFER,
+        dst_offset: 0,
+        size: (PROBE_DISPATCH_SLOTS as u64) * 4,
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -1765,6 +2027,72 @@ impl DrawProbe {
     }
 }
 
+/// One dispatch-and-read-back, from the frame that dispatched to the bytes read
+/// back — [`DrawProbe`]'s state machine again, on the compute path.
+///
+/// The two probes differ only in the frame they encode: a draw rasterises a
+/// triangle, a dispatch runs a compute shader that writes a storage buffer. Both
+/// end in the same `request_readback` and are answered by the same
+/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
+/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so the transitions
+/// mirror [`DrawProbe`]'s exactly.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum ComputeProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — 64 `u32`s, every one [`PROBE_DISPATCH_PATTERN`]
+        /// if the dispatch ran.
+        bytes: Vec<u8>,
+    },
+}
+
+impl ComputeProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`DrawProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            // A reply of another shape naming this sequence settles rather than
+            // waits, exactly as [`DrawProbe::absorb`] argues.
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -1802,6 +2130,10 @@ struct Probe {
     /// A decode error the draw drain hit, for [`DRAW_UNDECODABLE`]. Its own
     /// string for [`reason`](Self::reason)'s reason.
     draw_reason: String,
+    compute: ComputeProbe,
+    /// A decode error the compute drain hit, for [`COMPUTE_UNDECODABLE`]. Its own
+    /// string for [`reason`](Self::reason)'s reason.
+    compute_reason: String,
 }
 
 impl Probe {
@@ -1818,6 +2150,8 @@ impl Probe {
             readback_reason: String::new(),
             draw: DrawProbe::Unasked,
             draw_reason: String::new(),
+            compute: ComputeProbe::Unasked,
+            compute_reason: String::new(),
         }
     }
 
@@ -2233,6 +2567,7 @@ impl Probe {
                 self.caps.absorb(&replies);
                 self.readback.absorb(&replies);
                 self.draw.absorb(&replies);
+                self.compute.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -2577,6 +2912,142 @@ impl Probe {
     fn draw_bytes(&self) -> &[u8] {
         match &self.draw {
             DrawProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the dispatch setup frame: a compute pipeline that writes a storage
+    /// buffer, a pass that binds and dispatches it, and the copy to a host buffer
+    /// that is read back.
+    ///
+    /// **One frame, many commands, no reply** — [`request_draw`](Self::request_draw)'s
+    /// shape on the compute path. It records the two buffers, the pipeline's four
+    /// resources (shader, bind-group layout, bind group, pipeline layout, and the
+    /// pipeline itself), a command encoder, a compute pass that **binds
+    /// [`PROBE_DISPATCH_PIPELINE`], binds the storage buffer's group and
+    /// dispatches `1×1×1`** (one 64-invocation workgroup filling the 64 slots), the
+    /// buffer→buffer copy, the finish, the submit, and the `request_readback` under
+    /// [`PROBE_DISPATCH_READBACK`]. None is answered — every handle is
+    /// caller-allocated — so it is [`encode`](StreamChannel::encode); the poll is
+    /// what is awaited.
+    ///
+    /// `false` until a device has opened, [`request_draw`](Self::request_draw)'s
+    /// ordering rule — every command here is a device method.
+    fn request_compute(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_buffer(
+                    PROBE_DISPATCH_STORAGE_BUFFER,
+                    &probe_dispatch_storage_buffer_desc(),
+                );
+                stream.create_buffer(
+                    PROBE_DISPATCH_HOST_BUFFER,
+                    &probe_dispatch_host_buffer_desc(),
+                );
+                stream.create_shader_module(
+                    PROBE_DISPATCH_SHADER_MODULE,
+                    &PROBE_DISPATCH_SHADER_MODULE_DESC,
+                );
+                stream.create_bind_group_layout(
+                    PROBE_DISPATCH_BIND_GROUP_LAYOUT,
+                    &PROBE_DISPATCH_BIND_GROUP_LAYOUT_DESC,
+                );
+                stream
+                    .create_bind_group(PROBE_DISPATCH_BIND_GROUP, &PROBE_DISPATCH_BIND_GROUP_DESC);
+                stream.create_pipeline_layout(
+                    PROBE_DISPATCH_PIPELINE_LAYOUT,
+                    &PROBE_DISPATCH_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_compute_pipeline(
+                    PROBE_DISPATCH_PIPELINE,
+                    &PROBE_DISPATCH_PIPELINE_DESC,
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu dispatch encoder"),
+                    queue: PROBE_DISPATCH_QUEUE,
+                });
+                stream.begin_compute_pass(&ComputePassDesc {
+                    label: Some("crcbl-webgpu dispatch pass"),
+                });
+                stream.bind_compute_pipeline(PROBE_DISPATCH_PIPELINE);
+                stream.bind_group(
+                    0,
+                    PROBE_DISPATCH_BIND_GROUP,
+                    &[],
+                    PROBE_DISPATCH_PIPELINE_LAYOUT,
+                );
+                stream.dispatch(1, 1, 1);
+                stream.end_compute_pass();
+                stream.copy_buffer_to_buffer(&probe_dispatch_copy());
+                stream.finish(PROBE_DISPATCH_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_DISPATCH_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_DISPATCH_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu dispatch readback"),
+                        buffer: PROBE_DISPATCH_HOST_BUFFER,
+                        offset: 0,
+                        size: probe_dispatch_host_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.compute = ComputeProbe::Requested;
+            self.compute_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// dispatch's readback and register its wait, unless it is already waiting or
+    /// ready — [`poll_draw`](Self::poll_draw)'s protocol on the dispatch's handle.
+    fn poll_compute(&mut self) -> bool {
+        if !matches!(
+            self.compute,
+            ComputeProbe::Requested | ComputeProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_DISPATCH_READBACK))
+        else {
+            return false;
+        };
+        self.compute = ComputeProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the dispatch readback has got to.
+    fn compute_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.compute_reason = error.to_string();
+            return COMPUTE_UNDECODABLE;
+        }
+        match &self.compute {
+            ComputeProbe::Unasked => COMPUTE_UNASKED,
+            ComputeProbe::Requested => COMPUTE_REQUESTED,
+            ComputeProbe::Waiting { .. } => COMPUTE_WAITING,
+            ComputeProbe::Pending => COMPUTE_PENDING,
+            ComputeProbe::Ready { .. } => COMPUTE_READY,
+        }
+    }
+
+    /// The bytes the dispatch readback came back with, or an empty slice if it
+    /// has not.
+    fn compute_bytes(&self) -> &[u8] {
+        match &self.compute {
+            ComputeProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -3347,6 +3818,78 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Ask the page to run a compute dispatch that writes a known pattern into a
+    /// storage buffer and start reading it back on the device it opened.
+    ///
+    /// `1` when the setup frame — the two buffers, the pipeline's four resources,
+    /// an encoder, a compute pass that binds and dispatches, the copy, finish,
+    /// submit and `request_readback` — is on the stream; `0` when no device has
+    /// opened yet, the probe is re-entered, or another channel is installed.
+    ///
+    /// **This is the decisive observation point of the dispatch arms**: a fresh
+    /// WebGPU buffer is zero-initialised, so a readback of
+    /// [`PROBE_DISPATCH_PATTERN`](super::PROBE_DISPATCH_PATTERN) can only come from
+    /// a `dispatchWorkgroups` that actually ran — a stub that skips the dispatch
+    /// reads back zeros.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_compute() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_compute()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the dispatch's in-flight readback, once, on the reply channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for — no
+    /// dispatch requested, a poll already unanswered, or the bytes already in — or
+    /// when the channel would not take it. A no-op until the previous poll is
+    /// answered, so the gate can call it blindly each frame.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_compute_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_compute()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the dispatch readback has got to — one
+    /// of the `COMPUTE_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_compute_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.compute_state(),
+            Err(_) => super::COMPUTE_UNASKED,
+        })
+    }
+
+    /// A pointer into wasm memory to the bytes the dispatch readback came back
+    /// with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_compute_bytes_len`] bytes from here, and only
+    /// once [`__crcbl_web_gpu_probe_compute_state`] has answered
+    /// [`COMPUTE_READY`](super::COMPUTE_READY): before that the length is `0` and
+    /// this points at an empty buffer. Nothing here grows wasm memory, so the
+    /// pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_compute_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.compute_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_compute_bytes_ptr`] points at — the
+    /// dispatch readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_compute_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.compute_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -3358,21 +3901,23 @@ mod tests {
 
     use super::shim::{
         __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_bind_group,
-        __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_compute_pipeline,
-        __crcbl_web_gpu_probe_device, __crcbl_web_gpu_probe_device_features_hi,
-        __crcbl_web_gpu_probe_device_features_lo, __crcbl_web_gpu_probe_device_max_image_2d,
-        __crcbl_web_gpu_probe_device_reason_len, __crcbl_web_gpu_probe_device_reason_ptr,
-        __crcbl_web_gpu_probe_device_state, __crcbl_web_gpu_probe_draw,
-        __crcbl_web_gpu_probe_draw_bytes_len, __crcbl_web_gpu_probe_draw_bytes_ptr,
-        __crcbl_web_gpu_probe_draw_poll, __crcbl_web_gpu_probe_draw_state,
-        __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
-        __crcbl_web_gpu_probe_graphics_pipeline, __crcbl_web_gpu_probe_image,
-        __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_max_image_2d,
-        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_sampler,
-        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_compute,
+        __crcbl_web_gpu_probe_compute_bytes_len, __crcbl_web_gpu_probe_compute_bytes_ptr,
+        __crcbl_web_gpu_probe_compute_pipeline, __crcbl_web_gpu_probe_compute_poll,
+        __crcbl_web_gpu_probe_compute_state, __crcbl_web_gpu_probe_device,
+        __crcbl_web_gpu_probe_device_features_hi, __crcbl_web_gpu_probe_device_features_lo,
+        __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
+        __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
+        __crcbl_web_gpu_probe_draw, __crcbl_web_gpu_probe_draw_bytes_len,
+        __crcbl_web_gpu_probe_draw_bytes_ptr, __crcbl_web_gpu_probe_draw_poll,
+        __crcbl_web_gpu_probe_draw_state, __crcbl_web_gpu_probe_features_hi,
+        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_graphics_pipeline,
+        __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
+        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -4589,6 +5134,235 @@ mod tests {
         )]);
         assert!(!advanced);
         assert_eq!(draw, DrawProbe::Waiting { sequence: 7 });
+    }
+
+    /// The dispatch probe's bytes, read the way JS reads them.
+    fn compute_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_compute_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_compute_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the dispatch answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::compute` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **Every dispatch handle is a generation past every other probe's**, which
+    /// is the whole point of `3 << 32`: the dispatch frame has two buffers, a
+    /// shader, a bind-group layout, a bind group, a pipeline layout, a pipeline, a
+    /// command buffer, a queue and a readback all live at once, and none of them
+    /// may land in the slot the readback (`1 << 32`) or draw (`2 << 32`) probe
+    /// files its own resources under in the shared page. The two buffers are the
+    /// one case that shares a type, so they differ by index within generation 3.
+    #[test]
+    fn the_dispatch_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_DISPATCH_STORAGE_BUFFER.to_bits(),
+            PROBE_DISPATCH_HOST_BUFFER.to_bits(),
+            PROBE_DISPATCH_SHADER_MODULE.to_bits(),
+            PROBE_DISPATCH_BIND_GROUP_LAYOUT.to_bits(),
+            PROBE_DISPATCH_BIND_GROUP.to_bits(),
+            PROBE_DISPATCH_PIPELINE_LAYOUT.to_bits(),
+            PROBE_DISPATCH_PIPELINE.to_bits(),
+            PROBE_DISPATCH_COMMAND_BUFFER.to_bits(),
+            PROBE_DISPATCH_QUEUE.to_bits(),
+            PROBE_DISPATCH_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 3, "every dispatch handle is generation three");
+        }
+        // The two buffers share a kind, so they must not share bits.
+        assert_ne!(
+            PROBE_DISPATCH_STORAGE_BUFFER.to_bits(),
+            PROBE_DISPATCH_HOST_BUFFER.to_bits()
+        );
+        // A generation clear of both the readback probe (`1 << 32`) and the draw
+        // probe (`2 << 32`).
+        assert_ne!(
+            PROBE_DISPATCH_STORAGE_BUFFER.to_bits(),
+            PROBE_DRAW_BUFFER.to_bits()
+        );
+        assert_ne!(
+            PROBE_DISPATCH_PIPELINE.to_bits(),
+            PROBE_COMPUTE_PIPELINE.to_bits()
+        );
+        assert_ne!(
+            PROBE_DISPATCH_READBACK.to_bits(),
+            PROBE_DRAW_READBACK.to_bits()
+        );
+    }
+
+    /// The dispatch half: **one export, a whole frame** that dispatches into a
+    /// storage buffer and copies it out. The two buffers and the pipeline's four
+    /// resources come first, then the encoder and a compute pass that binds the
+    /// pipeline, binds the storage group and dispatches before the buffer→buffer
+    /// copy, the finish, the submit and the `request_readback` the poll chases.
+    #[test]
+    fn the_compute_export_encodes_the_pipeline_the_bind_and_the_dispatch() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_compute(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateShaderModule",
+                "CreateBindGroupLayout",
+                "CreateBindGroup",
+                "CreatePipelineLayout",
+                "CreateComputePipeline",
+                "CreateCommandEncoder",
+                "BeginComputePass",
+                "BindComputePipeline",
+                "BindGroup",
+                "Dispatch",
+                "EndComputePass",
+                "CopyBufferToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the frame builds the pipeline, then binds, dispatches and reads back"
+        );
+        // The three commands the dispatch arms add inside the pass, verbatim: the
+        // pipeline bind names the dispatch pipeline, the group binds the storage
+        // buffer at slot 0 with no dynamic offsets, and the dispatch is one
+        // workgroup in each dimension.
+        assert!(commands.contains(&Command::BindComputePipeline {
+            pipeline: PROBE_DISPATCH_PIPELINE,
+        }));
+        assert!(commands.contains(&Command::BindGroup {
+            slot: 0,
+            group: PROBE_DISPATCH_BIND_GROUP,
+            dynamic_offsets: Vec::new(),
+            layout: PROBE_DISPATCH_PIPELINE_LAYOUT,
+        }));
+        assert!(commands.contains(&Command::Dispatch { x: 1, y: 1, z: 1 }));
+    }
+
+    /// **Nothing waits on the setup frame**: every command in it is caller-
+    /// allocated and answered by nothing, so the wait belongs to the poll, not
+    /// here — [`the_draw_setup_frame_registers_no_wait_because_the_poll_is_what_is_awaited`]'s
+    /// rule on the dispatch's frame.
+    #[test]
+    fn the_compute_setup_frame_registers_no_wait_because_the_poll_is_what_is_awaited() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_compute(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(__crcbl_web_gpu_probe_compute_state(), COMPUTE_REQUESTED);
+    }
+
+    /// **A device has to have opened first**, the readback probe's ordering rule:
+    /// every command the frame carries is a device method.
+    #[test]
+    fn a_compute_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_compute(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_compute_state(), COMPUTE_UNASKED);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_compute(), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The whole dispatch exchange through the exports alone: request, poll, and a
+    /// `ReadbackReady` carrying the dispatched pattern — which reaches the bytes
+    /// exports. This is the browser gate's path with the replayer replaced by a
+    /// `ReplyWriter`, as a `cargo test` has no `navigator.gpu`.
+    #[test]
+    fn the_compute_readback_reaches_the_bytes_exports_as_the_dispatch_pattern() {
+        // `open_device` spends sequences 0 and 1, so the setup frame starts at 2
+        // and the poll follows it — read the length off the frame rather than
+        // hard-wiring it, so a later command added to the frame does not point the
+        // reply at the wrong sequence.
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_compute(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_compute_state(), COMPUTE_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_compute_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_compute_state(), COMPUTE_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_DISPATCH_READBACK,
+            }]
+        );
+
+        let mut written = Vec::new();
+        for _ in 0..PROBE_DISPATCH_SLOTS {
+            written.extend_from_slice(&PROBE_DISPATCH_PATTERN_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_DISPATCH_READBACK, &written);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_compute_state(), COMPUTE_READY);
+        assert_eq!(compute_bytes(), written);
+        assert_eq!(&compute_bytes()[..4], PROBE_DISPATCH_PATTERN_BYTES);
+        // The pattern is a value a zero-initialised buffer cannot hold — the whole
+        // evidence the gate reads back from the browser.
+        assert_ne!(PROBE_DISPATCH_PATTERN_BYTES, [0, 0, 0, 0]);
+    }
+
+    /// A `ReadbackPending` for the poll's sequence drops the dispatch back to
+    /// `Pending`, so the next frame polls again — [`ComputeProbe::absorb`]'s
+    /// pending arm.
+    #[test]
+    fn a_readback_pending_reply_drops_the_dispatch_back_to_pending() {
+        let mut compute = ComputeProbe::Waiting { sequence: 7 };
+        let advanced = compute.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_DISPATCH_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(compute, ComputeProbe::Pending);
+    }
+
+    /// A `ReadbackReady` for the poll's sequence carries the bytes into `Ready`.
+    #[test]
+    fn a_readback_ready_reply_carries_the_dispatch_bytes_into_ready() {
+        let mut compute = ComputeProbe::Waiting { sequence: 7 };
+        let bytes = vec![0xEF, 0xBE, 0xAD, 0xDE];
+        let advanced = compute.absorb(&[(
+            7,
+            Reply::ReadbackReady {
+                readback: PROBE_DISPATCH_READBACK,
+                data: bytes.clone(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(compute, ComputeProbe::Ready { bytes });
+    }
+
+    /// A reply for another sequence leaves the dispatch waiting, exactly as it
+    /// leaves every other probe.
+    #[test]
+    fn a_compute_probe_ignores_a_reply_for_another_sequence() {
+        let mut compute = ComputeProbe::Waiting { sequence: 7 };
+        let advanced = compute.absorb(&[(
+            8,
+            Reply::ReadbackReady {
+                readback: PROBE_DISPATCH_READBACK,
+                data: vec![1, 2, 3, 4],
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(compute, ComputeProbe::Waiting { sequence: 7 });
     }
 
     /// The capabilities a browser answers with, as `gpu-replay.js` builds them:

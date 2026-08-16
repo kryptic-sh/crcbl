@@ -4,15 +4,15 @@ use core::ops::Range;
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindGroupLayoutHandle, BindingKind, BindingResource, BlendState, BufferDesc, BufferHandle,
-    BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState, CommandBufferHandle,
-    CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, DepthStencilAttachment,
-    DepthStencilState, DeviceDesc, Extent3d, GraphicsPipelineDesc, GraphicsPipelineHandle,
-    ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc,
-    ImageViewHandle, MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle,
-    PrimitiveState, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, SamplerDesc,
-    SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle,
-    ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle,
+    BindGroupLayoutHandle, BindingKind, BindingResource, BlendState, BufferCopy, BufferDesc,
+    BufferHandle, BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState,
+    CommandBufferHandle, CommandEncoderDesc, ComputePassDesc, ComputePipelineDesc,
+    ComputePipelineHandle, DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageViewDesc, ImageViewHandle, MultisampleState, Offset3d,
+    PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, ReadbackDesc, ReadbackHandle, Rect2d,
+    RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -1088,6 +1088,41 @@ impl StreamWriter {
         self.push_tag(tag::END_RENDER_PASS_TAG)
     }
 
+    /// [`begin_compute_pass`](crcbl_hal::CommandEncoder::begin_compute_pass).
+    ///
+    /// The whole of [`ComputePassDesc`], which is only a label — compute has no
+    /// attachments.
+    pub fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::BEGIN_COMPUTE_PASS_TAG);
+        self.bytes.put_opt_str(desc.label);
+        sequence
+    }
+
+    /// [`bind_compute_pipeline`](crcbl_hal::CommandEncoder::bind_compute_pipeline).
+    pub fn bind_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) -> u64 {
+        let sequence = self.push_tag(tag::BIND_COMPUTE_PIPELINE_TAG);
+        self.bytes.put_handle(pipeline);
+        sequence
+    }
+
+    /// [`dispatch`](crcbl_hal::CommandEncoder::dispatch) — the three workgroup
+    /// counts, in the order the HAL call takes them.
+    pub fn dispatch(&mut self, x: u32, y: u32, z: u32) -> u64 {
+        let sequence = self.push_tag(tag::DISPATCH_TAG);
+        self.bytes.put_u32(x);
+        self.bytes.put_u32(y);
+        self.bytes.put_u32(z);
+        sequence
+    }
+
+    /// [`end_compute_pass`](crcbl_hal::CommandEncoder::end_compute_pass).
+    ///
+    /// Body-less, on the implicit-current encoder: it closes the pass
+    /// [`begin_compute_pass`](Self::begin_compute_pass) opened.
+    pub fn end_compute_pass(&mut self) -> u64 {
+        self.push_tag(tag::END_COMPUTE_PASS_TAG)
+    }
+
     /// [`finish`](crcbl_hal::CommandEncoder::finish) — consumes the
     /// implicit-current encoder and produces the command buffer.
     ///
@@ -1127,6 +1162,24 @@ impl StreamWriter {
         self.bytes.put_subresource_layers(copy.image_subresource);
         self.bytes.put_offset(copy.image_offset);
         self.bytes.put_extent(copy.image_extent);
+        sequence
+    }
+
+    /// [`copy_buffer_to_buffer`](crcbl_hal::CommandEncoder::copy_buffer_to_buffer),
+    /// on the implicit-current encoder.
+    ///
+    /// The whole of [`BufferCopy`] in the order the struct declares it — source
+    /// and its offset, destination and its offset, then the size. It is the only
+    /// way a dispatch's storage-buffer output is observed: a storage buffer cannot
+    /// be `MAP_READ`, so it is copied here into a host-readable buffer the readback
+    /// then maps.
+    pub fn copy_buffer_to_buffer(&mut self, copy: &BufferCopy) -> u64 {
+        let sequence = self.push_tag(tag::COPY_BUFFER_TO_BUFFER_TAG);
+        self.bytes.put_handle(copy.src);
+        self.bytes.put_u64(copy.src_offset);
+        self.bytes.put_handle(copy.dst);
+        self.bytes.put_u64(copy.dst_offset);
+        self.bytes.put_u64(copy.size);
         sequence
     }
 

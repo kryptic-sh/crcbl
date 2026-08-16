@@ -123,6 +123,24 @@ export const DRAW = Object.freeze({
 });
 
 /**
+ * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The dispatch probe is a readback at heart — its setup frame ends in the same
+ * `request_readback` — so its codes mirror {@link READBACK} exactly. `READY`
+ * carries the 64 `u32`s the dispatch wrote, which the gate checks are all the
+ * known pattern and so proves the dispatch ran.
+ */
+export const COMPUTE = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
  * The `SurfaceCapsFailure` codes `crates/crcbl-webgpu/src/tag.rs` assigns, which
  * `__crcbl_web_gpu_probe_surface_caps_cause` answers with.
  *
@@ -917,4 +935,74 @@ export function readDrawProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: drawStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the compute codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function computeStateName(state) {
+  const found = Object.entries(COMPUTE).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to run a compute dispatch that writes a known pattern into a storage
+ * buffer and start reading it back on the device it opened.
+ *
+ * {@link startDrawProbe}'s dispatch sibling: one frame that builds a compute
+ * pipeline, binds and dispatches it, copies its storage buffer to a host buffer,
+ * submits and requests. {@link pollComputeProbe} drives the poll and
+ * {@link readComputeProbe} reads the bytes when they land. Its answer is *data*
+ * and it needs a **device**, so `false` before one has opened is ordering rather
+ * than failure — wait for {@link readDeviceProbe} to say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startComputeProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_compute() === 1;
+}
+
+/**
+ * Poll the dispatch's in-flight readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_compute_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollComputeProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_compute_poll() === 1;
+}
+
+/**
+ * Read where the dispatch readback has got to, and its bytes once it is `READY`.
+ *
+ * {@link readDrawProbe}'s dispatch sibling, and `state` first for its reason —
+ * draining allocates and may detach a view built before it, so the `Uint8Array`
+ * is built after the state call and copied out with `slice`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readComputeProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_compute_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_compute_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_compute_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: computeStateName(state), bytes };
 }

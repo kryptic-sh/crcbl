@@ -13,16 +13,17 @@
 use crcbl_core::Handle;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp, BlendState, BufferDesc,
-    BufferImageCopy, BufferUsage, ClearValue, ColorAttachment, ColorTargetState, ColorWrites,
-    CommandEncoderDesc, CompareOp, ComputePipelineDesc, CullMode, DepthBias,
-    DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d, Features, FilterMode, Format,
-    FrontFace, GraphicsPipelineDesc, ImageAspect, ImageDesc, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp,
-    MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc, PolygonMode, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, ReadbackDesc, Rect2d, RenderPassDesc, SampleType,
-    SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp, SubmitInfo, depth,
+    BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp, BlendState, BufferCopy,
+    BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment, ColorTargetState,
+    ColorWrites, CommandEncoderDesc, CompareOp, ComputePassDesc, ComputePipelineDesc, CullMode,
+    DepthBias, DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d, Features,
+    FilterMode, Format, FrontFace, GraphicsPipelineDesc, ImageAspect, ImageDesc,
+    ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewType, LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc,
+    PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, ReadbackDesc, Rect2d,
+    RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp, StencilState,
+    StoreOp, SubmitInfo, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -963,6 +964,38 @@ pub fn every_command() -> Vec<Command> {
             vertices: 6..9,
             instances: 1..5,
         },
+        // The compute-pass commands. `BeginComputePass` carries only a label —
+        // compute has no attachments — and its labelled form is paired with the
+        // `None` twin below. The dispatch's three counts are all distinct so a
+        // transposition among x/y/z is visible.
+        Command::BeginComputePass {
+            label: Some("cull".into()),
+        },
+        Command::BindComputePipeline {
+            pipeline: handle(174, 175),
+        },
+        Command::Dispatch {
+            x: 1000,
+            y: 2000,
+            z: 3000,
+        },
+        Command::EndComputePass,
+        // The unlabelled twin of the pass above: `None` and `Some(_)` are
+        // different values.
+        Command::BeginComputePass { label: None },
+        // The copy that carries a dispatch's storage-buffer output to a host
+        // buffer. Distinct source and destination handles, and its two offsets and
+        // the size are three different values so a transposition among the copy's
+        // `u64` fields is visible.
+        Command::CopyBufferToBuffer {
+            copy: BufferCopy {
+                src: handle(176, 177),
+                src_offset: 1111,
+                dst: handle(178, 179),
+                dst_offset: 2222,
+                size: 3333,
+            },
+        },
         // **Every bit of both feature words crosses**, including the ones no
         // browser can satisfy: the replayer is what refuses them, and it can
         // only refuse what it was told. `TIMELINE_SEMAPHORE` is required here
@@ -1338,6 +1371,13 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             vertices,
             instances,
         } => stream.draw(vertices.clone(), instances.clone()),
+        Command::BeginComputePass { label } => stream.begin_compute_pass(&ComputePassDesc {
+            label: label.as_deref(),
+        }),
+        Command::BindComputePipeline { pipeline } => stream.bind_compute_pipeline(*pipeline),
+        Command::Dispatch { x, y, z } => stream.dispatch(*x, *y, *z),
+        Command::EndComputePass => stream.end_compute_pass(),
+        Command::CopyBufferToBuffer { copy } => stream.copy_buffer_to_buffer(copy),
         Command::EnumerateAdapters => stream.enumerate_adapters(),
         Command::SurfaceCaps => stream.surface_caps(),
         Command::CreateCommandEncoder { label, queue } => {

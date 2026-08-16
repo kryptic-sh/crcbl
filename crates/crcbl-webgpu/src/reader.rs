@@ -19,13 +19,13 @@
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource,
-    BlendFactor, BlendOp, BlendState, BufferUsage, ClearValue, ColorAttachment, ColorTargetState,
-    ColorWrites, CompareOp, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
-    Extent3d, FilterMode, Format, FrontFace, ImageAspect, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewType, LoadOp, MultisampleState,
-    Offset3d, PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, Rect2d,
-    SampleType, SamplerAddressMode, SemaphoreSignal, SemaphoreWait, ShaderStages, StencilFaceState,
-    StencilOp, StencilState, StoreOp,
+    BlendFactor, BlendOp, BlendState, BufferCopy, BufferUsage, ClearValue, ColorAttachment,
+    ColorTargetState, ColorWrites, CompareOp, CullMode, DepthBias, DepthStencilAttachment,
+    DepthStencilState, Extent3d, FilterMode, Format, FrontFace, ImageAspect,
+    ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewType, LoadOp,
+    MultisampleState, Offset3d, PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange,
+    Rect2d, SampleType, SamplerAddressMode, SemaphoreSignal, SemaphoreWait, ShaderStages,
+    StencilFaceState, StencilOp, StencilState, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -1056,6 +1056,20 @@ impl<'a> StreamReader<'a> {
                     instances: first_instance..last_instance,
                 })
             }
+            tag::BEGIN_COMPUTE_PASS_TAG => {
+                let label = r.read_opt_string("ComputePassDesc::label")?;
+                Ok(Command::BeginComputePass { label })
+            }
+            tag::BIND_COMPUTE_PIPELINE_TAG => Ok(Command::BindComputePipeline {
+                pipeline: r.read_handle("BindComputePipeline::pipeline")?,
+            }),
+            tag::DISPATCH_TAG => {
+                let x = r.read_u32()?;
+                let y = r.read_u32()?;
+                let z = r.read_u32()?;
+                Ok(Command::Dispatch { x, y, z })
+            }
+            tag::END_COMPUTE_PASS_TAG => Ok(Command::EndComputePass),
             tag::ENUMERATE_ADAPTERS_TAG => Ok(Command::EnumerateAdapters),
             tag::REQUEST_DEVICE_TAG => {
                 let adapter = AdapterId(r.read_u32()?);
@@ -1103,6 +1117,24 @@ impl<'a> StreamReader<'a> {
                     image_subresource,
                     image_offset,
                     image_extent,
+                })
+            }
+            tag::COPY_BUFFER_TO_BUFFER_TAG => {
+                // `BufferCopy` in declaration order: source and its offset,
+                // destination and its offset, then the size.
+                let src = r.read_handle("BufferCopy::src")?;
+                let src_offset = r.read_u64()?;
+                let dst = r.read_handle("BufferCopy::dst")?;
+                let dst_offset = r.read_u64()?;
+                let size = r.read_u64()?;
+                Ok(Command::CopyBufferToBuffer {
+                    copy: BufferCopy {
+                        src,
+                        src_offset,
+                        dst,
+                        dst_offset,
+                        size,
+                    },
                 })
             }
             tag::FINISH_TAG => Ok(Command::Finish {

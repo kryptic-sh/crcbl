@@ -1642,12 +1642,13 @@ fn every_command_has_its_own_name() {
     // CreateBindGroups, three CreateShaderModules, two CreatePipelineLayouts, one
     // CreateComputePipeline and its DestroyComputePipeline, one
     // CreateGraphicsPipeline and its DestroyGraphicsPipeline, two each of
-    // BeginRenderPass, BindGroup, RequestDevice, Submit and RequestReadback, and
-    // one each of the rest of the readback path (CreateCommandEncoder,
-    // EndRenderPass, CopyImageToBuffer, Finish, PollReadback, DestroyReadback,
-    // DestroyCommandBuffer), so the distinct-name count is what the writer has
-    // methods for.
-    assert_eq!(names.len(), 40);
+    // BeginRenderPass, BindGroup, BeginComputePass, RequestDevice, Submit and
+    // RequestReadback, and one each of the rest of the readback path
+    // (CreateCommandEncoder, EndRenderPass, CopyImageToBuffer, Finish,
+    // PollReadback, DestroyReadback, DestroyCommandBuffer) and of the compute pass
+    // (BindComputePipeline, Dispatch, EndComputePass, CopyBufferToBuffer), so the
+    // distinct-name count is what the writer has methods for.
+    assert_eq!(names.len(), 45);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

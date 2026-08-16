@@ -946,6 +946,27 @@ const EXPECTED = [
     vertices: { start: 6, end: 9 },
     instances: { start: 1, end: 5 },
   },
+  // The compute-pass commands. `BeginComputePass` is a label only — compute has
+  // no attachments — with its `None` twin below; the dispatch's three counts are
+  // distinct so a transposition among x/y/z is visible.
+  { name: 'BeginComputePass', label: 'cull' },
+  { name: 'BindComputePipeline', pipeline: handle(174, 175) },
+  { name: 'Dispatch', x: 1000, y: 2000, z: 3000 },
+  { name: 'EndComputePass' },
+  { name: 'BeginComputePass', label: null },
+  // The copy that carries a dispatch's storage-buffer output to a host buffer.
+  // Distinct source and destination, and its two offsets and the size are three
+  // different `BigInt`s so a transposition among the `u64` fields is visible.
+  {
+    name: 'CopyBufferToBuffer',
+    copy: {
+      src: handle(176, 177),
+      srcOffset: 1111n,
+      dst: handle(178, 179),
+      dstOffset: 2222n,
+      size: 3333n,
+    },
+  },
   // Both feature words are `BigInt`, and the required one carries
   // `TIMELINE_SEMAPHORE` (1 << 9) — a flag WebGPU cannot satisfy, which crosses
   // anyway because the replayer is what refuses it.

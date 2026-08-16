@@ -110,8 +110,18 @@ const PUSH_CONSTANTS_TAG = 0x44;
 const CREATE_COMMAND_ENCODER_TAG = 0x45;
 const END_RENDER_PASS_TAG = 0x46;
 const FINISH_TAG = 0x47;
+// The compute-pass encoder state: opening a compute pass (label only — compute
+// has no attachments), binding a compute pipeline, and closing the pass.
+const BEGIN_COMPUTE_PASS_TAG = 0x48;
+const END_COMPUTE_PASS_TAG = 0x49;
+const BIND_COMPUTE_PIPELINE_TAG = 0x4a;
 const DRAW_TAG = 0x60;
+// The dispatch family: the workgroup counts for a compute dispatch.
+const DISPATCH_TAG = 0x70;
 const COPY_IMAGE_TO_BUFFER_TAG = 0x78;
+// The buffer→buffer copy that carries a dispatch's storage-buffer output to a
+// host-readable buffer — the only way a dispatch is observed.
+const COPY_BUFFER_TO_BUFFER_TAG = 0x79;
 const ENUMERATE_ADAPTERS_TAG = 0x90;
 const REQUEST_DEVICE_TAG = 0x91;
 const SURFACE_CAPS_TAG = 0x92;
@@ -1869,6 +1879,29 @@ function decodeCommand(r) {
         name: 'Finish',
         commandBuffer: r.readHandle('Finish::command_buffer'),
       };
+    case BEGIN_COMPUTE_PASS_TAG:
+      // `ComputePassDesc` is only a label — compute has no attachments.
+      return {
+        name: 'BeginComputePass',
+        label: r.readOptString('ComputePassDesc::label'),
+      };
+    case BIND_COMPUTE_PIPELINE_TAG:
+      return {
+        name: 'BindComputePipeline',
+        pipeline: r.readHandle('BindComputePipeline::pipeline'),
+      };
+    case END_COMPUTE_PASS_TAG:
+      // Body-less: it closes the pass `BeginComputePass` opened, on the
+      // implicit-current encoder.
+      return { name: 'EndComputePass' };
+    case DISPATCH_TAG:
+      // The three workgroup counts, in the order the HAL call takes them.
+      return {
+        name: 'Dispatch',
+        x: r.readU32(),
+        y: r.readU32(),
+        z: r.readU32(),
+      };
     case COPY_IMAGE_TO_BUFFER_TAG: {
       // `BufferImageCopy` in declaration order; the direction is the tag, never a
       // field. `bufferRowLength` is in TEXELS and `0` is tightly packed — both
@@ -1893,6 +1926,20 @@ function decodeCommand(r) {
         imageSubresource,
         imageOffset,
         imageExtent,
+      };
+    }
+    case COPY_BUFFER_TO_BUFFER_TAG: {
+      // `BufferCopy` in declaration order: source and its offset, destination
+      // and its offset, then the size. The two offsets and the size are `u64`,
+      // read as `BigInt`.
+      const src = r.readHandle('BufferCopy::src');
+      const srcOffset = r.readU64();
+      const dst = r.readHandle('BufferCopy::dst');
+      const dstOffset = r.readU64();
+      const size = r.readU64();
+      return {
+        name: 'CopyBufferToBuffer',
+        copy: { src, srcOffset, dst, dstOffset, size },
       };
     }
     case DRAW_TAG: {

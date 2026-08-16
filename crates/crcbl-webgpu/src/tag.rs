@@ -385,11 +385,24 @@ pub const END_RENDER_PASS_TAG: u8 = 0x46;
 /// the caller allocated. In the encoder family for
 /// [`CREATE_COMMAND_ENCODER_TAG`]'s reason.
 pub const FINISH_TAG: u8 = 0x47;
+/// [`Command::BeginComputePass`](crate::Command::BeginComputePass).
+pub const BEGIN_COMPUTE_PASS_TAG: u8 = 0x48;
+/// [`Command::EndComputePass`](crate::Command::EndComputePass).
+pub const END_COMPUTE_PASS_TAG: u8 = 0x49;
+/// [`Command::BindComputePipeline`](crate::Command::BindComputePipeline).
+pub const BIND_COMPUTE_PIPELINE_TAG: u8 = 0x4A;
 /// [`Command::Draw`](crate::Command::Draw).
 pub const DRAW_TAG: u8 = 0x60;
+/// [`Command::Dispatch`](crate::Command::Dispatch) — the first tag of the
+/// dispatch family, [`FAMILY_DISPATCH`].
+pub const DISPATCH_TAG: u8 = 0x70;
 /// [`Command::CopyImageToBuffer`](crate::Command::CopyImageToBuffer) — the
 /// readback path's image→buffer copy.
 pub const COPY_IMAGE_TO_BUFFER_TAG: u8 = 0x78;
+/// [`Command::CopyBufferToBuffer`](crate::Command::CopyBufferToBuffer) — the
+/// buffer→buffer copy that carries a dispatch's storage-buffer output back to a
+/// host-readable buffer.
+pub const COPY_BUFFER_TO_BUFFER_TAG: u8 = 0x79;
 /// [`Command::EnumerateAdapters`](crate::Command::EnumerateAdapters).
 pub const ENUMERATE_ADAPTERS_TAG: u8 = 0x90;
 /// [`Command::RequestDevice`](crate::Command::RequestDevice).
@@ -1652,7 +1665,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 40] = [
+    const TAGS: [(&str, u8, u8); 45] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1738,8 +1751,17 @@ mod tests {
         ),
         ("EndRenderPass", END_RENDER_PASS_TAG, FAMILY_ENCODER),
         ("Finish", FINISH_TAG, FAMILY_ENCODER),
+        ("BeginComputePass", BEGIN_COMPUTE_PASS_TAG, FAMILY_ENCODER),
+        ("EndComputePass", END_COMPUTE_PASS_TAG, FAMILY_ENCODER),
+        (
+            "BindComputePipeline",
+            BIND_COMPUTE_PIPELINE_TAG,
+            FAMILY_ENCODER,
+        ),
         ("Draw", DRAW_TAG, FAMILY_DRAW),
+        ("Dispatch", DISPATCH_TAG, FAMILY_DISPATCH),
         ("CopyImageToBuffer", COPY_IMAGE_TO_BUFFER_TAG, FAMILY_COPY),
+        ("CopyBufferToBuffer", COPY_BUFFER_TO_BUFFER_TAG, FAMILY_COPY),
         ("EnumerateAdapters", ENUMERATE_ADAPTERS_TAG, FAMILY_INSTANCE),
         ("RequestDevice", REQUEST_DEVICE_TAG, FAMILY_INSTANCE),
         ("SurfaceCaps", SURFACE_CAPS_TAG, FAMILY_INSTANCE),

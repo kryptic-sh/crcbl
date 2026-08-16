@@ -2332,6 +2332,16 @@ export class Replayer {
    */
   #currentPass = null;
   /**
+   * The compute pass open on {@link #currentEncoder}, or `null`. Set by
+   * {@link Replayer#beginComputePass} and cleared by
+   * {@link Replayer#endComputePass}. Its own field beside {@link #currentPass}
+   * because a compute pass and a render pass are distinct WebGPU objects with
+   * distinct methods, and {@link Replayer#bindGroup} routes to whichever is open.
+   *
+   * @type {GPUComputePassEncoder | null}
+   */
+  #currentComputePass = null;
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -2743,8 +2753,23 @@ export class Replayer {
         case 'Draw':
           this.#draw(sequence, command);
           break;
+        case 'BeginComputePass':
+          this.#beginComputePass(sequence, command);
+          break;
+        case 'EndComputePass':
+          this.#endComputePass(sequence);
+          break;
+        case 'BindComputePipeline':
+          this.#bindComputePipeline(sequence, command);
+          break;
+        case 'Dispatch':
+          this.#dispatch(sequence, command);
+          break;
         case 'CopyImageToBuffer':
           this.#copyImageToBuffer(sequence, command);
+          break;
+        case 'CopyBufferToBuffer':
+          this.#copyBufferToBuffer(sequence, command);
           break;
         case 'Finish':
           this.#finish(sequence, command);
@@ -4401,6 +4426,7 @@ export class Replayer {
       command.label === null ? {} : { label: command.label }
     );
     this.#currentPass = null;
+    this.#currentComputePass = null;
   }
 
   /**
@@ -4547,7 +4573,13 @@ export class Replayer {
   }
 
   /**
-   * Binds a bind group to a slot on the open render pass.
+   * Binds a bind group to a slot on WHICHEVER pass is open — render or compute.
+   *
+   * A `BindGroup` is legal in both a render pass and a compute pass, and
+   * `setBindGroup(slot, group, dynamicOffsets)` has the same shape on both
+   * encoders, so this resolves the active pass: {@link #currentPass} if a render
+   * pass is open, else {@link #currentComputePass} if a compute pass is, else the
+   * error queue.
    *
    * A BIND WITH NO PASS OPEN, OR AN UNRESOLVABLE GROUP, GOES TO THE ERROR QUEUE
    * and does not throw — the same mid-frame ordering fault
@@ -4564,9 +4596,10 @@ export class Replayer {
    *           layout: { index: number, generation: number } }} command
    */
   #bindGroup(sequence, command) {
-    if (!this.#currentPass) {
+    const pass = this.#currentPass ?? this.#currentComputePass;
+    if (!pass) {
       this.#deviceError(
-        `a bind group was bound (command ${sequence}) with no render pass open`
+        `a bind group was bound (command ${sequence}) with no render or compute pass open`
       );
       return;
     }
@@ -4579,7 +4612,7 @@ export class Replayer {
       );
       return;
     }
-    this.#currentPass.setBindGroup(command.slot, group, command.dynamicOffsets);
+    pass.setBindGroup(command.slot, group, command.dynamicOffsets);
   }
 
   /**
@@ -4636,6 +4669,106 @@ export class Replayer {
       instances.end - instances.start,
       vertices.start,
       instances.start
+    );
+  }
+
+  /**
+   * Opens a compute pass on the implicit-current encoder.
+   *
+   * `ComputePassDesc` is only a label — compute has no attachments — so the whole
+   * of the descriptor is `{ label }`, and the label is omitted when absent so the
+   * descriptor an unlabelled pass hands `beginComputePass` is empty.
+   *
+   * A PASS WITH NO ENCODER GOES TO THE ERROR QUEUE and does not throw — a far side
+   * that got its ordering wrong mid-frame, {@link Replayer#takeError}'s case, not
+   * a reason to abandon the rest of the frame. {@link #currentComputePass} is left
+   * `null` so a later `EndComputePass` is itself a named malformed-stream error.
+   *
+   * @param {bigint} sequence
+   * @param {{ label: string | null }} command
+   */
+  #beginComputePass(sequence, command) {
+    if (!this.#currentEncoder) {
+      this.#deviceError(
+        `compute pass (command ${sequence}) was begun with no command encoder open`
+      );
+      return;
+    }
+    const descriptor = command.label === null ? {} : { label: command.label };
+    this.#currentComputePass =
+      this.#currentEncoder.beginComputePass(descriptor);
+  }
+
+  /**
+   * Closes the compute pass on the implicit-current encoder.
+   *
+   * ENDING WITH NO OPEN PASS IS A MALFORMED STREAM, routed to the error queue
+   * rather than thrown — {@link Replayer#endRenderPass}'s judgement on the compute
+   * pass.
+   *
+   * @param {bigint} sequence
+   */
+  #endComputePass(sequence) {
+    if (!this.#currentComputePass) {
+      this.#deviceError(
+        `a compute pass was ended (command ${sequence}) with none open`
+      );
+      return;
+    }
+    this.#currentComputePass.end();
+    this.#currentComputePass = null;
+  }
+
+  /**
+   * Binds a compute pipeline onto the open compute pass.
+   *
+   * A BIND WITH NO COMPUTE PASS OPEN, OR AN UNRESOLVABLE PIPELINE, GOES TO THE
+   * ERROR QUEUE and does not throw — {@link Replayer#bindGraphicsPipeline}'s
+   * judgement on the compute pass and its pipeline table.
+   *
+   * @param {bigint} sequence
+   * @param {{ pipeline: { index: number, generation: number } }} command
+   */
+  #bindComputePipeline(sequence, command) {
+    if (!this.#currentComputePass) {
+      this.#deviceError(
+        `a compute pipeline was bound (command ${sequence}) with no compute pass open`
+      );
+      return;
+    }
+    const pipeline = this.#computePipelines.get(command.pipeline);
+    if (pipeline === undefined) {
+      this.#deviceError(
+        `a compute pipeline was bound (command ${sequence}) naming pipeline ` +
+          `${command.pipeline.index}.${command.pipeline.generation}, which this ` +
+          'replayer holds no live compute pipeline under'
+      );
+      return;
+    }
+    this.#currentComputePass.setPipeline(pipeline);
+  }
+
+  /**
+   * Records a dispatch on the open compute pass.
+   *
+   * A DISPATCH WITH NO COMPUTE PASS OPEN GOES TO THE ERROR QUEUE and does not
+   * throw — the same mid-frame ordering fault the binds refuse. The three counts
+   * are workgroup counts, handed straight to `dispatchWorkgroups`.
+   *
+   * @param {bigint} sequence
+   * @param {{ x: number, y: number, z: number }} command
+   */
+  #dispatch(sequence, command) {
+    if (!this.#currentComputePass) {
+      this.#deviceError(
+        `a dispatch was recorded (command ${sequence}) with no compute pass open`
+      );
+      return;
+    }
+    this.#currentComputePass.dispatchWorkgroups(
+      command.x,
+      command.y,
+      command.z
     );
   }
 
@@ -4727,6 +4860,57 @@ export class Replayer {
   }
 
   /**
+   * Records a buffer→buffer copy on the implicit-current encoder — the path a
+   * dispatch's storage-buffer output takes to a host-readable buffer.
+   *
+   * On the encoder, NOT a pass: a copy is recorded between passes, so this needs
+   * {@link #currentEncoder} rather than an open pass. A missing encoder or an
+   * unresolvable source or destination buffer goes to the error queue naming the
+   * handle, {@link Replayer#copyImageToBuffer}'s judgement.
+   *
+   * The three `u64` fields — the two offsets and the size — arrive as `BigInt`
+   * and are narrowed with `Number` for the WebGPU call, exactly as
+   * {@link Replayer#copyImageToBuffer}'s `bufferOffset` is: a copy region past
+   * `Number.MAX_SAFE_INTEGER` is not one this seam produces.
+   *
+   * @param {bigint} sequence
+   * @param {{ copy: { src: { index: number, generation: number },
+   *           srcOffset: bigint, dst: { index: number, generation: number },
+   *           dstOffset: bigint, size: bigint } }} command
+   */
+  #copyBufferToBuffer(sequence, command) {
+    const named = `buffer→buffer copy (command ${sequence})`;
+    if (!this.#currentEncoder) {
+      this.#deviceError(`${named} was recorded with no command encoder open`);
+      return;
+    }
+    const { copy } = command;
+    const src = this.#buffers.get(copy.src);
+    if (src === undefined) {
+      this.#deviceError(
+        `${named} copies from buffer ${copy.src.index}.${copy.src.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    const dst = this.#buffers.get(copy.dst);
+    if (dst === undefined) {
+      this.#deviceError(
+        `${named} copies into buffer ${copy.dst.index}.${copy.dst.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    this.#currentEncoder.copyBufferToBuffer(
+      src,
+      Number(copy.srcOffset),
+      dst,
+      Number(copy.dstOffset),
+      Number(copy.size)
+    );
+  }
+
+  /**
    * Seals the implicit-current encoder into a command buffer at the handle wasm
    * allocated.
    *
@@ -4754,11 +4938,13 @@ export class Replayer {
       );
       this.#currentEncoder = null;
       this.#currentPass = null;
+      this.#currentComputePass = null;
       return;
     }
     this.#commandBuffers.insert(command.commandBuffer, buffer);
     this.#currentEncoder = null;
     this.#currentPass = null;
+    this.#currentComputePass = null;
   }
 
   /**
