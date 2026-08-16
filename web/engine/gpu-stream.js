@@ -81,6 +81,10 @@ const CREATE_SHADER_MODULE_TAG = 0x07;
 const CREATE_PIPELINE_LAYOUT_TAG = 0x08;
 const CREATE_COMPUTE_PIPELINE_TAG = 0x09;
 const CREATE_GRAPHICS_PIPELINE_TAG = 0x0a;
+// `request_readback` allocates a `ReadbackHandle` like every `create_*`, so it
+// sits in the creation family rather than the device one — see `crcbl-webgpu`'s
+// `tag` module.
+const REQUEST_READBACK_TAG = 0x0b;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
@@ -92,15 +96,29 @@ const DESTROY_SHADER_MODULE_TAG = 0x27;
 const DESTROY_PIPELINE_LAYOUT_TAG = 0x28;
 const DESTROY_COMPUTE_PIPELINE_TAG = 0x29;
 const DESTROY_GRAPHICS_PIPELINE_TAG = 0x2a;
+const DESTROY_COMMAND_BUFFER_TAG = 0x2b;
+const DESTROY_READBACK_TAG = 0x2c;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
 const BIND_GROUP_TAG = 0x43;
 const PUSH_CONSTANTS_TAG = 0x44;
+// The encoder's lifecycle: opening the implicit-current encoder, closing a
+// pass, and sealing the recorded buffer. `CreateCommandEncoder` names no handle
+// and `Finish` names the caller-allocated command buffer — see `crcbl-webgpu`'s
+// `Command` docs.
+const CREATE_COMMAND_ENCODER_TAG = 0x45;
+const END_RENDER_PASS_TAG = 0x46;
+const FINISH_TAG = 0x47;
 const DRAW_TAG = 0x60;
+const COPY_IMAGE_TO_BUFFER_TAG = 0x78;
 const ENUMERATE_ADAPTERS_TAG = 0x90;
 const REQUEST_DEVICE_TAG = 0x91;
 const SURFACE_CAPS_TAG = 0x92;
+// The device family: submission and the readback poll, the two `Device` methods
+// that make no object and release none.
+const SUBMIT_TAG = 0xa0;
+const POLL_READBACK_TAG = 0xa1;
 
 // ── Optional fields ──────────────────────────────────────────────────────────
 
@@ -955,6 +973,47 @@ class ByteReader {
   }
 
   /**
+   * A `crcbl_hal::ImageSubresourceLayers` — the single mip level a copy
+   * addresses, distinct from the range above in that it has one `mip` rather
+   * than a base-and-count. Its aspect goes through the same strict flag reader.
+   *
+   * @returns {{ aspect: string[], mip: number, baseLayer: number, layerCount: number }}
+   */
+  readSubresourceLayers() {
+    return {
+      aspect: this.readFlags('ImageSubresourceLayers::aspect', IMAGE_ASPECT),
+      mip: this.readU32(),
+      baseLayer: this.readU32(),
+      layerCount: this.readU32(),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::Offset3d` — three signed texel offsets, `x`, `y`, `z`.
+   *
+   * @returns {{ x: number, y: number, z: number }}
+   */
+  readOffset() {
+    return { x: this.readI32(), y: this.readI32(), z: this.readI32() };
+  }
+
+  /**
+   * A `crcbl_hal::SemaphoreWait` (or `SemaphoreSignal`, which is the same two
+   * fields): the handle, then the `u64` value carried as a `BigInt`. WebGPU has
+   * no semaphores, so the replayer refuses any non-empty list this appears in —
+   * but the pair is decoded whole so the refusal can name it and the round trip
+   * holds.
+   *
+   * @returns {{ semaphore: { index: number, generation: number }, value: bigint }}
+   */
+  readSemaphore(field) {
+    return {
+      semaphore: this.readHandle(field),
+      value: this.readU64(),
+    };
+  }
+
+  /**
    * A `crcbl_hal::BindingKind`: a code, then that variant's own fields.
    *
    * The one enum on this stream whose rows have bodies, and the reason the
@@ -1790,6 +1849,52 @@ function decodeCommand(r) {
         data: r.readField('PushConstants::data'),
         layout: r.readHandle('PushConstants::layout'),
       };
+    case CREATE_COMMAND_ENCODER_TAG:
+      // No handle: the encoder is the replayer's implicit-current one, as
+      // `crcbl-hal`'s recording methods assume no receiver. `queue` crosses and
+      // selects no queue — WebGPU has one implicit queue — so the replayer drops
+      // it, the way it drops a compute pipeline's `workgroupSize`.
+      return {
+        name: 'CreateCommandEncoder',
+        label: r.readOptString('CommandEncoderDesc::label'),
+        queue: r.readHandle('CommandEncoderDesc::queue'),
+      };
+    case END_RENDER_PASS_TAG:
+      // Body-less: it closes the pass `BeginRenderPass` opened, on the
+      // implicit-current encoder.
+      return { name: 'EndRenderPass' };
+    case FINISH_TAG:
+      // Names the caller-allocated command buffer the encoder seals into.
+      return {
+        name: 'Finish',
+        commandBuffer: r.readHandle('Finish::command_buffer'),
+      };
+    case COPY_IMAGE_TO_BUFFER_TAG: {
+      // `BufferImageCopy` in declaration order; the direction is the tag, never a
+      // field. `bufferRowLength` is in TEXELS and `0` is tightly packed — both
+      // cross verbatim, and turning texels into 256-aligned bytes is the
+      // replayer's, which is the only side that has the texture's format. See
+      // `gpu-replay.js`.
+      const buffer = r.readHandle('BufferImageCopy::buffer');
+      const bufferOffset = r.readU64();
+      const bufferRowLength = r.readU32();
+      const bufferImageHeight = r.readU32();
+      const image = r.readHandle('BufferImageCopy::image');
+      const imageSubresource = r.readSubresourceLayers();
+      const imageOffset = r.readOffset();
+      const imageExtent = r.readExtent();
+      return {
+        name: 'CopyImageToBuffer',
+        buffer,
+        bufferOffset,
+        bufferRowLength,
+        bufferImageHeight,
+        image,
+        imageSubresource,
+        imageOffset,
+        imageExtent,
+      };
+    }
     case DRAW_TAG: {
       // Spelled out rather than built inline: the two halves of each range are
       // read in source order either way, but relying on that to get the field
@@ -1804,6 +1909,65 @@ function decodeCommand(r) {
         instances: { start: firstInstance, end: lastInstance },
       };
     }
+    case SUBMIT_TAG: {
+      // The command buffers, then the counted waits and signals. The two
+      // semaphore lists are empty on every frame WebGPU can honour; a non-empty
+      // one is decoded whole so the replayer can refuse it by name.
+      const bufferCount = r.readCount('SubmitInfo::command_buffers');
+      const commandBuffers = [];
+      for (let i = 0; i < bufferCount; i += 1) {
+        commandBuffers.push(r.readHandle('SubmitInfo::command_buffers'));
+      }
+      const waitCount = r.readCount('SubmitInfo::waits');
+      const waits = [];
+      for (let i = 0; i < waitCount; i += 1) {
+        waits.push(r.readSemaphore('SubmitInfo::waits'));
+      }
+      const signalCount = r.readCount('SubmitInfo::signals');
+      const signals = [];
+      for (let i = 0; i < signalCount; i += 1) {
+        signals.push(r.readSemaphore('SubmitInfo::signals'));
+      }
+      return { name: 'Submit', commandBuffers, waits, signals };
+    }
+    case REQUEST_READBACK_TAG: {
+      // The caller-allocated handle, then the `ReadbackDesc`. `after` rides a
+      // presence byte: `null` is `mapAsync`, a present one is a semaphore wait
+      // the replayer refuses. `offset` and `size` are `BigInt`s, a buffer's own
+      // `u64`s.
+      const readback = r.readHandle('RequestReadback::readback');
+      const label = r.readOptString('ReadbackDesc::label');
+      const buffer = r.readHandle('ReadbackDesc::buffer');
+      const offset = r.readU64();
+      const size = r.readU64();
+      const after = r.readPresent('ReadbackDesc::after')
+        ? r.readSemaphore('ReadbackDesc::after')
+        : null;
+      return {
+        name: 'RequestReadback',
+        readback,
+        label,
+        buffer,
+        offset,
+        size,
+        after,
+      };
+    }
+    case POLL_READBACK_TAG:
+      return {
+        name: 'PollReadback',
+        readback: r.readHandle('PollReadback::readback'),
+      };
+    case DESTROY_READBACK_TAG:
+      return {
+        name: 'DestroyReadback',
+        readback: r.readHandle('DestroyReadback::readback'),
+      };
+    case DESTROY_COMMAND_BUFFER_TAG:
+      return {
+        name: 'DestroyCommandBuffer',
+        commandBuffer: r.readHandle('DestroyCommandBuffer::command_buffer'),
+      };
     case REQUEST_DEVICE_TAG: {
       // Spelled out rather than built inline, for `Draw`'s reason: the two
       // feature words are adjacent, identically typed and mean opposite things,

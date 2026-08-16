@@ -970,6 +970,71 @@ const EXPECTED = [
     optionalFeatures: 0x7ffffffn,
     compatibleSurface: null,
   },
+  // The readback path, in the order a frame records it — every number distinct
+  // so a transposition among the copy's many fields is visible, and every
+  // optional field both ways. `bufferOffset`, the readback offsets/sizes and the
+  // semaphore values are `BigInt`, a buffer's own `u64`s.
+  {
+    name: 'CreateCommandEncoder',
+    label: 'readback encoder',
+    queue: handle(140, 141),
+  },
+  {
+    name: 'CopyImageToBuffer',
+    buffer: handle(142, 143),
+    bufferOffset: 256n,
+    bufferRowLength: 100,
+    bufferImageHeight: 200,
+    image: handle(144, 145),
+    imageSubresource: {
+      aspect: ['COLOR'],
+      mip: 2,
+      baseLayer: 3,
+      layerCount: 5,
+    },
+    imageOffset: { x: -7, y: 9, z: 11 },
+    imageExtent: { width: 64, height: 48, depthOrLayers: 1 },
+  },
+  { name: 'EndRenderPass' },
+  { name: 'Finish', commandBuffer: handle(146, 147) },
+  // Waits and signals non-empty, which no browser honours but the encoding
+  // carries field for field — the replayer is where they are refused.
+  {
+    name: 'Submit',
+    commandBuffers: [handle(148, 149), handle(150, 151)],
+    waits: [{ semaphore: handle(152, 153), value: 0x0102030405060708n }],
+    signals: [{ semaphore: handle(154, 155), value: 9n }],
+  },
+  // The empty-list twin — the only case WebGPU maps — and one command buffer.
+  {
+    name: 'Submit',
+    commandBuffers: [handle(156, 157)],
+    waits: [],
+    signals: [],
+  },
+  // `after` present: a semaphore wait the replayer refuses, with a full `u64`.
+  {
+    name: 'RequestReadback',
+    readback: handle(158, 159),
+    label: 'stats readback',
+    buffer: handle(160, 161),
+    offset: 32n,
+    size: 64n,
+    after: { semaphore: handle(162, 163), value: 0x1122334455667788n },
+  },
+  // `after` absent — `mapAsync` — no label, and a `size` past a `u32`.
+  {
+    name: 'RequestReadback',
+    readback: handle(164, 165),
+    label: null,
+    buffer: handle(166, 167),
+    offset: 0n,
+    size: 0x100000000n,
+    after: null,
+  },
+  { name: 'PollReadback', readback: handle(168, 169) },
+  { name: 'DestroyReadback', readback: handle(170, 171) },
+  { name: 'DestroyCommandBuffer', commandBuffer: handle(172, 173) },
   // Body-less: the surface and the adapter the HAL call takes are validated
   // against an impl's own tables and never cross. A decoder that still read
   // them would consume the twelve bytes after this tag, which are the command

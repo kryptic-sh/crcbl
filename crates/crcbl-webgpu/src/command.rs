@@ -19,12 +19,13 @@ use core::ops::Range;
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
-    BufferHandle, BufferUsage, ColorAttachment, ColorTargetState, CompareOp, ComputePipelineHandle,
-    DepthStencilAttachment, DepthStencilState, Extent3d, Features, FilterMode, Format,
-    GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewHandle, ImageViewType, MemoryLocation, MultisampleState, PipelineLayoutHandle,
-    PrimitiveState, PushConstantRange, Rect2d, SamplerAddressMode, SamplerHandle,
-    ShaderModuleHandle, ShaderStages, SurfaceHandle,
+    BufferHandle, BufferUsage, ColorAttachment, ColorTargetState, CommandBufferHandle, CompareOp,
+    ComputePipelineHandle, DepthStencilAttachment, DepthStencilState, Extent3d, Features,
+    FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation,
+    MultisampleState, Offset3d, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
+    QueueHandle, ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle, SemaphoreSignal,
+    SemaphoreWait, ShaderModuleHandle, ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -663,6 +664,176 @@ pub enum Command {
         /// Instance range.
         instances: Range<u32>,
     },
+    /// [`Device::create_command_encoder`](crcbl_hal::Device::create_command_encoder).
+    ///
+    /// **It carries no handle**, unlike every other creation on this stream, and
+    /// that is the encoder's shape rather than an omission. `crcbl-hal`'s
+    /// recording methods — [`begin_render_pass`](crcbl_hal::CommandEncoder::begin_render_pass),
+    /// [`draw`](crcbl_hal::CommandEncoder::draw), the rest — name no encoder,
+    /// because a `Box<dyn CommandEncoder>` records into itself; this stream keeps
+    /// that model, so the replayer holds a single *implicit-current* encoder that
+    /// this command opens and [`Finish`](Self::Finish) consumes. The command
+    /// buffer the encoder eventually yields is what carries a handle, and
+    /// [`Finish`](Self::Finish) is where it is named.
+    ///
+    /// **`queue` is carried and not used to select a queue.** WebGPU has one
+    /// implicit queue — `device.queue` — so there is no queue for a handle to
+    /// pick; it crosses because [`CommandEncoderDesc`](crcbl_hal::CommandEncoderDesc)
+    /// has it (Vulkan command pools are per-queue-family, and the seam names the
+    /// queue at creation so the backend need not copy at submit time) and so a
+    /// transposition is visible, and the replayer ignores it the way it ignores
+    /// [`workgroup_size`](Self::CreateComputePipeline::workgroup_size).
+    CreateCommandEncoder {
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Queue the resulting command buffer will be submitted to. Carried, not
+        /// used to select a queue — see the variant docs.
+        queue: QueueHandle,
+    },
+    /// [`end_render_pass`](crcbl_hal::CommandEncoder::end_render_pass).
+    ///
+    /// Body-less, and on the implicit-current encoder: it closes the pass
+    /// [`BeginRenderPass`](Self::BeginRenderPass) opened. Ending with no open
+    /// pass is a malformed stream the replayer routes to the error queue rather
+    /// than throwing on — see `web/engine/gpu-replay.js`.
+    EndRenderPass,
+    /// [`copy_image_to_buffer`](crcbl_hal::CommandEncoder::copy_image_to_buffer)
+    /// — the readback path's image→buffer copy, recorded on the
+    /// implicit-current encoder.
+    ///
+    /// The whole of [`BufferImageCopy`](crcbl_hal::BufferImageCopy), flattened as
+    /// every descriptor here is, and **the direction is the variant's name and
+    /// never a field** — the HAL uses one struct for both directions and the
+    /// method called is what says which, so the two can never disagree.
+    ///
+    /// **[`buffer_row_length`](Self::CopyImageToBuffer::buffer_row_length) is in
+    /// texels, `0` meaning tightly packed, and crosses verbatim.** WebGPU's
+    /// `bytesPerRow` is in *bytes* and must be a multiple of 256, so the replayer
+    /// is where texels become bytes and where a misalignment surfaces — this
+    /// decoder does not resolve it, for the sentinel rule's reason. The
+    /// [`u32`](Self::CopyImageToBuffer::buffer_offset)/[`u64`](Self::CopyImageToBuffer::buffer_offset)
+    /// fields are chosen distinct in the corpus so a transposition among the many
+    /// numbers is visible.
+    CopyImageToBuffer {
+        /// Buffer side of the copy — the readback destination.
+        buffer: BufferHandle,
+        /// Byte offset in the buffer.
+        buffer_offset: u64,
+        /// Texels per row in the buffer; `0` is tightly packed. In *texels*, not
+        /// bytes — see the variant docs on the 256-byte trap.
+        buffer_row_length: u32,
+        /// Rows per layer in the buffer; `0` is tightly packed.
+        buffer_image_height: u32,
+        /// Image side of the copy — the readback source.
+        image: ImageHandle,
+        /// Mip level and layers touched.
+        image_subresource: ImageSubresourceLayers,
+        /// Texel offset within the image.
+        image_offset: Offset3d,
+        /// Region size in texels.
+        image_extent: Extent3d,
+    },
+    /// [`finish`](crcbl_hal::CommandEncoder::finish) — consumes the
+    /// implicit-current encoder and produces the command buffer.
+    ///
+    /// **The handle is the caller's, positional, as every creation's is**: the
+    /// stream cannot answer during the call, so wasm allocates the
+    /// [`CommandBufferHandle`] and the replayer
+    /// files `encoder.finish()` under it. It is an encoder command rather than a
+    /// creation because it makes nothing from a descriptor — it seals what the
+    /// encoder recorded — which is why its tag is in the encoder family.
+    Finish {
+        /// Id the replayer stores the finished command buffer at.
+        command_buffer: CommandBufferHandle,
+    },
+    /// [`Device::submit`](crcbl_hal::Device::submit).
+    ///
+    /// The whole of [`SubmitInfo`](crcbl_hal::SubmitInfo): the command buffers
+    /// executed in order, and the waits and signals.
+    ///
+    /// **The counted `waits`/`signals` lists cross even though empty is the only
+    /// case WebGPU maps.** WebGPU serialises its single queue and inserts hazard
+    /// barriers itself, so it has no semaphores at all — a non-empty `waits` or
+    /// `signals` names one, which the replayer refuses to the error queue rather
+    /// than dropping. Silently dropping a wait is a synchronisation bug, and the
+    /// engine's real frame *will* carry them, so the refusal must be loud and by
+    /// name — the same judgement a `Some` push-constant range gets. The lists are
+    /// carried whole so they round-trip in Rust and so the replayer can name what
+    /// it refuses; see `web/engine/gpu-replay.js`.
+    Submit {
+        /// Command buffers to execute, in order.
+        command_buffers: Vec<CommandBufferHandle>,
+        /// Semaphore waits before execution. Empty is the only case WebGPU maps;
+        /// a non-empty list is refused — see the variant docs.
+        waits: Vec<SemaphoreWait>,
+        /// Semaphore signals on completion. Empty for the same reason `waits` is.
+        signals: Vec<SemaphoreSignal>,
+    },
+    /// [`Device::request_readback`](crcbl_hal::Device::request_readback), with the
+    /// handle the caller allocated for it.
+    ///
+    /// The whole of [`ReadbackDesc`](crcbl_hal::ReadbackDesc). Identity is
+    /// positional here for [`CreateBuffer`](Self::CreateBuffer)'s reason: the
+    /// [`ReadbackHandle`] is caller-allocated, and the
+    /// in-flight readback is filed under it by the replayer.
+    ///
+    /// **`after` crosses whole, and the replayer refuses a `Some`.** `None` maps
+    /// to WebGPU's `mapAsync` — "everything submitted so far" — which is exactly
+    /// what [`ReadbackDesc::after`](crcbl_hal::ReadbackDesc::after)'s `None`
+    /// means. `Some(wait)` names a timeline value WebGPU has no semaphore to
+    /// express, so it is refused by name rather than ignored, for
+    /// [`Submit`](Self::Submit)'s reason. It rides a presence byte — the house
+    /// rule for an optional field that is not a handle — and round-trips in Rust
+    /// so a `Some` is testable even though no browser honours it.
+    RequestReadback {
+        /// Id the replayer stores the in-flight readback at.
+        readback: ReadbackHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Buffer to read. Must be
+        /// [`MemoryLocation::HostReadback`].
+        buffer: BufferHandle,
+        /// Byte offset within the buffer.
+        offset: u64,
+        /// Bytes to read.
+        size: u64,
+        /// Completion point to wait for. `None` is `mapAsync`; `Some` is a
+        /// semaphore wait the replayer refuses — see the variant docs.
+        after: Option<SemaphoreWait>,
+    },
+    /// [`Device::poll_readback`](crcbl_hal::Device::poll_readback) — names the
+    /// in-flight readback and asks whether its bytes are ready.
+    ///
+    /// **The one command in this slice that is answered on the reply channel.**
+    /// The replayer maps the buffer asynchronously when
+    /// [`RequestReadback`](Self::RequestReadback) is replayed, and this command
+    /// reports where that has got to: a [`Reply::ReadbackReady`](crate::Reply::ReadbackReady)
+    /// carrying the bytes once the map has resolved, a
+    /// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending) until then. Both
+    /// name this command's sequence, exactly as the adapter and device polls do —
+    /// see [`crate::instance`] and `web/engine/gpu-replay.js`.
+    PollReadback {
+        /// Which in-flight readback to poll.
+        readback: ReadbackHandle,
+    },
+    /// [`Device::destroy_readback`](crcbl_hal::Device::destroy_readback).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is. On WebGPU this is the `unmap` — abandoning
+    /// a readback without it leaks a mapped buffer, which is why the seam has an
+    /// explicit destroy.
+    DestroyReadback {
+        /// Id to release.
+        readback: ReadbackHandle,
+    },
+    /// [`Device::destroy_command_buffer`](crcbl_hal::Device::destroy_command_buffer).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is.
+    DestroyCommandBuffer {
+        /// Id to release.
+        command_buffer: CommandBufferHandle,
+    },
     /// [`Instance::adapters`](crcbl_hal::Instance::adapters) — enumerate what
     /// the browser will grant.
     ///
@@ -756,6 +927,15 @@ impl Command {
             Self::BindGroup { .. } => "BindGroup",
             Self::PushConstants { .. } => "PushConstants",
             Self::Draw { .. } => "Draw",
+            Self::CreateCommandEncoder { .. } => "CreateCommandEncoder",
+            Self::EndRenderPass => "EndRenderPass",
+            Self::CopyImageToBuffer { .. } => "CopyImageToBuffer",
+            Self::Finish { .. } => "Finish",
+            Self::Submit { .. } => "Submit",
+            Self::RequestReadback { .. } => "RequestReadback",
+            Self::PollReadback { .. } => "PollReadback",
+            Self::DestroyReadback { .. } => "DestroyReadback",
+            Self::DestroyCommandBuffer { .. } => "DestroyCommandBuffer",
             Self::EnumerateAdapters => "EnumerateAdapters",
             Self::RequestDevice { .. } => "RequestDevice",
             Self::SurfaceCaps => "SurfaceCaps",

@@ -290,14 +290,17 @@ use std::rc::Rc;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
     BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
-    BlendState, BufferDesc, BufferHandle, BufferUsage, ColorTargetState, ColorWrites, CompareOp,
-    ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias, DepthStencilState, DeviceDesc,
-    Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewDesc, ImageViewHandle, ImageViewType, MemoryLocation, MultisampleState,
-    PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PrimitiveState, PrimitiveTopology,
-    SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
+    BlendState, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, ClearValue,
+    ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle, CommandEncoderDesc,
+    CompareOp, ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias, DepthStencilState,
+    DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
+    GraphicsPipelineHandle, ImageAspect, ImageDesc, ImageHandle, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
+    LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle,
+    PolygonMode, PrimitiveState, PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle,
+    Rect2d, RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
+    ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo,
+    SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -367,6 +370,138 @@ pub const CAPS_REFUSED: u32 = 3;
 /// seam asked for, and this is the format's two hand-written sides having
 /// drifted.
 pub const CAPS_UNDECODABLE: u32 = 4;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const READBACK_UNASKED: u32 = 0;
+/// The setup frame — clear, copy, submit, request — is on the stream, and no
+/// poll has been issued yet.
+pub const READBACK_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const READBACK_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const READBACK_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_readback_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_readback_bytes_len`] carry them.
+pub const READBACK_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`PROBE_UNDECODABLE`]'s twin.
+pub const READBACK_UNDECODABLE: u32 = 5;
+
+/// The side of the square texture the readback probe clears and reads back.
+///
+/// **64, chosen so the row is exactly 256 bytes** — the copy's tight rows are
+/// `64 × 4` bytes for [`Format::Rgba8Unorm`], which is
+/// [`COPY_BYTES_PER_ROW_ALIGNMENT`](https://www.w3.org/TR/webgpu/) aligned
+/// already, so the happy path needs no padding. See
+/// [`shim::__crcbl_web_gpu_probe_readback`].
+pub const PROBE_READBACK_SIZE: u32 = 64;
+
+/// The distinctive clear colour, in linear-to-8-bit-exact channels.
+///
+/// **Every channel is exact in 8 bits**: `0.25 → 64`, `0.5 → 128`, `0.75 → 191`,
+/// `1.0 → 255`, so the bytes the gate asserts — `[64, 128, 191, 255]` — are what
+/// a correct clear-and-copy produces with no rounding to argue about. A stub
+/// cannot produce them: only a real clear writes the right pixels.
+pub const PROBE_READBACK_CLEAR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
+
+/// The clear colour as the bytes a `Rgba8Unorm` texel holds — what the gate
+/// checks every pixel against.
+pub const PROBE_READBACK_CLEAR_BYTES: [u8; 4] = [64, 128, 191, 255];
+
+/// The queue [`shim::__crcbl_web_gpu_probe_readback`] names in its command
+/// encoder. The same bits as every other probe handle — a handle carries no
+/// kind — and carried, not used to pick a queue: WebGPU has one implicit queue.
+pub const PROBE_QUEUE: QueueHandle = match QueueHandle::from_bits(1 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 1 is not zero"),
+};
+
+/// The command buffer [`shim::__crcbl_web_gpu_probe_readback`] finishes its
+/// encoder into. The same bits as every other probe handle.
+pub const PROBE_COMMAND_BUFFER: CommandBufferHandle = match CommandBufferHandle::from_bits(1 << 32)
+{
+    Some(command_buffer) => command_buffer,
+    None => panic!("generation 1 is not zero"),
+};
+
+/// The in-flight readback [`shim::__crcbl_web_gpu_probe_readback`] requests and
+/// [`shim::__crcbl_web_gpu_probe_readback_poll`] polls. The same bits again.
+pub const PROBE_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(1 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 1 is not zero"),
+};
+
+/// The image the readback probe clears — a 64×64 [`Format::Rgba8Unorm`] colour
+/// target that is also a copy source.
+///
+/// **Not [`probe_image_desc`]'s image**: that one is `SAMPLED | TRANSFER_DST`
+/// for a texture upload, and this one is `COLOR_ATTACHMENT | TRANSFER_SRC` — it
+/// is rendered into and then copied *out of*. Reusing [`PROBE_IMAGE`]'s handle
+/// is fine: identity is positional, so the replayer files the latest at that id.
+#[must_use]
+pub const fn probe_readback_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu readback image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The view of [`probe_readback_image_desc`]'s image the render pass clears.
+pub const PROBE_READBACK_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu readback view"),
+    image: PROBE_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The buffer the cleared pixels are copied into and read back from.
+///
+/// `64 * 64 * 4` bytes, [`MemoryLocation::HostReadback`] — which the replayer
+/// turns into WebGPU's `MAP_READ` — and [`BufferUsage::TRANSFER_DST`] for the
+/// copy. `MAP_READ | COPY_DST` is the one combination WebGPU allows a mappable
+/// readback buffer, and this is it.
+#[must_use]
+pub const fn probe_readback_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu readback buffer"),
+        size: (PROBE_READBACK_SIZE as u64) * (PROBE_READBACK_SIZE as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The image→buffer copy that moves the cleared pixels into the readback buffer.
+///
+/// **Tightly packed** (`buffer_row_length` / `buffer_image_height` both `0`), so
+/// the replayer computes `64 × 4 = 256` bytes per row — already 256-aligned. The
+/// whole 64×64 mip-0 slice, from the origin.
+#[must_use]
+pub const fn probe_readback_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+    }
+}
 
 /// The descriptor [`shim::__crcbl_web_gpu_probe_device`] asks with.
 ///
@@ -1237,6 +1372,80 @@ impl SurfaceCapsProbe {
     }
 }
 
+/// One readback, from the frame that cleared and copied to the bytes read back.
+///
+/// The first probe whose answer is *data* rather than a handle or a
+/// capability — the decisive proof that the WebGPU backend puts the right pixels
+/// in memory. Unlike [`SurfaceCapsProbe`], whose one query has one answer, a
+/// readback is polled across frames: the setup frame requests, and each frame
+/// after it polls until the browser's `mapAsync` has resolved.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum ReadbackProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — one `Rgba8Unorm` texel per four.
+        bytes: Vec<u8>,
+    },
+}
+
+impl ReadbackProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there.
+    ///
+    /// `true` when this call settled or advanced the probe. A
+    /// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) makes it
+    /// [`Ready`](Self::Ready); a [`Reply::ReadbackPending`](crate::Reply::ReadbackPending)
+    /// drops it back to [`Pending`](Self::Pending) so the next frame re-polls.
+    /// Everything not naming this probe's sequence is left alone, exactly as
+    /// [`SurfaceCapsProbe::absorb`] leaves the other probes' answers.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            // A reply of another shape naming this sequence is a replayer bug,
+            // and it settles rather than waits: the sequence is answered and a
+            // second answer is refused, so nothing else is coming. Reported as a
+            // pending that will never advance is worse than an honest stop, so
+            // drop to `Requested` to re-issue — but that would loop. Instead
+            // leave it `Pending`, which the gate's deadline catches.
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -1265,6 +1474,11 @@ struct Probe {
     /// Why the capability query answered nothing, or a decode error. Its own
     /// string for [`reason`](Self::reason)'s reason.
     caps_reason: String,
+    readback: ReadbackProbe,
+    /// A decode error the readback drain hit, for
+    /// [`READBACK_UNDECODABLE`]. Its own string for [`reason`](Self::reason)'s
+    /// reason.
+    readback_reason: String,
 }
 
 impl Probe {
@@ -1277,6 +1491,8 @@ impl Probe {
             reason: String::new(),
             caps: SurfaceCapsProbe::Unasked,
             caps_reason: String::new(),
+            readback: ReadbackProbe::Unasked,
+            readback_reason: String::new(),
         }
     }
 
@@ -1690,6 +1906,7 @@ impl Probe {
                 self.state.absorb(&replies);
                 self.device.absorb(&replies);
                 self.caps.absorb(&replies);
+                self.readback.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -1790,6 +2007,130 @@ impl Probe {
         match &self.caps {
             SurfaceCapsProbe::Refused { cause, .. } => Some(*cause),
             _ => None,
+        }
+    }
+
+    /// Encode the readback setup frame: a cleared image, its copy to a host
+    /// buffer, and the request that will be polled.
+    ///
+    /// **One frame, many commands, no reply** — the whole of the readback path
+    /// up to the poll. It records the image and its view, the host-readback
+    /// buffer, a command encoder, a render pass that clears the view to
+    /// [`PROBE_READBACK_CLEAR`], the copy of the image into the buffer, the
+    /// finish, the submit, and finally the `request_readback` that files the
+    /// in-flight map under [`PROBE_READBACK`]. None of these is answered — every
+    /// handle is caller-allocated — so it is [`encode`](StreamChannel::encode),
+    /// not [`encode_awaited`](StreamChannel::encode_awaited); the poll is what is
+    /// awaited.
+    ///
+    /// `false` until a device has opened — every command here is a device method
+    /// — which is [`request_buffer`](Self::request_buffer)'s ordering rule.
+    fn request_readback(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(PROBE_IMAGE, &probe_readback_image_desc());
+                stream.create_image_view(PROBE_IMAGE_VIEW, &PROBE_READBACK_VIEW_DESC);
+                stream.create_buffer(PROBE_BUFFER, &probe_readback_buffer_desc());
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu readback encoder"),
+                    queue: PROBE_QUEUE,
+                });
+                let attachments = [ColorAttachment {
+                    view: PROBE_IMAGE_VIEW,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(PROBE_READBACK_CLEAR),
+                }];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu readback clear"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                });
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_readback_copy());
+                stream.finish(PROBE_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu readback"),
+                        buffer: PROBE_BUFFER,
+                        offset: 0,
+                        size: probe_readback_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.readback = ReadbackProbe::Requested;
+            self.readback_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) and
+    /// register its wait, unless the readback is already waiting or ready.
+    ///
+    /// **Only polls when there is something to poll for**, which is what keeps
+    /// the poll protocol honest: a second poll while one is unanswered would
+    /// register a second sequence, and the first reply — naming a sequence
+    /// nothing waits on any more — would turn the whole frame's reply buffer into
+    /// a [`DecodeError::UnexpectedSequence`](crate::DecodeError::UnexpectedSequence).
+    /// So it encodes only from [`Requested`](ReadbackProbe::Requested) or
+    /// [`Pending`](ReadbackProbe::Pending), and is a no-op while
+    /// [`Waiting`](ReadbackProbe::Waiting) or [`Ready`](ReadbackProbe::Ready).
+    ///
+    /// Answered by a [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) or
+    /// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so it goes
+    /// through [`encode_awaited`](StreamChannel::encode_awaited) — the reply
+    /// names the sequence it returns.
+    fn poll_readback(&mut self) -> bool {
+        if !matches!(
+            self.readback,
+            ReadbackProbe::Requested | ReadbackProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) = channel.encode_awaited(|stream| stream.poll_readback(PROBE_READBACK))
+        else {
+            return false;
+        };
+        self.readback = ReadbackProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the readback has got to.
+    fn readback_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.readback_reason = error.to_string();
+            return READBACK_UNDECODABLE;
+        }
+        match &self.readback {
+            ReadbackProbe::Unasked => READBACK_UNASKED,
+            ReadbackProbe::Requested => READBACK_REQUESTED,
+            ReadbackProbe::Waiting { .. } => READBACK_WAITING,
+            ReadbackProbe::Pending => READBACK_PENDING,
+            ReadbackProbe::Ready { .. } => READBACK_READY,
+        }
+    }
+
+    /// The bytes the readback came back with, or an empty slice if it has not.
+    fn readback_bytes(&self) -> &[u8] {
+        match &self.readback {
+            ReadbackProbe::Ready { bytes } => bytes,
+            _ => &[],
         }
     }
 }
@@ -2414,6 +2755,80 @@ pub mod shim {
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_probe_surface_caps_has_extent() -> u32 {
         accepted_u32(|caps| u32::from(caps.current_extent.is_some()))
+    }
+
+    /// Ask the page to clear a texture and start reading it back on the device
+    /// it opened.
+    ///
+    /// `1` when the setup frame — image, view, host buffer, encoder, a
+    /// clear-only render pass, the copy, finish, submit and `request_readback` —
+    /// is on the stream; `0` when no device has opened yet, the probe is
+    /// re-entered, or another channel is installed.
+    ///
+    /// **This is the decisive observation point of the whole track**: it is the
+    /// first command that puts *rendered pixels* into host memory, and
+    /// [`__crcbl_web_gpu_probe_readback_state`] plus
+    /// [`__crcbl_web_gpu_probe_readback_bytes_ptr`] are how the gate reads them
+    /// back to prove they are the clear colour. A stub cannot forge them.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_readback() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_readback()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the in-flight readback, once, on the reply channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for —
+    /// no readback requested, a poll already unanswered, or the bytes already in
+    /// — or when the channel would not take it.
+    ///
+    /// Called each frame after [`__crcbl_web_gpu_probe_readback`]: it is a no-op
+    /// until the previous poll is answered, so the gate can call it blindly.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_readback_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_readback()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the readback has got to — one of the
+    /// `READBACK_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_readback_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.readback_state(),
+            Err(_) => super::READBACK_UNASKED,
+        })
+    }
+
+    /// A pointer into wasm memory to the bytes the readback came back with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_readback_bytes_len`] bytes from here, and
+    /// only once [`__crcbl_web_gpu_probe_readback_state`] has answered
+    /// [`READBACK_READY`](super::READBACK_READY): before that the length is `0`
+    /// and this points at an empty buffer. Nothing here grows wasm memory — the
+    /// bytes were allocated when the reply was decoded — so the pointer is stable
+    /// until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_readback_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.readback_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_readback_bytes_ptr`] points at — the
+    /// readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_readback_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.readback_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
     }
 }
 

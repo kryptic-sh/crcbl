@@ -1560,6 +1560,21 @@ async function main() {
       'DestroyComputePipeline',
       'CreateGraphicsPipeline',
       'DestroyGraphicsPipeline',
+      // The readback path, this slice's addition. Each records or answers rather
+      // than throwing; the ones that cannot proceed (a pass with no encoder, a
+      // poll of a readback nothing requested) route to the error queue, which is
+      // not a throw. Draws, bindings and pipelines bound into a pass are still
+      // unimplemented and still throw.
+      'CreateCommandEncoder',
+      'BeginRenderPass',
+      'EndRenderPass',
+      'CopyImageToBuffer',
+      'Finish',
+      'Submit',
+      'RequestReadback',
+      'PollReadback',
+      'DestroyReadback',
+      'DestroyCommandBuffer',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;

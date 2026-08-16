@@ -556,6 +556,23 @@ if [ -z "$GRAPHICS_PIPELINE_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the readback, which is group S and is the decisive one — the
+# first that reads *pixels* rather than confirming an object. A real device
+# clears a real texture to a colour exact in 8 bits, a real copyTextureToBuffer
+# and mapAsync carry it into host memory, and the reply channel hands the bytes
+# back for every one of the 64×64 texels to be checked against the clear colour.
+# The node suite proves the encoding and the state machine against a stub whose
+# mapped buffer hands back whatever it likes — which is exactly why only a real
+# browser can prove the *values*. Its absence means the backend stopped putting
+# the right pixels in memory, or the readback reply stopped arriving, rather than
+# that this demo has no device.
+READBACK_TRIP="$(grep -F 'the cleared pixels came back from memory as the clear colour, every one' "${OUTPUT}.plain" || true)"
+if [ -z "$READBACK_TRIP" ]; then
+    echo "crcbl web e2e: the driver never read cleared pixels back from a real device;" >&2
+    echo "               crcbl-webgpu's readback path put no right pixels in memory" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

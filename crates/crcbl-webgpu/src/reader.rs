@@ -21,10 +21,11 @@ use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource,
     BlendFactor, BlendOp, BlendState, BufferUsage, ClearValue, ColorAttachment, ColorTargetState,
     ColorWrites, CompareOp, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
-    Extent3d, FilterMode, Format, FrontFace, ImageAspect, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewType, LoadOp, MultisampleState, PolygonMode, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, Rect2d, SampleType, SamplerAddressMode, ShaderStages,
-    StencilFaceState, StencilOp, StencilState, StoreOp,
+    Extent3d, FilterMode, Format, FrontFace, ImageAspect, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewType, LoadOp, MultisampleState,
+    Offset3d, PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, Rect2d,
+    SampleType, SamplerAddressMode, SemaphoreSignal, SemaphoreWait, ShaderStages, StencilFaceState,
+    StencilOp, StencilState, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -337,6 +338,44 @@ impl ByteReader<'_> {
             mip_count: self.read_u32()?,
             base_layer: self.read_u32()?,
             layer_count: self.read_u32()?,
+        })
+    }
+
+    /// One [`ImageSubresourceLayers`] — the single mip level a copy addresses,
+    /// its aspect through the same strict `from_bits` path the range's is.
+    fn read_subresource_layers(&mut self) -> Result<ImageSubresourceLayers, DecodeError> {
+        Ok(ImageSubresourceLayers {
+            aspect: self.read_image_aspect("ImageSubresourceLayers::aspect")?,
+            mip: self.read_u32()?,
+            base_layer: self.read_u32()?,
+            layer_count: self.read_u32()?,
+        })
+    }
+
+    /// One [`Offset3d`], as three signed `i32` texel offsets in `x`, `y`, `z`
+    /// order — the counterpart of [`put_offset`](crate::bytes::ByteWriter).
+    fn read_offset(&mut self) -> Result<Offset3d, DecodeError> {
+        Ok(Offset3d {
+            x: self.read_i32()?,
+            y: self.read_i32()?,
+            z: self.read_i32()?,
+        })
+    }
+
+    /// One [`SemaphoreWait`]: the handle, then the `u64` value.
+    fn read_semaphore_wait(&mut self) -> Result<SemaphoreWait, DecodeError> {
+        Ok(SemaphoreWait {
+            semaphore: self.read_handle("SemaphoreWait::semaphore")?,
+            value: self.read_u64()?,
+        })
+    }
+
+    /// One [`SemaphoreSignal`], on [`read_semaphore_wait`](Self::read_semaphore_wait)'s
+    /// terms.
+    fn read_semaphore_signal(&mut self) -> Result<SemaphoreSignal, DecodeError> {
+        Ok(SemaphoreSignal {
+            semaphore: self.read_handle("SemaphoreSignal::semaphore")?,
+            value: self.read_u64()?,
         })
     }
 
@@ -1033,6 +1072,96 @@ impl<'a> StreamReader<'a> {
                 })
             }
             tag::SURFACE_CAPS_TAG => Ok(Command::SurfaceCaps),
+            tag::CREATE_COMMAND_ENCODER_TAG => {
+                // No handle: the encoder is the replayer's implicit-current one,
+                // as `crcbl-hal`'s recording methods assume no receiver. `queue`
+                // crosses and selects nothing — see `Command::CreateCommandEncoder`.
+                let label = r.read_opt_string("CommandEncoderDesc::label")?;
+                let queue = r.read_handle("CommandEncoderDesc::queue")?;
+                Ok(Command::CreateCommandEncoder { label, queue })
+            }
+            tag::END_RENDER_PASS_TAG => Ok(Command::EndRenderPass),
+            tag::COPY_IMAGE_TO_BUFFER_TAG => {
+                // `BufferImageCopy` in declaration order; the direction is the
+                // opcode, never a field. `buffer_row_length` is texels and `0` is
+                // tightly packed — both cross verbatim, the byte conversion the
+                // replayer's. See `Command::CopyImageToBuffer`.
+                let buffer = r.read_handle("BufferImageCopy::buffer")?;
+                let buffer_offset = r.read_u64()?;
+                let buffer_row_length = r.read_u32()?;
+                let buffer_image_height = r.read_u32()?;
+                let image = r.read_handle("BufferImageCopy::image")?;
+                let image_subresource = r.read_subresource_layers()?;
+                let image_offset = r.read_offset()?;
+                let image_extent = r.read_extent()?;
+                Ok(Command::CopyImageToBuffer {
+                    buffer,
+                    buffer_offset,
+                    buffer_row_length,
+                    buffer_image_height,
+                    image,
+                    image_subresource,
+                    image_offset,
+                    image_extent,
+                })
+            }
+            tag::FINISH_TAG => Ok(Command::Finish {
+                command_buffer: r.read_handle("Finish::command_buffer")?,
+            }),
+            tag::SUBMIT_TAG => {
+                let count = r.read_count("SubmitInfo::command_buffers")?;
+                let mut command_buffers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    command_buffers.push(r.read_handle("SubmitInfo::command_buffers")?);
+                }
+                let wait_count = r.read_count("SubmitInfo::waits")?;
+                let mut waits = Vec::with_capacity(wait_count);
+                for _ in 0..wait_count {
+                    waits.push(r.read_semaphore_wait()?);
+                }
+                let signal_count = r.read_count("SubmitInfo::signals")?;
+                let mut signals = Vec::with_capacity(signal_count);
+                for _ in 0..signal_count {
+                    signals.push(r.read_semaphore_signal()?);
+                }
+                Ok(Command::Submit {
+                    command_buffers,
+                    waits,
+                    signals,
+                })
+            }
+            tag::REQUEST_READBACK_TAG => {
+                let readback = r.read_handle("RequestReadback::readback")?;
+                let label = r.read_opt_string("ReadbackDesc::label")?;
+                let buffer = r.read_handle("ReadbackDesc::buffer")?;
+                let offset = r.read_u64()?;
+                let size = r.read_u64()?;
+                // A presence byte then the wait, as `create_sampler`'s `compare`
+                // is: `None` is `mapAsync`, `Some` the semaphore wait the replayer
+                // refuses. See `Command::RequestReadback`.
+                let after = if r.read_present("ReadbackDesc::after")? {
+                    Some(r.read_semaphore_wait()?)
+                } else {
+                    None
+                };
+                Ok(Command::RequestReadback {
+                    readback,
+                    label,
+                    buffer,
+                    offset,
+                    size,
+                    after,
+                })
+            }
+            tag::POLL_READBACK_TAG => Ok(Command::PollReadback {
+                readback: r.read_handle("PollReadback::readback")?,
+            }),
+            tag::DESTROY_READBACK_TAG => Ok(Command::DestroyReadback {
+                readback: r.read_handle("DestroyReadback::readback")?,
+            }),
+            tag::DESTROY_COMMAND_BUFFER_TAG => Ok(Command::DestroyCommandBuffer {
+                command_buffer: r.read_handle("DestroyCommandBuffer::command_buffer")?,
+            }),
             unknown => Err(DecodeError::UnknownTag { tag: unknown }),
         }
     }

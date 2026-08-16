@@ -88,6 +88,23 @@ export const CAPS = Object.freeze({
 });
 
 /**
+ * The `READBACK_*` codes `__crcbl_web_gpu_probe_readback_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * `PENDING` and `WAITING` both mean "poll again": `WAITING` is a poll out and
+ * unanswered, `PENDING` is a poll answered "not yet". `READY` is the one that
+ * carries bytes.
+ */
+export const READBACK = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
  * The `SurfaceCapsFailure` codes `crates/crcbl-webgpu/src/tag.rs` assigns, which
  * `__crcbl_web_gpu_probe_surface_caps_cause` answers with.
  *
@@ -736,4 +753,80 @@ export function readSurfaceCapsProbe({ exports, memory }) {
       exports.__crcbl_web_gpu_probe_surface_caps_present_modes() >>> 0,
     hasExtent: exports.__crcbl_web_gpu_probe_surface_caps_has_extent() === 1,
   };
+}
+
+/**
+ * The same state-name helper again, for the readback codes. Its own function
+ * for {@link deviceStateName}'s reason: a shared one passed the wrong table
+ * would print a plausible name for the wrong state.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function readbackStateName(state) {
+  const found = Object.entries(READBACK).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to clear a texture and start reading it back on the device it opened.
+ *
+ * The setup half of the readback probe: one frame that clears, copies, submits
+ * and requests. {@link pollReadbackProbe} drives the poll, and
+ * {@link readReadbackProbe} reads where it has got to and the bytes when they
+ * land.
+ *
+ * Unlike every creation probe here this one's answer is *data*, and it needs a
+ * **device**, not just an adapter: `false` before one has opened is that
+ * ordering rather than a failure — wait for {@link readDeviceProbe} to say
+ * `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startReadbackProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_readback() === 1;
+}
+
+/**
+ * Poll the in-flight readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame without tracking whether a
+ * poll is outstanding. See `__crcbl_web_gpu_probe_readback_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollReadbackProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_readback_poll() === 1;
+}
+
+/**
+ * Read where the readback has got to, and its bytes once it is `READY`.
+ *
+ * `state` first, because it drains the reply buffer and decodes a reply — which
+ * allocates, and an allocation may grow wasm memory and detach a view built
+ * before it, exactly the hazard {@link readAdapterProbe} guards. The pointer and
+ * length allocate nothing, so the `Uint8Array` is built from `memory.buffer`
+ * *after* the state call, and copied out with `slice` so a later drain cannot
+ * move the bytes under a caller holding the view.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readReadbackProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_readback_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_readback_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_readback_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: readbackStateName(state), bytes };
 }

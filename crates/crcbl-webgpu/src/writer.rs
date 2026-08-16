@@ -5,12 +5,14 @@ use core::ops::Range;
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingKind, BindingResource, BlendState, BufferDesc, BufferHandle,
-    ClearValue, ColorAttachment, ColorTargetState, ComputePipelineDesc, ComputePipelineHandle,
-    DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange, ImageViewDesc,
-    ImageViewHandle, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
-    Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, ShaderModuleDesc, ShaderModuleHandle,
-    ShaderStages, StencilFaceState, SurfaceHandle,
+    BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState, CommandBufferHandle,
+    CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, DepthStencilAttachment,
+    DepthStencilState, DeviceDesc, Extent3d, GraphicsPipelineDesc, GraphicsPipelineHandle,
+    ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc,
+    ImageViewHandle, MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle,
+    PrimitiveState, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, SamplerDesc,
+    SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle,
+    ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -51,6 +53,45 @@ impl ByteWriter {
         self.put_u32(range.mip_count);
         self.put_u32(range.base_layer);
         self.put_u32(range.layer_count);
+    }
+
+    /// One [`ImageSubresourceLayers`] — a single mip level across a layer range,
+    /// which is what a copy addresses, distinct from the full range above. The
+    /// aspect rides the same `bits()` primitive every bitflags field on this
+    /// stream uses, so a plane no aspect claims is refused by the reader rather
+    /// than truncated.
+    fn put_subresource_layers(&mut self, layers: ImageSubresourceLayers) {
+        self.put_u32(layers.aspect.bits());
+        self.put_u32(layers.mip);
+        self.put_u32(layers.base_layer);
+        self.put_u32(layers.layer_count);
+    }
+
+    /// One [`Offset3d`], as three signed texel offsets — `x`, `y`, `z` — through
+    /// [`put_i32`](Self::put_i32), the same primitive [`put_rect`](Self::put_rect)
+    /// uses for a rectangle's origin.
+    fn put_offset(&mut self, offset: Offset3d) {
+        self.put_i32(offset.x);
+        self.put_i32(offset.y);
+        self.put_i32(offset.z);
+    }
+
+    /// One [`SemaphoreWait`]: the handle, then the `u64` value. Shared by
+    /// [`SubmitInfo::waits`](crcbl_hal::SubmitInfo::waits) and
+    /// [`ReadbackDesc::after`](crcbl_hal::ReadbackDesc::after), which carry the
+    /// same pair. The replayer refuses any of these WebGPU cannot express, but
+    /// the pair still crosses whole so it round-trips in Rust.
+    fn put_semaphore_wait(&mut self, wait: SemaphoreWait) {
+        self.put_handle(wait.semaphore);
+        self.put_u64(wait.value);
+    }
+
+    /// One [`SemaphoreSignal`], on [`put_semaphore_wait`](Self::put_semaphore_wait)'s
+    /// terms — a handle and a `u64` value, its own writer only because the HAL
+    /// keeps `SemaphoreSignal` and `SemaphoreWait` distinct.
+    fn put_semaphore_signal(&mut self, signal: SemaphoreSignal) {
+        self.put_handle(signal.semaphore);
+        self.put_u64(signal.value);
     }
 
     fn put_color_attachment(&mut self, attachment: &ColorAttachment) {
@@ -926,6 +967,27 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::destroy_command_buffer`](crcbl_hal::Device::destroy_command_buffer).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason: the opcode is what says which table an id indexes, and a command
+    /// buffer shares its eight bytes with every other kind quite legitimately.
+    pub fn destroy_command_buffer(&mut self, command_buffer: CommandBufferHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_COMMAND_BUFFER_TAG);
+        self.bytes.put_handle(command_buffer);
+        sequence
+    }
+
+    /// [`Device::destroy_readback`](crcbl_hal::Device::destroy_readback).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason. On WebGPU the replayer's release of this id is the `unmap`.
+    pub fn destroy_readback(&mut self, readback: ReadbackHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_READBACK_TAG);
+        self.bytes.put_handle(readback);
+        sequence
+    }
+
     // ── Encoder state ────────────────────────────────────────────────────────
 
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
@@ -1001,6 +1063,73 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_command_encoder`](crcbl_hal::Device::create_command_encoder).
+    ///
+    /// **No handle on the wire.** The encoder is the replayer's implicit-current
+    /// one, exactly as `crcbl-hal`'s recording methods assume no encoder
+    /// receiver — so nothing is allocated here, unlike every `create_*`. The
+    /// command buffer it will yield is named by [`finish`](Self::finish).
+    ///
+    /// **`queue` crosses and selects no queue.** WebGPU has one implicit queue,
+    /// so the handle is carried for a transposition to be visible and dropped by
+    /// the replayer — see [`Command::CreateCommandEncoder`](crate::Command::CreateCommandEncoder).
+    pub fn create_command_encoder(&mut self, desc: &CommandEncoderDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_COMMAND_ENCODER_TAG);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_handle(desc.queue);
+        sequence
+    }
+
+    /// [`end_render_pass`](crcbl_hal::CommandEncoder::end_render_pass).
+    ///
+    /// Body-less, on the implicit-current encoder: it closes the pass
+    /// [`begin_render_pass`](Self::begin_render_pass) opened.
+    pub fn end_render_pass(&mut self) -> u64 {
+        self.push_tag(tag::END_RENDER_PASS_TAG)
+    }
+
+    /// [`finish`](crcbl_hal::CommandEncoder::finish) — consumes the
+    /// implicit-current encoder and produces the command buffer.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason: the [`CommandBufferHandle`] is caller-allocated, and the replayer
+    /// files `encoder.finish()` under it.
+    pub fn finish(&mut self, command_buffer: CommandBufferHandle) -> u64 {
+        let sequence = self.push_tag(tag::FINISH_TAG);
+        self.bytes.put_handle(command_buffer);
+        sequence
+    }
+
+    // ── Copies ─────────────────────────────────────────────────────────────────
+
+    /// [`copy_image_to_buffer`](crcbl_hal::CommandEncoder::copy_image_to_buffer),
+    /// on the implicit-current encoder.
+    ///
+    /// The whole of [`BufferImageCopy`] in the order the struct declares it, and
+    /// **the direction is the method, never a field**: the same struct serves
+    /// both directions and the opcode is what says which, so the two cannot
+    /// disagree.
+    ///
+    /// **`buffer_row_length` crosses in texels, `0` included, and is not
+    /// resolved.** WebGPU's `bytesPerRow` is bytes and must be 256-aligned, so
+    /// turning texels into bytes — and refusing a misalignment — is the
+    /// replayer's, for the sentinel rule's reason: only it has the texture's
+    /// format to multiply by. See
+    /// [`Command::CopyImageToBuffer`](crate::Command::CopyImageToBuffer) and
+    /// `web/engine/gpu-replay.js`.
+    pub fn copy_image_to_buffer(&mut self, copy: &BufferImageCopy) -> u64 {
+        let sequence = self.push_tag(tag::COPY_IMAGE_TO_BUFFER_TAG);
+        self.bytes.put_handle(copy.buffer);
+        self.bytes.put_u64(copy.buffer_offset);
+        self.bytes.put_u32(copy.buffer_row_length);
+        self.bytes.put_u32(copy.buffer_image_height);
+        self.bytes.put_handle(copy.image);
+        self.bytes.put_subresource_layers(copy.image_subresource);
+        self.bytes.put_offset(copy.image_offset);
+        self.bytes.put_extent(copy.image_extent);
+        sequence
+    }
+
     // ── Draws ────────────────────────────────────────────────────────────────
 
     /// [`draw`](crcbl_hal::CommandEncoder::draw).
@@ -1010,6 +1139,79 @@ impl StreamWriter {
         self.bytes.put_u32(vertices.end);
         self.bytes.put_u32(instances.start);
         self.bytes.put_u32(instances.end);
+        sequence
+    }
+
+    // ── Submission and readback ──────────────────────────────────────────────
+
+    /// [`Device::submit`](crcbl_hal::Device::submit).
+    ///
+    /// The whole of [`SubmitInfo`]: the command buffers in order, then the
+    /// counted `waits` and `signals`.
+    ///
+    /// **The wait and signal lists cross whole, empty or not.** WebGPU has no
+    /// semaphores, so a non-empty list is what the replayer refuses by name — a
+    /// dropped wait is a synchronisation bug, and the engine's real frame will
+    /// carry them. The writer carries what the caller gives; the replayer refuses
+    /// what WebGPU can't do, exactly as a `Some` push-constant range is handled.
+    pub fn submit(&mut self, submit: &SubmitInfo<'_>) -> u64 {
+        let sequence = self.push_tag(tag::SUBMIT_TAG);
+        self.bytes.put_count(submit.command_buffers.len());
+        for command_buffer in submit.command_buffers {
+            self.bytes.put_handle(*command_buffer);
+        }
+        self.bytes.put_count(submit.waits.len());
+        for wait in submit.waits {
+            self.bytes.put_semaphore_wait(*wait);
+        }
+        self.bytes.put_count(submit.signals.len());
+        for signal in submit.signals {
+            self.bytes.put_semaphore_signal(*signal);
+        }
+        sequence
+    }
+
+    /// [`Device::request_readback`](crcbl_hal::Device::request_readback), with the
+    /// handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow [`ReadbackDesc`]'s declaration order behind the
+    /// handle.
+    ///
+    /// **`after` rides a presence byte and crosses whole.** `None` is WebGPU's
+    /// `mapAsync`; `Some` names a semaphore wait the replayer refuses — WebGPU
+    /// cannot express it — so it is carried by name rather than resolved, the
+    /// house rule for an optional field that is not a handle. See
+    /// [`Command::RequestReadback`](crate::Command::RequestReadback).
+    pub fn request_readback(&mut self, readback: ReadbackHandle, desc: &ReadbackDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::REQUEST_READBACK_TAG);
+        self.bytes.put_handle(readback);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_handle(desc.buffer);
+        self.bytes.put_u64(desc.offset);
+        self.bytes.put_u64(desc.size);
+        match desc.after {
+            None => self.bytes.put_u8(tag::ABSENT),
+            Some(wait) => {
+                self.bytes.put_u8(tag::PRESENT);
+                self.bytes.put_semaphore_wait(wait);
+            }
+        }
+        sequence
+    }
+
+    /// [`Device::poll_readback`](crcbl_hal::Device::poll_readback).
+    ///
+    /// **The one command here whose answer comes back**, so — like
+    /// [`enumerate_adapters`](Self::enumerate_adapters) — it must go through
+    /// [`StreamChannel::encode_awaited`](crate::web::StreamChannel::encode_awaited)
+    /// so something is waiting on the returned sequence before the frame ends,
+    /// or the [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) naming it is
+    /// refused as an answer to a command nobody asked — and refused for the whole
+    /// buffer.
+    pub fn poll_readback(&mut self, readback: ReadbackHandle) -> u64 {
+        let sequence = self.push_tag(tag::POLL_READBACK_TAG);
+        self.bytes.put_handle(readback);
         sequence
     }
 

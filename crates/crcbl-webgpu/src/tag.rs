@@ -202,12 +202,35 @@ pub const FAMILY_INSTANCE: u8 = 0x90;
 /// One past the instance family.
 pub const FAMILY_INSTANCE_END: u8 = 0xA0;
 
+/// First tag of the device family: the [`Device`](crcbl_hal::Device) methods
+/// that make no object and release none — queue submission and the readback
+/// poll. Named for the type that declares them, exactly as [`FAMILY_INSTANCE`]
+/// is: creation and destruction are grouped by *shape* and go wherever a
+/// caller-allocated handle or a released id belongs, and what is left over from
+/// each of the two big HAL types earns a family named for the type.
+///
+/// [`request_readback`](crcbl_hal::Device::request_readback) is deliberately
+/// **not** here: it allocates a [`ReadbackHandle`](crcbl_hal::ReadbackHandle)
+/// from a [`ReadbackDesc`](crcbl_hal::ReadbackDesc) and so is an ordinary
+/// creation ([`REQUEST_READBACK_TAG`]), with
+/// [`destroy_readback`](crcbl_hal::Device::destroy_readback) its release
+/// ([`DESTROY_READBACK_TAG`]) — the same CREATE/DESTROY split every resource
+/// takes. `submit` and `poll_readback` have no descriptor and no handle of their
+/// own, which is what leaves them here.
+///
+/// Appended after the instance family for that family's own reason: the tags
+/// below it are committed to a fixture and a hand-written JavaScript decoder,
+/// and moving them would renumber every one for a cosmetic ordering.
+pub const FAMILY_DEVICE: u8 = 0xA0;
+/// One past the device family.
+pub const FAMILY_DEVICE_END: u8 = 0xB0;
+
 /// Every family, as `(first, end)` pairs in ascending order.
 ///
 /// The table is what the tests walk, so a family added without a range — or one
 /// that overlaps its neighbour — is caught here rather than by two decoders
 /// quietly disagreeing.
-pub const FAMILIES: [(u8, u8); 9] = [
+pub const FAMILIES: [(u8, u8); 10] = [
     (FAMILY_CREATE, FAMILY_CREATE_END),
     (FAMILY_DESTROY, FAMILY_DESTROY_END),
     (FAMILY_ENCODER, FAMILY_ENCODER_END),
@@ -217,10 +240,11 @@ pub const FAMILIES: [(u8, u8); 9] = [
     (FAMILY_QUERY, FAMILY_QUERY_END),
     (FAMILY_PRESENT, FAMILY_PRESENT_END),
     (FAMILY_INSTANCE, FAMILY_INSTANCE_END),
+    (FAMILY_DEVICE, FAMILY_DEVICE_END),
 ];
 
 /// One past the last claimed tag. Everything above is unassigned.
-pub const FAMILIES_END: u8 = FAMILY_INSTANCE_END;
+pub const FAMILIES_END: u8 = FAMILY_DEVICE_END;
 
 // ── Command tags ──────────────────────────────────────────────────────────────
 //
@@ -273,6 +297,15 @@ pub const CREATE_COMPUTE_PIPELINE_TAG: u8 = 0x09;
 /// Written out rather than as `FAMILY_CREATE + 10`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const CREATE_GRAPHICS_PIPELINE_TAG: u8 = 0x0A;
+/// [`Command::RequestReadback`](crate::Command::RequestReadback).
+///
+/// In the creation family, not the device one:
+/// [`request_readback`](crcbl_hal::Device::request_readback) allocates a
+/// [`ReadbackHandle`](crcbl_hal::ReadbackHandle) the caller writes into the
+/// stream, exactly as every `create_*` does. See [`FAMILY_DEVICE`] for the
+/// split. Written out rather than as `FAMILY_CREATE + 11`, for
+/// [`CREATE_SAMPLER_TAG`]'s reason.
+pub const REQUEST_READBACK_TAG: u8 = 0x0B;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -316,6 +349,16 @@ pub const DESTROY_COMPUTE_PIPELINE_TAG: u8 = 0x29;
 /// Written out rather than as `FAMILY_DESTROY + 10`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const DESTROY_GRAPHICS_PIPELINE_TAG: u8 = 0x2A;
+/// [`Command::DestroyCommandBuffer`](crate::Command::DestroyCommandBuffer).
+///
+/// Written out rather than as `FAMILY_DESTROY + 11`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const DESTROY_COMMAND_BUFFER_TAG: u8 = 0x2B;
+/// [`Command::DestroyReadback`](crate::Command::DestroyReadback).
+///
+/// Written out rather than as `FAMILY_DESTROY + 12`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const DESTROY_READBACK_TAG: u8 = 0x2C;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -326,8 +369,27 @@ pub const BIND_GRAPHICS_PIPELINE_TAG: u8 = 0x42;
 pub const BIND_GROUP_TAG: u8 = 0x43;
 /// [`Command::PushConstants`](crate::Command::PushConstants).
 pub const PUSH_CONSTANTS_TAG: u8 = 0x44;
+/// [`Command::CreateCommandEncoder`](crate::Command::CreateCommandEncoder).
+///
+/// In the encoder family rather than the creation one: it names no handle — the
+/// encoder it opens is the replayer's implicit-current one, exactly as
+/// `crcbl-hal`'s recording methods assume — so there is nothing for a caller to
+/// allocate. Its terminal op [`Finish`](crate::Command::Finish) is what yields a
+/// [`CommandBufferHandle`](crcbl_hal::CommandBufferHandle), and it too is an
+/// encoder state transition rather than a descriptor-driven creation.
+pub const CREATE_COMMAND_ENCODER_TAG: u8 = 0x45;
+/// [`Command::EndRenderPass`](crate::Command::EndRenderPass).
+pub const END_RENDER_PASS_TAG: u8 = 0x46;
+/// [`Command::Finish`](crate::Command::Finish) — the implicit-current encoder's
+/// terminal op, which produces the [`CommandBufferHandle`](crcbl_hal::CommandBufferHandle)
+/// the caller allocated. In the encoder family for
+/// [`CREATE_COMMAND_ENCODER_TAG`]'s reason.
+pub const FINISH_TAG: u8 = 0x47;
 /// [`Command::Draw`](crate::Command::Draw).
 pub const DRAW_TAG: u8 = 0x60;
+/// [`Command::CopyImageToBuffer`](crate::Command::CopyImageToBuffer) — the
+/// readback path's image→buffer copy.
+pub const COPY_IMAGE_TO_BUFFER_TAG: u8 = 0x78;
 /// [`Command::EnumerateAdapters`](crate::Command::EnumerateAdapters).
 pub const ENUMERATE_ADAPTERS_TAG: u8 = 0x90;
 /// [`Command::RequestDevice`](crate::Command::RequestDevice).
@@ -340,6 +402,14 @@ pub const REQUEST_DEVICE_TAG: u8 = 0x91;
 /// family base cannot fail that assertion. The check would still run and would
 /// no longer be able to fail.
 pub const SURFACE_CAPS_TAG: u8 = 0x92;
+/// [`Command::Submit`](crate::Command::Submit) — the first command of the device
+/// family; see [`FAMILY_DEVICE`] for why submission and the readback poll sit
+/// together and apart from the create/destroy pairs.
+pub const SUBMIT_TAG: u8 = 0xA0;
+/// [`Command::PollReadback`](crate::Command::PollReadback) — the one device-family
+/// command that is *answered*, by a [`Reply::ReadbackReady`](crate::Reply::ReadbackReady)
+/// or [`Reply::ReadbackPending`](crate::Reply::ReadbackPending) naming its sequence.
+pub const POLL_READBACK_TAG: u8 = 0xA1;
 
 // ── Reply families ────────────────────────────────────────────────────────────
 //
@@ -1582,7 +1652,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 31] = [
+    const TAGS: [(&str, u8, u8); 40] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1614,6 +1684,7 @@ mod tests {
             CREATE_GRAPHICS_PIPELINE_TAG,
             FAMILY_CREATE,
         ),
+        ("RequestReadback", REQUEST_READBACK_TAG, FAMILY_CREATE),
         (
             "DestroyComputePipeline",
             DESTROY_COMPUTE_PIPELINE_TAG,
@@ -1645,6 +1716,12 @@ mod tests {
         ("DestroyImage", DESTROY_IMAGE_TAG, FAMILY_DESTROY),
         ("DestroyImageView", DESTROY_IMAGE_VIEW_TAG, FAMILY_DESTROY),
         ("DestroySampler", DESTROY_SAMPLER_TAG, FAMILY_DESTROY),
+        (
+            "DestroyCommandBuffer",
+            DESTROY_COMMAND_BUFFER_TAG,
+            FAMILY_DESTROY,
+        ),
+        ("DestroyReadback", DESTROY_READBACK_TAG, FAMILY_DESTROY),
         ("BeginDebugLabel", BEGIN_DEBUG_LABEL_TAG, FAMILY_ENCODER),
         ("BeginRenderPass", BEGIN_RENDER_PASS_TAG, FAMILY_ENCODER),
         (
@@ -1654,10 +1731,20 @@ mod tests {
         ),
         ("BindGroup", BIND_GROUP_TAG, FAMILY_ENCODER),
         ("PushConstants", PUSH_CONSTANTS_TAG, FAMILY_ENCODER),
+        (
+            "CreateCommandEncoder",
+            CREATE_COMMAND_ENCODER_TAG,
+            FAMILY_ENCODER,
+        ),
+        ("EndRenderPass", END_RENDER_PASS_TAG, FAMILY_ENCODER),
+        ("Finish", FINISH_TAG, FAMILY_ENCODER),
         ("Draw", DRAW_TAG, FAMILY_DRAW),
+        ("CopyImageToBuffer", COPY_IMAGE_TO_BUFFER_TAG, FAMILY_COPY),
         ("EnumerateAdapters", ENUMERATE_ADAPTERS_TAG, FAMILY_INSTANCE),
         ("RequestDevice", REQUEST_DEVICE_TAG, FAMILY_INSTANCE),
         ("SurfaceCaps", SURFACE_CAPS_TAG, FAMILY_INSTANCE),
+        ("Submit", SUBMIT_TAG, FAMILY_DEVICE),
+        ("PollReadback", POLL_READBACK_TAG, FAMILY_DEVICE),
     ];
 
     /// Every reply tag this slice defines, with the family its name claims.

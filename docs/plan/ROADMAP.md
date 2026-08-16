@@ -2271,6 +2271,22 @@ something trusted, and in a browser the only trusted renderer today is
      value, not a pipeline field. Slice 6 is complete — a frame is now drawable
      object by object.
 7. Command encoding, render and compute passes.
+   - ~~7a — the encoder lifecycle, a clearing render pass, and readback.~~ —
+     **shipped, and it is the first rendered pixels.** Group S records a command
+     buffer that clears a 64×64 offscreen texture to `[64, 128, 191, 255]`,
+     submits it, copies the texture into a host buffer, reads that buffer back
+     over the reply channel, and asserts **every texel** is the clear colour.
+     The encoder is implicit-current (a current encoder and a current pass, no
+     handle), `finish` consumes it into a command-buffer handle, and `barrier()`
+     is out of scope — WebGPU tracks resource state itself, so it lands as a
+     no-op in a later slice. `waits`/`signals` on submit and a `Some` readback
+     `after` are semaphores WebGPU has no concept of, refused by name. The
+     readback path is what slice 10's parity gate reads back through.
+   - 7b — the draws: bind pipeline, bind groups, push constants, draw. The
+     commands are already encoded; this adds their replay arms inside a pass.
+   - 7c — compute passes and dispatch.
+   - 7d — the remaining copies (buffer, buffer↔image, image↔image, fill), and
+     `barrier()` as the documented no-op.
 8. Surface, swapchain, present.
 9. Replace `getrandom` with the 32-byte export shim, and empty
    `ALLOWED_IMPORT_MODULES`.

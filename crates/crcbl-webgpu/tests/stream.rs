@@ -11,13 +11,14 @@ mod corpus;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp,
-    BlendState, BufferDesc, BufferUsage, ColorTargetState, ColorWrites, CompareOp,
-    ComputePipelineDesc, CullMode, DepthBias, DepthStencilState, DeviceDesc, Extent3d, Features,
-    FilterMode, Format, FrontFace, GraphicsPipelineDesc, ImageAspect, ImageDesc,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, MemoryLocation,
-    MultisampleState, PipelineLayoutDesc, PolygonMode, PrimitiveState, PrimitiveTopology,
-    PushConstantRange, SampleType, SamplerAddressMode, SamplerDesc, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StencilFaceState, StencilOp, StencilState,
+    BlendState, BufferDesc, BufferImageCopy, BufferUsage, ColorTargetState, ColorWrites,
+    CommandEncoderDesc, CompareOp, ComputePipelineDesc, CullMode, DepthBias, DepthStencilState,
+    DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
+    ImageAspect, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewDesc, ImageViewType, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc,
+    PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, ReadbackDesc, SampleType,
+    SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, StencilFaceState, StencilOp, StencilState, SubmitInfo,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -1640,10 +1641,13 @@ fn every_command_has_its_own_name() {
     // CreateImageViews, four CreateSamplers, six CreateBindGroupLayouts, two
     // CreateBindGroups, three CreateShaderModules, two CreatePipelineLayouts, one
     // CreateComputePipeline and its DestroyComputePipeline, one
-    // CreateGraphicsPipeline and its DestroyGraphicsPipeline, and two each of
-    // BeginRenderPass, BindGroup and RequestDevice, so the distinct-name count is
-    // what the writer has methods for.
-    assert_eq!(names.len(), 31);
+    // CreateGraphicsPipeline and its DestroyGraphicsPipeline, two each of
+    // BeginRenderPass, BindGroup, RequestDevice, Submit and RequestReadback, and
+    // one each of the rest of the readback path (CreateCommandEncoder,
+    // EndRenderPass, CopyImageToBuffer, Finish, PollReadback, DestroyReadback,
+    // DestroyCommandBuffer), so the distinct-name count is what the writer has
+    // methods for.
+    assert_eq!(names.len(), 40);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -2843,4 +2847,202 @@ fn no_byte_sequence_makes_the_decoder_panic() {
         // …and without a valid header, so `new` is fuzzed too.
         let _ = decode_stream(&stream[..stream.len().min(tag::HEADER_BYTES + len / 2)]);
     }
+}
+
+// ── The readback path (slice 7a) ────────────────────────────────────────────────
+
+#[test]
+fn a_copy_to_buffer_carries_every_field_including_a_signed_offset_component() {
+    // The copy has more same-typed neighbours than anything else on the stream —
+    // a `u64`, two `u32`s, a subresource of three more, a three-`i32` offset and a
+    // three-`u32` extent — so every value differs from every other a byte could be
+    // read from, and the offset carries a negative so an `i32` read as a `u32`
+    // (or vice versa) would not still compare equal.
+    let copy = BufferImageCopy {
+        buffer: handle(80, 81),
+        buffer_offset: 256,
+        buffer_row_length: 100,
+        buffer_image_height: 200,
+        image: handle(82, 83),
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 2,
+            base_layer: 3,
+            layer_count: 5,
+        },
+        image_offset: Offset3d { x: -7, y: 9, z: 11 },
+        image_extent: Extent3d {
+            width: 64,
+            height: 48,
+            depth_or_layers: 1,
+        },
+    };
+    let mut stream = StreamWriter::new();
+    stream.copy_image_to_buffer(&copy);
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![Command::CopyImageToBuffer {
+            buffer: copy.buffer,
+            buffer_offset: copy.buffer_offset,
+            buffer_row_length: copy.buffer_row_length,
+            buffer_image_height: copy.buffer_image_height,
+            image: copy.image,
+            image_subresource: copy.image_subresource,
+            image_offset: copy.image_offset,
+            image_extent: copy.image_extent,
+        }])
+    );
+    assert_ne!(
+        copy.buffer.to_bits(),
+        copy.image.to_bits(),
+        "the test would not notice the two handles swapped otherwise"
+    );
+    assert!(
+        copy.image_offset.x < 0,
+        "a negative component is what makes the i32/u32 confusion visible"
+    );
+}
+
+#[test]
+fn a_submit_carries_its_buffers_waits_and_signals_in_order() {
+    // Every handle and every value distinct, so a list read at the wrong stride —
+    // or a wait read where a signal belongs — does not still compare equal. The
+    // waits and signals are non-empty here though no browser honours them: the
+    // encoding must carry them, and the replayer is where they are refused.
+    let submit = SubmitInfo {
+        command_buffers: &[handle(90, 91), handle(92, 93)],
+        waits: &[SemaphoreWait {
+            semaphore: handle(94, 95),
+            value: 0x0102_0304_0506_0708,
+        }],
+        signals: &[SemaphoreSignal {
+            semaphore: handle(96, 97),
+            value: 9,
+        }],
+    };
+    let mut stream = StreamWriter::new();
+    stream.submit(&submit);
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![Command::Submit {
+            command_buffers: vec![handle(90, 91), handle(92, 93)],
+            waits: vec![SemaphoreWait {
+                semaphore: handle(94, 95),
+                value: 0x0102_0304_0506_0708,
+            }],
+            signals: vec![SemaphoreSignal {
+                semaphore: handle(96, 97),
+                value: 9,
+            }],
+        }])
+    );
+}
+
+#[test]
+fn a_bare_submit_carries_its_empty_lists_rather_than_dropping_them() {
+    let buffers = [handle(90, 91)];
+    let submit = SubmitInfo::new(&buffers);
+    let mut stream = StreamWriter::new();
+    stream.submit(&submit);
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![Command::Submit {
+            command_buffers: vec![handle(90, 91)],
+            waits: Vec::new(),
+            signals: Vec::new(),
+        }])
+    );
+}
+
+#[test]
+fn a_readbacks_after_is_distinguishable_present_from_absent() {
+    // The presence byte is what keeps `Some(wait)` — a semaphore the replayer
+    // refuses — apart from `None`, which is `mapAsync`. A decoder that read the
+    // wait unconditionally would consume the handle after the size on a `None`.
+    let with_wait = ReadbackDesc {
+        label: Some("stats"),
+        buffer: handle(100, 101),
+        offset: 32,
+        size: 64,
+        after: Some(SemaphoreWait {
+            semaphore: handle(102, 103),
+            value: 0x1122_3344_5566_7788,
+        }),
+    };
+    let without = ReadbackDesc {
+        after: None,
+        ..with_wait
+    };
+    let mut present = StreamWriter::new();
+    present.request_readback(handle(104, 105), &with_wait);
+    let mut absent = StreamWriter::new();
+    absent.request_readback(handle(104, 105), &without);
+
+    let present = decode_stream(present.bytes()).expect("a stream this crate wrote decodes");
+    let absent = decode_stream(absent.bytes()).expect("a stream this crate wrote decodes");
+    match (&present[0], &absent[0]) {
+        (
+            Command::RequestReadback {
+                after: Some(wait), ..
+            },
+            Command::RequestReadback { after: None, .. },
+        ) => {
+            assert_eq!(wait.value, 0x1122_3344_5566_7788);
+            assert_eq!(wait.semaphore, handle(102, 103));
+        }
+        other => panic!("the two `after` spellings did not survive: {other:?}"),
+    }
+    assert_ne!(
+        present, absent,
+        "a decoder that ignored the presence byte would make the two equal"
+    );
+}
+
+#[test]
+fn an_encoder_and_its_finish_round_trip_with_the_queue_that_selects_nothing() {
+    let mut stream = StreamWriter::new();
+    stream.create_command_encoder(&CommandEncoderDesc {
+        label: Some("frame"),
+        queue: handle(110, 111),
+    });
+    stream.end_render_pass();
+    stream.finish(handle(112, 113));
+    stream.destroy_command_buffer(handle(114, 115));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateCommandEncoder {
+                label: Some("frame".into()),
+                queue: handle(110, 111),
+            },
+            Command::EndRenderPass,
+            Command::Finish {
+                command_buffer: handle(112, 113),
+            },
+            Command::DestroyCommandBuffer {
+                command_buffer: handle(114, 115),
+            },
+        ])
+    );
+}
+
+#[test]
+fn a_poll_and_destroy_readback_carry_only_their_handle() {
+    let mut stream = StreamWriter::new();
+    stream.poll_readback(handle(120, 121));
+    stream.destroy_readback(handle(122, 123));
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::PollReadback {
+                readback: handle(120, 121),
+            },
+            Command::DestroyReadback {
+                readback: handle(122, 123),
+            },
+        ])
+    );
 }

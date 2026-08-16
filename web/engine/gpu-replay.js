@@ -307,6 +307,70 @@ const FEATURE_MAP = Object.freeze({
 const COPY_BYTES_PER_ROW_ALIGNMENT = 256n;
 
 /**
+ * `GPUMapMode.READ`, spelled as its specification value rather than reached for
+ * off the global.
+ *
+ * A fixed number in the WebGPU specification — `GPUMapMode.READ` is `0x0001` —
+ * so writing it here is not a guess, and it lets {@link Replayer#requestReadback}
+ * run under node against a stub buffer where the `GPUMapMode` namespace does not
+ * exist, exactly as {@link GPU_SHADER_STAGE} does for the shader-stage bits.
+ */
+const GPU_MAP_READ = 0x0001;
+
+/**
+ * Bytes per texel for the colour formats a linear buffer↔image copy makes sense
+ * for, keyed by the `GPUTextureFormat` string {@link TEXTURE_FORMAT} maps to.
+ *
+ * **Why this table and not {@link TEXTURE_FORMAT}**: a copy carries no format —
+ * it names the image, and the texture's own `format` is read back off it — so
+ * the conversion from `crcbl_hal::BufferImageCopy::buffer_row_length` (which is
+ * in *texels*) to WebGPU's `bytesPerRow` (which is in *bytes*) needs the block
+ * size the format string does not carry. Only the uncompressed, single-plane
+ * colour formats are here: a block-compressed or depth/stencil format has no
+ * single "bytes per texel", and {@link Replayer#copyImageToBuffer} refuses one
+ * rather than guessing — a linear readback of those is not this slice's path.
+ */
+const TEXEL_BYTES = Object.freeze({
+  r8unorm: 1,
+  rg8unorm: 2,
+  rgba8unorm: 4,
+  'rgba8unorm-srgb': 4,
+  bgra8unorm: 4,
+  'bgra8unorm-srgb': 4,
+  rgb10a2unorm: 4,
+  rg11b10ufloat: 4,
+  r16float: 2,
+  rg16float: 4,
+  rgba16float: 8,
+  r32float: 4,
+  rg32float: 8,
+  rgba32float: 16,
+  r32uint: 4,
+  rg32uint: 8,
+});
+
+/**
+ * The `GPULoadOp` a decoded `crcbl_hal::LoadOp` lowers to.
+ *
+ * `DontCare` has no WebGPU spelling — WebGPU offers only `'load'` and `'clear'`
+ * — and it lowers to **`'clear'`**, not `'load'`. `LoadOp::DontCare` means "the
+ * previous contents are not meaningful", which is true precisely when the pass
+ * writes every pixel or a swapchain image was just acquired; lowering it to
+ * `'clear'` writes the attachment's own clear value, which is deterministic,
+ * where `'load'` would preserve contents WebGPU leaves undefined and a validation
+ * layer may flag as uninitialised. The seam's `ColorAttachment` always carries a
+ * clear value, so there is always one to use.
+ */
+const LOAD_OP = Object.freeze({
+  Load: 'load',
+  Clear: 'clear',
+  DontCare: 'clear',
+});
+
+/** The `GPUStoreOp` a decoded `crcbl_hal::StoreOp` lowers to. */
+const STORE_OP = Object.freeze({ Store: 'store', Discard: 'discard' });
+
+/**
  * The sample counts WebGPU guarantees, as a ceiling.
  *
  * `GPUTextureDescriptor.sampleCount` is specified to be exactly `1` or `4` and
@@ -2225,6 +2289,49 @@ export class Replayer {
    */
   #graphicsPipelines = new HandleTable();
   /**
+   * Finished command buffers, filed by {@link Replayer#finish} at the handle
+   * wasm allocated and resolved by {@link Replayer#submit}. Its own table for
+   * {@link Replayer#computePipelines}'s reason — a handle carries no kind.
+   *
+   * @type {HandleTable<GPUCommandBuffer>}
+   */
+  #commandBuffers = new HandleTable();
+  /**
+   * In-flight readbacks, filed by {@link Replayer#requestReadback} at the handle
+   * wasm allocated. Each entry is `{ buffer, offset, size, state, bytes }`:
+   * `state` is `'mapping'` until `mapAsync` resolves and `'ready'` after, and
+   * `bytes` is the copied-out `Uint8Array` a `PollReadback` answers with.
+   *
+   * **Not the persistent-object tables' shape**, which is the whole reason it is
+   * separate: those hold a browser object for the frames between its create and
+   * its destroy, and this holds transient poll state that a `mapAsync` promise
+   * mutates a turn of the event loop later.
+   *
+   * @type {HandleTable<{ buffer: GPUBuffer, offset: number, size: number, state: 'mapping' | 'ready', bytes: Uint8Array | null }>}
+   */
+  #readbacks = new HandleTable();
+  /**
+   * The encoder recording commands right now, or `null` between a
+   * {@link Replayer#finish} and the next {@link Replayer#createCommandEncoder}.
+   *
+   * **Implicit-current, not named by a handle**, because `crcbl-hal`'s recording
+   * methods name no encoder — a `Box<dyn CommandEncoder>` records into itself —
+   * and this stream keeps that model. A `BeginRenderPass`, a `CopyImageToBuffer`
+   * or a `Finish` with none open is a malformed stream routed to the error
+   * queue, not a throw.
+   *
+   * @type {GPUCommandEncoder | null}
+   */
+  #currentEncoder = null;
+  /**
+   * The render pass open on {@link #currentEncoder}, or `null`. Set by
+   * {@link Replayer#beginRenderPass} and cleared by
+   * {@link Replayer#endRenderPass}.
+   *
+   * @type {GPURenderPassEncoder | null}
+   */
+  #currentPass = null;
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -2425,6 +2532,26 @@ export class Replayer {
     return this.#graphicsPipelines;
   }
 
+  /**
+   * Finished command buffers, keyed by the handle wasm allocated.
+   *
+   * @type {HandleTable<GPUCommandBuffer>}
+   */
+  get commandBuffers() {
+    return this.#commandBuffers;
+  }
+
+  /**
+   * In-flight readbacks, keyed by the handle wasm allocated — the poll state a
+   * `PollReadback` answers from, not a browser object. The browser gate reads
+   * the ready entry's `bytes` to prove the clear colour reached memory.
+   *
+   * @type {HandleTable<{ buffer: GPUBuffer, offset: number, size: number, state: string, bytes: Uint8Array | null }>}
+   */
+  get readbacks() {
+    return this.#readbacks;
+  }
+
   /** How many out-of-band errors are waiting to be taken. */
   get pendingErrors() {
     return this.#errors.length;
@@ -2594,6 +2721,36 @@ export class Replayer {
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
+          break;
+        case 'CreateCommandEncoder':
+          this.#createCommandEncoder(sequence, command);
+          break;
+        case 'BeginRenderPass':
+          this.#beginRenderPass(sequence, command);
+          break;
+        case 'EndRenderPass':
+          this.#endRenderPass(sequence);
+          break;
+        case 'CopyImageToBuffer':
+          this.#copyImageToBuffer(sequence, command);
+          break;
+        case 'Finish':
+          this.#finish(sequence, command);
+          break;
+        case 'Submit':
+          this.#submit(sequence, command);
+          break;
+        case 'RequestReadback':
+          this.#requestReadback(sequence, command);
+          break;
+        case 'PollReadback':
+          this.#pollReadback(sequence, command);
+          break;
+        case 'DestroyReadback':
+          this.#destroyReadback(command);
+          break;
+        case 'DestroyCommandBuffer':
+          this.#destroyCommandBuffer(command);
           break;
         default:
           throw new ReplayError(String(command.name), sequence);
@@ -4203,6 +4360,451 @@ export class Replayer {
    */
   #destroyGraphicsPipeline(command) {
     this.#graphicsPipelines.remove(command.pipeline);
+  }
+
+  /**
+   * Opens the implicit-current command encoder.
+   *
+   * **No handle to file it under**, unlike every creation above: the encoder is
+   * the one `crcbl-hal`'s recording methods record into without naming it, so it
+   * is held in {@link #currentEncoder} rather than a table. {@link Replayer#finish}
+   * is what turns it into a command buffer at a handle.
+   *
+   * `queue` is DROPPED, and that is not a refusal. WebGPU has one implicit queue,
+   * `device.queue`, so there is no queue for a handle to select — the field
+   * crosses so a transposition is visible and is ignored here, exactly as a
+   * compute pipeline's `workgroupSize` is.
+   *
+   * @param {bigint} sequence
+   * @param {{ label: string | null, queue: { index: number, generation: number } }} command
+   */
+  #createCommandEncoder(sequence, command) {
+    if (!this.#device) {
+      this.#deviceError(
+        `command encoder (command ${sequence}) was created before any device opened`
+      );
+      return;
+    }
+    this.#currentEncoder = this.#device.createCommandEncoder(
+      command.label === null ? {} : { label: command.label }
+    );
+    this.#currentPass = null;
+  }
+
+  /**
+   * Opens a render pass on the implicit-current encoder.
+   *
+   * This slice records a pass with a `LoadOp::Clear` colour attachment and no
+   * draws — the clear is the whole of it — so what matters here is that every
+   * attachment's view resolves and the load/store ops lower correctly. Draws,
+   * bindings and pipelines are a later slice and have no arm yet.
+   *
+   * A PASS WITH NO ENCODER, OR AN UNRESOLVABLE VIEW, GOES TO THE ERROR QUEUE and
+   * does not throw — both are a far side that got its ordering wrong mid-frame,
+   * which is {@link Replayer#takeError}'s case, not a reason to abandon the rest
+   * of the frame. `#currentPass` is left `null` so a later `EndRenderPass` is
+   * itself a named malformed-stream error rather than a throw.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #beginRenderPass(sequence, command) {
+    const named = `render pass (command ${sequence})`;
+    if (!this.#currentEncoder) {
+      this.#deviceError(`${named} was begun with no command encoder open`);
+      return;
+    }
+    const colorAttachments = [];
+    for (let i = 0; i < command.colorAttachments.length; i += 1) {
+      const attachment = command.colorAttachments[i];
+      const view = this.#imageViews.get(attachment.view);
+      if (view === undefined) {
+        this.#deviceError(
+          `${named} colour attachment ${i} names image view ` +
+            `${attachment.view.index}.${attachment.view.generation}, which this ` +
+            'replayer holds no live view under'
+        );
+        return;
+      }
+      const entry = {
+        view,
+        loadOp: LOAD_OP[attachment.load],
+        storeOp: STORE_OP[attachment.store],
+        clearValue: attachment.clear.color,
+      };
+      if (attachment.resolve !== null) {
+        const resolveTarget = this.#imageViews.get(attachment.resolve);
+        if (resolveTarget === undefined) {
+          this.#deviceError(
+            `${named} colour attachment ${i} resolves into image view ` +
+              `${attachment.resolve.index}.${attachment.resolve.generation}, which this ` +
+              'replayer holds no live view under'
+          );
+          return;
+        }
+        entry.resolveTarget = resolveTarget;
+      }
+      colorAttachments.push(entry);
+    }
+
+    const descriptor = { colorAttachments };
+    if (command.label !== null) descriptor.label = command.label;
+    const ds = command.depthStencilAttachment;
+    if (ds !== null) {
+      const view = this.#imageViews.get(ds.view);
+      if (view === undefined) {
+        this.#deviceError(
+          `${named} depth-stencil attachment names image view ` +
+            `${ds.view.index}.${ds.view.generation}, which this replayer holds no live view under`
+        );
+        return;
+      }
+      // `read_only` maps to both `depthReadOnly` and `stencilReadOnly`: the HAL
+      // carries one flag because a read-only depth attachment is read-only in
+      // both planes. WebGPU forbids load/store ops on a read-only plane, so they
+      // are omitted then. This path is not exercised by a browser gate in this
+      // slice — the readback pass has no depth attachment — so it is written to
+      // the seam's contract rather than to a test.
+      descriptor.depthStencilAttachment = {
+        view,
+        depthReadOnly: ds.readOnly,
+        stencilReadOnly: ds.readOnly,
+        ...(ds.readOnly
+          ? {}
+          : {
+              depthLoadOp: LOAD_OP[ds.depthLoad],
+              depthStoreOp: STORE_OP[ds.depthStore],
+              depthClearValue: ds.clear.depth,
+              stencilLoadOp: LOAD_OP[ds.stencilLoad],
+              stencilStoreOp: STORE_OP[ds.stencilStore],
+              stencilClearValue: ds.clear.stencil,
+            }),
+      };
+    }
+    this.#currentPass = this.#currentEncoder.beginRenderPass(descriptor);
+  }
+
+  /**
+   * Closes the render pass on the implicit-current encoder.
+   *
+   * ENDING WITH NO OPEN PASS IS A MALFORMED STREAM, routed to the error queue
+   * rather than thrown — a mis-nested pass is the far side's ordering bug, and
+   * throwing would take down every command after it in the frame.
+   *
+   * @param {bigint} sequence
+   */
+  #endRenderPass(sequence) {
+    if (!this.#currentPass) {
+      this.#deviceError(
+        `a render pass was ended (command ${sequence}) with none open`
+      );
+      return;
+    }
+    this.#currentPass.end();
+    this.#currentPass = null;
+  }
+
+  /**
+   * Records an image→buffer copy on the implicit-current encoder — the readback
+   * path's copy.
+   *
+   * THE 256-BYTE TRAP. `crcbl_hal::BufferImageCopy::buffer_row_length` is in
+   * TEXELS (`0` = tightly packed), and WebGPU's `bytesPerRow` is in BYTES and
+   * must be a multiple of {@link COPY_BYTES_PER_ROW_ALIGNMENT}. So the texel
+   * pitch is multiplied by the source texture's bytes-per-texel here, and the
+   * result is passed through UNPADDED: padding it would change the buffer layout
+   * the reader on the far side expects to read back, so a misaligned pitch is
+   * left for WebGPU to refuse on `uncapturederror` rather than silently repaired.
+   * The probe picks a 64×64 `rgba8unorm` texture precisely so its natural row is
+   * 64 × 4 = 256 bytes, already aligned, and the happy path needs no padding at
+   * all.
+   *
+   * A missing encoder, an unresolvable buffer or image, or a format with no
+   * defined bytes-per-texel ({@link TEXEL_BYTES}) all go to the error queue.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #copyImageToBuffer(sequence, command) {
+    const named = `image→buffer copy (command ${sequence})`;
+    if (!this.#currentEncoder) {
+      this.#deviceError(`${named} was recorded with no command encoder open`);
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
+      this.#deviceError(
+        `${named} copies into buffer ${command.buffer.index}.${command.buffer.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    const texture = this.#images.get(command.image);
+    if (texture === undefined) {
+      this.#deviceError(
+        `${named} copies from image ${command.image.index}.${command.image.generation}, ` +
+          'which this replayer holds no live image under'
+      );
+      return;
+    }
+    const texelBytes = TEXEL_BYTES[texture.format];
+    if (texelBytes === undefined) {
+      this.#deviceError(
+        `${named} copies a ${texture.format} texture, which has no single bytes-per-texel ` +
+          'this replayer can turn buffer_row_length into a bytesPerRow with'
+      );
+      return;
+    }
+    // `0` means tightly packed, so the row is the copy width; otherwise the
+    // caller's explicit texel pitch. Multiplied to bytes, passed through unpadded
+    // — see the 256-byte trap above.
+    const rowTexels =
+      command.bufferRowLength === 0
+        ? command.imageExtent.width
+        : command.bufferRowLength;
+    const bytesPerRow = rowTexels * texelBytes;
+    const rowsPerImage =
+      command.bufferImageHeight === 0
+        ? command.imageExtent.height
+        : command.bufferImageHeight;
+    this.#currentEncoder.copyTextureToBuffer(
+      {
+        texture,
+        mipLevel: command.imageSubresource.mip,
+        origin: {
+          x: command.imageOffset.x,
+          y: command.imageOffset.y,
+          z: command.imageOffset.z,
+        },
+      },
+      {
+        buffer,
+        offset: Number(command.bufferOffset),
+        bytesPerRow,
+        rowsPerImage,
+      },
+      {
+        width: command.imageExtent.width,
+        height: command.imageExtent.height,
+        depthOrArrayLayers: command.imageExtent.depthOrLayers,
+      }
+    );
+  }
+
+  /**
+   * Seals the implicit-current encoder into a command buffer at the handle wasm
+   * allocated.
+   *
+   * A FINISH WITH NO ENCODER OPEN IS A MALFORMED STREAM, into the error queue.
+   * On success `#currentEncoder` is cleared, so a stray recording command after
+   * it is a named error rather than a call on a finished encoder.
+   *
+   * @param {bigint} sequence
+   * @param {{ commandBuffer: { index: number, generation: number } }} command
+   */
+  #finish(sequence, command) {
+    if (!this.#currentEncoder) {
+      this.#deviceError(
+        `an encoder was finished (command ${sequence}) with none open`
+      );
+      return;
+    }
+    let buffer;
+    try {
+      buffer = this.#currentEncoder.finish();
+    } catch (error) {
+      this.#deviceError(
+        `the command buffer ${command.commandBuffer.index}.${command.commandBuffer.generation} ` +
+          `(command ${sequence}) could not be finished: ${String(error)}`
+      );
+      this.#currentEncoder = null;
+      this.#currentPass = null;
+      return;
+    }
+    this.#commandBuffers.insert(command.commandBuffer, buffer);
+    this.#currentEncoder = null;
+    this.#currentPass = null;
+  }
+
+  /**
+   * Submits command buffers to the device's one implicit queue.
+   *
+   * A NON-EMPTY `waits` OR `signals` IS REFUSED BY NAME. WebGPU serialises its
+   * single queue and inserts hazard barriers itself, so it has no semaphores at
+   * all — dropping a wait would be a silent synchronisation bug, and the engine's
+   * real frame will carry them, so this is the loud refusal
+   * `docs/plan/41-webgpu-stream.md`'s reasoning asks for rather than a quiet
+   * omission. An unresolvable command buffer is refused too. Both are the far
+   * side's bug, so both go to the error queue rather than throwing.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #submit(sequence, command) {
+    const named = `submit (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} ran before any device opened`);
+      return;
+    }
+    if (command.waits.length > 0 || command.signals.length > 0) {
+      this.#deviceError(
+        `${named} carries ${command.waits.length} wait(s) and ${command.signals.length} ` +
+          'signal(s), and WebGPU has no semaphores to satisfy them — its single queue ' +
+          'is ordered and it inserts hazard barriers itself'
+      );
+      return;
+    }
+    const buffers = [];
+    for (let i = 0; i < command.commandBuffers.length; i += 1) {
+      const handle = command.commandBuffers[i];
+      const buffer = this.#commandBuffers.get(handle);
+      if (buffer === undefined) {
+        this.#deviceError(
+          `${named} names command buffer ${handle.index}.${handle.generation}, which this ` +
+            'replayer holds no finished command buffer under'
+        );
+        return;
+      }
+      buffers.push(buffer);
+    }
+    this.#device.queue.submit(buffers);
+  }
+
+  /**
+   * Starts a readback: maps the buffer asynchronously and files the in-flight
+   * request under the handle wasm allocated.
+   *
+   * NO REPLY — the handle came in with the command, so nothing is waiting to
+   * learn it; {@link Replayer#pollReadback} is what is answered. The `mapAsync`
+   * is NOT awaited inside `replay`: the request is filed `'mapping'`, and when
+   * the promise resolves the mapped range is copied out and the state becomes
+   * `'ready'`. Copied, not viewed — `getMappedRange` returns a view that
+   * `unmap`/destroy invalidates, so a poll a frame later would read a detached
+   * buffer.
+   *
+   * REFUSALS WEBGPU CANNOT EXPRESS, each into the error queue: a request before
+   * any device opened, a `Some` `after` (a semaphore wait — WebGPU's `mapAsync`
+   * is exactly "everything submitted so far", the `None` case, and it has no way
+   * to wait on a value), and an unresolvable buffer. A `mapAsync` that rejects
+   * is recorded there too — this slice has no readback-failed reply, so the
+   * request stays `'mapping'` and the reason surfaces through `take_error`.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #requestReadback(sequence, command) {
+    const named = `readback ${command.readback.index}.${command.readback.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was requested before any device opened`);
+      return;
+    }
+    if (command.after !== null) {
+      this.#deviceError(
+        `${named} names an 'after' semaphore, which WebGPU has no way to wait on — ` +
+          'its mapAsync observes everything submitted so far and nothing finer'
+      );
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
+      this.#deviceError(
+        `${named} reads buffer ${command.buffer.index}.${command.buffer.generation}, which this ` +
+          'replayer holds no live buffer under'
+      );
+      return;
+    }
+    const offset = Number(command.offset);
+    const size = Number(command.size);
+    const entry = { buffer, offset, size, state: 'mapping', bytes: null };
+    this.#readbacks.insert(command.readback, entry);
+    this.#inFlight += 1;
+    buffer
+      .mapAsync(GPU_MAP_READ, offset, size)
+      .then(() => {
+        // A fresh copy: `getMappedRange` is a view onto memory `unmap` reclaims,
+        // so the bytes have to leave it before a destroy can.
+        entry.bytes = new Uint8Array(
+          buffer.getMappedRange(offset, size).slice(0)
+        );
+        entry.state = 'ready';
+      })
+      .catch((error) => {
+        this.#deviceError(`${named} could not be mapped: ${String(error)}`);
+      })
+      .finally(() => {
+        this.#inFlight -= 1;
+      });
+  }
+
+  /**
+   * Answers where a readback has got to, on the reply channel.
+   *
+   * ANSWERED WITHIN THE CALL, like {@link Replayer#surfaceCaps}: the map runs on
+   * its own promise and this only reads the state it left, so deferring would add
+   * a frame for nothing. A `'ready'` request answers {@link ReplyWriter#readbackReady}
+   * with the copied bytes; anything else answers {@link ReplyWriter#readbackPending}.
+   * Every path queues exactly one reply naming this command's sequence, because a
+   * poll that named nothing would leave the far side waiting for ever.
+   *
+   * A POLL OF A HANDLE NOTHING WAS REQUESTED UNDER still answers — `Pending`, and
+   * an error beside it — rather than staying silent: the sequence is registered
+   * on the far side and must be answered, and `Pending` is the only honest answer
+   * with no bytes to hand back.
+   *
+   * @param {bigint} sequence
+   * @param {{ readback: { index: number, generation: number } }} command
+   */
+  #pollReadback(sequence, command) {
+    const entry = this.#readbacks.get(command.readback);
+    if (entry === undefined) {
+      this.#deviceError(
+        `poll (command ${sequence}) names readback ` +
+          `${command.readback.index}.${command.readback.generation}, which this replayer holds ` +
+          'no in-flight readback under'
+      );
+      this.#replies.readbackPending(sequence, command.readback);
+      this.#queued = true;
+      return;
+    }
+    if (entry.state === 'ready') {
+      this.#replies.readbackReady(sequence, command.readback, entry.bytes);
+    } else {
+      this.#replies.readbackPending(sequence, command.readback);
+    }
+    this.#queued = true;
+  }
+
+  /**
+   * Releases a readback and unmaps its buffer.
+   *
+   * `GPUBuffer.unmap()` is the release WebGPU calls for — abandoning a readback
+   * without it leaks a mapped buffer — and it is what makes destroying a readback
+   * an explicit op on this seam. It does NOT destroy the buffer: the buffer has
+   * its own `DestroyBuffer`.
+   *
+   * A DESTROY THAT NAMES NOTHING LIVE IS A NO-OP, in both of its ways — an empty
+   * slot and a stale generation — because {@link HandleTable#remove} answers
+   * `undefined` for both.
+   *
+   * @param {{ readback: { index: number, generation: number } }} command
+   */
+  #destroyReadback(command) {
+    const entry = this.#readbacks.remove(command.readback);
+    if (entry !== undefined) entry.buffer.unmap();
+  }
+
+  /**
+   * Lets go of a finished command buffer.
+   *
+   * **Letting go is the whole of the release**: a `GPUCommandBuffer` has no
+   * `destroy()`, so dropping the reference is everything there is to do, exactly
+   * as it is for a pipeline or a view. A destroy naming nothing live is a no-op
+   * in both of its ways.
+   *
+   * @param {{ commandBuffer: { index: number, generation: number } }} command
+   */
+  #destroyCommandBuffer(command) {
+    this.#commandBuffers.remove(command.commandBuffer);
   }
 
   /**

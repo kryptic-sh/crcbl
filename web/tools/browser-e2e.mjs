@@ -4444,6 +4444,111 @@ try {
           `${graphicsPipelineReport?.error ? ` — ${graphicsPipelineReport.error}` : ''}`
   );
 
+  // **THE DECISIVE GATE OF THE WHOLE TRACK, AND THE FIRST THAT READS PIXELS.**
+  // Everything above builds objects — a buffer, a texture, a pipeline — and
+  // proves the browser accepted the descriptor this seam encoded. None of them
+  // proves the backend puts the *right pixels* in memory, because none of them
+  // renders and reads back. This does: wasm records a clear of a 64×64 texture to
+  // a colour exact in 8 bits, a copy of it into a host-readable buffer, a submit
+  // and a readback request; the demo's own loop replays it; the browser's
+  // `mapAsync` resolves a few frames later; and the bytes that come back on the
+  // reply channel are asserted to be that colour, every pixel.
+  //
+  // `gpu-replay.mjs` cannot reach here: its stub buffer hands back whatever bytes
+  // it likes, so a readback against it proves the bookkeeping and nothing about
+  // the pixels. Only a real device clears a real texture, and only a real
+  // `copyTextureToBuffer` and `mapAsync` carry the result back — which is why
+  // this check is the one that a stub silently substituted for the backend fails.
+  group('S — cleared pixels are read back from memory as the clear colour');
+
+  const PROBE_READBACK_PIXELS = 64 * 64;
+  const PROBE_READBACK_CLEAR_BYTES = [64, 128, 191, 255];
+
+  const readbackStart = await evaluate(
+    page,
+    `(async () => {
+       const { startReadbackProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startReadbackProbe({ exports }),
+         replayed: before.replayed,
+       };
+     })()`
+  );
+  // Poll across frames the way group G/H wait for the device: the demo's rAF loop
+  // replays the poll and delivers its reply between these evaluations, and each
+  // evaluation drains what has arrived, then queues another poll while the map is
+  // still resolving. `readReadbackProbe` drains first, so a reply delivered since
+  // the last frame is absorbed before another poll is queued — and a second poll
+  // is never queued while one is unanswered, which `poll_readback` enforces.
+  const readback = readbackStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+             const { readReadbackProbe, pollReadbackProbe, READBACK } =
+               await import('/engine/gpu-probe.js');
+             const { exports, gpu } = globalThis.crcbl;
+             const r = readReadbackProbe({ exports, memory: exports.memory });
+             if (r.state === READBACK.UNDECODABLE) {
+               return { done: true, state: r.name, error: gpu.replayer.takeError() };
+             }
+             if (r.state !== READBACK.READY) {
+               // Not yet — queue another poll for the loop to replay, and wait.
+               pollReadbackProbe({ exports });
+               return null;
+             }
+             // Ready: check every pixel here rather than shipping 16384 numbers
+             // out over the protocol. \`want\` is the clear colour in 8-bit-exact
+             // channels — 0.25/0.5/0.75/1.0 → 64/128/191/255.
+             const want = ${JSON.stringify(PROBE_READBACK_CLEAR_BYTES)};
+             let allMatch = r.bytes.length === ${PROBE_READBACK_PIXELS} * 4;
+             let firstWrong = -1;
+             for (let i = 0; i < r.bytes.length && allMatch; i += 1) {
+               if (r.bytes[i] !== want[i % 4]) {
+                 allMatch = false;
+                 firstWrong = i;
+               }
+             }
+             return {
+               done: true,
+               state: r.name,
+               len: r.bytes.length,
+               allMatch,
+               firstWrong,
+               // The first two texels, for a failure message a human can read.
+               sample: [...r.bytes.slice(0, 8)],
+               error: gpu.replayer.takeError(),
+             };
+           })()`
+        )
+      )
+    : null;
+  check(
+    'S',
+    'wasm encoded the readback setup frame — clear, copy, submit, request',
+    readbackStart?.started === true,
+    readbackStart?.started
+      ? 'the clear-and-read frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'S',
+    'the cleared pixels came back from memory as the clear colour, every one',
+    readback?.done === true &&
+      readback.allMatch === true &&
+      readback.len === PROBE_READBACK_PIXELS * 4,
+    readback?.done !== true
+      ? `no readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : readback.allMatch
+        ? `${readback.len} bytes, every texel [${PROBE_READBACK_CLEAR_BYTES.join(', ')}]`
+        : `state ${readback.state}, ${readback.len ?? 0} bytes, ` +
+          `first wrong at byte ${readback.firstWrong} (sample ${JSON.stringify(readback.sample)} ` +
+          `against [${PROBE_READBACK_CLEAR_BYTES.join(', ')}])` +
+          `${readback.error ? ` — ${readback.error}` : ''}`
+  );
+
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.

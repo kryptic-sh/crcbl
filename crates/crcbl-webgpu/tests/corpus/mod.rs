@@ -14,14 +14,15 @@ use crcbl_core::Handle;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp, BlendState, BufferDesc,
-    BufferUsage, ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CompareOp,
-    ComputePipelineDesc, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
-    DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
-    ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewType, LoadOp, MemoryLocation, MultisampleState, PipelineLayoutDesc, PolygonMode,
-    PrimitiveState, PrimitiveTopology, PushConstantRange, Rect2d, RenderPassDesc, SampleType,
-    SamplerAddressMode, SamplerDesc, ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState,
-    StencilOp, StencilState, StoreOp, depth,
+    BufferImageCopy, BufferUsage, ClearValue, ColorAttachment, ColorTargetState, ColorWrites,
+    CommandEncoderDesc, CompareOp, ComputePipelineDesc, CullMode, DepthBias,
+    DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d, Features, FilterMode, Format,
+    FrontFace, GraphicsPipelineDesc, ImageAspect, ImageDesc, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp,
+    MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc, PolygonMode, PrimitiveState,
+    PrimitiveTopology, PushConstantRange, ReadbackDesc, Rect2d, RenderPassDesc, SampleType,
+    SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp, SubmitInfo, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -987,6 +988,95 @@ pub fn every_command() -> Vec<Command> {
             optional_features: Features::all(),
             compatible_surface: None,
         },
+        // The readback path, in the order a frame records it. Every number is
+        // distinct so a transposition among the copy's many `u32`/`u64` fields is
+        // visible, and every optional field appears both ways.
+        Command::CreateCommandEncoder {
+            label: Some("readback encoder".into()),
+            queue: handle(140, 141),
+        },
+        // The copy the readback reads: its buffer and image side, and the many
+        // numbers `docs/plan/41-webgpu-stream.md` warns a transposition would
+        // hide. `buffer_row_length` is texels and non-zero here (an explicit
+        // pitch), `image_height` a different non-zero, and the offset's three
+        // signed components are all distinct with a negative among them.
+        Command::CopyImageToBuffer {
+            buffer: handle(142, 143),
+            buffer_offset: 256,
+            buffer_row_length: 100,
+            buffer_image_height: 200,
+            image: handle(144, 145),
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 2,
+                base_layer: 3,
+                layer_count: 5,
+            },
+            image_offset: Offset3d { x: -7, y: 9, z: 11 },
+            image_extent: Extent3d {
+                width: 64,
+                height: 48,
+                depth_or_layers: 1,
+            },
+        },
+        Command::EndRenderPass,
+        Command::Finish {
+            command_buffer: handle(146, 147),
+        },
+        // **Waits and signals non-empty**, which no browser honours but the
+        // encoding must carry field for field: two command buffers, one wait and
+        // one signal, each a distinct handle and a distinct `u64` value so the
+        // list strides and the value halves are both pinned.
+        Command::Submit {
+            command_buffers: vec![handle(148, 149), handle(150, 151)],
+            waits: vec![SemaphoreWait {
+                semaphore: handle(152, 153),
+                value: 0x0102_0304_0506_0708,
+            }],
+            signals: vec![SemaphoreSignal {
+                semaphore: handle(154, 155),
+                value: 9,
+            }],
+        },
+        // Its empty-list twin — the only case WebGPU maps — and a single command
+        // buffer, so both counted-list boundaries appear at zero as well.
+        Command::Submit {
+            command_buffers: vec![handle(156, 157)],
+            waits: Vec::new(),
+            signals: Vec::new(),
+        },
+        // `after: Some` — a semaphore wait the replayer refuses — with a full
+        // `u64` value, distinct offset and size.
+        Command::RequestReadback {
+            readback: handle(158, 159),
+            label: Some("stats readback".into()),
+            buffer: handle(160, 161),
+            offset: 32,
+            size: 64,
+            after: Some(SemaphoreWait {
+                semaphore: handle(162, 163),
+                value: 0x1122_3344_5566_7788,
+            }),
+        },
+        // `after: None` — WebGPU's `mapAsync` — no label, and a `size` past a
+        // `u32` so the field's width is pinned.
+        Command::RequestReadback {
+            readback: handle(164, 165),
+            label: None,
+            buffer: handle(166, 167),
+            offset: 0,
+            size: 0x0000_0001_0000_0000,
+            after: None,
+        },
+        Command::PollReadback {
+            readback: handle(168, 169),
+        },
+        Command::DestroyReadback {
+            readback: handle(170, 171),
+        },
+        Command::DestroyCommandBuffer {
+            command_buffer: handle(172, 173),
+        },
         // **Body-less, and deliberately not last.** Its whole encoding is one
         // byte, so a decoder that read a field that is no longer there would
         // consume the `EnumerateAdapters` below it and end the stream one
@@ -1250,6 +1340,64 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         } => stream.draw(vertices.clone(), instances.clone()),
         Command::EnumerateAdapters => stream.enumerate_adapters(),
         Command::SurfaceCaps => stream.surface_caps(),
+        Command::CreateCommandEncoder { label, queue } => {
+            stream.create_command_encoder(&CommandEncoderDesc {
+                label: label.as_deref(),
+                queue: *queue,
+            })
+        }
+        Command::EndRenderPass => stream.end_render_pass(),
+        Command::CopyImageToBuffer {
+            buffer,
+            buffer_offset,
+            buffer_row_length,
+            buffer_image_height,
+            image,
+            image_subresource,
+            image_offset,
+            image_extent,
+        } => stream.copy_image_to_buffer(&BufferImageCopy {
+            buffer: *buffer,
+            buffer_offset: *buffer_offset,
+            buffer_row_length: *buffer_row_length,
+            buffer_image_height: *buffer_image_height,
+            image: *image,
+            image_subresource: *image_subresource,
+            image_offset: *image_offset,
+            image_extent: *image_extent,
+        }),
+        Command::Finish { command_buffer } => stream.finish(*command_buffer),
+        Command::Submit {
+            command_buffers,
+            waits,
+            signals,
+        } => stream.submit(&SubmitInfo {
+            command_buffers,
+            waits,
+            signals,
+        }),
+        Command::RequestReadback {
+            readback,
+            label,
+            buffer,
+            offset,
+            size,
+            after,
+        } => stream.request_readback(
+            *readback,
+            &ReadbackDesc {
+                label: label.as_deref(),
+                buffer: *buffer,
+                offset: *offset,
+                size: *size,
+                after: *after,
+            },
+        ),
+        Command::PollReadback { readback } => stream.poll_readback(*readback),
+        Command::DestroyReadback { readback } => stream.destroy_readback(*readback),
+        Command::DestroyCommandBuffer { command_buffer } => {
+            stream.destroy_command_buffer(*command_buffer)
+        }
         Command::RequestDevice {
             adapter,
             label,

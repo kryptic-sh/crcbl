@@ -62,6 +62,22 @@ discusses sign and magnitude as floats and does not mention that a quarter of
 the backends cannot carry a fractional one — that is where the outcome belongs
 once it is decided.
 
+### A readback that fails on the browser has no reply, only `take_error`
+
+`poll_readback` answers with a `ReadbackReady` reply (the bytes) or a
+`ReadbackPending` reply (poll again), and there is **no third reply for a
+readback that failed**. In the replayer a `mapAsync` rejection — a device lost
+mid-map, a buffer that was destroyed — surfaces through the `take_error` queue
+and the poll stays `Pending` forever.
+
+That is honest for slice 7a, whose only reader is the gate polling a known-good
+readback, but `Device::poll_readback` returns `Result<ReadbackState, HalError>`
+and a real caller must be able to see `Err(DeviceLost)` rather than spin. Slice
+10's parity gate reads back every scene, so it is the first place a failed
+readback matters. The fix is a `ReadbackFailed` reply carrying the reason, the
+shape `DeviceFailed` and `SurfaceCapsFailed` already use — the reply codec has
+room; nothing consumes it yet.
+
 ### The stream decoder caps a SPIR-V module at 65 536 words
 
 `crcbl-webgpu`'s decoder bounds `ShaderModuleDesc::spirv` by `MAX_ELEMENT_COUNT`
