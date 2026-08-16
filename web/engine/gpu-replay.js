@@ -2105,6 +2105,19 @@ export class Replayer {
    */
   #shaderModules = new HandleTable();
   /**
+   * The `GPUPipelineLayout` behind each live pipeline-layout handle.
+   *
+   * Its own table for the reason every table here is its own, and — like
+   * {@link Replayer#bindGroupLayouts} — a table a later command *reads*: a
+   * pipeline layout is the resource layout a pipeline is built against, so a
+   * graphics or compute pipeline (a later slice) looks its layout up here. It is
+   * also the second kind to read one, since a `CreatePipelineLayout` looks each
+   * of its own set handles up in {@link Replayer#bindGroupLayouts}.
+   *
+   * @type {HandleTable<GPUPipelineLayout>}
+   */
+  #pipelineLayouts = new HandleTable();
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -2250,6 +2263,23 @@ export class Replayer {
    */
   get shaderModules() {
     return this.#shaderModules;
+  }
+
+  /**
+   * The pipeline layouts that are live right now, on {@link Replayer#surfaces}'s
+   * terms.
+   *
+   * **A `GPUPipelineLayout` reports its `label` and nothing else** — not its
+   * bind-group layouts, not its push-constant ranges (WebGPU has none) — so this
+   * table's contents and the device's error queue are the whole of what a reader
+   * can learn, as they are for a sampler, a bind-group layout and a bind group.
+   * What the descriptor was is checkable only before it is handed over, which is
+   * what `web/tools/gpu-replay.mjs` does.
+   *
+   * @type {HandleTable<GPUPipelineLayout>}
+   */
+  get pipelineLayouts() {
+    return this.#pipelineLayouts;
   }
 
   /** How many out-of-band errors are waiting to be taken. */
@@ -2400,6 +2430,12 @@ export class Replayer {
           break;
         case 'DestroyShaderModule':
           this.#destroyShaderModule(command);
+          break;
+        case 'CreatePipelineLayout':
+          this.#createPipelineLayout(sequence, command);
+          break;
+        case 'DestroyPipelineLayout':
+          this.#destroyPipelineLayout(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -3520,6 +3556,114 @@ export class Replayer {
    */
   #destroyShaderModule(command) {
     this.#shaderModules.remove(command.module);
+  }
+
+  /**
+   * Creates a pipeline layout on the open device and files it under the handle
+   * wasm allocated.
+   *
+   * `#createBindGroup`'s shape once more — synchronous, no reply, every failure
+   * into {@link Replayer#takeError} — and the second creation that reads the
+   * {@link Replayer#bindGroupLayouts} table: a pipeline layout is built from the
+   * bind-group layouts a shader's `@group(n)` will index. Two things are refused
+   * rather than smoothed over, each because the seam can say it and WebGPU
+   * cannot.
+   *
+   *   * **a `Some` `pushConstants`** — a push-constant range. **WebGPU has no push
+   *     constants at all**: WGSL cannot express one, so `Features::PUSH_CONSTANTS`
+   *     is on the never-set list above and there is no `GPUPipelineLayout` member
+   *     to carry a range. This is the case `crcbl_hal::Device::create_pipeline_layout`'s
+   *     own docs single out — it *must fail loudly rather than dropping the writes
+   *     later* — because a layout accepted with the range silently discarded
+   *     produces a pipeline whose per-draw constants go nowhere, and the failure
+   *     surfaces at whatever shader reads them rather than at the creation. So it
+   *     is refused here, before the browser is asked, exactly as `#createBuffer`
+   *     refuses `BufferUsage::DEVICE_ADDRESS` and `#createBindGroupLayout` refuses
+   *     a `VARIABLE_COUNT` entry.
+   *   * **a set handle that resolves to nothing** — a bind-group layout never
+   *     created, one already destroyed, or one at a generation the slot has moved
+   *     past. A handle carries no kind, so this is `#createImageView`'s judgement
+   *     applied to the pipeline-layout's set list: the miss names *which set
+   *     index* could not be resolved, and returns rather than throwing, because a
+   *     pipeline layout naming a stale layout is a far side that got its ordering
+   *     wrong mid-frame and taking the frame down would abandon every command
+   *     after it.
+   *
+   * **THE SET LIST KEEPS ITS ORDER**, which is `gpu-stream.js`'s doing and this
+   * loop's to preserve: `bindGroupLayouts` is what `@group(n)` indexes, so a
+   * reordered list binds the wrong set to the wrong slot — a failure WebGPU
+   * reports at the pipeline, a command away from the layout that was wrong.
+   *
+   * @param {bigint} sequence
+   * @param {{ layout: { index: number, generation: number },
+   *           label: string | null,
+   *           bindGroupLayouts: { index: number, generation: number }[],
+   *           pushConstants: { stages: string[], offset: number,
+   *                            size: number } | null }} command
+   */
+  #createPipelineLayout(sequence, command) {
+    const named = `pipeline layout ${command.layout.index}.${command.layout.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    if (command.pushConstants !== null) {
+      const stages =
+        command.pushConstants.stages
+          .map((stage) => `ShaderStages::${stage}`)
+          .join(' | ') || '(no stages)';
+      this.#deviceError(
+        `${named} sets a push-constant range (${stages}, offset ${command.pushConstants.offset}, ` +
+          `size ${command.pushConstants.size}), and WebGPU has no push constants at all: WGSL ` +
+          'cannot express one, so Features::PUSH_CONSTANTS is never reported and a ' +
+          'GPUPipelineLayoutDescriptor has no member to carry the range'
+      );
+      return;
+    }
+    const bindGroupLayouts = [];
+    for (const [at, handle] of command.bindGroupLayouts.entries()) {
+      const bindGroupLayout = this.#bindGroupLayouts.get(handle);
+      if (bindGroupLayout === undefined) {
+        this.#deviceError(
+          `${named} names bind group layout ${handle.index}.${handle.generation} at set ${at}, ` +
+            'which this replayer holds no live bind group layout under'
+        );
+        return;
+      }
+      bindGroupLayouts.push(bindGroupLayout);
+    }
+    let made;
+    try {
+      made = this.#device.createPipelineLayout({
+        // No label rather than an empty one, as `#createBuffer` passes it.
+        ...(command.label === null ? {} : { label: command.label }),
+        bindGroupLayouts,
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#pipelineLayouts.insert(command.layout, made);
+  }
+
+  /**
+   * Lets go of a pipeline layout.
+   *
+   * **LETTING GO IS THE WHOLE OF THE RELEASE**, as it is for a sampler, a view, a
+   * bind-group layout and a bind group: a `GPUPipelineLayout` has no `destroy()`
+   * — it is a description of a resource interface rather than an allocation — so
+   * there is nothing to call.
+   *
+   * A destroy naming nothing live is a no-op in both of its ways, and — like the
+   * bind-group layout's — that is the **ordinary** path rather than an edge one:
+   * every layout `#createPipelineLayout` refuses above (a `Some` range, an
+   * unresolvable set) leaves its handle empty, and the caller that pre-allocated
+   * the handle destroys it all the same.
+   *
+   * @param {{ layout: { index: number, generation: number } }} command
+   */
+  #destroyPipelineLayout(command) {
+    this.#pipelineLayouts.remove(command.layout);
   }
 
   /**

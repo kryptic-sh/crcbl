@@ -257,6 +257,11 @@ pub const CREATE_BIND_GROUP_TAG: u8 = 0x06;
 /// Written out rather than as `FAMILY_CREATE + 7`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const CREATE_SHADER_MODULE_TAG: u8 = 0x07;
+/// [`Command::CreatePipelineLayout`](crate::Command::CreatePipelineLayout).
+///
+/// Written out rather than as `FAMILY_CREATE + 8`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const CREATE_PIPELINE_LAYOUT_TAG: u8 = 0x08;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -285,6 +290,11 @@ pub const DESTROY_BIND_GROUP_TAG: u8 = 0x26;
 /// Written out rather than as `FAMILY_DESTROY + 7`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const DESTROY_SHADER_MODULE_TAG: u8 = 0x27;
+/// [`Command::DestroyPipelineLayout`](crate::Command::DestroyPipelineLayout).
+///
+/// Written out rather than as `FAMILY_DESTROY + 8`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const DESTROY_PIPELINE_LAYOUT_TAG: u8 = 0x28;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -1214,7 +1224,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 25] = [
+    const TAGS: [(&str, u8, u8); 27] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1230,6 +1240,16 @@ mod tests {
             "CreateShaderModule",
             CREATE_SHADER_MODULE_TAG,
             FAMILY_CREATE,
+        ),
+        (
+            "CreatePipelineLayout",
+            CREATE_PIPELINE_LAYOUT_TAG,
+            FAMILY_CREATE,
+        ),
+        (
+            "DestroyPipelineLayout",
+            DESTROY_PIPELINE_LAYOUT_TAG,
+            FAMILY_DESTROY,
         ),
         (
             "DestroyBindGroupLayout",

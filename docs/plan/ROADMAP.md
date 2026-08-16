@@ -2242,7 +2242,14 @@ something trusted, and in a browser the only trusted renderer today is
      a real `GPUShaderModule` with **clean `getCompilationInfo()`**, which is
      stronger than existence — a bad shader still returns an
      `instanceof`-passing module.
-   - 6b — pipeline layouts.
+   - ~~6b — pipeline layouts.~~ — **shipped.** Group P proves a real
+     `GPUPipelineLayout` built from the bind-group layout the probe also
+     creates. The set-order list is preserved and pinned four ways.
+     `push_constants: Some(_)` is refused to the error queue: WebGPU has no push
+     constants at all, WGSL cannot express one, and the HAL asks for a loud
+     failure rather than dropping the writes later — the whole
+     `PushConstantRange` still crosses the wire and the replayer refuses it,
+     keeping the writer carrying what the caller gives.
    - 6c — compute pipelines, then graphics pipelines.
 7. Command encoding, render and compute passes.
 8. Surface, swapchain, present.

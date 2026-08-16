@@ -64,6 +64,7 @@ const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
 const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
 const CREATE_BIND_GROUP_TAG = 0x06;
+const CREATE_PIPELINE_LAYOUT_TAG = 0x08;
 const REQUEST_DEVICE_TAG = 0x91;
 
 /** @type {string[]} */
@@ -736,6 +737,30 @@ const EXPECTED = [
     msl: '',
     dxil: [{ entryPoint: 'truncated', container: new Uint8Array([]) }],
   },
+  // The last thing a pipeline is built from, and a counted list of bare handles
+  // rather than of structs. `bindGroupLayouts` is in *set order* — what a
+  // shader's `@group(n)` indexes — so a decoder that reversed it answers a
+  // different layout, and two distinct handles are what make that visible.
+  // `pushConstants` is `null`, the ordinary value.
+  {
+    name: 'CreatePipelineLayout',
+    layout: handle(121, 122),
+    label: 'gbuffer',
+    bindGroupLayouts: [handle(93, 94), handle(95, 96)],
+    pushConstants: null,
+  },
+  // `pushConstants` present, which WebGPU has no way to express at all: it
+  // crosses whole so `gpu-replay.js` can refuse it by name. `stages` names two
+  // bits, and `offset` differs from `size` so the pair cannot be swapped
+  // unnoticed. The single bind-group layout keeps this list's length distinct
+  // from the two-entry one above.
+  {
+    name: 'CreatePipelineLayout',
+    layout: handle(123, 124),
+    label: null,
+    bindGroupLayouts: [handle(97, 98)],
+    pushConstants: { stages: ['VERTEX', 'FRAGMENT'], offset: 16, size: 128 },
+  },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
   { name: 'DestroySurface', surface: handle(47, 48) },
   // A view and the image it views are separate objects in separate tables, so
@@ -756,6 +781,11 @@ const EXPECTED = [
   // be the same eight bytes as anything else's, and this is the destroy
   // `crcbl-render` leans on hardest.
   { name: 'DestroyShaderModule', module: handle(119, 120) },
+  // Its own command and its own table again, and — like the bind-group layout's
+  // destroy — the one whose empty slot is the ordinary case: a pipeline layout
+  // the replayer refused (a present push-constant range, an unresolvable
+  // bind-group layout) still has its pre-allocated handle destroyed.
+  { name: 'DestroyPipelineLayout', layout: handle(125, 126) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',
@@ -1667,6 +1697,48 @@ async function main() {
     decodedKinds.map(([actual]) => actual),
     decodedKinds.map(([, expected]) => expected),
     'every BindingKind code decodes to the variant it names, with its own body'
+  );
+
+  // ---- a pipeline layout's push-constant range is checked, both halves ----
+  // The range crosses only so `gpu-replay.js` can refuse a present one by name,
+  // and its `stages` still rides the strict bitflags rule: a bit no flag claims
+  // is an error rather than a truncation, exactly as a layout entry's visibility
+  // is. Hand-built with an empty set list, so the presence byte and the stages
+  // word are the last few bytes.
+  checkRefused(
+    streamOf(header, [
+      CREATE_PIPELINE_LAYOUT_TAG,
+      ...someHandle, // the layout's own id
+      0, // the label, absent
+      ...u32le(0), // an empty bind-group-layout list
+      PRESENT, // push_constants present
+      ...u32le(0xffffffff), // stages — a bit no ShaderStages flag claims
+      ...u32le(0), // offset
+      ...u32le(4), // size
+    ]),
+    {
+      kind: 'InvalidEnum',
+      field: 'PushConstantRange::stages',
+      code: 0xffffffff,
+    },
+    'a push-constant range stage bit no flag claims is refused rather than truncated'
+  );
+  // …and the presence byte itself is refused when it is neither canonical value,
+  // naming the optional field rather than the range's stages.
+  checkRefused(
+    streamOf(header, [
+      CREATE_PIPELINE_LAYOUT_TAG,
+      ...someHandle,
+      0,
+      ...u32le(0),
+      2, // neither ABSENT nor PRESENT
+    ]),
+    {
+      kind: 'InvalidEnum',
+      field: 'PipelineLayoutDesc::push_constants',
+      code: 2,
+    },
+    "a push-constant range's presence byte of 2 is refused rather than read as truthy"
   );
 
   // ---- a failed reader stays failed rather than resyncing mid-body --------

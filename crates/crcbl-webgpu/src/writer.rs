@@ -7,8 +7,8 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingKind, BindingResource, BufferDesc, BufferHandle, ClearValue,
     ColorAttachment, DepthStencilAttachment, DeviceDesc, Extent3d, GraphicsPipelineHandle,
     ImageDesc, ImageHandle, ImageSubresourceRange, ImageViewDesc, ImageViewHandle,
-    PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderStages, SurfaceHandle,
+    PipelineLayoutDesc, PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
+    ShaderModuleDesc, ShaderModuleHandle, ShaderStages, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -512,6 +512,61 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_pipeline_layout`](crcbl_hal::Device::create_pipeline_layout),
+    /// with the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow the descriptor's declaration order for
+    /// [`create_image`](Self::create_image)'s.
+    ///
+    /// **The bind-group layouts go over as a counted list of bare handles, in
+    /// set order and not sorted.** `docs/plan/41-webgpu-stream.md` states the
+    /// shape — a `u32` count then that many `to_bits` words — and set order is
+    /// part of the value: it is what a shader's `@group(n)` indexes, so a
+    /// decoder that reordered it would build a layout binding the wrong set to
+    /// the wrong slot. Each id names an existing bind-group layout the replayer
+    /// looks up, not one it fills in.
+    ///
+    /// **Nothing is resolved and nothing is validated.** A
+    /// [`Some`] [`push_constants`](crcbl_hal::PipelineLayoutDesc::push_constants)
+    /// crosses whole — the [`PushConstantRange`](crcbl_hal::PushConstantRange)'s
+    /// `stages`, `offset` and `size` — even though WebGPU has no push constants
+    /// and the replayer refuses it: the writer carries what the caller gives,
+    /// the replayer refuses what WebGPU can't do, exactly as a
+    /// [`BufferUsage::DEVICE_ADDRESS`](crcbl_hal::BufferUsage::DEVICE_ADDRESS)
+    /// buffer or a `VARIABLE_COUNT` layout does. `stages` rides the
+    /// [`ShaderStages`] bitflags primitive every other stage field on this
+    /// stream uses, so a stage this build has no name for is refused by the
+    /// reader rather than truncated. See
+    /// [`Command::CreatePipelineLayout`](crate::Command::CreatePipelineLayout).
+    pub fn create_pipeline_layout(
+        &mut self,
+        layout: PipelineLayoutHandle,
+        desc: &PipelineLayoutDesc<'_>,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_PIPELINE_LAYOUT_TAG);
+        self.bytes.put_handle(layout);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_count(desc.bind_group_layouts.len());
+        for bind_group_layout in desc.bind_group_layouts {
+            self.bytes.put_handle(*bind_group_layout);
+        }
+        // A presence byte, because `PushConstantRange` is not a handle and has no
+        // niche to spare — the house rule for every optional field that is not
+        // one, exactly as `create_sampler`'s `compare` and `create_bind_group`'s
+        // `variable_count` do.
+        match desc.push_constants {
+            None => self.bytes.put_u8(tag::ABSENT),
+            Some(range) => {
+                self.bytes.put_u8(tag::PRESENT);
+                self.bytes.put_u32(range.stages.bits());
+                self.bytes.put_u32(range.offset);
+                self.bytes.put_u32(range.size);
+            }
+        }
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -592,6 +647,21 @@ impl StreamWriter {
     pub fn destroy_shader_module(&mut self, module: ShaderModuleHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_SHADER_MODULE_TAG);
         self.bytes.put_handle(module);
+        sequence
+    }
+
+    /// [`Device::destroy_pipeline_layout`](crcbl_hal::Device::destroy_pipeline_layout).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason, and the second destroy here whose **empty slot is ordinary rather
+    /// than exceptional** — like [`destroy_bind_group_layout`](Self::destroy_bind_group_layout):
+    /// the replayer refuses a layout it cannot express — a `Some` push-constant
+    /// range, a bind-group layout that resolves to nothing — so the handle the
+    /// caller pre-allocated is destroyed with nothing behind it every time that
+    /// happens.
+    pub fn destroy_pipeline_layout(&mut self, layout: PipelineLayoutHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_PIPELINE_LAYOUT_TAG);
+        self.bytes.put_handle(layout);
         sequence
     }
 

@@ -283,7 +283,7 @@ const FIRST_COMMAND = {
 const LAST_COMMAND = { name: 'EnumerateAdapters' };
 
 /** How many commands `corpus::every_command` holds. */
-const COMMAND_COUNT = 48;
+const COMMAND_COUNT = 51;
 
 async function main() {
   const override = process.argv.slice(2).find((arg) => !arg.startsWith('--'));

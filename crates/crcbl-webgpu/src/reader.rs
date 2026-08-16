@@ -21,7 +21,7 @@ use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource,
     BufferUsage, ClearValue, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d,
     FilterMode, Format, ImageAspect, ImageSubresourceRange, ImageType, ImageUsage, ImageViewType,
-    LoadOp, Rect2d, SampleType, SamplerAddressMode, ShaderStages, StoreOp,
+    LoadOp, PushConstantRange, Rect2d, SampleType, SamplerAddressMode, ShaderStages, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -107,6 +107,33 @@ impl ByteReader<'_> {
                 field,
                 code: code.into(),
             })
+    }
+
+    /// The presence byte, then a [`PushConstantRange`] if there is one.
+    ///
+    /// The optional-field rule applied to a struct rather than to a scalar or an
+    /// enum — [`read_opt_compare_op`](Self::read_opt_compare_op)'s shape with a
+    /// three-field body. Its `stages` reads through
+    /// [`read_shader_stages`](Self::read_shader_stages), so a stage bit no flag
+    /// claims is refused rather than truncated; the field crosses at all only so
+    /// the replayer can refuse a `Some` by name — WebGPU has no push constants —
+    /// which is why the strictness on the stages it carries still earns its
+    /// place.
+    fn read_opt_push_constant_range(
+        &mut self,
+        field: &'static str,
+    ) -> Result<Option<PushConstantRange>, DecodeError> {
+        if !self.read_present(field)? {
+            return Ok(None);
+        }
+        let stages = self.read_shader_stages("PushConstantRange::stages")?;
+        let offset = self.read_u32()?;
+        let size = self.read_u32()?;
+        Ok(Some(PushConstantRange {
+            stages,
+            offset,
+            size,
+        }))
     }
 
     fn read_sample_type(&mut self, field: &'static str) -> Result<SampleType, DecodeError> {
@@ -608,8 +635,32 @@ impl<'a> StreamReader<'a> {
                     dxil,
                 })
             }
+            tag::CREATE_PIPELINE_LAYOUT_TAG => {
+                let layout = r.read_handle("CreatePipelineLayout::layout")?;
+                let label = r.read_opt_string("PipelineLayoutDesc::label")?;
+                let count = r.read_count("PipelineLayoutDesc::bind_group_layouts")?;
+                // Pushed in wire order and never sorted: set order is what a
+                // shader's `@group(n)` indexes, so the slice's order is part of
+                // the value. See `Command::CreatePipelineLayout`.
+                let mut bind_group_layouts = Vec::with_capacity(count);
+                for _ in 0..count {
+                    bind_group_layouts
+                        .push(r.read_handle("PipelineLayoutDesc::bind_group_layouts")?);
+                }
+                let push_constants =
+                    r.read_opt_push_constant_range("PipelineLayoutDesc::push_constants")?;
+                Ok(Command::CreatePipelineLayout {
+                    layout,
+                    label,
+                    bind_group_layouts,
+                    push_constants,
+                })
+            }
             tag::DESTROY_SHADER_MODULE_TAG => Ok(Command::DestroyShaderModule {
                 module: r.read_handle("DestroyShaderModule::module")?,
+            }),
+            tag::DESTROY_PIPELINE_LAYOUT_TAG => Ok(Command::DestroyPipelineLayout {
+                layout: r.read_handle("DestroyPipelineLayout::layout")?,
             }),
             tag::DESTROY_BIND_GROUP_LAYOUT_TAG => Ok(Command::DestroyBindGroupLayout {
                 layout: r.read_handle("DestroyBindGroupLayout::layout")?,

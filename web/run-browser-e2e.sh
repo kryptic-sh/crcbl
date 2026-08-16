@@ -498,6 +498,25 @@ if [ -z "$SHADER_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the pipeline layout, which is group P and is the last thing a
+# pipeline is built from. It is like the bind group in shape — its export encodes
+# a whole frame, a bind-group layout and then a pipeline layout built from it — and
+# like the sampler, layout and bind group in evidence: a `GPUPipelineLayout`
+# reports its label and nothing else, so `instanceof GPUPipelineLayout` and the
+# silent error queue are all the browser can be asked. What that queue guards here
+# is the set resolution: a bind-group layout the pipeline layout could not find, or
+# a set list the browser refused. The node suite proves the descriptor and every
+# refusal — a `Some` push-constant range, an unresolvable set — against a stub
+# whose `createPipelineLayout` returns a plain object; only this asks a real device
+# to accept it. Its absence means that stopped happening rather than that this demo
+# has no device.
+PIPELINE_LAYOUT_TRIP="$(grep -F 'a real GPUPipelineLayout came back from the device with the bind-group layout set accepted' "${OUTPUT}.plain" || true)"
+if [ -z "$PIPELINE_LAYOUT_TRIP" ]; then
+    echo "crcbl web e2e: the driver never created a pipeline layout on a real device;" >&2
+    echo "               crcbl-webgpu's CreatePipelineLayout is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

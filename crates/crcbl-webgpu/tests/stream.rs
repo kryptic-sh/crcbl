@@ -10,10 +10,11 @@ mod corpus;
 
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage, CompareOp, DeviceDesc,
-    Extent3d, Features, FilterMode, Format, ImageAspect, ImageDesc, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewDesc, ImageViewType, MemoryLocation, SampleType,
-    SamplerAddressMode, SamplerDesc, ShaderModuleDesc, ShaderStages,
+    BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage,
+    CompareOp, DeviceDesc, Extent3d, Features, FilterMode, Format, ImageAspect, ImageDesc,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, MemoryLocation,
+    PipelineLayoutDesc, PushConstantRange, SampleType, SamplerAddressMode, SamplerDesc,
+    ShaderModuleDesc, ShaderStages,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -1634,10 +1635,10 @@ fn every_command_has_its_own_name() {
     names.dedup();
     // `every_command` holds three CreateBuffers, three CreateImages, six
     // CreateImageViews, four CreateSamplers, six CreateBindGroupLayouts, two
-    // CreateBindGroups, three CreateShaderModules and two each of BeginRenderPass,
-    // BindGroup and RequestDevice, so the distinct-name count is what the writer
-    // has methods for.
-    assert_eq!(names.len(), 25);
+    // CreateBindGroups, three CreateShaderModules, two CreatePipelineLayouts and
+    // two each of BeginRenderPass, BindGroup and RequestDevice, so the
+    // distinct-name count is what the writer has methods for.
+    assert_eq!(names.len(), 27);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -1878,6 +1879,180 @@ fn a_shader_modules_dxil_pair_list_round_trips_with_two_differently_sized_entrie
         }
         other => panic!("expected CreateShaderModule, got {}", other.name()),
     }
+}
+
+// ── Pipeline layouts ──────────────────────────────────────────────────────────
+
+/// Encodes one unlabelled pipeline layout and returns its bytes. The label is
+/// absent so every field after it sits at a fixed offset.
+fn pipeline_layout_of(
+    bind_group_layouts: &[BindGroupLayoutHandle],
+    push_constants: Option<PushConstantRange>,
+) -> Vec<u8> {
+    let mut stream = StreamWriter::new();
+    stream.create_pipeline_layout(
+        handle(1, 1),
+        &PipelineLayoutDesc {
+            label: None,
+            bind_group_layouts,
+            push_constants,
+        },
+    );
+    stream.bytes().to_vec()
+}
+
+/// The single command a `pipeline_layout_of` buffer decodes to.
+fn decode_one(bytes: &[u8]) -> Command {
+    decode_stream(bytes)
+        .expect("a stream this crate wrote decodes")
+        .into_iter()
+        .next()
+        .expect("one command")
+}
+
+/// **The bind-group layouts cross in set order and the list is not reversed.**
+///
+/// `bind_group_layouts` is what a shader's `@group(n)` indexes, so its order is
+/// part of the value rather than a presentation of it — a decoder that reversed
+/// it would bind the wrong set to the wrong slot. Two distinct handles are what
+/// makes a reversal visible: a single-element list decodes identically whichever
+/// way a reader walks it.
+#[test]
+fn a_pipeline_layout_carries_its_bind_group_layout_list_in_set_order() {
+    let first = handle(93, 94);
+    let second = handle(95, 96);
+    let forward = pipeline_layout_of(&[first, second], None);
+    let reversed = pipeline_layout_of(&[second, first], None);
+    assert_ne!(forward, reversed, "set order is not on the wire");
+
+    match decode_one(&forward) {
+        Command::CreatePipelineLayout {
+            bind_group_layouts,
+            push_constants,
+            ..
+        } => {
+            assert_eq!(bind_group_layouts, vec![first, second]);
+            assert_eq!(push_constants, None);
+        }
+        other => panic!("expected CreatePipelineLayout, got {}", other.name()),
+    }
+    assert_ne!(
+        first.to_bits(),
+        second.to_bits(),
+        "the test would not notice a reversed list otherwise"
+    );
+}
+
+/// **A `Some` push-constant range round-trips field for field, and an absent one
+/// is a distinct, shorter body.**
+///
+/// WebGPU has no push constants, so a `Some` is refused by the replayer — but it
+/// crosses whole so the replayer can refuse it *by name*, which is the writer's
+/// "carry what the caller gives" rule. `offset` and `size` are distinct so a swap
+/// cannot pass, and `stages` names two bits so it is more than a single-bit value.
+#[test]
+fn a_pipeline_layouts_push_constant_range_round_trips_and_an_absent_one_differs() {
+    let range = PushConstantRange {
+        stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+        offset: 16,
+        size: 128,
+    };
+    let present = pipeline_layout_of(&[handle(9, 9)], Some(range));
+    let absent = pipeline_layout_of(&[handle(9, 9)], None);
+    assert_ne!(present, absent);
+    // The absent one is twelve bytes shorter: the stages/offset/size trio is not
+    // written when there is nothing to write.
+    assert_eq!(absent.len() + 12, present.len());
+
+    match decode_one(&present) {
+        Command::CreatePipelineLayout {
+            push_constants: Some(got),
+            ..
+        } => {
+            assert_eq!(got.stages, range.stages);
+            assert_eq!(got.offset, range.offset);
+            assert_eq!(got.size, range.size);
+            assert_ne!(
+                got.offset, got.size,
+                "offset and size are equal, so the test would not notice them swapped"
+            );
+        }
+        other => panic!(
+            "expected a present push-constant range, got {}",
+            other.name()
+        ),
+    }
+    match decode_one(&absent) {
+        Command::CreatePipelineLayout { push_constants, .. } => assert_eq!(push_constants, None),
+        other => panic!("expected CreatePipelineLayout, got {}", other.name()),
+    }
+}
+
+/// **The empty pipeline layout is a layout.** No bind-group layouts and no push
+/// constants is the empty pipeline layout, which is legal and must build — the
+/// counted list at zero, whose end is the push-constant presence byte rather than
+/// the next command.
+#[test]
+fn an_empty_pipeline_layout_is_a_layout() {
+    assert_eq!(
+        decode_stream(&pipeline_layout_of(&[], None)),
+        Ok(vec![Command::CreatePipelineLayout {
+            layout: handle(1, 1),
+            label: None,
+            bind_group_layouts: Vec::new(),
+            push_constants: None,
+        }])
+    );
+}
+
+/// A stage bit no `ShaderStages` flag claims in a push-constant range is refused
+/// rather than truncated, and a presence byte that is neither canonical value is
+/// refused rather than read as truthy.
+#[test]
+fn a_push_constant_ranges_stage_bit_and_presence_byte_are_both_checked() {
+    let range = PushConstantRange {
+        stages: ShaderStages::VERTEX,
+        offset: 0,
+        size: 4,
+    };
+    let whole = pipeline_layout_of(&[], Some(range));
+
+    // stages, offset and size are the last twelve bytes of the body; the presence
+    // byte is the one before them.
+    let stages_at = whole.len() - 12;
+    let mut bytes = whole.clone();
+    bytes[stages_at..stages_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "PushConstantRange::stages",
+            code: u32::MAX.into(),
+        })
+    );
+
+    // One bit past the last claimed stage, where a table that stopped a stage
+    // short lands and where `u32::MAX` would not distinguish itself.
+    let unclaimed = ShaderStages::all().bits() | (ShaderStages::all().bits() + 1);
+    let mut bytes = whole.clone();
+    bytes[stages_at..stages_at + 4].copy_from_slice(&unclaimed.to_le_bytes());
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "PushConstantRange::stages",
+            ..
+        })
+    ));
+
+    let presence_at = stages_at - 1;
+    let mut bytes = whole;
+    bytes[presence_at] = 2;
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "PipelineLayoutDesc::push_constants",
+            code: 2,
+        })
+    );
 }
 
 // ── Malformed streams ─────────────────────────────────────────────────────────

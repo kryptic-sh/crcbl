@@ -78,6 +78,7 @@ const CREATE_SAMPLER_TAG = 0x04;
 const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
 const CREATE_BIND_GROUP_TAG = 0x06;
 const CREATE_SHADER_MODULE_TAG = 0x07;
+const CREATE_PIPELINE_LAYOUT_TAG = 0x08;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
@@ -86,6 +87,7 @@ const DESTROY_SAMPLER_TAG = 0x24;
 const DESTROY_BIND_GROUP_LAYOUT_TAG = 0x25;
 const DESTROY_BIND_GROUP_TAG = 0x26;
 const DESTROY_SHADER_MODULE_TAG = 0x27;
+const DESTROY_PIPELINE_LAYOUT_TAG = 0x28;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -671,6 +673,28 @@ class ByteReader {
    */
   readOptU32(field) {
     return this.readPresent(field) ? this.readU32() : null;
+  }
+
+  /**
+   * A presence byte, then a `crcbl_hal::PushConstantRange` if there is one.
+   *
+   * The optional-field rule applied to a struct rather than a scalar. Its
+   * `stages` reads through {@link ByteReader#readFlags} against {@link
+   * SHADER_STAGES}, so a stage bit no flag claims is an error rather than a
+   * truncation. The whole range crosses only so `gpu-replay.js` can refuse a
+   * present one *by name* — WebGPU has no push constants at all — which is why
+   * the strictness on the stages it carries still matters.
+   *
+   * @param {string} field
+   * @returns {{ stages: string[], offset: number, size: number } | null}
+   */
+  readOptPushConstantRange(field) {
+    if (!this.readPresent(field)) return null;
+    return {
+      stages: this.readFlags('PushConstantRange::stages', SHADER_STAGES),
+      offset: this.readU32(),
+      size: this.readU32(),
+    };
   }
 
   /**
@@ -1288,12 +1312,48 @@ function decodeCommand(r) {
         dxil: r.readDxil('ShaderModuleDesc::dxil'),
       };
     }
+    case CREATE_PIPELINE_LAYOUT_TAG: {
+      // **A counted list of bare handles, in set order** — what a shader's
+      // `@group(n)` indexes — so it is pushed in wire order and never sorted, and
+      // a single-element list would prove nothing about that. The fixture carries
+      // a two-layout pipeline layout for exactly that reason. `pushConstants`
+      // crosses whole even though WebGPU has none at all: `gpu-replay.js` refuses
+      // a present one by name, and it can only refuse what it was told.
+      const layout = r.readHandle('CreatePipelineLayout::layout');
+      const label = r.readOptString('PipelineLayoutDesc::label');
+      const count = r.readCount('PipelineLayoutDesc::bind_group_layouts');
+      const bindGroupLayouts = [];
+      for (let i = 0; i < count; i += 1) {
+        bindGroupLayouts.push(
+          r.readHandle('PipelineLayoutDesc::bind_group_layouts')
+        );
+      }
+      return {
+        name: 'CreatePipelineLayout',
+        layout,
+        label,
+        bindGroupLayouts,
+        pushConstants: r.readOptPushConstantRange(
+          'PipelineLayoutDesc::push_constants'
+        ),
+      };
+    }
     case DESTROY_SHADER_MODULE_TAG:
       // Its own tag and its own table again: a shader module's id is allowed to
       // be the same eight bytes as anything else's.
       return {
         name: 'DestroyShaderModule',
         module: r.readHandle('DestroyShaderModule::module'),
+      };
+    case DESTROY_PIPELINE_LAYOUT_TAG:
+      // Its own tag and its own table again, and — like the bind-group layout's
+      // destroy — the one whose empty slot is the *ordinary* case: the replayer
+      // refuses a layout it cannot express (a present push-constant range, an
+      // unresolvable bind-group layout), so the handle the caller pre-allocated
+      // is released with nothing behind it every time that happens.
+      return {
+        name: 'DestroyPipelineLayout',
+        layout: r.readHandle('DestroyPipelineLayout::layout'),
       };
     case DESTROY_BIND_GROUP_LAYOUT_TAG:
       // Its own tag and its own table again, and the destroy whose empty slot is

@@ -22,7 +22,8 @@ use crcbl_hal::{
     BufferHandle, BufferUsage, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d,
     Features, FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange,
     ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutHandle,
-    Rect2d, SamplerAddressMode, SamplerHandle, ShaderModuleHandle, ShaderStages, SurfaceHandle,
+    PushConstantRange, Rect2d, SamplerAddressMode, SamplerHandle, ShaderModuleHandle, ShaderStages,
+    SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -323,6 +324,56 @@ pub enum Command {
         /// empty container is a truncated artifact.
         dxil: Vec<(String, Vec<u8>)>,
     },
+    /// [`Device::create_pipeline_layout`](crcbl_hal::Device::create_pipeline_layout),
+    /// with the handle the caller allocated for it.
+    ///
+    /// The whole of [`PipelineLayoutDesc`](crcbl_hal::PipelineLayoutDesc), and
+    /// the last thing a pipeline is built from that this seam did not already
+    /// carry — shader modules and bind-group layouts both ship. Two of its three
+    /// fields are the command's shape rather than the encoding's convenience.
+    ///
+    /// **[`bind_group_layouts`](Self::CreatePipelineLayout::bind_group_layouts)
+    /// is a counted list of bare handles, in set order, and is not sorted or
+    /// rebuilt.** `GPUPipelineLayoutDescriptor.bindGroupLayouts` is an array in
+    /// set order, and set order is what a shader's `@group(n)` indexes — a
+    /// decoder that reordered it would build a layout binding the wrong set to
+    /// the wrong slot. Each handle resolves against the **bind-group-layout
+    /// table** the layout command fills, and a handle that is stale, never
+    /// created, or the wrong kind is a failure the replayer routes to the error
+    /// queue naming which set index could not be resolved.
+    ///
+    /// **[`push_constants`](Self::CreatePipelineLayout::push_constants) crosses
+    /// verbatim, and the replayer refuses a `Some`.** WebGPU has no push
+    /// constants at all, so a `Some(_)` is the "WebGPU cannot express it" case
+    /// [`Device::create_pipeline_layout`](crcbl_hal::Device::create_pipeline_layout)'s
+    /// doc requires to fail *loudly rather than dropping the writes later* — the
+    /// same judgement `web/engine/gpu-replay.js` already makes for
+    /// [`BufferUsage::DEVICE_ADDRESS`](crcbl_hal::BufferUsage::DEVICE_ADDRESS)
+    /// and a `VARIABLE_COUNT` layout. The whole
+    /// [`PushConstantRange`] is on the wire anyway
+    /// — the writer carries what the caller gives, the replayer refuses what
+    /// WebGPU can't do — so it round-trips in Rust even though no browser builds
+    /// it. A `None` proceeds, and an empty `bind_group_layouts` list with `None`
+    /// is the empty pipeline layout, which must build.
+    ///
+    /// **Nothing is validated here**, which is [`Command::CreateImage`]'s rule:
+    /// the errors [`Device::create_pipeline_layout`](crcbl_hal::Device::create_pipeline_layout)'s
+    /// doc lists — push constants without
+    /// [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS), a
+    /// mesh/task stage the device does not report — are the replayer's to raise,
+    /// because only it faces WebGPU. See `web/engine/gpu-replay.js`.
+    CreatePipelineLayout {
+        /// Id the replayer stores the new object at.
+        layout: PipelineLayoutHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Bind-group layouts, **in set order** — an id the replayer looks up,
+        /// not one it fills in.
+        bind_group_layouts: Vec<BindGroupLayoutHandle>,
+        /// Push-constant range, if any. `None` is the ordinary value; `Some`
+        /// names a range WebGPU cannot express, which the replayer refuses.
+        push_constants: Option<PushConstantRange>,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -393,6 +444,18 @@ pub enum Command {
     DestroyShaderModule {
         /// Id to release.
         module: ShaderModuleHandle,
+    },
+    /// [`Device::destroy_pipeline_layout`](crcbl_hal::Device::destroy_pipeline_layout).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is — and, like
+    /// [`Command::DestroyBindGroupLayout`], the empty slot is the *ordinary*
+    /// case rather than an edge one: a layout the replayer refused (a `Some`
+    /// push-constant range, an unresolvable bind-group layout) still has its
+    /// handle destroyed by the caller that pre-allocated it.
+    DestroyPipelineLayout {
+        /// Id to release.
+        layout: PipelineLayoutHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -518,6 +581,7 @@ impl Command {
             Self::CreateBindGroupLayout { .. } => "CreateBindGroupLayout",
             Self::CreateBindGroup { .. } => "CreateBindGroup",
             Self::CreateShaderModule { .. } => "CreateShaderModule",
+            Self::CreatePipelineLayout { .. } => "CreatePipelineLayout",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
             Self::DestroyImage { .. } => "DestroyImage",
@@ -526,6 +590,7 @@ impl Command {
             Self::DestroyBindGroupLayout { .. } => "DestroyBindGroupLayout",
             Self::DestroyBindGroup { .. } => "DestroyBindGroup",
             Self::DestroyShaderModule { .. } => "DestroyShaderModule",
+            Self::DestroyPipelineLayout { .. } => "DestroyPipelineLayout",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",

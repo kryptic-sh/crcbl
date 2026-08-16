@@ -460,6 +460,42 @@ export function startShaderModuleProbe({ exports }) {
 }
 
 /**
+ * Asks wasm to encode a pipeline-layout creation on the device it opened.
+ *
+ * **There is no `readPipelineLayoutProbe`, for {@link startBufferProbe}'s
+ * reason:** `CreatePipelineLayout` has no entry on the reply channel either.
+ * `globalThis.crcbl.gpu.replayer.pipelineLayouts` is the table the
+ * `GPUPipelineLayout` lands in, and a layout the browser would not have — one
+ * carrying push constants, or naming a bind-group layout it cannot resolve —
+ * arrives in `crcbl.gpu.replayer.takeError()`.
+ *
+ * **AND NOTHING TO PASS IN**, on {@link startBindGroupLayoutProbe}'s terms: a
+ * `GPUPipelineLayout` reports its `label` and nothing else — not its bind-group
+ * layouts, not its push-constant ranges — so a number chosen by the page could
+ * not be read back off the object. The descriptor is fixed in
+ * `crates/crcbl-webgpu/src/probe.rs`, with `push_constants: None` so it *builds*
+ * rather than being refused.
+ *
+ * **What is new is that this one export encodes a whole FRAME.** A pipeline
+ * layout names a live bind-group layout, so wasm records the layout before the
+ * pipeline layout — and the pipeline layout resolves that layout out of the
+ * bind-group-layout table, which is what puts the set-index resolution in front
+ * of a real `createPipelineLayout`.
+ *
+ * It needs a **device**, as {@link startBufferProbe} does and for the same
+ * reason: `create_pipeline_layout` is a device method, so a `false` right after
+ * {@link startDeviceProbe} is that ordering rather than a failure.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded it, on {@link startImageProbe}'s
+ *   terms.
+ */
+export function startPipelineLayoutProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_pipeline_layout() === 1;
+}
+
+/**
  * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of

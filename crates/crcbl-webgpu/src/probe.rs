@@ -46,6 +46,7 @@
 //! | [`__crcbl_web_gpu_probe_bind_group_layout`](shim::__crcbl_web_gpu_probe_bind_group_layout) | `() -> i32` | Encode one [`CreateBindGroupLayout`](crate::Command::CreateBindGroupLayout) against [`PROBE_BIND_GROUP_LAYOUT`], with [`PROBE_BIND_GROUP_LAYOUT_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_bind_group`](shim::__crcbl_web_gpu_probe_bind_group) | `() -> i32` | Encode one frame — a layout, its resources, and a [`CreateBindGroup`](crate::Command::CreateBindGroup) against [`PROBE_BIND_GROUP`] with [`PROBE_BIND_GROUP_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_shader_module`](shim::__crcbl_web_gpu_probe_shader_module) | `() -> i32` | Encode one [`CreateShaderModule`](crate::Command::CreateShaderModule) against [`PROBE_SHADER_MODULE`] with [`PROBE_SHADER_MODULE_DESC`]. `1`, or `0` on the same three conditions. |
+//! | [`__crcbl_web_gpu_probe_pipeline_layout`](shim::__crcbl_web_gpu_probe_pipeline_layout) | `() -> i32` | Encode one frame — a bind-group layout and a [`CreatePipelineLayout`](crate::Command::CreatePipelineLayout) against [`PROBE_PIPELINE_LAYOUT`] built from it. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `() -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) and register its wait. `1`, or `0` if there was no room or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
@@ -289,8 +290,9 @@ use crcbl_hal::{
     BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
     BufferDesc, BufferHandle, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features, FilterMode,
     Format, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewHandle, ImageViewType, MemoryLocation, SampleType, SamplerAddressMode, SamplerDesc,
-    SamplerHandle, ShaderModuleDesc, ShaderModuleHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
+    ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle,
+    SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -852,6 +854,56 @@ pub const PROBE_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc
     dxil: &[],
 };
 
+/// The pipeline layout [`shim::__crcbl_web_gpu_probe_pipeline_layout`] creates,
+/// every time.
+///
+/// The same bits an eighth time, on [`PROBE_SHADER_MODULE`]'s terms: a handle
+/// carries no kind, so a page filing eight kinds under one key would be a
+/// replayer with one table where the crate docs require eight. Its bits are
+/// [`PROBE_BIND_GROUP_LAYOUT`]'s too — and here the sharing is the *point*, as it
+/// is for the image and its view: a pipeline layout and a bind-group layout are
+/// alive at the same time and the pipeline layout **names** the bind-group
+/// layout, so a replayer with one table would resolve the pipeline layout's own
+/// id as the set it is built from.
+pub const PROBE_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(1 << 32) {
+        Some(layout) => layout,
+        // Generation `1`, as above.
+        None => panic!("generation 1 is not zero"),
+    };
+
+/// The bind-group layouts [`PROBE_PIPELINE_LAYOUT_DESC`] is built from.
+///
+/// One entry, [`PROBE_BIND_GROUP_LAYOUT`], which the pipeline-layout probe's
+/// frame creates just before the pipeline layout — a pipeline layout names live
+/// bind-group layouts, so they have to exist first. One is enough here: the
+/// *order* of a longer list is pinned by the corpus, which carries a two-layout
+/// pipeline layout; what this probe puts in front of a browser is a real
+/// `createPipelineLayout` accepting a set it can resolve.
+pub const PROBE_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS: [BindGroupLayoutHandle; 1] =
+    [PROBE_BIND_GROUP_LAYOUT];
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_pipeline_layout`] asks with.
+///
+/// A `const` rather than a function for [`PROBE_IMAGE_VIEW_DESC`]'s reason: there
+/// is nothing for a caller to pass. **A `GPUPipelineLayout` reports its `label`
+/// and nothing else** — not its bind-group layouts, not its push-constant ranges
+/// (it has none) — so this is [`PROBE_BIND_GROUP_LAYOUT_DESC`]'s situation
+/// exactly, and what a browser can be asked is the same two things: that the
+/// object is an instance of this browser's own `GPUPipelineLayout`, and that the
+/// device reported nothing about the descriptor afterwards.
+///
+/// **`push_constants` is `None`.** A `Some` is the "WebGPU cannot express it"
+/// case the replayer refuses — WebGPU has no push constants at all — so a probe
+/// naming one would be testing the refusal rather than the creation. The corpus
+/// drives that refusal instead, through a pipeline layout the writer really
+/// carries a `Some` on.
+pub const PROBE_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu probe pipeline layout"),
+    bind_group_layouts: &PROBE_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS,
+    push_constants: None,
+};
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -1242,6 +1294,44 @@ impl Probe {
         channel
             .encode(|stream| {
                 stream.create_shader_module(PROBE_SHADER_MODULE, &PROBE_SHADER_MODULE_DESC)
+            })
+            .is_some()
+    }
+
+    /// Encode one [`CreatePipelineLayout`](crate::Command::CreatePipelineLayout)
+    /// against [`PROBE_PIPELINE_LAYOUT`], built from a bind-group layout the same
+    /// frame creates.
+    ///
+    /// **Two commands in one frame**, like the bind group: a pipeline layout
+    /// names a live bind-group layout, so this records the layout
+    /// ([`PROBE_BIND_GROUP_LAYOUT_DESC`]) and then the pipeline layout — one
+    /// export, because a creation is answered by nothing and there is no reply to
+    /// poll for at either step.
+    ///
+    /// [`request_sampler`](Self::request_sampler)'s ordering rule and wait rule
+    /// both apply — `create_pipeline_layout` is a device method, so it refuses
+    /// until a device has opened, and nothing answers a creation.
+    ///
+    /// **It cannot check that its bind-group layout will resolve, and does not
+    /// pretend to**: the layout lives in the page's replayer and nothing here
+    /// holds one. A pipeline layout naming a set the browser cannot resolve, or
+    /// carrying push constants, is reported through `Device::take_error`, exactly
+    /// as a bind group naming a missing resource is. `web/engine/gpu-replay.js`
+    /// argues that where it is made.
+    fn request_pipeline_layout(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| {
+                stream.create_bind_group_layout(
+                    PROBE_BIND_GROUP_LAYOUT,
+                    &PROBE_BIND_GROUP_LAYOUT_DESC,
+                );
+                stream.create_pipeline_layout(PROBE_PIPELINE_LAYOUT, &PROBE_PIPELINE_LAYOUT_DESC)
             })
             .is_some()
     }
@@ -1737,6 +1827,37 @@ pub mod shim {
         })
     }
 
+    /// Ask the page to make a pipeline layout on the device it opened.
+    ///
+    /// `1` when the frame — a bind-group layout and the
+    /// [`CreatePipelineLayout`](crate::Command::CreatePipelineLayout) built from
+    /// it — is on the stream; `0` on
+    /// [`__crcbl_web_gpu_probe_shader_module`]'s three conditions.
+    ///
+    /// **No `state` beside it and no arguments either**, exactly as its
+    /// neighbours have none and for the same two reasons: nothing answers a
+    /// creation, and a `GPUPipelineLayout` reports its `label` and nothing else —
+    /// not its bind-group layouts, not its push-constant ranges — so a number
+    /// chosen by the page could not be read back off the object. The descriptor
+    /// is fixed in `crates/crcbl-webgpu/src/probe.rs`, with `push_constants:
+    /// None` so it *builds* rather than being refused; the `Some` refusal is the
+    /// corpus's to drive.
+    ///
+    /// **What is new is that this one export encodes a whole *frame*.** A
+    /// pipeline layout names a live bind-group layout, so wasm records the layout
+    /// before the pipeline layout — and the pipeline layout resolves that layout
+    /// out of a table keyed by handle bits it shares with the pipeline layout's
+    /// own id, which is what puts the set-index resolution in front of a real
+    /// `createPipelineLayout`. `crcbl.gpu.replayer.pipelineLayouts` is the table
+    /// the `GPUPipelineLayout` lands in.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_pipeline_layout() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_pipeline_layout()),
+            Err(_) => 0,
+        })
+    }
+
     /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
     /// legal value for each of these, so they are read only once
     /// [`__crcbl_web_gpu_probe_device_state`] has answered
@@ -1934,11 +2055,11 @@ mod tests {
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
         __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
         __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
-        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_sampler,
-        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
+        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -2727,6 +2848,70 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_device(), 1);
         assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
         assert_eq!(__crcbl_web_gpu_probe_shader_module(), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The pipeline layout shares its bits with everything else, so eight kinds
+    /// now stand on one index and one generation, distinguished only by the
+    /// opcode — and here two of those eight, the pipeline layout and the
+    /// bind-group layout it is built from, are alive at once.
+    #[test]
+    fn the_probes_pipeline_layout_names_the_same_handle_bits_as_everything_else() {
+        assert_eq!(PROBE_PIPELINE_LAYOUT.to_bits(), PROBE_BIND_GROUP.to_bits());
+        assert_eq!(
+            PROBE_PIPELINE_LAYOUT.to_bits(),
+            PROBE_BIND_GROUP_LAYOUT.to_bits()
+        );
+    }
+
+    /// The pipeline-layout half: **one export, a whole frame.** A pipeline layout
+    /// names a live bind-group layout, so the export records the layout before
+    /// the pipeline layout, and the pipeline layout carries that layout's handle
+    /// in its set list.
+    #[test]
+    fn the_pipeline_layout_export_encodes_the_layout_and_the_pipeline_layout() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_pipeline_layout(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec!["CreateBindGroupLayout", "CreatePipelineLayout"],
+            "the frame builds the bind-group layout before the pipeline layout"
+        );
+        assert_eq!(
+            commands.last(),
+            Some(&Command::CreatePipelineLayout {
+                layout: PROBE_PIPELINE_LAYOUT,
+                label: Some("crcbl-webgpu probe pipeline layout".into()),
+                bind_group_layouts: PROBE_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS.to_vec(),
+                push_constants: None,
+            })
+        );
+    }
+
+    /// **Nothing waits on the frame**, for the image pair's reason: every command
+    /// in it is a creation, and a creation is answered by nothing.
+    #[test]
+    fn the_pipeline_layout_request_registers_no_wait_because_nothing_answers_it() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_pipeline_layout(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(take_frame().len(), 2);
+    }
+
+    /// **A device has to have opened first**, for the sampler export's reason:
+    /// both commands the frame carries are device methods.
+    #[test]
+    fn a_pipeline_layout_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_pipeline_layout(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_pipeline_layout(), 0);
         assert_eq!(take_frame().len(), 1);
     }
 

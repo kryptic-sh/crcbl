@@ -613,6 +613,21 @@ function stubBindGroup(desc) {
 }
 
 /**
+ * A `GPUPipelineLayout` as `createPipelineLayout` answers one.
+ *
+ * {@link stubBindGroupLayout}'s shape and for its reason: a real one reports its
+ * `label` and nothing else — not its bind-group layouts, not its push-constant
+ * ranges (WebGPU has none) — so every claim about a pipeline layout's descriptor
+ * below is made against `device.createdPipelineLayouts` rather than against what
+ * came back. `of` is the descriptor it was made from.
+ *
+ * @param {{ label?: string }} desc
+ */
+function stubPipelineLayout(desc) {
+  return { label: desc.label ?? '', of: desc };
+}
+
+/**
  * A `GPUShaderModule` as `createShaderModule` answers one.
  *
  * {@link stubSampler}'s shape and for its reason: a real one reports its `label`,
@@ -657,6 +672,8 @@ function stubShaderModule(desc) {
  * @param {unknown} [options.refuseShaderModules] The same for
  *   `createShaderModule` — which a real WebGPU device does not do for bad WGSL,
  *   but may for an out-of-memory or a device already lost.
+ * @param {unknown} [options.refusePipelineLayouts] The same for
+ *   `createPipelineLayout`.
  */
 function stubDevice(
   features = [],
@@ -667,6 +684,7 @@ function stubDevice(
     refuseLayouts,
     refuseGroups,
     refuseShaderModules,
+    refusePipelineLayouts,
   } = {}
 ) {
   const device = {
@@ -690,6 +708,11 @@ function stubDevice(
      *   order.
      */
     createdShaderModules: [],
+    /**
+     * @type {object[]} Every `GPUPipelineLayoutDescriptor` it was handed, in
+     *   order.
+     */
+    createdPipelineLayouts: [],
     /** @type {Array<[string, Function]>} */
     listeners: [],
     /**
@@ -745,6 +768,12 @@ function stubDevice(
       device.createdShaderModules.push(desc);
       if (refuseShaderModules !== undefined) throw refuseShaderModules;
       return stubShaderModule(desc);
+    },
+    /** @param {object} desc */
+    createPipelineLayout(desc) {
+      device.createdPipelineLayouts.push(desc);
+      if (refusePipelineLayouts !== undefined) throw refusePipelineLayouts;
+      return stubPipelineLayout(desc);
     },
   };
   return device;
@@ -1214,6 +1243,23 @@ async function main() {
   );
   const [fullShader, emptyWgslShader, noWgslShader] = shaders;
 
+  // The pipeline-layout pair, from the fixture for the same reason again — the
+  // last thing a pipeline is built from. The corpus carries two: one whose set
+  // list holds two bind-group layouts (which pins set order) with no push
+  // constants, and one whose `push_constants` is `Some` — the case WebGPU cannot
+  // express at all, driven as a refusal below.
+  const pipelineLayouts = commands.filter(
+    (command) => command.name === 'CreatePipelineLayout'
+  );
+  const destroyPipelineLayout = commands.find(
+    (command) => command.name === 'DestroyPipelineLayout'
+  );
+  check(
+    pipelineLayouts.length === 2 && destroyPipelineLayout !== undefined,
+    `the committed stream carries two CreatePipelineLayouts and a DestroyPipelineLayout (${pipelineLayouts.length} creates)`
+  );
+  const [twoSetLayout, pushConstantLayout] = pipelineLayouts;
+
   const [flatImage, volumeImage, lutImage] = images;
   const [
     cascadeView,
@@ -1413,6 +1459,8 @@ async function main() {
       'DestroyBindGroup',
       'CreateShaderModule',
       'DestroyShaderModule',
+      'CreatePipelineLayout',
+      'DestroyPipelineLayout',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -4265,6 +4313,144 @@ async function main() {
     check(
       replayer.shaderModules.get(fullShader.module) === undefined,
       'and destroying the module by its own handle releases it'
+    );
+  }
+
+  // ---- the pipeline-layout pair --------------------------------------------
+  //
+  // The last thing a pipeline is built from, and the second creation that reads
+  // the bind-group-layout table: a pipeline layout's set list is what a shader's
+  // `@group(n)` indexes. A `GPUPipelineLayout` reports its `label` and nothing
+  // else — not its bind-group layouts, not its push-constant ranges (WebGPU has
+  // none) — so every claim below is made against the `GPUPipelineLayoutDescriptor`
+  // the device was *handed*, as the layout's and the group's are.
+  {
+    // **The set list resolves in order, and the layout builds.** The two
+    // bind-group layouts the fixture's pipeline layout names are created first,
+    // and the descriptor the device is handed carries the two resolved
+    // `GPUBindGroupLayout` objects in set order — distinct objects, so a decoder
+    // that reversed the list would be caught here rather than only at the shader.
+    const { replayer, device } = await readyWithDevice();
+    const [setA, setB] = twoSetLayout.bindGroupLayouts;
+    replayer.replay(frameOf(emptyLayoutAt(setA), 320n));
+    replayer.replay(frameOf(emptyLayoutAt(setB), 321n));
+    replayer.replay(frameOf(twoSetLayout, 322n));
+    const pd = device.createdPipelineLayouts[0];
+    const built =
+      device.createdPipelineLayouts.length === 1 &&
+      pd.label === 'gbuffer' &&
+      pd.bindGroupLayouts.length === 2 &&
+      pd.bindGroupLayouts[0] === replayer.bindGroupLayouts.get(setA) &&
+      pd.bindGroupLayouts[1] === replayer.bindGroupLayouts.get(setB) &&
+      pd.bindGroupLayouts[0] !== pd.bindGroupLayouts[1] &&
+      twoSetLayout.pushConstants === null;
+    check(
+      built,
+      built
+        ? 'a CreatePipelineLayout reaches the device as one GPUPipelineLayoutDescriptor, its set list resolved in order'
+        : `the built descriptor is not what was asked for (${JSON.stringify(pd, (_, v) => (typeof v === 'bigint' ? String(v) : v))})`
+    );
+    check(
+      replayer.pipelineLayouts.get(twoSetLayout.layout) !== undefined &&
+        !replayer.hasReplies &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `and the layout lands in its table, queues no reply and reports no error (queued ${replayer.hasReplies})`
+    );
+  }
+  {
+    // **A `Some` push-constant range is refused — WebGPU has no push constants at
+    // all.** WGSL cannot express one, so `Features::PUSH_CONSTANTS` is never
+    // reported and there is no `GPUPipelineLayout` member to carry the range;
+    // `Device::create_pipeline_layout`'s own docs require this fail loudly rather
+    // than dropping the writes later. Refused *before* the set list is looked up,
+    // so the fixture's push-constant layout is driven with none of its set
+    // layouts created and the refusal is still the push constants.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(pushConstantLayout, 323n));
+    const reason = replayer.takeError();
+    check(
+      device.createdPipelineLayouts.length === 0 &&
+        replayer.pipelineLayouts.size === 0 &&
+        pushConstantLayout.pushConstants !== null &&
+        String(reason).includes('push-constant range') &&
+        String(reason).includes('no push constants'),
+      `a Some push-constant range is refused as something WebGPU cannot express (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **A set handle that resolves to nothing goes to the error queue and names
+    // which set index** — `#createBindGroup`'s judgement applied to the set list,
+    // and never a throw. Index 0 resolves and index 1 does not, so the message is
+    // about set 1 and not a push-constant refusal or a wholly empty table.
+    const { replayer, device } = await readyWithDevice();
+    const present = handle(300, 1);
+    const missing = handle(301, 7);
+    replayer.replay(frameOf(emptyLayoutAt(present), 330n));
+    let thrown = null;
+    let reason = null;
+    try {
+      replayer.replay(
+        frameOf(
+          {
+            name: 'CreatePipelineLayout',
+            layout: handle(310, 1),
+            label: null,
+            bindGroupLayouts: [present, missing],
+            pushConstants: null,
+          },
+          331n
+        )
+      );
+      reason = replayer.takeError();
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        device.createdPipelineLayouts.length === 0 &&
+        replayer.pipelineLayouts.size === 0 &&
+        String(reason).includes('set 1') &&
+        String(reason).includes('no live bind group layout'),
+      `an unresolvable set handle is refused to the error queue naming its index, without throwing (${String(thrown)}, ${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **Destroys: a stale generation is a no-op that leaves the live occupant, and
+    // an empty slot does not throw** — the ordinary case here, since every layout
+    // the replayer refuses above leaves its handle empty for the caller to destroy
+    // anyway.
+    const { replayer } = await readyWithDevice();
+    const [setA, setB] = twoSetLayout.bindGroupLayouts;
+    replayer.replay(frameOf(emptyLayoutAt(setA), 340n));
+    replayer.replay(frameOf(emptyLayoutAt(setB), 341n));
+    replayer.replay(frameOf(twoSetLayout, 342n));
+    const live = replayer.pipelineLayouts.get(twoSetLayout.layout);
+    const stale = handle(
+      twoSetLayout.layout.index,
+      twoSetLayout.layout.generation + 1
+    );
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf({ ...destroyPipelineLayout, layout: stale }, 343n)
+      );
+      replayer.replay(frameOf(destroyPipelineLayout, 344n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        live !== undefined &&
+        replayer.pipelineLayouts.get(twoSetLayout.layout) === live,
+      `a stale-generation destroy leaves the live pipeline layout and an empty-slot destroy does not throw (${String(thrown)})`
+    );
+    replayer.replay(
+      frameOf({ ...destroyPipelineLayout, layout: twoSetLayout.layout }, 345n)
+    );
+    check(
+      replayer.pipelineLayouts.get(twoSetLayout.layout) === undefined,
+      'and destroying the layout by its own handle releases it'
     );
   }
 

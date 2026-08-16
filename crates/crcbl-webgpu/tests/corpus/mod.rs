@@ -16,8 +16,9 @@ use crcbl_hal::{
     BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage, ClearValue,
     ColorAttachment, CompareOp, DepthStencilAttachment, DeviceDesc, Extent3d, Features, FilterMode,
     Format, ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewType, LoadOp, MemoryLocation, Rect2d, RenderPassDesc, SampleType, SamplerAddressMode,
-    SamplerDesc, ShaderModuleDesc, ShaderStages, StoreOp, depth,
+    ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc, PushConstantRange, Rect2d,
+    RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc, ShaderModuleDesc, ShaderStages,
+    StoreOp, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -682,6 +683,38 @@ pub fn every_command() -> Vec<Command> {
             msl: Some(String::new()),
             dxil: vec![("truncated".into(), Vec::new())],
         },
+        // **The last thing a pipeline is built from, and a counted list of bare
+        // handles rather than of structs.** `bind_group_layouts` is in *set
+        // order* — what a shader's `@group(n)` indexes — so the two handles here
+        // are distinct in both halves and a decoder that reversed them answers a
+        // different layout. `push_constants` is `None`, the ordinary value; the
+        // twin below carries the `Some` WebGPU cannot express. Two handles rather
+        // than one, because a single-element list decodes identically whether the
+        // reader kept order or not.
+        Command::CreatePipelineLayout {
+            layout: handle(121, 122),
+            label: Some("gbuffer".into()),
+            bind_group_layouts: vec![handle(93, 94), handle(95, 96)],
+            push_constants: None,
+        },
+        // **`push_constants: Some`, which WebGPU has no way to express at all.**
+        // It crosses whole — `stages`, `offset`, `size` — because the writer
+        // carries what the caller gives and the replayer is what refuses it,
+        // exactly as a `BufferUsage::DEVICE_ADDRESS` buffer or a `VARIABLE_COUNT`
+        // layout does. `stages` names two at once so the `ShaderStages` bits are
+        // exercised beyond a single-bit value, and `offset` differs from `size`
+        // so the pair cannot be swapped unnoticed. The single bind-group layout
+        // keeps this list's length distinct from the two-entry one above.
+        Command::CreatePipelineLayout {
+            layout: handle(123, 124),
+            label: None,
+            bind_group_layouts: vec![handle(97, 98)],
+            push_constants: Some(PushConstantRange {
+                stages: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                offset: 16,
+                size: 128,
+            }),
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
         },
@@ -719,6 +752,14 @@ pub fn every_command() -> Vec<Command> {
         // it, and only then applies `?` to the creation.
         Command::DestroyShaderModule {
             module: handle(119, 120),
+        },
+        // Its own command and its own table again, and — like the bind-group
+        // layout's destroy — the one whose empty slot is the *ordinary* case: a
+        // pipeline layout the replayer refused (a `Some` push-constant range, an
+        // unresolvable bind-group layout) still has its pre-allocated handle
+        // destroyed by the caller.
+        Command::DestroyPipelineLayout {
+            layout: handle(125, 126),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -979,6 +1020,20 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 },
             )
         }
+        Command::CreatePipelineLayout {
+            layout,
+            label,
+            bind_group_layouts,
+            push_constants,
+        } => stream.create_pipeline_layout(
+            *layout,
+            &PipelineLayoutDesc {
+                label: label.as_deref(),
+                bind_group_layouts,
+                push_constants: *push_constants,
+            },
+        ),
+        Command::DestroyPipelineLayout { layout } => stream.destroy_pipeline_layout(*layout),
         Command::DestroyBindGroupLayout { layout } => stream.destroy_bind_group_layout(*layout),
         Command::DestroyBindGroup { group } => stream.destroy_bind_group(*group),
         Command::DestroyShaderModule { module } => stream.destroy_shader_module(*module),
