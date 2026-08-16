@@ -1743,6 +1743,52 @@ const CANVAS_FORMAT = Object.freeze({
 });
 
 /**
+ * The `GPUCanvasAlphaMode` a decoded `CompositeAlpha` names, or why it names
+ * none.
+ *
+ * TWO OF THE SEAM'S FOUR HAVE A CANVAS SPELLING AND TWO DO NOT. `GPUCanvasContext`
+ * offers only `'opaque'` and `'premultiplied'`, which is exactly the pair
+ * `surfaceCapsFor` reports a canvas surface accepts — so `Opaque` and
+ * `PreMultiplied` map, and `PostMultiplied` and `Inherit` are refused *by name*
+ * rather than folded onto the nearest legal value. A silent fold would composite
+ * the canvas differently from what was asked with nothing reporting it, the same
+ * class of quiet wrong this file refuses everywhere else; and the caller was
+ * promised only the two `SurfaceCaps` listed, so a swapchain asking for either of
+ * the other two is a far-side bug that has to surface.
+ *
+ * The decoded name is the reply direction's spelling (`PRE_MULTIPLIED`), because
+ * `gpu-stream.js` inverts `gpu-reply.js`'s `COMPOSITE_ALPHA` table to read it.
+ *
+ * @param {string} compositeAlpha A `crcbl_hal::CompositeAlpha` code's name.
+ * @returns {{ mode: string | null, reason: string | null }} `reason` is a phrase
+ *   for the message a person reads, and is `null` exactly when `mode` is not.
+ */
+export function webgpuAlphaModeFor(compositeAlpha) {
+  const mode = ALPHA_MODE[compositeAlpha];
+  if (mode === undefined) {
+    return {
+      mode: null,
+      reason:
+        `asks for CompositeAlpha::${compositeAlpha}, which a GPUCanvasContext has no ` +
+        'alphaMode for — a browser canvas offers only opaque and premultiplied',
+    };
+  }
+  return { mode, reason: null };
+}
+
+/**
+ * `crcbl_hal::CompositeAlpha` code names to the `GPUCanvasAlphaMode` strings, for
+ * the two a canvas can express. Keyed by the reply direction's spelling, which is
+ * how {@link webgpuAlphaModeFor}'s argument arrives; `POST_MULTIPLIED` and
+ * `INHERIT` are absent on purpose, so a lookup answers `undefined` and the
+ * swapchain is refused.
+ */
+const ALPHA_MODE = Object.freeze({
+  OPAQUE: 'opaque',
+  PRE_MULTIPLIED: 'premultiplied',
+});
+
+/**
  * The image count a WebGPU canvas offers, as a range of exactly one.
  *
  * `crcbl_hal::SurfaceCaps` records the decision this implements: the fields are
@@ -2167,6 +2213,19 @@ export class Replayer {
    */
   #surfaces = new HandleTable();
   /**
+   * What each live swapchain handle configured, as `{ context, format }`.
+   *
+   * A table of its own for {@link Replayer#surfaces}'s reason — a swapchain
+   * handle and a surface handle can carry identical bits — holding the configured
+   * `GPUCanvasContext` and the `GPUTextureFormat` string it was configured with,
+   * so `AcquireNextFrame` can reach the context to call `getCurrentTexture` and
+   * `DestroySwapchain` can `unconfigure` it. The format is kept beside the context
+   * because a canvas reports no way back to what it was configured with.
+   *
+   * @type {HandleTable<{ context: GPUCanvasContext, format: string }>}
+   */
+  #swapchains = new HandleTable();
+  /**
    * The `GPUBuffer` behind each live buffer handle.
    *
    * {@link Replayer#surfaces}'s twin in every respect, including the one that
@@ -2399,6 +2458,16 @@ export class Replayer {
    */
   get surfaces() {
     return this.#surfaces;
+  }
+
+  /**
+   * The swapchains that are configured right now, on {@link Replayer#surfaces}'s
+   * terms. Each entry is the `{ context, format }` `CreateSwapchain` filed.
+   *
+   * @type {HandleTable<{ context: GPUCanvasContext, format: string }>}
+   */
+  get swapchains() {
+    return this.#swapchains;
   }
 
   /**
@@ -2732,6 +2801,18 @@ export class Replayer {
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
           break;
+        case 'CreateSwapchain':
+          this.#createSwapchain(sequence, command);
+          break;
+        case 'AcquireNextFrame':
+          this.#acquireNextFrame(sequence, command);
+          break;
+        case 'Present':
+          this.#present(sequence, command);
+          break;
+        case 'DestroySwapchain':
+          this.#destroySwapchain(command);
+          break;
         case 'CreateCommandEncoder':
           this.#createCommandEncoder(sequence, command);
           break;
@@ -3043,6 +3124,168 @@ export class Replayer {
    */
   #destroySurface(command) {
     this.#surfaces.remove(command.surface);
+  }
+
+  /**
+   * Configures a canvas swapchain: resolves the surface's `GPUCanvasContext` and
+   * calls `configure`, then files `{ context, format }` under the handle wasm
+   * allocated.
+   *
+   * SWAPCHAIN CREATION ON WEBGPU IS A CANVAS `configure`, not an allocation — the
+   * `configure` `#createSurface` deliberately does not make, because it needs a
+   * device this replayer may not have had then and a format nobody had described
+   * yet. Both exist now: the device is open and the descriptor carries the
+   * format. Synchronous and with no reply, as the surface pair is.
+   *
+   * THE `COPY_SRC` IN THE USAGE IS DELIBERATE AND LOAD-BEARING. `SwapchainDesc`
+   * carries no usage field, and a canvas context defaults to `RENDER_ATTACHMENT`
+   * only — which cannot be copied *from*. The WebGPU backend configures the canvas
+   * as a copy source as well, a benign superset of the render-target usage, so an
+   * acquired frame can be read back and used as a copy source. Without it the
+   * present probe's `copyTextureToBuffer` off the acquired texture would be a
+   * validation error, and the golden-image path could never read a presented
+   * frame.
+   *
+   * `imageCount` AND `presentMode` ARE CARRIED AND DROPPED, the way a compute
+   * pipeline's `workgroupSize` is: a browser only offers fifo and manages its own
+   * buffering, so a canvas `configure` has no knob for either. `extent` is
+   * informational too — the canvas owns its size — so it is read for nothing here.
+   * Everything that can go wrong goes to {@link Replayer#takeError}: no device, a
+   * surface that resolves to no context, a format or alpha mode a canvas cannot
+   * express, or a `configure` that throws.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #createSwapchain(sequence, command) {
+    const named = `swapchain ${command.swapchain.index}.${command.swapchain.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was configured before any device opened`);
+      return;
+    }
+    const context = this.#surfaces.get(command.surface);
+    if (context === undefined) {
+      this.#deviceError(
+        `${named} names surface ${command.surface.index}.${command.surface.generation}, ` +
+          'which this replayer holds no live surface under'
+      );
+      return;
+    }
+    const format = webgpuTextureFormatFor(
+      command.format,
+      this.#device.features
+    );
+    if (format.reason !== null) {
+      this.#deviceError(`${named} ${format.reason}`);
+      return;
+    }
+    const alpha = webgpuAlphaModeFor(command.compositeAlpha);
+    if (alpha.reason !== null) {
+      this.#deviceError(`${named} ${alpha.reason}`);
+      return;
+    }
+    try {
+      context.configure({
+        device: this.#device,
+        format: format.name,
+        // COPY_SRC beside RENDER_ATTACHMENT: the acquired frame must be readable
+        // as a copy source. See the method docs — this is the load-bearing line.
+        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
+        alphaMode: alpha.mode,
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be configured: ${String(error)}`);
+      return;
+    }
+    this.#swapchains.insert(command.swapchain, {
+      context,
+      format: format.name,
+    });
+  }
+
+  /**
+   * Acquires the swapchain's current frame and files it and its view under the
+   * handles wasm allocated.
+   *
+   * SYNCHRONOUS AND DETERMINISTIC ON WEBGPU — `getCurrentTexture()` answers in the
+   * call — so there is no reply; wasm allocated the image and view handles and
+   * moved on. The acquired `GPUTexture` is filed under `image` exactly as
+   * `CreateImage` files a created one, and its `createView()` under `view` exactly
+   * as `CreateImageView` files a created view, so every command downstream that
+   * names either resolves it through the tables it already reads.
+   *
+   * A SWAPCHAIN THAT RESOLVES TO NOTHING GOES TO THE ERROR QUEUE and does not
+   * throw — a far side that acquired before it configured, which is the ordering
+   * bug {@link Replayer#takeError} exists to keep from taking the frame down.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #acquireNextFrame(sequence, command) {
+    const named = `acquire (command ${sequence})`;
+    const entry = this.#swapchains.get(command.swapchain);
+    if (entry === undefined) {
+      this.#deviceError(
+        `${named} names swapchain ${command.swapchain.index}.${command.swapchain.generation}, ` +
+          'which this replayer holds no configured swapchain under'
+      );
+      return;
+    }
+    let texture;
+    try {
+      texture = entry.context.getCurrentTexture();
+    } catch (error) {
+      this.#deviceError(
+        `${named} could not get the current texture: ${String(error)}`
+      );
+      return;
+    }
+    this.#images.insert(command.image, texture);
+    this.#imageViews.insert(command.view, texture.createView());
+  }
+
+  /**
+   * Presents a swapchain — a documented NO-OP.
+   *
+   * WEBGPU HAS NO EXPLICIT PRESENT: the browser composites the configured canvas
+   * on its own `requestAnimationFrame`, so there is nothing to call and this
+   * touches nothing. It is here so the command is recognised rather than thrown,
+   * exactly as `PipelineBarrier` is.
+   *
+   * A NON-EMPTY `waits` IS REFUSED BY NAME, the way {@link Replayer#submit}'s is:
+   * WebGPU has no semaphores, so there is nothing to wait on, and silently
+   * dropping a wait is a synchronisation bug. `presentId` is dropped because
+   * WebGPU has no present-completion query to number.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #present(sequence, command) {
+    if (command.waits.length > 0) {
+      this.#deviceError(
+        `present (command ${sequence}) carries ${command.waits.length} wait(s), and WebGPU has ` +
+          'no semaphores to satisfy them — the browser composites the configured canvas on its ' +
+          'own requestAnimationFrame'
+      );
+    }
+    // Otherwise nothing: the present is the browser's rAF composite, which this
+    // replayer does not and cannot drive.
+  }
+
+  /**
+   * Unconfigures a swapchain's canvas context and lets go of its slot.
+   *
+   * `GPUCanvasContext.unconfigure()` is the counterpart of the `configure`
+   * {@link Replayer#createSwapchain} made, and it is what makes destroying a
+   * swapchain an explicit op on this seam. A destroy that names nothing live is a
+   * no-op in both of its ways — an empty slot and a stale generation — because
+   * {@link HandleTable#remove} answers `undefined` for both, so a stale handle is
+   * left alone exactly as every other destroy leaves one.
+   *
+   * @param {{ swapchain: { index: number, generation: number } }} command
+   */
+  #destroySwapchain(command) {
+    this.#swapchains.remove(command.swapchain)?.context.unconfigure();
   }
 
   /**

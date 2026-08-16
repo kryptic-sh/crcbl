@@ -48,7 +48,7 @@
 //
 // Everything else on the wire is 32 bits or narrower and stays a number.
 
-import { FORMAT } from './gpu-reply.js';
+import { COMPOSITE_ALPHA, FORMAT, PRESENT_MODE } from './gpu-reply.js';
 
 // ── Header ───────────────────────────────────────────────────────────────────
 
@@ -130,6 +130,12 @@ const COPY_BUFFER_TO_BUFFER_TAG = 0x79;
 const COPY_BUFFER_TO_IMAGE_TAG = 0x7a;
 const COPY_IMAGE_TO_IMAGE_TAG = 0x7b;
 const FILL_BUFFER_TAG = 0x7c;
+// The presentation family: configuring a canvas swapchain, acquiring its frame,
+// presenting (a no-op the browser composites on rAF), and unconfiguring.
+const CREATE_SWAPCHAIN_TAG = 0x88;
+const ACQUIRE_NEXT_FRAME_TAG = 0x89;
+const PRESENT_TAG = 0x8a;
+const DESTROY_SWAPCHAIN_TAG = 0x8b;
 const ENUMERATE_ADAPTERS_TAG = 0x90;
 const REQUEST_DEVICE_TAG = 0x91;
 const SURFACE_CAPS_TAG = 0x92;
@@ -436,6 +442,32 @@ const BINDING_RESOURCE = ['Buffer', 'ImageView', 'Sampler'];
  */
 const IMAGE_FORMAT = [];
 for (const [name, code] of Object.entries(FORMAT)) IMAGE_FORMAT[code] = name;
+
+/**
+ * `tag::PRESENT_MODE_*`, code-indexed — the inverse of the {@link PRESENT_MODE}
+ * table `gpu-reply.js` exports, for {@link IMAGE_FORMAT}'s reason: one place
+ * where a code and a mode meet, so the two directions cannot drift.
+ *
+ * A gap answers `undefined` rather than a neighbour: `Fifo` is the mode every
+ * surface is promised, so a drifted table folding an unknown code onto it would
+ * be indistinguishable from a surface that genuinely offers only that.
+ */
+const SWAPCHAIN_PRESENT_MODE = [];
+for (const [name, code] of Object.entries(PRESENT_MODE))
+  SWAPCHAIN_PRESENT_MODE[code] = name;
+
+/**
+ * `tag::COMPOSITE_ALPHA_*`, code-indexed — the inverse of the
+ * {@link COMPOSITE_ALPHA} table `gpu-reply.js` exports, for {@link IMAGE_FORMAT}'s
+ * reason.
+ *
+ * The two multiplied modes are adjacent codes and mean opposite things about the
+ * colour channels, so folding an unknown code into either is a surface that
+ * composites wrongly and never says why.
+ */
+const SWAPCHAIN_COMPOSITE_ALPHA = [];
+for (const [name, code] of Object.entries(COMPOSITE_ALPHA))
+  SWAPCHAIN_COMPOSITE_ALPHA[code] = name;
 
 // ── Bitflag tables ───────────────────────────────────────────────────────────
 //
@@ -2084,6 +2116,69 @@ function decodeCommand(r) {
       const value = r.readU32();
       return { name: 'FillBuffer', buffer, offset, size, value };
     }
+    case CREATE_SWAPCHAIN_TAG: {
+      // `SwapchainDesc` in declaration order behind the caller-allocated handle:
+      // the surface, the format, the extent's two components, the image count,
+      // then the present-mode and composite-alpha enum codes. `imageCount` and
+      // `presentMode` are carried verbatim even though the replayer drops them —
+      // a browser only offers fifo and manages its own buffering.
+      const swapchain = r.readHandle('CreateSwapchain::swapchain');
+      const label = r.readOptString('SwapchainDesc::label');
+      const surface = r.readHandle('SwapchainDesc::surface');
+      const format = r.readEnum('SwapchainDesc::format', IMAGE_FORMAT);
+      const width = r.readU32();
+      const height = r.readU32();
+      const imageCount = r.readU32();
+      const presentMode = r.readEnum(
+        'SwapchainDesc::present_mode',
+        SWAPCHAIN_PRESENT_MODE
+      );
+      const compositeAlpha = r.readEnum(
+        'SwapchainDesc::composite_alpha',
+        SWAPCHAIN_COMPOSITE_ALPHA
+      );
+      return {
+        name: 'CreateSwapchain',
+        swapchain,
+        label,
+        surface,
+        format,
+        extent: { width, height },
+        imageCount,
+        presentMode,
+        compositeAlpha,
+      };
+    }
+    case ACQUIRE_NEXT_FRAME_TAG: {
+      // The swapchain, then the two caller-allocated handles the acquired texture
+      // and its view are filed under — three handles that mean different things,
+      // so spelled out one at a time.
+      const swapchain = r.readHandle('AcquireNextFrame::swapchain');
+      const image = r.readHandle('AcquireNextFrame::image');
+      const view = r.readHandle('AcquireNextFrame::view');
+      return { name: 'AcquireNextFrame', swapchain, image, view };
+    }
+    case PRESENT_TAG: {
+      // The swapchain, the counted waits, then the optional `presentId` behind a
+      // presence byte. The wait list is decoded whole so the replayer can refuse
+      // a non-empty one by name — WebGPU has no semaphores. `presentId` is a
+      // `u64`, a `BigInt`.
+      const swapchain = r.readHandle('PresentInfo::swapchain');
+      const waitCount = r.readCount('PresentInfo::waits');
+      const waits = [];
+      for (let i = 0; i < waitCount; i += 1) {
+        waits.push(r.readHandle('PresentInfo::waits'));
+      }
+      const presentId = r.readPresent('PresentInfo::present_id')
+        ? r.readU64()
+        : null;
+      return { name: 'Present', swapchain, waits, presentId };
+    }
+    case DESTROY_SWAPCHAIN_TAG:
+      return {
+        name: 'DestroySwapchain',
+        swapchain: r.readHandle('DestroySwapchain::swapchain'),
+      };
     case PIPELINE_BARRIER_TAG: {
       // The `Barriers` batch: the counted buffer list, the counted image list,
       // then the `global` flag. Decoded whole for wire fidelity — the replayer

@@ -77,6 +77,11 @@
 //! | [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) | `() -> i32` | Drain, and answer one of the `FILL_*` codes. |
 //! | [`__crcbl_web_gpu_probe_fill_bytes_ptr`](shim::__crcbl_web_gpu_probe_fill_bytes_ptr) | `() -> i32` | Where the filled bytes start, once [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) answers [`FILL_READY`]. |
 //! | [`__crcbl_web_gpu_probe_fill_bytes_len`](shim::__crcbl_web_gpu_probe_fill_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the fill probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_present`](shim::__crcbl_web_gpu_probe_present) | `(i32) -> i32` | Encode one frame — a surface on the canvas `canvas_id` names, a swapchain configured on it, the acquired frame, a pass that clears the acquired view to [`PROBE_PRESENT_COLOR`], the copy, submit, present, and a `request_readback` against [`PROBE_PRESENT_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_present_poll`](shim::__crcbl_web_gpu_probe_present_poll) | `() -> i32` | Poll the present probe's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_present_state`](shim::__crcbl_web_gpu_probe_present_state) | `() -> i32` | Drain, and answer one of the `PRESENT_*` codes. |
+//! | [`__crcbl_web_gpu_probe_present_bytes_ptr`](shim::__crcbl_web_gpu_probe_present_bytes_ptr) | `() -> i32` | Where the presented bytes start, once [`__crcbl_web_gpu_probe_present_state`](shim::__crcbl_web_gpu_probe_present_state) answers [`PRESENT_READY`]. |
+//! | [`__crcbl_web_gpu_probe_present_bytes_len`](shim::__crcbl_web_gpu_probe_present_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the present probe has not answered. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -312,16 +317,16 @@ use crcbl_hal::{
     BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
     BlendState, BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage,
     ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle,
-    CommandEncoderDesc, CompareOp, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle,
-    CullMode, DepthBias, DepthStencilState, DeviceDesc, Extent3d, Features, FilterMode, Format,
-    FrontFace, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect, ImageCopy, ImageDesc,
-    ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewDesc, ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, MultisampleState,
-    Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PrimitiveState,
-    PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc,
-    ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
-    ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo, SurfaceCaps,
-    SurfaceHandle,
+    CommandEncoderDesc, CompareOp, CompositeAlpha, ComputePassDesc, ComputePipelineDesc,
+    ComputePipelineHandle, CullMode, DepthBias, DepthStencilState, DeviceDesc, Extent3d, Features,
+    FilterMode, Format, FrontFace, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect,
+    ImageCopy, ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, LoadOp, MemoryLocation,
+    MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PresentInfo,
+    PresentMode, PrimitiveState, PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle,
+    Rect2d, RenderPassDesc, ResourceState, SampleType, SamplerAddressMode, SamplerDesc,
+    SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StoreOp,
+    SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc, SwapchainHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -497,6 +502,29 @@ pub const FILL_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`COMPUTE_UNDECODABLE`]'s twin.
 pub const FILL_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const PRESENT_UNASKED: u32 = 0;
+/// The setup frame — a surface, a configured swapchain, the acquired frame, the
+/// host buffer, an encoder, a render pass that clears the acquired view to red,
+/// the copy, the submit, the present, and the request — is on the stream, and no
+/// poll has been issued.
+pub const PRESENT_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const PRESENT_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const PRESENT_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_present_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_present_bytes_len`] carry them — 64×64
+/// `Rgba8Unorm` texels, every one [`PROBE_PRESENT_COLOR_BYTES`] if the real
+/// canvas context path acquired, rendered and copied a frame end to end.
+pub const PRESENT_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`COMPUTE_UNDECODABLE`]'s twin.
+pub const PRESENT_UNDECODABLE: u32 = 5;
 
 /// The side of the square texture the readback probe clears and reads back.
 ///
@@ -2373,6 +2401,132 @@ pub const fn probe_fill_copy() -> BufferCopy {
     }
 }
 
+// The present probe (group X): the first probe to drive a *real canvas context*.
+// It creates a surface on the page's canvas, configures a swapchain on it,
+// acquires the frame, clears that acquired image to red, copies it out to a host
+// buffer and reads it back — so the bytes prove the whole canvas-context path
+// (configure, getCurrentTexture, render, copy) ran. Every handle it names is
+// `5 << 32` — a generation past the copy-chain and fill probes' `4 << 32` — so
+// its live resources never land in another probe's slot in the shared page.
+
+/// The colour the present probe clears the acquired frame to — opaque red,
+/// `vec4<f32>(1.0, 0.0, 0.0, 1.0)`. Distinctive so a stub that acquired nothing
+/// and cleared nothing leaves a black/zero canvas rather than this.
+pub const PROBE_PRESENT_COLOR: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+/// The clear colour as the bytes a `Rgba8Unorm` texel holds — what the gate
+/// checks every pixel against. Only a real acquire-render-copy produces them.
+pub const PROBE_PRESENT_COLOR_BYTES: [u8; 4] = [255, 0, 0, 255];
+
+/// The surface the present probe creates on the page's canvas. `5 << 32`.
+pub const PROBE_PRESENT_SURFACE: SurfaceHandle = match SurfaceHandle::from_bits(5 << 32) {
+    Some(surface) => surface,
+    None => panic!("generation 5 is not zero"),
+};
+
+/// The swapchain the present probe configures on its surface. `5 << 32`.
+pub const PROBE_PRESENT_SWAPCHAIN: SwapchainHandle = match SwapchainHandle::from_bits(5 << 32) {
+    Some(swapchain) => swapchain,
+    None => panic!("generation 5 is not zero"),
+};
+
+/// The descriptor the present probe configures its swapchain with — a 64×64
+/// [`Format::Rgba8Unorm`] surface, `Fifo` and `Opaque` (the two a browser
+/// canvas offers), on [`PROBE_PRESENT_SURFACE`].
+#[must_use]
+pub const fn probe_present_swapchain_desc() -> SwapchainDesc<'static> {
+    SwapchainDesc {
+        label: Some("crcbl-webgpu present swapchain"),
+        surface: PROBE_PRESENT_SURFACE,
+        format: Format::Rgba8Unorm,
+        extent: (PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    }
+}
+
+/// The image handle the acquired frame is filed under. `5 << 32`.
+pub const PROBE_PRESENT_IMAGE: ImageHandle = match ImageHandle::from_bits(5 << 32) {
+    Some(image) => image,
+    None => panic!("generation 5 is not zero"),
+};
+
+/// The image-view handle the acquired frame's view is filed under, and the pass
+/// clears. `5 << 32`.
+pub const PROBE_PRESENT_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(5 << 32) {
+    Some(view) => view,
+    None => panic!("generation 5 is not zero"),
+};
+
+/// The buffer handle the presented pixels are copied into and read back from.
+/// `5 << 32`.
+pub const PROBE_PRESENT_BUFFER: BufferHandle = match BufferHandle::from_bits(5 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 5 is not zero"),
+};
+
+/// The buffer the presented pixels are copied into and read back from — the
+/// readback buffer's shape (`64 * 64 * 4` bytes, [`MemoryLocation::HostReadback`],
+/// [`BufferUsage::TRANSFER_DST`]) under [`PROBE_PRESENT_BUFFER`].
+#[must_use]
+pub const fn probe_present_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu present buffer"),
+        size: (PROBE_READBACK_SIZE as u64) * (PROBE_READBACK_SIZE as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The queue the present probe names in its command encoder. `5 << 32`.
+pub const PROBE_PRESENT_QUEUE: QueueHandle = match QueueHandle::from_bits(5 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 5 is not zero"),
+};
+
+/// The command buffer the present probe finishes its encoder into. `5 << 32`.
+pub const PROBE_PRESENT_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(5 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 5 is not zero"),
+    };
+
+/// The in-flight readback the present probe requests and polls. `5 << 32`.
+pub const PROBE_PRESENT_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(5 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 5 is not zero"),
+};
+
+/// The image→buffer copy that moves the acquired-and-cleared pixels into the
+/// readback buffer — tightly packed (`64 × 4 = 256` bytes per row), the whole
+/// 64×64 mip-0 slice, under the present probe's own image and buffer handles.
+///
+/// **Recorded before the present**, which is legal because the present is a
+/// no-op here: the copy reads the acquired texture the configured canvas handed
+/// back, and the `COPY_SRC` usage
+/// [`create_swapchain`](crate::StreamWriter::create_swapchain) configures the
+/// context with is what lets that copy exist. See
+/// [`shim::__crcbl_web_gpu_probe_present`].
+#[must_use]
+pub const fn probe_present_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_PRESENT_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_PRESENT_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -2804,6 +2958,72 @@ impl FillProbe {
     }
 }
 
+/// One present-and-read-back, from the frame that acquired-cleared-and-copied to
+/// the bytes read back — [`DrawProbe`]'s state machine again, on the present
+/// path.
+///
+/// The frame it encodes differs in what it records before the readback: a
+/// surface, a configured swapchain, an acquire, a clear of the *acquired* view,
+/// the copy, a submit and a no-op present rather than a create-image-and-clear.
+/// It ends in the same `request_readback` and is answered by the same
+/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
+/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so the transitions
+/// mirror [`DrawProbe`]'s exactly.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum PresentProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — 64×64 `Rgba8Unorm` texels, every one
+        /// [`PROBE_PRESENT_COLOR_BYTES`] if the canvas-context path ran.
+        bytes: Vec<u8>,
+    },
+}
+
+impl PresentProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`DrawProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -2853,6 +3073,10 @@ struct Probe {
     /// A decode error the fill drain hit, for [`FILL_UNDECODABLE`]. Its own string
     /// for [`reason`](Self::reason)'s reason.
     fill_reason: String,
+    present: PresentProbe,
+    /// A decode error the present drain hit, for [`PRESENT_UNDECODABLE`]. Its own
+    /// string for [`reason`](Self::reason)'s reason.
+    present_reason: String,
 }
 
 impl Probe {
@@ -2875,6 +3099,8 @@ impl Probe {
             copychain_reason: String::new(),
             fill: FillProbe::Unasked,
             fill_reason: String::new(),
+            present: PresentProbe::Unasked,
+            present_reason: String::new(),
         }
     }
 
@@ -3293,6 +3519,7 @@ impl Probe {
                 self.compute.absorb(&replies);
                 self.copychain.absorb(&replies);
                 self.fill.absorb(&replies);
+                self.present.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -3637,6 +3864,141 @@ impl Probe {
     fn draw_bytes(&self) -> &[u8] {
         match &self.draw {
             DrawProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the present setup frame: a surface on the page's canvas, a
+    /// swapchain configured on it, the acquired frame, a pass that clears the
+    /// acquired view to [`PROBE_PRESENT_COLOR`], the copy to a host buffer, a
+    /// submit, a no-op present, and the request that is read back.
+    ///
+    /// **One frame, many commands, no reply** — [`request_draw`](Self::request_draw)'s
+    /// shape on the present path, and the first probe to drive a *real canvas
+    /// context*. It records the surface (naming the canvas `canvas_id` is the
+    /// page's key for), the swapchain (a `configure`), the acquire (a
+    /// `getCurrentTexture` that binds [`PROBE_PRESENT_IMAGE`] and its view), the
+    /// host buffer, an encoder, a render pass that clears
+    /// [`PROBE_PRESENT_VIEW`] to red, the copy out of the acquired image, the
+    /// finish, the submit, the present (a no-op) and the `request_readback` under
+    /// [`PROBE_PRESENT_READBACK`]. None is answered — every handle is
+    /// caller-allocated — so it is [`encode`](StreamChannel::encode); the poll is
+    /// what is awaited.
+    ///
+    /// **The copy is recorded before the present, which is deliberate**: the
+    /// present is a no-op, so it changes nothing, and reading the acquired texture
+    /// first is what makes the presented frame observable. That copy can exist at
+    /// all only because [`create_swapchain`](crate::StreamWriter::create_swapchain)
+    /// configures the canvas context with `COPY_SRC` beside the render-target
+    /// usage — see `web/engine/gpu-replay.js`.
+    ///
+    /// `false` until a device has opened, [`request_draw`](Self::request_draw)'s
+    /// ordering rule — every command after the surface is a device method.
+    fn request_present(&mut self, canvas_id: u32) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_surface(PROBE_PRESENT_SURFACE, canvas_id);
+                stream.create_swapchain(PROBE_PRESENT_SWAPCHAIN, &probe_present_swapchain_desc());
+                stream.acquire_next_frame(
+                    PROBE_PRESENT_SWAPCHAIN,
+                    PROBE_PRESENT_IMAGE,
+                    PROBE_PRESENT_VIEW,
+                );
+                stream.create_buffer(PROBE_PRESENT_BUFFER, &probe_present_buffer_desc());
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu present encoder"),
+                    queue: PROBE_PRESENT_QUEUE,
+                });
+                let attachments = [ColorAttachment {
+                    view: PROBE_PRESENT_VIEW,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(PROBE_PRESENT_COLOR),
+                }];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu present clear"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                });
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_present_copy());
+                stream.finish(PROBE_PRESENT_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_PRESENT_COMMAND_BUFFER]));
+                stream.present(&PresentInfo {
+                    swapchain: PROBE_PRESENT_SWAPCHAIN,
+                    waits: &[],
+                    present_id: None,
+                });
+                stream.request_readback(
+                    PROBE_PRESENT_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu present readback"),
+                        buffer: PROBE_PRESENT_BUFFER,
+                        offset: 0,
+                        size: probe_present_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.present = PresentProbe::Requested;
+            self.present_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// present's readback and register its wait, unless it is already waiting or
+    /// ready — [`poll_readback`](Self::poll_readback)'s protocol on the present's
+    /// handle.
+    fn poll_present(&mut self) -> bool {
+        if !matches!(
+            self.present,
+            PresentProbe::Requested | PresentProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_PRESENT_READBACK))
+        else {
+            return false;
+        };
+        self.present = PresentProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the present readback has got to.
+    fn present_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.present_reason = error.to_string();
+            return PRESENT_UNDECODABLE;
+        }
+        match &self.present {
+            PresentProbe::Unasked => PRESENT_UNASKED,
+            PresentProbe::Requested => PRESENT_REQUESTED,
+            PresentProbe::Waiting { .. } => PRESENT_WAITING,
+            PresentProbe::Pending => PRESENT_PENDING,
+            PresentProbe::Ready { .. } => PRESENT_READY,
+        }
+    }
+
+    /// The bytes the present readback came back with, or an empty slice if it has
+    /// not.
+    fn present_bytes(&self) -> &[u8] {
+        match &self.present {
+            PresentProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -5017,6 +5379,76 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Ask the page to present a frame to the canvas `canvas_id` names and start
+    /// reading it back on the device it opened.
+    ///
+    /// `1` when the setup frame — the surface, the configured swapchain, the
+    /// acquired frame, the host buffer, an encoder, a pass that clears the acquired
+    /// view red, the copy, finish, submit, present and `request_readback` — is on
+    /// the stream; `0` when no device has opened yet, the probe is re-entered, or
+    /// another channel is installed.
+    ///
+    /// **This is the decisive observation point of the present arm, and the first
+    /// proof the real canvas-context path works end to end**: a stub that skips the
+    /// configure/acquire/render leaves a black/zero canvas, so reading back
+    /// [`PROBE_PRESENT_COLOR_BYTES`](super::PROBE_PRESENT_COLOR_BYTES) can only come
+    /// from a `configure` + `getCurrentTexture` + render + copy that actually ran.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_present(canvas_id: u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_present(canvas_id)),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the present probe's in-flight readback, once, on the reply channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for. A
+    /// no-op until the previous poll is answered, so the gate can call it blindly.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_present_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_present()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the present probe's readback has got to
+    /// — one of the `PRESENT_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_present_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.present_state(),
+            Err(_) => super::PRESENT_UNASKED,
+        })
+    }
+
+    /// A pointer into wasm memory to the bytes the present probe's readback came
+    /// back with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_present_bytes_len`] bytes from here, and only
+    /// once [`__crcbl_web_gpu_probe_present_state`] has answered
+    /// [`PRESENT_READY`](super::PRESENT_READY). Nothing here grows wasm memory, so
+    /// the pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_present_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.present_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_present_bytes_ptr`] points at — the
+    /// present probe's readback length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_present_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.present_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -5046,10 +5478,13 @@ mod tests {
         __crcbl_web_gpu_probe_fill_state, __crcbl_web_gpu_probe_graphics_pipeline,
         __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
-        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
-        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
-        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
-        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_present, __crcbl_web_gpu_probe_present_bytes_len,
+        __crcbl_web_gpu_probe_present_bytes_ptr, __crcbl_web_gpu_probe_present_poll,
+        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_sampler,
+        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
+        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
+        __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -6266,6 +6701,211 @@ mod tests {
         )]);
         assert!(!advanced);
         assert_eq!(draw, DrawProbe::Waiting { sequence: 7 });
+    }
+
+    /// The present probe's bytes, read the way JS reads them.
+    fn present_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_present_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_present_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the present answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::present` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **Every present handle is a generation past every other probe's**, which is
+    /// the whole point of `5 << 32`: the present frame has a surface, a swapchain,
+    /// an image, a view, a buffer, a command buffer, a queue and a readback all
+    /// live at once, and none of them may land in the slot the copy-chain or fill
+    /// probe (both at `4 << 32`) files its own resources under in the shared page.
+    #[test]
+    fn the_present_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_PRESENT_SURFACE.to_bits(),
+            PROBE_PRESENT_SWAPCHAIN.to_bits(),
+            PROBE_PRESENT_IMAGE.to_bits(),
+            PROBE_PRESENT_VIEW.to_bits(),
+            PROBE_PRESENT_BUFFER.to_bits(),
+            PROBE_PRESENT_COMMAND_BUFFER.to_bits(),
+            PROBE_PRESENT_QUEUE.to_bits(),
+            PROBE_PRESENT_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 5, "every present handle is generation five");
+        }
+        // A generation clear of the copy-chain and fill probes (both `4 << 32`),
+        // and of every earlier probe below that.
+        assert_ne!(PROBE_PRESENT_IMAGE.to_bits(), PROBE_DRAW_IMAGE.to_bits());
+        assert_ne!(
+            PROBE_PRESENT_READBACK.to_bits(),
+            PROBE_FILL_READBACK.to_bits()
+        );
+        assert_ne!(PROBE_PRESENT_SURFACE.to_bits(), PROBE_SURFACE.to_bits());
+    }
+
+    /// The present half: **one export, a whole frame** that creates a surface,
+    /// configures a swapchain on it, acquires the frame, clears the *acquired*
+    /// view, copies it out, submits, presents (a no-op) and reads back — the first
+    /// probe to drive a real canvas context. The copy is recorded before the
+    /// present, which is what makes the acquired frame observable.
+    #[test]
+    fn the_present_export_encodes_the_surface_swapchain_acquire_clear_and_present() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_present(7), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateSurface",
+                "CreateSwapchain",
+                "AcquireNextFrame",
+                "CreateBuffer",
+                "CreateCommandEncoder",
+                "BeginRenderPass",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "Present",
+                "RequestReadback",
+            ],
+            "the frame configures a canvas, acquires, clears, copies, submits, presents and reads back"
+        );
+        // The acquire binds the present probe's own image and view under the
+        // swapchain, and the present names that swapchain with no waits — the
+        // no-op the browser composites on rAF.
+        assert!(commands.contains(&Command::AcquireNextFrame {
+            swapchain: PROBE_PRESENT_SWAPCHAIN,
+            image: PROBE_PRESENT_IMAGE,
+            view: PROBE_PRESENT_VIEW,
+        }));
+        assert!(commands.contains(&Command::Present {
+            swapchain: PROBE_PRESENT_SWAPCHAIN,
+            waits: Vec::new(),
+            present_id: None,
+        }));
+    }
+
+    /// **Nothing waits on the setup frame**: every command in it is caller-
+    /// allocated and answered by nothing — the present included, being a no-op —
+    /// so the wait belongs to the poll, not here.
+    #[test]
+    fn the_present_setup_frame_registers_no_wait_because_the_poll_is_what_is_awaited() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_present(7), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(__crcbl_web_gpu_probe_present_state(), PRESENT_REQUESTED);
+    }
+
+    /// **A device has to have opened first**, the draw probe's ordering rule:
+    /// every command after the surface is a device method.
+    #[test]
+    fn a_present_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_present(7), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_present_state(), PRESENT_UNASKED);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_present(7), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The whole present exchange through the exports alone: request, poll, and a
+    /// `ReadbackReady` carrying the presented pixels — which reach the bytes
+    /// exports as the present colour. The browser gate's path with the replayer
+    /// replaced by a `ReplyWriter`, as a `cargo test` has no `navigator.gpu`.
+    #[test]
+    fn the_present_readback_reaches_the_bytes_exports_as_the_present_colour() {
+        // `open_device` spends sequences 0 (the adapter) and 1 (the device), so
+        // the setup frame starts at 2 and the poll that follows it is the command
+        // after the frame's own — read the length off the frame rather than
+        // hard-wiring it.
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_present(7), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_present_state(), PRESENT_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_present_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_present_state(), PRESENT_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_PRESENT_READBACK,
+            }]
+        );
+
+        let mut presented = Vec::new();
+        for _ in 0..(PROBE_READBACK_SIZE * PROBE_READBACK_SIZE) {
+            presented.extend_from_slice(&PROBE_PRESENT_COLOR_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_PRESENT_READBACK, &presented);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_present_state(), PRESENT_READY);
+        assert_eq!(present_bytes(), presented);
+        assert_eq!(&present_bytes()[..4], PROBE_PRESENT_COLOR_BYTES);
+    }
+
+    /// A `ReadbackPending` for the poll's sequence drops the present back to
+    /// `Pending`, so the next frame polls again — [`PresentProbe::absorb`]'s
+    /// pending arm, tested at the enum because the sequence is known there.
+    #[test]
+    fn a_readback_pending_reply_drops_the_present_back_to_pending() {
+        let mut present = PresentProbe::Waiting { sequence: 7 };
+        let advanced = present.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_PRESENT_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(present, PresentProbe::Pending);
+    }
+
+    /// A `ReadbackReady` for the poll's sequence carries the bytes into `Ready`.
+    #[test]
+    fn a_readback_ready_reply_carries_the_present_bytes_into_ready() {
+        let mut present = PresentProbe::Waiting { sequence: 7 };
+        let bytes = vec![255, 0, 0, 255];
+        let advanced = present.absorb(&[(
+            7,
+            Reply::ReadbackReady {
+                readback: PROBE_PRESENT_READBACK,
+                data: bytes.clone(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(present, PresentProbe::Ready { bytes });
+    }
+
+    /// A reply for another sequence leaves the present waiting, exactly as it
+    /// leaves every other probe: one channel carries every probe's replies, and
+    /// each takes only its own.
+    #[test]
+    fn a_present_probe_ignores_a_reply_for_another_sequence() {
+        let mut present = PresentProbe::Waiting { sequence: 7 };
+        let advanced = present.absorb(&[(
+            8,
+            Reply::ReadbackReady {
+                readback: PROBE_PRESENT_READBACK,
+                data: vec![1, 2, 3, 4],
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(present, PresentProbe::Waiting { sequence: 7 });
     }
 
     /// The dispatch probe's bytes, read the way JS reads them.
