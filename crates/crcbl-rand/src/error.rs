@@ -5,9 +5,10 @@ use core::fmt;
 /// Why an [`entropy`](crate::entropy) draw failed.
 ///
 /// The variants are target-specific because the two entropy sources are:
-/// [`Os`](Error::Os) exists only where there is an OS CSPRNG to fail, and
+/// `Os` exists only where there is an OS CSPRNG to fail (native targets), and
 /// [`Unseeded`](Error::Unseeded) only on `wasm32`, where the seed arrives from
-/// the host and may not have yet.
+/// the host and may not have yet. `Os` is not linked here because it is
+/// `cfg`-gated away on `wasm32`, where this doc still builds.
 #[derive(Debug)]
 pub enum Error {
     /// The operating system's entropy source returned an error. Native targets

@@ -58,10 +58,17 @@ skip = [
   { crate = "toml_edit@0.22.27", reason = "toml 0.8 via crcbl-store; the 1.x copy comes from ndk/num_enum" },
   { crate = "toml_datetime@0.6.11", reason = "same toml 0.8 stack" },
   { crate = "winnow@0.7.15", reason = "same toml 0.8 stack" },
-  # `getrandom` 0.4 is the workspace's own pin; 0.2 arrives under a transitive
-  # user that has not migrated. Skipping the oldest is enough — 0.3 and 0.4 are
-  # semver-compatible as far as this check is concerned.
+  # `getrandom` 0.4 is the workspace's own pin (crcbl-rand's native entropy).
+  # 0.2 arrives under a transitive user that has not migrated, and 0.3 under
+  # `rand_core`'s `os_rng` feature — which `--all-features` turns on and cargo's
+  # feature unification then applies to the copy of `rand_core` that crcbl-rand's
+  # `rand_chacha` shares, even though crcbl-rand keeps `os_rng` off. None of
+  # these can be resolved from here, so the older two are skipped and 0.4 stands.
   { crate = "getrandom@0.2.17", reason = "transitive; the workspace pins 0.4" },
+  { crate = "getrandom@0.3.4", reason = "rand_core's os_rng under --all-features; the workspace pins 0.4" },
+  # `r-efi` is getrandom's UEFI backend: 5.x under getrandom 0.3, 6.x under 0.4.
+  # The duplicate follows the getrandom one above; skip the older with it.
+  { crate = "r-efi@5.3.0", reason = "getrandom 0.3's UEFI backend; 6.x comes from getrandom 0.4" },
   # `thiserror` 1.x survives only under third-party crates; every crate in this
   # workspace uses the 2.0 pin from `[workspace.dependencies]`.
   { crate = "thiserror@1.0.69", reason = "transitive; the workspace pins 2.0" },
