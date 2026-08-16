@@ -2282,11 +2282,29 @@ something trusted, and in a browser the only trusted renderer today is
      no-op in a later slice. `waits`/`signals` on submit and a `Some` readback
      `after` are semaphores WebGPU has no concept of, refused by name. The
      readback path is what slice 10's parity gate reads back through.
-   - 7b — the draws: bind pipeline, bind groups, push constants, draw. The
-     commands are already encoded; this adds their replay arms inside a pass.
-   - 7c — compute passes and dispatch.
-   - 7d — the remaining copies (buffer, buffer↔image, image↔image, fill), and
-     `barrier()` as the documented no-op.
+   - ~~7b — the draws: bind pipeline, bind groups, push constants, draw.~~ —
+     **shipped.** The four replay arms run inside a render pass; push constants
+     are refused by name (WGSL has none), and `bind_group` binds to whichever
+     pass is open. Group T draws a full-screen red triangle over a blue clear
+     and reads back red, so a stubbed `setPipeline`/`draw` fails.
+   - ~~7c — compute passes and dispatch.~~ — **shipped.** A
+     `#currentComputePass` beside the render pass drives `bind_compute_pipeline`
+     and `dispatch`; `CopyBufferToBuffer` came forward as the only way to
+     observe a dispatch. Group U dispatches a shader that fills sixty-four
+     `u32`s with `0xDEADBEEF` and reads every one back — a fresh buffer is zero,
+     so a stub is visible. `dispatch_indirect` is deferred (its counts come from
+     buffer bytes nothing can yet write); see `docs/backlog.md`.
+   - ~~7d — the remaining copies (buffer↔image, image↔image, fill), and
+     `barrier()` as the documented no-op.~~ — **shipped, in two parts.** 7d-a:
+     `CopyBufferToImage`/`CopyImageToImage` map to `copyBufferToTexture`/
+     `copyTextureToTexture`, and `FillBuffer` maps a zero fill to `clearBuffer`
+     while refusing a non-zero value the way `crcbl-wgpu` does (WebGPU has no
+     valued fill). Groups V and W read back a buffer→image→image→buffer chain
+     and a half-zeroed fill. 7d-b: `PipelineBarrier` carries its barrier lists
+     on the wire for fidelity and replays as a no-op — WebGPU inserts every
+     hazard barrier itself — proven inert by a barrier sitting in group V's
+     frame. Slice 7 is complete: the encoder can draw, compute, copy, fill and
+     barrier.
 8. Surface, swapchain, present.
 9. Replace `getrandom` with the 32-byte export shim, and empty
    `ALLOWED_IMPORT_MODULES`.
