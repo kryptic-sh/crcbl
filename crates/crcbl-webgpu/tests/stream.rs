@@ -11,10 +11,10 @@ mod corpus;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage,
-    CompareOp, DeviceDesc, Extent3d, Features, FilterMode, Format, ImageAspect, ImageDesc,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, MemoryLocation,
-    PipelineLayoutDesc, PushConstantRange, SampleType, SamplerAddressMode, SamplerDesc,
-    ShaderModuleDesc, ShaderStages,
+    CompareOp, ComputePipelineDesc, DeviceDesc, Extent3d, Features, FilterMode, Format,
+    ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewType, MemoryLocation, PipelineLayoutDesc, PushConstantRange, SampleType,
+    SamplerAddressMode, SamplerDesc, ShaderEntry, ShaderModuleDesc, ShaderStages,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -1635,10 +1635,11 @@ fn every_command_has_its_own_name() {
     names.dedup();
     // `every_command` holds three CreateBuffers, three CreateImages, six
     // CreateImageViews, four CreateSamplers, six CreateBindGroupLayouts, two
-    // CreateBindGroups, three CreateShaderModules, two CreatePipelineLayouts and
-    // two each of BeginRenderPass, BindGroup and RequestDevice, so the
-    // distinct-name count is what the writer has methods for.
-    assert_eq!(names.len(), 27);
+    // CreateBindGroups, three CreateShaderModules, two CreatePipelineLayouts, one
+    // CreateComputePipeline and its DestroyComputePipeline, and two each of
+    // BeginRenderPass, BindGroup and RequestDevice, so the distinct-name count is
+    // what the writer has methods for.
+    assert_eq!(names.len(), 29);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -2053,6 +2054,141 @@ fn a_push_constant_ranges_stage_bit_and_presence_byte_are_both_checked() {
             code: 2,
         })
     );
+}
+
+// ── Compute pipelines ─────────────────────────────────────────────────────────
+
+/// **A compute pipeline carries every field of its descriptor in the
+/// descriptor's order**, and this is the command where two of those claims are
+/// worth the most.
+///
+/// **The `workgroup_size` is non-uniform on purpose** — `[8, 4, 2]`, three
+/// distinct numbers — so a transposition of the three components changes the
+/// decode rather than reproducing it. The replayer drops the field (WebGPU reads
+/// the real value from the module's `@workgroup_size`), but it round-trips in
+/// Rust because Metal reads it from the descriptor, so the wire has to carry it
+/// intact.
+///
+/// **The two handles cross into two *different* tables and are not
+/// interchangeable**: `layout` names a pipeline layout and `module` a shader
+/// module, and a handle carries no kind, so a body that transposed them would
+/// name the wrong object in each. The assertions at the end state that out loud.
+#[test]
+fn a_compute_pipeline_carries_every_field_of_its_descriptor_in_the_descriptors_order() {
+    let pipeline = handle(5, 6);
+    let layout = handle(7, 8);
+    let module = handle(9, 10);
+    let desc = ComputePipelineDesc {
+        label: Some("cull"),
+        layout,
+        compute: ShaderEntry {
+            module,
+            entry_point: "computeMain",
+        },
+        workgroup_size: [8, 4, 2],
+    };
+    let mut stream = StreamWriter::new();
+    stream.create_compute_pipeline(pipeline, &desc);
+    stream.destroy_compute_pipeline(handle(11, 12));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateComputePipeline {
+                pipeline,
+                label: Some("cull".into()),
+                layout,
+                module,
+                entry_point: "computeMain".into(),
+                workgroup_size: [8, 4, 2],
+            },
+            Command::DestroyComputePipeline {
+                pipeline: handle(11, 12),
+            },
+        ])
+    );
+
+    let [x, y, z] = desc.workgroup_size;
+    assert!(
+        x != y && y != z && x != z,
+        "two workgroup-size components are equal, so the test would not notice \
+         them swapped"
+    );
+    assert_ne!(
+        layout.to_bits(),
+        module.to_bits(),
+        "the two handles must differ, or the test would not notice them swapped"
+    );
+}
+
+/// **The non-uniform workgroup size is on the wire, little-endian, all three
+/// components**, and an absent label puts them at a fixed offset.
+///
+/// A writer that dropped a component, or resolved the size to what the module
+/// declares, would still round-trip through this crate's reader; the assertion is
+/// on the bytes.
+#[test]
+fn a_compute_pipelines_workgroup_size_is_three_u32s_on_the_wire() {
+    let desc = ComputePipelineDesc {
+        label: None,
+        layout: handle(7, 8),
+        compute: ShaderEntry {
+            module: handle(9, 10),
+            entry_point: "cs",
+        },
+        workgroup_size: [8, 4, 2],
+    };
+    let mut stream = StreamWriter::new();
+    stream.create_compute_pipeline(handle(1, 1), &desc);
+    let bytes = stream.bytes();
+
+    // The three components are the last twelve bytes of the body, behind the
+    // pipeline handle, the absent label's presence byte, the two descriptor
+    // handles and the two-byte `"cs"` entry point with its length prefix.
+    let at = tag::HEADER_BYTES + 1 + 8 + 1 + 8 + 8 + 4 + "cs".len();
+    for (index, extent) in desc.workgroup_size.iter().enumerate() {
+        let component_at = at + index * 4;
+        assert_eq!(
+            &bytes[component_at..component_at + 4],
+            &extent.to_le_bytes(),
+            "workgroup-size component {index} is not little-endian on the wire"
+        );
+    }
+    assert_eq!(bytes.len(), at + 12, "the body has grown a field");
+}
+
+/// **An absent label is not a present one for a compute pipeline either**, so
+/// the `Some("")`/`None` distinction that decides a WGSL truncation elsewhere is
+/// held here too.
+#[test]
+fn a_compute_pipelines_label_keeps_some_empty_apart_from_none() {
+    let base = |label| ComputePipelineDesc {
+        label,
+        layout: handle(7, 8),
+        compute: ShaderEntry {
+            module: handle(9, 10),
+            entry_point: "main",
+        },
+        workgroup_size: [1, 1, 1],
+    };
+    let mut empty = StreamWriter::new();
+    empty.create_compute_pipeline(handle(1, 1), &base(Some("")));
+    let mut absent = StreamWriter::new();
+    absent.create_compute_pipeline(handle(1, 1), &base(None));
+    assert_ne!(empty.bytes(), absent.bytes());
+
+    let empty = decode_stream(empty.bytes()).expect("a stream this crate wrote decodes");
+    let absent = decode_stream(absent.bytes()).expect("a stream this crate wrote decodes");
+    match (&empty[0], &absent[0]) {
+        (
+            Command::CreateComputePipeline { label: empty, .. },
+            Command::CreateComputePipeline { label: absent, .. },
+        ) => {
+            assert_eq!(empty.as_deref(), Some(""));
+            assert_eq!(*absent, None);
+        }
+        _ => panic!("expected two CreateComputePipelines"),
+    }
 }
 
 // ── Malformed streams ─────────────────────────────────────────────────────────

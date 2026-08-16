@@ -79,6 +79,7 @@ const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
 const CREATE_BIND_GROUP_TAG = 0x06;
 const CREATE_SHADER_MODULE_TAG = 0x07;
 const CREATE_PIPELINE_LAYOUT_TAG = 0x08;
+const CREATE_COMPUTE_PIPELINE_TAG = 0x09;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
@@ -88,6 +89,7 @@ const DESTROY_BIND_GROUP_LAYOUT_TAG = 0x25;
 const DESTROY_BIND_GROUP_TAG = 0x26;
 const DESTROY_SHADER_MODULE_TAG = 0x27;
 const DESTROY_PIPELINE_LAYOUT_TAG = 0x28;
+const DESTROY_COMPUTE_PIPELINE_TAG = 0x29;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -1338,6 +1340,43 @@ function decodeCommand(r) {
         ),
       };
     }
+    case CREATE_COMPUTE_PIPELINE_TAG: {
+      // **TWO HANDLES INTO TWO DIFFERENT TABLES.** `layout` resolves against the
+      // pipeline-layout table and `module` against the shader-module table, and a
+      // handle carries no kind, so which table each indexes is the wire position
+      // and nothing else — spelled out one at a time so the two cannot be read in
+      // the other order. `entryPoint` is a bare string, always present.
+      //
+      // `workgroupSize` is three `u32`s and crosses whole even though a WebGPU
+      // replayer drops it: WebGPU reads the size from the module's
+      // `@workgroup_size`, but `crcbl_hal::ComputePipelineDesc` carries it because
+      // Metal has nowhere else to declare it. `gpu-replay.js` drops it there.
+      const pipeline = r.readHandle('CreateComputePipeline::pipeline');
+      const label = r.readOptString('ComputePipelineDesc::label');
+      const layout = r.readHandle('ComputePipelineDesc::layout');
+      const module = r.readHandle('ShaderEntry::module');
+      const entryPoint = r.readString('ShaderEntry::entry_point');
+      const workgroupSize = [r.readU32(), r.readU32(), r.readU32()];
+      return {
+        name: 'CreateComputePipeline',
+        pipeline,
+        label,
+        layout,
+        module,
+        entryPoint,
+        workgroupSize,
+      };
+    }
+    case DESTROY_COMPUTE_PIPELINE_TAG:
+      // Its own tag and its own table again: a compute pipeline's id is allowed to
+      // be the same eight bytes as anything else's, and — like the pipeline-layout
+      // destroy — the one whose empty slot is the *ordinary* case, since the
+      // replayer refuses a pipeline it cannot build (an unresolvable layout or
+      // module) and the caller destroys the pre-allocated handle regardless.
+      return {
+        name: 'DestroyComputePipeline',
+        pipeline: r.readHandle('DestroyComputePipeline::pipeline'),
+      };
     case DESTROY_SHADER_MODULE_TAG:
       // Its own tag and its own table again: a shader module's id is allowed to
       // be the same eight bytes as anything else's.

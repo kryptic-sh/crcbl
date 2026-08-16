@@ -5,10 +5,11 @@ use core::ops::Range;
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingKind, BindingResource, BufferDesc, BufferHandle, ClearValue,
-    ColorAttachment, DepthStencilAttachment, DeviceDesc, Extent3d, GraphicsPipelineHandle,
-    ImageDesc, ImageHandle, ImageSubresourceRange, ImageViewDesc, ImageViewHandle,
-    PipelineLayoutDesc, PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
-    ShaderModuleDesc, ShaderModuleHandle, ShaderStages, SurfaceHandle,
+    ColorAttachment, ComputePipelineDesc, ComputePipelineHandle, DepthStencilAttachment,
+    DeviceDesc, Extent3d, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange,
+    ImageViewDesc, ImageViewHandle, PipelineLayoutDesc, PipelineLayoutHandle, Rect2d,
+    RenderPassDesc, SamplerDesc, SamplerHandle, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
+    SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -567,6 +568,55 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_compute_pipeline`](crcbl_hal::Device::create_compute_pipeline),
+    /// with the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow the descriptor's declaration order for
+    /// [`create_image`](Self::create_image)'s.
+    ///
+    /// **Two handles cross into two *different* tables, and they are not
+    /// interchangeable.** `desc.layout` names a pipeline layout and
+    /// `desc.compute.module` a shader module — the first command on this stream to
+    /// resolve handles into two distinct non-buffer tables. A handle carries no
+    /// kind, so the parameter and the two descriptor handles are all eight bytes
+    /// the others could hold; the opcode and their position are what say which
+    /// table each indexes. The replayer routes a miss on either to the error queue
+    /// naming which one it was — see
+    /// [`Command::CreateComputePipeline`](crate::Command::CreateComputePipeline).
+    ///
+    /// **[`ComputePipelineDesc::workgroup_size`]
+    /// crosses whole, all three components**, even though a WebGPU replayer drops
+    /// it: `GPUComputePipelineDescriptor` reads the workgroup size from the
+    /// module's `@workgroup_size` attribute and has no member for it, but
+    /// [`ComputePipelineDesc`] carries it because
+    /// Metal has nowhere else to declare it. The writer carries what the caller
+    /// gives; the replayer drops what WebGPU reads from the shader — and dropping
+    /// it changes nothing, so unlike a push-constant range it is not refused. It
+    /// round-trips in Rust so a transposition of the three components is visible.
+    ///
+    /// **`entry_point` is a bare length-prefixed string**, always written — the
+    /// seam always supplies one rather than leaning on WebGPU's default-to-the-
+    /// sole-entry-point rule. Nothing is validated here, which is
+    /// [`create_image`](Self::create_image)'s rule: the workgroup-size and
+    /// handle-resolution checks are the replayer's, because only it faces WebGPU.
+    pub fn create_compute_pipeline(
+        &mut self,
+        pipeline: ComputePipelineHandle,
+        desc: &ComputePipelineDesc<'_>,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_COMPUTE_PIPELINE_TAG);
+        self.bytes.put_handle(pipeline);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_handle(desc.layout);
+        self.bytes.put_handle(desc.compute.module);
+        self.bytes.put_bytes(desc.compute.entry_point.as_bytes());
+        for extent in desc.workgroup_size {
+            self.bytes.put_u32(extent);
+        }
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -662,6 +712,20 @@ impl StreamWriter {
     pub fn destroy_pipeline_layout(&mut self, layout: PipelineLayoutHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_PIPELINE_LAYOUT_TAG);
         self.bytes.put_handle(layout);
+        sequence
+    }
+
+    /// [`Device::destroy_compute_pipeline`](crcbl_hal::Device::destroy_compute_pipeline).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason, and the third destroy here whose **empty slot is ordinary rather
+    /// than exceptional** — like [`destroy_pipeline_layout`](Self::destroy_pipeline_layout):
+    /// the replayer refuses a pipeline it cannot build (an unresolvable layout or
+    /// module), so the handle the caller pre-allocated is destroyed with nothing
+    /// behind it every time that happens.
+    pub fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_COMPUTE_PIPELINE_TAG);
+        self.bytes.put_handle(pipeline);
         sequence
     }
 

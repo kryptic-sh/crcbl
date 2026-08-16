@@ -496,6 +496,44 @@ export function startPipelineLayoutProbe({ exports }) {
 }
 
 /**
+ * Asks wasm to encode a compute-pipeline creation on the device it opened.
+ *
+ * **There is no `readComputePipelineProbe`, for {@link startBufferProbe}'s
+ * reason:** `CreateComputePipeline` has no entry on the reply channel either.
+ * `globalThis.crcbl.gpu.replayer.computePipelines` is the table the
+ * `GPUComputePipeline` lands in, and a pipeline the browser would not have — one
+ * naming a shader module or a pipeline layout the replayer cannot resolve —
+ * arrives in `crcbl.gpu.replayer.takeError()`.
+ *
+ * **What differs from every probe before it is what a browser can be asked about
+ * the result.** A `GPUComputePipeline` reports its `label`, like a pipeline
+ * layout, but it also answers `getBindGroupLayout(n)` — the derived layout only a
+ * genuinely-built pipeline can hand back, because a pipeline is where the shader
+ * and its layout are validated against each other. That is stronger than mere
+ * existence and is a second thing a stub cannot fake: node has no
+ * `GPUComputePipeline` binding at all. The descriptor is fixed in
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * **What is new is that the pipeline resolves handles into two *different*
+ * tables.** Its export encodes a whole frame — a compute shader module, an empty
+ * pipeline layout, and the pipeline built from both — and the pipeline then
+ * resolves one id out of the shader-module table and one out of the
+ * pipeline-layout table, which is the first command anywhere to do that.
+ *
+ * It needs a **device**, as {@link startBufferProbe} does and for the same
+ * reason: `create_compute_pipeline` is a device method, so a `false` right after
+ * {@link startDeviceProbe} is that ordering rather than a failure.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded it, on {@link startImageProbe}'s
+ *   terms.
+ */
+export function startComputePipelineProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_compute_pipeline() === 1;
+}
+
+/**
  * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of

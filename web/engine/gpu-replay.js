@@ -2118,6 +2118,19 @@ export class Replayer {
    */
   #pipelineLayouts = new HandleTable();
   /**
+   * The `GPUComputePipeline` behind each live compute-pipeline handle.
+   *
+   * Its own table for the reason every table here is its own — a compute-pipeline
+   * handle is allowed to carry the same eight bytes as a buffer's or a shader
+   * module's, and the probe's `PROBE_COMPUTE_PIPELINE` deliberately does. It is
+   * the first creation to resolve handles into *two* other tables: a
+   * `CreateComputePipeline` looks its layout up in {@link Replayer#pipelineLayouts}
+   * and its compute module up in {@link Replayer#shaderModules}.
+   *
+   * @type {HandleTable<GPUComputePipeline>}
+   */
+  #computePipelines = new HandleTable();
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -2282,6 +2295,24 @@ export class Replayer {
     return this.#pipelineLayouts;
   }
 
+  /**
+   * The compute pipelines that are live right now, on {@link Replayer#surfaces}'s
+   * terms.
+   *
+   * **A `GPUComputePipeline` reports its `label` and — unlike a layout — one thing
+   * more that matters here: `getBindGroupLayout(n)`**, the derived layout only a
+   * genuinely-built pipeline can answer, because a pipeline is where the shader
+   * and its layout are validated against each other. So this table's contents,
+   * that call, and the device's error queue are what a reader can learn.
+   * `web/tools/browser-e2e.mjs` reads `getBindGroupLayout`; `web/tools/gpu-replay.mjs`
+   * proves the descriptor against a stub.
+   *
+   * @type {HandleTable<GPUComputePipeline>}
+   */
+  get computePipelines() {
+    return this.#computePipelines;
+  }
+
   /** How many out-of-band errors are waiting to be taken. */
   get pendingErrors() {
     return this.#errors.length;
@@ -2436,6 +2467,12 @@ export class Replayer {
           break;
         case 'DestroyPipelineLayout':
           this.#destroyPipelineLayout(command);
+          break;
+        case 'CreateComputePipeline':
+          this.#createComputePipeline(sequence, command);
+          break;
+        case 'DestroyComputePipeline':
+          this.#destroyComputePipeline(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -3664,6 +3701,114 @@ export class Replayer {
    */
   #destroyPipelineLayout(command) {
     this.#pipelineLayouts.remove(command.layout);
+  }
+
+  /**
+   * Creates a compute pipeline on the open device and files it under the handle
+   * wasm allocated.
+   *
+   * `#createBuffer`'s shape — synchronous, no reply, every failure into
+   * {@link Replayer#takeError} — and **the first creation that resolves handles
+   * into two *different* non-buffer tables**: `layout` against
+   * {@link Replayer#pipelineLayouts} and `module` against
+   * {@link Replayer#shaderModules}. A handle carries no kind, so the two could
+   * hold identical bits; the field each arrived in is what says which table it
+   * indexes. Three things are decided here.
+   *
+   *   * **Either handle resolving to nothing goes to the error queue naming which
+   *     one** — the layout or the module — never a throw. This is
+   *     `#createPipelineLayout`'s set-resolution judgement with a sharper edge:
+   *     there are *two* tables, so the two failures must read distinctly, or a
+   *     stale layout and a stale module would be indistinguishable in the log. A
+   *     pipeline naming a stale resource is a far side that got its ordering wrong
+   *     mid-frame, and taking the frame down would abandon every command after it.
+   *   * **`workgroupSize` is carried on the wire and DROPPED here, and that is NOT
+   *     a refusal.** WebGPU — like Vulkan — reads the workgroup size from the
+   *     shader's `@workgroup_size(x, y, z)` attribute, not from the descriptor:
+   *     `GPUComputePipelineDescriptor` has no member for it, and only Metal reads
+   *     it from the descriptor, which is why `crcbl_hal::ComputePipelineDesc`
+   *     carries it at all. So this does not pass it and does not refuse it — the
+   *     authoritative copy is in the WGSL the module already carries, and the
+   *     descriptor's copy is a cross-check for backends that cannot see the
+   *     shader's. Dropping it changes nothing, unlike dropping a push-constant
+   *     range, which would lose data — which is why `#createPipelineLayout` refuses
+   *     a `Some` range and this passes `workgroupSize` by in silence.
+   *   * **`createComputePipeline` errors are async, exactly like
+   *     `createShaderModule`.** A bad entry point, or a shader/layout mismatch,
+   *     returns a `GPUComputePipeline` object and reports the error through
+   *     `uncapturederror` a task later — `createComputePipelineAsync` is the
+   *     alternative and is deliberately not used, because it would mean deferring
+   *     this creation to a promise, the machinery the whole buffer/image/pipeline
+   *     family does without. So this builds synchronously and lets the failure
+   *     surface through the device's `uncapturederror` listener
+   *     (`#requestDevice`) into the same queue a `#createBuffer` throw feeds.
+   *
+   * @param {bigint} sequence
+   * @param {{ pipeline: { index: number, generation: number },
+   *           label: string | null,
+   *           layout: { index: number, generation: number },
+   *           module: { index: number, generation: number },
+   *           entryPoint: string, workgroupSize: number[] }} command
+   */
+  #createComputePipeline(sequence, command) {
+    const named = `compute pipeline ${command.pipeline.index}.${command.pipeline.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    const layout = this.#pipelineLayouts.get(command.layout);
+    if (layout === undefined) {
+      this.#deviceError(
+        `${named} names pipeline layout ${command.layout.index}.${command.layout.generation} as its layout, ` +
+          'which this replayer holds no live pipeline layout under'
+      );
+      return;
+    }
+    const module = this.#shaderModules.get(command.module);
+    if (module === undefined) {
+      this.#deviceError(
+        `${named} names shader module ${command.module.index}.${command.module.generation} as its compute stage, ` +
+          'which this replayer holds no live shader module under'
+      );
+      return;
+    }
+    let pipeline;
+    try {
+      // `command.workgroupSize` is deliberately not passed: WebGPU reads it from
+      // the module's `@workgroup_size`, and `GPUComputePipelineDescriptor` has no
+      // member for it. See the method docs.
+      pipeline = this.#device.createComputePipeline({
+        // No label rather than an empty one, as `#createBuffer` passes it.
+        ...(command.label === null ? {} : { label: command.label }),
+        layout,
+        compute: { module, entryPoint: command.entryPoint },
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#computePipelines.insert(command.pipeline, pipeline);
+  }
+
+  /**
+   * Lets go of a compute pipeline.
+   *
+   * **LETTING GO IS THE WHOLE OF THE RELEASE**, as it is for a shader module and a
+   * pipeline layout: a `GPUComputePipeline` has no `destroy()` — it holds no
+   * allocation this side can free — so there is nothing to call.
+   *
+   * A destroy naming nothing live is a no-op in both of its ways — a stale
+   * generation and an empty slot — exactly as every other destroy here, because
+   * {@link HandleTable#remove} answers `undefined` for both. Like the
+   * pipeline-layout's, the empty slot is the *ordinary* case: every pipeline
+   * `#createComputePipeline` refuses above (an unresolvable layout or module)
+   * leaves its handle empty, and the caller that pre-allocated it destroys it all
+   * the same.
+   *
+   * @param {{ pipeline: { index: number, generation: number } }} command
+   */
+  #destroyComputePipeline(command) {
+    this.#computePipelines.remove(command.pipeline);
   }
 
   /**

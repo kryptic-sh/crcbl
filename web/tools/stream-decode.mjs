@@ -761,6 +761,22 @@ const EXPECTED = [
     bindGroupLayouts: [handle(97, 98)],
     pushConstants: { stages: ['VERTEX', 'FRAGMENT'], offset: 16, size: 128 },
   },
+  // The first command resolving handles into two *different* non-buffer tables:
+  // `layout` names a pipeline layout and `module` a shader module, and which
+  // table each indexes is the wire position and nothing else. `workgroupSize` is
+  // `[8, 4, 2]`, non-uniform on purpose — three distinct numbers, so a
+  // transposition of the components changes the decode rather than reproducing
+  // it, and `gpu-replay.js` drops the field because WebGPU reads the real value
+  // from the module's `@workgroup_size`. `entryPoint` is a real string.
+  {
+    name: 'CreateComputePipeline',
+    pipeline: handle(127, 128),
+    label: 'cull',
+    layout: handle(121, 122),
+    module: handle(113, 114),
+    entryPoint: 'computeMain',
+    workgroupSize: [8, 4, 2],
+  },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
   { name: 'DestroySurface', surface: handle(47, 48) },
   // A view and the image it views are separate objects in separate tables, so
@@ -786,6 +802,11 @@ const EXPECTED = [
   // the replayer refused (a present push-constant range, an unresolvable
   // bind-group layout) still has its pre-allocated handle destroyed.
   { name: 'DestroyPipelineLayout', layout: handle(125, 126) },
+  // Its own command and its own table again: a compute pipeline's id is allowed
+  // to be the same eight bytes as anything else's, and — like the pipeline-layout
+  // destroy — the one whose empty slot is the ordinary case, since the replayer
+  // refuses a pipeline it cannot build and the caller destroys the handle anyway.
+  { name: 'DestroyComputePipeline', pipeline: handle(129, 130) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',

@@ -19,11 +19,11 @@ use core::ops::Range;
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
-    BufferHandle, BufferUsage, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d,
-    Features, FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutHandle,
-    PushConstantRange, Rect2d, SamplerAddressMode, SamplerHandle, ShaderModuleHandle, ShaderStages,
-    SurfaceHandle,
+    BufferHandle, BufferUsage, ColorAttachment, CompareOp, ComputePipelineHandle,
+    DepthStencilAttachment, Extent3d, Features, FilterMode, Format, GraphicsPipelineHandle,
+    ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType,
+    MemoryLocation, PipelineLayoutHandle, PushConstantRange, Rect2d, SamplerAddressMode,
+    SamplerHandle, ShaderModuleHandle, ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -374,6 +374,60 @@ pub enum Command {
         /// names a range WebGPU cannot express, which the replayer refuses.
         push_constants: Option<PushConstantRange>,
     },
+    /// [`Device::create_compute_pipeline`](crcbl_hal::Device::create_compute_pipeline),
+    /// with the handle the caller allocated for it.
+    ///
+    /// The whole of [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc),
+    /// flattened as every other descriptor here is — and **the first command
+    /// resolving handles into two *different* non-buffer tables**:
+    /// [`layout`](Self::CreateComputePipeline::layout) is a
+    /// [`PipelineLayoutHandle`] and [`module`](Self::CreateComputePipeline::module)
+    /// a [`ShaderModuleHandle`], so the replayer looks each up in a different table
+    /// and a miss on either is a failure naming *which* — the layout or the module —
+    /// could not be resolved. A handle carries no kind, so the two could hold
+    /// identical bits.
+    ///
+    /// **[`workgroup_size`](Self::CreateComputePipeline::workgroup_size) is on the
+    /// wire and the replayer IGNORES it, and that is not a refusal.** WebGPU — like
+    /// Vulkan — reads the workgroup size from the shader's `@workgroup_size(x, y, z)`
+    /// attribute, not from the pipeline descriptor: `GPUComputePipelineDescriptor`
+    /// has no member for it. Only Metal reads it from the descriptor, which is why
+    /// [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc) carries it at all.
+    /// So it crosses because the HAL descriptor has it and Metal needs it, and the
+    /// replayer drops it because the authoritative copy is in the WGSL the module
+    /// already carries — dropping it changes nothing, unlike dropping a
+    /// push-constant range, which would lose data. It still round-trips in Rust:
+    /// all three components cross so a transposition is visible. See
+    /// `web/engine/gpu-replay.js`.
+    ///
+    /// **[`entry_point`](Self::CreateComputePipeline::entry_point) is a bare
+    /// string**, always present — the seam does not lean on WebGPU's rule that it
+    /// may be omitted when a module has a single entry point — and becomes
+    /// `GPUProgrammableStage.entryPoint`.
+    ///
+    /// **Nothing is validated here**, which is [`Command::CreateImage`]'s rule:
+    /// [`ComputePipelineDesc::check_workgroup_size`](crcbl_hal::ComputePipelineDesc::check_workgroup_size)
+    /// and the errors an unresolvable handle raises are the replayer's, because
+    /// only it faces WebGPU. See `web/engine/gpu-replay.js`.
+    CreateComputePipeline {
+        /// Id the replayer stores the new object at.
+        pipeline: ComputePipelineHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Resource layout — an id the replayer looks up in the pipeline-layout
+        /// table, not one it fills in.
+        layout: PipelineLayoutHandle,
+        /// Compute stage's module — an id the replayer looks up in the
+        /// shader-module table, a *different* table from `layout`'s.
+        module: ShaderModuleHandle,
+        /// Compute stage's entry point, as it appears in the module.
+        entry_point: String,
+        /// Invocations per workgroup, in the three dimensions. Carried because
+        /// the HAL descriptor has it and Metal needs it; the WebGPU replayer
+        /// drops it, reading the real value from the module — see the variant
+        /// docs.
+        workgroup_size: [u32; 3],
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -456,6 +510,18 @@ pub enum Command {
     DestroyPipelineLayout {
         /// Id to release.
         layout: PipelineLayoutHandle,
+    },
+    /// [`Device::destroy_compute_pipeline`](crcbl_hal::Device::destroy_compute_pipeline).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is — and, like the pipeline-layout and
+    /// bind-group-layout destroys, the empty slot is an *ordinary* case rather
+    /// than an edge one: a pipeline the replayer refused (an unresolvable layout
+    /// or module) still has its handle destroyed by the caller that pre-allocated
+    /// it.
+    DestroyComputePipeline {
+        /// Id to release.
+        pipeline: ComputePipelineHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -582,6 +648,7 @@ impl Command {
             Self::CreateBindGroup { .. } => "CreateBindGroup",
             Self::CreateShaderModule { .. } => "CreateShaderModule",
             Self::CreatePipelineLayout { .. } => "CreatePipelineLayout",
+            Self::CreateComputePipeline { .. } => "CreateComputePipeline",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
             Self::DestroyImage { .. } => "DestroyImage",
@@ -591,6 +658,7 @@ impl Command {
             Self::DestroyBindGroup { .. } => "DestroyBindGroup",
             Self::DestroyShaderModule { .. } => "DestroyShaderModule",
             Self::DestroyPipelineLayout { .. } => "DestroyPipelineLayout",
+            Self::DestroyComputePipeline { .. } => "DestroyComputePipeline",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",

@@ -517,6 +517,26 @@ if [ -z "$PIPELINE_LAYOUT_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the compute pipeline, which is group Q and is its own thing
+# for a reason none of the above share: it is the first command anywhere that
+# resolves handles into two *different* tables — its layout out of the
+# pipeline-layout table and its compute module out of the shader-module table —
+# and the first where the shader is bound to the layout. A `GPUComputePipeline`
+# reports its label like a pipeline layout, but it also answers
+# `getBindGroupLayout(0)`, the derived layout only a genuinely-built pipeline can
+# hand back, so that call plus the silent error queue are the browser's evidence.
+# The node suite proves the descriptor — its two resolved handles and no
+# workgroup-size member — and the two distinct resolution refusals against a stub
+# whose `createComputePipeline` returns a plain object; only this asks a real
+# device to build it from a real compute shader. Its absence means that stopped
+# happening rather than that this demo has no device.
+COMPUTE_PIPELINE_TRIP="$(grep -F 'a real GPUComputePipeline came back from the device and answered getBindGroupLayout' "${OUTPUT}.plain" || true)"
+if [ -z "$COMPUTE_PIPELINE_TRIP" ]; then
+    echo "crcbl web e2e: the driver never built a compute pipeline on a real device;" >&2
+    echo "               crcbl-webgpu's CreateComputePipeline is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

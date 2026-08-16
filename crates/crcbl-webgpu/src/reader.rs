@@ -656,6 +656,31 @@ impl<'a> StreamReader<'a> {
                     push_constants,
                 })
             }
+            tag::CREATE_COMPUTE_PIPELINE_TAG => {
+                // Two handles into two *different* tables — `layout` into the
+                // pipeline-layout table and `module` into the shader-module table
+                // — so they are read one at a time and named for the field each
+                // fills, since a handle carries no kind and the two could hold
+                // identical bits. `workgroup_size` crosses whole though the WebGPU
+                // replayer drops it; see `Command::CreateComputePipeline`.
+                let pipeline = r.read_handle("CreateComputePipeline::pipeline")?;
+                let label = r.read_opt_string("ComputePipelineDesc::label")?;
+                let layout = r.read_handle("ComputePipelineDesc::layout")?;
+                let module = r.read_handle("ShaderEntry::module")?;
+                let entry_point = r.read_string("ShaderEntry::entry_point")?;
+                let workgroup_size = [r.read_u32()?, r.read_u32()?, r.read_u32()?];
+                Ok(Command::CreateComputePipeline {
+                    pipeline,
+                    label,
+                    layout,
+                    module,
+                    entry_point,
+                    workgroup_size,
+                })
+            }
+            tag::DESTROY_COMPUTE_PIPELINE_TAG => Ok(Command::DestroyComputePipeline {
+                pipeline: r.read_handle("DestroyComputePipeline::pipeline")?,
+            }),
             tag::DESTROY_SHADER_MODULE_TAG => Ok(Command::DestroyShaderModule {
                 module: r.read_handle("DestroyShaderModule::module")?,
             }),

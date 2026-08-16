@@ -2250,7 +2250,15 @@ something trusted, and in a browser the only trusted renderer today is
      failure rather than dropping the writes later — the whole
      `PushConstantRange` still crosses the wire and the replayer refuses it,
      keeping the writer carrying what the caller gives.
-   - 6c — compute pipelines, then graphics pipelines.
+   - ~~6c — compute pipelines.~~ — **shipped.** Group Q proves a real
+     `GPUComputePipeline` whose `getBindGroupLayout(0)` answers — a check only a
+     genuinely-built pipeline passes. It resolves handles into two different
+     tables (layout and shader module) with a distinct failure message for each.
+     `workgroup_size` is carried on the wire and **dropped** by the replayer,
+     and — unlike push constants — deliberately not refused: WebGPU reads the
+     authoritative size from the shader's `@workgroup_size`, so the descriptor's
+     copy is redundant rather than lost, and dropping it changes nothing.
+   - 6d — graphics pipelines, the large descriptor.
 7. Command encoding, render and compute passes.
 8. Surface, swapchain, present.
 9. Replace `getrandom` with the 32-byte export shim, and empty

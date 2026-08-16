@@ -628,6 +628,27 @@ function stubPipelineLayout(desc) {
 }
 
 /**
+ * A `GPUComputePipeline` as `createComputePipeline` answers one.
+ *
+ * {@link stubPipelineLayout}'s shape, with one addition: a real
+ * `GPUComputePipeline` answers `getBindGroupLayout(n)` — the derived layout a
+ * genuinely-built pipeline can hand back, which no other object here has — so the
+ * stub carries it too, and the browser gate is what actually calls it. `of` is
+ * the `GPUComputePipelineDescriptor` it was made from, kept for the checks that
+ * need to say *what* the pipeline was built with — including the one that matters
+ * most: that it carries no workgroup-size member at all.
+ *
+ * @param {{ label?: string }} desc
+ */
+function stubComputePipeline(desc) {
+  return {
+    label: desc.label ?? '',
+    of: desc,
+    getBindGroupLayout: (index) => ({ label: `derived ${index}` }),
+  };
+}
+
+/**
  * A `GPUShaderModule` as `createShaderModule` answers one.
  *
  * {@link stubSampler}'s shape and for its reason: a real one reports its `label`,
@@ -674,6 +695,10 @@ function stubShaderModule(desc) {
  *   but may for an out-of-memory or a device already lost.
  * @param {unknown} [options.refusePipelineLayouts] The same for
  *   `createPipelineLayout`.
+ * @param {unknown} [options.refuseComputePipelines] The same for
+ *   `createComputePipeline` — which a real WebGPU device does not do for a bad
+ *   entry point (that surfaces asynchronously through `uncapturederror`), but may
+ *   for an out-of-memory or a device already lost.
  */
 function stubDevice(
   features = [],
@@ -685,6 +710,7 @@ function stubDevice(
     refuseGroups,
     refuseShaderModules,
     refusePipelineLayouts,
+    refuseComputePipelines,
   } = {}
 ) {
   const device = {
@@ -713,6 +739,11 @@ function stubDevice(
      *   order.
      */
     createdPipelineLayouts: [],
+    /**
+     * @type {object[]} Every `GPUComputePipelineDescriptor` it was handed, in
+     *   order.
+     */
+    createdComputePipelines: [],
     /** @type {Array<[string, Function]>} */
     listeners: [],
     /**
@@ -774,6 +805,12 @@ function stubDevice(
       device.createdPipelineLayouts.push(desc);
       if (refusePipelineLayouts !== undefined) throw refusePipelineLayouts;
       return stubPipelineLayout(desc);
+    },
+    /** @param {object} desc */
+    createComputePipeline(desc) {
+      device.createdComputePipelines.push(desc);
+      if (refuseComputePipelines !== undefined) throw refuseComputePipelines;
+      return stubComputePipeline(desc);
     },
   };
   return device;
@@ -1260,6 +1297,21 @@ async function main() {
   );
   const [twoSetLayout, pushConstantLayout] = pipelineLayouts;
 
+  // The compute-pipeline pair, from the fixture for the same reason again — the
+  // first command that resolves handles into two *different* tables. The corpus
+  // carries one create, whose `layout` and `module` name existing handles and
+  // whose `workgroupSize` is the non-uniform `[8, 4, 2]`, and one destroy.
+  const computePipeline = commands.find(
+    (command) => command.name === 'CreateComputePipeline'
+  );
+  const destroyComputePipeline = commands.find(
+    (command) => command.name === 'DestroyComputePipeline'
+  );
+  check(
+    computePipeline !== undefined && destroyComputePipeline !== undefined,
+    `the committed stream carries a CreateComputePipeline and a DestroyComputePipeline (${computePipeline ? 'found' : 'missing'})`
+  );
+
   const [flatImage, volumeImage, lutImage] = images;
   const [
     cascadeView,
@@ -1461,6 +1513,8 @@ async function main() {
       'DestroyShaderModule',
       'CreatePipelineLayout',
       'DestroyPipelineLayout',
+      'CreateComputePipeline',
+      'DestroyComputePipeline',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -4451,6 +4505,184 @@ async function main() {
     check(
       replayer.pipelineLayouts.get(twoSetLayout.layout) === undefined,
       'and destroying the layout by its own handle releases it'
+    );
+  }
+
+  // ---- the compute-pipeline pair -------------------------------------------
+  //
+  // The first command that resolves handles into two *different* non-buffer
+  // tables: `layout` against the pipeline-layout table and `module` against the
+  // shader-module table. A `GPUComputePipeline` reports its `label` and answers
+  // `getBindGroupLayout(n)`; the descriptor the device is *handed* is what the
+  // checks below read, as the layout's and the group's are — and the one field
+  // that matters most about it is the one that is not there.
+  //
+  // The fixture's compute pipeline names `fullShader`'s module handle and
+  // `twoSetLayout`'s layout handle, so those two are what the frame builds first.
+  const emptyPipelineLayoutAt = (h) => ({
+    name: 'CreatePipelineLayout',
+    layout: h,
+    label: null,
+    bindGroupLayouts: [],
+    pushConstants: null,
+  });
+  {
+    // **The happy path: layout and module resolve, and the pipeline builds — with
+    // NO workgroup-size member on the descriptor.** WebGPU reads the workgroup
+    // size from the module's `@workgroup_size` and `GPUComputePipelineDescriptor`
+    // has no member for it, so the replayer drops the field it carried; the
+    // `compute` stage the device is handed is exactly `{ module, entryPoint }`,
+    // its two resolved objects, and the two ids resolved out of two different
+    // tables.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(fullShader, 400n));
+    replayer.replay(
+      frameOf(emptyPipelineLayoutAt(computePipeline.layout), 401n)
+    );
+    replayer.replay(frameOf(computePipeline, 402n));
+    const pd = device.createdComputePipelines[0];
+    const built =
+      device.createdComputePipelines.length === 1 &&
+      pd.label === 'cull' &&
+      pd.layout === replayer.pipelineLayouts.get(computePipeline.layout) &&
+      pd.compute.module ===
+        replayer.shaderModules.get(computePipeline.module) &&
+      pd.compute.entryPoint === computePipeline.entryPoint &&
+      // The compute stage is its two members and nothing else — no workgroup size
+      // smuggled inside it.
+      Object.keys(pd.compute).sort().join(',') === 'entryPoint,module';
+    check(
+      built,
+      built
+        ? 'a CreateComputePipeline reaches the device with its layout and module resolved out of two different tables'
+        : `the built descriptor is not what was asked for (${JSON.stringify(pd, (_, v) => (typeof v === 'bigint' ? String(v) : v))})`
+    );
+    // **The workgroup size is carried in Rust but not passed to WebGPU.** Asserted
+    // on the descriptor built for the browser, at the top level and inside the
+    // stage, because `GPUComputePipelineDescriptor` has no member for it — dropping
+    // it changes nothing, unlike dropping a push-constant range.
+    const dropped =
+      !('workgroupSize' in pd) &&
+      !('workgroup_size' in pd) &&
+      !('workgroupSize' in pd.compute) &&
+      !('workgroup_size' in pd.compute);
+    check(
+      dropped,
+      dropped
+        ? 'the workgroup size is carried on the wire and dropped rather than passed to createComputePipeline'
+        : `a workgroup-size member reached the descriptor (${JSON.stringify(pd, (_, v) => (typeof v === 'bigint' ? String(v) : v))})`
+    );
+    check(
+      replayer.computePipelines.get(computePipeline.pipeline) !== undefined &&
+        !replayer.hasReplies &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `and the pipeline lands in its table, queues no reply and reports no error (queued ${replayer.hasReplies})`
+    );
+  }
+  {
+    // **An unresolvable layout goes to the error queue naming the layout, and an
+    // unresolvable module names the module — two DISTINCT messages.** This is the
+    // whole reason the pair of tables is worth stating: a stale layout and a stale
+    // module must not read the same in the log. Neither throws. The module is
+    // built for the layout case and the layout for the module case, so each isolates
+    // the one handle that could not be resolved.
+    const layoutCase = await readyWithDevice();
+    layoutCase.replayer.replay(frameOf(fullShader, 410n));
+    let layoutThrew = null;
+    let layoutReason = null;
+    try {
+      layoutCase.replayer.replay(frameOf(computePipeline, 411n));
+      layoutReason = layoutCase.replayer.takeError();
+    } catch (error) {
+      layoutThrew = error;
+    }
+
+    const moduleCase = await readyWithDevice();
+    moduleCase.replayer.replay(
+      frameOf(emptyPipelineLayoutAt(computePipeline.layout), 420n)
+    );
+    let moduleThrew = null;
+    let moduleReason = null;
+    try {
+      moduleCase.replayer.replay(frameOf(computePipeline, 421n));
+      moduleReason = moduleCase.replayer.takeError();
+    } catch (error) {
+      moduleThrew = error;
+    }
+
+    const distinct =
+      layoutThrew === null &&
+      moduleThrew === null &&
+      layoutCase.device.createdComputePipelines.length === 0 &&
+      moduleCase.device.createdComputePipelines.length === 0 &&
+      layoutCase.replayer.computePipelines.size === 0 &&
+      moduleCase.replayer.computePipelines.size === 0 &&
+      String(layoutReason).includes('pipeline layout') &&
+      String(layoutReason).includes('as its layout') &&
+      !String(layoutReason).includes('shader module') &&
+      String(moduleReason).includes('shader module') &&
+      String(moduleReason).includes('as its compute stage') &&
+      !String(moduleReason).includes('pipeline layout') &&
+      String(layoutReason) !== String(moduleReason);
+    check(
+      distinct,
+      distinct
+        ? 'an unresolvable layout and an unresolvable module each go to the error queue naming which, in two distinct messages'
+        : `the two failures are not distinct (${JSON.stringify(layoutThrew ?? moduleThrew)}, layout ${JSON.stringify(layoutReason)}, module ${JSON.stringify(moduleReason)})`
+    );
+  }
+  {
+    // **A compute pipeline before any device is refused, like every device
+    // method** — recorded rather than thrown, for the buffer pair's reason.
+    const bare = new Replayer({ gpu: stubGpu(async () => null) });
+    bare.replay(frameOf(computePipeline, 430n));
+    const early = bare.takeError();
+    check(
+      typeof early === 'string' && early.includes('before any device opened'),
+      `a compute pipeline before a device is a device error, not a throw (${JSON.stringify(early)})`
+    );
+  }
+  {
+    // **Destroys: a stale generation is a no-op that leaves the live occupant, and
+    // an empty slot does not throw** — the ordinary case here, since every pipeline
+    // the replayer refuses above leaves its handle empty for the caller to destroy
+    // anyway.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(fullShader, 440n));
+    replayer.replay(
+      frameOf(emptyPipelineLayoutAt(computePipeline.layout), 441n)
+    );
+    replayer.replay(frameOf(computePipeline, 442n));
+    const live = replayer.computePipelines.get(computePipeline.pipeline);
+    const stale = handle(
+      computePipeline.pipeline.index,
+      computePipeline.pipeline.generation + 1
+    );
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf({ ...destroyComputePipeline, pipeline: stale }, 443n)
+      );
+      replayer.replay(frameOf(destroyComputePipeline, 444n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        live !== undefined &&
+        replayer.computePipelines.get(computePipeline.pipeline) === live,
+      `a stale-generation destroy leaves the live compute pipeline and an empty-slot destroy does not throw (${String(thrown)})`
+    );
+    replayer.replay(
+      frameOf(
+        { ...destroyComputePipeline, pipeline: computePipeline.pipeline },
+        445n
+      )
+    );
+    check(
+      replayer.computePipelines.get(computePipeline.pipeline) === undefined,
+      'and destroying the pipeline by its own handle releases it'
     );
   }
 

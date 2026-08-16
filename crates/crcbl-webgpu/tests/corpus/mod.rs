@@ -14,11 +14,11 @@ use crcbl_core::Handle;
 use crcbl_hal::{
     AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage, ClearValue,
-    ColorAttachment, CompareOp, DepthStencilAttachment, DeviceDesc, Extent3d, Features, FilterMode,
-    Format, ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc, PushConstantRange, Rect2d,
-    RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc, ShaderModuleDesc, ShaderStages,
-    StoreOp, depth,
+    ColorAttachment, CompareOp, ComputePipelineDesc, DepthStencilAttachment, DeviceDesc, Extent3d,
+    Features, FilterMode, Format, ImageAspect, ImageDesc, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
+    PushConstantRange, Rect2d, RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -715,6 +715,23 @@ pub fn every_command() -> Vec<Command> {
                 size: 128,
             }),
         },
+        // **The first command resolving handles into two *different* non-buffer
+        // tables.** `layout` names an existing pipeline layout and `module` an
+        // existing shader module — a handle carries no kind, so which table each
+        // indexes is the wire position and nothing else. **`workgroup_size` is
+        // `[8, 4, 2]`, non-uniform on purpose**: all three components differ, so a
+        // transposition on the wire changes the decode rather than reproducing it,
+        // and the replayer drops the field entirely because WebGPU reads the real
+        // value from the module's `@workgroup_size`. `entry_point` is a real
+        // string, distinct from every label here.
+        Command::CreateComputePipeline {
+            pipeline: handle(127, 128),
+            label: Some("cull".into()),
+            layout: handle(121, 122),
+            module: handle(113, 114),
+            entry_point: "computeMain".into(),
+            workgroup_size: [8, 4, 2],
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
         },
@@ -760,6 +777,14 @@ pub fn every_command() -> Vec<Command> {
         // destroyed by the caller.
         Command::DestroyPipelineLayout {
             layout: handle(125, 126),
+        },
+        // Its own command and its own table again, and — like the pipeline-layout
+        // and bind-group-layout destroys — the one whose empty slot is the
+        // *ordinary* case: a compute pipeline the replayer refused (an unresolvable
+        // layout or module) still has its pre-allocated handle destroyed by the
+        // caller.
+        Command::DestroyComputePipeline {
+            pipeline: handle(129, 130),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -1033,6 +1058,26 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 push_constants: *push_constants,
             },
         ),
+        Command::CreateComputePipeline {
+            pipeline,
+            label,
+            layout,
+            module,
+            entry_point,
+            workgroup_size,
+        } => stream.create_compute_pipeline(
+            *pipeline,
+            &ComputePipelineDesc {
+                label: label.as_deref(),
+                layout: *layout,
+                compute: ShaderEntry {
+                    module: *module,
+                    entry_point,
+                },
+                workgroup_size: *workgroup_size,
+            },
+        ),
+        Command::DestroyComputePipeline { pipeline } => stream.destroy_compute_pipeline(*pipeline),
         Command::DestroyPipelineLayout { layout } => stream.destroy_pipeline_layout(*layout),
         Command::DestroyBindGroupLayout { layout } => stream.destroy_bind_group_layout(*layout),
         Command::DestroyBindGroup { group } => stream.destroy_bind_group(*group),
