@@ -2305,12 +2305,31 @@ something trusted, and in a browser the only trusted renderer today is
      hazard barrier itself — proven inert by a barrier sitting in group V's
      frame. Slice 7 is complete: the encoder can draw, compute, copy, fill and
      barrier.
-8. Surface, swapchain, present.
+8. ~~Surface, swapchain, present.~~ — **shipped, in two parts.** 8a: the present
+   path — `CreateSwapchain` configures the canvas context (with
+   `RENDER_ATTACHMENT | COPY_SRC`, since a `SwapchainDesc` carries no usage and
+   an acquired frame must be readable back), `AcquireNextFrame` hands
+   `getCurrentTexture` back as an image and view, `Present` is the browser's rAF
+   composite and so a no-op (a present with `waits` is refused — WebGPU has no
+   semaphores), and `DestroySwapchain` unconfigures. 8b: `ReconfigureSwapchain`
+   re-runs `configure` in place. Groups X and Y present to a dedicated
+   `OffscreenCanvas` the probe owns — configuring the demo's own canvas collides
+   with the demo's device over the one `GPUCanvasContext`, which slipped a
+   hardware gate but failed the swiftshader Pages job. The remaining
+   present-feedback calls — `wait_until_presented` (a display-less no-op) and
+   the OutOfDate/suboptimal returns of `acquire_next_frame` — are not stream
+   commands and belong to the HAL `Device` impl, which does not exist yet:
+   `crcbl-webgpu` is stream + replay + probe only.
 9. Replace `getrandom` with the 32-byte export shim, and empty
    `ALLOWED_IMPORT_MODULES`.
 10. **Parity gate**: every `render_e2e` scene drawn through the new backend in a
     browser, checked against the shared references. This is the exit criterion,
-    and it is what makes the switch a measurement rather than a hope.
+    and it is what makes the switch a measurement rather than a hope. **It needs
+    the HAL `Device`/`Swapchain` impl first** — the layer that turns the
+    engine's trait calls into `StreamWriter` commands and returns the acquired
+    frames and present-feedback the stream itself does not carry. That
+    integration is the bulk of this slice; the golden-image comparison is what
+    it unlocks.
 11. Flip the browser default, delete `crcbl-wgpu` and
     `run-cross-backend-e2e.sh`, drop the `wgpu` and `wasm-bindgen` dependencies,
     and correct the `crcbl-mtl` and `crcbl-dx12` manifest comments.
