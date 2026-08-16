@@ -236,6 +236,17 @@ export function bootDemo(spec) {
     ]);
     log();
 
+    // Seed the wasm entropy source before booting: `boot()` constructs the
+    // engine's `Server`, whose first act is drawing a resume token, and on
+    // wasm32 that draw fails closed until the host seeds the CSPRNG. So this
+    // must land before `boot()`, or `Server::new` errors and the boot gate is
+    // red. Take the buffer pointer and write 32 fresh secure bytes into it in
+    // one shot — nothing between the two can `memory.grow()` and detach the
+    // view — then commit, which seeds the stream and zeroes the buffer.
+    const seedPtr = exports.__crcbl_web_seed_entropy_ptr();
+    crypto.getRandomValues(new Uint8Array(memory.buffer, seedPtr, 32));
+    exports.__crcbl_web_seed_entropy();
+
     say('Opening a GPU device…');
     const shell = attachShell({ exports, memory, canvas, canvasId: CANVAS_ID });
     if (api.boot() !== 1) {

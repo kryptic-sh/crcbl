@@ -90,14 +90,15 @@ impl<T: Transport> Server<T> {
     ///
     /// # Errors
     ///
-    /// Returns the operating-system entropy error rather than issuing a
-    /// predictable resume credential.
+    /// Returns the entropy source's error — the OS CSPRNG failing on native, or
+    /// an unseeded source on `wasm32` — rather than issuing a predictable resume
+    /// credential.
     pub fn try_new_with_compatibility(
         mut world: World,
         transport: T,
         tick_hz: u32,
         compatibility: ProtocolCompatibility,
-    ) -> Result<Self, getrandom::Error> {
+    ) -> Result<Self, crcbl_rand::Error> {
         compatibility.assert_explicit();
         let clock = FrameClock::new(tick_hz);
         world.set_tick_dt(clock.tick_dt_secs());
@@ -390,13 +391,13 @@ impl<T: Transport> Server<T> {
         self.session_crypto = Some(SessionCrypto::from_token(&self.resume_token));
     }
 
-    fn generate_resume_token() -> Result<ResumeToken, getrandom::Error> {
+    fn generate_resume_token() -> Result<ResumeToken, crcbl_rand::Error> {
         let mut bytes = [0; 32];
-        getrandom::fill(&mut bytes[..])?;
+        crcbl_rand::entropy(&mut bytes[..])?;
         Ok(ResumeToken::from_bytes(bytes))
     }
 
-    fn rotate_session(&mut self) -> Result<(), getrandom::Error> {
+    fn rotate_session(&mut self) -> Result<(), crcbl_rand::Error> {
         let resume_token = Self::generate_resume_token()?;
         let session_id = SessionId(self.next_session_id);
         self.next_session_id = self.next_session_id.wrapping_add(1);
@@ -424,7 +425,7 @@ impl<T: Transport> Server<T> {
         }
     }
 
-    fn entropy_failure(generation: u64, error: getrandom::Error) -> HandshakeResult {
+    fn entropy_failure(generation: u64, error: crcbl_rand::Error) -> HandshakeResult {
         HandshakeResult::Reject {
             generation,
             reason: RejectReason {

@@ -422,6 +422,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-rand"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "rand_chacha",
+ "rand_core",
+]
+
+[[package]]
 name = "crcbl-render"
 version = "0.1.0"
 dependencies = [
@@ -458,7 +467,7 @@ dependencies = [
  "crcbl-ecs",
  "crcbl-net",
  "crcbl-phys",
- "getrandom 0.4.3",
+ "crcbl-rand",
  "glam",
 ]
 
@@ -747,10 +756,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "r-efi 6.0.0",
- "wasm-bindgen",
 ]
 
 [[package]]
