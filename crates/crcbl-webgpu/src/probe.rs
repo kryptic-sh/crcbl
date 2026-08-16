@@ -45,6 +45,7 @@
 //! | [`__crcbl_web_gpu_probe_sampler`](shim::__crcbl_web_gpu_probe_sampler) | `() -> i32` | Encode one [`CreateSampler`](crate::Command::CreateSampler) against [`PROBE_SAMPLER`], with [`PROBE_SAMPLER_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_bind_group_layout`](shim::__crcbl_web_gpu_probe_bind_group_layout) | `() -> i32` | Encode one [`CreateBindGroupLayout`](crate::Command::CreateBindGroupLayout) against [`PROBE_BIND_GROUP_LAYOUT`], with [`PROBE_BIND_GROUP_LAYOUT_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_bind_group`](shim::__crcbl_web_gpu_probe_bind_group) | `() -> i32` | Encode one frame — a layout, its resources, and a [`CreateBindGroup`](crate::Command::CreateBindGroup) against [`PROBE_BIND_GROUP`] with [`PROBE_BIND_GROUP_DESC`]. `1`, or `0` on the same three conditions. |
+//! | [`__crcbl_web_gpu_probe_shader_module`](shim::__crcbl_web_gpu_probe_shader_module) | `() -> i32` | Encode one [`CreateShaderModule`](crate::Command::CreateShaderModule) against [`PROBE_SHADER_MODULE`] with [`PROBE_SHADER_MODULE_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `() -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) and register its wait. `1`, or `0` if there was no room or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
@@ -289,7 +290,7 @@ use crcbl_hal::{
     BufferDesc, BufferHandle, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features, FilterMode,
     Format, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
     ImageViewHandle, ImageViewType, MemoryLocation, SampleType, SamplerAddressMode, SamplerDesc,
-    SamplerHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
+    SamplerHandle, ShaderModuleDesc, ShaderModuleHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -808,6 +809,49 @@ pub const PROBE_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
     variable_count: None,
 };
 
+/// The shader module [`shim::__crcbl_web_gpu_probe_shader_module`] creates, every
+/// time.
+///
+/// The same bits a seventh time, on [`PROBE_BIND_GROUP`]'s terms: a handle
+/// carries no kind, so a page filing seven kinds under one key would be a
+/// replayer with one table where the crate docs require seven.
+pub const PROBE_SHADER_MODULE: ShaderModuleHandle = match ShaderModuleHandle::from_bits(1 << 32) {
+    Some(module) => module,
+    // Generation `1`, as above.
+    None => panic!("generation 1 is not zero"),
+};
+
+/// A trivial vertex entry point — valid WGSL a software adapter compiles.
+///
+/// The probe is what proves a real `GPUShaderModule` comes back from a real WGSL
+/// string, so the source has to be one `createShaderModule` accepts *and*
+/// `getCompilationInfo()` reports no error for. A bare vertex entry that writes a
+/// clip-space position is the smallest such thing SwiftShader will take —
+/// smaller than a fragment shader, which would need a colour target to be worth
+/// anything, and unambiguously non-empty, unlike `""` (which is also valid but
+/// says nothing about whether a compiler ran).
+pub const PROBE_SHADER_MODULE_WGSL: &str =
+    "@vertex fn main() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }";
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_shader_module`] asks with.
+///
+/// A `const` rather than a function for [`PROBE_IMAGE_VIEW_DESC`]'s reason: there
+/// is nothing for a caller to pass. **Only [`wgsl`](ShaderModuleDesc::wgsl) is
+/// filled**, because a browser consumes only WGSL — the other three artifacts are
+/// absent (`spirv` empty, `msl` `None`, `dxil` empty), which the seam's four
+/// distinct absence conventions each spell differently and each cross verbatim.
+/// A `GPUShaderModule` reports its `label`, so that is one piece of evidence; the
+/// stronger piece is that compilation happened here, so the gate reads
+/// `getCompilationInfo()` and holds it to no errors — see
+/// `web/tools/browser-e2e.mjs`.
+pub const PROBE_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu probe shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_SHADER_MODULE_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -1173,6 +1217,31 @@ impl Probe {
                 stream.create_image_view(PROBE_IMAGE_VIEW, &PROBE_IMAGE_VIEW_DESC);
                 stream.create_sampler(PROBE_SAMPLER, &PROBE_SAMPLER_DESC);
                 stream.create_bind_group(PROBE_BIND_GROUP, &PROBE_BIND_GROUP_DESC)
+            })
+            .is_some()
+    }
+
+    /// Encode one [`CreateShaderModule`](crate::Command::CreateShaderModule)
+    /// against [`PROBE_SHADER_MODULE`], with [`PROBE_SHADER_MODULE_DESC`].
+    ///
+    /// [`request_sampler`](Self::request_sampler)'s twin in every structural
+    /// respect — a device method, so it refuses until a device has opened; no wait
+    /// registered, because nothing answers a creation; no arguments, because the
+    /// descriptor is fixed. What differs is what a browser can be asked about the
+    /// result: a `GPUShaderModule` is where *compilation* happens, so the gate
+    /// reads `getCompilationInfo()` off it — evidence a stub cannot fake and a
+    /// clamp or a filter cannot stand in for. `crcbl.gpu.replayer.shaderModules`
+    /// is the table the module lands in.
+    fn request_shader_module(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| {
+                stream.create_shader_module(PROBE_SHADER_MODULE, &PROBE_SHADER_MODULE_DESC)
             })
             .is_some()
     }
@@ -1645,6 +1714,29 @@ pub mod shim {
         })
     }
 
+    /// Ask the page to make a shader module on the device it opened.
+    ///
+    /// `1` when one [`CreateShaderModule`](crate::Command::CreateShaderModule) is
+    /// on the stream; `0` on [`__crcbl_web_gpu_probe_bind_group`]'s three
+    /// conditions.
+    ///
+    /// **No `state` beside it and no arguments either**, exactly as its neighbours
+    /// have none — nothing answers a creation, and the descriptor is fixed in
+    /// `crates/crcbl-webgpu/src/probe.rs`. What is new is *why* this module is
+    /// worth a group of its own: a shader module is where compilation happens, so
+    /// beyond `instanceof GPUShaderModule` the gate reads `getCompilationInfo()`
+    /// off the object and holds it to no errors for the known-good WGSL
+    /// [`PROBE_SHADER_MODULE_DESC`](super::PROBE_SHADER_MODULE_DESC) carries.
+    /// `crcbl.gpu.replayer.shaderModules` is the table the `GPUShaderModule` lands
+    /// in.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_shader_module() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_shader_module()),
+            Err(_) => 0,
+        })
+    }
+
     /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
     /// legal value for each of these, so they are read only once
     /// [`__crcbl_web_gpu_probe_device_state`] has answered
@@ -1843,9 +1935,10 @@ mod tests {
         __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
         __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_sampler,
-        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
-        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
-        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
+        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
+        __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -2582,6 +2675,58 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_device(), 1);
         assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
         assert_eq!(__crcbl_web_gpu_probe_sampler(), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The shader module shares its bits with everything else, so seven kinds now
+    /// stand on one index and one generation, distinguished only by the opcode.
+    #[test]
+    fn the_probes_shader_module_names_the_same_handle_bits_as_everything_else() {
+        assert_eq!(PROBE_SHADER_MODULE.to_bits(), PROBE_BIND_GROUP.to_bits());
+    }
+
+    /// The shader-module half: one export, one command, and the descriptor this
+    /// module fixed — WGSL alone, with the other three artifacts spelled absent by
+    /// their own conventions, because a browser consumes only WGSL and that is the
+    /// one the gate builds a real `GPUShaderModule` from.
+    #[test]
+    fn the_shader_module_export_encodes_one_create_shader_module_carrying_only_wgsl() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_shader_module(), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::CreateShaderModule {
+                module: PROBE_SHADER_MODULE,
+                label: Some("crcbl-webgpu probe shader".into()),
+                spirv: Vec::new(),
+                wgsl: Some(PROBE_SHADER_MODULE_WGSL.into()),
+                msl: None,
+                dxil: Vec::new(),
+            }]
+        );
+    }
+
+    /// **Nothing waits on it**, for the image pair's reason.
+    #[test]
+    fn the_shader_module_request_registers_no_wait_because_nothing_answers_it() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_shader_module(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// **A device has to have opened first**, for the sampler export's reason:
+    /// `Device::create_shader_module` is a device method too.
+    #[test]
+    fn a_shader_module_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_shader_module(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_shader_module(), 0);
         assert_eq!(take_frame().len(), 1);
     }
 

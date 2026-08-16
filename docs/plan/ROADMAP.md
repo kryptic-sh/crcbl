@@ -2232,6 +2232,18 @@ something trusted, and in a browser the only trusted renderer today is
      Slice 5 is complete.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
+   - ~~6a — shader modules.~~ — **shipped.** The heaviest single descriptor on
+     the seam, and the encoding was the work: all four artifact formats cross —
+     `spirv` words, `wgsl`/`msl` optional text, and `dxil`'s list of
+     name-plus-container pairs — each with its own absence convention preserved,
+     and the corpus carries a module exercising every one. Only `wgsl` is
+     consumed in a browser; a module carrying none is refused to the error
+     queue, and a `Some("")` builds the valid empty module it is. Group O proves
+     a real `GPUShaderModule` with **clean `getCompilationInfo()`**, which is
+     stronger than existence — a bad shader still returns an
+     `instanceof`-passing module.
+   - 6b — pipeline layouts.
+   - 6c — compute pipelines, then graphics pipelines.
 7. Command encoding, render and compute passes.
 8. Surface, swapchain, present.
 9. Replace `getrandom` with the 32-byte export shim, and empty

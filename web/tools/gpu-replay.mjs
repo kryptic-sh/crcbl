@@ -613,6 +613,28 @@ function stubBindGroup(desc) {
 }
 
 /**
+ * A `GPUShaderModule` as `createShaderModule` answers one.
+ *
+ * {@link stubSampler}'s shape and for its reason: a real one reports its `label`,
+ * so every claim about *what was compiled* is made against
+ * `device.createdShaderModules` rather than against what came back. `of` is the
+ * descriptor it was made from. `getCompilationInfo` is here because a
+ * `GPUShaderModule` really has one and the browser gate reads it — the stub
+ * answers "no messages", which is what a clean compile reports; this file's job
+ * is the descriptor the replayer builds, and the browser's is whether the code
+ * compiles.
+ *
+ * @param {{ label?: string }} desc
+ */
+function stubShaderModule(desc) {
+  return {
+    label: desc.label ?? '',
+    of: desc,
+    getCompilationInfo: async () => ({ messages: [] }),
+  };
+}
+
+/**
  * A `GPUDevice` as `requestDevice()` resolves one: its own features, its own
  * limits, the buffer creation this slice drives, and the error channel WebGPU
  * reports asynchronous failures on.
@@ -632,6 +654,9 @@ function stubBindGroup(desc) {
  * @param {unknown} [options.refuseLayouts] The same for
  *   `createBindGroupLayout`.
  * @param {unknown} [options.refuseGroups] The same for `createBindGroup`.
+ * @param {unknown} [options.refuseShaderModules] The same for
+ *   `createShaderModule` — which a real WebGPU device does not do for bad WGSL,
+ *   but may for an out-of-memory or a device already lost.
  */
 function stubDevice(
   features = [],
@@ -641,6 +666,7 @@ function stubDevice(
     refuseSamplers,
     refuseLayouts,
     refuseGroups,
+    refuseShaderModules,
   } = {}
 ) {
   const device = {
@@ -659,6 +685,11 @@ function stubDevice(
     createdLayouts: [],
     /** @type {object[]} Every `GPUBindGroupDescriptor` it was handed, in order. */
     createdGroups: [],
+    /**
+     * @type {object[]} Every `GPUShaderModuleDescriptor` it was handed, in
+     *   order.
+     */
+    createdShaderModules: [],
     /** @type {Array<[string, Function]>} */
     listeners: [],
     /**
@@ -708,6 +739,12 @@ function stubDevice(
       device.createdGroups.push(desc);
       if (refuseGroups !== undefined) throw refuseGroups;
       return stubBindGroup(desc);
+    },
+    /** @param {object} desc */
+    createShaderModule(desc) {
+      device.createdShaderModules.push(desc);
+      if (refuseShaderModules !== undefined) throw refuseShaderModules;
+      return stubShaderModule(desc);
     },
   };
   return device;
@@ -1159,6 +1196,24 @@ async function main() {
   );
   const [materialGroup, bindlessGroup] = groups;
 
+  // The shader-module pair, from the fixture for the same reason again — and here
+  // the corpus buys all four absence conventions across three modules: one with
+  // every artifact non-trivial, one whose `wgsl` is `Some("")` (a valid empty
+  // module this backend builds), and one whose `wgsl` is `None` (a module this
+  // backend refuses, because a WebGPU device compiles only WGSL). Each is a
+  // branch below, replayed as the Rust encoder wrote it.
+  const shaders = commands.filter(
+    (command) => command.name === 'CreateShaderModule'
+  );
+  const destroyShader = commands.find(
+    (command) => command.name === 'DestroyShaderModule'
+  );
+  check(
+    shaders.length === 3 && destroyShader !== undefined,
+    `the committed stream carries three CreateShaderModules and a DestroyShaderModule (${shaders.length} creates)`
+  );
+  const [fullShader, emptyWgslShader, noWgslShader] = shaders;
+
   const [flatImage, volumeImage, lutImage] = images;
   const [
     cascadeView,
@@ -1356,6 +1411,8 @@ async function main() {
       'DestroyBindGroupLayout',
       'CreateBindGroup',
       'DestroyBindGroup',
+      'CreateShaderModule',
+      'DestroyShaderModule',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -4084,6 +4141,130 @@ async function main() {
         replayer.bindGroups.size === 0 &&
         String(refused).includes('too many bind groups'),
       `a CreateBindGroup with no device, and a createBindGroup that throws, are both recorded rather than thrown on (${JSON.stringify([early, refused])}, ${String(thrown)})`
+    );
+  }
+
+  // ---- the shader-module pair ----------------------------------------------
+  {
+    // **ONLY WGSL CROSSES TO THE BROWSER, AND EVERY OTHER ARTIFACT IS DROPPED.**
+    // The full module carries `spirv`, `wgsl`, `msl` and `dxil`; a WebGPU device
+    // compiles only WGSL, so what reaches `createShaderModule` is `{ label, code }`
+    // and nothing else. The SPIR-V words, the MSL source and the DXIL containers
+    // are for the Rust decoders — `crcbl-dx12` reads the DXIL, `crcbl-mtl` the MSL
+    // — and have no WebGPU path, so they are read off the wire and then dropped.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(fullShader, 300n));
+    checkEqual(
+      device.createdShaderModules,
+      [{ label: 'mesh.slang', code: fullShader.wgsl }],
+      'a CreateShaderModule reaches the device as { label, code } with only its WGSL'
+    );
+    const made = replayer.shaderModules.get(fullShader.module);
+    check(
+      made !== undefined && made.label === 'mesh.slang',
+      `and the module is findable at its handle with the label asked for (${JSON.stringify(made?.label)})`
+    );
+    check(
+      replayer.shaderModules.get(
+        handle(fullShader.module.index, fullShader.module.generation + 1)
+      ) === undefined,
+      'a lookup with a stale generation does not find the live module'
+    );
+    check(
+      !replayer.hasReplies &&
+        replayer.inFlight === 0 &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `a shader-module command queues no reply, starts nothing and reports no error (queued ${replayer.hasReplies}, in flight ${replayer.inFlight}, errors ${replayer.pendingErrors})`
+    );
+  }
+  {
+    // **`Some("")` IS A VALID EMPTY MODULE AND BUILDS.** An empty WGSL string is a
+    // module with no entry points — a real thing — and must not be confused with
+    // `None`; a replayer that refused it would turn a real, if useless, module
+    // into a failure the seam does not have. So `code: ''` reaches the device and
+    // the module is filed, with nothing on the error queue.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(emptyWgslShader, 301n));
+    checkEqual(
+      device.createdShaderModules,
+      [{ label: 'empty.wgsl', code: '' }],
+      'a Some("") WGSL builds a module with no entry points rather than being refused'
+    );
+    check(
+      replayer.shaderModules.get(emptyWgslShader.module) !== undefined &&
+        replayer.takeError() === null,
+      'the empty module is built and the device reported nothing'
+    );
+  }
+  {
+    // **A MODULE CARRYING NO WGSL IS REFUSED, BY NAME, AND NOTHING REACHES THE
+    // DEVICE.** `ShaderModuleDesc::unusable`: a WebGPU backend compiles only WGSL,
+    // and this module — `spirv` empty, `wgsl` `None`, `msl` `Some("")`, `dxil` one
+    // pair — carries MSL and DXIL and no WGSL. Refused synchronously, as
+    // `#createBuffer` refuses a usage WebGPU has no bit for, rather than built
+    // empty: an empty module filed under the handle is a shader no pipeline can
+    // use, and every pipeline naming it would fail with the reason nowhere near
+    // the creation. The message names both sides of the gap.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(noWgslShader, 302n));
+    const refused = replayer.takeError();
+    check(
+      device.createdShaderModules.length === 0 &&
+        replayer.shaderModules.size === 0 &&
+        typeof refused === 'string' &&
+        refused.includes('can only compile WGSL') &&
+        refused.includes('MSL and DXIL'),
+      `a module with no WGSL is refused before the device is asked, naming what it was given (${JSON.stringify(refused)})`
+    );
+  }
+  {
+    // **A shader module before any device is refused, like every device method.**
+    // `Device::create_shader_module` is a device method, so a stream carrying one
+    // before its `RequestDevice` settled is asking the replayer for what it has
+    // not got — recorded rather than thrown, for the buffer pair's reason.
+    const bare = new Replayer({ gpu: stubGpu(async () => null) });
+    bare.replay(frameOf(fullShader, 303n));
+    const early = bare.takeError();
+    check(
+      typeof early === 'string' && early.includes('before any device opened'),
+      `a shader module before a device is a device error, not a throw (${JSON.stringify(early)})`
+    );
+  }
+  {
+    // **THE DESTROYS: AN EMPTY SLOT IS A NO-OP AND A STALE GENERATION LEAVES THE
+    // LIVE OCCUPANT ALONE.** `crcbl-render` leans on this destroy hardest — it
+    // pre-allocates the handle, destroys it, and only then applies `?` — so a
+    // destroy naming a generation the slot has moved past must not release the
+    // reissued index's current module, and a destroy naming an empty slot must not
+    // throw. Both are the one branch {@link HandleTable#remove} answers `undefined`
+    // for.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(fullShader, 304n));
+    const live = replayer.shaderModules.get(fullShader.module);
+    const reissued = handle(
+      fullShader.module.index,
+      fullShader.module.generation + 1
+    );
+    let thrown = null;
+    try {
+      replayer.replay(frameOf({ ...destroyShader, module: reissued }, 305n));
+      replayer.replay(frameOf(destroyShader, 306n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        live !== undefined &&
+        replayer.shaderModules.get(fullShader.module) === live,
+      `a stale-generation destroy leaves the live module and an empty-slot destroy does not throw (${String(thrown)})`
+    );
+    replayer.replay(
+      frameOf({ ...destroyShader, module: fullShader.module }, 307n)
+    );
+    check(
+      replayer.shaderModules.get(fullShader.module) === undefined,
+      'and destroying the module by its own handle releases it'
     );
   }
 

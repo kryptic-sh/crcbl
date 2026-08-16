@@ -7,8 +7,8 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingKind, BindingResource, BufferDesc, BufferHandle, ClearValue,
     ColorAttachment, DepthStencilAttachment, DeviceDesc, Extent3d, GraphicsPipelineHandle,
     ImageDesc, ImageHandle, ImageSubresourceRange, ImageViewDesc, ImageViewHandle,
-    PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, ShaderStages,
-    SurfaceHandle,
+    PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -477,6 +477,41 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_shader_module`](crcbl_hal::Device::create_shader_module),
+    /// with the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and **every field of [`ShaderModuleDesc`] crosses in the order the
+    /// descriptor declares them** — `label`, `spirv`, `wgsl`, `msl`, `dxil` —
+    /// because the encoding is the seam's rather than WebGPU's, and a decoder must
+    /// traverse all four artifacts to reach the end of the command even though a
+    /// browser reads only WGSL. Each carries its own absence convention over the
+    /// wire, verbatim: `spirv` empty is absent, `wgsl`/`msl` keep `Some("")` apart
+    /// from `None` through the shared `put_opt_str` primitive, and `dxil`'s empty
+    /// list is absence while a pair with an empty container is a
+    /// truncated artifact — see [`Command::CreateShaderModule`](crate::Command::CreateShaderModule).
+    ///
+    /// **Nothing is validated here**, which is [`create_image`](Self::create_image)'s
+    /// rule: a descriptor carrying no format at all, or only formats a backend
+    /// cannot compile, is a creation failure the replayer raises through
+    /// [`Device::take_error`](crcbl_hal::Device::take_error) — see
+    /// [`ShaderModuleDesc::unusable`](crcbl_hal::ShaderModuleDesc::unusable) — not
+    /// a malformed stream this writer refuses.
+    pub fn create_shader_module(
+        &mut self,
+        module: ShaderModuleHandle,
+        desc: &ShaderModuleDesc<'_>,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_SHADER_MODULE_TAG);
+        self.bytes.put_handle(module);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_words(desc.spirv);
+        self.bytes.put_opt_str(desc.wgsl);
+        self.bytes.put_opt_str(desc.msl);
+        self.bytes.put_dxil(desc.dxil);
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -546,6 +581,17 @@ impl StreamWriter {
     pub fn destroy_bind_group(&mut self, group: BindGroupHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_BIND_GROUP_TAG);
         self.bytes.put_handle(group);
+        sequence
+    }
+
+    /// [`Device::destroy_shader_module`](crcbl_hal::Device::destroy_shader_module).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason: the opcode is what says which table an id indexes, and a shader
+    /// module shares its eight bytes with every other kind quite legitimately.
+    pub fn destroy_shader_module(&mut self, module: ShaderModuleHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_SHADER_MODULE_TAG);
+        self.bytes.put_handle(module);
         sequence
     }
 

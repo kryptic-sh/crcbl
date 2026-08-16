@@ -252,6 +252,11 @@ pub const CREATE_BIND_GROUP_LAYOUT_TAG: u8 = 0x05;
 /// Written out rather than as `FAMILY_CREATE + 6`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const CREATE_BIND_GROUP_TAG: u8 = 0x06;
+/// [`Command::CreateShaderModule`](crate::Command::CreateShaderModule).
+///
+/// Written out rather than as `FAMILY_CREATE + 7`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const CREATE_SHADER_MODULE_TAG: u8 = 0x07;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -275,6 +280,11 @@ pub const DESTROY_BIND_GROUP_LAYOUT_TAG: u8 = 0x25;
 /// Written out rather than as `FAMILY_DESTROY + 6`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const DESTROY_BIND_GROUP_TAG: u8 = 0x26;
+/// [`Command::DestroyShaderModule`](crate::Command::DestroyShaderModule).
+///
+/// Written out rather than as `FAMILY_DESTROY + 7`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const DESTROY_SHADER_MODULE_TAG: u8 = 0x27;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -1204,7 +1214,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 23] = [
+    const TAGS: [(&str, u8, u8); 25] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1217,11 +1227,21 @@ mod tests {
         ),
         ("CreateBindGroup", CREATE_BIND_GROUP_TAG, FAMILY_CREATE),
         (
+            "CreateShaderModule",
+            CREATE_SHADER_MODULE_TAG,
+            FAMILY_CREATE,
+        ),
+        (
             "DestroyBindGroupLayout",
             DESTROY_BIND_GROUP_LAYOUT_TAG,
             FAMILY_DESTROY,
         ),
         ("DestroyBindGroup", DESTROY_BIND_GROUP_TAG, FAMILY_DESTROY),
+        (
+            "DestroyShaderModule",
+            DESTROY_SHADER_MODULE_TAG,
+            FAMILY_DESTROY,
+        ),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
         ("DestroySurface", DESTROY_SURFACE_TAG, FAMILY_DESTROY),
         ("DestroyImage", DESTROY_IMAGE_TAG, FAMILY_DESTROY),

@@ -17,7 +17,7 @@ use crcbl_hal::{
     ColorAttachment, CompareOp, DepthStencilAttachment, DeviceDesc, Extent3d, Features, FilterMode,
     Format, ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
     ImageViewType, LoadOp, MemoryLocation, Rect2d, RenderPassDesc, SampleType, SamplerAddressMode,
-    SamplerDesc, ShaderStages, StoreOp, depth,
+    SamplerDesc, ShaderModuleDesc, ShaderStages, StoreOp, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -624,6 +624,64 @@ pub fn every_command() -> Vec<Command> {
             ],
             variable_count: Some(2),
         },
+        // **The heaviest single descriptor on the seam, carrying every artifact
+        // at once.** All four formats are non-trivial, so a decoder that stopped
+        // traversing one of them lands the cursor wrong for the rest and answers a
+        // different module. The `spirv` words are distinct and open with SPIR-V's
+        // own magic; the `wgsl` and `msl` are two different sources; and the
+        // `dxil` list is two pairs whose **string lengths and container lengths
+        // both differ** (`vsMain`/4 bytes against `fragment`/2), so a decoder that
+        // read the wrong length for either leaf is caught rather than landing back
+        // on a plausible boundary.
+        Command::CreateShaderModule {
+            module: handle(113, 114),
+            label: Some("mesh.slang".into()),
+            spirv: vec![
+                0x0723_0203,
+                0x0001_0600,
+                0x0000_002a,
+                0x0000_0007,
+                0x0000_0000,
+            ],
+            wgsl: Some("@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }".into()),
+            msl: Some("#include <metal_stdlib>\nvertex float4 vs() { return 0; }".into()),
+            dxil: vec![
+                ("vsMain".into(), vec![0xDE, 0xAD, 0xBE, 0xEF]),
+                ("fragment".into(), vec![0x01, 0x02]),
+            ],
+        },
+        // **The first absence trap: `spirv` empty, `wgsl` `Some("")`, `msl`
+        // `None`, `dxil` the empty list.** The empty WGSL is a *valid empty
+        // module* — one with no entry points — and must not converge with the
+        // `None` on the next module; the empty `spirv` is genuinely absent, unlike
+        // the empty WGSL string; and the empty `dxil` list is absence, against the
+        // pair-with-empty-container on the next module. A decoder that treated
+        // `Some("")` as `None`, or an empty `dxil` container as an absent artifact,
+        // goes red here.
+        Command::CreateShaderModule {
+            module: handle(115, 116),
+            label: Some("empty.wgsl".into()),
+            spirv: Vec::new(),
+            wgsl: Some(String::new()),
+            msl: None,
+            dxil: Vec::new(),
+        },
+        // **The second absence trap, the mirror of the first: `wgsl` `None`, `msl`
+        // `Some("")`, `dxil` a single pair whose container is empty.** The `None`
+        // WGSL is absence where the module above had a present-and-empty string;
+        // the `Some("")` MSL is present-and-empty where the module above had
+        // `None`; and the empty *container* under a present name is a truncated
+        // DXIL artifact, which is a present pair — the distinction the empty list
+        // above is what carries. `spirv` is empty again, so the two empties are
+        // both on the wire and neither is a sentinel.
+        Command::CreateShaderModule {
+            module: handle(117, 118),
+            label: None,
+            spirv: Vec::new(),
+            wgsl: None,
+            msl: Some(String::new()),
+            dxil: vec![("truncated".into(), Vec::new())],
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
         },
@@ -654,6 +712,13 @@ pub fn every_command() -> Vec<Command> {
         // to be the same eight bytes as anything else's.
         Command::DestroyBindGroup {
             group: handle(111, 112),
+        },
+        // Its own command and its own table again: a shader module's id is allowed
+        // to be the same eight bytes as anything else's, and this is the destroy
+        // `crcbl-render` leans on hardest — it pre-allocates the handle, destroys
+        // it, and only then applies `?` to the creation.
+        Command::DestroyShaderModule {
+            module: handle(119, 120),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -888,8 +953,35 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 variable_count: *variable_count,
             },
         ),
+        Command::CreateShaderModule {
+            module,
+            label,
+            spirv,
+            wgsl,
+            msl,
+            dxil,
+        } => {
+            // The owned `(String, Vec<u8>)` pairs are borrowed back into the
+            // `(&str, &[u8])` shape the descriptor takes, so the round trip goes
+            // through the same encoder a real caller would.
+            let dxil: Vec<(&str, &[u8])> = dxil
+                .iter()
+                .map(|(name, container)| (name.as_str(), container.as_slice()))
+                .collect();
+            stream.create_shader_module(
+                *module,
+                &ShaderModuleDesc {
+                    label: label.as_deref(),
+                    spirv,
+                    wgsl: wgsl.as_deref(),
+                    msl: msl.as_deref(),
+                    dxil: &dxil,
+                },
+            )
+        }
         Command::DestroyBindGroupLayout { layout } => stream.destroy_bind_group_layout(*layout),
         Command::DestroyBindGroup { group } => stream.destroy_bind_group(*group),
+        Command::DestroyShaderModule { module } => stream.destroy_shader_module(*module),
         Command::DestroyBuffer { buffer } => stream.destroy_buffer(*buffer),
         Command::DestroySurface { surface } => stream.destroy_surface(*surface),
         Command::DestroyImage { image } => stream.destroy_image(*image),

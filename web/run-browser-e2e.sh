@@ -479,6 +479,25 @@ if [ -z "$GROUP_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the shader module, which is group O and is its own thing for
+# a reason none of the above share: it is the only object this seam makes where
+# *compilation* happens. A `GPUShaderModule` reports its label like a sampler, so
+# `instanceof GPUShaderModule` and the silent error queue are two of its checks —
+# but the one that matters is `getCompilationInfo()`, because WebGPU answers bad
+# WGSL not by throwing but through that async report, so a module that came back
+# yet would not compile is invisible to every other check here. The node suite
+# proves the descriptor — WGSL alone, the other three artifacts dropped — and the
+# WGSL-less refusal against a stub whose `createShaderModule` returns a plain
+# object; only this asks a real device to compile the known-good WGSL and reads
+# the info back. Its absence means that stopped happening rather than that this
+# demo has no device.
+SHADER_TRIP="$(grep -F 'a real GPUShaderModule came back from the device with clean compilation info for the known-good WGSL' "${OUTPUT}.plain" || true)"
+if [ -z "$SHADER_TRIP" ]; then
+    echo "crcbl web e2e: the driver never compiled a shader module on a real device;" >&2
+    echo "               crcbl-webgpu's CreateShaderModule is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

@@ -77,6 +77,7 @@ const CREATE_IMAGE_VIEW_TAG = 0x03;
 const CREATE_SAMPLER_TAG = 0x04;
 const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
 const CREATE_BIND_GROUP_TAG = 0x06;
+const CREATE_SHADER_MODULE_TAG = 0x07;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
@@ -84,6 +85,7 @@ const DESTROY_IMAGE_VIEW_TAG = 0x23;
 const DESTROY_SAMPLER_TAG = 0x24;
 const DESTROY_BIND_GROUP_LAYOUT_TAG = 0x25;
 const DESTROY_BIND_GROUP_TAG = 0x26;
+const DESTROY_SHADER_MODULE_TAG = 0x27;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -672,6 +674,53 @@ class ByteReader {
   }
 
   /**
+   * A `u32`-word slice: a count of words, then that many little-endian words.
+   *
+   * `crcbl_hal::ShaderModuleDesc::spirv`'s shape, and the one field on this stream
+   * a browser never *uses* — WGSL is what `createShaderModule` consumes — but
+   * still has to *traverse*, because it sits before the fields after it. Decoded
+   * to a plain array of numbers, each `u32` and therefore exact, so the cursor
+   * lands correctly on the WGSL that follows however many words there are. Absence
+   * is the empty slice: a zero count is a real absent artifact, not a sentinel.
+   *
+   * @param {string} field
+   * @returns {number[]}
+   */
+  readWords(field) {
+    const count = this.readCount(field);
+    const words = new Array(count);
+    for (let i = 0; i < count; i += 1) words[i] = this.readU32();
+    return words;
+  }
+
+  /**
+   * A counted list of `(entry point, container)` pairs — the shape
+   * `crcbl_hal::ShaderModuleDesc::dxil` crosses on, and the worst-shaped field on
+   * the seam: each element is a length-prefixed string **and** a length-prefixed
+   * byte slice, two variable-length leaves a fixed-stride reader cannot skip.
+   *
+   * The name is read first and the container second, each with its own length
+   * prefix, so a pair whose container is empty is a *present* pair with a
+   * zero-length blob rather than an absent one — the empty list is the only
+   * absence. The container is copied, because the command object outlives the view
+   * it was decoded from, exactly as {@link ByteReader#readField} is.
+   *
+   * @param {string} field
+   * @returns {{ entryPoint: string, container: Uint8Array }[]}
+   */
+  readDxil(field) {
+    const count = this.readCount(field);
+    const pairs = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+      pairs[i] = {
+        entryPoint: this.readString(field),
+        container: this.readField(field),
+      };
+    }
+    return pairs;
+  }
+
+  /**
    * A bitflags value, as the names of the bits it sets in ascending bit order.
    *
    * Strict, like `from_bits` and unlike `from_bits_truncate`: a bit no flag
@@ -1214,6 +1263,38 @@ function decodeCommand(r) {
         variableCount: r.readOptU32('BindGroupDesc::variable_count'),
       };
     }
+    case CREATE_SHADER_MODULE_TAG: {
+      // **The heaviest descriptor on the seam, and every field is traversed even
+      // though a browser reads only WGSL.** The four artifacts do not share an
+      // absence convention, and each is decoded by its own convention: `spirv`
+      // empty is absent (a word array), `wgsl` and `msl` keep `Some("")` apart
+      // from `None` through {@link ByteReader#readOptString}, and `dxil`'s empty
+      // list is absence while a pair with an empty container is a present,
+      // truncated artifact. The words are decoded in order so the cursor lands on
+      // the WGSL after them — reading a later field before skipping `spirv` would
+      // decode the wrong bytes for every field that follows.
+      const module = r.readHandle('CreateShaderModule::module');
+      const label = r.readOptString('ShaderModuleDesc::label');
+      const spirv = r.readWords('ShaderModuleDesc::spirv');
+      const wgsl = r.readOptString('ShaderModuleDesc::wgsl');
+      const msl = r.readOptString('ShaderModuleDesc::msl');
+      return {
+        name: 'CreateShaderModule',
+        module,
+        label,
+        spirv,
+        wgsl,
+        msl,
+        dxil: r.readDxil('ShaderModuleDesc::dxil'),
+      };
+    }
+    case DESTROY_SHADER_MODULE_TAG:
+      // Its own tag and its own table again: a shader module's id is allowed to
+      // be the same eight bytes as anything else's.
+      return {
+        name: 'DestroyShaderModule',
+        module: r.readHandle('DestroyShaderModule::module'),
+      };
     case DESTROY_BIND_GROUP_LAYOUT_TAG:
       // Its own tag and its own table again, and the destroy whose empty slot is
       // the *ordinary* case: the replayer refuses a layout it cannot express —

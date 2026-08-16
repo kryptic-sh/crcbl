@@ -300,6 +300,58 @@ impl<'a> ByteReader<'a> {
         }
         Ok(count)
     }
+
+    /// A `u32`-word slice: a count of words, then that many little-endian words.
+    ///
+    /// The primitive [`ShaderModuleDesc::spirv`](crcbl_hal::ShaderModuleDesc::spirv)
+    /// crosses on, and the one that meets the house style's "pad nothing" rule
+    /// against SPIR-V's own four-byte alignment. The words are decoded one at a
+    /// time through [`read_u32`](Self::read_u32) — the deliberate alignment
+    /// exception `docs/plan/41-webgpu-stream.md` calls for, taken over a hidden
+    /// realignment copy: the buffer is byte-addressed and packed, so the words do
+    /// not start on a four-byte boundary, and reading them word by word from
+    /// little-endian bytes is exact wherever they land. Absence is the empty
+    /// slice, so an empty count is a real empty artifact rather than a sentinel.
+    ///
+    /// [`read_count`](Self::read_count) caps the word count by
+    /// [`tag::MAX_ELEMENT_COUNT`] and by the bytes left; each word then costs four
+    /// more, which [`read_u32`](Self::read_u32) bounds-checks in turn.
+    pub(crate) fn read_words(&mut self, field: &'static str) -> Result<Vec<u32>, DecodeError> {
+        let count = self.read_count(field)?;
+        let mut words = Vec::with_capacity(count);
+        for _ in 0..count {
+            words.push(self.read_u32()?);
+        }
+        Ok(words)
+    }
+
+    /// A counted list of `(entry point, container)` pairs — the shape
+    /// [`ShaderModuleDesc::dxil`](crcbl_hal::ShaderModuleDesc::dxil) crosses on,
+    /// and the worst-shaped field on the seam: each element is a length-prefixed
+    /// string *and* a length-prefixed byte slice, two variable-length leaves that
+    /// a fixed-stride decoder cannot skip.
+    ///
+    /// The two leaves are read in the descriptor's order — the name first, then
+    /// the container — each with its own `u32` length prefix, so a pair whose
+    /// container is empty is a *present* pair with a truncated artifact rather than
+    /// an absent one, and the empty list is the only absence. Both leaves reuse
+    /// the same caps every other field on this stream does:
+    /// [`read_string`](Self::read_string) and [`read_field`](Self::read_field) are
+    /// each capped by [`tag::MAX_FIELD_BYTES`], and the pair count by
+    /// [`read_count`](Self::read_count).
+    pub(crate) fn read_dxil(
+        &mut self,
+        field: &'static str,
+    ) -> Result<Vec<(String, Vec<u8>)>, DecodeError> {
+        let count = self.read_count(field)?;
+        let mut pairs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let entry_point = self.read_string(field)?;
+            let container = self.read_field(field)?.to_vec();
+            pairs.push((entry_point, container));
+        }
+        Ok(pairs)
+    }
 }
 
 // ── ByteWriter ────────────────────────────────────────────────────────────────
@@ -426,6 +478,37 @@ impl ByteWriter {
     /// reader intends would be gone without either half changing.
     pub(crate) fn put_bool(&mut self, value: bool) {
         self.put_u8(if value { tag::PRESENT } else { tag::ABSENT });
+    }
+
+    /// The counterpart of [`ByteReader::read_words`]: a word count, then that many
+    /// little-endian words.
+    ///
+    /// The count is written through [`put_count`](Self::put_count), which asserts
+    /// against [`tag::MAX_ELEMENT_COUNT`], so nothing this crate encodes is a word
+    /// slice its own reader would refuse. Empty stays empty — the absence spelling
+    /// for a word slice is the empty list, not a sentinel.
+    pub(crate) fn put_words(&mut self, words: &[u32]) {
+        self.put_count(words.len());
+        for word in words {
+            self.put_u32(*word);
+        }
+    }
+
+    /// The counterpart of [`ByteReader::read_dxil`]: a pair count, then each pair
+    /// as a length-prefixed name and a length-prefixed container.
+    ///
+    /// The name and the container each go over through [`put_bytes`](Self::put_bytes),
+    /// which asserts against [`tag::MAX_FIELD_BYTES`], and the count through
+    /// [`put_count`](Self::put_count). A pair whose container is empty is written
+    /// as a present pair with a zero-length byte field, so the reader recovers a
+    /// truncated artifact rather than an absent one — the distinction the empty
+    /// *list* is what carries.
+    pub(crate) fn put_dxil(&mut self, dxil: &[(&str, &[u8])]) {
+        self.put_count(dxil.len());
+        for (entry_point, container) in dxil {
+            self.put_bytes(entry_point.as_bytes());
+            self.put_bytes(container);
+        }
     }
 }
 

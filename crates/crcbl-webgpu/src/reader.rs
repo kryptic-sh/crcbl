@@ -586,6 +586,31 @@ impl<'a> StreamReader<'a> {
                     variable_count,
                 })
             }
+            tag::CREATE_SHADER_MODULE_TAG => {
+                // Every field of `ShaderModuleDesc`, in its declaration order, and
+                // every one with its own absence convention preserved: `spirv`
+                // empty is absent, `wgsl`/`msl` keep `Some("")` apart from `None`,
+                // and `dxil`'s empty list is absence while a pair with an empty
+                // container is a truncated artifact. A browser reads only `wgsl`,
+                // but this decoder traverses all four to reach the command's end.
+                let module = r.read_handle("CreateShaderModule::module")?;
+                let label = r.read_opt_string("ShaderModuleDesc::label")?;
+                let spirv = r.read_words("ShaderModuleDesc::spirv")?;
+                let wgsl = r.read_opt_string("ShaderModuleDesc::wgsl")?;
+                let msl = r.read_opt_string("ShaderModuleDesc::msl")?;
+                let dxil = r.read_dxil("ShaderModuleDesc::dxil")?;
+                Ok(Command::CreateShaderModule {
+                    module,
+                    label,
+                    spirv,
+                    wgsl,
+                    msl,
+                    dxil,
+                })
+            }
+            tag::DESTROY_SHADER_MODULE_TAG => Ok(Command::DestroyShaderModule {
+                module: r.read_handle("DestroyShaderModule::module")?,
+            }),
             tag::DESTROY_BIND_GROUP_LAYOUT_TAG => Ok(Command::DestroyBindGroupLayout {
                 layout: r.read_handle("DestroyBindGroupLayout::layout")?,
             }),

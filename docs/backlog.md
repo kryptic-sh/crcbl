@@ -39,6 +39,24 @@ either. Written down so a green group M is not read as covering them.
   does not catch a lost visibility word. That mapping is held by
   `gpu-replay.mjs`'s bit-by-bit table and by the fixture instead.
 
+### The stream decoder caps a SPIR-V module at 65 536 words
+
+`crcbl-webgpu`'s decoder bounds `ShaderModuleDesc::spirv` by `MAX_ELEMENT_COUNT`
+(`1 << 16` words = 256 KiB), the same cap every counted list on this stream
+uses. A real SPIR-V module can be larger — a big compute shader clears 256 KiB
+easily — so pointing the decoder at one would refuse it as `InvalidLength`.
+
+**It cannot bite the WebGPU path**, and that is why it was left. A browser
+consumes only `wgsl`; on a browser build the engine hands `create_shader_module`
+a descriptor whose `spirv` is empty, so the field the cap guards is never
+populated on the only path this decoder runs. The ceiling is reachable solely by
+aiming the Rust decoder at a stream carrying real SPIR-V, which is a test or a
+tool, never production.
+
+If a future use does stream SPIR-V through this decoder, the fix is a per-field
+cap sized to a shader rather than the shared element count — the two limits
+answer different questions and `MAX_ELEMENT_COUNT` was sized for the second.
+
 ### Anisotropy: the limit says one, the replayer passes more through
 
 `halLimitsFor` reports `max_sampler_anisotropy: 1` and withholds

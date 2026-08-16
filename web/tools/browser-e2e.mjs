@@ -651,6 +651,17 @@ const PROBE_LAYOUT_ENTRIES = 4;
 const PROBE_BIND_GROUP_LABEL = 'crcbl-webgpu probe bind group';
 
 /**
+ * The label `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_SHADER_MODULE_DESC` sets.
+ *
+ * A `GPUShaderModule` reports its `label` like every object above — but, unlike
+ * them, it is **where compilation happens**, so group O has a second and stronger
+ * piece of evidence than the label and the silent error queue: `getCompilationInfo()`.
+ * The descriptor carries a known-good WGSL vertex entry, so a clean compile is a
+ * fact a real browser can state and a stub cannot fake.
+ */
+const PROBE_SHADER_MODULE_LABEL = 'crcbl-webgpu probe shader';
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -3944,6 +3955,124 @@ try {
         ? `an instance of this browser's GPUBindGroup labelled ${JSON.stringify(bindGroupProbe.label)}, binding a buffer, a view and a sampler, of ${bindGroupProbe.held} held, and the device reported nothing`
         : `instanceof GPUBindGroup: ${bindGroupProbe?.isRealGroup}, label ${JSON.stringify(bindGroupProbe?.label)}` +
           `${bindGroupReport.error ? ` — ${bindGroupReport.error}` : ''}`
+  );
+
+  // A `GPUShaderModule` reports its `label`, like a sampler, a layout and a bind
+  // group — but it is the only object this seam makes where *compilation* happens,
+  // so group O has a second piece of evidence the others do not: `getCompilationInfo()`.
+  // The descriptor carries a known-good WGSL vertex entry, so beyond
+  // `instanceof GPUShaderModule` — which no stub can satisfy, node having no such
+  // binding — the gate reads the compilation info off the object and holds it to
+  // no errors. That is stronger than existence: a module that came back but would
+  // not compile is exactly what a browser answers for bad WGSL without throwing,
+  // and only `getCompilationInfo()` catches it. `gpu-replay.mjs` proves the
+  // descriptor — WGSL alone, the other three artifacts dropped — against a stub,
+  // and proves the WGSL-less refusal; only this asks a real device to compile it.
+  group('O — a shader module is compiled on the real device');
+
+  const shaderStart = await evaluate(
+    page,
+    `(async () => {
+       const { startShaderModuleProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startShaderModuleProbe({ exports }),
+         replayed: before.replayed,
+       };
+     })()`
+  );
+  const shaderProbe = shaderStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const { gpu } = globalThis.crcbl;
+             const stats = gpu.stats();
+             if (stats.replayed <= ${shaderStart.replayed} && !stats.failure) {
+               return null;
+             }
+             const entries = [...gpu.replayer.shaderModules.entries()];
+             const last = entries[entries.length - 1];
+             const module = last ? last[1] : undefined;
+             return {
+               commands: stats.commands,
+               failure: stats.failure,
+               handle: last ? last[0] : null,
+               held: entries.length,
+               // The browser's own class, as groups H, J–N ask. Node has no
+               // \`GPUShaderModule\` binding at all, so this is what a silent fall
+               // back to a stub cannot survive.
+               isRealModule:
+                 typeof GPUShaderModule === 'function' &&
+                 module instanceof GPUShaderModule,
+               label: module?.label,
+             };
+           })()`
+        )
+      )
+    : null;
+
+  // Read the compilation info in a second evaluation, because it is async and
+  // needs the module object. This is the check no other group has: a shader
+  // module is where compilation happens, and a browser reports a bad WGSL not by
+  // throwing but through this report — so a clean one is the proof the WGSL this
+  // seam sent compiled, which is stronger than the module merely existing. The
+  // device error queue is read after a couple of frames too, as groups K–N do,
+  // for anything WebGPU raises in a future task.
+  const shaderReport = shaderProbe?.isRealModule
+    ? await evaluate(
+        page,
+        `(async () => {
+           const entries = [...globalThis.crcbl.gpu.replayer.shaderModules.entries()];
+           const last = entries[entries.length - 1];
+           const module = last ? last[1] : undefined;
+           const info = module ? await module.getCompilationInfo() : null;
+           const errors = info
+             ? info.messages
+                 .filter((m) => m.type === 'error')
+                 .map((m) => m.message)
+             : ['the module was gone before getCompilationInfo could run'];
+           await new Promise((settle) =>
+             requestAnimationFrame(() => requestAnimationFrame(settle))
+           );
+           return {
+             waited: true,
+             errors,
+             error: globalThis.crcbl.gpu.replayer.takeError(),
+           };
+         })()`
+      )
+    : null;
+  check(
+    'O',
+    'wasm encoded a shader module creation and the demo loop replayed it',
+    shaderProbe?.commands?.join(',') === 'CreateShaderModule' &&
+      Number.isInteger(shaderProbe.handle),
+    shaderProbe
+      ? `the loop replayed [${shaderProbe.commands.join(', ')}] for module ${shaderProbe.handle}` +
+          `${shaderProbe.failure ? ` — ${shaderProbe.failure}` : ''}`
+      : shaderStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'O',
+    'a real GPUShaderModule came back from the device with clean compilation info for the known-good WGSL',
+    shaderProbe?.isRealModule === true &&
+      shaderProbe?.label === PROBE_SHADER_MODULE_LABEL &&
+      shaderReport?.waited === true &&
+      Array.isArray(shaderReport?.errors) &&
+      shaderReport.errors.length === 0 &&
+      shaderReport?.error === null,
+    shaderReport?.waited !== true
+      ? 'the page never got as far as reading the module’s compilation info'
+      : shaderProbe?.isRealModule &&
+          shaderReport.errors.length === 0 &&
+          shaderReport.error === null
+        ? `an instance of this browser's GPUShaderModule labelled ${JSON.stringify(shaderProbe.label)}, getCompilationInfo reported no errors, of ${shaderProbe.held} held, and the device reported nothing`
+        : `instanceof GPUShaderModule: ${shaderProbe?.isRealModule}, label ${JSON.stringify(shaderProbe?.label)}, compilation errors ${JSON.stringify(shaderReport?.errors)}` +
+          `${shaderReport?.error ? ` — ${shaderReport.error}` : ''}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

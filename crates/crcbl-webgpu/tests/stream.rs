@@ -13,7 +13,7 @@ use crcbl_hal::{
     BindingFlags, BindingKind, BindingResource, BufferDesc, BufferUsage, CompareOp, DeviceDesc,
     Extent3d, Features, FilterMode, Format, ImageAspect, ImageDesc, ImageSubresourceRange,
     ImageType, ImageUsage, ImageViewDesc, ImageViewType, MemoryLocation, SampleType,
-    SamplerAddressMode, SamplerDesc, ShaderStages,
+    SamplerAddressMode, SamplerDesc, ShaderModuleDesc, ShaderStages,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -1634,11 +1634,250 @@ fn every_command_has_its_own_name() {
     names.dedup();
     // `every_command` holds three CreateBuffers, three CreateImages, six
     // CreateImageViews, four CreateSamplers, six CreateBindGroupLayouts, two
-    // CreateBindGroups and two each of BeginRenderPass, BindGroup and
-    // RequestDevice, so the distinct-name count is what the writer has methods
-    // for.
-    assert_eq!(names.len(), 23);
+    // CreateBindGroups, three CreateShaderModules and two each of BeginRenderPass,
+    // BindGroup and RequestDevice, so the distinct-name count is what the writer
+    // has methods for.
+    assert_eq!(names.len(), 25);
     assert!(names.iter().all(|name| !name.is_empty()));
+}
+
+// ── Shader modules ────────────────────────────────────────────────────────────
+
+/// Encodes one unlabelled shader module holding the four artifacts given, and
+/// returns its bytes. The label is absent so every field after it sits at a
+/// fixed offset.
+fn module_of(
+    spirv: &[u32],
+    wgsl: Option<&str>,
+    msl: Option<&str>,
+    dxil: &[(&str, &[u8])],
+) -> Vec<u8> {
+    let mut stream = StreamWriter::new();
+    stream.create_shader_module(
+        handle(1, 1),
+        &ShaderModuleDesc {
+            label: None,
+            spirv,
+            wgsl,
+            msl,
+            dxil,
+        },
+    );
+    stream.bytes().to_vec()
+}
+
+/// The single command a `module_of` buffer decodes to.
+fn decode_module(bytes: &[u8]) -> Command {
+    decode_stream(bytes)
+        .expect("a stream this crate wrote decodes")
+        .into_iter()
+        .next()
+        .expect("one command")
+}
+
+/// **Every field of the seam's heaviest descriptor crosses, in the descriptor's
+/// order, with all four artifacts non-trivial.**
+///
+/// The round trip over the corpus says the whole set survives; what this pins is
+/// that no artifact can be dropped or read in another's place — every value is
+/// distinct, and the `dxil` list's two entries differ in both their string and
+/// their container lengths so a decoder reading the wrong length for either leaf
+/// answers a different module.
+#[test]
+fn a_shader_module_carries_every_artifact_in_the_descriptors_order() {
+    let module = handle(5, 6);
+    let spirv = [0x0723_0203u32, 0x0001_0600, 42, 7, 0];
+    let dxil: &[(&str, &[u8])] = &[
+        ("vsMain", &[0xDE, 0xAD, 0xBE, 0xEF]),
+        ("fragment", &[0x01, 0x02]),
+    ];
+    let mut stream = StreamWriter::new();
+    stream.create_shader_module(
+        module,
+        &ShaderModuleDesc {
+            label: Some("mesh.slang"),
+            spirv: &spirv,
+            wgsl: Some("@vertex fn vs() {}"),
+            msl: Some("vertex void vs() {}"),
+            dxil,
+        },
+    );
+    stream.destroy_shader_module(handle(7, 8));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateShaderModule {
+                module,
+                label: Some("mesh.slang".into()),
+                spirv: spirv.to_vec(),
+                wgsl: Some("@vertex fn vs() {}".into()),
+                msl: Some("vertex void vs() {}".into()),
+                dxil: vec![
+                    ("vsMain".into(), vec![0xDE, 0xAD, 0xBE, 0xEF]),
+                    ("fragment".into(), vec![0x01, 0x02]),
+                ],
+            },
+            Command::DestroyShaderModule {
+                module: handle(7, 8),
+            },
+        ])
+    );
+}
+
+/// **The four absence conventions each survive, and they are four distinct
+/// traps.** `spirv` empty is absent; `wgsl` and `msl` keep `Some("")` — a valid
+/// empty module — apart from `None`; and `dxil`'s empty list is absence while a
+/// pair whose container is empty is a present, truncated artifact. A decoder
+/// that treated `Some("")` as `None`, or an empty container as an absent
+/// artifact, goes red here.
+#[test]
+fn a_shader_module_keeps_each_artifacts_absence_convention_distinct() {
+    match decode_module(&module_of(&[], Some(""), Some(""), &[("main", &[])])) {
+        Command::CreateShaderModule {
+            spirv,
+            wgsl,
+            msl,
+            dxil,
+            ..
+        } => {
+            assert!(spirv.is_empty(), "an empty spirv slice is absent");
+            assert_eq!(
+                wgsl.as_deref(),
+                Some(""),
+                "a Some(\"\") wgsl is present and empty, not None"
+            );
+            assert_eq!(
+                msl.as_deref(),
+                Some(""),
+                "a Some(\"\") msl is present and empty, not None"
+            );
+            assert_eq!(
+                dxil,
+                vec![("main".to_string(), Vec::new())],
+                "a pair whose container is empty is a present, truncated artifact"
+            );
+        }
+        other => panic!("expected CreateShaderModule, got {}", other.name()),
+    }
+    match decode_module(&module_of(&[7], None, None, &[])) {
+        Command::CreateShaderModule {
+            spirv,
+            wgsl,
+            msl,
+            dxil,
+            ..
+        } => {
+            assert_eq!(spirv, vec![7], "a non-empty spirv slice is present");
+            assert_eq!(wgsl, None, "an absent wgsl is None, not Some(\"\")");
+            assert_eq!(msl, None, "an absent msl is None, not Some(\"\")");
+            assert!(dxil.is_empty(), "the empty dxil list is absence");
+        }
+        other => panic!("expected CreateShaderModule, got {}", other.name()),
+    }
+
+    // …and each convention moves the bytes, which is what says the distinction is
+    // on the wire rather than only in this crate's own reader.
+    assert_ne!(
+        module_of(&[], None, None, &[]),
+        module_of(&[7], None, None, &[]),
+        "spirv empty and non-empty must differ"
+    );
+    assert_ne!(
+        module_of(&[], None, None, &[]),
+        module_of(&[], Some(""), None, &[]),
+        "wgsl None and Some(\"\") must differ"
+    );
+    assert_ne!(
+        module_of(&[], Some(""), None, &[]),
+        module_of(&[], Some("x"), None, &[]),
+        "wgsl Some(\"\") and Some(\"x\") must differ"
+    );
+    assert_ne!(
+        module_of(&[], None, None, &[]),
+        module_of(&[], None, Some(""), &[]),
+        "msl None and Some(\"\") must differ"
+    );
+    assert_ne!(
+        module_of(&[], None, Some(""), &[]),
+        module_of(&[], None, Some("x"), &[]),
+        "msl Some(\"\") and Some(\"x\") must differ"
+    );
+    assert_ne!(
+        module_of(&[], None, None, &[]),
+        module_of(&[], None, None, &[("main", &[])]),
+        "an empty dxil list and a pair with an empty container must differ"
+    );
+}
+
+/// **The `spirv` words survive bit for bit and the reader returns the right
+/// count**, carried as a `u32` word count then that many little-endian words.
+///
+/// A byte-length or decimal encoding, or a reader that returned a wrong count,
+/// would not reproduce the bytes: the assertion is on the wire, not just the
+/// decode.
+#[test]
+fn a_shader_modules_spirv_words_survive_bit_for_bit_and_the_reader_returns_the_right_count() {
+    let words = [0x0723_0203u32, 0x0001_0600, 0xDEAD_BEEF, 0, u32::MAX];
+    let bytes = module_of(&words, None, None, &[]);
+    match decode_module(&bytes) {
+        Command::CreateShaderModule { spirv, .. } => {
+            assert_eq!(spirv.len(), words.len(), "the reader returns every word");
+            assert_eq!(spirv, words.to_vec(), "each word survives bit for bit");
+        }
+        other => panic!("expected CreateShaderModule, got {}", other.name()),
+    }
+
+    // The count and the words are the body after the tag, the handle and the
+    // absent label's presence byte.
+    let count_at = tag::HEADER_BYTES + 1 + 8 + 1;
+    assert_eq!(
+        &bytes[count_at..count_at + 4],
+        &(words.len() as u32).to_le_bytes(),
+        "the word count is a u32 prefix"
+    );
+    for (index, word) in words.iter().enumerate() {
+        let at = count_at + 4 + index * 4;
+        assert_eq!(
+            &bytes[at..at + 4],
+            &word.to_le_bytes(),
+            "word {index} is little-endian on the wire"
+        );
+    }
+}
+
+/// **The `dxil` pair-list round-trips, two entries with different string and
+/// container lengths.** `dxil` is the worst-shaped field on the seam — a counted
+/// list whose element is a length-prefixed string *and* a length-prefixed byte
+/// slice — so the two entries below differ in both leaf lengths, and a decoder
+/// reading the wrong length for either lands the cursor wrong and answers the
+/// wrong pairs.
+#[test]
+fn a_shader_modules_dxil_pair_list_round_trips_with_two_differently_sized_entries() {
+    let dxil: &[(&str, &[u8])] = &[("vsMain", &[1, 2, 3, 4]), ("ps", &[9])];
+    assert_ne!(
+        dxil[0].0.len(),
+        dxil[1].0.len(),
+        "the two entry-point names are different lengths"
+    );
+    assert_ne!(
+        dxil[0].1.len(),
+        dxil[1].1.len(),
+        "the two containers are different lengths"
+    );
+
+    match decode_module(&module_of(&[], None, None, dxil)) {
+        Command::CreateShaderModule { dxil: got, .. } => {
+            assert_eq!(
+                got,
+                vec![
+                    ("vsMain".to_string(), vec![1, 2, 3, 4]),
+                    ("ps".to_string(), vec![9]),
+                ]
+            );
+        }
+        other => panic!("expected CreateShaderModule, got {}", other.name()),
+    }
 }
 
 // ── Malformed streams ─────────────────────────────────────────────────────────

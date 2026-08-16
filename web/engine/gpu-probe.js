@@ -427,6 +427,39 @@ export function startBindGroupProbe({ exports }) {
 }
 
 /**
+ * Asks wasm to encode a shader-module creation on the device it opened.
+ *
+ * **There is no `readShaderModuleProbe`, for {@link startBufferProbe}'s reason:**
+ * `CreateShaderModule` has no entry on the reply channel either.
+ * `globalThis.crcbl.gpu.replayer.shaderModules` is the table the
+ * `GPUShaderModule` lands in, and a module the browser would not have — one
+ * carrying no WGSL for this backend to compile — arrives in
+ * `crcbl.gpu.replayer.takeError()`.
+ *
+ * **What differs from every probe before it is what a browser can be asked about
+ * the result.** A `GPUShaderModule` reports its `label`, like a sampler, but it
+ * is also **where compilation happens** — so beyond `instanceof GPUShaderModule`
+ * the gate reads `getCompilationInfo()` off the object and holds it to no errors
+ * for the known-good WGSL the descriptor carries. That is stronger than mere
+ * existence and is the one thing a stub cannot fake: node has no
+ * `GPUShaderModule` binding and no compiler behind it. The descriptor is fixed in
+ * `crates/crcbl-webgpu/src/probe.rs` — WGSL alone, the other three artifacts
+ * absent — because a browser consumes only WGSL.
+ *
+ * It needs a **device**, as {@link startBufferProbe} does and for the same
+ * reason: `create_shader_module` is a device method, so a `false` right after
+ * {@link startDeviceProbe} is that ordering rather than a failure.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded it, on {@link startImageProbe}'s
+ *   terms.
+ */
+export function startShaderModuleProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_shader_module() === 1;
+}
+
+/**
  * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of

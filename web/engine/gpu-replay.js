@@ -2093,6 +2093,18 @@ export class Replayer {
    */
   #bindGroups = new HandleTable();
   /**
+   * The `GPUShaderModule` behind each live shader-module handle.
+   *
+   * Its own table for the reason every table here is its own: a shader-module
+   * handle is genuinely allowed to carry the same eight bytes as a buffer's or a
+   * sampler's, and the probe's `PROBE_SHADER_MODULE` deliberately does. It holds
+   * only the modules built from WGSL — the one artifact a browser consumes —
+   * because a module carrying no WGSL is refused before there is anything to file.
+   *
+   * @type {HandleTable<GPUShaderModule>}
+   */
+  #shaderModules = new HandleTable();
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -2221,6 +2233,23 @@ export class Replayer {
    */
   get bindGroups() {
     return this.#bindGroups;
+  }
+
+  /**
+   * The shader modules that are live right now, on {@link Replayer#surfaces}'s
+   * terms.
+   *
+   * **A `GPUShaderModule` reports its `label`, and — unlike a sampler or a
+   * layout — one thing more that matters here: `getCompilationInfo()`**, because
+   * a shader module is where compilation happens. So this table's contents, the
+   * device's error queue, and that async report are what a reader can learn.
+   * `web/tools/browser-e2e.mjs` reads the compilation info; `web/tools/gpu-replay.mjs`
+   * proves the descriptor against a stub.
+   *
+   * @type {HandleTable<GPUShaderModule>}
+   */
+  get shaderModules() {
+    return this.#shaderModules;
   }
 
   /** How many out-of-band errors are waiting to be taken. */
@@ -2365,6 +2394,12 @@ export class Replayer {
           break;
         case 'DestroyBindGroup':
           this.#destroyBindGroup(command);
+          break;
+        case 'CreateShaderModule':
+          this.#createShaderModule(sequence, command);
+          break;
+        case 'DestroyShaderModule':
+          this.#destroyShaderModule(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -3388,6 +3423,103 @@ export class Replayer {
    */
   #destroyBindGroup(command) {
     this.#bindGroups.remove(command.group);
+  }
+
+  /**
+   * Creates a shader module on the open device and files it under the handle wasm
+   * allocated.
+   *
+   * `#createBuffer`'s shape — synchronous, no reply, every failure into
+   * {@link Replayer#takeError} — for a descriptor that carries **four artifacts
+   * and this backend consumes exactly one**. `spirv`, `msl` and `dxil` all cross
+   * so the Rust decoder (`crcbl-dx12` reads the DXIL, `crcbl-mtl` the MSL) has
+   * them, but a WebGPU backend has no path for any of them — naga cannot take the
+   * `DrawParameters` SPIR-V this engine ships — so `wgsl` is the only field read
+   * here. Two of its states are decided before the browser is asked, and one is
+   * left to the browser exactly as `#createBuffer` leaves an allocation failure:
+   *
+   *   * **`wgsl` is `null` — refused, by name.** A module carrying no WGSL is
+   *     `ShaderModuleDesc::unusable` for this backend, and this is the same
+   *     synchronous refusal `#createBuffer` makes for a usage WebGPU has no bit
+   *     for: the two quieter answers are worse. Building an empty module would
+   *     file a shader no pipeline can use under the handle, and every pipeline
+   *     naming it would then fail with the reason nowhere near the creation.
+   *   * **`wgsl` is `''` — built.** An empty WGSL module is *valid* — one with no
+   *     entry points — and must not be confused with `null`; refusing it would
+   *     turn a real, if useless, module into a failure the seam does not have.
+   *   * **`wgsl` is source that will not compile — built anyway, and NOT inspected
+   *     here.** `createShaderModule` never throws for bad WGSL: WebGPU hands back
+   *     a `GPUShaderModule` regardless and reports compilation errors through the
+   *     async `getCompilationInfo()`, with some but not all also reaching
+   *     `uncapturederror`. Inspecting compilation info would mean deferring this
+   *     creation to a promise — the machinery `#enumerateAdapters` needs and the
+   *     whole buffer/image/sampler family deliberately does without — for a
+   *     failure that already has a home: a bad shader fails at pipeline creation
+   *     in a later slice, and the device's `uncapturederror` listener
+   *     (`#requestDevice`) feeds the same queue a `#createBuffer` throw does. So
+   *     this leaves it there rather than growing an async path the seam answers
+   *     positionally. `web/tools/browser-e2e.mjs` is where `getCompilationInfo()`
+   *     *is* read — off a known-good module, to prove compilation ran clean, which
+   *     is the browser's job and not this replay's.
+   *
+   * @param {bigint} sequence
+   * @param {{ module: { index: number, generation: number },
+   *           label: string | null, spirv: number[], wgsl: string | null,
+   *           msl: string | null,
+   *           dxil: { entryPoint: string, container: Uint8Array }[] }} command
+   */
+  #createShaderModule(sequence, command) {
+    const named = `shader module ${command.module.index}.${command.module.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    if (command.wgsl === null) {
+      // Named the way `ShaderModuleDesc::unusable` names it: which formats were
+      // offered and which this backend needed. `spirv`/`msl`/`dxil` are the ones
+      // it was given and cannot use; WGSL is the one it needed and did not get.
+      const offered = [];
+      if (command.spirv.length > 0) offered.push('SPIR-V');
+      if (command.msl !== null) offered.push('MSL');
+      if (command.dxil.length > 0) offered.push('DXIL');
+      const given = offered.length > 0 ? offered.join(' and ') : 'nothing';
+      this.#deviceError(
+        `${named} was given ${given}, but this backend can only compile WGSL and the module carried none`
+      );
+      return;
+    }
+    let module;
+    try {
+      module = this.#device.createShaderModule({
+        // No label rather than an empty one, as `#createBuffer` passes it.
+        ...(command.label === null ? {} : { label: command.label }),
+        code: command.wgsl,
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#shaderModules.insert(command.module, module);
+  }
+
+  /**
+   * Lets go of a shader module.
+   *
+   * **LETTING GO IS THE WHOLE OF THE RELEASE**, as it is for a sampler, a view, a
+   * layout and a bind group: a `GPUShaderModule` has no `destroy()` — it holds no
+   * allocation of its own — so there is nothing to call.
+   *
+   * A destroy naming nothing live is a no-op in both of its ways — an empty slot
+   * and a stale generation — exactly as every other destroy here, because
+   * {@link HandleTable#remove} answers `undefined` for both. This is the destroy
+   * `crcbl-render` leans on hardest, so the stale-generation no-op matters: it
+   * pre-allocates the handle, destroys it, and only then applies `?`, so the id
+   * may name a module whose creation failed and whose index has since been reused.
+   *
+   * @param {{ module: { index: number, generation: number } }} command
+   */
+  #destroyShaderModule(command) {
+    this.#shaderModules.remove(command.module);
   }
 
   /**

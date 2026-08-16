@@ -689,6 +689,53 @@ const EXPECTED = [
     ],
     variableCount: 2,
   },
+  // **The heaviest descriptor on the seam, all four artifacts non-trivial.** A
+  // decoder that stopped traversing one field lands the cursor wrong for the
+  // rest; a decoder that read a later field before skipping `spirv` decodes the
+  // wrong bytes for it. `spirv` is a word array a browser never uses but must
+  // step over; the two `dxil` pairs differ in both their string and container
+  // lengths, so a wrong length for either leaf is caught.
+  {
+    name: 'CreateShaderModule',
+    module: handle(113, 114),
+    label: 'mesh.slang',
+    spirv: [0x07230203, 0x00010600, 0x0000002a, 0x00000007, 0x00000000],
+    wgsl: '@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }',
+    msl: '#include <metal_stdlib>\nvertex float4 vs() { return 0; }',
+    dxil: [
+      {
+        entryPoint: 'vsMain',
+        container: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+      },
+      { entryPoint: 'fragment', container: new Uint8Array([0x01, 0x02]) },
+    ],
+  },
+  // The first absence trap: `spirv` empty (absent), `wgsl` `''` (present and
+  // empty — a valid module with no entry points), `msl` `null` (absent), `dxil`
+  // the empty list (absent). A decoder that read `Some("")` as `null` fails on
+  // the WGSL here.
+  {
+    name: 'CreateShaderModule',
+    module: handle(115, 116),
+    label: 'empty.wgsl',
+    spirv: [],
+    wgsl: '',
+    msl: null,
+    dxil: [],
+  },
+  // The mirror trap: `wgsl` `null` (absent, where the module above was present
+  // and empty), `msl` `''` (present and empty, where the module above was
+  // absent), and `dxil` a single pair whose container is empty — a present,
+  // truncated artifact rather than the absent empty list above.
+  {
+    name: 'CreateShaderModule',
+    module: handle(117, 118),
+    label: null,
+    spirv: [],
+    wgsl: null,
+    msl: '',
+    dxil: [{ entryPoint: 'truncated', container: new Uint8Array([]) }],
+  },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
   { name: 'DestroySurface', surface: handle(47, 48) },
   // A view and the image it views are separate objects in separate tables, so
@@ -705,6 +752,10 @@ const EXPECTED = [
   // Its own command and its own table again: a bind group's id is allowed to be
   // the same eight bytes as anything else's.
   { name: 'DestroyBindGroup', group: handle(111, 112) },
+  // Its own command and its own table again: a shader module's id is allowed to
+  // be the same eight bytes as anything else's, and this is the destroy
+  // `crcbl-render` leans on hardest.
+  { name: 'DestroyShaderModule', module: handle(119, 120) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',
@@ -1041,6 +1092,36 @@ async function main() {
     labels,
     ['instances', null, ''],
     'Some("") and None decode to distinct labels'
+  );
+
+  // ---- a shader module's four absence conventions each survive -------------
+  // The four artifacts do not share one, and the difference is load-bearing:
+  // stated on its own so a decoder that collapsed `Some("")` into `null`, or an
+  // empty `dxil` container into an absent artifact, fails with a message naming
+  // which rule rather than only somewhere in a field-for-field diff.
+  const shaders = decoded.filter(
+    (command) => command.name === 'CreateShaderModule'
+  );
+  checkEqual(
+    shaders.map((s) => [
+      s.spirv.length === 0 ? 'absent' : `present(${s.spirv.length} words)`,
+      s.wgsl === null ? 'None' : `Some(${JSON.stringify(s.wgsl)})`,
+      s.msl === null ? 'None' : `Some(${JSON.stringify(s.msl)})`,
+      s.dxil.length === 0
+        ? 'absent'
+        : `present(${s.dxil.map((p) => p.container.length).join(',')} bytes)`,
+    ]),
+    [
+      [
+        'present(5 words)',
+        'Some("@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }")',
+        'Some("#include <metal_stdlib>\\nvertex float4 vs() { return 0; }")',
+        'present(4,2 bytes)',
+      ],
+      ['absent', 'Some("")', 'None', 'absent'],
+      ['absent', 'None', 'Some("")', 'present(0 bytes)'],
+    ],
+    'spirv empty≠present, wgsl/msl None≠Some("")≠Some("code"), and dxil empty-list≠a-pair-with-an-empty-container all decode distinctly'
   );
 
   // ---- the byte payload is bytes, and a copy ------------------------------

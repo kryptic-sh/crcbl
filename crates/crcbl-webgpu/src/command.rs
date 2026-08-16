@@ -22,7 +22,7 @@ use crcbl_hal::{
     BufferHandle, BufferUsage, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d,
     Features, FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange,
     ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutHandle,
-    Rect2d, SamplerAddressMode, SamplerHandle, ShaderStages, SurfaceHandle,
+    Rect2d, SamplerAddressMode, SamplerHandle, ShaderModuleHandle, ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -274,6 +274,55 @@ pub enum Command {
         /// runtime-sized array, which WebGPU cannot express.
         variable_count: Option<u32>,
     },
+    /// [`Device::create_shader_module`](crcbl_hal::Device::create_shader_module),
+    /// with the handle the caller allocated for it.
+    ///
+    /// The whole of [`ShaderModuleDesc`](crcbl_hal::ShaderModuleDesc), and **the
+    /// heaviest single descriptor on the seam**: it carries one field per artifact
+    /// format — SPIR-V words, WGSL source, MSL source, DXIL containers — because
+    /// the encoding is the seam's rather than WebGPU's, so a decoder must traverse
+    /// every field even though a browser consumes only [`wgsl`](Self::CreateShaderModule::wgsl).
+    ///
+    /// **The four artifacts do not share an absence convention, and the difference
+    /// is load-bearing** — [`ShaderModuleDesc`](crcbl_hal::ShaderModuleDesc) spells
+    /// each one out, and every one crosses verbatim:
+    ///
+    /// * [`spirv`](Self::CreateShaderModule::spirv) is words, and empty means
+    ///   absent — a zero-word SPIR-V module is not a thing that exists, so the two
+    ///   states cannot be confused.
+    /// * [`wgsl`](Self::CreateShaderModule::wgsl) and
+    ///   [`msl`](Self::CreateShaderModule::msl) are `Option<String>`, because
+    ///   `Some("")` is a *valid empty module* — one with no entry points — and is
+    ///   not `None`. Conflating them would turn a truncated file into "this backend
+    ///   does not get WGSL".
+    /// * [`dxil`](Self::CreateShaderModule::dxil) is the list, and its absence is
+    ///   the *empty list*; a pair whose container is empty is a truncated artifact,
+    ///   not an absent one — the distinction a zero-byte container would lose.
+    ///
+    /// **Nothing is validated here**, which is [`Command::CreateImage`]'s rule:
+    /// [`ShaderModuleDesc::unusable`](crcbl_hal::ShaderModuleDesc::unusable) — the
+    /// error a backend owes a module carrying nothing it can compile, WGSL-less
+    /// modules included — is the replayer's to raise, because only it knows which
+    /// formats this backend accepts. See `web/engine/gpu-replay.js`.
+    CreateShaderModule {
+        /// Id the replayer stores the new object at.
+        module: ShaderModuleHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// SPIR-V words. Empty when there is no SPIR-V artifact — a browser never
+        /// consumes these, but a decoder still traverses them to reach the fields
+        /// after.
+        spirv: Vec<u32>,
+        /// WGSL source. `None` is absent and `Some(String::new())` is a valid
+        /// empty module; the two stay distinct.
+        wgsl: Option<String>,
+        /// MSL source, on [`wgsl`](Self::CreateShaderModule::wgsl)'s terms.
+        msl: Option<String>,
+        /// DXIL containers, each paired with the entry point it was compiled for,
+        /// **in the descriptor's own order**. Empty is absent; a pair with an
+        /// empty container is a truncated artifact.
+        dxil: Vec<(String, Vec<u8>)>,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -333,6 +382,17 @@ pub enum Command {
     DestroyBindGroup {
         /// Id to release.
         group: BindGroupHandle,
+    },
+    /// [`Device::destroy_shader_module`](crcbl_hal::Device::destroy_shader_module).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is — and this destroy is the one `crcbl-render`
+    /// leans on hardest, since it pre-allocates a module handle, destroys it, and
+    /// only then applies `?` to the creation `Result`, so the id may name a
+    /// creation that turned out to fail.
+    DestroyShaderModule {
+        /// Id to release.
+        module: ShaderModuleHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -457,6 +517,7 @@ impl Command {
             Self::CreateSampler { .. } => "CreateSampler",
             Self::CreateBindGroupLayout { .. } => "CreateBindGroupLayout",
             Self::CreateBindGroup { .. } => "CreateBindGroup",
+            Self::CreateShaderModule { .. } => "CreateShaderModule",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
             Self::DestroyImage { .. } => "DestroyImage",
@@ -464,6 +525,7 @@ impl Command {
             Self::DestroySampler { .. } => "DestroySampler",
             Self::DestroyBindGroupLayout { .. } => "DestroyBindGroupLayout",
             Self::DestroyBindGroup { .. } => "DestroyBindGroup",
+            Self::DestroyShaderModule { .. } => "DestroyShaderModule",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",
