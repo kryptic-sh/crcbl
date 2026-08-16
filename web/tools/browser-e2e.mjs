@@ -4549,6 +4549,102 @@ try {
           `${readback.error ? ` — ${readback.error}` : ''}`
   );
 
+  // **THE DRAW GATE, AND THE FIRST THAT PROVES A DRAW.** Group S proves a clear
+  // reaches host memory. This proves a `setPipeline` + `draw` *overwrites* that
+  // clear: wasm records a colour-only pipeline, a pass that clears the 64×64
+  // texture to the blue clear and then binds the pipeline and draws a fullscreen
+  // triangle whose fragment shader writes constant red, a copy into a host
+  // buffer, a submit and a readback; the demo's loop replays it; and the bytes
+  // that come back are asserted to be the red draw colour, every pixel — not the
+  // blue clear underneath. A stub that skips the draw leaves blue and fails here;
+  // only a real draw leaves red. `gpu-replay.mjs` cannot reach this for group S's
+  // reason: only a real device rasterises a triangle into a real texture.
+  group('T — a drawn triangle is read back as the draw colour, not the clear');
+
+  const PROBE_DRAW_PIXELS = 64 * 64;
+  const PROBE_DRAW_COLOR_BYTES = [255, 0, 0, 255];
+  const PROBE_DRAW_CLEAR_BYTES = [64, 128, 191, 255];
+
+  const drawStart = await evaluate(
+    page,
+    `(async () => {
+       const { startDrawProbe } = await import('/engine/gpu-probe.js');
+       const { exports } = globalThis.crcbl;
+       return { started: startDrawProbe({ exports }) };
+     })()`
+  );
+  // Poll across frames exactly as group S does: the demo's rAF loop replays the
+  // poll and delivers its reply between these evaluations, and each evaluation
+  // drains what has arrived, then queues another poll while the map is still
+  // resolving. `readDrawProbe` drains first, so a reply delivered since the last
+  // frame is absorbed before another poll is queued.
+  const draw = drawStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+             const { readDrawProbe, pollDrawProbe, DRAW } =
+               await import('/engine/gpu-probe.js');
+             const { exports, gpu } = globalThis.crcbl;
+             const r = readDrawProbe({ exports, memory: exports.memory });
+             if (r.state === DRAW.UNDECODABLE) {
+               return { done: true, state: r.name, error: gpu.replayer.takeError() };
+             }
+             if (r.state !== DRAW.READY) {
+               // Not yet — queue another poll for the loop to replay, and wait.
+               pollDrawProbe({ exports });
+               return null;
+             }
+             // Ready: check every pixel here rather than shipping 16384 numbers
+             // out. \`want\` is the fragment's constant red; the clear beneath it
+             // was blue, so a texel still blue is a draw that did not happen.
+             const want = ${JSON.stringify(PROBE_DRAW_COLOR_BYTES)};
+             let allMatch = r.bytes.length === ${PROBE_DRAW_PIXELS} * 4;
+             let firstWrong = -1;
+             for (let i = 0; i < r.bytes.length && allMatch; i += 1) {
+               if (r.bytes[i] !== want[i % 4]) {
+                 allMatch = false;
+                 firstWrong = i;
+               }
+             }
+             return {
+               done: true,
+               state: r.name,
+               len: r.bytes.length,
+               allMatch,
+               firstWrong,
+               // The first two texels, for a failure message a human can read.
+               sample: [...r.bytes.slice(0, 8)],
+               error: gpu.replayer.takeError(),
+             };
+           })()`
+        )
+      )
+    : null;
+  check(
+    'T',
+    'wasm encoded the draw setup frame — pipeline, clear, bind, draw, copy, request',
+    drawStart?.started === true,
+    drawStart?.started
+      ? 'the draw-and-read frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'T',
+    'the drawn pixels came back as the draw colour, not the clear, every one',
+    draw?.done === true &&
+      draw.allMatch === true &&
+      draw.len === PROBE_DRAW_PIXELS * 4,
+    draw?.done !== true
+      ? `no draw readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : draw.allMatch
+        ? `${draw.len} bytes, every texel [${PROBE_DRAW_COLOR_BYTES.join(', ')}] (red), not the clear [${PROBE_DRAW_CLEAR_BYTES.join(', ')}] (blue)`
+        : `state ${draw.state}, ${draw.len ?? 0} bytes, ` +
+          `first wrong at byte ${draw.firstWrong} (sample ${JSON.stringify(draw.sample)} ` +
+          `against [${PROBE_DRAW_COLOR_BYTES.join(', ')}]; the clear was [${PROBE_DRAW_CLEAR_BYTES.join(', ')}])` +
+          `${draw.error ? ` — ${draw.error}` : ''}`
+  );
+
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.

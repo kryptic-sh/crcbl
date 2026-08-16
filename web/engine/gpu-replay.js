@@ -2731,6 +2731,18 @@ export class Replayer {
         case 'EndRenderPass':
           this.#endRenderPass(sequence);
           break;
+        case 'BindGraphicsPipeline':
+          this.#bindGraphicsPipeline(sequence, command);
+          break;
+        case 'BindGroup':
+          this.#bindGroup(sequence, command);
+          break;
+        case 'PushConstants':
+          this.#pushConstants(sequence, command);
+          break;
+        case 'Draw':
+          this.#draw(sequence, command);
+          break;
         case 'CopyImageToBuffer':
           this.#copyImageToBuffer(sequence, command);
           break;
@@ -4502,6 +4514,129 @@ export class Replayer {
     }
     this.#currentPass.end();
     this.#currentPass = null;
+  }
+
+  /**
+   * Binds a graphics pipeline onto the open render pass.
+   *
+   * A BIND WITH NO PASS OPEN, OR AN UNRESOLVABLE PIPELINE, GOES TO THE ERROR
+   * QUEUE and does not throw — both are a far side that got its ordering wrong
+   * mid-frame, {@link Replayer#takeError}'s case, not a reason to abandon the
+   * rest of the frame.
+   *
+   * @param {bigint} sequence
+   * @param {{ pipeline: { index: number, generation: number } }} command
+   */
+  #bindGraphicsPipeline(sequence, command) {
+    if (!this.#currentPass) {
+      this.#deviceError(
+        `a graphics pipeline was bound (command ${sequence}) with no render pass open`
+      );
+      return;
+    }
+    const pipeline = this.#graphicsPipelines.get(command.pipeline);
+    if (pipeline === undefined) {
+      this.#deviceError(
+        `a graphics pipeline was bound (command ${sequence}) naming pipeline ` +
+          `${command.pipeline.index}.${command.pipeline.generation}, which this ` +
+          'replayer holds no live graphics pipeline under'
+      );
+      return;
+    }
+    this.#currentPass.setPipeline(pipeline);
+  }
+
+  /**
+   * Binds a bind group to a slot on the open render pass.
+   *
+   * A BIND WITH NO PASS OPEN, OR AN UNRESOLVABLE GROUP, GOES TO THE ERROR QUEUE
+   * and does not throw — the same mid-frame ordering fault
+   * {@link Replayer#bindGraphicsPipeline} refuses.
+   *
+   * `command.layout` is CARRIED AND NOT USED — WebGPU derives the binding layout
+   * from the bound pipeline, so there is no descriptor member to hand it to. It
+   * crosses so a transposition is visible and is dropped here, exactly as
+   * {@link Replayer#createCommandEncoder}'s `queue` is.
+   *
+   * @param {bigint} sequence
+   * @param {{ slot: number, group: { index: number, generation: number },
+   *           dynamicOffsets: number[],
+   *           layout: { index: number, generation: number } }} command
+   */
+  #bindGroup(sequence, command) {
+    if (!this.#currentPass) {
+      this.#deviceError(
+        `a bind group was bound (command ${sequence}) with no render pass open`
+      );
+      return;
+    }
+    const group = this.#bindGroups.get(command.group);
+    if (group === undefined) {
+      this.#deviceError(
+        `a bind group was bound (command ${sequence}) naming bind group ` +
+          `${command.group.index}.${command.group.generation}, which this ` +
+          'replayer holds no live bind group under'
+      );
+      return;
+    }
+    this.#currentPass.setBindGroup(command.slot, group, command.dynamicOffsets);
+  }
+
+  /**
+   * Refuses a push-constant write, by name.
+   *
+   * WebGPU HAS NO PUSH CONSTANTS AT ALL, so this arm routes UNCONDITIONALLY to
+   * the error queue, mirroring the refusal {@link Replayer#createPipelineLayout}
+   * already makes of a push-constant range.
+   *
+   * A push-constant range never survives `createPipelineLayout` — it is refused
+   * there — so a valid stream cannot reach this arm inside a pass. The arm
+   * exists so a hand-written encoder that emits a `PushConstants` is refused by
+   * name rather than throwing off the dispatch's `default`.
+   *
+   * @param {bigint} sequence
+   * @param {{ stages: string[], offset: number,
+   *           layout: { index: number, generation: number } }} command
+   */
+  #pushConstants(sequence, command) {
+    const stages =
+      command.stages.map((stage) => `ShaderStages::${stage}`).join(' | ') ||
+      '(no stages)';
+    this.#deviceError(
+      `a push constant was written (command ${sequence}) (${stages}, offset ` +
+        `${command.offset}), and WebGPU has no push constants at all: WGSL ` +
+        'cannot express one, so Features::PUSH_CONSTANTS is never reported and a ' +
+        'GPUPipelineLayoutDescriptor has no member to carry the range'
+    );
+  }
+
+  /**
+   * Records a draw on the open render pass.
+   *
+   * A DRAW WITH NO PASS OPEN GOES TO THE ERROR QUEUE and does not throw — the
+   * same mid-frame ordering fault the binds above refuse.
+   *
+   * `vertices` and `instances` are `{ start, end }` half-open ranges — the HAL's
+   * `Range<u32>` — so the counts are their spans and the firsts are their starts.
+   *
+   * @param {bigint} sequence
+   * @param {{ vertices: { start: number, end: number },
+   *           instances: { start: number, end: number } }} command
+   */
+  #draw(sequence, command) {
+    if (!this.#currentPass) {
+      this.#deviceError(
+        `a draw was recorded (command ${sequence}) with no render pass open`
+      );
+      return;
+    }
+    const { vertices, instances } = command;
+    this.#currentPass.draw(
+      vertices.end - vertices.start,
+      instances.end - instances.start,
+      vertices.start,
+      instances.start
+    );
   }
 
   /**

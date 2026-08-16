@@ -3,6 +3,17 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The probe module-doc export table is missing the readback shims
+
+`crates/crcbl-webgpu/src/probe.rs`'s `# Exports` table lists every shim through
+`__crcbl_web_gpu_probe_surface_caps_has_extent`, then jumps to the draw shims
+this slice added — the five `__crcbl_web_gpu_probe_readback*` exports from the
+prior readback slice were never added to the table. The functions and their doc
+comments exist; only the summary table skipped them. Left out of the draw slice
+as out of scope: add the readback rows between the surface-caps and draw rows so
+the table is whole again. Verified by reading the table (lines ~27–65) against
+the `pub extern "C"` shim fns.
+
 ### Nothing on the WebGPU backend can ever say "try the next adapter"
 
 `surface_caps`'s contract obliges a caller doing selection to read an `Err` as

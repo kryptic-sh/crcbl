@@ -105,6 +105,24 @@ export const READBACK = Object.freeze({
 });
 
 /**
+ * The `DRAW_*` codes `__crcbl_web_gpu_probe_draw_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The draw probe is a readback at heart — its setup frame ends in the same
+ * `request_readback` — so its codes mirror {@link READBACK} exactly. `READY`
+ * carries the drawn pixels, which the gate checks are the draw colour and not
+ * the clear.
+ */
+export const DRAW = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
  * The `SurfaceCapsFailure` codes `crates/crcbl-webgpu/src/tag.rs` assigns, which
  * `__crcbl_web_gpu_probe_surface_caps_cause` answers with.
  *
@@ -829,4 +847,74 @@ export function readReadbackProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: readbackStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the draw codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function drawStateName(state) {
+  const found = Object.entries(DRAW).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to draw a red triangle over a clear and start reading it back on the
+ * device it opened.
+ *
+ * {@link startReadbackProbe}'s draw sibling: one frame that builds a pipeline,
+ * clears, binds and draws it, copies, submits and requests. {@link pollDrawProbe}
+ * drives the poll and {@link readDrawProbe} reads the bytes when they land. Its
+ * answer is *data* and it needs a **device**, so `false` before one has opened
+ * is ordering rather than failure — wait for {@link readDeviceProbe} to say
+ * `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startDrawProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_draw() === 1;
+}
+
+/**
+ * Poll the draw's in-flight readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_draw_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollDrawProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_draw_poll() === 1;
+}
+
+/**
+ * Read where the draw readback has got to, and its bytes once it is `READY`.
+ *
+ * {@link readReadbackProbe}'s draw sibling, and `state` first for its reason —
+ * draining allocates and may detach a view built before it, so the `Uint8Array`
+ * is built after the state call and copied out with `slice`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readDrawProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_draw_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_draw_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_draw_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: drawStateName(state), bytes };
 }

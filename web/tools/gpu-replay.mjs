@@ -691,6 +691,66 @@ function stubShaderModule(desc) {
 }
 
 /**
+ * A `GPURenderPassEncoder` as `beginRenderPass` answers one, recording every
+ * `setPipeline`, `setBindGroup` and `draw` it is handed.
+ *
+ * The draw arms have no reply and no browser object to read back — a bound
+ * pipeline or a draw leaves nothing on the device's error channel when it
+ * succeeds — so what a check reads is the call the replayer made: `setPipelines`
+ * is the pipelines passed to `setPipeline`, `setBindGroups` the
+ * `{ slot, group, dynamicOffsets }` triples, and `draws` the four counts the
+ * replayer computed from a `Draw`'s two ranges. `ended` counts `end` so a pass
+ * left open is visible.
+ */
+function stubRenderPass() {
+  const pass = {
+    /** @type {object[]} The pipelines `setPipeline` was handed, in order. */
+    setPipelines: [],
+    /**
+     * @type {Array<{ slot: number, group: object, dynamicOffsets: number[] }>}
+     *   Every `setBindGroup`, in order.
+     */
+    setBindGroups: [],
+    /**
+     * @type {Array<{ vertexCount: number, instanceCount: number,
+     *   firstVertex: number, firstInstance: number }>} Every `draw`, in order.
+     */
+    draws: [],
+    ended: 0,
+    /** @param {object} pipeline */
+    setPipeline(pipeline) {
+      pass.setPipelines.push(pipeline);
+    },
+    /**
+     * @param {number} slot
+     * @param {object} group
+     * @param {number[]} dynamicOffsets
+     */
+    setBindGroup(slot, group, dynamicOffsets) {
+      pass.setBindGroups.push({ slot, group, dynamicOffsets });
+    },
+    /**
+     * @param {number} vertexCount
+     * @param {number} instanceCount
+     * @param {number} firstVertex
+     * @param {number} firstInstance
+     */
+    draw(vertexCount, instanceCount, firstVertex, firstInstance) {
+      pass.draws.push({
+        vertexCount,
+        instanceCount,
+        firstVertex,
+        firstInstance,
+      });
+    },
+    end() {
+      pass.ended += 1;
+    },
+  };
+  return pass;
+}
+
+/**
  * A `GPUDevice` as `requestDevice()` resolves one: its own features, its own
  * limits, the buffer creation this slice drives, and the error channel WebGPU
  * reports asynchronous failures on.
@@ -770,6 +830,12 @@ function stubDevice(
      *   order.
      */
     createdRenderPipelines: [],
+    /**
+     * @type {object[]} Every command encoder `createCommandEncoder` opened,
+     *   newest last — each carrying the render pass it last began at `.pass`, so
+     *   a draw scenario can read back the calls the replayer made on it.
+     */
+    createdEncoders: [],
     /** @type {Array<[string, Function]>} */
     listeners: [],
     /**
@@ -843,6 +909,29 @@ function stubDevice(
       device.createdRenderPipelines.push(desc);
       if (refuseRenderPipelines !== undefined) throw refuseRenderPipelines;
       return stubRenderPipeline(desc);
+    },
+    /**
+     * A `GPUCommandEncoder` whose `beginRenderPass` hands back a
+     * {@link stubRenderPass} and keeps it at `.pass` for a check to read.
+     *
+     * @param {{ label?: string }} [desc]
+     */
+    createCommandEncoder(desc) {
+      const encoder = {
+        label: desc?.label ?? '',
+        /** @type {object[]} Every `GPURenderPassDescriptor`, in order. */
+        beganPasses: [],
+        /** @type {object|null} The render pass it last began. */
+        pass: null,
+        /** @param {object} passDesc */
+        beginRenderPass(passDesc) {
+          encoder.beganPasses.push(passDesc);
+          encoder.pass = stubRenderPass();
+          return encoder.pass;
+        },
+      };
+      device.createdEncoders.push(encoder);
+      return encoder;
     },
   };
   return device;
@@ -1560,14 +1649,18 @@ async function main() {
       'DestroyComputePipeline',
       'CreateGraphicsPipeline',
       'DestroyGraphicsPipeline',
-      // The readback path, this slice's addition. Each records or answers rather
-      // than throwing; the ones that cannot proceed (a pass with no encoder, a
-      // poll of a readback nothing requested) route to the error queue, which is
-      // not a throw. Draws, bindings and pipelines bound into a pass are still
-      // unimplemented and still throw.
+      // The readback path and the draw arms. Each records or answers rather than
+      // throwing; the ones that cannot proceed (a pass with no encoder, a bind
+      // or draw with no pass open, a poll of a readback nothing requested) route
+      // to the error queue, which is not a throw. `PushConstants` is refused on
+      // the error queue too — WebGPU has none — rather than thrown.
       'CreateCommandEncoder',
       'BeginRenderPass',
       'EndRenderPass',
+      'BindGraphicsPipeline',
+      'BindGroup',
+      'PushConstants',
+      'Draw',
       'CopyImageToBuffer',
       'Finish',
       'Submit',
@@ -5024,6 +5117,256 @@ async function main() {
     check(
       replayer.graphicsPipelines.get(graphicsPipeline.pipeline) === undefined,
       'and destroying the render pipeline by its own handle releases it'
+    );
+  }
+
+  // ---- the draw arms: a pipeline bound and a triangle drawn into a pass ----
+  //
+  // `BindGraphicsPipeline`, `BindGroup` and `Draw` record onto the render pass
+  // the encoder opened, so a check reads the call the replayer made on the pass
+  // (spied by `stubRenderPass`). None answers a reply and none has a browser
+  // object to read back, so a malformed one — no pass open, an unresolvable
+  // handle — leaves a line on the device's error queue instead of throwing.
+  // `PushConstants` is refused outright, since WebGPU has none.
+  const encoderCommand = {
+    name: 'CreateCommandEncoder',
+    label: null,
+    queue: handle(1, 1),
+  };
+  const openPass = {
+    name: 'BeginRenderPass',
+    label: null,
+    colorAttachments: [],
+    depthStencilAttachment: null,
+    renderArea: { x: 0, y: 0, width: 1, height: 1 },
+  };
+  /**
+   * Opens an encoder and a render pass on `replayer` and hands back the pass
+   * the device recorded, so a check can read the calls made on it.
+   *
+   * @param {Replayer} replayer
+   * @param {{ createdEncoders: object[] }} device
+   */
+  const openedPass = (replayer, device) => {
+    replayer.replay(frameOf(encoderCommand, 600n));
+    replayer.replay(frameOf(openPass, 601n));
+    return device.createdEncoders.at(-1).pass;
+  };
+  const drawOf = (vertices, instances) => ({
+    name: 'Draw',
+    vertices,
+    instances,
+  });
+  {
+    // **A draw's two ranges become WebGPU's four counts.** `0..3` vertices and
+    // `0..1` instances is three vertices of one instance, both from the origin.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(drawOf({ start: 0, end: 3 }, { start: 0, end: 1 }), 602n)
+    );
+    checkEqual(
+      pass.draws,
+      [{ vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0 }],
+      'a Draw records draw(vertexCount, instanceCount, firstVertex, firstInstance) from its ranges'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid draw leaves the error queue empty'
+    );
+  }
+  {
+    // **Non-zero starts prove the spans are widths, not ends.** `2..5`/`1..3`
+    // is three vertices and two instances, from vertex 2 and instance 1 — the
+    // case that fails if the arm passed the range ends through as counts.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(drawOf({ start: 2, end: 5 }, { start: 1, end: 3 }), 602n)
+    );
+    checkEqual(
+      pass.draws,
+      [{ vertexCount: 3, instanceCount: 2, firstVertex: 2, firstInstance: 1 }],
+      'a Draw with non-zero range starts carries the widths and the firsts through'
+    );
+  }
+  {
+    // **A draw with no pass open is a mid-frame ordering fault** — the error
+    // queue, not a throw that would take the rest of the frame down.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(drawOf({ start: 0, end: 3 }, { start: 0, end: 1 }), 602n)
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no render pass open'),
+      `a draw with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A bound pipeline reaches the pass as the resolved GPURenderPipeline.**
+    // The corpus pipeline is built first, exactly as the section above does, so
+    // its handle resolves; the pass then gets that same object.
+    const { replayer, device } = await rasterReady();
+    rasterFrame(replayer);
+    replayer.replay(frameOf(graphicsPipeline, 503n));
+    const pipeline = replayer.graphicsPipelines.get(graphicsPipeline.pipeline);
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        { name: 'BindGraphicsPipeline', pipeline: graphicsPipeline.pipeline },
+        602n
+      )
+    );
+    check(
+      pass.setPipelines.length === 1 &&
+        pass.setPipelines[0] === pipeline &&
+        replayer.pendingErrors === 0,
+      'BindGraphicsPipeline sets the resolved pipeline on the pass and queues no error'
+    );
+  }
+  {
+    // **An unresolvable pipeline handle is named on the error queue**, as
+    // `index.generation`, and nothing is set on the pass.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf({ name: 'BindGraphicsPipeline', pipeline: handle(9, 4) }, 602n)
+    );
+    const error = replayer.takeError();
+    check(
+      pass.setPipelines.length === 0 && error !== null && error.includes('9.4'),
+      `an unresolvable pipeline handle goes to the error queue naming it (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **Binding a pipeline with no pass open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf({ name: 'BindGraphicsPipeline', pipeline: handle(1, 1) }, 602n)
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no render pass open'),
+      `binding a pipeline with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A bound group reaches the pass with its slot and dynamic offsets.** The
+    // fixture's material group is built against resources at the handles it
+    // names — the bind-group section's own setup — so its handle resolves.
+    const { replayer, device } = await readyWithDevice();
+    const bufA = materialGroup.entries[0].resource.buffer;
+    const bufB = materialGroup.entries[3].resource.buffer;
+    const view = materialGroup.entries[1].resource.view;
+    const sampler = materialGroup.entries[2].resource.sampler;
+    const image = handle(220, 1);
+    replayer.replay(frameOf(emptyLayoutAt(materialGroup.layout), 200n));
+    replayer.replay(frameOf(storageBufferAt(bufA), 201n));
+    replayer.replay(frameOf(storageBufferAt(bufB), 202n));
+    replayer.replay(frameOf(sampledImageAt(image), 203n));
+    replayer.replay(frameOf(viewOf(view, image), 204n));
+    replayer.replay(frameOf(samplerAt(sampler), 205n));
+    replayer.replay(frameOf(materialGroup, 206n));
+    const group = replayer.bindGroups.get(materialGroup.group);
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'BindGroup',
+          slot: 3,
+          group: materialGroup.group,
+          dynamicOffsets: [16, 32],
+          layout: handle(7, 7),
+        },
+        602n
+      )
+    );
+    check(
+      pass.setBindGroups.length === 1 &&
+        pass.setBindGroups[0].slot === 3 &&
+        pass.setBindGroups[0].group === group &&
+        replayer.pendingErrors === 0,
+      'BindGroup sets the resolved group on its slot and queues no error'
+    );
+    checkEqual(
+      pass.setBindGroups[0].dynamicOffsets,
+      [16, 32],
+      'and the dynamic offsets reach setBindGroup as given'
+    );
+  }
+  {
+    // **An unresolvable group handle is named on the error queue.**
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'BindGroup',
+          slot: 0,
+          group: handle(5, 2),
+          dynamicOffsets: [],
+          layout: handle(7, 7),
+        },
+        602n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      pass.setBindGroups.length === 0 &&
+        error !== null &&
+        error.includes('5.2'),
+      `an unresolvable group handle goes to the error queue naming it (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **Binding a group with no pass open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'BindGroup',
+          slot: 0,
+          group: handle(1, 1),
+          dynamicOffsets: [],
+          layout: handle(7, 7),
+        },
+        602n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no render pass open'),
+      `binding a group with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **PushConstants is refused outright and does not throw.** WebGPU has no
+    // push constants, so a range never survives `createPipelineLayout` and a
+    // valid stream never reaches this arm; a hand-written one is named here
+    // rather than falling to the dispatch's throwing default.
+    const { replayer } = await readyWithDevice();
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf(
+          {
+            name: 'PushConstants',
+            stages: ['VERTEX', 'FRAGMENT'],
+            offset: 16,
+            data: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+            layout: handle(1, 1),
+          },
+          602n
+        )
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    const error = replayer.takeError();
+    check(
+      thrown === null && error !== null && error.includes('no push constants'),
+      `PushConstants is refused on the error queue without throwing (threw ${String(thrown)}, said ${JSON.stringify(error)})`
     );
   }
 

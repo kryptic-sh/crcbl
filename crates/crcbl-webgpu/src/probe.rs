@@ -57,6 +57,11 @@
 //! | [`__crcbl_web_gpu_probe_surface_caps_format`](shim::__crcbl_web_gpu_probe_surface_caps_format) | `() -> i32` | The surface's [`preferred_format`](SurfaceCaps::preferred_format), as [`crate::tag::format_code`] spells it. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_present_modes`](shim::__crcbl_web_gpu_probe_surface_caps_present_modes) | `() -> i32` | One bit per mode offered, at `1 <<` its [`crate::tag::present_mode_code`]. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_has_extent`](shim::__crcbl_web_gpu_probe_surface_caps_has_extent) | `() -> i32` | `1` if the surface reported a [`current_extent`](SurfaceCaps::current_extent), `0` if it reported none. |
+//! | [`__crcbl_web_gpu_probe_draw`](shim::__crcbl_web_gpu_probe_draw) | `() -> i32` | Encode one frame — a red-triangle pipeline, a pass that clears to [`PROBE_DRAW_CLEAR`] then binds and draws it, the copy, and a `request_readback` against [`PROBE_DRAW_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_draw_poll`](shim::__crcbl_web_gpu_probe_draw_poll) | `() -> i32` | Poll the draw's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_draw_state`](shim::__crcbl_web_gpu_probe_draw_state) | `() -> i32` | Drain, and answer one of the `DRAW_*` codes. |
+//! | [`__crcbl_web_gpu_probe_draw_bytes_ptr`](shim::__crcbl_web_gpu_probe_draw_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_draw_state`](shim::__crcbl_web_gpu_probe_draw_state) answers [`DRAW_READY`]. |
+//! | [`__crcbl_web_gpu_probe_draw_bytes_len`](shim::__crcbl_web_gpu_probe_draw_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the draw has not answered. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -389,6 +394,26 @@ pub const READBACK_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`PROBE_UNDECODABLE`]'s twin.
 pub const READBACK_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const DRAW_UNASKED: u32 = 0;
+/// The setup frame — the pipeline, a clear, a bound pipeline, a draw, the copy,
+/// the submit and the request — is on the stream, and no poll has been issued.
+pub const DRAW_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const DRAW_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const DRAW_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_draw_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_draw_bytes_len`] carry them — one drawn texel
+/// per four, which the gate checks is the draw colour and not the clear.
+pub const DRAW_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`READBACK_UNDECODABLE`]'s twin.
+pub const DRAW_UNDECODABLE: u32 = 5;
 
 /// The side of the square texture the readback probe clears and reads back.
 ///
@@ -1275,6 +1300,232 @@ pub const PROBE_GRAPHICS_PIPELINE_DESC: GraphicsPipelineDesc<'static> = Graphics
     color_targets: &PROBE_GRAPHICS_COLOR_TARGETS,
 };
 
+// The draw probe (group T): the readback probe's frame with a real pipeline
+// bound and a triangle drawn between the clear and the copy, so the pixels read
+// back are the fragment's colour rather than the clear's. Every handle it names
+// is `2 << 32` — a generation past every other probe's `1 << 32` — so its nine
+// live resources never land in another probe's slot in the shared page, the way
+// the readback and graphics-pipeline probes each reuse `1 << 32` across their own.
+
+/// The clear the draw pass loads with — the colour the draw must overwrite.
+///
+/// The same channels as [`PROBE_READBACK_CLEAR`], and exact in 8 bits for its
+/// reason. It is decisive that this is **not** [`PROBE_DRAW_COLOR_BYTES`]: a stub
+/// that binds no pipeline and draws nothing leaves these bytes in the buffer, so
+/// the gate reading back the draw colour instead is what proves the draw ran.
+pub const PROBE_DRAW_CLEAR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
+
+/// The colour the fragment shader writes, as the bytes a `Rgba8Unorm` texel
+/// holds — opaque red, `vec4<f32>(1.0, 0.0, 0.0, 1.0)`. What the gate checks
+/// every pixel against, and what only a real `setPipeline` + `draw` produces.
+pub const PROBE_DRAW_COLOR_BYTES: [u8; 4] = [255, 0, 0, 255];
+
+/// The queue the draw probe names in its command encoder. `2 << 32` — carried,
+/// not used to pick a queue: WebGPU has one implicit queue.
+pub const PROBE_DRAW_QUEUE: QueueHandle = match QueueHandle::from_bits(2 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 2 is not zero"),
+};
+
+/// The command buffer the draw probe finishes its encoder into. `2 << 32`.
+pub const PROBE_DRAW_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(2 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 2 is not zero"),
+    };
+
+/// The in-flight readback the draw probe requests and polls. `2 << 32`.
+pub const PROBE_DRAW_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(2 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 2 is not zero"),
+};
+
+/// The image the draw probe renders into and copies out of — a 64×64
+/// [`Format::Rgba8Unorm`] colour target and copy source, [`PROBE_DRAW_IMAGE`]'s
+/// own descriptor so it never shares a slot with the readback probe's image.
+#[must_use]
+pub const fn probe_draw_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu draw image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The image handle the draw probe renders into. `2 << 32`.
+pub const PROBE_DRAW_IMAGE: ImageHandle = match ImageHandle::from_bits(2 << 32) {
+    Some(image) => image,
+    None => panic!("generation 2 is not zero"),
+};
+
+/// The image-view handle the draw probe's pass clears and draws into. `2 << 32`.
+pub const PROBE_DRAW_IMAGE_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(2 << 32) {
+    Some(view) => view,
+    None => panic!("generation 2 is not zero"),
+};
+
+/// The view of [`probe_draw_image_desc`]'s image the draw pass renders into.
+pub const PROBE_DRAW_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu draw view"),
+    image: PROBE_DRAW_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The buffer handle the drawn pixels are copied into and read back from.
+/// `2 << 32`.
+pub const PROBE_DRAW_BUFFER: BufferHandle = match BufferHandle::from_bits(2 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 2 is not zero"),
+};
+
+/// The buffer the drawn pixels are copied into and read back from — the readback
+/// buffer's shape (`64 * 64 * 4` bytes, [`MemoryLocation::HostReadback`],
+/// [`BufferUsage::TRANSFER_DST`]) under [`PROBE_DRAW_BUFFER`].
+#[must_use]
+pub const fn probe_draw_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu draw buffer"),
+        size: (PROBE_READBACK_SIZE as u64) * (PROBE_READBACK_SIZE as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The image→buffer copy that moves the drawn pixels into the readback buffer —
+/// tightly packed (`64 × 4 = 256` bytes per row, already 256-aligned), the whole
+/// 64×64 mip-0 slice, under the draw probe's own image and buffer handles.
+#[must_use]
+pub const fn probe_draw_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_DRAW_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_DRAW_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+    }
+}
+
+/// A fullscreen-triangle WGSL module that paints the target one flat colour.
+///
+/// **No vertex buffers.** `vsMain` positions three vertices from
+/// `@builtin(vertex_index)` alone — `(-1,-1)`, `(3,-1)`, `(-1,3)`, the oversized
+/// triangle that covers the whole viewport — so the draw needs no geometry bound,
+/// which is what lets the probe draw with an empty pipeline layout. `fsMain`
+/// returns a constant opaque red, [`PROBE_DRAW_COLOR_BYTES`]'s colour, so every
+/// covered texel is the same known value. `vsMain`/`fsMain` are the entry points
+/// [`PROBE_DRAW_PIPELINE_DESC`] names.
+pub const PROBE_DRAW_WGSL: &str = concat!(
+    "@vertex fn vsMain(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> { ",
+    "var positions = array<vec2<f32>, 3>(",
+    "vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0)); ",
+    "return vec4<f32>(positions[vertex], 0.0, 1.0); } ",
+    "@fragment fn fsMain() -> @location(0) vec4<f32> ",
+    "{ return vec4<f32>(1.0, 0.0, 0.0, 1.0); }"
+);
+
+/// The shader module the draw probe's frame creates for its pipeline. WGSL only,
+/// on [`PROBE_GRAPHICS_SHADER_MODULE_DESC`]'s terms, filed at
+/// [`PROBE_DRAW_SHADER_MODULE`].
+pub const PROBE_DRAW_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu draw shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_DRAW_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The shader-module handle the draw probe's pipeline names. `2 << 32`.
+pub const PROBE_DRAW_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(2 << 32) {
+        Some(module) => module,
+        None => panic!("generation 2 is not zero"),
+    };
+
+/// The pipeline-layout handle the draw probe's pipeline is built against.
+/// `2 << 32`.
+pub const PROBE_DRAW_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(2 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 2 is not zero"),
+    };
+
+/// The pipeline layout the draw probe's frame creates. **Empty** — the shaders
+/// bind nothing, so there are no bind-group layouts and no push constants.
+pub const PROBE_DRAW_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu draw pipeline layout"),
+    bind_group_layouts: &[],
+    push_constants: None,
+};
+
+/// The graphics-pipeline handle the draw probe binds and draws with. `2 << 32`.
+pub const PROBE_DRAW_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits(2 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 2 is not zero"),
+    };
+
+/// The one colour target [`PROBE_DRAW_PIPELINE_DESC`] writes.
+///
+/// [`Format::Rgba8Unorm`] to match the render target, and **`blend: None`** —
+/// opaque, so the fragment's colour is written to the texel exactly with no
+/// blend against the clear underneath it. That exactness is what lets the gate
+/// assert the read-back bytes are [`PROBE_DRAW_COLOR_BYTES`] and not a mix.
+pub const PROBE_DRAW_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTargetState {
+    format: Format::Rgba8Unorm,
+    blend: None,
+    write_mask: ColorWrites::ALL,
+}];
+
+/// The pipeline the draw probe binds before its draw.
+///
+/// **Colour only** — `depth_stencil: None`, not the graphics-probe default's
+/// reversed-Z depth — because the pass has no depth attachment and the draw only
+/// needs to write colour. A plain [`PrimitiveTopology::TriangleList`] with no
+/// culling so the fullscreen triangle always rasterises whichever way it winds;
+/// single-sampled so no attachment must be multisampled; and the one opaque
+/// colour target above. `vertex` and `fragment` both name
+/// [`PROBE_DRAW_SHADER_MODULE`] with the two entry points its WGSL declares.
+pub const PROBE_DRAW_PIPELINE_DESC: GraphicsPipelineDesc<'static> = GraphicsPipelineDesc {
+    label: Some("crcbl-webgpu draw pipeline"),
+    layout: PROBE_DRAW_PIPELINE_LAYOUT,
+    vertex: ShaderEntry {
+        module: PROBE_DRAW_SHADER_MODULE,
+        entry_point: "vsMain",
+    },
+    fragment: Some(ShaderEntry {
+        module: PROBE_DRAW_SHADER_MODULE,
+        entry_point: "fsMain",
+    }),
+    primitive: PrimitiveState {
+        topology: PrimitiveTopology::TriangleList,
+        front_face: FrontFace::Ccw,
+        cull_mode: CullMode::None,
+        polygon_mode: PolygonMode::Fill,
+        depth_clamp: false,
+    },
+    depth_stencil: None,
+    multisample: MultisampleState {
+        samples: 1,
+        mask: !0,
+        alpha_to_coverage: false,
+    },
+    color_targets: &PROBE_DRAW_COLOR_TARGETS,
+};
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -1446,6 +1697,74 @@ impl ReadbackProbe {
     }
 }
 
+/// One draw-and-read-back, from the frame that drew to the bytes read back.
+///
+/// [`ReadbackProbe`]'s state machine over again, and deliberately its own rather
+/// than a share of it: the two probes are drawing distinct frames and settling on
+/// their own schedules, so each holds its own place in the poll protocol. A draw
+/// probe *is* a readback at heart — its setup frame ends in the same
+/// `request_readback`, and it is answered by the same
+/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
+/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending) — so the transitions
+/// mirror the readback's exactly.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum DrawProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — one `Rgba8Unorm` texel per four, every one the
+        /// drawn colour if the draw ran.
+        bytes: Vec<u8>,
+    },
+}
+
+impl DrawProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`ReadbackProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            // A reply of another shape naming this sequence settles rather than
+            // waits, exactly as [`ReadbackProbe::absorb`] argues: leave it
+            // `Pending` for the gate's deadline to catch.
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -1479,6 +1798,10 @@ struct Probe {
     /// [`READBACK_UNDECODABLE`]. Its own string for [`reason`](Self::reason)'s
     /// reason.
     readback_reason: String,
+    draw: DrawProbe,
+    /// A decode error the draw drain hit, for [`DRAW_UNDECODABLE`]. Its own
+    /// string for [`reason`](Self::reason)'s reason.
+    draw_reason: String,
 }
 
 impl Probe {
@@ -1493,6 +1816,8 @@ impl Probe {
             caps_reason: String::new(),
             readback: ReadbackProbe::Unasked,
             readback_reason: String::new(),
+            draw: DrawProbe::Unasked,
+            draw_reason: String::new(),
         }
     }
 
@@ -1907,6 +2232,7 @@ impl Probe {
                 self.device.absorb(&replies);
                 self.caps.absorb(&replies);
                 self.readback.absorb(&replies);
+                self.draw.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -2130,6 +2456,127 @@ impl Probe {
     fn readback_bytes(&self) -> &[u8] {
         match &self.readback {
             ReadbackProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the draw setup frame: a red-triangle pipeline, a pass that clears
+    /// to [`PROBE_DRAW_CLEAR`] and then binds it and draws, and the copy to a host
+    /// buffer that is read back.
+    ///
+    /// **One frame, many commands, no reply** — [`request_readback`](Self::request_readback)'s
+    /// frame with three creations prepended (the shader module, the empty pipeline
+    /// layout, the pipeline) and two commands added inside the pass (the bind and
+    /// the draw). It records the image, its view, the host buffer, the pipeline's
+    /// three resources, a command encoder, a render pass that clears the view,
+    /// **binds [`PROBE_DRAW_PIPELINE`] and draws three vertices**, the copy, the
+    /// finish, the submit, and the `request_readback` under [`PROBE_DRAW_READBACK`].
+    /// None is answered — every handle is caller-allocated — so it is
+    /// [`encode`](StreamChannel::encode); the poll is what is awaited.
+    ///
+    /// `false` until a device has opened, [`request_readback`](Self::request_readback)'s
+    /// ordering rule — every command here is a device method.
+    fn request_draw(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(PROBE_DRAW_IMAGE, &probe_draw_image_desc());
+                stream.create_image_view(PROBE_DRAW_IMAGE_VIEW, &PROBE_DRAW_VIEW_DESC);
+                stream.create_buffer(PROBE_DRAW_BUFFER, &probe_draw_buffer_desc());
+                stream
+                    .create_shader_module(PROBE_DRAW_SHADER_MODULE, &PROBE_DRAW_SHADER_MODULE_DESC);
+                stream.create_pipeline_layout(
+                    PROBE_DRAW_PIPELINE_LAYOUT,
+                    &PROBE_DRAW_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_graphics_pipeline(PROBE_DRAW_PIPELINE, &PROBE_DRAW_PIPELINE_DESC);
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu draw encoder"),
+                    queue: PROBE_DRAW_QUEUE,
+                });
+                let attachments = [ColorAttachment {
+                    view: PROBE_DRAW_IMAGE_VIEW,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(PROBE_DRAW_CLEAR),
+                }];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu draw pass"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                });
+                stream.bind_graphics_pipeline(PROBE_DRAW_PIPELINE);
+                stream.draw(0..3, 0..1);
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_draw_copy());
+                stream.finish(PROBE_DRAW_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_DRAW_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_DRAW_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu draw readback"),
+                        buffer: PROBE_DRAW_BUFFER,
+                        offset: 0,
+                        size: probe_draw_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.draw = DrawProbe::Requested;
+            self.draw_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// draw's readback and register its wait, unless it is already waiting or
+    /// ready — [`poll_readback`](Self::poll_readback)'s protocol on the draw's
+    /// handle.
+    fn poll_draw(&mut self) -> bool {
+        if !matches!(self.draw, DrawProbe::Requested | DrawProbe::Pending) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_DRAW_READBACK))
+        else {
+            return false;
+        };
+        self.draw = DrawProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the draw readback has got to.
+    fn draw_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.draw_reason = error.to_string();
+            return DRAW_UNDECODABLE;
+        }
+        match &self.draw {
+            DrawProbe::Unasked => DRAW_UNASKED,
+            DrawProbe::Requested => DRAW_REQUESTED,
+            DrawProbe::Waiting { .. } => DRAW_WAITING,
+            DrawProbe::Pending => DRAW_PENDING,
+            DrawProbe::Ready { .. } => DRAW_READY,
+        }
+    }
+
+    /// The bytes the draw readback came back with, or an empty slice if it has
+    /// not.
+    fn draw_bytes(&self) -> &[u8] {
+        match &self.draw {
+            DrawProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -2830,6 +3277,76 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Ask the page to draw a red triangle over a clear and start reading it back
+    /// on the device it opened.
+    ///
+    /// `1` when the setup frame — the pipeline's three resources, image, view,
+    /// host buffer, encoder, a render pass that clears then binds and draws, the
+    /// copy, finish, submit and `request_readback` — is on the stream; `0` when no
+    /// device has opened yet, the probe is re-entered, or another channel is
+    /// installed.
+    ///
+    /// **This is the decisive observation point of the draw arms**: the readback
+    /// probe proves a clear reaches host memory, and this proves a `setPipeline` +
+    /// `draw` overwrites that clear — its bytes are the fragment's colour, not the
+    /// clear's, and a stub that skips the draw cannot forge them.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_draw() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_draw()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the draw's in-flight readback, once, on the reply channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for — no
+    /// draw requested, a poll already unanswered, or the bytes already in — or when
+    /// the channel would not take it. A no-op until the previous poll is answered,
+    /// so the gate can call it blindly each frame.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_draw_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_draw()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the draw readback has got to — one of
+    /// the `DRAW_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_draw_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.draw_state(),
+            Err(_) => super::DRAW_UNASKED,
+        })
+    }
+
+    /// A pointer into wasm memory to the bytes the draw readback came back with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_draw_bytes_len`] bytes from here, and only once
+    /// [`__crcbl_web_gpu_probe_draw_state`] has answered [`DRAW_READY`](super::DRAW_READY):
+    /// before that the length is `0` and this points at an empty buffer. Nothing
+    /// here grows wasm memory, so the pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_draw_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.draw_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_draw_bytes_ptr`] points at — the draw
+    /// readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_draw_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.draw_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -2845,14 +3362,17 @@ mod tests {
         __crcbl_web_gpu_probe_device, __crcbl_web_gpu_probe_device_features_hi,
         __crcbl_web_gpu_probe_device_features_lo, __crcbl_web_gpu_probe_device_max_image_2d,
         __crcbl_web_gpu_probe_device_reason_len, __crcbl_web_gpu_probe_device_reason_ptr,
-        __crcbl_web_gpu_probe_device_state, __crcbl_web_gpu_probe_features_hi,
-        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_graphics_pipeline,
-        __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
-        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
-        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
-        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
-        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
-        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_device_state, __crcbl_web_gpu_probe_draw,
+        __crcbl_web_gpu_probe_draw_bytes_len, __crcbl_web_gpu_probe_draw_bytes_ptr,
+        __crcbl_web_gpu_probe_draw_poll, __crcbl_web_gpu_probe_draw_state,
+        __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
+        __crcbl_web_gpu_probe_graphics_pipeline, __crcbl_web_gpu_probe_image,
+        __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_max_image_2d,
+        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_sampler,
+        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
+        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
+        __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -3859,6 +4379,216 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
         assert_eq!(__crcbl_web_gpu_probe_graphics_pipeline(), 0);
         assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The draw probe's bytes, read the way JS reads them.
+    fn draw_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_draw_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_draw_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(!ptr.is_null(), "the draw answered a length with no pointer");
+        // SAFETY: `ptr` and `len` are this thread's `Probe::draw` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **Every draw handle is a generation past every other probe's**, which is
+    /// the whole point of `2 << 32`: the draw frame has an image, a view, a
+    /// buffer, a shader module, a pipeline layout, a pipeline, a command buffer, a
+    /// queue and a readback all live at once, and none of them may land in the
+    /// slot the readback or graphics-pipeline probe (both at `1 << 32`) files its
+    /// own resources under in the shared page.
+    #[test]
+    fn the_draw_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_DRAW_IMAGE.to_bits(),
+            PROBE_DRAW_IMAGE_VIEW.to_bits(),
+            PROBE_DRAW_BUFFER.to_bits(),
+            PROBE_DRAW_SHADER_MODULE.to_bits(),
+            PROBE_DRAW_PIPELINE_LAYOUT.to_bits(),
+            PROBE_DRAW_PIPELINE.to_bits(),
+            PROBE_DRAW_COMMAND_BUFFER.to_bits(),
+            PROBE_DRAW_QUEUE.to_bits(),
+            PROBE_DRAW_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits, 2 << 32, "every draw handle is generation two");
+        }
+        // The graphics-pipeline probe (group R) and the readback probe (group S)
+        // both sit at `1 << 32`, so the draw probe is one generation clear of both.
+        assert_ne!(
+            PROBE_DRAW_PIPELINE.to_bits(),
+            PROBE_GRAPHICS_PIPELINE.to_bits()
+        );
+        assert_ne!(PROBE_DRAW_IMAGE.to_bits(), PROBE_IMAGE.to_bits());
+        assert_ne!(PROBE_DRAW_READBACK.to_bits(), PROBE_READBACK.to_bits());
+    }
+
+    /// The draw half: **one export, a whole frame** that clears and then draws.
+    /// The pipeline's three resources come first, then the encoder and a render
+    /// pass that clears — and, unlike the readback probe's clear-only pass, binds
+    /// the pipeline and draws before the copy, the finish, the submit and the
+    /// `request_readback` that the poll will chase.
+    #[test]
+    fn the_draw_export_encodes_the_pipeline_the_clear_the_bind_and_the_draw() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_draw(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateShaderModule",
+                "CreatePipelineLayout",
+                "CreateGraphicsPipeline",
+                "CreateCommandEncoder",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "Draw",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the frame builds the pipeline, then clears, binds, draws and reads back"
+        );
+        // The two commands the draw arms add inside the pass, verbatim: the bind
+        // names the draw pipeline, and the draw is three vertices of one instance
+        // — the fullscreen triangle.
+        assert!(commands.contains(&Command::BindGraphicsPipeline {
+            pipeline: PROBE_DRAW_PIPELINE,
+        }));
+        assert!(commands.contains(&Command::Draw {
+            vertices: 0..3,
+            instances: 0..1,
+        }));
+    }
+
+    /// **Nothing waits on the setup frame**: every command in it is caller-
+    /// allocated and answered by nothing, so the wait belongs to the poll, not
+    /// here — a registered wait would hold a slot for a reply never coming.
+    #[test]
+    fn the_draw_setup_frame_registers_no_wait_because_the_poll_is_what_is_awaited() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_draw(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(__crcbl_web_gpu_probe_draw_state(), DRAW_REQUESTED);
+    }
+
+    /// **A device has to have opened first**, the readback probe's ordering rule:
+    /// every command the frame carries is a device method.
+    #[test]
+    fn a_draw_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_draw(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_draw_state(), DRAW_UNASKED);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_draw(), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The whole draw exchange through the exports alone: request, poll, and a
+    /// `ReadbackReady` carrying the drawn pixels — which reach the bytes exports
+    /// as the draw colour. This is the browser gate's path with the replayer
+    /// replaced by a `ReplyWriter`, as a `cargo test` has no `navigator.gpu`.
+    #[test]
+    fn the_draw_readback_reaches_the_bytes_exports_as_the_drawn_colour() {
+        // `open_device` spends sequences 0 (the adapter) and 1 (the device), so
+        // the setup frame starts at 2 and the poll that follows it is the command
+        // after the frame's own — read the length off the frame rather than
+        // hard-wiring it so a later command added to the frame does not silently
+        // point the reply at the wrong sequence.
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_draw(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_draw_state(), DRAW_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_draw_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_draw_state(), DRAW_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_DRAW_READBACK,
+            }]
+        );
+
+        let mut drawn = Vec::new();
+        for _ in 0..(PROBE_READBACK_SIZE * PROBE_READBACK_SIZE) {
+            drawn.extend_from_slice(&PROBE_DRAW_COLOR_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_DRAW_READBACK, &drawn);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_draw_state(), DRAW_READY);
+        assert_eq!(draw_bytes(), drawn);
+        assert_eq!(&draw_bytes()[..4], PROBE_DRAW_COLOR_BYTES);
+        // The draw colour is not the clear's byte form the pass loaded with —
+        // the whole evidence the gate reads back from the browser. The draw
+        // probe's clear shares the readback probe's channels, so its bytes are
+        // `PROBE_READBACK_CLEAR_BYTES`.
+        assert_ne!(PROBE_DRAW_COLOR_BYTES, PROBE_READBACK_CLEAR_BYTES);
+    }
+
+    /// A `ReadbackPending` for the poll's sequence drops the draw back to
+    /// `Pending`, so the next frame polls again — [`DrawProbe::absorb`]'s pending
+    /// arm, tested at the enum because the sequence is known there.
+    #[test]
+    fn a_readback_pending_reply_drops_the_draw_back_to_pending() {
+        let mut draw = DrawProbe::Waiting { sequence: 7 };
+        let advanced = draw.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_DRAW_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(draw, DrawProbe::Pending);
+    }
+
+    /// A `ReadbackReady` for the poll's sequence carries the bytes into `Ready`.
+    #[test]
+    fn a_readback_ready_reply_carries_the_draw_bytes_into_ready() {
+        let mut draw = DrawProbe::Waiting { sequence: 7 };
+        let bytes = vec![255, 0, 0, 255];
+        let advanced = draw.absorb(&[(
+            7,
+            Reply::ReadbackReady {
+                readback: PROBE_DRAW_READBACK,
+                data: bytes.clone(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(draw, DrawProbe::Ready { bytes });
+    }
+
+    /// A reply for another sequence leaves the draw waiting, exactly as it leaves
+    /// every other probe: one channel carries every probe's replies, and each
+    /// takes only its own.
+    #[test]
+    fn a_draw_probe_ignores_a_reply_for_another_sequence() {
+        let mut draw = DrawProbe::Waiting { sequence: 7 };
+        let advanced = draw.absorb(&[(
+            8,
+            Reply::ReadbackReady {
+                readback: PROBE_DRAW_READBACK,
+                data: vec![1, 2, 3, 4],
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(draw, DrawProbe::Waiting { sequence: 7 });
     }
 
     /// The capabilities a browser answers with, as `gpu-replay.js` builds them:
