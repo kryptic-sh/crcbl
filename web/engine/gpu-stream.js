@@ -122,6 +122,11 @@ const COPY_IMAGE_TO_BUFFER_TAG = 0x78;
 // The buffer→buffer copy that carries a dispatch's storage-buffer output to a
 // host-readable buffer — the only way a dispatch is observed.
 const COPY_BUFFER_TO_BUFFER_TAG = 0x79;
+// The buffer→image upload copy and the image→image copy, plus a buffer fill
+// WebGPU can only perform for the value zero (`clearBuffer`).
+const COPY_BUFFER_TO_IMAGE_TAG = 0x7a;
+const COPY_IMAGE_TO_IMAGE_TAG = 0x7b;
+const FILL_BUFFER_TAG = 0x7c;
 const ENUMERATE_ADAPTERS_TAG = 0x90;
 const REQUEST_DEVICE_TAG = 0x91;
 const SURFACE_CAPS_TAG = 0x92;
@@ -1941,6 +1946,64 @@ function decodeCommand(r) {
         name: 'CopyBufferToBuffer',
         copy: { src, srcOffset, dst, dstOffset, size },
       };
+    }
+    case COPY_BUFFER_TO_IMAGE_TAG: {
+      // `BufferImageCopy` in declaration order, the same layout
+      // `CopyImageToBuffer` reads; the direction is the tag, never a field.
+      // `bufferRowLength` is in TEXELS and `0` is tightly packed, the texel→byte
+      // conversion the replayer's. See `gpu-replay.js`.
+      const buffer = r.readHandle('BufferImageCopy::buffer');
+      const bufferOffset = r.readU64();
+      const bufferRowLength = r.readU32();
+      const bufferImageHeight = r.readU32();
+      const image = r.readHandle('BufferImageCopy::image');
+      const imageSubresource = r.readSubresourceLayers();
+      const imageOffset = r.readOffset();
+      const imageExtent = r.readExtent();
+      return {
+        name: 'CopyBufferToImage',
+        buffer,
+        bufferOffset,
+        bufferRowLength,
+        bufferImageHeight,
+        image,
+        imageSubresource,
+        imageOffset,
+        imageExtent,
+      };
+    }
+    case COPY_IMAGE_TO_IMAGE_TAG: {
+      // `ImageCopy` in declaration order: source, its subresource and offset,
+      // destination, its subresource and offset, then the shared extent.
+      const src = r.readHandle('ImageCopy::src');
+      const srcSubresource = r.readSubresourceLayers();
+      const srcOffset = r.readOffset();
+      const dst = r.readHandle('ImageCopy::dst');
+      const dstSubresource = r.readSubresourceLayers();
+      const dstOffset = r.readOffset();
+      const extent = r.readExtent();
+      return {
+        name: 'CopyImageToImage',
+        copy: {
+          src,
+          srcSubresource,
+          srcOffset,
+          dst,
+          dstSubresource,
+          dstOffset,
+          extent,
+        },
+      };
+    }
+    case FILL_BUFFER_TAG: {
+      // The buffer, its offset and size (`u64`, `BigInt`), then the `u32` value.
+      // Only `0` is expressible on WebGPU (`clearBuffer`); the replayer refuses
+      // any other value.
+      const buffer = r.readHandle('FillBuffer::buffer');
+      const offset = r.readU64();
+      const size = r.readU64();
+      const value = r.readU32();
+      return { name: 'FillBuffer', buffer, offset, size, value };
     }
     case DRAW_TAG: {
       // Spelled out rather than built inline: the two halves of each range are

@@ -989,6 +989,21 @@ function stubDevice(
          *   dstOffset: number, size: number }>} Every `copyBufferToBuffer`.
          */
         bufferCopies: [],
+        /**
+         * @type {Array<{ source: object, destination: object, size: object }>}
+         *   Every `copyBufferToTexture`.
+         */
+        bufferToImageCopies: [],
+        /**
+         * @type {Array<{ source: object, destination: object, size: object }>}
+         *   Every `copyTextureToTexture`.
+         */
+        imageCopies: [],
+        /**
+         * @type {Array<{ buffer: object, offset: number, size: number }>} Every
+         *   `clearBuffer`.
+         */
+        bufferFills: [],
         /** @param {object} passDesc */
         beginRenderPass(passDesc) {
           encoder.beganPasses.push(passDesc);
@@ -1010,6 +1025,30 @@ function stubDevice(
          */
         copyBufferToBuffer(src, srcOffset, dst, dstOffset, size) {
           encoder.bufferCopies.push({ src, srcOffset, dst, dstOffset, size });
+        },
+        /**
+         * @param {object} source A `GPUImageCopyBuffer`.
+         * @param {object} destination A `GPUImageCopyTexture`.
+         * @param {object} size A `GPUExtent3D`.
+         */
+        copyBufferToTexture(source, destination, size) {
+          encoder.bufferToImageCopies.push({ source, destination, size });
+        },
+        /**
+         * @param {object} source A `GPUImageCopyTexture`.
+         * @param {object} destination A `GPUImageCopyTexture`.
+         * @param {object} size A `GPUExtent3D`.
+         */
+        copyTextureToTexture(source, destination, size) {
+          encoder.imageCopies.push({ source, destination, size });
+        },
+        /**
+         * @param {object} buffer
+         * @param {number} offset
+         * @param {number} size
+         */
+        clearBuffer(buffer, offset, size) {
+          encoder.bufferFills.push({ buffer, offset, size });
         },
       };
       device.createdEncoders.push(encoder);
@@ -1749,6 +1788,9 @@ async function main() {
       'Dispatch',
       'CopyImageToBuffer',
       'CopyBufferToBuffer',
+      'CopyBufferToImage',
+      'CopyImageToImage',
+      'FillBuffer',
       'Finish',
       'Submit',
       'RequestReadback',
@@ -5734,6 +5776,379 @@ async function main() {
     check(
       error !== null && error.includes('no command encoder open'),
       `a buffer copy with no encoder goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+
+  // ---- the remaining copies and the buffer fill ----------------------------
+  //
+  // `CopyBufferToImage` and `CopyImageToImage` record onto the encoder itself
+  // (spied by `bufferToImageCopies` / `imageCopies`), and `FillBuffer` maps a
+  // zero fill to `clearBuffer` (spied by `bufferFills`) and refuses any other
+  // value to the error queue — the same judgement `crcbl-wgpu` makes. None
+  // answers a reply, so a malformed one leaves a line on the device's error
+  // queue instead of throwing.
+  {
+    // **A buffer→image copy reaches the encoder with buffer and image resolved,
+    // the texel pitch turned into bytesPerRow, and the arguments in
+    // copyBufferToTexture's order (source = buffer layout, destination =
+    // texture) — the reverse of copyTextureToBuffer.** `bufferRowLength` is 0
+    // here, so the row is the copy width (4 texels × 4 bytes = 16).
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(80, 1);
+    const imgH = handle(90, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    replayer.replay(frameOf(sampledImageAt(imgH), 701n));
+    const buffer = replayer.buffers.get(bufH);
+    const image = replayer.images.get(imgH);
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CopyBufferToImage',
+          buffer: bufH,
+          bufferOffset: 8n,
+          bufferRowLength: 0,
+          bufferImageHeight: 0,
+          image: imgH,
+          imageSubresource: {
+            aspect: ['COLOR'],
+            mip: 0,
+            baseLayer: 0,
+            layerCount: 1,
+          },
+          imageOffset: { x: 2, y: 3, z: 0 },
+          imageExtent: { width: 4, height: 4, depthOrLayers: 1 },
+        },
+        703n
+      )
+    );
+    const copies = device.createdEncoders.at(-1).bufferToImageCopies;
+    check(
+      copies.length === 1 &&
+        copies[0].source.buffer === buffer &&
+        copies[0].source.offset === 8 &&
+        copies[0].source.bytesPerRow === 16 &&
+        copies[0].destination.texture === image &&
+        copies[0].destination.origin.x === 2 &&
+        copies[0].destination.origin.y === 3 &&
+        copies[0].size.width === 4 &&
+        copies[0].size.height === 4 &&
+        replayer.pendingErrors === 0,
+      'CopyBufferToImage records copyBufferToTexture(bufferLayout, textureView, size) with resolved handles'
+    );
+  }
+  {
+    // **An unresolvable source buffer or destination image is named on the error
+    // queue — two DISTINCT messages.** The image is built for the buffer case and
+    // the buffer for the image case, so each isolates the handle that did not
+    // resolve.
+    const copyOf = (buffer, image) => ({
+      name: 'CopyBufferToImage',
+      buffer,
+      bufferOffset: 0n,
+      bufferRowLength: 0,
+      bufferImageHeight: 0,
+      image,
+      imageSubresource: {
+        aspect: ['COLOR'],
+        mip: 0,
+        baseLayer: 0,
+        layerCount: 1,
+      },
+      imageOffset: { x: 0, y: 0, z: 0 },
+      imageExtent: { width: 4, height: 4, depthOrLayers: 1 },
+    });
+    const bufCase = await readyWithDevice();
+    bufCase.replayer.replay(frameOf(sampledImageAt(handle(90, 1)), 700n));
+    bufCase.replayer.replay(frameOf(encoderCommand, 701n));
+    bufCase.replayer.replay(
+      frameOf(copyOf(handle(80, 1), handle(90, 1)), 702n)
+    );
+    const bufError = bufCase.replayer.takeError();
+
+    const imgCase = await readyWithDevice();
+    imgCase.replayer.replay(frameOf(storageBufferAt(handle(80, 1)), 700n));
+    imgCase.replayer.replay(frameOf(encoderCommand, 701n));
+    imgCase.replayer.replay(
+      frameOf(copyOf(handle(80, 1), handle(90, 1)), 702n)
+    );
+    const imgError = imgCase.replayer.takeError();
+    check(
+      bufError !== null &&
+        bufError.includes('80.1') &&
+        bufError.includes('from buffer') &&
+        imgError !== null &&
+        imgError.includes('90.1') &&
+        imgError.includes('image'),
+      `an unresolvable buffer→image source names the buffer and destination names the image, distinctly (${JSON.stringify([bufError, imgError])})`
+    );
+  }
+  {
+    // **A buffer→image copy with no encoder open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CopyBufferToImage',
+          buffer: handle(80, 1),
+          bufferOffset: 0n,
+          bufferRowLength: 0,
+          bufferImageHeight: 0,
+          image: handle(90, 1),
+          imageSubresource: {
+            aspect: ['COLOR'],
+            mip: 0,
+            baseLayer: 0,
+            layerCount: 1,
+          },
+          imageOffset: { x: 0, y: 0, z: 0 },
+          imageExtent: { width: 4, height: 4, depthOrLayers: 1 },
+        },
+        702n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no command encoder open'),
+      `a buffer→image copy with no encoder goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **An image→image copy reaches the encoder with both images resolved and the
+    // two sides' mip levels, origins and the shared extent passed through.** The
+    // two sides differ in mip and origin so a source/destination transposition is
+    // visible.
+    const { replayer, device } = await readyWithDevice();
+    const srcH = handle(90, 1);
+    const dstH = handle(91, 1);
+    replayer.replay(frameOf(sampledImageAt(srcH), 700n));
+    replayer.replay(frameOf(sampledImageAt(dstH), 701n));
+    const src = replayer.images.get(srcH);
+    const dst = replayer.images.get(dstH);
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CopyImageToImage',
+          copy: {
+            src: srcH,
+            srcSubresource: {
+              aspect: ['COLOR'],
+              mip: 0,
+              baseLayer: 0,
+              layerCount: 1,
+            },
+            srcOffset: { x: 1, y: 2, z: 0 },
+            dst: dstH,
+            dstSubresource: {
+              aspect: ['COLOR'],
+              mip: 0,
+              baseLayer: 0,
+              layerCount: 1,
+            },
+            dstOffset: { x: 3, y: 4, z: 0 },
+            extent: { width: 2, height: 2, depthOrLayers: 1 },
+          },
+        },
+        703n
+      )
+    );
+    const copies = device.createdEncoders.at(-1).imageCopies;
+    check(
+      copies.length === 1 &&
+        copies[0].source.texture === src &&
+        copies[0].source.origin.x === 1 &&
+        copies[0].source.origin.y === 2 &&
+        copies[0].destination.texture === dst &&
+        copies[0].destination.origin.x === 3 &&
+        copies[0].destination.origin.y === 4 &&
+        copies[0].size.width === 2 &&
+        copies[0].size.height === 2 &&
+        replayer.pendingErrors === 0,
+      'CopyImageToImage records copyTextureToTexture(src, dst, extent) with resolved images'
+    );
+  }
+  {
+    // **An unresolvable source or destination image is named on the error queue —
+    // two DISTINCT messages.**
+    const copyOf = (src, dst) => ({
+      name: 'CopyImageToImage',
+      copy: {
+        src,
+        srcSubresource: {
+          aspect: ['COLOR'],
+          mip: 0,
+          baseLayer: 0,
+          layerCount: 1,
+        },
+        srcOffset: { x: 0, y: 0, z: 0 },
+        dst,
+        dstSubresource: {
+          aspect: ['COLOR'],
+          mip: 0,
+          baseLayer: 0,
+          layerCount: 1,
+        },
+        dstOffset: { x: 0, y: 0, z: 0 },
+        extent: { width: 2, height: 2, depthOrLayers: 1 },
+      },
+    });
+    const srcCase = await readyWithDevice();
+    srcCase.replayer.replay(frameOf(sampledImageAt(handle(91, 1)), 700n));
+    srcCase.replayer.replay(frameOf(encoderCommand, 701n));
+    srcCase.replayer.replay(
+      frameOf(copyOf(handle(90, 1), handle(91, 1)), 702n)
+    );
+    const srcError = srcCase.replayer.takeError();
+
+    const dstCase = await readyWithDevice();
+    dstCase.replayer.replay(frameOf(sampledImageAt(handle(90, 1)), 700n));
+    dstCase.replayer.replay(frameOf(encoderCommand, 701n));
+    dstCase.replayer.replay(
+      frameOf(copyOf(handle(90, 1), handle(91, 1)), 702n)
+    );
+    const dstError = dstCase.replayer.takeError();
+    check(
+      srcError !== null &&
+        srcError.includes('90.1') &&
+        srcError.includes('from') &&
+        dstError !== null &&
+        dstError.includes('91.1') &&
+        dstError.includes('into'),
+      `an unresolvable image copy source names it (from) and a destination names it (into), distinctly (${JSON.stringify([srcError, dstError])})`
+    );
+  }
+  {
+    // **An image→image copy with no encoder open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CopyImageToImage',
+          copy: {
+            src: handle(90, 1),
+            srcSubresource: {
+              aspect: ['COLOR'],
+              mip: 0,
+              baseLayer: 0,
+              layerCount: 1,
+            },
+            srcOffset: { x: 0, y: 0, z: 0 },
+            dst: handle(91, 1),
+            dstSubresource: {
+              aspect: ['COLOR'],
+              mip: 0,
+              baseLayer: 0,
+              layerCount: 1,
+            },
+            dstOffset: { x: 0, y: 0, z: 0 },
+            extent: { width: 2, height: 2, depthOrLayers: 1 },
+          },
+        },
+        702n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no command encoder open'),
+      `an image→image copy with no encoder goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A zero fill maps to clearBuffer(buffer, offset, size) with the buffer
+    // resolved and the u64 offset and size narrowed to Number.**
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(80, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    const buffer = replayer.buffers.get(bufH);
+    replayer.replay(frameOf(encoderCommand, 701n));
+    replayer.replay(
+      frameOf(
+        { name: 'FillBuffer', buffer: bufH, offset: 16n, size: 64n, value: 0 },
+        702n
+      )
+    );
+    const fills = device.createdEncoders.at(-1).bufferFills;
+    check(
+      fills.length === 1 &&
+        fills[0].buffer === buffer &&
+        fills[0].offset === 16 &&
+        fills[0].size === 64 &&
+        replayer.pendingErrors === 0,
+      'FillBuffer with value 0 records clearBuffer(buffer, offset, size) with the buffer resolved'
+    );
+  }
+  {
+    // **A non-zero fill is refused to the error queue and records NO clearBuffer**
+    // — WebGPU's clearBuffer is zero-only, the same refusal crcbl-wgpu makes. The
+    // buffer is built so the refusal is the value's, not an unresolvable handle.
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(80, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    replayer.replay(frameOf(encoderCommand, 701n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'FillBuffer',
+          buffer: bufH,
+          offset: 0n,
+          size: 64n,
+          value: 0xdeadbeef,
+        },
+        702n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('non-zero') &&
+        error.includes('clearBuffer') &&
+        device.createdEncoders.at(-1).bufferFills.length === 0,
+      `a non-zero fill is refused and records no clearBuffer (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A fill with no encoder open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'FillBuffer',
+          buffer: handle(80, 1),
+          offset: 0n,
+          size: 4n,
+          value: 0,
+        },
+        702n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no command encoder open'),
+      `a fill with no encoder goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A zero fill of an unresolvable buffer is named on the error queue.** The
+    // encoder is open, so the refusal is the buffer's.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(encoderCommand, 701n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'FillBuffer',
+          buffer: handle(80, 1),
+          offset: 0n,
+          size: 4n,
+          value: 0,
+        },
+        702n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('80.1'),
+      `a fill of an unresolvable buffer names it on the error queue (${JSON.stringify(error)})`
     );
   }
 

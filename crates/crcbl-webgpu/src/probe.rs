@@ -67,6 +67,16 @@
 //! | [`__crcbl_web_gpu_probe_compute_state`](shim::__crcbl_web_gpu_probe_compute_state) | `() -> i32` | Drain, and answer one of the `COMPUTE_*` codes. |
 //! | [`__crcbl_web_gpu_probe_compute_bytes_ptr`](shim::__crcbl_web_gpu_probe_compute_bytes_ptr) | `() -> i32` | Where the dispatched bytes start, once [`__crcbl_web_gpu_probe_compute_state`](shim::__crcbl_web_gpu_probe_compute_state) answers [`COMPUTE_READY`]. |
 //! | [`__crcbl_web_gpu_probe_compute_bytes_len`](shim::__crcbl_web_gpu_probe_compute_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the dispatch has not answered. |
+//! | [`__crcbl_web_gpu_probe_copychain`](shim::__crcbl_web_gpu_probe_copychain) | `() -> i32` | Encode one frame — a dispatch that fills a storage buffer with [`PROBE_COPYCHAIN_PATTERN`], a buffer→image copy into a texture, an image→image copy to a second texture, an image→buffer copy out to a host buffer, and a `request_readback` against [`PROBE_COPYCHAIN_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_copychain_poll`](shim::__crcbl_web_gpu_probe_copychain_poll) | `() -> i32` | Poll the copy chain's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_copychain_state`](shim::__crcbl_web_gpu_probe_copychain_state) | `() -> i32` | Drain, and answer one of the `COPYCHAIN_*` codes. |
+//! | [`__crcbl_web_gpu_probe_copychain_bytes_ptr`](shim::__crcbl_web_gpu_probe_copychain_bytes_ptr) | `() -> i32` | Where the copied bytes start, once [`__crcbl_web_gpu_probe_copychain_state`](shim::__crcbl_web_gpu_probe_copychain_state) answers [`COPYCHAIN_READY`]. |
+//! | [`__crcbl_web_gpu_probe_copychain_bytes_len`](shim::__crcbl_web_gpu_probe_copychain_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the copy chain has not answered. |
+//! | [`__crcbl_web_gpu_probe_fill`](shim::__crcbl_web_gpu_probe_fill) | `() -> i32` | Encode one frame — a dispatch that fills a storage buffer with [`PROBE_FILL_PATTERN`], a zero `fill_buffer` over its first half, the copy to a host buffer, and a `request_readback` against [`PROBE_FILL_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_fill_poll`](shim::__crcbl_web_gpu_probe_fill_poll) | `() -> i32` | Poll the fill probe's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) | `() -> i32` | Drain, and answer one of the `FILL_*` codes. |
+//! | [`__crcbl_web_gpu_probe_fill_bytes_ptr`](shim::__crcbl_web_gpu_probe_fill_bytes_ptr) | `() -> i32` | Where the filled bytes start, once [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) answers [`FILL_READY`]. |
+//! | [`__crcbl_web_gpu_probe_fill_bytes_len`](shim::__crcbl_web_gpu_probe_fill_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the fill probe has not answered. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -304,7 +314,7 @@ use crcbl_hal::{
     ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle, CommandEncoderDesc,
     CompareOp, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias,
     DepthStencilState, DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect, ImageDesc, ImageHandle,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect, ImageCopy, ImageDesc, ImageHandle,
     ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
     ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, MultisampleState, Offset3d,
     PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PrimitiveState, PrimitiveTopology,
@@ -441,6 +451,51 @@ pub const COMPUTE_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`READBACK_UNDECODABLE`]'s twin.
 pub const COMPUTE_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const COPYCHAIN_UNASKED: u32 = 0;
+/// The setup frame — a dispatch that fills a storage buffer with the red
+/// pattern, the buffer→image, image→image and image→buffer copies, the submit
+/// and the request — is on the stream, and no poll has been issued.
+pub const COPYCHAIN_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const COPYCHAIN_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const COPYCHAIN_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_copychain_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_copychain_bytes_len`] carry them — 64×64
+/// `Rgba8Unorm` texels, every one [`PROBE_COPYCHAIN_PATTERN`] if both copies
+/// ran, which is what proves `copyBufferToTexture` and `copyTextureToTexture`.
+pub const COPYCHAIN_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`COMPUTE_UNDECODABLE`]'s twin.
+pub const COPYCHAIN_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const FILL_UNASKED: u32 = 0;
+/// The setup frame — a dispatch that fills a storage buffer with the pattern, a
+/// zero [`fill_buffer`](crate::StreamWriter::fill_buffer) over its first half,
+/// the copy to a host buffer, the submit and the request — is on the stream,
+/// and no poll has been issued.
+pub const FILL_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const FILL_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const FILL_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_fill_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_fill_bytes_len`] carry them — the gate checks
+/// the first half is zero (the fill ran) and the second half is still
+/// [`PROBE_FILL_PATTERN`] (the fill zeroed exactly its sub-range).
+pub const FILL_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`COMPUTE_UNDECODABLE`]'s twin.
+pub const FILL_UNDECODABLE: u32 = 5;
 
 /// The side of the square texture the readback probe clears and reads back.
 ///
@@ -1788,6 +1843,535 @@ pub const fn probe_dispatch_copy() -> BufferCopy {
     }
 }
 
+// The copy-chain probe (group V): a compute dispatch fills a storage buffer with
+// a red `rgba8` pattern, that buffer is copied INTO a texture
+// (`copy_buffer_to_image`), that texture is copied to a SECOND texture
+// (`copy_image_to_image`), and the second is copied back OUT to a host buffer
+// (`copy_image_to_buffer`) that is read back. The read-back texels are red only
+// if both new copies ran, so one chain observes them both. Every handle is
+// `4 << 32` — a generation past the dispatch probe's `3 << 32` — so its live
+// resources never land in another probe's slot in the shared page; the handle
+// kinds it shares with the fill probe (which is also `4 << 32`) are given
+// distinct indices below.
+
+/// The 32-bit pattern the dispatch writes into every slot of the storage buffer
+/// — opaque red as `Rgba8Unorm` little-endian bytes `[255, 0, 0, 255]`, a value
+/// a zero-initialised buffer or texture cannot hold, so a red read-back is proof
+/// the whole copy chain ran.
+pub const PROBE_COPYCHAIN_PATTERN: u32 = 0xFF00_00FF;
+
+/// [`PROBE_COPYCHAIN_PATTERN`] as the four little-endian bytes each texel holds
+/// it as — `[255, 0, 0, 255]`, what the gate checks every 4-byte texel against.
+pub const PROBE_COPYCHAIN_PATTERN_BYTES: [u8; 4] = PROBE_COPYCHAIN_PATTERN.to_le_bytes();
+
+/// The side of the square textures the copy chain moves through.
+///
+/// **64, so a tightly-packed `Rgba8Unorm` row is `64 × 4 = 256` bytes** — already
+/// the copy alignment WebGPU wants, exactly as [`PROBE_READBACK_SIZE`] is chosen.
+pub const PROBE_COPYCHAIN_SIZE: u32 = 64;
+
+/// The number of `u32` slots the storage buffer holds and the dispatch fills —
+/// one per texel of a [`PROBE_COPYCHAIN_SIZE`]² texture, `64 × 64 = 4096`.
+pub const PROBE_COPYCHAIN_SLOTS: u32 = PROBE_COPYCHAIN_SIZE * PROBE_COPYCHAIN_SIZE;
+
+/// The storage buffer the dispatch writes and the buffer→image copy reads.
+/// `4 << 32`, index `0`.
+pub const PROBE_COPYCHAIN_STORAGE_BUFFER: BufferHandle = match BufferHandle::from_bits(4 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The storage buffer's descriptor: [`PROBE_COPYCHAIN_SLOTS`] `u32`s (16 KiB),
+/// [`BufferUsage::STORAGE`] (the dispatch's `read_write` binding) and
+/// [`BufferUsage::TRANSFER_SRC`] (it is copied from), device-local.
+#[must_use]
+pub const fn probe_copychain_storage_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu copychain storage buffer"),
+        size: (PROBE_COPYCHAIN_SLOTS as u64) * 4,
+        usage: BufferUsage::STORAGE.union(BufferUsage::TRANSFER_SRC),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The host buffer the second texture is copied into and read back from. A
+/// distinct [`BufferHandle`] from [`PROBE_COPYCHAIN_STORAGE_BUFFER`] at `4 << 32`
+/// with index `1`.
+pub const PROBE_COPYCHAIN_HOST_BUFFER: BufferHandle = match BufferHandle::from_bits((4 << 32) | 1) {
+    Some(buffer) => buffer,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The host buffer's descriptor — the readback buffer's shape
+/// ([`MemoryLocation::HostReadback`], [`BufferUsage::TRANSFER_DST`]) at
+/// [`PROBE_COPYCHAIN_SLOTS`] `u32`s.
+#[must_use]
+pub const fn probe_copychain_host_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu copychain host buffer"),
+        size: (PROBE_COPYCHAIN_SLOTS as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The first texture — the buffer→image copy's destination and the image→image
+/// copy's source. `4 << 32`, index `0`.
+pub const PROBE_COPYCHAIN_IMAGE_A: ImageHandle = match ImageHandle::from_bits(4 << 32) {
+    Some(image) => image,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The second texture — the image→image copy's destination and the image→buffer
+/// copy's source. A distinct [`ImageHandle`] from [`PROBE_COPYCHAIN_IMAGE_A`] at
+/// `4 << 32` with index `1`.
+pub const PROBE_COPYCHAIN_IMAGE_B: ImageHandle = match ImageHandle::from_bits((4 << 32) | 1) {
+    Some(image) => image,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The two textures' shared descriptor: [`PROBE_COPYCHAIN_SIZE`]² `Rgba8Unorm`,
+/// both [`ImageUsage::TRANSFER_DST`] (each is copied into) and
+/// [`ImageUsage::TRANSFER_SRC`] (each is copied from).
+#[must_use]
+pub const fn probe_copychain_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu copychain image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_COPYCHAIN_SIZE, PROBE_COPYCHAIN_SIZE),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::TRANSFER_DST.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The compute WGSL: a `read_write` storage buffer whose every slot the shader
+/// sets to [`PROBE_COPYCHAIN_PATTERN`].
+///
+/// **`@workgroup_size(64)` and `out[gid.x]`**: `dispatch(64, 1, 1)` runs 64
+/// workgroups of 64 invocations, `4096` in all, and each writes its own slot, so
+/// the 4096-`u32` buffer is filled exactly.
+pub const PROBE_COPYCHAIN_WGSL: &str = concat!(
+    "@group(0) @binding(0) var<storage, read_write> out: array<u32>; ",
+    "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) ",
+    "{ out[gid.x] = 0xFF0000FFu; }"
+);
+
+/// The shader-module handle the copy chain's pipeline names. `4 << 32`, index
+/// `0`.
+pub const PROBE_COPYCHAIN_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(4 << 32) {
+        Some(module) => module,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The shader module the copy chain's frame creates. WGSL only, filed at
+/// [`PROBE_COPYCHAIN_SHADER_MODULE`].
+pub const PROBE_COPYCHAIN_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu copychain shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_COPYCHAIN_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The bind-group-layout handle the copy chain's pipeline is built against.
+/// `4 << 32`, index `0`.
+pub const PROBE_COPYCHAIN_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
+    match BindGroupLayoutHandle::from_bits(4 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The one binding the copy chain's shader declares: a `read_write` storage
+/// buffer at `@group(0) @binding(0)`, visible to compute.
+pub const PROBE_COPYCHAIN_BIND_GROUP_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 1] =
+    [BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::COMPUTE,
+        kind: BindingKind::StorageBuffer {
+            read_only: false,
+            dynamic: false,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    }];
+
+/// The bind-group layout the copy chain's frame creates just before the group.
+pub const PROBE_COPYCHAIN_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> =
+    BindGroupLayoutDesc {
+        label: Some("crcbl-webgpu copychain layout"),
+        entries: &PROBE_COPYCHAIN_BIND_GROUP_LAYOUT_ENTRIES,
+    };
+
+/// The bind-group handle the copy chain binds at slot 0. `4 << 32`, index `0`.
+pub const PROBE_COPYCHAIN_BIND_GROUP: BindGroupHandle = match BindGroupHandle::from_bits(4 << 32) {
+    Some(group) => group,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The one assignment the copy chain's bind group carries: the whole of
+/// [`PROBE_COPYCHAIN_STORAGE_BUFFER`] at binding 0.
+pub const PROBE_COPYCHAIN_BIND_GROUP_ENTRIES: [BindGroupEntry; 1] = [BindGroupEntry {
+    binding: 0,
+    array_index: 0,
+    resource: BindingResource::whole_buffer(PROBE_COPYCHAIN_STORAGE_BUFFER),
+}];
+
+/// The descriptor the copy chain's `create_bind_group` asks with.
+pub const PROBE_COPYCHAIN_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
+    label: Some("crcbl-webgpu copychain bind group"),
+    layout: PROBE_COPYCHAIN_BIND_GROUP_LAYOUT,
+    entries: &PROBE_COPYCHAIN_BIND_GROUP_ENTRIES,
+    variable_count: None,
+};
+
+/// The pipeline-layout handle the copy chain's pipeline is built against.
+/// `4 << 32`, index `0`.
+pub const PROBE_COPYCHAIN_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(4 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The one bind-group layout [`PROBE_COPYCHAIN_PIPELINE_LAYOUT_DESC`] names.
+pub const PROBE_COPYCHAIN_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS: [BindGroupLayoutHandle; 1] =
+    [PROBE_COPYCHAIN_BIND_GROUP_LAYOUT];
+
+/// The pipeline layout the copy chain's frame creates — the one bind-group
+/// layout above, no push constants.
+pub const PROBE_COPYCHAIN_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu copychain pipeline layout"),
+    bind_group_layouts: &PROBE_COPYCHAIN_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS,
+    push_constants: None,
+};
+
+/// The compute-pipeline handle the copy chain binds. `4 << 32`, index `0`.
+pub const PROBE_COPYCHAIN_PIPELINE: ComputePipelineHandle =
+    match ComputePipelineHandle::from_bits(4 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The pipeline the copy chain binds and runs — `workgroup_size` `[64, 1, 1]`
+/// matching the module's `@workgroup_size(64)`.
+pub const PROBE_COPYCHAIN_PIPELINE_DESC: ComputePipelineDesc<'static> = ComputePipelineDesc {
+    label: Some("crcbl-webgpu copychain pipeline"),
+    layout: PROBE_COPYCHAIN_PIPELINE_LAYOUT,
+    compute: ShaderEntry {
+        module: PROBE_COPYCHAIN_SHADER_MODULE,
+        entry_point: "main",
+    },
+    workgroup_size: [64, 1, 1],
+};
+
+/// The queue the copy chain names in its command encoder. `4 << 32`, index `0`.
+pub const PROBE_COPYCHAIN_QUEUE: QueueHandle = match QueueHandle::from_bits(4 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The command buffer the copy chain finishes its encoder into. `4 << 32`, index
+/// `0`.
+pub const PROBE_COPYCHAIN_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(4 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The in-flight readback the copy chain requests and polls. `4 << 32`, index
+/// `0`.
+pub const PROBE_COPYCHAIN_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(4 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The buffer→image copy that uploads the dispatch's red storage buffer into the
+/// first texture — tightly packed (`0` row length and image height), the whole
+/// mip-0 slice.
+#[must_use]
+pub const fn probe_copychain_buffer_to_image() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_COPYCHAIN_STORAGE_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_COPYCHAIN_IMAGE_A,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_COPYCHAIN_SIZE, PROBE_COPYCHAIN_SIZE),
+    }
+}
+
+/// The image→image copy that moves the first texture into the second — mip 0 to
+/// mip 0, origin to origin, the whole slice.
+#[must_use]
+pub const fn probe_copychain_image_to_image() -> ImageCopy {
+    ImageCopy {
+        src: PROBE_COPYCHAIN_IMAGE_A,
+        src_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        src_offset: Offset3d { x: 0, y: 0, z: 0 },
+        dst: PROBE_COPYCHAIN_IMAGE_B,
+        dst_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        dst_offset: Offset3d { x: 0, y: 0, z: 0 },
+        extent: Extent3d::d2(PROBE_COPYCHAIN_SIZE, PROBE_COPYCHAIN_SIZE),
+    }
+}
+
+/// The image→buffer copy that reads the second texture out into the host buffer
+/// — tightly packed, the whole mip-0 slice.
+#[must_use]
+pub const fn probe_copychain_image_to_buffer() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_COPYCHAIN_HOST_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_COPYCHAIN_IMAGE_B,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_COPYCHAIN_SIZE, PROBE_COPYCHAIN_SIZE),
+    }
+}
+
+// The fill probe (group W): a compute dispatch fills a 256-byte storage buffer
+// with a pattern, `fill_buffer(offset 0, size 128, value 0)` zeroes its first
+// half, and the whole buffer is copied to a host buffer and read back. The read
+// back proves `clearBuffer` zeroed exactly its sub-range — the first half zero,
+// the second half still the pattern. `4 << 32`, with the handle kinds it shares
+// with the copy chain given distinct indices.
+
+/// The 32-bit pattern the dispatch writes into every slot before the fill zeroes
+/// half — `0xDEADBEEF`, a value a zero-initialised buffer cannot hold, so the
+/// second half reading it back is proof the fill left it alone.
+pub const PROBE_FILL_PATTERN: u32 = 0xDEAD_BEEF;
+
+/// [`PROBE_FILL_PATTERN`] as the four little-endian bytes the buffer holds it as
+/// — `[0xEF, 0xBE, 0xAD, 0xDE]`, what the gate checks the untouched half against.
+pub const PROBE_FILL_PATTERN_BYTES: [u8; 4] = PROBE_FILL_PATTERN.to_le_bytes();
+
+/// The number of `u32` slots the storage buffer holds and the dispatch fills —
+/// `64`, so the buffer is `256` bytes, matching the shader's `@workgroup_size`.
+pub const PROBE_FILL_SLOTS: u32 = 64;
+
+/// The bytes the fill zeroes, from offset `0` — `128`, exactly half the
+/// `256`-byte buffer, so the read-back proves the fill touched its range and no
+/// more.
+pub const PROBE_FILL_ZEROED_BYTES: u64 = 128;
+
+/// The storage buffer the dispatch writes, the fill zeroes half of, and the copy
+/// reads. `4 << 32`, index `2` — distinct from the copy chain's two buffers.
+pub const PROBE_FILL_STORAGE_BUFFER: BufferHandle = match BufferHandle::from_bits((4 << 32) | 2) {
+    Some(buffer) => buffer,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The storage buffer's descriptor: [`PROBE_FILL_SLOTS`] `u32`s (256 bytes),
+/// [`BufferUsage::STORAGE`] (the dispatch's binding), [`BufferUsage::TRANSFER_DST`]
+/// (the fill writes it) and [`BufferUsage::TRANSFER_SRC`] (it is copied from),
+/// device-local.
+#[must_use]
+pub const fn probe_fill_storage_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu fill storage buffer"),
+        size: (PROBE_FILL_SLOTS as u64) * 4,
+        usage: BufferUsage::STORAGE
+            .union(BufferUsage::TRANSFER_DST)
+            .union(BufferUsage::TRANSFER_SRC),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The host buffer the storage buffer is copied into and read back from. A
+/// distinct [`BufferHandle`] at `4 << 32` with index `3`.
+pub const PROBE_FILL_HOST_BUFFER: BufferHandle = match BufferHandle::from_bits((4 << 32) | 3) {
+    Some(buffer) => buffer,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The host buffer's descriptor — the readback buffer's shape at
+/// [`PROBE_FILL_SLOTS`] `u32`s.
+#[must_use]
+pub const fn probe_fill_host_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu fill host buffer"),
+        size: (PROBE_FILL_SLOTS as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The compute WGSL: a `read_write` storage buffer whose every slot the shader
+/// sets to [`PROBE_FILL_PATTERN`]. `@workgroup_size(64)` filled by
+/// `dispatch(1, 1, 1)` — one 64-invocation workgroup for the 64 slots.
+pub const PROBE_FILL_WGSL: &str = concat!(
+    "@group(0) @binding(0) var<storage, read_write> out: array<u32>; ",
+    "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) ",
+    "{ out[gid.x] = 0xDEADBEEFu; }"
+);
+
+/// The shader-module handle the fill probe's pipeline names. `4 << 32`, index
+/// `1`.
+pub const PROBE_FILL_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits((4 << 32) | 1) {
+        Some(module) => module,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The shader module the fill probe's frame creates. WGSL only, filed at
+/// [`PROBE_FILL_SHADER_MODULE`].
+pub const PROBE_FILL_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu fill shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_FILL_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The bind-group-layout handle the fill probe's pipeline is built against.
+/// `4 << 32`, index `1`.
+pub const PROBE_FILL_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
+    match BindGroupLayoutHandle::from_bits((4 << 32) | 1) {
+        Some(layout) => layout,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The one binding the fill probe's shader declares: a `read_write` storage
+/// buffer at `@group(0) @binding(0)`, visible to compute.
+pub const PROBE_FILL_BIND_GROUP_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 1] =
+    [BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::COMPUTE,
+        kind: BindingKind::StorageBuffer {
+            read_only: false,
+            dynamic: false,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    }];
+
+/// The bind-group layout the fill probe's frame creates just before the group.
+pub const PROBE_FILL_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> = BindGroupLayoutDesc {
+    label: Some("crcbl-webgpu fill layout"),
+    entries: &PROBE_FILL_BIND_GROUP_LAYOUT_ENTRIES,
+};
+
+/// The bind-group handle the fill probe binds at slot 0. `4 << 32`, index `1`.
+pub const PROBE_FILL_BIND_GROUP: BindGroupHandle = match BindGroupHandle::from_bits((4 << 32) | 1) {
+    Some(group) => group,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The one assignment the fill probe's bind group carries: the whole of
+/// [`PROBE_FILL_STORAGE_BUFFER`] at binding 0.
+pub const PROBE_FILL_BIND_GROUP_ENTRIES: [BindGroupEntry; 1] = [BindGroupEntry {
+    binding: 0,
+    array_index: 0,
+    resource: BindingResource::whole_buffer(PROBE_FILL_STORAGE_BUFFER),
+}];
+
+/// The descriptor the fill probe's `create_bind_group` asks with.
+pub const PROBE_FILL_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
+    label: Some("crcbl-webgpu fill bind group"),
+    layout: PROBE_FILL_BIND_GROUP_LAYOUT,
+    entries: &PROBE_FILL_BIND_GROUP_ENTRIES,
+    variable_count: None,
+};
+
+/// The pipeline-layout handle the fill probe's pipeline is built against.
+/// `4 << 32`, index `1`.
+pub const PROBE_FILL_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits((4 << 32) | 1) {
+        Some(layout) => layout,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The one bind-group layout [`PROBE_FILL_PIPELINE_LAYOUT_DESC`] names.
+pub const PROBE_FILL_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS: [BindGroupLayoutHandle; 1] =
+    [PROBE_FILL_BIND_GROUP_LAYOUT];
+
+/// The pipeline layout the fill probe's frame creates — the one bind-group
+/// layout above, no push constants.
+pub const PROBE_FILL_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu fill pipeline layout"),
+    bind_group_layouts: &PROBE_FILL_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS,
+    push_constants: None,
+};
+
+/// The compute-pipeline handle the fill probe binds. `4 << 32`, index `1`.
+pub const PROBE_FILL_PIPELINE: ComputePipelineHandle =
+    match ComputePipelineHandle::from_bits((4 << 32) | 1) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The pipeline the fill probe binds and runs — `workgroup_size` `[64, 1, 1]`
+/// matching the module's `@workgroup_size(64)`.
+pub const PROBE_FILL_PIPELINE_DESC: ComputePipelineDesc<'static> = ComputePipelineDesc {
+    label: Some("crcbl-webgpu fill pipeline"),
+    layout: PROBE_FILL_PIPELINE_LAYOUT,
+    compute: ShaderEntry {
+        module: PROBE_FILL_SHADER_MODULE,
+        entry_point: "main",
+    },
+    workgroup_size: [PROBE_FILL_SLOTS, 1, 1],
+};
+
+/// The queue the fill probe names in its command encoder. `4 << 32`, index `1`.
+pub const PROBE_FILL_QUEUE: QueueHandle = match QueueHandle::from_bits((4 << 32) | 1) {
+    Some(queue) => queue,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The command buffer the fill probe finishes its encoder into. `4 << 32`, index
+/// `1`.
+pub const PROBE_FILL_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits((4 << 32) | 1) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 4 is not zero"),
+    };
+
+/// The in-flight readback the fill probe requests and polls. `4 << 32`, index
+/// `1`.
+pub const PROBE_FILL_READBACK: ReadbackHandle = match ReadbackHandle::from_bits((4 << 32) | 1) {
+    Some(readback) => readback,
+    None => panic!("generation 4 is not zero"),
+};
+
+/// The buffer→buffer copy that moves the filled storage buffer into the host
+/// buffer — the whole 256 bytes from offset 0 to offset 0.
+#[must_use]
+pub const fn probe_fill_copy() -> BufferCopy {
+    BufferCopy {
+        src: PROBE_FILL_STORAGE_BUFFER,
+        src_offset: 0,
+        dst: PROBE_FILL_HOST_BUFFER,
+        dst_offset: 0,
+        size: (PROBE_FILL_SLOTS as u64) * 4,
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -2093,6 +2677,132 @@ impl ComputeProbe {
     }
 }
 
+/// One copy-chain-and-read-back, from the frame that dispatched-and-copied to the
+/// bytes read back — [`ComputeProbe`]'s state machine again, on the copy path.
+///
+/// The frame it encodes differs only in what it records between the dispatch and
+/// the readback: a buffer→image, an image→image and an image→buffer copy rather
+/// than one buffer→buffer. Both end in the same `request_readback` and are
+/// answered by the same replies, so the transitions mirror [`ComputeProbe`]'s
+/// exactly.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum CopyChainProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — 64×64 `Rgba8Unorm` texels, every one
+        /// [`PROBE_COPYCHAIN_PATTERN`] if both copies ran.
+        bytes: Vec<u8>,
+    },
+}
+
+impl CopyChainProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`ComputeProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
+/// One fill-and-read-back, from the frame that dispatched-filled-and-copied to
+/// the bytes read back — [`ComputeProbe`]'s state machine again, on the fill
+/// path.
+///
+/// The frame it encodes fills a storage buffer by dispatch, zeroes its first
+/// half with a [`fill_buffer`](crate::StreamWriter::fill_buffer), and copies the
+/// whole thing to a host buffer. Both end in the same `request_readback`, so the
+/// transitions mirror [`ComputeProbe`]'s exactly.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum FillProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — 64 `u32`s, the first half zeroed by the fill and
+        /// the second half still [`PROBE_FILL_PATTERN`].
+        bytes: Vec<u8>,
+    },
+}
+
+impl FillProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`ComputeProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -2134,6 +2844,14 @@ struct Probe {
     /// A decode error the compute drain hit, for [`COMPUTE_UNDECODABLE`]. Its own
     /// string for [`reason`](Self::reason)'s reason.
     compute_reason: String,
+    copychain: CopyChainProbe,
+    /// A decode error the copy-chain drain hit, for [`COPYCHAIN_UNDECODABLE`]. Its
+    /// own string for [`reason`](Self::reason)'s reason.
+    copychain_reason: String,
+    fill: FillProbe,
+    /// A decode error the fill drain hit, for [`FILL_UNDECODABLE`]. Its own string
+    /// for [`reason`](Self::reason)'s reason.
+    fill_reason: String,
 }
 
 impl Probe {
@@ -2152,6 +2870,10 @@ impl Probe {
             draw_reason: String::new(),
             compute: ComputeProbe::Unasked,
             compute_reason: String::new(),
+            copychain: CopyChainProbe::Unasked,
+            copychain_reason: String::new(),
+            fill: FillProbe::Unasked,
+            fill_reason: String::new(),
         }
     }
 
@@ -2568,6 +3290,8 @@ impl Probe {
                 self.readback.absorb(&replies);
                 self.draw.absorb(&replies);
                 self.compute.absorb(&replies);
+                self.copychain.absorb(&replies);
+                self.fill.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -3048,6 +3772,256 @@ impl Probe {
     fn compute_bytes(&self) -> &[u8] {
         match &self.compute {
             ComputeProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the copy-chain setup frame: a dispatch that fills a storage buffer
+    /// with the red pattern, then the buffer→image, image→image and image→buffer
+    /// copies that carry it through two textures to a host buffer, read back.
+    ///
+    /// **One frame, many commands, no reply** — [`request_compute`](Self::request_compute)'s
+    /// shape with three copies where that one has one. It records the two buffers,
+    /// the two textures, the pipeline's four resources, a command encoder, a
+    /// compute pass that binds, binds the storage group and dispatches
+    /// `64×1×1` (4096 invocations for the 4096 slots), the three copies, the
+    /// finish, the submit, and the `request_readback` under
+    /// [`PROBE_COPYCHAIN_READBACK`]. None is answered, so it is
+    /// [`encode`](StreamChannel::encode); the poll is what is awaited.
+    ///
+    /// `false` until a device has opened, [`request_compute`](Self::request_compute)'s
+    /// ordering rule — every command here is a device method.
+    fn request_copychain(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_buffer(
+                    PROBE_COPYCHAIN_STORAGE_BUFFER,
+                    &probe_copychain_storage_buffer_desc(),
+                );
+                stream.create_buffer(
+                    PROBE_COPYCHAIN_HOST_BUFFER,
+                    &probe_copychain_host_buffer_desc(),
+                );
+                stream.create_image(PROBE_COPYCHAIN_IMAGE_A, &probe_copychain_image_desc());
+                stream.create_image(PROBE_COPYCHAIN_IMAGE_B, &probe_copychain_image_desc());
+                stream.create_shader_module(
+                    PROBE_COPYCHAIN_SHADER_MODULE,
+                    &PROBE_COPYCHAIN_SHADER_MODULE_DESC,
+                );
+                stream.create_bind_group_layout(
+                    PROBE_COPYCHAIN_BIND_GROUP_LAYOUT,
+                    &PROBE_COPYCHAIN_BIND_GROUP_LAYOUT_DESC,
+                );
+                stream.create_bind_group(
+                    PROBE_COPYCHAIN_BIND_GROUP,
+                    &PROBE_COPYCHAIN_BIND_GROUP_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_COPYCHAIN_PIPELINE_LAYOUT,
+                    &PROBE_COPYCHAIN_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_compute_pipeline(
+                    PROBE_COPYCHAIN_PIPELINE,
+                    &PROBE_COPYCHAIN_PIPELINE_DESC,
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu copychain encoder"),
+                    queue: PROBE_COPYCHAIN_QUEUE,
+                });
+                stream.begin_compute_pass(&ComputePassDesc {
+                    label: Some("crcbl-webgpu copychain pass"),
+                });
+                stream.bind_compute_pipeline(PROBE_COPYCHAIN_PIPELINE);
+                stream.bind_group(
+                    0,
+                    PROBE_COPYCHAIN_BIND_GROUP,
+                    &[],
+                    PROBE_COPYCHAIN_PIPELINE_LAYOUT,
+                );
+                stream.dispatch(PROBE_COPYCHAIN_SIZE, 1, 1);
+                stream.end_compute_pass();
+                stream.copy_buffer_to_image(&probe_copychain_buffer_to_image());
+                stream.copy_image_to_image(&probe_copychain_image_to_image());
+                stream.copy_image_to_buffer(&probe_copychain_image_to_buffer());
+                stream.finish(PROBE_COPYCHAIN_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_COPYCHAIN_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_COPYCHAIN_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu copychain readback"),
+                        buffer: PROBE_COPYCHAIN_HOST_BUFFER,
+                        offset: 0,
+                        size: probe_copychain_host_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.copychain = CopyChainProbe::Requested;
+            self.copychain_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// copy chain's readback and register its wait, unless it is already waiting
+    /// or ready — [`poll_compute`](Self::poll_compute)'s protocol on the copy
+    /// chain's handle.
+    fn poll_copychain(&mut self) -> bool {
+        if !matches!(
+            self.copychain,
+            CopyChainProbe::Requested | CopyChainProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_COPYCHAIN_READBACK))
+        else {
+            return false;
+        };
+        self.copychain = CopyChainProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the copy chain's readback has got to.
+    fn copychain_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.copychain_reason = error.to_string();
+            return COPYCHAIN_UNDECODABLE;
+        }
+        match &self.copychain {
+            CopyChainProbe::Unasked => COPYCHAIN_UNASKED,
+            CopyChainProbe::Requested => COPYCHAIN_REQUESTED,
+            CopyChainProbe::Waiting { .. } => COPYCHAIN_WAITING,
+            CopyChainProbe::Pending => COPYCHAIN_PENDING,
+            CopyChainProbe::Ready { .. } => COPYCHAIN_READY,
+        }
+    }
+
+    /// The bytes the copy chain's readback came back with, or an empty slice if
+    /// it has not.
+    fn copychain_bytes(&self) -> &[u8] {
+        match &self.copychain {
+            CopyChainProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the fill setup frame: a dispatch that fills a storage buffer with
+    /// the pattern, a zero [`fill_buffer`](crate::StreamWriter::fill_buffer) over
+    /// its first half, and the copy to a host buffer that is read back.
+    ///
+    /// **One frame, many commands, no reply** — [`request_compute`](Self::request_compute)'s
+    /// shape with a `fill_buffer` recorded on the encoder after the compute pass
+    /// closes and before the buffer→buffer copy. `false` until a device has
+    /// opened, that method's ordering rule.
+    fn request_fill(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_buffer(PROBE_FILL_STORAGE_BUFFER, &probe_fill_storage_buffer_desc());
+                stream.create_buffer(PROBE_FILL_HOST_BUFFER, &probe_fill_host_buffer_desc());
+                stream
+                    .create_shader_module(PROBE_FILL_SHADER_MODULE, &PROBE_FILL_SHADER_MODULE_DESC);
+                stream.create_bind_group_layout(
+                    PROBE_FILL_BIND_GROUP_LAYOUT,
+                    &PROBE_FILL_BIND_GROUP_LAYOUT_DESC,
+                );
+                stream.create_bind_group(PROBE_FILL_BIND_GROUP, &PROBE_FILL_BIND_GROUP_DESC);
+                stream.create_pipeline_layout(
+                    PROBE_FILL_PIPELINE_LAYOUT,
+                    &PROBE_FILL_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_compute_pipeline(PROBE_FILL_PIPELINE, &PROBE_FILL_PIPELINE_DESC);
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu fill encoder"),
+                    queue: PROBE_FILL_QUEUE,
+                });
+                stream.begin_compute_pass(&ComputePassDesc {
+                    label: Some("crcbl-webgpu fill pass"),
+                });
+                stream.bind_compute_pipeline(PROBE_FILL_PIPELINE);
+                stream.bind_group(0, PROBE_FILL_BIND_GROUP, &[], PROBE_FILL_PIPELINE_LAYOUT);
+                stream.dispatch(1, 1, 1);
+                stream.end_compute_pass();
+                stream.fill_buffer(PROBE_FILL_STORAGE_BUFFER, 0, PROBE_FILL_ZEROED_BYTES, 0);
+                stream.copy_buffer_to_buffer(&probe_fill_copy());
+                stream.finish(PROBE_FILL_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_FILL_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_FILL_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu fill readback"),
+                        buffer: PROBE_FILL_HOST_BUFFER,
+                        offset: 0,
+                        size: probe_fill_host_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.fill = FillProbe::Requested;
+            self.fill_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// fill probe's readback and register its wait, unless it is already waiting
+    /// or ready — [`poll_compute`](Self::poll_compute)'s protocol on the fill
+    /// probe's handle.
+    fn poll_fill(&mut self) -> bool {
+        if !matches!(self.fill, FillProbe::Requested | FillProbe::Pending) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_FILL_READBACK))
+        else {
+            return false;
+        };
+        self.fill = FillProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the fill probe's readback has got to.
+    fn fill_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.fill_reason = error.to_string();
+            return FILL_UNDECODABLE;
+        }
+        match &self.fill {
+            FillProbe::Unasked => FILL_UNASKED,
+            FillProbe::Requested => FILL_REQUESTED,
+            FillProbe::Waiting { .. } => FILL_WAITING,
+            FillProbe::Pending => FILL_PENDING,
+            FillProbe::Ready { .. } => FILL_READY,
+        }
+    }
+
+    /// The bytes the fill probe's readback came back with, or an empty slice if
+    /// it has not.
+    fn fill_bytes(&self) -> &[u8] {
+        match &self.fill {
+            FillProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -3890,6 +4864,142 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Ask the page to run the copy chain — a dispatch that fills a storage
+    /// buffer red, a buffer→image copy into a texture, an image→image copy to a
+    /// second texture, and an image→buffer copy out to a host buffer — and start
+    /// reading it back on the device it opened.
+    ///
+    /// `1` when the setup frame is on the stream; `0` when no device has opened
+    /// yet, the probe is re-entered, or another channel is installed.
+    ///
+    /// **This observes both new copies at once**: a fresh WebGPU texture is
+    /// zero-initialised, so a red read-back can only come from the buffer→image
+    /// AND image→image copies both running — a stub that skips either reads back
+    /// zeros.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_copychain() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_copychain()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the copy chain's in-flight readback, once, on the reply channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for. A
+    /// no-op until the previous poll is answered, so the gate can call it blindly.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_copychain_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_copychain()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the copy chain's readback has got to —
+    /// one of the `COPYCHAIN_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_copychain_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.copychain_state(),
+            Err(_) => super::COPYCHAIN_UNASKED,
+        })
+    }
+
+    /// A pointer into wasm memory to the bytes the copy chain's readback came back
+    /// with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_copychain_bytes_len`] bytes from here, and
+    /// only once [`__crcbl_web_gpu_probe_copychain_state`] has answered
+    /// [`COPYCHAIN_READY`](super::COPYCHAIN_READY). Nothing here grows wasm
+    /// memory, so the pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_copychain_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.copychain_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_copychain_bytes_ptr`] points at —
+    /// the copy chain's readback length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_copychain_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.copychain_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// Ask the page to run the fill probe — a dispatch that fills a storage buffer
+    /// with a pattern, a zero [`fill_buffer`](crate::StreamWriter::fill_buffer)
+    /// over its first half, and a copy to a host buffer — and start reading it
+    /// back on the device it opened.
+    ///
+    /// `1` when the setup frame is on the stream; `0` when no device has opened
+    /// yet, the probe is re-entered, or another channel is installed.
+    ///
+    /// **This observes `clearBuffer` zeroing exactly its sub-range**: the dispatch
+    /// writes the whole buffer, the fill zeroes only the first half, so the read
+    /// back is zero there and the pattern beyond — a stub `clearBuffer` leaves the
+    /// pattern in the half that should be zero.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_fill() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_fill()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the fill probe's in-flight readback, once, on the reply channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for. A
+    /// no-op until the previous poll is answered, so the gate can call it blindly.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_fill_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_fill()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the fill probe's readback has got to —
+    /// one of the `FILL_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_fill_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.fill_state(),
+            Err(_) => super::FILL_UNASKED,
+        })
+    }
+
+    /// A pointer into wasm memory to the bytes the fill probe's readback came back
+    /// with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_fill_bytes_len`] bytes from here, and only
+    /// once [`__crcbl_web_gpu_probe_fill_state`] has answered
+    /// [`FILL_READY`](super::FILL_READY). Nothing here grows wasm memory, so the
+    /// pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_fill_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.fill_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_fill_bytes_ptr`] points at — the
+    /// fill probe's readback length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_fill_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.fill_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -3904,14 +5014,19 @@ mod tests {
         __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_compute,
         __crcbl_web_gpu_probe_compute_bytes_len, __crcbl_web_gpu_probe_compute_bytes_ptr,
         __crcbl_web_gpu_probe_compute_pipeline, __crcbl_web_gpu_probe_compute_poll,
-        __crcbl_web_gpu_probe_compute_state, __crcbl_web_gpu_probe_device,
-        __crcbl_web_gpu_probe_device_features_hi, __crcbl_web_gpu_probe_device_features_lo,
-        __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
-        __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
-        __crcbl_web_gpu_probe_draw, __crcbl_web_gpu_probe_draw_bytes_len,
-        __crcbl_web_gpu_probe_draw_bytes_ptr, __crcbl_web_gpu_probe_draw_poll,
-        __crcbl_web_gpu_probe_draw_state, __crcbl_web_gpu_probe_features_hi,
-        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_graphics_pipeline,
+        __crcbl_web_gpu_probe_compute_state, __crcbl_web_gpu_probe_copychain,
+        __crcbl_web_gpu_probe_copychain_bytes_len, __crcbl_web_gpu_probe_copychain_bytes_ptr,
+        __crcbl_web_gpu_probe_copychain_poll, __crcbl_web_gpu_probe_copychain_state,
+        __crcbl_web_gpu_probe_device, __crcbl_web_gpu_probe_device_features_hi,
+        __crcbl_web_gpu_probe_device_features_lo, __crcbl_web_gpu_probe_device_max_image_2d,
+        __crcbl_web_gpu_probe_device_reason_len, __crcbl_web_gpu_probe_device_reason_ptr,
+        __crcbl_web_gpu_probe_device_state, __crcbl_web_gpu_probe_draw,
+        __crcbl_web_gpu_probe_draw_bytes_len, __crcbl_web_gpu_probe_draw_bytes_ptr,
+        __crcbl_web_gpu_probe_draw_poll, __crcbl_web_gpu_probe_draw_state,
+        __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
+        __crcbl_web_gpu_probe_fill, __crcbl_web_gpu_probe_fill_bytes_len,
+        __crcbl_web_gpu_probe_fill_bytes_ptr, __crcbl_web_gpu_probe_fill_poll,
+        __crcbl_web_gpu_probe_fill_state, __crcbl_web_gpu_probe_graphics_pipeline,
         __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
         __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
@@ -5363,6 +6478,318 @@ mod tests {
         )]);
         assert!(!advanced);
         assert_eq!(compute, ComputeProbe::Waiting { sequence: 7 });
+    }
+
+    /// The copy-chain probe's bytes, read the way JS reads them.
+    fn copychain_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_copychain_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_copychain_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the copy chain answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::copychain` bytes,
+        // which nothing between the two calls above can have moved — neither
+        // export allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **Every copy-chain handle is generation four**, a generation past every
+    /// other probe: the frame has two buffers, two textures, and the pipeline's
+    /// resources, a command buffer, a queue and a readback all live at once, and
+    /// none may land in the dispatch (`3 << 32`), draw (`2 << 32`) or readback
+    /// (`1 << 32`) probe's slot in the shared page. The two buffers and the two
+    /// textures each share a kind, so they differ by index within generation 4.
+    #[test]
+    fn the_copychain_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_COPYCHAIN_STORAGE_BUFFER.to_bits(),
+            PROBE_COPYCHAIN_HOST_BUFFER.to_bits(),
+            PROBE_COPYCHAIN_IMAGE_A.to_bits(),
+            PROBE_COPYCHAIN_IMAGE_B.to_bits(),
+            PROBE_COPYCHAIN_SHADER_MODULE.to_bits(),
+            PROBE_COPYCHAIN_BIND_GROUP_LAYOUT.to_bits(),
+            PROBE_COPYCHAIN_BIND_GROUP.to_bits(),
+            PROBE_COPYCHAIN_PIPELINE_LAYOUT.to_bits(),
+            PROBE_COPYCHAIN_PIPELINE.to_bits(),
+            PROBE_COPYCHAIN_COMMAND_BUFFER.to_bits(),
+            PROBE_COPYCHAIN_QUEUE.to_bits(),
+            PROBE_COPYCHAIN_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 4, "every copy-chain handle is generation four");
+        }
+        // The two buffers share a kind, so they must not share bits; likewise the
+        // two textures.
+        assert_ne!(
+            PROBE_COPYCHAIN_STORAGE_BUFFER.to_bits(),
+            PROBE_COPYCHAIN_HOST_BUFFER.to_bits()
+        );
+        assert_ne!(
+            PROBE_COPYCHAIN_IMAGE_A.to_bits(),
+            PROBE_COPYCHAIN_IMAGE_B.to_bits()
+        );
+        // A generation clear of the dispatch probe (`3 << 32`).
+        assert_ne!(
+            PROBE_COPYCHAIN_STORAGE_BUFFER.to_bits(),
+            PROBE_DISPATCH_STORAGE_BUFFER.to_bits()
+        );
+    }
+
+    /// The copy-chain half: **one export, a whole frame** that dispatches red into
+    /// a storage buffer and moves it through two textures to a host buffer. The
+    /// three copies — buffer→image, image→image, image→buffer — are the point.
+    #[test]
+    fn the_copychain_export_encodes_the_dispatch_and_the_three_copies() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_copychain(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateImage",
+                "CreateImage",
+                "CreateShaderModule",
+                "CreateBindGroupLayout",
+                "CreateBindGroup",
+                "CreatePipelineLayout",
+                "CreateComputePipeline",
+                "CreateCommandEncoder",
+                "BeginComputePass",
+                "BindComputePipeline",
+                "BindGroup",
+                "Dispatch",
+                "EndComputePass",
+                "CopyBufferToImage",
+                "CopyImageToImage",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the frame dispatches, then copies buffer→image→image→buffer and reads back"
+        );
+        // The three copies, verbatim: the upload into the first texture, the
+        // texture→texture copy, and the read-out into the host buffer.
+        assert!(commands.contains(&Command::CopyBufferToImage {
+            copy: probe_copychain_buffer_to_image(),
+        }));
+        assert!(commands.contains(&Command::CopyImageToImage {
+            copy: probe_copychain_image_to_image(),
+        }));
+        assert!(commands.contains(&Command::Dispatch {
+            x: PROBE_COPYCHAIN_SIZE,
+            y: 1,
+            z: 1,
+        }));
+    }
+
+    /// A copy-chain request before a device opens is refused and encodes nothing.
+    #[test]
+    fn a_copychain_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_copychain(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_copychain_state(), COPYCHAIN_UNASKED);
+    }
+
+    /// The whole copy-chain exchange through the exports alone: request, poll, and
+    /// a `ReadbackReady` carrying the red pattern for every texel, which reaches
+    /// the bytes exports. A `cargo test` has no `navigator.gpu`, so the replayer
+    /// is stood in for by a `ReplyWriter`.
+    #[test]
+    fn the_copychain_readback_reaches_the_bytes_exports_as_the_red_pattern() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_copychain(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_copychain_state(), COPYCHAIN_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_copychain_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_copychain_state(), COPYCHAIN_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_COPYCHAIN_READBACK,
+            }]
+        );
+
+        let mut red = Vec::new();
+        for _ in 0..PROBE_COPYCHAIN_SLOTS {
+            red.extend_from_slice(&PROBE_COPYCHAIN_PATTERN_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_COPYCHAIN_READBACK, &red);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_copychain_state(), COPYCHAIN_READY);
+        assert_eq!(copychain_bytes(), red);
+        assert_eq!(&copychain_bytes()[..4], PROBE_COPYCHAIN_PATTERN_BYTES);
+        // Red is a value a zero-initialised texture cannot hold — the evidence the
+        // gate reads back that both copies ran.
+        assert_ne!(PROBE_COPYCHAIN_PATTERN_BYTES, [0, 0, 0, 0]);
+    }
+
+    /// The fill probe's bytes, read the way JS reads them.
+    fn fill_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_fill_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_fill_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(!ptr.is_null(), "the fill answered a length with no pointer");
+        // SAFETY: `ptr` and `len` are this thread's `Probe::fill` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **Every fill handle is generation four and distinct from the copy chain's**
+    /// — the two probes share generation 4 and the kinds they both use are given
+    /// distinct indices, so their live resources never collide in the shared page.
+    #[test]
+    fn the_fill_handles_are_generation_four_and_distinct_from_the_copychain() {
+        for bits in [
+            PROBE_FILL_STORAGE_BUFFER.to_bits(),
+            PROBE_FILL_HOST_BUFFER.to_bits(),
+            PROBE_FILL_SHADER_MODULE.to_bits(),
+            PROBE_FILL_BIND_GROUP_LAYOUT.to_bits(),
+            PROBE_FILL_BIND_GROUP.to_bits(),
+            PROBE_FILL_PIPELINE_LAYOUT.to_bits(),
+            PROBE_FILL_PIPELINE.to_bits(),
+            PROBE_FILL_COMMAND_BUFFER.to_bits(),
+            PROBE_FILL_QUEUE.to_bits(),
+            PROBE_FILL_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 4, "every fill handle is generation four");
+        }
+        // The buffer kind is shared with the copy chain (which uses indices 0 and
+        // 1), so the fill's two buffers take 2 and 3 and must not collide.
+        for (fill, chain) in [
+            (
+                PROBE_FILL_STORAGE_BUFFER.to_bits(),
+                PROBE_COPYCHAIN_STORAGE_BUFFER.to_bits(),
+            ),
+            (
+                PROBE_FILL_HOST_BUFFER.to_bits(),
+                PROBE_COPYCHAIN_HOST_BUFFER.to_bits(),
+            ),
+            (
+                PROBE_FILL_SHADER_MODULE.to_bits(),
+                PROBE_COPYCHAIN_SHADER_MODULE.to_bits(),
+            ),
+            (
+                PROBE_FILL_PIPELINE.to_bits(),
+                PROBE_COPYCHAIN_PIPELINE.to_bits(),
+            ),
+            (
+                PROBE_FILL_READBACK.to_bits(),
+                PROBE_COPYCHAIN_READBACK.to_bits(),
+            ),
+        ] {
+            assert_ne!(fill, chain, "a fill handle collides with the copy chain's");
+        }
+    }
+
+    /// The fill half: **one export, a whole frame** that dispatches a pattern into
+    /// a storage buffer, zeroes its first half with a `fill_buffer`, and copies it
+    /// out. The `FillBuffer` between the pass and the copy is the point.
+    #[test]
+    fn the_fill_export_encodes_the_dispatch_the_fill_and_the_copy() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_fill(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateShaderModule",
+                "CreateBindGroupLayout",
+                "CreateBindGroup",
+                "CreatePipelineLayout",
+                "CreateComputePipeline",
+                "CreateCommandEncoder",
+                "BeginComputePass",
+                "BindComputePipeline",
+                "BindGroup",
+                "Dispatch",
+                "EndComputePass",
+                "FillBuffer",
+                "CopyBufferToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the frame dispatches, fills half the buffer to zero, then copies and reads back"
+        );
+        // The fill zeroes exactly the first half of the storage buffer.
+        assert!(commands.contains(&Command::FillBuffer {
+            buffer: PROBE_FILL_STORAGE_BUFFER,
+            offset: 0,
+            size: PROBE_FILL_ZEROED_BYTES,
+            value: 0,
+        }));
+    }
+
+    /// A fill request before a device opens is refused and encodes nothing.
+    #[test]
+    fn a_fill_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_fill(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_fill_state(), FILL_UNASKED);
+    }
+
+    /// The whole fill exchange through the exports alone: a `ReadbackReady`
+    /// carrying the first half zeroed and the second half still the pattern, which
+    /// reaches the bytes exports and is what the gate checks.
+    #[test]
+    fn the_fill_readback_reaches_the_bytes_exports_zeroed_then_pattern() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_fill(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_fill_state(), FILL_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_fill_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_fill_state(), FILL_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_FILL_READBACK,
+            }]
+        );
+
+        // The bytes a real `clearBuffer` over the first half would leave: zeros to
+        // `PROBE_FILL_ZEROED_BYTES`, then the dispatch's pattern for the rest.
+        let total = (PROBE_FILL_SLOTS as usize) * 4;
+        let zeroed = PROBE_FILL_ZEROED_BYTES as usize;
+        let mut filled = vec![0u8; zeroed];
+        while filled.len() < total {
+            filled.extend_from_slice(&PROBE_FILL_PATTERN_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_FILL_READBACK, &filled);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_fill_state(), FILL_READY);
+        let bytes = fill_bytes();
+        assert_eq!(bytes, filled);
+        assert!(
+            bytes[..zeroed].iter().all(|&byte| byte == 0),
+            "the fill zeroed its whole sub-range"
+        );
+        assert_eq!(&bytes[zeroed..zeroed + 4], PROBE_FILL_PATTERN_BYTES);
+        // The pattern is a value a zero fill cannot leave — the evidence the fill
+        // stopped at its size and did not zero the whole buffer.
+        assert_ne!(PROBE_FILL_PATTERN_BYTES, [0, 0, 0, 0]);
     }
 
     /// The capabilities a browser answers with, as `gpu-replay.js` builds them:

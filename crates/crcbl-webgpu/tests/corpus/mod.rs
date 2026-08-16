@@ -17,7 +17,7 @@ use crcbl_hal::{
     BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment, ColorTargetState,
     ColorWrites, CommandEncoderDesc, CompareOp, ComputePassDesc, ComputePipelineDesc, CullMode,
     DepthBias, DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d, Features,
-    FilterMode, Format, FrontFace, GraphicsPipelineDesc, ImageAspect, ImageDesc,
+    FilterMode, Format, FrontFace, GraphicsPipelineDesc, ImageAspect, ImageCopy, ImageDesc,
     ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
     ImageViewType, LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc,
     PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, ReadbackDesc, Rect2d,
@@ -996,6 +996,69 @@ pub fn every_command() -> Vec<Command> {
                 size: 3333,
             },
         },
+        // The buffer→image upload copy. Same `BufferImageCopy` shape as
+        // `CopyImageToBuffer` above but the opposite direction, with its own
+        // distinct handles and a non-zero texel pitch and image height so a
+        // transposition among its many numbers is visible; the offset carries a
+        // negative among three distinct signed components.
+        Command::CopyBufferToImage {
+            copy: BufferImageCopy {
+                buffer: handle(180, 181),
+                buffer_offset: 512,
+                buffer_row_length: 120,
+                buffer_image_height: 240,
+                image: handle(182, 183),
+                image_subresource: ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 1,
+                    base_layer: 2,
+                    layer_count: 3,
+                },
+                image_offset: Offset3d { x: 5, y: -6, z: 7 },
+                image_extent: Extent3d {
+                    width: 32,
+                    height: 24,
+                    depth_or_layers: 1,
+                },
+            },
+        },
+        // The image→image copy, across *different* mip levels and offsets on the
+        // two sides so a source/destination transposition cannot round-trip. Each
+        // side has its own subresource and offset; the extent is shared.
+        Command::CopyImageToImage {
+            copy: ImageCopy {
+                src: handle(184, 185),
+                src_subresource: ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 1,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+                src_offset: Offset3d { x: 8, y: 9, z: 0 },
+                dst: handle(186, 187),
+                dst_subresource: ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 3,
+                    base_layer: 4,
+                    layer_count: 1,
+                },
+                dst_offset: Offset3d { x: -1, y: 2, z: 3 },
+                extent: Extent3d {
+                    width: 16,
+                    height: 12,
+                    depth_or_layers: 1,
+                },
+            },
+        },
+        // The buffer fill, with a NON-ZERO value so the corpus carries the wire
+        // the replayer refuses (WebGPU's `clearBuffer` is zero-only). Its offset
+        // and size are distinct so a transposition among the `u64` fields shows.
+        Command::FillBuffer {
+            buffer: handle(188, 189),
+            offset: 64,
+            size: 256,
+            value: 0xDEAD_BEEF,
+        },
         // **Every bit of both feature words crosses**, including the ones no
         // browser can satisfy: the replayer is what refuses them, and it can
         // only refuse what it was told. `TIMELINE_SEMAPHORE` is required here
@@ -1378,6 +1441,14 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         Command::Dispatch { x, y, z } => stream.dispatch(*x, *y, *z),
         Command::EndComputePass => stream.end_compute_pass(),
         Command::CopyBufferToBuffer { copy } => stream.copy_buffer_to_buffer(copy),
+        Command::CopyBufferToImage { copy } => stream.copy_buffer_to_image(copy),
+        Command::CopyImageToImage { copy } => stream.copy_image_to_image(copy),
+        Command::FillBuffer {
+            buffer,
+            offset,
+            size,
+            value,
+        } => stream.fill_buffer(*buffer, *offset, *size, *value),
         Command::EnumerateAdapters => stream.enumerate_adapters(),
         Command::SurfaceCaps => stream.surface_caps(),
         Command::CreateCommandEncoder { label, queue } => {

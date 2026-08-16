@@ -403,6 +403,16 @@ pub const COPY_IMAGE_TO_BUFFER_TAG: u8 = 0x78;
 /// buffer→buffer copy that carries a dispatch's storage-buffer output back to a
 /// host-readable buffer.
 pub const COPY_BUFFER_TO_BUFFER_TAG: u8 = 0x79;
+/// [`Command::CopyBufferToImage`](crate::Command::CopyBufferToImage) — the
+/// buffer→image copy, the upload counterpart of [`COPY_IMAGE_TO_BUFFER_TAG`].
+pub const COPY_BUFFER_TO_IMAGE_TAG: u8 = 0x7A;
+/// [`Command::CopyImageToImage`](crate::Command::CopyImageToImage) — the
+/// image→image copy.
+pub const COPY_IMAGE_TO_IMAGE_TAG: u8 = 0x7B;
+/// [`Command::FillBuffer`](crate::Command::FillBuffer) — a buffer fill, which
+/// WebGPU can perform only for the value zero (`clearBuffer`); any other value
+/// is refused by the replayer.
+pub const FILL_BUFFER_TAG: u8 = 0x7C;
 /// [`Command::EnumerateAdapters`](crate::Command::EnumerateAdapters).
 pub const ENUMERATE_ADAPTERS_TAG: u8 = 0x90;
 /// [`Command::RequestDevice`](crate::Command::RequestDevice).
@@ -1665,7 +1675,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 45] = [
+    const TAGS: [(&str, u8, u8); 48] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1762,6 +1772,9 @@ mod tests {
         ("Dispatch", DISPATCH_TAG, FAMILY_DISPATCH),
         ("CopyImageToBuffer", COPY_IMAGE_TO_BUFFER_TAG, FAMILY_COPY),
         ("CopyBufferToBuffer", COPY_BUFFER_TO_BUFFER_TAG, FAMILY_COPY),
+        ("CopyBufferToImage", COPY_BUFFER_TO_IMAGE_TAG, FAMILY_COPY),
+        ("CopyImageToImage", COPY_IMAGE_TO_IMAGE_TAG, FAMILY_COPY),
+        ("FillBuffer", FILL_BUFFER_TAG, FAMILY_COPY),
         ("EnumerateAdapters", ENUMERATE_ADAPTERS_TAG, FAMILY_INSTANCE),
         ("RequestDevice", REQUEST_DEVICE_TAG, FAMILY_INSTANCE),
         ("SurfaceCaps", SURFACE_CAPS_TAG, FAMILY_INSTANCE),

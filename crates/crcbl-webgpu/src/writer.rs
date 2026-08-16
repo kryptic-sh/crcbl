@@ -8,11 +8,12 @@ use crcbl_hal::{
     BufferHandle, BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState,
     CommandBufferHandle, CommandEncoderDesc, ComputePassDesc, ComputePipelineDesc,
     ComputePipelineHandle, DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageViewDesc, ImageViewHandle, MultisampleState, Offset3d,
-    PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, ReadbackDesc, ReadbackHandle, Rect2d,
-    RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, ImageCopy, ImageDesc, ImageHandle,
+    ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc, ImageViewHandle,
+    MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
+    ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
+    SemaphoreSignal, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
+    StencilFaceState, SubmitInfo, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -1180,6 +1181,64 @@ impl StreamWriter {
         self.bytes.put_handle(copy.dst);
         self.bytes.put_u64(copy.dst_offset);
         self.bytes.put_u64(copy.size);
+        sequence
+    }
+
+    /// [`copy_buffer_to_image`](crcbl_hal::CommandEncoder::copy_buffer_to_image),
+    /// on the implicit-current encoder — the upload counterpart of
+    /// [`copy_image_to_buffer`](Self::copy_image_to_buffer).
+    ///
+    /// The whole of [`BufferImageCopy`] in the same field order that method
+    /// writes, since the HAL uses one struct for both directions; the opcode is
+    /// what says which way the copy runs. `buffer_row_length` crosses in texels,
+    /// `0` included, and is not resolved — the texel→byte conversion is the
+    /// replayer's, exactly as for [`copy_image_to_buffer`](Self::copy_image_to_buffer).
+    pub fn copy_buffer_to_image(&mut self, copy: &BufferImageCopy) -> u64 {
+        let sequence = self.push_tag(tag::COPY_BUFFER_TO_IMAGE_TAG);
+        self.bytes.put_handle(copy.buffer);
+        self.bytes.put_u64(copy.buffer_offset);
+        self.bytes.put_u32(copy.buffer_row_length);
+        self.bytes.put_u32(copy.buffer_image_height);
+        self.bytes.put_handle(copy.image);
+        self.bytes.put_subresource_layers(copy.image_subresource);
+        self.bytes.put_offset(copy.image_offset);
+        self.bytes.put_extent(copy.image_extent);
+        sequence
+    }
+
+    /// [`copy_image_to_image`](crcbl_hal::CommandEncoder::copy_image_to_image),
+    /// on the implicit-current encoder.
+    ///
+    /// The whole of [`ImageCopy`] in the order the struct declares it — source,
+    /// its subresource and offset, destination, its subresource and offset, then
+    /// the shared extent — composed from the same subresource/offset/extent
+    /// primitives every image copy on this stream uses.
+    pub fn copy_image_to_image(&mut self, copy: &ImageCopy) -> u64 {
+        let sequence = self.push_tag(tag::COPY_IMAGE_TO_IMAGE_TAG);
+        self.bytes.put_handle(copy.src);
+        self.bytes.put_subresource_layers(copy.src_subresource);
+        self.bytes.put_offset(copy.src_offset);
+        self.bytes.put_handle(copy.dst);
+        self.bytes.put_subresource_layers(copy.dst_subresource);
+        self.bytes.put_offset(copy.dst_offset);
+        self.bytes.put_extent(copy.extent);
+        sequence
+    }
+
+    /// [`fill_buffer`](crcbl_hal::CommandEncoder::fill_buffer), on the
+    /// implicit-current encoder — the buffer, its offset and size, then the
+    /// `u32` value.
+    ///
+    /// The value crosses verbatim even though WebGPU can only express a zero
+    /// fill: the replayer refuses a non-zero value at the target, so it must be
+    /// told what the value was. See
+    /// [`Command::FillBuffer`](crate::Command::FillBuffer).
+    pub fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) -> u64 {
+        let sequence = self.push_tag(tag::FILL_BUFFER_TAG);
+        self.bytes.put_handle(buffer);
+        self.bytes.put_u64(offset);
+        self.bytes.put_u64(size);
+        self.bytes.put_u32(value);
         sequence
     }
 

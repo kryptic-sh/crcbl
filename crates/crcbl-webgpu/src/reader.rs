@@ -19,13 +19,13 @@
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource,
-    BlendFactor, BlendOp, BlendState, BufferCopy, BufferUsage, ClearValue, ColorAttachment,
-    ColorTargetState, ColorWrites, CompareOp, CullMode, DepthBias, DepthStencilAttachment,
-    DepthStencilState, Extent3d, FilterMode, Format, FrontFace, ImageAspect,
-    ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewType, LoadOp,
-    MultisampleState, Offset3d, PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange,
-    Rect2d, SampleType, SamplerAddressMode, SemaphoreSignal, SemaphoreWait, ShaderStages,
-    StencilFaceState, StencilOp, StencilState, StoreOp,
+    BlendFactor, BlendOp, BlendState, BufferCopy, BufferImageCopy, BufferUsage, ClearValue,
+    ColorAttachment, ColorTargetState, ColorWrites, CompareOp, CullMode, DepthBias,
+    DepthStencilAttachment, DepthStencilState, Extent3d, FilterMode, Format, FrontFace,
+    ImageAspect, ImageCopy, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewType, LoadOp, MultisampleState, Offset3d, PolygonMode, PrimitiveState,
+    PrimitiveTopology, PushConstantRange, Rect2d, SampleType, SamplerAddressMode, SemaphoreSignal,
+    SemaphoreWait, ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -1135,6 +1135,65 @@ impl<'a> StreamReader<'a> {
                         dst_offset,
                         size,
                     },
+                })
+            }
+            tag::COPY_BUFFER_TO_IMAGE_TAG => {
+                // `BufferImageCopy` in declaration order, the same layout
+                // `CopyImageToBuffer` reads; the direction is the opcode, never a
+                // field. See `Command::CopyBufferToImage`.
+                let buffer = r.read_handle("BufferImageCopy::buffer")?;
+                let buffer_offset = r.read_u64()?;
+                let buffer_row_length = r.read_u32()?;
+                let buffer_image_height = r.read_u32()?;
+                let image = r.read_handle("BufferImageCopy::image")?;
+                let image_subresource = r.read_subresource_layers()?;
+                let image_offset = r.read_offset()?;
+                let image_extent = r.read_extent()?;
+                Ok(Command::CopyBufferToImage {
+                    copy: BufferImageCopy {
+                        buffer,
+                        buffer_offset,
+                        buffer_row_length,
+                        buffer_image_height,
+                        image,
+                        image_subresource,
+                        image_offset,
+                        image_extent,
+                    },
+                })
+            }
+            tag::COPY_IMAGE_TO_IMAGE_TAG => {
+                // `ImageCopy` in declaration order: source, its subresource and
+                // offset, destination, its subresource and offset, then the extent.
+                let src = r.read_handle("ImageCopy::src")?;
+                let src_subresource = r.read_subresource_layers()?;
+                let src_offset = r.read_offset()?;
+                let dst = r.read_handle("ImageCopy::dst")?;
+                let dst_subresource = r.read_subresource_layers()?;
+                let dst_offset = r.read_offset()?;
+                let extent = r.read_extent()?;
+                Ok(Command::CopyImageToImage {
+                    copy: ImageCopy {
+                        src,
+                        src_subresource,
+                        src_offset,
+                        dst,
+                        dst_subresource,
+                        dst_offset,
+                        extent,
+                    },
+                })
+            }
+            tag::FILL_BUFFER_TAG => {
+                let buffer = r.read_handle("FillBuffer::buffer")?;
+                let offset = r.read_u64()?;
+                let size = r.read_u64()?;
+                let value = r.read_u32()?;
+                Ok(Command::FillBuffer {
+                    buffer,
+                    offset,
+                    size,
+                    value,
                 })
             }
             tag::FINISH_TAG => Ok(Command::Finish {

@@ -2771,6 +2771,15 @@ export class Replayer {
         case 'CopyBufferToBuffer':
           this.#copyBufferToBuffer(sequence, command);
           break;
+        case 'CopyBufferToImage':
+          this.#copyBufferToImage(sequence, command);
+          break;
+        case 'CopyImageToImage':
+          this.#copyImageToImage(sequence, command);
+          break;
+        case 'FillBuffer':
+          this.#fillBuffer(sequence, command);
+          break;
         case 'Finish':
           this.#finish(sequence, command);
           break;
@@ -4773,22 +4782,96 @@ export class Replayer {
   }
 
   /**
+   * The shared buffer↔texture copy layout — the mapping both
+   * {@link Replayer#copyImageToBuffer} and {@link Replayer#copyBufferToImage}
+   * need, resolved once from a `crcbl_hal::BufferImageCopy`.
+   *
+   * THE 256-BYTE TRAP. `BufferImageCopy::buffer_row_length` is in TEXELS (`0` =
+   * tightly packed), and WebGPU's `bytesPerRow` is in BYTES and must be a
+   * multiple of {@link COPY_BYTES_PER_ROW_ALIGNMENT}. So the texel pitch is
+   * multiplied by the texture's bytes-per-texel here, and the result is passed
+   * through UNPADDED: padding it would change the buffer layout the other side
+   * expects, so a misaligned pitch is left for WebGPU to refuse on
+   * `uncapturederror` rather than silently repaired. The copy-chain probe picks
+   * a 64×64 `rgba8unorm` texture precisely so its natural row is 64 × 4 = 256
+   * bytes, already aligned, and the happy path needs no padding at all.
+   *
+   * Returns the `GPUImageCopyTexture`, the `GPUImageDataLayout` WITHOUT its
+   * buffer — the caller adds the resolved buffer, whose role (source or
+   * destination) and error wording differ by direction — and the copy size; or
+   * queues a `#deviceError` naming `named` and returns `null` when the image is
+   * unresolvable or its format has no defined bytes-per-texel
+   * ({@link TEXEL_BYTES}).
+   *
+   * @param {object} command
+   * @param {string} named
+   * @returns {{ texture: object,
+   *   textureView: { texture: object, mipLevel: number,
+   *     origin: { x: number, y: number, z: number } },
+   *   bufferLayout: { offset: number, bytesPerRow: number, rowsPerImage: number },
+   *   size: { width: number, height: number, depthOrArrayLayers: number } } | null}
+   */
+  #textureCopyLayout(command, named) {
+    const texture = this.#images.get(command.image);
+    if (texture === undefined) {
+      this.#deviceError(
+        `${named} names image ${command.image.index}.${command.image.generation}, ` +
+          'which this replayer holds no live image under'
+      );
+      return null;
+    }
+    const texelBytes = TEXEL_BYTES[texture.format];
+    if (texelBytes === undefined) {
+      this.#deviceError(
+        `${named} touches a ${texture.format} texture, which has no single bytes-per-texel ` +
+          'this replayer can turn buffer_row_length into a bytesPerRow with'
+      );
+      return null;
+    }
+    // `0` means tightly packed, so the row is the copy width; otherwise the
+    // caller's explicit texel pitch. Multiplied to bytes, passed through unpadded
+    // — see the 256-byte trap above.
+    const rowTexels =
+      command.bufferRowLength === 0
+        ? command.imageExtent.width
+        : command.bufferRowLength;
+    const bytesPerRow = rowTexels * texelBytes;
+    const rowsPerImage =
+      command.bufferImageHeight === 0
+        ? command.imageExtent.height
+        : command.bufferImageHeight;
+    return {
+      texture,
+      textureView: {
+        texture,
+        mipLevel: command.imageSubresource.mip,
+        origin: {
+          x: command.imageOffset.x,
+          y: command.imageOffset.y,
+          z: command.imageOffset.z,
+        },
+      },
+      bufferLayout: {
+        offset: Number(command.bufferOffset),
+        bytesPerRow,
+        rowsPerImage,
+      },
+      size: {
+        width: command.imageExtent.width,
+        height: command.imageExtent.height,
+        depthOrArrayLayers: command.imageExtent.depthOrLayers,
+      },
+    };
+  }
+
+  /**
    * Records an image→buffer copy on the implicit-current encoder — the readback
    * path's copy.
    *
-   * THE 256-BYTE TRAP. `crcbl_hal::BufferImageCopy::buffer_row_length` is in
-   * TEXELS (`0` = tightly packed), and WebGPU's `bytesPerRow` is in BYTES and
-   * must be a multiple of {@link COPY_BYTES_PER_ROW_ALIGNMENT}. So the texel
-   * pitch is multiplied by the source texture's bytes-per-texel here, and the
-   * result is passed through UNPADDED: padding it would change the buffer layout
-   * the reader on the far side expects to read back, so a misaligned pitch is
-   * left for WebGPU to refuse on `uncapturederror` rather than silently repaired.
-   * The probe picks a 64×64 `rgba8unorm` texture precisely so its natural row is
-   * 64 × 4 = 256 bytes, already aligned, and the happy path needs no padding at
-   * all.
-   *
-   * A missing encoder, an unresolvable buffer or image, or a format with no
-   * defined bytes-per-texel ({@link TEXEL_BYTES}) all go to the error queue.
+   * The buffer is the copy's DESTINATION; {@link Replayer#textureCopyLayout}
+   * resolves the image side and the 256-byte-trap layout. A missing encoder, an
+   * unresolvable buffer or image, or a format with no defined bytes-per-texel
+   * all go to the error queue.
    *
    * @param {bigint} sequence
    * @param {object} command
@@ -4807,55 +4890,156 @@ export class Replayer {
       );
       return;
     }
-    const texture = this.#images.get(command.image);
-    if (texture === undefined) {
+    const layout = this.#textureCopyLayout(command, named);
+    if (!layout) return;
+    this.#currentEncoder.copyTextureToBuffer(
+      layout.textureView,
+      { buffer, ...layout.bufferLayout },
+      layout.size
+    );
+  }
+
+  /**
+   * Records a buffer→image copy on the implicit-current encoder — the upload
+   * counterpart of {@link Replayer#copyImageToBuffer}.
+   *
+   * The buffer is the copy's SOURCE; {@link Replayer#textureCopyLayout} resolves
+   * the image side and the 256-byte-trap layout. `copyBufferToTexture` takes its
+   * arguments (source = buffer layout, destination = texture view, size) in the
+   * OPPOSITE order to `copyTextureToBuffer`. A missing encoder, an unresolvable
+   * buffer or image, or a format with no defined bytes-per-texel all go to the
+   * error queue.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #copyBufferToImage(sequence, command) {
+    const named = `buffer→image copy (command ${sequence})`;
+    if (!this.#currentEncoder) {
+      this.#deviceError(`${named} was recorded with no command encoder open`);
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
       this.#deviceError(
-        `${named} copies from image ${command.image.index}.${command.image.generation}, ` +
+        `${named} copies from buffer ${command.buffer.index}.${command.buffer.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    const layout = this.#textureCopyLayout(command, named);
+    if (!layout) return;
+    this.#currentEncoder.copyBufferToTexture(
+      { buffer, ...layout.bufferLayout },
+      layout.textureView,
+      layout.size
+    );
+  }
+
+  /**
+   * Records an image→image copy on the implicit-current encoder.
+   *
+   * Both sides are textures — each with its own mip level and texel origin — so
+   * this resolves the two images and maps straight to `copyTextureToTexture`;
+   * there is no buffer layout and no 256-byte trap. A missing encoder or an
+   * unresolvable source or destination image goes to the error queue naming the
+   * handle, distinctly by direction.
+   *
+   * @param {bigint} sequence
+   * @param {{ copy: { src: { index: number, generation: number },
+   *   srcSubresource: { mip: number }, srcOffset: { x: number, y: number, z: number },
+   *   dst: { index: number, generation: number }, dstSubresource: { mip: number },
+   *   dstOffset: { x: number, y: number, z: number },
+   *   extent: { width: number, height: number, depthOrLayers: number } } }} command
+   */
+  #copyImageToImage(sequence, command) {
+    const named = `image→image copy (command ${sequence})`;
+    if (!this.#currentEncoder) {
+      this.#deviceError(`${named} was recorded with no command encoder open`);
+      return;
+    }
+    const { copy } = command;
+    const src = this.#images.get(copy.src);
+    if (src === undefined) {
+      this.#deviceError(
+        `${named} copies from image ${copy.src.index}.${copy.src.generation}, ` +
           'which this replayer holds no live image under'
       );
       return;
     }
-    const texelBytes = TEXEL_BYTES[texture.format];
-    if (texelBytes === undefined) {
+    const dst = this.#images.get(copy.dst);
+    if (dst === undefined) {
       this.#deviceError(
-        `${named} copies a ${texture.format} texture, which has no single bytes-per-texel ` +
-          'this replayer can turn buffer_row_length into a bytesPerRow with'
+        `${named} copies into image ${copy.dst.index}.${copy.dst.generation}, ` +
+          'which this replayer holds no live image under'
       );
       return;
     }
-    // `0` means tightly packed, so the row is the copy width; otherwise the
-    // caller's explicit texel pitch. Multiplied to bytes, passed through unpadded
-    // — see the 256-byte trap above.
-    const rowTexels =
-      command.bufferRowLength === 0
-        ? command.imageExtent.width
-        : command.bufferRowLength;
-    const bytesPerRow = rowTexels * texelBytes;
-    const rowsPerImage =
-      command.bufferImageHeight === 0
-        ? command.imageExtent.height
-        : command.bufferImageHeight;
-    this.#currentEncoder.copyTextureToBuffer(
+    this.#currentEncoder.copyTextureToTexture(
       {
-        texture,
-        mipLevel: command.imageSubresource.mip,
+        texture: src,
+        mipLevel: copy.srcSubresource.mip,
         origin: {
-          x: command.imageOffset.x,
-          y: command.imageOffset.y,
-          z: command.imageOffset.z,
+          x: copy.srcOffset.x,
+          y: copy.srcOffset.y,
+          z: copy.srcOffset.z,
         },
       },
       {
-        buffer,
-        offset: Number(command.bufferOffset),
-        bytesPerRow,
-        rowsPerImage,
+        texture: dst,
+        mipLevel: copy.dstSubresource.mip,
+        origin: {
+          x: copy.dstOffset.x,
+          y: copy.dstOffset.y,
+          z: copy.dstOffset.z,
+        },
       },
       {
-        width: command.imageExtent.width,
-        height: command.imageExtent.height,
-        depthOrArrayLayers: command.imageExtent.depthOrLayers,
+        width: copy.extent.width,
+        height: copy.extent.height,
+        depthOrArrayLayers: copy.extent.depthOrLayers,
       }
+    );
+  }
+
+  /**
+   * Records a buffer fill on the implicit-current encoder.
+   *
+   * WEBGPU HAS NO VALUED DEVICE-SIDE FILL. Its `clearBuffer` zeroes and nothing
+   * else, so a `value` of `0` maps to `clearBuffer(buffer, offset, size)` and any
+   * other value is a write this replayer refuses to the error queue — the same
+   * judgement the `crcbl-wgpu` backend makes. A missing encoder or an
+   * unresolvable buffer also goes to the error queue.
+   *
+   * @param {bigint} sequence
+   * @param {{ buffer: { index: number, generation: number }, offset: bigint,
+   *   size: bigint, value: number }} command
+   */
+  #fillBuffer(sequence, command) {
+    const named = `buffer fill (command ${sequence})`;
+    if (!this.#currentEncoder) {
+      this.#deviceError(`${named} was recorded with no command encoder open`);
+      return;
+    }
+    if (command.value !== 0) {
+      this.#deviceError(
+        `${named} fills a non-zero value 0x${(command.value >>> 0).toString(16)}: ` +
+          'WebGPU only offers a zero fill (clearBuffer)'
+      );
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
+      this.#deviceError(
+        `${named} fills buffer ${command.buffer.index}.${command.buffer.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    this.#currentEncoder.clearBuffer(
+      buffer,
+      Number(command.offset),
+      Number(command.size)
     );
   }
 

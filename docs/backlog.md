@@ -12,19 +12,37 @@ for it. Left out of the compute-passes slice (7c) on purpose.
 
 **Why it is blocked, not merely deferred.** An indirect dispatch reads its three
 workgroup counts out of a buffer's contents at replay time. Nothing on this seam
-can yet _write_ those bytes: there is no fill command and no host→buffer upload
-command, so the indirect-args buffer would always hold whatever a fresh WebGPU
-buffer holds — zeros — and the dispatch would be a no-op the gate could not tell
-from a stub. The direct `Dispatch` shipped in 7c takes its counts inline, which
-is exactly why it _could_ be observed (its probe reads back `0xDEADBEEF`).
+can yet write _arbitrary_ bytes there: `FillBuffer` shipped in 7d-a but WebGPU's
+`clearBuffer` is zero-only, so a non-zero count cannot be written with it, and
+there is still no host→buffer upload command. The indirect-args buffer would
+hold either a fresh buffer's zeros or a zero fill — a no-op the gate could not
+tell from a stub. The direct `Dispatch` shipped in 7c takes its counts inline,
+which is exactly why it _could_ be observed (its probe reads back `0xDEADBEEF`).
 
-**Its natural gate.** Add a fill or host→buffer upload command first, write the
-three counts into the args buffer with it, then `dispatch_indirect` off that
-buffer and read back a storage buffer sized/written by those counts — so a wrong
-count is visible. Until those bytes can be written, an indirect-dispatch probe
-would assert nothing. Verified by grep: `dispatch_indirect` appears only in
-`crcbl-hal` and the null/vk backends, with no `crcbl-webgpu` command, tag, or
-replay arm.
+**Its natural gate.** Add a host→buffer upload command (or a valued fill on a
+backend that has one) first, write the three counts into the args buffer with
+it, then `dispatch_indirect` off that buffer and read back a storage buffer
+sized/written by those counts — so a wrong count is visible. Until non-zero
+bytes can be written, an indirect-dispatch probe would assert nothing. Verified
+by grep: `dispatch_indirect` appears only in `crcbl-hal` and the null/vk
+backends, with no `crcbl-webgpu` command, tag, or replay arm.
+
+### Non-zero `fill_buffer` is refused on the WebGPU backend
+
+`crates/crcbl-webgpu/src/command.rs`'s `Command::FillBuffer` and its
+`gpu-replay.js` `#fillBuffer` arm map `value == 0` to WebGPU's `clearBuffer` and
+route any other value to the device error queue — WebGPU offers no valued
+device-side fill, so this matches the `crcbl-wgpu` backend's `fill_buffer`
+(`crates/crcbl-wgpu/src/command.rs`, "wgpu only offers a zero fill").
+
+**The consequence for scenes.** If any `render_e2e` scene issues a non-zero
+`fill_buffer`, that scene cannot render on the WebGPU backend — the fill lands
+on the error queue and the buffer it meant to initialise keeps its previous
+contents. The parity gate (slice 10) is where that surfaces as a WebGPU/native
+divergence. **It is unverified whether any scene actually issues a non-zero
+fill**: the scenes were not audited for it in this slice. When slice 10 lands,
+check the scene set for non-zero `fill_buffer` calls before treating a WebGPU
+parity failure as a backend bug rather than an unsupported operation.
 
 ### The probe module-doc export table is missing the readback shims
 

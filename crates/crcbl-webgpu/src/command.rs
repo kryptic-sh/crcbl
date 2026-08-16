@@ -19,13 +19,14 @@ use core::ops::Range;
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
-    BufferCopy, BufferHandle, BufferUsage, ColorAttachment, ColorTargetState, CommandBufferHandle,
-    CompareOp, ComputePipelineHandle, DepthStencilAttachment, DepthStencilState, Extent3d,
-    Features, FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceLayers,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation,
-    MultisampleState, Offset3d, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
-    QueueHandle, ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle, SemaphoreSignal,
-    SemaphoreWait, ShaderModuleHandle, ShaderStages, SurfaceHandle,
+    BufferCopy, BufferHandle, BufferImageCopy, BufferUsage, ColorAttachment, ColorTargetState,
+    CommandBufferHandle, CompareOp, ComputePipelineHandle, DepthStencilAttachment,
+    DepthStencilState, Extent3d, Features, FilterMode, Format, GraphicsPipelineHandle, ImageCopy,
+    ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewHandle, ImageViewType, MemoryLocation, MultisampleState, Offset3d,
+    PipelineLayoutHandle, PrimitiveState, PushConstantRange, QueueHandle, ReadbackHandle, Rect2d,
+    SamplerAddressMode, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleHandle,
+    ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -738,8 +739,8 @@ pub enum Command {
     /// — the readback path's image→buffer copy, recorded on the
     /// implicit-current encoder.
     ///
-    /// The whole of [`BufferImageCopy`](crcbl_hal::BufferImageCopy), flattened as
-    /// every descriptor here is, and **the direction is the variant's name and
+    /// The whole of [`BufferImageCopy`], flattened as every descriptor here is,
+    /// and **the direction is the variant's name and
     /// never a field** — the HAL uses one struct for both directions and the
     /// method called is what says which, so the two can never disagree.
     ///
@@ -784,6 +785,54 @@ pub enum Command {
     CopyBufferToBuffer {
         /// Source, destination, their byte offsets, and the size copied.
         copy: BufferCopy,
+    },
+    /// [`copy_buffer_to_image`](crcbl_hal::CommandEncoder::copy_buffer_to_image)
+    /// — the buffer→image copy, recorded on the implicit-current encoder and the
+    /// upload counterpart of [`CopyImageToBuffer`](Self::CopyImageToBuffer).
+    ///
+    /// The whole of [`BufferImageCopy`], carried as one nested value — the same
+    /// struct [`CopyImageToBuffer`](Self::CopyImageToBuffer) flattens, and **the
+    /// direction is the variant's name, never a field**: the HAL uses one struct
+    /// for both directions and the method called is what says which. Its
+    /// [`buffer_row_length`](crcbl_hal::BufferImageCopy::buffer_row_length) is in
+    /// *texels*, `0` meaning tightly packed, and crosses verbatim; WebGPU's
+    /// `bytesPerRow` is bytes and must be 256-aligned, so the texel→byte
+    /// conversion is the replayer's — it maps to `copyBufferToTexture`, whose
+    /// argument order is the reverse of `copyTextureToBuffer`. See
+    /// `web/engine/gpu-replay.js`.
+    CopyBufferToImage {
+        /// Buffer side, image side, and the region copied.
+        copy: BufferImageCopy,
+    },
+    /// [`copy_image_to_image`](crcbl_hal::CommandEncoder::copy_image_to_image) —
+    /// the image→image copy, recorded on the implicit-current encoder.
+    ///
+    /// The whole of [`ImageCopy`], carried as one nested value: source and
+    /// destination each with their own mip level, layer range and texel offset,
+    /// then the shared extent. It maps to WebGPU's `copyTextureToTexture`. The
+    /// corpus copies across *different* mip levels and offsets so a source/dest
+    /// transposition is visible.
+    CopyImageToImage {
+        /// Source, destination, their subresources and offsets, and the extent.
+        copy: ImageCopy,
+    },
+    /// [`fill_buffer`](crcbl_hal::CommandEncoder::fill_buffer) — a value fill
+    /// over a buffer range, recorded on the implicit-current encoder.
+    ///
+    /// **WebGPU has no valued device-side fill.** Its `clearBuffer` zeroes and
+    /// nothing else, so `value == 0` maps to `clearBuffer(buffer, offset, size)`
+    /// and any other value is a write the replayer refuses to the error queue —
+    /// the same judgement the `crcbl-wgpu` backend makes. The value crosses
+    /// verbatim so the refusal happens where the target is, not at the encoder.
+    FillBuffer {
+        /// Buffer filled.
+        buffer: BufferHandle,
+        /// Byte offset the fill starts at.
+        offset: u64,
+        /// Bytes filled.
+        size: u64,
+        /// The `u32` written into each word; only `0` is expressible on WebGPU.
+        value: u32,
     },
     /// [`finish`](crcbl_hal::CommandEncoder::finish) — consumes the
     /// implicit-current encoder and produces the command buffer.
@@ -987,6 +1036,9 @@ impl Command {
             Self::EndRenderPass => "EndRenderPass",
             Self::CopyImageToBuffer { .. } => "CopyImageToBuffer",
             Self::CopyBufferToBuffer { .. } => "CopyBufferToBuffer",
+            Self::CopyBufferToImage { .. } => "CopyBufferToImage",
+            Self::CopyImageToImage { .. } => "CopyImageToImage",
+            Self::FillBuffer { .. } => "FillBuffer",
             Self::Finish { .. } => "Finish",
             Self::Submit { .. } => "Submit",
             Self::RequestReadback { .. } => "RequestReadback",

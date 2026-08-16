@@ -967,6 +967,59 @@ const EXPECTED = [
       size: 3333n,
     },
   },
+  // The buffer→image upload copy — the same `BufferImageCopy` shape as
+  // `CopyImageToBuffer` but the opposite direction, with its own distinct handles
+  // and a non-zero texel pitch and image height. `bufferOffset` is `BigInt`.
+  {
+    name: 'CopyBufferToImage',
+    buffer: handle(180, 181),
+    bufferOffset: 512n,
+    bufferRowLength: 120,
+    bufferImageHeight: 240,
+    image: handle(182, 183),
+    imageSubresource: {
+      aspect: ['COLOR'],
+      mip: 1,
+      baseLayer: 2,
+      layerCount: 3,
+    },
+    imageOffset: { x: 5, y: -6, z: 7 },
+    imageExtent: { width: 32, height: 24, depthOrLayers: 1 },
+  },
+  // The image→image copy, across different mip levels and offsets on the two
+  // sides so a source/destination transposition cannot round-trip.
+  {
+    name: 'CopyImageToImage',
+    copy: {
+      src: handle(184, 185),
+      srcSubresource: {
+        aspect: ['COLOR'],
+        mip: 1,
+        baseLayer: 0,
+        layerCount: 1,
+      },
+      srcOffset: { x: 8, y: 9, z: 0 },
+      dst: handle(186, 187),
+      dstSubresource: {
+        aspect: ['COLOR'],
+        mip: 3,
+        baseLayer: 4,
+        layerCount: 1,
+      },
+      dstOffset: { x: -1, y: 2, z: 3 },
+      extent: { width: 16, height: 12, depthOrLayers: 1 },
+    },
+  },
+  // The buffer fill, with a NON-ZERO value so the fixture carries the wire the
+  // replayer refuses (WebGPU's `clearBuffer` is zero-only). `offset` and `size`
+  // are `BigInt`; the value is a `u32`.
+  {
+    name: 'FillBuffer',
+    buffer: handle(188, 189),
+    offset: 64n,
+    size: 256n,
+    value: 0xdeadbeef,
+  },
   // Both feature words are `BigInt`, and the required one carries
   // `TIMELINE_SEMAPHORE` (1 << 9) — a flag WebGPU cannot satisfy, which crosses
   // anyway because the replayer is what refuses it.

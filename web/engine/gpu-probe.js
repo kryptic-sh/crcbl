@@ -141,6 +141,42 @@ export const COMPUTE = Object.freeze({
 });
 
 /**
+ * The `COPYCHAIN_*` codes `__crcbl_web_gpu_probe_copychain_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The copy-chain probe is a readback at heart — its setup frame ends in the same
+ * `request_readback` — so its codes mirror {@link READBACK} exactly. `READY`
+ * carries the 64×64 `rgba8unorm` texels the chain moved, which the gate checks
+ * are all red and so proves `copyBufferToTexture` and `copyTextureToTexture` ran.
+ */
+export const COPYCHAIN = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
+ * The `FILL_*` codes `__crcbl_web_gpu_probe_fill_state` answers, from the same
+ * file.
+ *
+ * The fill probe is a readback at heart — its setup frame ends in the same
+ * `request_readback` — so its codes mirror {@link READBACK} exactly. `READY`
+ * carries the 64 `u32`s, the first half zeroed by `clearBuffer` and the second
+ * half still the pattern, which is what the gate checks.
+ */
+export const FILL = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
  * The `SurfaceCapsFailure` codes `crates/crcbl-webgpu/src/tag.rs` assigns, which
  * `__crcbl_web_gpu_probe_surface_caps_cause` answers with.
  *
@@ -1005,4 +1041,142 @@ export function readComputeProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: computeStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the copy-chain codes. Its own function
+ * for {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function copyChainStateName(state) {
+  const found = Object.entries(COPYCHAIN).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to run the copy chain — a dispatch that fills a storage buffer red, a
+ * buffer→image copy into a texture, an image→image copy to a second texture, and
+ * an image→buffer copy out to a host buffer — and start reading it back on the
+ * device it opened.
+ *
+ * {@link startComputeProbe}'s copy sibling. {@link pollCopyChainProbe} drives the
+ * poll and {@link readCopyChainProbe} reads the bytes when they land. Its answer
+ * is *data* and it needs a **device**, so `false` before one has opened is
+ * ordering rather than failure — wait for {@link readDeviceProbe} to say
+ * `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startCopyChainProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_copychain() === 1;
+}
+
+/**
+ * Poll the copy chain's in-flight readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_copychain_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollCopyChainProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_copychain_poll() === 1;
+}
+
+/**
+ * Read where the copy chain's readback has got to, and its bytes once it is
+ * `READY`.
+ *
+ * {@link readComputeProbe}'s copy sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readCopyChainProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_copychain_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_copychain_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_copychain_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: copyChainStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the fill codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function fillStateName(state) {
+  const found = Object.entries(FILL).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to run the fill probe — a dispatch that fills a storage buffer with a
+ * pattern, a zero `fill_buffer` over its first half, and a copy to a host buffer
+ * — and start reading it back on the device it opened.
+ *
+ * {@link startComputeProbe}'s fill sibling. {@link pollFillProbe} drives the poll
+ * and {@link readFillProbe} reads the bytes when they land. Its answer is *data*
+ * and it needs a **device**, so `false` before one has opened is ordering rather
+ * than failure — wait for {@link readDeviceProbe} to say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startFillProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_fill() === 1;
+}
+
+/**
+ * Poll the fill probe's in-flight readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_fill_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollFillProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_fill_poll() === 1;
+}
+
+/**
+ * Read where the fill probe's readback has got to, and its bytes once it is
+ * `READY`.
+ *
+ * {@link readComputeProbe}'s fill sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readFillProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_fill_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_fill_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_fill_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: fillStateName(state), bytes };
 }

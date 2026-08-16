@@ -4741,6 +4741,194 @@ try {
           `${compute.error ? ` — ${compute.error}` : ''}`
   );
 
+  // **THE COPY-CHAIN GATE, AND THE FIRST THAT PROVES A BUFFER→IMAGE AND AN
+  // IMAGE→IMAGE COPY RAN.** wasm records a dispatch that fills a storage buffer
+  // with red (`0xFF0000FF` per texel), a `copyBufferToTexture` into a 64×64
+  // texture, a `copyTextureToTexture` to a second texture, a `copyTextureToBuffer`
+  // out to a host buffer, a submit and a readback; the demo's loop replays it; and
+  // the 16384 bytes that come back are asserted red in every texel. A fresh
+  // WebGPU texture is zero-initialised, so a stub that skips EITHER copy reads
+  // back zeros — only both copies running carries the red all the way out.
+  // `gpu-replay.mjs` cannot reach this: only a real device runs the copies.
+  group('V — a buffer→image→image→buffer copy chain is read back red');
+
+  const PROBE_COPYCHAIN_TEXELS = 64 * 64;
+  // Opaque red as the little-endian bytes an `rgba8unorm` texel holds it as.
+  const PROBE_COPYCHAIN_PATTERN_BYTES = [255, 0, 0, 255];
+
+  const copyChainStart = await evaluate(
+    page,
+    `(async () => {
+       const { startCopyChainProbe } = await import('/engine/gpu-probe.js');
+       const { exports } = globalThis.crcbl;
+       return { started: startCopyChainProbe({ exports }) };
+     })()`
+  );
+  const copyChain = copyChainStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+             const { readCopyChainProbe, pollCopyChainProbe, COPYCHAIN } =
+               await import('/engine/gpu-probe.js');
+             const { exports, gpu } = globalThis.crcbl;
+             const r = readCopyChainProbe({ exports, memory: exports.memory });
+             if (r.state === COPYCHAIN.UNDECODABLE) {
+               return { done: true, state: r.name, error: gpu.replayer.takeError() };
+             }
+             if (r.state !== COPYCHAIN.READY) {
+               pollCopyChainProbe({ exports });
+               return null;
+             }
+             // Ready: check every texel here rather than shipping 16384 numbers
+             // out. \`want\` is red; a texel left at zero is a copy that did not
+             // happen.
+             const want = ${JSON.stringify(PROBE_COPYCHAIN_PATTERN_BYTES)};
+             let allMatch = r.bytes.length === ${PROBE_COPYCHAIN_TEXELS} * 4;
+             let firstWrong = -1;
+             for (let i = 0; i < r.bytes.length && allMatch; i += 1) {
+               if (r.bytes[i] !== want[i % 4]) {
+                 allMatch = false;
+                 firstWrong = i;
+               }
+             }
+             return {
+               done: true,
+               state: r.name,
+               len: r.bytes.length,
+               allMatch,
+               firstWrong,
+               sample: [...r.bytes.slice(0, 8)],
+               error: gpu.replayer.takeError(),
+             };
+           })()`
+        )
+      )
+    : null;
+  check(
+    'V',
+    'wasm encoded the copy-chain setup frame — dispatch, buffer→image, image→image, image→buffer, request',
+    copyChainStart?.started === true,
+    copyChainStart?.started
+      ? 'the copy-chain frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'V',
+    'the copy chain came back red in every texel — both new copies ran',
+    copyChain?.done === true &&
+      copyChain.allMatch === true &&
+      copyChain.len === PROBE_COPYCHAIN_TEXELS * 4,
+    copyChain?.done !== true
+      ? `no copy-chain readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : copyChain.allMatch
+        ? `${copyChain.len} bytes, every texel [${PROBE_COPYCHAIN_PATTERN_BYTES.join(', ')}] (red), not the zero-init a stub reads back`
+        : `state ${copyChain.state}, ${copyChain.len ?? 0} bytes, ` +
+          `first wrong at byte ${copyChain.firstWrong} (sample ${JSON.stringify(copyChain.sample)} ` +
+          `against [${PROBE_COPYCHAIN_PATTERN_BYTES.join(', ')}])` +
+          `${copyChain.error ? ` — ${copyChain.error}` : ''}`
+  );
+
+  // **THE FILL GATE, AND THE FIRST THAT PROVES `clearBuffer` ZEROES EXACTLY ITS
+  // SUB-RANGE.** wasm records a dispatch that fills a 256-byte storage buffer with
+  // `0xDEADBEEF`, a `fill_buffer(offset 0, size 128, value 0)` that maps to
+  // `clearBuffer` over the first half, a copy to a host buffer, a submit and a
+  // readback; the demo's loop replays it; and the 256 bytes that come back are
+  // asserted zero in bytes 0..128 and still `0xDEADBEEF` in bytes 128..256. A stub
+  // `clearBuffer` leaves the pattern in the half that should be zero; a fill that
+  // ran too far zeroes the pattern beyond its size. `gpu-replay.mjs` cannot reach
+  // this: only a real device runs a compute shader and a clear into a real buffer.
+  group('W — clearBuffer zeroes its sub-range and leaves the rest');
+
+  const PROBE_FILL_WORDS = 64;
+  const PROBE_FILL_ZEROED_BYTES = 128;
+  // 0xDEADBEEF as the little-endian bytes a `u32` holds it as.
+  const PROBE_FILL_PATTERN_BYTES = [0xef, 0xbe, 0xad, 0xde];
+
+  const fillStart = await evaluate(
+    page,
+    `(async () => {
+       const { startFillProbe } = await import('/engine/gpu-probe.js');
+       const { exports } = globalThis.crcbl;
+       return { started: startFillProbe({ exports }) };
+     })()`
+  );
+  const fill = fillStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+             const { readFillProbe, pollFillProbe, FILL } =
+               await import('/engine/gpu-probe.js');
+             const { exports, gpu } = globalThis.crcbl;
+             const r = readFillProbe({ exports, memory: exports.memory });
+             if (r.state === FILL.UNDECODABLE) {
+               return { done: true, state: r.name, error: gpu.replayer.takeError() };
+             }
+             if (r.state !== FILL.READY) {
+               pollFillProbe({ exports });
+               return null;
+             }
+             // Ready: the first half must be zero (the fill ran) and the second
+             // half still the pattern (the fill stopped at its size).
+             const pattern = ${JSON.stringify(PROBE_FILL_PATTERN_BYTES)};
+             const zeroed = ${PROBE_FILL_ZEROED_BYTES};
+             let lenOk = r.bytes.length === ${PROBE_FILL_WORDS} * 4;
+             let firstHalfZero = lenOk;
+             let firstWrong = -1;
+             for (let i = 0; i < zeroed && firstHalfZero; i += 1) {
+               if (r.bytes[i] !== 0) {
+                 firstHalfZero = false;
+                 firstWrong = i;
+               }
+             }
+             let secondHalfPattern = lenOk;
+             for (let i = zeroed; i < r.bytes.length && secondHalfPattern; i += 1) {
+               if (r.bytes[i] !== pattern[i % 4]) {
+                 secondHalfPattern = false;
+                 firstWrong = i;
+               }
+             }
+             return {
+               done: true,
+               state: r.name,
+               len: r.bytes.length,
+               firstHalfZero,
+               secondHalfPattern,
+               firstWrong,
+               // A byte from each half, for a failure message a human can read.
+               sample: [...r.bytes.slice(124, 132)],
+               error: gpu.replayer.takeError(),
+             };
+           })()`
+        )
+      )
+    : null;
+  check(
+    'W',
+    'wasm encoded the fill setup frame — dispatch, fill_buffer, copy, request',
+    fillStart?.started === true,
+    fillStart?.started
+      ? 'the fill frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'W',
+    'the fill zeroed the first half and left the second half as 0xDEADBEEF',
+    fill?.done === true &&
+      fill.firstHalfZero === true &&
+      fill.secondHalfPattern === true &&
+      fill.len === PROBE_FILL_WORDS * 4,
+    fill?.done !== true
+      ? `no fill readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : fill.firstHalfZero && fill.secondHalfPattern
+        ? `${fill.len} bytes, first ${PROBE_FILL_ZEROED_BYTES} zero and the rest 0xDEADBEEF [${PROBE_FILL_PATTERN_BYTES.join(', ')}]`
+        : `state ${fill.state}, ${fill.len ?? 0} bytes, ` +
+          `first wrong at byte ${fill.firstWrong} (sample around the boundary ${JSON.stringify(fill.sample)}; ` +
+          `want zero then [${PROBE_FILL_PATTERN_BYTES.join(', ')}])` +
+          `${fill.error ? ` — ${fill.error}` : ''}`
+  );
+
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.
