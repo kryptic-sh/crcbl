@@ -1,0 +1,24 @@
+[package]
+name = "crcbl-rand"
+description = "Crucible randomness seam: portable deterministic PRNG and secure entropy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The portable ChaCha PRNG and the `RngCore`/`SeedableRng` traits it plugs into.
+# Both are pure Rust with no platform paths, so the deterministic `Rng` produces
+# byte-identical output on every target — the point of the seam.
+rand_chacha = { workspace = true }
+rand_core = { workspace = true }
+
+# Secure OS entropy, native only. `getrandom` is deliberately absent on wasm32:
+# there the seed comes from the host through the `__crcbl_web_seed_entropy`
+# export, so pulling `getrandom` (and `wasm-bindgen` behind its `wasm_js`
+# feature) onto wasm32 would be dead weight the seam exists to avoid.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = { workspace = true }
+
+[lints]
+workspace = true
