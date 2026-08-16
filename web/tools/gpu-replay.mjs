@@ -14,13 +14,14 @@
 // `navigator.gpu` is absent altogether, and the reason string is too long for
 // the writer's cap. Each is driven below, and each has to end with a reply.
 //
-// AND THE DEVICE REQUEST HAS FIVE MORE, which is why it has a section of its
-// own: an adapter id nothing enumerated, a `compatible_surface` this replayer
-// has no table for, a required feature with no `GPUFeatureName` at all, a
-// required feature whose name exists and whose adapter does not have it, and a
-// `requestDevice` that simply rejects. The first four are refused *before* the
-// browser is asked — each is something WebGPU cannot be told — and every one of
-// the five still answers.
+// AND THE DEVICE REQUEST HAS ITS OWN, which is why it has a section of its own:
+// an adapter id nothing enumerated, a required feature with no `GPUFeatureName`
+// at all, a required feature whose name exists and whose adapter does not have
+// it, and a `requestDevice` that simply rejects. The first three are refused
+// *before* the browser is asked — each is something WebGPU cannot be told — and
+// every case still answers. A `compatible_surface` is the one that is **not**
+// refused: WebGPU has no surface-specific device, so it is dropped and the
+// request reaches the browser like any other, which its own check confirms.
 //
 // THE SURFACE COMMANDS ANSWER NOTHING, so what is checked about them is what
 // they did rather than what they replied: that `CreateSurface` resolved the
@@ -2214,10 +2215,13 @@ async function main() {
     );
   }
   {
-    // The fixture's *other* request: adapter 3, and a `compatible_surface`.
-    // Both are things this replayer cannot honour, and the surface is the one
-    // that must not be honoured silently — a headless device handed to a caller
-    // that asked for a presentable one renders nothing and reports nothing.
+    // The fixture's *other* request: adapter 3, and a `compatible_surface`. The
+    // surface is *dropped*, not refused — WebGPU has no surface-specific device,
+    // so the field is a carried-over Vulkan-ism with no WebGPU meaning, and the
+    // real engine passes the surface it just created. Refusing over it would
+    // fail device-open under the engine; ignoring it opens the same device the
+    // caller would get by omitting it. So the request reaches the browser and
+    // the device opens.
     const withSurface = commands.find(
       (command) =>
         command.name === 'RequestDevice' && command.compatibleSurface !== null
@@ -2226,21 +2230,29 @@ async function main() {
       withSurface !== undefined,
       'the committed stream carries a RequestDevice naming a surface'
     );
+    // Features zeroed so this isolates the surface: the fixture's request also
+    // names a required feature the bare stub adapter lacks, and feature refusal
+    // has its own checks above. What is under test here is that the surface no
+    // longer stops the request short of the browser.
     const adapter = openingAdapter();
     const replayer = await openDevice(
       adapter,
-      { ...withSurface, adapter: 0 },
+      {
+        ...withSurface,
+        adapter: 0,
+        requiredFeatures: 0n,
+        optionalFeatures: 0n,
+      },
       5n
     );
     check(
-      adapter.requests.length === 0,
-      'a request naming a surface never reaches the browser'
+      adapter.requests.length === 1,
+      `a request naming a surface still reaches the browser — the surface is dropped, not refused (${adapter.requests.length} requests)`
     );
     const answered = decodeOneReply(replayer.replies);
     check(
-      answered?.tag === 'DeviceFailed' &&
-        String(answered.reason).includes('surface'),
-      `a compatible_surface this replayer cannot resolve is refused (${shown(answered)})`
+      answered?.tag === 'Device',
+      `a compatible_surface is dropped and the device opens (${shown(answered)})`
     );
   }
 

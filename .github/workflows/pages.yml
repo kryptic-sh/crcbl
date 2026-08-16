@@ -190,6 +190,25 @@ jobs:
       - name: Render breakout in a real browser
         run: CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh
 
+      # THE WEBGPU GATE. The same breakout, rendered through `crcbl-webgpu`
+      # instead of `crcbl-wgpu`: `CRCBL_WEB_BACKEND=webgpu` builds the site with
+      # the umbrella's `webgpu` feature and drives the demo through the backend,
+      # running groups A–F — boots, opens a webgpu device, draws distinct frames.
+      # The crcbl-webgpu probe groups are skipped here: the engine's own device
+      # owns the one command-stream channel, and the wgpu run above still
+      # exercises them.
+      #
+      # Built into its OWN `SITE_DIR`, not `target/site`. The wasm links a
+      # different backend, so `--build` produces a different artifact — and
+      # `target/site` is what the remaining wgpu demo steps reuse and what the
+      # deploy ships, so it must stay the default (wgpu) build. A separate
+      # directory keeps this gate from poisoning either.
+      #
+      # Only breakout renders through WebGpu today; the other samples come in
+      # later slices, so only breakout is gated here.
+      - name: Render breakout through WebGpu in a real browser
+        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh --build
+
       - name: Render flappy in a real browser
         run: CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh
 

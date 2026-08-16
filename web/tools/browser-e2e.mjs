@@ -306,6 +306,43 @@ const TIMEOUT_MS = Number(
  */
 const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
 
+/**
+ * Whether the site under test renders through `crcbl-webgpu` rather than
+ * `crcbl-wgpu`.
+ *
+ * Set by `CRCBL_WEB_BACKEND=webgpu`, the same variable `web/build.sh` reads to
+ * turn on the umbrella's `webgpu` feature. In this mode the engine's own
+ * `WebGpuDevice` installs the one `StreamChannel`, so the crcbl-webgpu PROBE
+ * groups (G onward) cannot install a second one and are skipped — the demo does
+ * through the backend exactly what those groups do standalone. The engine boot
+ * check also expects the *webgpu* backend's adapter line instead of wgpu's. The
+ * default (`wgpu`, or unset) runs everything as before.
+ */
+const WEBGPU_MODE = (process.env.CRCBL_WEB_BACKEND ?? 'wgpu') === 'webgpu';
+
+/**
+ * The one WebGPU *warning* group D filters out, and why it is safe to.
+ *
+ * Under SwiftShader — the only adapter a runner with no GPU has — the browser
+ * prefers `rgba8unorm` for the canvas, while `crcbl-webgpu`'s `surface_caps`
+ * offers `Bgra8Unorm` first and the engine configures the swapchain with it.
+ * Chrome emits this through the device's error channel, so it lands in
+ * `deviceErrors` beside real validation failures, but it is a *performance*
+ * warning ("requires an extra copy"), not a device error: the frame still
+ * renders and reads back correctly, which every other group D check confirms.
+ *
+ * Matched on a distinctive substring so it swallows only this warning and never
+ * a real error. **This is a stopgap.** The proper fix is for the WebGpu backend
+ * to prefer the browser's own `getPreferredCanvasFormat()` so no mismatch and no
+ * warning is produced; it needs the format prefetched during instance-open,
+ * which is a command-stream change with committed fixtures behind it — tracked
+ * in `docs/backlog.md` under "WebGpu surface_caps should prefer the browser's
+ * canvas format". Until then the warning is filtered rather than left to fail a
+ * clean render.
+ */
+const BENIGN_FORMAT_WARNING =
+  'configured with a different format than is preferred by this device';
+
 /** How many times the canvas is read back once the ball is in flight. */
 const SAMPLE_COUNT = 16;
 
@@ -1569,11 +1606,19 @@ try {
     said('shell: first configure'),
     said('shell: first configure')?.trim() ?? 'no configure line'
   );
+  // The engine logs `hal: <backend> adapter …` at open, where `<backend>` is
+  // `Instance::backend()` — `wgpu` normally, `webgpu` when the site was built
+  // with the `webgpu` feature. Reading the backend's own line is what makes this
+  // a check that the *right* backend opened the device rather than that some
+  // backend did.
+  const backendAdapterLine = WEBGPU_MODE
+    ? 'hal: webgpu adapter'
+    : 'hal: wgpu adapter';
   check(
     'B',
-    'the wgpu backend opened a device',
-    said('hal: wgpu adapter'),
-    said('hal: wgpu adapter')?.trim() ?? 'no adapter line'
+    `the ${WEBGPU_MODE ? 'webgpu' : 'wgpu'} backend opened a device`,
+    said(backendAdapterLine),
+    said(backendAdapterLine)?.trim() ?? 'no adapter line'
   );
   check(
     'B',
@@ -1776,12 +1821,18 @@ try {
     last ? `${last.width}x${last.height}` : 'no canvas'
   );
 
+  // The benign swapchain-format perf warning is dropped here rather than at
+  // collection, so it still appears in the full device-error dump and the saved
+  // log — it is real output, just not a failure. See `BENIGN_FORMAT_WARNING`.
+  const realDeviceErrors = deviceErrors.filter(
+    (text) => !text.includes(BENIGN_FORMAT_WARNING)
+  );
   check(
     'D',
     'the browser reported no WebGPU device errors',
-    deviceErrors.length === 0,
-    deviceErrors.length
-      ? `${deviceErrors.length} error(s); first: ${deviceErrors[0].split('\n')[0]}`
+    realDeviceErrors.length === 0,
+    realDeviceErrors.length
+      ? `${realDeviceErrors.length} error(s); first: ${realDeviceErrors[0].split('\n')[0]}`
       : ''
   );
 
@@ -2769,27 +2820,35 @@ try {
   // that only read back what wasm sent would prove the transport and nothing
   // else, and the transport already has a node suite.
   //
-  // It runs for every demo because every demo links `crcbl-webgpu` and none of
-  // them drives it: `crcbl::backend`'s registry entry for `webgpu` still
-  // refuses, so the channel the probe installs is the only one in the page. The
-  // engine's own frame loop is drawing throughout, which is the other half of
-  // what this says — the last check below is that the demo did not notice.
-  group('G — the WebGPU command stream makes a round trip');
-
-  // **NOTHING HERE DRAINS, REPLAYS OR DELIVERS.** The probe encodes a command
-  // and the demo's own frame loop does the rest — one drain, one replay, one
-  // delivery per frame, in `web/engine/demo.js`'s `pumpGpu`. So every check
-  // below waits for that loop to have done the work, which is what makes this
-  // group a gate on the loop the WebGPU backend will use rather than on a
-  // replayer the harness stood up for itself. A demo whose loop stopped
-  // replaying fails here even though the transport, the format and the replayer
-  // are all still correct — that is the claim, and no other check makes it.
+  // It runs for every demo whose site was built for `wgpu` — the default —
+  // because those demos link `crcbl-webgpu` and none of them drives it:
+  // `crcbl::backend`'s registry entry for `webgpu` is not the active backend, so
+  // the channel the probe installs is the only one in the page. The engine's own
+  // frame loop is drawing throughout, which is the other half of what this says
+  // — the last check below is that the demo did not notice.
   //
-  // The decoy goes into the demo's *own* registry, which is the only one there
-  // is now, and group H is what reads it back. See DECOY_CANVAS_ID.
-  const probe = await evaluate(
-    page,
-    `(async () => {
+  // **These groups are skipped in webgpu mode**, and must be: there the engine's
+  // own `WebGpuDevice` installs that one channel, so the probe cannot install a
+  // second and every group here would fail at "could not install a channel". The
+  // demo rendering through the backend (groups A–F) is what proves the same path
+  // in that mode. See `WEBGPU_MODE`.
+  if (!WEBGPU_MODE) {
+    group('G — the WebGPU command stream makes a round trip');
+
+    // **NOTHING HERE DRAINS, REPLAYS OR DELIVERS.** The probe encodes a command
+    // and the demo's own frame loop does the rest — one drain, one replay, one
+    // delivery per frame, in `web/engine/demo.js`'s `pumpGpu`. So every check
+    // below waits for that loop to have done the work, which is what makes this
+    // group a gate on the loop the WebGPU backend will use rather than on a
+    // replayer the harness stood up for itself. A demo whose loop stopped
+    // replaying fails here even though the transport, the format and the replayer
+    // are all still correct — that is the claim, and no other check makes it.
+    //
+    // The decoy goes into the demo's *own* registry, which is the only one there
+    // is now, and group H is what reads it back. See DECOY_CANVAS_ID.
+    const probe = await evaluate(
+      page,
+      `(async () => {
        const { startAdapterProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const decoy = document.createElement('canvas');
@@ -2807,50 +2866,50 @@ try {
          delivered: before.delivered,
        };
      })()`
-  );
+    );
 
-  // Polled, because the command is encoded on this evaluation's frame and
-  // replayed on the demo's next one. `stats().replayed` counting up is the loop
-  // saying it took a frame off the channel; `commands` is what that frame
-  // carried, decoded by the loop rather than by anything here.
-  const carried = probe?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    // Polled, because the command is encoded on this evaluation's frame and
+    // replayed on the demo's next one. `stats().replayed` counting up is the loop
+    // saying it took a frame off the channel; `commands` is what that frame
+    // carried, decoded by the loop rather than by anything here.
+    const carried = probe?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const stats = globalThis.crcbl.gpu.stats();
              return stats.replayed > ${probe.replayed} || stats.failure
                ? stats
                : null;
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'G',
-    'wasm encoded an adapter enumeration and the demo loop replayed it',
-    carried?.commands?.join(',') === 'EnumerateAdapters',
-    carried
-      ? `the loop replayed [${carried.commands.join(', ')}] at sequence ${carried.baseSequence}` +
-          `${carried.failure ? ` — ${carried.failure}` : ''}`
-      : probe?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'the probe could not install a channel — something else already has one'
-  );
+      : null;
+    check(
+      'G',
+      'wasm encoded an adapter enumeration and the demo loop replayed it',
+      carried?.commands?.join(',') === 'EnumerateAdapters',
+      carried
+        ? `the loop replayed [${carried.commands.join(', ')}] at sequence ${carried.baseSequence}` +
+            `${carried.failure ? ` — ${carried.failure}` : ''}`
+        : probe?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'the probe could not install a channel — something else already has one'
+    );
 
-  // Then polled again, because the answer cannot be on the frame that asked:
-  // WebGPU's adapter API is a promise and the stream is replayed synchronously
-  // once a frame, so the reply is queued when the browser settles and the loop
-  // hands it over on a later frame. `WAITING` is the ordinary answer until then
-  // and is not a state to report.
-  //
-  // `delivered` comes from the loop's own counter rather than from this call,
-  // which no longer moves any bytes: it is the loop saying wasm took a reply
-  // buffer, beside wasm saying it understood one.
-  const answered = await until(async () =>
-    evaluate(
-      page,
-      `(async () => {
+    // Then polled again, because the answer cannot be on the frame that asked:
+    // WebGPU's adapter API is a promise and the stream is replayed synchronously
+    // once a frame, so the reply is queued when the browser settles and the loop
+    // hands it over on a later frame. `WAITING` is the ordinary answer until then
+    // and is not a state to report.
+    //
+    // `delivered` comes from the loop's own counter rather than from this call,
+    // which no longer moves any bytes: it is the loop saying wasm took a reply
+    // buffer, beside wasm saying it understood one.
+    const answered = await until(async () =>
+      evaluate(
+        page,
+        `(async () => {
          const { readAdapterProbe, PROBE } = await import('/engine/gpu-probe.js');
          const { exports, memory, gpu } = globalThis.crcbl;
          const out = readAdapterProbe({ exports, memory });
@@ -2858,31 +2917,31 @@ try {
            ? null
            : { ...out, delivered: gpu.stats().delivered };
        })()`
-    )
-  );
-  check(
-    'G',
-    'the browser answered it and wasm read the answer back',
-    answered?.name === 'GRANTED' &&
-      answered.delivered > (probe?.delivered ?? 0),
-    answered
-      ? `${answered.name}: ${JSON.stringify(answered.text)}, after the loop delivered ` +
-          `${answered.delivered - (probe?.delivered ?? 0)} reply buffer(s)`
-      : `no answer in ${TIMEOUT_MS} ms — the reply never reached wasm`
-  );
+      )
+    );
+    check(
+      'G',
+      'the browser answered it and wasm read the answer back',
+      answered?.name === 'GRANTED' &&
+        answered.delivered > (probe?.delivered ?? 0),
+      answered
+        ? `${answered.name}: ${JSON.stringify(answered.text)}, after the loop delivered ` +
+            `${answered.delivered - (probe?.delivered ?? 0)} reply buffer(s)`
+        : `no answer in ${TIMEOUT_MS} ms — the reply never reached wasm`
+    );
 
-  // **The name is the browser's own, not a string the round trip invented.**
-  // Asked of the same page, through the same joins `gpu-replay.js` makes, at
-  // the same moment — so a replayer that answered with a constant, or with the
-  // wrong adapter, differs here. Nothing else in this group would notice.
-  //
-  // The same evaluation also brings back the raw `adapter.features` and
-  // `adapter.limits` — what the browser says, before anything of ours has
-  // touched them — and what the page's own mapping makes of the limits. Those
-  // are what the capability checks below are held against.
-  const live = await evaluate(
-    page,
-    `(async () => {
+    // **The name is the browser's own, not a string the round trip invented.**
+    // Asked of the same page, through the same joins `gpu-replay.js` makes, at
+    // the same moment — so a replayer that answered with a constant, or with the
+    // wrong adapter, differs here. Nothing else in this group would notice.
+    //
+    // The same evaluation also brings back the raw `adapter.features` and
+    // `adapter.limits` — what the browser says, before anything of ours has
+    // touched them — and what the page's own mapping makes of the limits. Those
+    // are what the capability checks below are held against.
+    const live = await evaluate(
+      page,
+      `(async () => {
        const { halLimitsFor } = await import('/engine/gpu-replay.js');
        const adapter = await navigator.gpu.requestAdapter();
        const info = adapter?.info ?? {};
@@ -2919,108 +2978,113 @@ try {
          ),
        };
      })()`
-  );
-  check(
-    'G',
-    'the adapter name wasm received is the one this browser reports',
-    typeof answered?.text === 'string' && answered.text === live?.name,
-    answered?.text === live?.name
-      ? `both say ${JSON.stringify(live?.name)}`
-      : `wasm got ${JSON.stringify(answered?.text)}, the browser says ${JSON.stringify(live?.name)}`
-  );
-
-  // **The capabilities crossed too, and they are the browser's own.** The whole
-  // of `AdapterInfo` now travels, and five of its seven wire fields are the
-  // documented absences that a browser has nothing to disagree with — so the two
-  // that vary are the two worth asking a browser about, and both are asked here.
-  //
-  // The expected bits are spelled out below rather than imported from
-  // `gpu-replay.js`: a table taken from the thing under test agrees with it by
-  // construction, and what this check is for is that the table itself is right
-  // about this browser's feature set.
-  const wasmCaps = answered?.caps;
-  // `crcbl_hal::Features` bits: the four core WebGPU grants outright, then the
-  // four with a `GPUFeatureName` behind them.
-  const CORE_FEATURE_BITS = (1 << 8) | (1 << 7) | (1 << 14) | (1 << 18); // COMPUTE, OCCLUSION_QUERY, DEPTH_BIAS_CLAMP, DEBUG_MARKERS
-  const NAMED_FEATURE_BITS = {
-    'depth-clip-control': 1 << 13, // DEPTH_CLAMP
-    'texture-compression-bc': 1 << 16, // TEXTURE_COMPRESSION_BC
-    'timestamp-query': 1 << 5, // TIMESTAMP_QUERY
-    'indirect-first-instance': 1 << 4, // INDIRECT_FIRST_INSTANCE
-  };
-  /** The `crcbl_hal::Features` word a list of `GPUFeatureName`s amounts to. */
-  const featureBitsOf = (names) =>
-    (names ?? []).reduce(
-      (bits, name) => bits | (NAMED_FEATURE_BITS[name] ?? 0),
-      CORE_FEATURE_BITS
-    ) >>> 0;
-  const expectedFeatures = featureBitsOf(live?.features);
-  check(
-    'G',
-    'the feature set wasm received is what this browser actually reports',
-    wasmCaps?.featuresLo === expectedFeatures && wasmCaps?.featuresHi === 0,
-    `wasm got ${wasmCaps?.featuresLo?.toString(16)}/${wasmCaps?.featuresHi?.toString(16)},` +
-      ` ${expectedFeatures.toString(16)} expected from [${(live?.features ?? []).join(', ')}]`
-  );
-  check(
-    'G',
-    'a limit wasm received is the number this browser reports',
-    wasmCaps?.maxImage2d === live?.limits?.maxTextureDimension2D &&
-      wasmCaps?.maxImage2d > 0,
-    `wasm got ${wasmCaps?.maxImage2d}, navigator.gpu says` +
-      ` maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
-  );
-
-  // …and the other eighteen limits, which no export carries. Checked where they
-  // can be: against the live adapter, in the page, through the same mapping the
-  // replayer used to fill the reply. `gpu-replay.mjs` does this against a stub
-  // with distinct numbers; this is the same table meeting a real browser's.
-  const limitPairs = [
-    ['maxImage2d', 'maxTextureDimension2D'],
-    ['maxImage3d', 'maxTextureDimension3D'],
-    ['maxImageArrayLayers', 'maxTextureArrayLayers'],
-    ['maxStorageBufferRange', 'maxStorageBufferBindingSize'],
-    ['maxUniformBufferRange', 'maxUniformBufferBindingSize'],
-    ['maxBindGroups', 'maxBindGroups'],
-    ['maxColorAttachments', 'maxColorAttachments'],
-    ['maxComputeInvocationsPerWorkgroup', 'maxComputeInvocationsPerWorkgroup'],
-    ['maxComputeWorkgroupsPerDimension', 'maxComputeWorkgroupsPerDimension'],
-    ['minUniformBufferOffsetAlignment', 'minUniformBufferOffsetAlignment'],
-    ['minStorageBufferOffsetAlignment', 'minStorageBufferOffsetAlignment'],
-  ];
-  const mismatched = limitPairs
-    .filter(([seam, webgpu]) => live?.mapped?.[seam] !== live?.limits?.[webgpu])
-    .map(
-      ([seam, webgpu]) =>
-        `${seam}=${live?.mapped?.[seam]} but ${webgpu}=${live?.limits?.[webgpu]}`
     );
-  const workgroup = live?.mapped?.maxComputeWorkgroupSize ?? [];
-  if (
-    workgroup[0] !== live?.limits?.maxComputeWorkgroupSizeX ||
-    workgroup[1] !== live?.limits?.maxComputeWorkgroupSizeY ||
-    workgroup[2] !== live?.limits?.maxComputeWorkgroupSizeZ
-  ) {
-    mismatched.push(`maxComputeWorkgroupSize=[${workgroup.join(', ')}]`);
-  }
-  check(
-    'G',
-    'every limit the browser reports lands in the seam field that names it',
-    mismatched.length === 0 && workgroup.length === 3,
-    mismatched.length
-      ? mismatched.join('; ')
-      : `${limitPairs.length + 1} mapped, on maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
-  );
+    check(
+      'G',
+      'the adapter name wasm received is the one this browser reports',
+      typeof answered?.text === 'string' && answered.text === live?.name,
+      answered?.text === live?.name
+        ? `both say ${JSON.stringify(live?.name)}`
+        : `wasm got ${JSON.stringify(answered?.text)}, the browser says ${JSON.stringify(live?.name)}`
+    );
 
-  // **AND THEN A DEVICE OPENS.** The enumeration proves a command crossed and an
-  // answer came back; this proves the answer was *used*. wasm encodes a
-  // `RequestDevice` naming the adapter it was just granted, the replayer turns
-  // its `crcbl_hal::Features` words back into `GPUFeatureName`s, `requestDevice`
-  // resolves, and the device's own capabilities come home. Nothing without a
-  // browser can reach any of it: `gpu-replay.mjs` drives the same code against a
-  // stub that is not WebGPU.
-  const deviceProbe = await evaluate(
-    page,
-    `(async () => {
+    // **The capabilities crossed too, and they are the browser's own.** The whole
+    // of `AdapterInfo` now travels, and five of its seven wire fields are the
+    // documented absences that a browser has nothing to disagree with — so the two
+    // that vary are the two worth asking a browser about, and both are asked here.
+    //
+    // The expected bits are spelled out below rather than imported from
+    // `gpu-replay.js`: a table taken from the thing under test agrees with it by
+    // construction, and what this check is for is that the table itself is right
+    // about this browser's feature set.
+    const wasmCaps = answered?.caps;
+    // `crcbl_hal::Features` bits: the four core WebGPU grants outright, then the
+    // four with a `GPUFeatureName` behind them.
+    const CORE_FEATURE_BITS = (1 << 8) | (1 << 7) | (1 << 14) | (1 << 18); // COMPUTE, OCCLUSION_QUERY, DEPTH_BIAS_CLAMP, DEBUG_MARKERS
+    const NAMED_FEATURE_BITS = {
+      'depth-clip-control': 1 << 13, // DEPTH_CLAMP
+      'texture-compression-bc': 1 << 16, // TEXTURE_COMPRESSION_BC
+      'timestamp-query': 1 << 5, // TIMESTAMP_QUERY
+      'indirect-first-instance': 1 << 4, // INDIRECT_FIRST_INSTANCE
+    };
+    /** The `crcbl_hal::Features` word a list of `GPUFeatureName`s amounts to. */
+    const featureBitsOf = (names) =>
+      (names ?? []).reduce(
+        (bits, name) => bits | (NAMED_FEATURE_BITS[name] ?? 0),
+        CORE_FEATURE_BITS
+      ) >>> 0;
+    const expectedFeatures = featureBitsOf(live?.features);
+    check(
+      'G',
+      'the feature set wasm received is what this browser actually reports',
+      wasmCaps?.featuresLo === expectedFeatures && wasmCaps?.featuresHi === 0,
+      `wasm got ${wasmCaps?.featuresLo?.toString(16)}/${wasmCaps?.featuresHi?.toString(16)},` +
+        ` ${expectedFeatures.toString(16)} expected from [${(live?.features ?? []).join(', ')}]`
+    );
+    check(
+      'G',
+      'a limit wasm received is the number this browser reports',
+      wasmCaps?.maxImage2d === live?.limits?.maxTextureDimension2D &&
+        wasmCaps?.maxImage2d > 0,
+      `wasm got ${wasmCaps?.maxImage2d}, navigator.gpu says` +
+        ` maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
+    );
+
+    // …and the other eighteen limits, which no export carries. Checked where they
+    // can be: against the live adapter, in the page, through the same mapping the
+    // replayer used to fill the reply. `gpu-replay.mjs` does this against a stub
+    // with distinct numbers; this is the same table meeting a real browser's.
+    const limitPairs = [
+      ['maxImage2d', 'maxTextureDimension2D'],
+      ['maxImage3d', 'maxTextureDimension3D'],
+      ['maxImageArrayLayers', 'maxTextureArrayLayers'],
+      ['maxStorageBufferRange', 'maxStorageBufferBindingSize'],
+      ['maxUniformBufferRange', 'maxUniformBufferBindingSize'],
+      ['maxBindGroups', 'maxBindGroups'],
+      ['maxColorAttachments', 'maxColorAttachments'],
+      [
+        'maxComputeInvocationsPerWorkgroup',
+        'maxComputeInvocationsPerWorkgroup',
+      ],
+      ['maxComputeWorkgroupsPerDimension', 'maxComputeWorkgroupsPerDimension'],
+      ['minUniformBufferOffsetAlignment', 'minUniformBufferOffsetAlignment'],
+      ['minStorageBufferOffsetAlignment', 'minStorageBufferOffsetAlignment'],
+    ];
+    const mismatched = limitPairs
+      .filter(
+        ([seam, webgpu]) => live?.mapped?.[seam] !== live?.limits?.[webgpu]
+      )
+      .map(
+        ([seam, webgpu]) =>
+          `${seam}=${live?.mapped?.[seam]} but ${webgpu}=${live?.limits?.[webgpu]}`
+      );
+    const workgroup = live?.mapped?.maxComputeWorkgroupSize ?? [];
+    if (
+      workgroup[0] !== live?.limits?.maxComputeWorkgroupSizeX ||
+      workgroup[1] !== live?.limits?.maxComputeWorkgroupSizeY ||
+      workgroup[2] !== live?.limits?.maxComputeWorkgroupSizeZ
+    ) {
+      mismatched.push(`maxComputeWorkgroupSize=[${workgroup.join(', ')}]`);
+    }
+    check(
+      'G',
+      'every limit the browser reports lands in the seam field that names it',
+      mismatched.length === 0 && workgroup.length === 3,
+      mismatched.length
+        ? mismatched.join('; ')
+        : `${limitPairs.length + 1} mapped, on maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
+    );
+
+    // **AND THEN A DEVICE OPENS.** The enumeration proves a command crossed and an
+    // answer came back; this proves the answer was *used*. wasm encodes a
+    // `RequestDevice` naming the adapter it was just granted, the replayer turns
+    // its `crcbl_hal::Features` words back into `GPUFeatureName`s, `requestDevice`
+    // resolves, and the device's own capabilities come home. Nothing without a
+    // browser can reach any of it: `gpu-replay.mjs` drives the same code against a
+    // stub that is not WebGPU.
+    const deviceProbe = await evaluate(
+      page,
+      `(async () => {
        const { startDeviceProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -3030,36 +3094,36 @@ try {
          delivered: before.delivered,
        };
      })()`
-  );
-  const deviceCarried = deviceProbe?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const deviceCarried = deviceProbe?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const stats = globalThis.crcbl.gpu.stats();
              return stats.replayed > ${deviceProbe.replayed} || stats.failure
                ? stats
                : null;
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'G',
-    'wasm encoded a device request and the demo loop replayed it',
-    deviceCarried?.commands?.join(',') === 'RequestDevice',
-    deviceCarried
-      ? `the loop replayed [${deviceCarried.commands.join(', ')}] at sequence ${deviceCarried.baseSequence}` +
-          `${deviceCarried.failure ? ` — ${deviceCarried.failure}` : ''}`
-      : deviceProbe?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not ask — no adapter had been granted, or the waiting set is full'
-  );
+      : null;
+    check(
+      'G',
+      'wasm encoded a device request and the demo loop replayed it',
+      deviceCarried?.commands?.join(',') === 'RequestDevice',
+      deviceCarried
+        ? `the loop replayed [${deviceCarried.commands.join(', ')}] at sequence ${deviceCarried.baseSequence}` +
+            `${deviceCarried.failure ? ` — ${deviceCarried.failure}` : ''}`
+        : deviceProbe?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not ask — no adapter had been granted, or the waiting set is full'
+    );
 
-  const opened = await until(async () =>
-    evaluate(
-      page,
-      `(async () => {
+    const opened = await until(async () =>
+      evaluate(
+        page,
+        `(async () => {
          const { readDeviceProbe, DEVICE } = await import('/engine/gpu-probe.js');
          const { exports, memory, gpu } = globalThis.crcbl;
          const out = readDeviceProbe({ exports, memory });
@@ -3067,27 +3131,27 @@ try {
            ? null
            : { ...out, delivered: gpu.stats().delivered };
        })()`
-    )
-  );
-  check(
-    'G',
-    'the browser opened a device and wasm read its capabilities back',
-    opened?.name === 'OPENED' &&
-      opened.delivered > (deviceProbe?.delivered ?? 0),
-    opened
-      ? `${opened.name}${opened.reason ? `: ${JSON.stringify(opened.reason)}` : ''}` +
-          `, after the loop delivered ${opened.delivered - (deviceProbe?.delivered ?? 0)} reply buffer(s)`
-      : `no answer in ${TIMEOUT_MS} ms — requestDevice never settled, or the reply never reached wasm`
-  );
+      )
+    );
+    check(
+      'G',
+      'the browser opened a device and wasm read its capabilities back',
+      opened?.name === 'OPENED' &&
+        opened.delivered > (deviceProbe?.delivered ?? 0),
+      opened
+        ? `${opened.name}${opened.reason ? `: ${JSON.stringify(opened.reason)}` : ''}` +
+            `, after the loop delivered ${opened.delivered - (deviceProbe?.delivered ?? 0)} reply buffer(s)`
+        : `no answer in ${TIMEOUT_MS} ms — requestDevice never settled, or the reply never reached wasm`
+    );
 
-  // **What the page can see for itself.** A device opened here, in this browser,
-  // with the descriptor the probe uses — no optional features and no requested
-  // limits — is the same device WebGPU gives the replayer, so its own
-  // `features` and `limits` are what wasm's numbers are held to. Asked of the
-  // browser rather than of anything of ours, which is what makes it evidence.
-  const liveDevice = await evaluate(
-    page,
-    `(async () => {
+    // **What the page can see for itself.** A device opened here, in this browser,
+    // with the descriptor the probe uses — no optional features and no requested
+    // limits — is the same device WebGPU gives the replayer, so its own
+    // `features` and `limits` are what wasm's numbers are held to. Asked of the
+    // browser rather than of anything of ours, which is what makes it evidence.
+    const liveDevice = await evaluate(
+      page,
+      `(async () => {
        const adapter = await navigator.gpu.requestAdapter();
        const device = await adapter.requestDevice();
        return {
@@ -3096,84 +3160,84 @@ try {
          adapterMaxTextureDimension2D: adapter.limits.maxTextureDimension2D,
        };
      })()`
-  );
-  const deviceCaps = opened?.caps;
-  const expectedDeviceFeatures = featureBitsOf(liveDevice?.features);
-  check(
-    'G',
-    "the device's feature set wasm received is what this browser's own device reports",
-    deviceCaps?.featuresLo === expectedDeviceFeatures &&
-      deviceCaps?.featuresHi === 0,
-    `wasm got ${deviceCaps?.featuresLo?.toString(16)}/${deviceCaps?.featuresHi?.toString(16)},` +
-      ` ${expectedDeviceFeatures.toString(16)} expected from [${(liveDevice?.features ?? []).join(', ')}]`
-  );
-  check(
-    'G',
-    "a limit wasm received for the device is the number this browser's device reports",
-    deviceCaps?.maxImage2d === liveDevice?.maxTextureDimension2D &&
-      deviceCaps?.maxImage2d > 0,
-    `wasm got ${deviceCaps?.maxImage2d}, the device says` +
-      ` maxTextureDimension2D ${liveDevice?.maxTextureDimension2D}`
-  );
+    );
+    const deviceCaps = opened?.caps;
+    const expectedDeviceFeatures = featureBitsOf(liveDevice?.features);
+    check(
+      'G',
+      "the device's feature set wasm received is what this browser's own device reports",
+      deviceCaps?.featuresLo === expectedDeviceFeatures &&
+        deviceCaps?.featuresHi === 0,
+      `wasm got ${deviceCaps?.featuresLo?.toString(16)}/${deviceCaps?.featuresHi?.toString(16)},` +
+        ` ${expectedDeviceFeatures.toString(16)} expected from [${(liveDevice?.features ?? []).join(', ')}]`
+    );
+    check(
+      'G',
+      "a limit wasm received for the device is the number this browser's device reports",
+      deviceCaps?.maxImage2d === liveDevice?.maxTextureDimension2D &&
+        deviceCaps?.maxImage2d > 0,
+      `wasm got ${deviceCaps?.maxImage2d}, the device says` +
+        ` maxTextureDimension2D ${liveDevice?.maxTextureDimension2D}`
+    );
 
-  // **The device's capabilities are not the adapter's**, which is the claim a
-  // backend gets wrong for free: the adapter is right there when the reply is
-  // built. WebGPU grants a device what was asked for, and the probe asks for
-  // nothing optional and no limits — so on any machine whose adapter reports
-  // more than the specification's floor, the two records differ, and wasm's two
-  // sets of numbers have to differ with them.
-  //
-  // Where an adapter *is* at the floor the two legitimately coincide, and this
-  // says so rather than claiming a distinction it could not observe. The checks
-  // above still hold the device's numbers to a device either way.
-  const adapterIsAboveTheFloor =
-    expectedFeatures !== expectedDeviceFeatures ||
-    live?.limits?.maxTextureDimension2D !== liveDevice?.maxTextureDimension2D;
-  const wasmSaysTheyDiffer =
-    wasmCaps?.featuresLo !== deviceCaps?.featuresLo ||
-    wasmCaps?.maxImage2d !== deviceCaps?.maxImage2d;
-  check(
-    'G',
-    'the device wasm was told about is a device, not a copy of its adapter',
-    adapterIsAboveTheFloor ? wasmSaysTheyDiffer : !wasmSaysTheyDiffer,
-    adapterIsAboveTheFloor
-      ? `adapter ${wasmCaps?.featuresLo?.toString(16)}/${wasmCaps?.maxImage2d}` +
-          ` against device ${deviceCaps?.featuresLo?.toString(16)}/${deviceCaps?.maxImage2d}`
-      : 'this adapter grants nothing beyond the floor, so the two records ' +
-          'genuinely coincide here and a copy could not be told apart'
-  );
+    // **The device's capabilities are not the adapter's**, which is the claim a
+    // backend gets wrong for free: the adapter is right there when the reply is
+    // built. WebGPU grants a device what was asked for, and the probe asks for
+    // nothing optional and no limits — so on any machine whose adapter reports
+    // more than the specification's floor, the two records differ, and wasm's two
+    // sets of numbers have to differ with them.
+    //
+    // Where an adapter *is* at the floor the two legitimately coincide, and this
+    // says so rather than claiming a distinction it could not observe. The checks
+    // above still hold the device's numbers to a device either way.
+    const adapterIsAboveTheFloor =
+      expectedFeatures !== expectedDeviceFeatures ||
+      live?.limits?.maxTextureDimension2D !== liveDevice?.maxTextureDimension2D;
+    const wasmSaysTheyDiffer =
+      wasmCaps?.featuresLo !== deviceCaps?.featuresLo ||
+      wasmCaps?.maxImage2d !== deviceCaps?.maxImage2d;
+    check(
+      'G',
+      'the device wasm was told about is a device, not a copy of its adapter',
+      adapterIsAboveTheFloor ? wasmSaysTheyDiffer : !wasmSaysTheyDiffer,
+      adapterIsAboveTheFloor
+        ? `adapter ${wasmCaps?.featuresLo?.toString(16)}/${wasmCaps?.maxImage2d}` +
+            ` against device ${deviceCaps?.featuresLo?.toString(16)}/${deviceCaps?.maxImage2d}`
+        : 'this adapter grants nothing beyond the floor, so the two records ' +
+            'genuinely coincide here and a copy could not be told apart'
+    );
 
-  // A channel installed under a running demo must be invisible to it. The
-  // demo's loop has been draining every frame throughout, and from the moment
-  // the probe installed a channel it stopped answering "nothing to do" and
-  // started decoding real headers, replaying them against WebGPU and handing
-  // replies back — all of it between the engine's frame and the next rAF.
-  const survived = await evaluate(page, `crcbl.status()`);
-  check(
-    'G',
-    'the demo kept running with a channel installed under it',
-    survived === STATUS_RUNNING,
-    `status ${survived}`
-  );
+    // A channel installed under a running demo must be invisible to it. The
+    // demo's loop has been draining every frame throughout, and from the moment
+    // the probe installed a channel it stopped answering "nothing to do" and
+    // started decoding real headers, replaying them against WebGPU and handing
+    // replies back — all of it between the engine's frame and the next rAF.
+    const survived = await evaluate(page, `crcbl.status()`);
+    check(
+      'G',
+      'the demo kept running with a channel installed under it',
+      survived === STATUS_RUNNING,
+      `status ${survived}`
+    );
 
-  // **THE ONLY GATE ON A SURFACE.** `gpu-replay.mjs` drives the same two
-  // commands under node against a stub canvas whose `getContext` returns a plain
-  // object, so what it proves is the bookkeeping: that the `canvasId` on the
-  // wire is the key that gets looked up, and that a destroy lets go. What it
-  // cannot reach is the only thing a surface finally is — `getContext('webgpu')`
-  // on a real element, answering a real `GPUCanvasContext`. Nothing else runs
-  // that, and the registry it is resolved against is the demo's own.
-  //
-  // Polled rather than read straight back, for group G's reason and no other:
-  // `CreateSurface` still makes no round trip — wasm names the handle and moves
-  // on — but the replay is the demo loop's, so what there is to see appears on
-  // the loop's next frame rather than in this call. See
-  // `crates/crcbl-webgpu/src/probe.rs`.
-  group('H — a surface resolves to a real canvas context');
+    // **THE ONLY GATE ON A SURFACE.** `gpu-replay.mjs` drives the same two
+    // commands under node against a stub canvas whose `getContext` returns a plain
+    // object, so what it proves is the bookkeeping: that the `canvasId` on the
+    // wire is the key that gets looked up, and that a destroy lets go. What it
+    // cannot reach is the only thing a surface finally is — `getContext('webgpu')`
+    // on a real element, answering a real `GPUCanvasContext`. Nothing else runs
+    // that, and the registry it is resolved against is the demo's own.
+    //
+    // Polled rather than read straight back, for group G's reason and no other:
+    // `CreateSurface` still makes no round trip — wasm names the handle and moves
+    // on — but the replay is the demo loop's, so what there is to see appears on
+    // the loop's next frame rather than in this call. See
+    // `crates/crcbl-webgpu/src/probe.rs`.
+    group('H — a surface resolves to a real canvas context');
 
-  const surfaceStart = await evaluate(
-    page,
-    `(async () => {
+    const surfaceStart = await evaluate(
+      page,
+      `(async () => {
        const { startSurfaceProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -3183,17 +3247,17 @@ try {
          canvasId: gpu.canvasId,
        };
      })()`
-  );
-  // A `SurfaceError` out of the replay is the page failing to resolve the
-  // canvas, and it is the one failure this group exists to catch. It is thrown
-  // in the demo's loop now, which latches it and reports it as `stats().failure`
-  // — so it settles this poll and lands as a red check naming what threw,
-  // rather than either aborting the run or timing out with nothing to say.
-  const surfaceProbe = surfaceStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    // A `SurfaceError` out of the replay is the page failing to resolve the
+    // canvas, and it is the one failure this group exists to catch. It is thrown
+    // in the demo's loop now, which latches it and reports it as `stats().failure`
+    // — so it settles this poll and lands as a red check naming what threw,
+    // rather than either aborting the run or timing out with nothing to say.
+    const surfaceProbe = surfaceStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${surfaceStart.replayed} && !stats.failure) {
@@ -3225,70 +3289,70 @@ try {
                hasCurrentTexture: typeof context?.getCurrentTexture === 'function',
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'H',
-    'wasm encoded a surface creation and the demo loop replayed it',
-    surfaceProbe?.commands?.join(',') === 'CreateSurface' &&
-      Number.isInteger(surfaceProbe.surface),
-    surfaceProbe
-      ? `the loop replayed [${surfaceProbe.commands.join(', ')}] for surface ${surfaceProbe.surface}` +
-          `${surfaceProbe.failure ? ` — ${surfaceProbe.failure}` : ''}`
-      : surfaceStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — another channel is installed'
-  );
-  check(
-    'H',
-    'the surface resolved the canvas the page registered and not the decoy',
-    surfaceProbe?.isTheCanvas === true && surfaceProbe?.isTheDecoy === false,
-    surfaceProbe?.isTheCanvas
-      ? `surface ${surfaceProbe.surface} holds the context of canvas ${surfaceStart?.canvasId}, of ${surfaceProbe.held} held`
-      : `the context under surface ${surfaceProbe?.surface} belongs to ` +
-          `${surfaceProbe?.isTheDecoy ? `the decoy at ${DECOY_CANVAS_ID}` : 'no canvas this page registered'}` +
-          `${surfaceProbe?.failure ? ` — ${surfaceProbe.failure}` : ''}`
-  );
-  check(
-    'H',
-    'a real GPUCanvasContext came from that canvas, not a stub of one',
-    surfaceProbe?.isRealContext === true &&
-      surfaceProbe?.hasCurrentTexture === true,
-    surfaceProbe?.isRealContext
-      ? 'the context is an instance of this browser GPUCanvasContext and has getCurrentTexture'
-      : `instanceof GPUCanvasContext: ${surfaceProbe?.isRealContext}, ` +
-          `getCurrentTexture: ${surfaceProbe?.hasCurrentTexture}` +
-          `${surfaceProbe?.failure ? ` — ${surfaceProbe.failure}` : ''}`
-  );
+      : null;
+    check(
+      'H',
+      'wasm encoded a surface creation and the demo loop replayed it',
+      surfaceProbe?.commands?.join(',') === 'CreateSurface' &&
+        Number.isInteger(surfaceProbe.surface),
+      surfaceProbe
+        ? `the loop replayed [${surfaceProbe.commands.join(', ')}] for surface ${surfaceProbe.surface}` +
+            `${surfaceProbe.failure ? ` — ${surfaceProbe.failure}` : ''}`
+        : surfaceStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — another channel is installed'
+    );
+    check(
+      'H',
+      'the surface resolved the canvas the page registered and not the decoy',
+      surfaceProbe?.isTheCanvas === true && surfaceProbe?.isTheDecoy === false,
+      surfaceProbe?.isTheCanvas
+        ? `surface ${surfaceProbe.surface} holds the context of canvas ${surfaceStart?.canvasId}, of ${surfaceProbe.held} held`
+        : `the context under surface ${surfaceProbe?.surface} belongs to ` +
+            `${surfaceProbe?.isTheDecoy ? `the decoy at ${DECOY_CANVAS_ID}` : 'no canvas this page registered'}` +
+            `${surfaceProbe?.failure ? ` — ${surfaceProbe.failure}` : ''}`
+    );
+    check(
+      'H',
+      'a real GPUCanvasContext came from that canvas, not a stub of one',
+      surfaceProbe?.isRealContext === true &&
+        surfaceProbe?.hasCurrentTexture === true,
+      surfaceProbe?.isRealContext
+        ? 'the context is an instance of this browser GPUCanvasContext and has getCurrentTexture'
+        : `instanceof GPUCanvasContext: ${surfaceProbe?.isRealContext}, ` +
+            `getCurrentTexture: ${surfaceProbe?.hasCurrentTexture}` +
+            `${surfaceProbe?.failure ? ` — ${surfaceProbe.failure}` : ''}`
+    );
 
-  // **THE ONLY GATE ON A CAPABILITY QUERY.** `gpu-replay.mjs` drives the same
-  // command under node against a stub whose `getPreferredCanvasFormat` returns
-  // whatever that file wrote a line above, so what it proves is the encoding and
-  // the translation. The fact left over is the one only a browser has: **what
-  // this machine's WebGPU actually prefers to put on a canvas**, which varies by
-  // browser and by platform and which no fixture can contain.
-  //
-  // So the check below asks the page for that answer directly, at the same
-  // moment, and holds wasm's number to it. A replayer that answered with a
-  // constant, or a decoder that read the format list off by one, differs there
-  // and nowhere else in this file.
-  //
-  // **There is no refusal check here, and there is nothing to replace it with.**
-  // This group used to drive a surface handle nothing created and expect
-  // `InvalidHandle` back. `Command::SurfaceCaps` carries no ids now — the record
-  // depends on neither, so an `impl Instance` refuses a stale handle against its
-  // own tables without a round trip — and the only cause left, `Backend`, is the
-  // browser naming a canvas format this seam has no `Format` for, which no page
-  // can be made to do. The refusal path is a `cargo test` and a `gpu-replay.mjs`
-  // check; the reply channel carrying one is not a browser fact any more.
-  //
-  // Nothing here drains, replays or delivers, for group G's reason.
-  group('I — a surface says what it will accept');
+    // **THE ONLY GATE ON A CAPABILITY QUERY.** `gpu-replay.mjs` drives the same
+    // command under node against a stub whose `getPreferredCanvasFormat` returns
+    // whatever that file wrote a line above, so what it proves is the encoding and
+    // the translation. The fact left over is the one only a browser has: **what
+    // this machine's WebGPU actually prefers to put on a canvas**, which varies by
+    // browser and by platform and which no fixture can contain.
+    //
+    // So the check below asks the page for that answer directly, at the same
+    // moment, and holds wasm's number to it. A replayer that answered with a
+    // constant, or a decoder that read the format list off by one, differs there
+    // and nowhere else in this file.
+    //
+    // **There is no refusal check here, and there is nothing to replace it with.**
+    // This group used to drive a surface handle nothing created and expect
+    // `InvalidHandle` back. `Command::SurfaceCaps` carries no ids now — the record
+    // depends on neither, so an `impl Instance` refuses a stale handle against its
+    // own tables without a round trip — and the only cause left, `Backend`, is the
+    // browser naming a canvas format this seam has no `Format` for, which no page
+    // can be made to do. The refusal path is a `cargo test` and a `gpu-replay.mjs`
+    // check; the reply channel carrying one is not a browser fact any more.
+    //
+    // Nothing here drains, replays or delivers, for group G's reason.
+    group('I — a surface says what it will accept');
 
-  const capsStart = await evaluate(
-    page,
-    `(async () => {
+    const capsStart = await evaluate(
+      page,
+      `(async () => {
        const { startSurfaceCapsProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -3298,40 +3362,40 @@ try {
          delivered: before.delivered,
        };
      })()`
-  );
-  const capsCarried = capsStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const capsCarried = capsStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const stats = globalThis.crcbl.gpu.stats();
              return stats.replayed > ${capsStart.replayed} || stats.failure
                ? stats
                : null;
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'I',
-    'wasm encoded a surface-capability query and the demo loop replayed it',
-    capsCarried?.commands?.join(',') === 'SurfaceCaps',
-    capsCarried
-      ? `the loop replayed [${capsCarried.commands.join(', ')}] at sequence ${capsCarried.baseSequence}` +
-          `${capsCarried.failure ? ` — ${capsCarried.failure}` : ''}`
-      : capsStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — another channel is installed, or the waiting set is full'
-  );
+      : null;
+    check(
+      'I',
+      'wasm encoded a surface-capability query and the demo loop replayed it',
+      capsCarried?.commands?.join(',') === 'SurfaceCaps',
+      capsCarried
+        ? `the loop replayed [${capsCarried.commands.join(', ')}] at sequence ${capsCarried.baseSequence}` +
+            `${capsCarried.failure ? ` — ${capsCarried.failure}` : ''}`
+        : capsStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — another channel is installed, or the waiting set is full'
+    );
 
-  // Polled like group G's answers, and for a weaker version of the same reason:
-  // this command is answered inside the replay rather than out of a promise, so
-  // it settles on the frame the loop replays it — which is still not the frame
-  // that asked.
-  const capsAnswered = await until(async () =>
-    evaluate(
-      page,
-      `(async () => {
+    // Polled like group G's answers, and for a weaker version of the same reason:
+    // this command is answered inside the replay rather than out of a promise, so
+    // it settles on the frame the loop replays it — which is still not the frame
+    // that asked.
+    const capsAnswered = await until(async () =>
+      evaluate(
+        page,
+        `(async () => {
          const { readSurfaceCapsProbe, CAPS } = await import('/engine/gpu-probe.js');
          const { exports, memory, gpu } = globalThis.crcbl;
          const out = readSurfaceCapsProbe({ exports, memory });
@@ -3339,71 +3403,71 @@ try {
            ? null
            : { ...out, delivered: gpu.stats().delivered };
        })()`
-    )
-  );
+      )
+    );
 
-  // Asked of the browser, in the same page, at the same moment — the half that
-  // makes the next check a round trip rather than a restatement.
-  const preferredFormat = await evaluate(
-    page,
-    `navigator.gpu.getPreferredCanvasFormat()`
-  );
-  const expectedFormatCode = SEAM_FORMAT_CODE[preferredFormat];
-  check(
-    'I',
-    'the preferred format wasm received is the one this browser prefers',
-    capsAnswered?.name === 'ANSWERED' &&
-      expectedFormatCode !== undefined &&
-      capsAnswered.format === expectedFormatCode,
-    capsAnswered?.name === 'ANSWERED'
-      ? `wasm got format code ${capsAnswered.format}, navigator.gpu prefers ` +
-          `${JSON.stringify(preferredFormat)} which is code ${expectedFormatCode}` +
-          `, after the loop delivered ${capsAnswered.delivered - (capsStart?.delivered ?? 0)} reply buffer(s)`
-      : capsAnswered
-        ? `${capsAnswered.name}: ${JSON.stringify(capsAnswered.reason)}`
-        : `no answer in ${TIMEOUT_MS} ms — the reply never reached wasm`
-  );
+    // Asked of the browser, in the same page, at the same moment — the half that
+    // makes the next check a round trip rather than a restatement.
+    const preferredFormat = await evaluate(
+      page,
+      `navigator.gpu.getPreferredCanvasFormat()`
+    );
+    const expectedFormatCode = SEAM_FORMAT_CODE[preferredFormat];
+    check(
+      'I',
+      'the preferred format wasm received is the one this browser prefers',
+      capsAnswered?.name === 'ANSWERED' &&
+        expectedFormatCode !== undefined &&
+        capsAnswered.format === expectedFormatCode,
+      capsAnswered?.name === 'ANSWERED'
+        ? `wasm got format code ${capsAnswered.format}, navigator.gpu prefers ` +
+            `${JSON.stringify(preferredFormat)} which is code ${expectedFormatCode}` +
+            `, after the loop delivered ${capsAnswered.delivered - (capsStart?.delivered ?? 0)} reply buffer(s)`
+        : capsAnswered
+          ? `${capsAnswered.name}: ${JSON.stringify(capsAnswered.reason)}`
+          : `no answer in ${TIMEOUT_MS} ms — the reply never reached wasm`
+    );
 
-  // The two promises the rest of the record carries, and the reason they are
-  // here beside a format that would decode correctly whatever happened to the
-  // lists behind it: an empty mode list, or an extent that appeared from
-  // nowhere, is a reader that lost its place after the first field. Both are
-  // invariants rather than counts — `SurfaceCaps` promises Fifo is always
-  // offered, and a browser has no `currentExtent` to report at all — so neither
-  // asserts a number the replayer chose.
-  check(
-    'I',
-    'the surface offers Fifo and reports no extent of its own',
-    capsAnswered?.name === 'ANSWERED' &&
-      (capsAnswered.presentModes & FIFO_BIT) === FIFO_BIT &&
-      capsAnswered.hasExtent === false,
-    capsAnswered?.name === 'ANSWERED'
-      ? `present modes 0b${capsAnswered.presentModes.toString(2)}, currentExtent ` +
-          `${capsAnswered.hasExtent ? 'present' : 'absent'}`
-      : `state ${capsAnswered?.name}, which carries no capabilities to read`
-  );
+    // The two promises the rest of the record carries, and the reason they are
+    // here beside a format that would decode correctly whatever happened to the
+    // lists behind it: an empty mode list, or an extent that appeared from
+    // nowhere, is a reader that lost its place after the first field. Both are
+    // invariants rather than counts — `SurfaceCaps` promises Fifo is always
+    // offered, and a browser has no `currentExtent` to report at all — so neither
+    // asserts a number the replayer chose.
+    check(
+      'I',
+      'the surface offers Fifo and reports no extent of its own',
+      capsAnswered?.name === 'ANSWERED' &&
+        (capsAnswered.presentModes & FIFO_BIT) === FIFO_BIT &&
+        capsAnswered.hasExtent === false,
+      capsAnswered?.name === 'ANSWERED'
+        ? `present modes 0b${capsAnswered.presentModes.toString(2)}, currentExtent ` +
+            `${capsAnswered.hasExtent ? 'present' : 'absent'}`
+        : `state ${capsAnswered?.name}, which carries no capabilities to read`
+    );
 
-  // **THE ONLY GATE ON A RESOURCE ACTUALLY BEING MADE.** Everything above this
-  // asks the browser questions — what it has, what it prefers, what it will
-  // grant. This is the first command that tells it to *do* something and keeps
-  // what came back: a `crcbl_hal::BufferDesc` encoded in wasm, replayed through
-  // the demo's own loop, and a real `GPUBuffer` on the real device at the end of
-  // it.
-  //
-  // `gpu-replay.mjs` drives the same two commands under node against a stub
-  // device whose `createBuffer` hands back a plain object built from the
-  // descriptor — so what it proves is the translation and the bookkeeping, and
-  // it would pass just as well against a replayer that never called a browser at
-  // all. What only a browser can establish is what is checked here: that
-  // `createBuffer` accepted the descriptor this seam builds, and that the object
-  // it answered reports the size, the label and the usage that were asked for.
-  // `GPUBuffer.usage` is the interesting one — it is the browser reading back a
-  // word two seam fields were folded into.
-  group('J — a buffer is created on the real device');
+    // **THE ONLY GATE ON A RESOURCE ACTUALLY BEING MADE.** Everything above this
+    // asks the browser questions — what it has, what it prefers, what it will
+    // grant. This is the first command that tells it to *do* something and keeps
+    // what came back: a `crcbl_hal::BufferDesc` encoded in wasm, replayed through
+    // the demo's own loop, and a real `GPUBuffer` on the real device at the end of
+    // it.
+    //
+    // `gpu-replay.mjs` drives the same two commands under node against a stub
+    // device whose `createBuffer` hands back a plain object built from the
+    // descriptor — so what it proves is the translation and the bookkeeping, and
+    // it would pass just as well against a replayer that never called a browser at
+    // all. What only a browser can establish is what is checked here: that
+    // `createBuffer` accepted the descriptor this seam builds, and that the object
+    // it answered reports the size, the label and the usage that were asked for.
+    // `GPUBuffer.usage` is the interesting one — it is the browser reading back a
+    // word two seam fields were folded into.
+    group('J — a buffer is created on the real device');
 
-  const bufferStart = await evaluate(
-    page,
-    `(async () => {
+    const bufferStart = await evaluate(
+      page,
+      `(async () => {
        const { startBufferProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -3412,12 +3476,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const bufferProbe = bufferStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const bufferProbe = bufferStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${bufferStart.replayed} && !stats.failure) {
@@ -3452,63 +3516,63 @@ try {
                error: gpu.replayer.takeError(),
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'J',
-    'wasm encoded a buffer creation and the demo loop replayed it',
-    bufferProbe?.commands?.join(',') === 'CreateBuffer' &&
-      Number.isInteger(bufferProbe.handle),
-    bufferProbe
-      ? `the loop replayed [${bufferProbe.commands.join(', ')}] for buffer ${bufferProbe.handle}` +
-          `${bufferProbe.failure ? ` — ${bufferProbe.failure}` : ''}` +
-          `${bufferProbe.error ? ` — ${bufferProbe.error}` : ''}`
-      : bufferStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'J',
-    'a real GPUBuffer came back from the device with the size that was asked for',
-    bufferProbe?.isRealBuffer === true &&
-      bufferProbe?.size === PROBE_BUFFER_BYTES,
-    bufferProbe?.isRealBuffer
-      ? `an instance of this browser's GPUBuffer, of ${bufferProbe.size} bytes, of ${bufferProbe.held} held`
-      : `instanceof GPUBuffer: ${bufferProbe?.isRealBuffer}, size ${bufferProbe?.size}` +
-          ` (${PROBE_BUFFER_BYTES} asked for)` +
-          `${bufferProbe?.error ? ` — ${bufferProbe.error}` : ''}`
-  );
-  check(
-    'J',
-    'the browser gave that buffer the usage and the label the seam asked for',
-    bufferProbe?.usage === bufferProbe?.expectedUsage &&
-      bufferProbe?.label === PROBE_BUFFER_LABEL,
-    `usage 0x${bufferProbe?.usage?.toString(16)} against 0x${bufferProbe?.expectedUsage?.toString(16)}` +
-      ` from GPUBufferUsage, label ${JSON.stringify(bufferProbe?.label)}`
-  );
+      : null;
+    check(
+      'J',
+      'wasm encoded a buffer creation and the demo loop replayed it',
+      bufferProbe?.commands?.join(',') === 'CreateBuffer' &&
+        Number.isInteger(bufferProbe.handle),
+      bufferProbe
+        ? `the loop replayed [${bufferProbe.commands.join(', ')}] for buffer ${bufferProbe.handle}` +
+            `${bufferProbe.failure ? ` — ${bufferProbe.failure}` : ''}` +
+            `${bufferProbe.error ? ` — ${bufferProbe.error}` : ''}`
+        : bufferStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'J',
+      'a real GPUBuffer came back from the device with the size that was asked for',
+      bufferProbe?.isRealBuffer === true &&
+        bufferProbe?.size === PROBE_BUFFER_BYTES,
+      bufferProbe?.isRealBuffer
+        ? `an instance of this browser's GPUBuffer, of ${bufferProbe.size} bytes, of ${bufferProbe.held} held`
+        : `instanceof GPUBuffer: ${bufferProbe?.isRealBuffer}, size ${bufferProbe?.size}` +
+            ` (${PROBE_BUFFER_BYTES} asked for)` +
+            `${bufferProbe?.error ? ` — ${bufferProbe.error}` : ''}`
+    );
+    check(
+      'J',
+      'the browser gave that buffer the usage and the label the seam asked for',
+      bufferProbe?.usage === bufferProbe?.expectedUsage &&
+        bufferProbe?.label === PROBE_BUFFER_LABEL,
+      `usage 0x${bufferProbe?.usage?.toString(16)} against 0x${bufferProbe?.expectedUsage?.toString(16)}` +
+        ` from GPUBufferUsage, label ${JSON.stringify(bufferProbe?.label)}`
+    );
 
-  // **THE ONLY GATE ON AN IMAGE, AND ON A RESOURCE MADE FROM ANOTHER ONE.**
-  // Group J watches this seam make something on the device; this watches it make
-  // something on *that*, which is the shape no command before it has: a
-  // `GPUTextureView` comes from the texture and not from the device, so the
-  // image handle on the wire has to resolve to a live `GPUTexture` in the
-  // replayer's own table before there is anything to call.
-  //
-  // `gpu-replay.mjs` drives both commands under node against a stub device whose
-  // `createTexture` hands back a plain object built from the descriptor, so what
-  // it proves is the translation and the bookkeeping — every table row, every
-  // refusal, and that the range's sentinel reaches `createView` as an absent
-  // member rather than as `4294967295`. What only a browser can establish is
-  // that a real `createTexture` accepted the descriptor this seam builds, that
-  // the `GPUTexture` it answered reports the extent, format, mip count, usage
-  // and label that were asked for, and that a real `createView` accepted the
-  // resolved range — which the number on the wire would have been refused for.
-  group('K — an image and a view of it are created on the real device');
+    // **THE ONLY GATE ON AN IMAGE, AND ON A RESOURCE MADE FROM ANOTHER ONE.**
+    // Group J watches this seam make something on the device; this watches it make
+    // something on *that*, which is the shape no command before it has: a
+    // `GPUTextureView` comes from the texture and not from the device, so the
+    // image handle on the wire has to resolve to a live `GPUTexture` in the
+    // replayer's own table before there is anything to call.
+    //
+    // `gpu-replay.mjs` drives both commands under node against a stub device whose
+    // `createTexture` hands back a plain object built from the descriptor, so what
+    // it proves is the translation and the bookkeeping — every table row, every
+    // refusal, and that the range's sentinel reaches `createView` as an absent
+    // member rather than as `4294967295`. What only a browser can establish is
+    // that a real `createTexture` accepted the descriptor this seam builds, that
+    // the `GPUTexture` it answered reports the extent, format, mip count, usage
+    // and label that were asked for, and that a real `createView` accepted the
+    // resolved range — which the number on the wire would have been refused for.
+    group('K — an image and a view of it are created on the real device');
 
-  const imageStart = await evaluate(
-    page,
-    `(async () => {
+    const imageStart = await evaluate(
+      page,
+      `(async () => {
        const { startImageProbe, startImageViewProbe } =
          await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
@@ -3528,12 +3592,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const imageProbe = imageStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const imageProbe = imageStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${imageStart.replayed} && !stats.failure) {
@@ -3575,30 +3639,30 @@ try {
                  GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
              };
            })()`
+          )
         )
-      )
-    : null;
+      : null;
 
-  // **THE ONLY THING THAT CAN SAY THE VIEW'S RANGE WAS ACCEPTED**, and it is
-  // read a moment after the replay rather than during it. A `GPUTextureView`
-  // reports nothing but its label, so one built from a range the browser refused
-  // is indistinguishable from a good one by inspection — the refusal arrives on
-  // the *device's* error channel instead, which is the queue
-  // `Device::take_error` drains and which `gpu-replay.js` feeds from its
-  // `uncapturederror` listener.
-  //
-  // WebGPU raises that error "in a future task", so reading the queue in the
-  // same evaluation that saw the replay finish reads it too early and finds an
-  // empty queue whatever happened — which is a check that cannot fail. Two
-  // animation frames inside the page is the wait, and it is a wait for an
-  // *absence*: there is no event that says "no error is coming", so a bounded
-  // one is the only shape available. Measured against the failure it guards —
-  // `ImageSubresourceRange::ALL` passed on as `4294967295`, which Chromium
-  // refuses — this is enough and reading immediately is not.
-  const deviceReport = imageProbe
-    ? await evaluate(
-        page,
-        `(async () => {
+    // **THE ONLY THING THAT CAN SAY THE VIEW'S RANGE WAS ACCEPTED**, and it is
+    // read a moment after the replay rather than during it. A `GPUTextureView`
+    // reports nothing but its label, so one built from a range the browser refused
+    // is indistinguishable from a good one by inspection — the refusal arrives on
+    // the *device's* error channel instead, which is the queue
+    // `Device::take_error` drains and which `gpu-replay.js` feeds from its
+    // `uncapturederror` listener.
+    //
+    // WebGPU raises that error "in a future task", so reading the queue in the
+    // same evaluation that saw the replay finish reads it too early and finds an
+    // empty queue whatever happened — which is a check that cannot fail. Two
+    // animation frames inside the page is the wait, and it is a wait for an
+    // *absence*: there is no event that says "no error is coming", so a bounded
+    // one is the only shape available. Measured against the failure it guards —
+    // `ImageSubresourceRange::ALL` passed on as `4294967295`, which Chromium
+    // refuses — this is enough and reading immediately is not.
+    const deviceReport = imageProbe
+      ? await evaluate(
+          page,
+          `(async () => {
            await new Promise((settle) =>
              requestAnimationFrame(() => requestAnimationFrame(settle))
            );
@@ -3608,89 +3672,89 @@ try {
            // cannot fail.
            return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
          })()`
-      )
-    : null;
-  check(
-    'K',
-    'wasm encoded an image and a view of it, and the demo loop replayed both',
-    imageProbe?.commands?.join(',') === 'CreateImage,CreateImageView' &&
-      Number.isInteger(imageProbe.imageHandle) &&
-      Number.isInteger(imageProbe.viewHandle),
-    imageProbe
-      ? `the loop replayed [${imageProbe.commands.join(', ')}] for image ${imageProbe.imageHandle} and view ${imageProbe.viewHandle}` +
-          `${imageProbe.failure ? ` — ${imageProbe.failure}` : ''}`
-      : imageStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode them — no device has opened, or another channel is installed'
-  );
-  check(
-    'K',
-    'a real GPUTexture came back from the device with the extent, format and mip count asked for',
-    imageProbe?.isRealTexture === true &&
-      imageProbe?.width === PROBE_IMAGE_WIDTH &&
-      imageProbe?.height === PROBE_IMAGE_HEIGHT &&
-      imageProbe?.depthOrArrayLayers === 1 &&
-      imageProbe?.mipLevelCount === PROBE_IMAGE_MIPS &&
-      imageProbe?.dimension === '2d' &&
-      imageProbe?.format === 'rgba8unorm',
-    imageProbe?.isRealTexture
-      ? `an instance of this browser's GPUTexture, ${imageProbe.width}x${imageProbe.height}x${imageProbe.depthOrArrayLayers} ${imageProbe.dimension} ${imageProbe.format}` +
-          ` with ${imageProbe.mipLevelCount} mips, of ${imageProbe.heldImages} held`
-      : `instanceof GPUTexture: ${imageProbe?.isRealTexture}, ${imageProbe?.width}x${imageProbe?.height}` +
-          ` ${imageProbe?.dimension} ${imageProbe?.format}, ${imageProbe?.mipLevelCount} mips` +
-          ` (${PROBE_IMAGE_WIDTH}x${PROBE_IMAGE_HEIGHT} 2d rgba8unorm, ${PROBE_IMAGE_MIPS} mips asked for)`
-  );
-  check(
-    'K',
-    'the browser gave that texture the usage and the label the seam asked for',
-    imageProbe?.usage === imageProbe?.expectedUsage &&
-      imageProbe?.label === PROBE_IMAGE_LABEL,
-    `usage 0x${imageProbe?.usage?.toString(16)} against 0x${imageProbe?.expectedUsage?.toString(16)}` +
-      ` from GPUTextureUsage, label ${JSON.stringify(imageProbe?.label)}`
-  );
-  check(
-    'K',
-    'a real GPUTextureView came back from that texture with the whole-image range accepted',
-    imageProbe?.isRealView === true &&
-      imageProbe?.viewLabel === PROBE_VIEW_LABEL &&
-      deviceReport?.waited === true &&
-      deviceReport?.error === null,
-    deviceReport?.waited !== true
-      ? 'the page never got as far as reading the device error queue'
-      : imageProbe?.isRealView && deviceReport.error === null
-        ? `an instance of this browser's GPUTextureView labelled ${JSON.stringify(imageProbe.viewLabel)}, of ${imageProbe.heldViews} held, and the device reported nothing`
-        : `instanceof GPUTextureView: ${imageProbe?.isRealView}, label ${JSON.stringify(imageProbe?.viewLabel)}` +
-          `${deviceReport.error ? ` — ${deviceReport.error}` : ''}`
-  );
+        )
+      : null;
+    check(
+      'K',
+      'wasm encoded an image and a view of it, and the demo loop replayed both',
+      imageProbe?.commands?.join(',') === 'CreateImage,CreateImageView' &&
+        Number.isInteger(imageProbe.imageHandle) &&
+        Number.isInteger(imageProbe.viewHandle),
+      imageProbe
+        ? `the loop replayed [${imageProbe.commands.join(', ')}] for image ${imageProbe.imageHandle} and view ${imageProbe.viewHandle}` +
+            `${imageProbe.failure ? ` — ${imageProbe.failure}` : ''}`
+        : imageStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode them — no device has opened, or another channel is installed'
+    );
+    check(
+      'K',
+      'a real GPUTexture came back from the device with the extent, format and mip count asked for',
+      imageProbe?.isRealTexture === true &&
+        imageProbe?.width === PROBE_IMAGE_WIDTH &&
+        imageProbe?.height === PROBE_IMAGE_HEIGHT &&
+        imageProbe?.depthOrArrayLayers === 1 &&
+        imageProbe?.mipLevelCount === PROBE_IMAGE_MIPS &&
+        imageProbe?.dimension === '2d' &&
+        imageProbe?.format === 'rgba8unorm',
+      imageProbe?.isRealTexture
+        ? `an instance of this browser's GPUTexture, ${imageProbe.width}x${imageProbe.height}x${imageProbe.depthOrArrayLayers} ${imageProbe.dimension} ${imageProbe.format}` +
+            ` with ${imageProbe.mipLevelCount} mips, of ${imageProbe.heldImages} held`
+        : `instanceof GPUTexture: ${imageProbe?.isRealTexture}, ${imageProbe?.width}x${imageProbe?.height}` +
+            ` ${imageProbe?.dimension} ${imageProbe?.format}, ${imageProbe?.mipLevelCount} mips` +
+            ` (${PROBE_IMAGE_WIDTH}x${PROBE_IMAGE_HEIGHT} 2d rgba8unorm, ${PROBE_IMAGE_MIPS} mips asked for)`
+    );
+    check(
+      'K',
+      'the browser gave that texture the usage and the label the seam asked for',
+      imageProbe?.usage === imageProbe?.expectedUsage &&
+        imageProbe?.label === PROBE_IMAGE_LABEL,
+      `usage 0x${imageProbe?.usage?.toString(16)} against 0x${imageProbe?.expectedUsage?.toString(16)}` +
+        ` from GPUTextureUsage, label ${JSON.stringify(imageProbe?.label)}`
+    );
+    check(
+      'K',
+      'a real GPUTextureView came back from that texture with the whole-image range accepted',
+      imageProbe?.isRealView === true &&
+        imageProbe?.viewLabel === PROBE_VIEW_LABEL &&
+        deviceReport?.waited === true &&
+        deviceReport?.error === null,
+      deviceReport?.waited !== true
+        ? 'the page never got as far as reading the device error queue'
+        : imageProbe?.isRealView && deviceReport.error === null
+          ? `an instance of this browser's GPUTextureView labelled ${JSON.stringify(imageProbe.viewLabel)}, of ${imageProbe.heldViews} held, and the device reported nothing`
+          : `instanceof GPUTextureView: ${imageProbe?.isRealView}, label ${JSON.stringify(imageProbe?.viewLabel)}` +
+            `${deviceReport.error ? ` — ${deviceReport.error}` : ''}`
+    );
 
-  // **THE ONLY GATE ON A SAMPLER, AND THE ONE WHERE THE OBJECT SAYS LEAST.**
-  // Group J watches this seam make something the browser then describes back —
-  // a `GPUBuffer` reports its size, usage and label — and group K watches it
-  // make something that describes back nine members. A `GPUSampler` reports its
-  // `label` and nothing else: no filters, no address modes, no clamps. So there
-  // is no "pass a number in and read it back" check available here, and the two
-  // things that are:
-  //
-  //   * the class of what came back, which `instanceof GPUSampler` settles and
-  //     no stub can satisfy — node has no such binding at all; and
-  //   * the device's error queue being empty afterwards, which is the only thing
-  //     anywhere that can say `createSampler` *accepted* the descriptor this
-  //     seam built.
-  //
-  // That second one is what this group exists for, because the descriptor
-  // carries `lod_max: f32::MAX` — `SamplerDesc::default`'s "no limit" sentinel.
-  // It crosses the wire verbatim, and the replayer has to hand WebGPU an
-  // explicit `lodMaxClamp` holding it: omitting the member, which is how the
-  // *view's* range sentinel is spelled one group earlier, would substitute
-  // WebGPU's own default — a number rather than "the rest" — and nothing
-  // downstream reports a mip clamp. `gpu-replay.mjs` proves the descriptor this
-  // seam builds against a stub; only a real `createSampler` can say the browser
-  // takes it.
-  group('L — a sampler is created on the real device');
+    // **THE ONLY GATE ON A SAMPLER, AND THE ONE WHERE THE OBJECT SAYS LEAST.**
+    // Group J watches this seam make something the browser then describes back —
+    // a `GPUBuffer` reports its size, usage and label — and group K watches it
+    // make something that describes back nine members. A `GPUSampler` reports its
+    // `label` and nothing else: no filters, no address modes, no clamps. So there
+    // is no "pass a number in and read it back" check available here, and the two
+    // things that are:
+    //
+    //   * the class of what came back, which `instanceof GPUSampler` settles and
+    //     no stub can satisfy — node has no such binding at all; and
+    //   * the device's error queue being empty afterwards, which is the only thing
+    //     anywhere that can say `createSampler` *accepted* the descriptor this
+    //     seam built.
+    //
+    // That second one is what this group exists for, because the descriptor
+    // carries `lod_max: f32::MAX` — `SamplerDesc::default`'s "no limit" sentinel.
+    // It crosses the wire verbatim, and the replayer has to hand WebGPU an
+    // explicit `lodMaxClamp` holding it: omitting the member, which is how the
+    // *view's* range sentinel is spelled one group earlier, would substitute
+    // WebGPU's own default — a number rather than "the rest" — and nothing
+    // downstream reports a mip clamp. `gpu-replay.mjs` proves the descriptor this
+    // seam builds against a stub; only a real `createSampler` can say the browser
+    // takes it.
+    group('L — a sampler is created on the real device');
 
-  const samplerStart = await evaluate(
-    page,
-    `(async () => {
+    const samplerStart = await evaluate(
+      page,
+      `(async () => {
        const { startSamplerProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -3699,12 +3763,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const samplerProbe = samplerStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const samplerProbe = samplerStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${samplerStart.replayed} && !stats.failure) {
@@ -3729,76 +3793,76 @@ try {
                label: sampler?.label,
              };
            })()`
+          )
         )
-      )
-    : null;
+      : null;
 
-  // Read a moment after the replay rather than during it, for the reason group K
-  // spells out: WebGPU raises a validation error "in a future task", so a queue
-  // read in the evaluation that saw the replay finish is empty whatever
-  // happened — a check that cannot fail. Two animation frames is the same
-  // bounded wait for the same absence, and the failure it guards here is the one
-  // this group exists for: `lod_max`'s sentinel reaching the browser as
-  // something `createSampler` refuses.
-  const samplerReport = samplerProbe
-    ? await evaluate(
-        page,
-        `(async () => {
+    // Read a moment after the replay rather than during it, for the reason group K
+    // spells out: WebGPU raises a validation error "in a future task", so a queue
+    // read in the evaluation that saw the replay finish is empty whatever
+    // happened — a check that cannot fail. Two animation frames is the same
+    // bounded wait for the same absence, and the failure it guards here is the one
+    // this group exists for: `lod_max`'s sentinel reaching the browser as
+    // something `createSampler` refuses.
+    const samplerReport = samplerProbe
+      ? await evaluate(
+          page,
+          `(async () => {
            await new Promise((settle) =>
              requestAnimationFrame(() => requestAnimationFrame(settle))
            );
            return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
          })()`
-      )
-    : null;
-  check(
-    'L',
-    'wasm encoded a sampler creation and the demo loop replayed it',
-    samplerProbe?.commands?.join(',') === 'CreateSampler' &&
-      Number.isInteger(samplerProbe.handle),
-    samplerProbe
-      ? `the loop replayed [${samplerProbe.commands.join(', ')}] for sampler ${samplerProbe.handle}` +
-          `${samplerProbe.failure ? ` — ${samplerProbe.failure}` : ''}`
-      : samplerStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'L',
-    'a real GPUSampler came back from the device with the no-limit lod clamp accepted',
-    samplerProbe?.isRealSampler === true &&
-      samplerProbe?.label === PROBE_SAMPLER_LABEL &&
-      samplerReport?.waited === true &&
-      samplerReport?.error === null,
-    samplerReport?.waited !== true
-      ? 'the page never got as far as reading the device error queue'
-      : samplerProbe?.isRealSampler && samplerReport.error === null
-        ? `an instance of this browser's GPUSampler labelled ${JSON.stringify(samplerProbe.label)}, of ${samplerProbe.held} held, and the device reported nothing`
-        : `instanceof GPUSampler: ${samplerProbe?.isRealSampler}, label ${JSON.stringify(samplerProbe?.label)}` +
-          `${samplerReport.error ? ` — ${samplerReport.error}` : ''}`
-  );
+        )
+      : null;
+    check(
+      'L',
+      'wasm encoded a sampler creation and the demo loop replayed it',
+      samplerProbe?.commands?.join(',') === 'CreateSampler' &&
+        Number.isInteger(samplerProbe.handle),
+      samplerProbe
+        ? `the loop replayed [${samplerProbe.commands.join(', ')}] for sampler ${samplerProbe.handle}` +
+            `${samplerProbe.failure ? ` — ${samplerProbe.failure}` : ''}`
+        : samplerStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'L',
+      'a real GPUSampler came back from the device with the no-limit lod clamp accepted',
+      samplerProbe?.isRealSampler === true &&
+        samplerProbe?.label === PROBE_SAMPLER_LABEL &&
+        samplerReport?.waited === true &&
+        samplerReport?.error === null,
+      samplerReport?.waited !== true
+        ? 'the page never got as far as reading the device error queue'
+        : samplerProbe?.isRealSampler && samplerReport.error === null
+          ? `an instance of this browser's GPUSampler labelled ${JSON.stringify(samplerProbe.label)}, of ${samplerProbe.held} held, and the device reported nothing`
+          : `instanceof GPUSampler: ${samplerProbe?.isRealSampler}, label ${JSON.stringify(samplerProbe?.label)}` +
+            `${samplerReport.error ? ` — ${samplerReport.error}` : ''}`
+    );
 
-  // **THE ONLY GATE ON A LIST.** Every command groups G to L put in front of a
-  // browser is a fixed set of fields; this one's body is a counted list of
-  // structs, each five fields deep, each carrying an enum whose variants have
-  // different-length payloads. A stride out by a byte therefore does not
-  // truncate — it decodes the next entry out of the middle of this one and
-  // produces a layout that is well-formed and describes different resources.
-  //
-  // A `GPUBindGroupLayout` reports its `label` and nothing else, exactly as a
-  // `GPUSampler` does, so the two things available here are group L's two: the
-  // class of what came back, which `instanceof GPUBindGroupLayout` settles and
-  // no stub can satisfy — node has no such binding — and the device's error
-  // queue being empty afterwards, which is the only thing anywhere that can say
-  // `createBindGroupLayout` *accepted* the four-entry descriptor this seam
-  // built. `gpu-replay.mjs` proves that descriptor against a stub, entry for
-  // entry, and proves every refusal; only a real device can say the browser
-  // takes it.
-  group('M — a bind-group layout is created on the real device');
+    // **THE ONLY GATE ON A LIST.** Every command groups G to L put in front of a
+    // browser is a fixed set of fields; this one's body is a counted list of
+    // structs, each five fields deep, each carrying an enum whose variants have
+    // different-length payloads. A stride out by a byte therefore does not
+    // truncate — it decodes the next entry out of the middle of this one and
+    // produces a layout that is well-formed and describes different resources.
+    //
+    // A `GPUBindGroupLayout` reports its `label` and nothing else, exactly as a
+    // `GPUSampler` does, so the two things available here are group L's two: the
+    // class of what came back, which `instanceof GPUBindGroupLayout` settles and
+    // no stub can satisfy — node has no such binding — and the device's error
+    // queue being empty afterwards, which is the only thing anywhere that can say
+    // `createBindGroupLayout` *accepted* the four-entry descriptor this seam
+    // built. `gpu-replay.mjs` proves that descriptor against a stub, entry for
+    // entry, and proves every refusal; only a real device can say the browser
+    // takes it.
+    group('M — a bind-group layout is created on the real device');
 
-  const layoutStart = await evaluate(
-    page,
-    `(async () => {
+    const layoutStart = await evaluate(
+      page,
+      `(async () => {
        const { startBindGroupLayoutProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -3807,12 +3871,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const layoutProbe = layoutStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const layoutProbe = layoutStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${layoutStart.replayed} && !stats.failure) {
@@ -3837,77 +3901,77 @@ try {
                label: layout?.label,
              };
            })()`
+          )
         )
-      )
-    : null;
+      : null;
 
-  // Read a moment after the replay rather than during it, for the reason groups
-  // K and L spell out: WebGPU raises a validation error "in a future task", so a
-  // queue read in the evaluation that saw the replay finish is empty whatever
-  // happened. The failure it guards here is the list: an entry's `visibility`
-  // arriving as zero, a `texture` member missing its `sampleType`, a
-  // `hasDynamicOffset` under a name WebIDL ignores — every one of those is a
-  // layout the browser refuses and nothing else reports.
-  const layoutReport = layoutProbe
-    ? await evaluate(
-        page,
-        `(async () => {
+    // Read a moment after the replay rather than during it, for the reason groups
+    // K and L spell out: WebGPU raises a validation error "in a future task", so a
+    // queue read in the evaluation that saw the replay finish is empty whatever
+    // happened. The failure it guards here is the list: an entry's `visibility`
+    // arriving as zero, a `texture` member missing its `sampleType`, a
+    // `hasDynamicOffset` under a name WebIDL ignores — every one of those is a
+    // layout the browser refuses and nothing else reports.
+    const layoutReport = layoutProbe
+      ? await evaluate(
+          page,
+          `(async () => {
            await new Promise((settle) =>
              requestAnimationFrame(() => requestAnimationFrame(settle))
            );
            return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
          })()`
-      )
-    : null;
-  check(
-    'M',
-    'wasm encoded a bind-group layout creation and the demo loop replayed it',
-    layoutProbe?.commands?.join(',') === 'CreateBindGroupLayout' &&
-      Number.isInteger(layoutProbe.handle),
-    layoutProbe
-      ? `the loop replayed [${layoutProbe.commands.join(', ')}] for layout ${layoutProbe.handle}` +
-          `${layoutProbe.failure ? ` — ${layoutProbe.failure}` : ''}`
-      : layoutStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'M',
-    'a real GPUBindGroupLayout came back from the device with every entry accepted',
-    layoutProbe?.isRealLayout === true &&
-      layoutProbe?.label === PROBE_LAYOUT_LABEL &&
-      layoutReport?.waited === true &&
-      layoutReport?.error === null,
-    layoutReport?.waited !== true
-      ? 'the page never got as far as reading the device error queue'
-      : layoutProbe?.isRealLayout && layoutReport.error === null
-        ? `an instance of this browser's GPUBindGroupLayout labelled ${JSON.stringify(layoutProbe.label)}, built from ${PROBE_LAYOUT_ENTRIES} entries, of ${layoutProbe.held} held, and the device reported nothing`
-        : `instanceof GPUBindGroupLayout: ${layoutProbe?.isRealLayout}, label ${JSON.stringify(layoutProbe?.label)}` +
-          `${layoutReport.error ? ` — ${layoutReport.error}` : ''}`
-  );
+        )
+      : null;
+    check(
+      'M',
+      'wasm encoded a bind-group layout creation and the demo loop replayed it',
+      layoutProbe?.commands?.join(',') === 'CreateBindGroupLayout' &&
+        Number.isInteger(layoutProbe.handle),
+      layoutProbe
+        ? `the loop replayed [${layoutProbe.commands.join(', ')}] for layout ${layoutProbe.handle}` +
+            `${layoutProbe.failure ? ` — ${layoutProbe.failure}` : ''}`
+        : layoutStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'M',
+      'a real GPUBindGroupLayout came back from the device with every entry accepted',
+      layoutProbe?.isRealLayout === true &&
+        layoutProbe?.label === PROBE_LAYOUT_LABEL &&
+        layoutReport?.waited === true &&
+        layoutReport?.error === null,
+      layoutReport?.waited !== true
+        ? 'the page never got as far as reading the device error queue'
+        : layoutProbe?.isRealLayout && layoutReport.error === null
+          ? `an instance of this browser's GPUBindGroupLayout labelled ${JSON.stringify(layoutProbe.label)}, built from ${PROBE_LAYOUT_ENTRIES} entries, of ${layoutProbe.held} held, and the device reported nothing`
+          : `instanceof GPUBindGroupLayout: ${layoutProbe?.isRealLayout}, label ${JSON.stringify(layoutProbe?.label)}` +
+            `${layoutReport.error ? ` — ${layoutReport.error}` : ''}`
+    );
 
-  // **THE ONLY GATE ON A COMMAND THAT NAMES OTHER RESOURCES.** Every command
-  // groups G to M put in front of a browser stands alone; this one binds a
-  // layout, a buffer, an image view and a sampler that have to exist first, so
-  // wasm records a whole frame — the layout, the four resources, then the group —
-  // and the group's entries carry one handle into each of three resource tables.
-  // A handle carries no kind, so the entry's discriminant is the only thing that
-  // says which table an id indexes, and the whole-buffer binding's size crosses as
-  // the `u64::MAX` sentinel and has to reach WebGPU as an *absent* member.
-  //
-  // A `GPUBindGroup` reports its `label` and nothing else, exactly as a
-  // `GPUBindGroupLayout` does, so the two things available here are group M's two:
-  // the class of what came back, which `instanceof GPUBindGroup` settles and no
-  // stub can satisfy — node has no such binding — and the device's error queue
-  // being empty afterwards, which is the only thing that can say `createBindGroup`
-  // *accepted* the descriptor, its `WHOLE_BUFFER` binding and all three resource
-  // kinds. `gpu-replay.mjs` proves that descriptor against a stub and proves every
-  // refusal; only a real device can say the browser takes it.
-  group('N — a bind group is created on the real device');
+    // **THE ONLY GATE ON A COMMAND THAT NAMES OTHER RESOURCES.** Every command
+    // groups G to M put in front of a browser stands alone; this one binds a
+    // layout, a buffer, an image view and a sampler that have to exist first, so
+    // wasm records a whole frame — the layout, the four resources, then the group —
+    // and the group's entries carry one handle into each of three resource tables.
+    // A handle carries no kind, so the entry's discriminant is the only thing that
+    // says which table an id indexes, and the whole-buffer binding's size crosses as
+    // the `u64::MAX` sentinel and has to reach WebGPU as an *absent* member.
+    //
+    // A `GPUBindGroup` reports its `label` and nothing else, exactly as a
+    // `GPUBindGroupLayout` does, so the two things available here are group M's two:
+    // the class of what came back, which `instanceof GPUBindGroup` settles and no
+    // stub can satisfy — node has no such binding — and the device's error queue
+    // being empty afterwards, which is the only thing that can say `createBindGroup`
+    // *accepted* the descriptor, its `WHOLE_BUFFER` binding and all three resource
+    // kinds. `gpu-replay.mjs` proves that descriptor against a stub and proves every
+    // refusal; only a real device can say the browser takes it.
+    group('N — a bind group is created on the real device');
 
-  const bindGroupStart = await evaluate(
-    page,
-    `(async () => {
+    const bindGroupStart = await evaluate(
+      page,
+      `(async () => {
        const { startBindGroupProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -3916,12 +3980,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const bindGroupProbe = bindGroupStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const bindGroupProbe = bindGroupStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${bindGroupStart.replayed} && !stats.failure) {
@@ -3946,72 +4010,72 @@ try {
                label: group?.label,
              };
            })()`
+          )
         )
-      )
-    : null;
+      : null;
 
-  // Read a moment after the replay rather than during it, for the reason groups
-  // K, L and M spell out: WebGPU raises a validation error "in a future task", so
-  // a queue read in the evaluation that saw the replay finish is empty whatever
-  // happened. The failure it guards here is the resolution: a `WHOLE_BUFFER` size
-  // passed on as `18446744073709551615`, a resource resolved against the wrong
-  // table, a layout the group does not match — every one of those is a group the
-  // browser refuses and nothing else reports.
-  const bindGroupReport = bindGroupProbe
-    ? await evaluate(
-        page,
-        `(async () => {
+    // Read a moment after the replay rather than during it, for the reason groups
+    // K, L and M spell out: WebGPU raises a validation error "in a future task", so
+    // a queue read in the evaluation that saw the replay finish is empty whatever
+    // happened. The failure it guards here is the resolution: a `WHOLE_BUFFER` size
+    // passed on as `18446744073709551615`, a resource resolved against the wrong
+    // table, a layout the group does not match — every one of those is a group the
+    // browser refuses and nothing else reports.
+    const bindGroupReport = bindGroupProbe
+      ? await evaluate(
+          page,
+          `(async () => {
            await new Promise((settle) =>
              requestAnimationFrame(() => requestAnimationFrame(settle))
            );
            return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
          })()`
-      )
-    : null;
-  check(
-    'N',
-    'wasm encoded a bind group creation and the demo loop replayed it',
-    bindGroupProbe?.commands?.join(',') ===
-      'CreateBindGroupLayout,CreateBuffer,CreateImage,CreateImageView,CreateSampler,CreateBindGroup' &&
-      Number.isInteger(bindGroupProbe.handle),
-    bindGroupProbe
-      ? `the loop replayed [${bindGroupProbe.commands.join(', ')}] for group ${bindGroupProbe.handle}` +
-          `${bindGroupProbe.failure ? ` — ${bindGroupProbe.failure}` : ''}`
-      : bindGroupStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'N',
-    'a real GPUBindGroup came back from the device with the whole-buffer binding and all three resource kinds accepted',
-    bindGroupProbe?.isRealGroup === true &&
-      bindGroupProbe?.label === PROBE_BIND_GROUP_LABEL &&
-      bindGroupReport?.waited === true &&
-      bindGroupReport?.error === null,
-    bindGroupReport?.waited !== true
-      ? 'the page never got as far as reading the device error queue'
-      : bindGroupProbe?.isRealGroup && bindGroupReport.error === null
-        ? `an instance of this browser's GPUBindGroup labelled ${JSON.stringify(bindGroupProbe.label)}, binding a buffer, a view and a sampler, of ${bindGroupProbe.held} held, and the device reported nothing`
-        : `instanceof GPUBindGroup: ${bindGroupProbe?.isRealGroup}, label ${JSON.stringify(bindGroupProbe?.label)}` +
-          `${bindGroupReport.error ? ` — ${bindGroupReport.error}` : ''}`
-  );
+        )
+      : null;
+    check(
+      'N',
+      'wasm encoded a bind group creation and the demo loop replayed it',
+      bindGroupProbe?.commands?.join(',') ===
+        'CreateBindGroupLayout,CreateBuffer,CreateImage,CreateImageView,CreateSampler,CreateBindGroup' &&
+        Number.isInteger(bindGroupProbe.handle),
+      bindGroupProbe
+        ? `the loop replayed [${bindGroupProbe.commands.join(', ')}] for group ${bindGroupProbe.handle}` +
+            `${bindGroupProbe.failure ? ` — ${bindGroupProbe.failure}` : ''}`
+        : bindGroupStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'N',
+      'a real GPUBindGroup came back from the device with the whole-buffer binding and all three resource kinds accepted',
+      bindGroupProbe?.isRealGroup === true &&
+        bindGroupProbe?.label === PROBE_BIND_GROUP_LABEL &&
+        bindGroupReport?.waited === true &&
+        bindGroupReport?.error === null,
+      bindGroupReport?.waited !== true
+        ? 'the page never got as far as reading the device error queue'
+        : bindGroupProbe?.isRealGroup && bindGroupReport.error === null
+          ? `an instance of this browser's GPUBindGroup labelled ${JSON.stringify(bindGroupProbe.label)}, binding a buffer, a view and a sampler, of ${bindGroupProbe.held} held, and the device reported nothing`
+          : `instanceof GPUBindGroup: ${bindGroupProbe?.isRealGroup}, label ${JSON.stringify(bindGroupProbe?.label)}` +
+            `${bindGroupReport.error ? ` — ${bindGroupReport.error}` : ''}`
+    );
 
-  // A `GPUShaderModule` reports its `label`, like a sampler, a layout and a bind
-  // group — but it is the only object this seam makes where *compilation* happens,
-  // so group O has a second piece of evidence the others do not: `getCompilationInfo()`.
-  // The descriptor carries a known-good WGSL vertex entry, so beyond
-  // `instanceof GPUShaderModule` — which no stub can satisfy, node having no such
-  // binding — the gate reads the compilation info off the object and holds it to
-  // no errors. That is stronger than existence: a module that came back but would
-  // not compile is exactly what a browser answers for bad WGSL without throwing,
-  // and only `getCompilationInfo()` catches it. `gpu-replay.mjs` proves the
-  // descriptor — WGSL alone, the other three artifacts dropped — against a stub,
-  // and proves the WGSL-less refusal; only this asks a real device to compile it.
-  group('O — a shader module is compiled on the real device');
+    // A `GPUShaderModule` reports its `label`, like a sampler, a layout and a bind
+    // group — but it is the only object this seam makes where *compilation* happens,
+    // so group O has a second piece of evidence the others do not: `getCompilationInfo()`.
+    // The descriptor carries a known-good WGSL vertex entry, so beyond
+    // `instanceof GPUShaderModule` — which no stub can satisfy, node having no such
+    // binding — the gate reads the compilation info off the object and holds it to
+    // no errors. That is stronger than existence: a module that came back but would
+    // not compile is exactly what a browser answers for bad WGSL without throwing,
+    // and only `getCompilationInfo()` catches it. `gpu-replay.mjs` proves the
+    // descriptor — WGSL alone, the other three artifacts dropped — against a stub,
+    // and proves the WGSL-less refusal; only this asks a real device to compile it.
+    group('O — a shader module is compiled on the real device');
 
-  const shaderStart = await evaluate(
-    page,
-    `(async () => {
+    const shaderStart = await evaluate(
+      page,
+      `(async () => {
        const { startShaderModuleProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -4020,12 +4084,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const shaderProbe = shaderStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const shaderProbe = shaderStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${shaderStart.replayed} && !stats.failure) {
@@ -4048,21 +4112,21 @@ try {
                label: module?.label,
              };
            })()`
+          )
         )
-      )
-    : null;
+      : null;
 
-  // Read the compilation info in a second evaluation, because it is async and
-  // needs the module object. This is the check no other group has: a shader
-  // module is where compilation happens, and a browser reports a bad WGSL not by
-  // throwing but through this report — so a clean one is the proof the WGSL this
-  // seam sent compiled, which is stronger than the module merely existing. The
-  // device error queue is read after a couple of frames too, as groups K–N do,
-  // for anything WebGPU raises in a future task.
-  const shaderReport = shaderProbe?.isRealModule
-    ? await evaluate(
-        page,
-        `(async () => {
+    // Read the compilation info in a second evaluation, because it is async and
+    // needs the module object. This is the check no other group has: a shader
+    // module is where compilation happens, and a browser reports a bad WGSL not by
+    // throwing but through this report — so a clean one is the proof the WGSL this
+    // seam sent compiled, which is stronger than the module merely existing. The
+    // device error queue is read after a couple of frames too, as groups K–N do,
+    // for anything WebGPU raises in a future task.
+    const shaderReport = shaderProbe?.isRealModule
+      ? await evaluate(
+          page,
+          `(async () => {
            const entries = [...globalThis.crcbl.gpu.replayer.shaderModules.entries()];
            const last = entries[entries.length - 1];
            const module = last ? last[1] : undefined;
@@ -4081,55 +4145,55 @@ try {
              error: globalThis.crcbl.gpu.replayer.takeError(),
            };
          })()`
-      )
-    : null;
-  check(
-    'O',
-    'wasm encoded a shader module creation and the demo loop replayed it',
-    shaderProbe?.commands?.join(',') === 'CreateShaderModule' &&
-      Number.isInteger(shaderProbe.handle),
-    shaderProbe
-      ? `the loop replayed [${shaderProbe.commands.join(', ')}] for module ${shaderProbe.handle}` +
-          `${shaderProbe.failure ? ` — ${shaderProbe.failure}` : ''}`
-      : shaderStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'O',
-    'a real GPUShaderModule came back from the device with clean compilation info for the known-good WGSL',
-    shaderProbe?.isRealModule === true &&
-      shaderProbe?.label === PROBE_SHADER_MODULE_LABEL &&
-      shaderReport?.waited === true &&
-      Array.isArray(shaderReport?.errors) &&
-      shaderReport.errors.length === 0 &&
-      shaderReport?.error === null,
-    shaderReport?.waited !== true
-      ? 'the page never got as far as reading the module’s compilation info'
-      : shaderProbe?.isRealModule &&
-          shaderReport.errors.length === 0 &&
-          shaderReport.error === null
-        ? `an instance of this browser's GPUShaderModule labelled ${JSON.stringify(shaderProbe.label)}, getCompilationInfo reported no errors, of ${shaderProbe.held} held, and the device reported nothing`
-        : `instanceof GPUShaderModule: ${shaderProbe?.isRealModule}, label ${JSON.stringify(shaderProbe?.label)}, compilation errors ${JSON.stringify(shaderReport?.errors)}` +
-          `${shaderReport?.error ? ` — ${shaderReport.error}` : ''}`
-  );
+        )
+      : null;
+    check(
+      'O',
+      'wasm encoded a shader module creation and the demo loop replayed it',
+      shaderProbe?.commands?.join(',') === 'CreateShaderModule' &&
+        Number.isInteger(shaderProbe.handle),
+      shaderProbe
+        ? `the loop replayed [${shaderProbe.commands.join(', ')}] for module ${shaderProbe.handle}` +
+            `${shaderProbe.failure ? ` — ${shaderProbe.failure}` : ''}`
+        : shaderStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'O',
+      'a real GPUShaderModule came back from the device with clean compilation info for the known-good WGSL',
+      shaderProbe?.isRealModule === true &&
+        shaderProbe?.label === PROBE_SHADER_MODULE_LABEL &&
+        shaderReport?.waited === true &&
+        Array.isArray(shaderReport?.errors) &&
+        shaderReport.errors.length === 0 &&
+        shaderReport?.error === null,
+      shaderReport?.waited !== true
+        ? 'the page never got as far as reading the module’s compilation info'
+        : shaderProbe?.isRealModule &&
+            shaderReport.errors.length === 0 &&
+            shaderReport.error === null
+          ? `an instance of this browser's GPUShaderModule labelled ${JSON.stringify(shaderProbe.label)}, getCompilationInfo reported no errors, of ${shaderProbe.held} held, and the device reported nothing`
+          : `instanceof GPUShaderModule: ${shaderProbe?.isRealModule}, label ${JSON.stringify(shaderProbe?.label)}, compilation errors ${JSON.stringify(shaderReport?.errors)}` +
+            `${shaderReport?.error ? ` — ${shaderReport.error}` : ''}`
+    );
 
-  // A `GPUPipelineLayout` reports its `label` and nothing else — not its
-  // bind-group layouts, not its push-constant ranges (WebGPU has none) — so group
-  // P's evidence is group N's two: the class of what came back, which
-  // `instanceof GPUPipelineLayout` settles and no stub can satisfy (node has no
-  // such binding), and the device's error queue being empty afterwards, which is
-  // the only thing that can say `createPipelineLayout` *accepted* the set list it
-  // was handed. The probe records a bind-group layout and then a pipeline layout
-  // built from it, with `push_constants: None` so it builds rather than being
-  // refused. `gpu-replay.mjs` proves that descriptor and every refusal — a `Some`
-  // push-constant range, an unresolvable set — against a stub; only a real device
-  // can say the browser takes it.
-  group('P — a pipeline layout is created on the real device');
+    // A `GPUPipelineLayout` reports its `label` and nothing else — not its
+    // bind-group layouts, not its push-constant ranges (WebGPU has none) — so group
+    // P's evidence is group N's two: the class of what came back, which
+    // `instanceof GPUPipelineLayout` settles and no stub can satisfy (node has no
+    // such binding), and the device's error queue being empty afterwards, which is
+    // the only thing that can say `createPipelineLayout` *accepted* the set list it
+    // was handed. The probe records a bind-group layout and then a pipeline layout
+    // built from it, with `push_constants: None` so it builds rather than being
+    // refused. `gpu-replay.mjs` proves that descriptor and every refusal — a `Some`
+    // push-constant range, an unresolvable set — against a stub; only a real device
+    // can say the browser takes it.
+    group('P — a pipeline layout is created on the real device');
 
-  const pipelineLayoutStart = await evaluate(
-    page,
-    `(async () => {
+    const pipelineLayoutStart = await evaluate(
+      page,
+      `(async () => {
        const { startPipelineLayoutProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -4138,12 +4202,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const pipelineLayoutProbe = pipelineLayoutStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const pipelineLayoutProbe = pipelineLayoutStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${pipelineLayoutStart.replayed} && !stats.failure) {
@@ -4168,70 +4232,71 @@ try {
                label: layout?.label,
              };
            })()`
+          )
         )
-      )
-    : null;
+      : null;
 
-  // Read a moment after the replay rather than during it, for the reason groups
-  // K–N spell out: WebGPU raises a validation error "in a future task", so a
-  // queue read in the evaluation that saw the replay finish is empty whatever
-  // happened. The failure it guards here is the set resolution: a bind-group
-  // layout the pipeline layout could not find, or a set list the browser refused.
-  const pipelineLayoutReport = pipelineLayoutProbe
-    ? await evaluate(
-        page,
-        `(async () => {
+    // Read a moment after the replay rather than during it, for the reason groups
+    // K–N spell out: WebGPU raises a validation error "in a future task", so a
+    // queue read in the evaluation that saw the replay finish is empty whatever
+    // happened. The failure it guards here is the set resolution: a bind-group
+    // layout the pipeline layout could not find, or a set list the browser refused.
+    const pipelineLayoutReport = pipelineLayoutProbe
+      ? await evaluate(
+          page,
+          `(async () => {
            await new Promise((settle) =>
              requestAnimationFrame(() => requestAnimationFrame(settle))
            );
            return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
          })()`
-      )
-    : null;
-  check(
-    'P',
-    'wasm encoded a pipeline layout creation and the demo loop replayed it',
-    pipelineLayoutProbe?.commands?.join(',') ===
-      'CreateBindGroupLayout,CreatePipelineLayout' &&
-      Number.isInteger(pipelineLayoutProbe.handle),
-    pipelineLayoutProbe
-      ? `the loop replayed [${pipelineLayoutProbe.commands.join(', ')}] for pipeline layout ${pipelineLayoutProbe.handle}` +
-          `${pipelineLayoutProbe.failure ? ` — ${pipelineLayoutProbe.failure}` : ''}`
-      : pipelineLayoutStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'P',
-    'a real GPUPipelineLayout came back from the device with the bind-group layout set accepted',
-    pipelineLayoutProbe?.isRealLayout === true &&
-      pipelineLayoutProbe?.label === PROBE_PIPELINE_LAYOUT_LABEL &&
-      pipelineLayoutReport?.waited === true &&
-      pipelineLayoutReport?.error === null,
-    pipelineLayoutReport?.waited !== true
-      ? 'the page never got as far as reading the device error queue'
-      : pipelineLayoutProbe?.isRealLayout && pipelineLayoutReport.error === null
-        ? `an instance of this browser's GPUPipelineLayout labelled ${JSON.stringify(pipelineLayoutProbe.label)}, built from one bind-group layout, of ${pipelineLayoutProbe.held} held, and the device reported nothing`
-        : `instanceof GPUPipelineLayout: ${pipelineLayoutProbe?.isRealLayout}, label ${JSON.stringify(pipelineLayoutProbe?.label)}` +
-          `${pipelineLayoutReport.error ? ` — ${pipelineLayoutReport.error}` : ''}`
-  );
+        )
+      : null;
+    check(
+      'P',
+      'wasm encoded a pipeline layout creation and the demo loop replayed it',
+      pipelineLayoutProbe?.commands?.join(',') ===
+        'CreateBindGroupLayout,CreatePipelineLayout' &&
+        Number.isInteger(pipelineLayoutProbe.handle),
+      pipelineLayoutProbe
+        ? `the loop replayed [${pipelineLayoutProbe.commands.join(', ')}] for pipeline layout ${pipelineLayoutProbe.handle}` +
+            `${pipelineLayoutProbe.failure ? ` — ${pipelineLayoutProbe.failure}` : ''}`
+        : pipelineLayoutStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'P',
+      'a real GPUPipelineLayout came back from the device with the bind-group layout set accepted',
+      pipelineLayoutProbe?.isRealLayout === true &&
+        pipelineLayoutProbe?.label === PROBE_PIPELINE_LAYOUT_LABEL &&
+        pipelineLayoutReport?.waited === true &&
+        pipelineLayoutReport?.error === null,
+      pipelineLayoutReport?.waited !== true
+        ? 'the page never got as far as reading the device error queue'
+        : pipelineLayoutProbe?.isRealLayout &&
+            pipelineLayoutReport.error === null
+          ? `an instance of this browser's GPUPipelineLayout labelled ${JSON.stringify(pipelineLayoutProbe.label)}, built from one bind-group layout, of ${pipelineLayoutProbe.held} held, and the device reported nothing`
+          : `instanceof GPUPipelineLayout: ${pipelineLayoutProbe?.isRealLayout}, label ${JSON.stringify(pipelineLayoutProbe?.label)}` +
+            `${pipelineLayoutReport.error ? ` — ${pipelineLayoutReport.error}` : ''}`
+    );
 
-  // A `GPUComputePipeline` reports its `label`, like a pipeline layout — but it
-  // is the first object this seam makes that resolves handles into two *different*
-  // tables (its layout and its compute module) and where the shader is bound to
-  // the layout, so group Q has evidence group P does not: `getBindGroupLayout(0)`,
-  // the derived layout only a genuinely-built pipeline answers. So beyond
-  // `instanceof GPUComputePipeline` — which no stub can satisfy, node having no
-  // such binding — the gate calls `getBindGroupLayout(0)` and reads the device's
-  // error queue after a settle. `gpu-replay.mjs` proves the descriptor — its two
-  // resolved handles and, the field that matters most, no workgroup-size member —
-  // and the two distinct resolution refusals against a stub; only this asks a real
-  // device to build the pipeline from a real compute shader.
-  group('Q — a compute pipeline is built on the real device');
+    // A `GPUComputePipeline` reports its `label`, like a pipeline layout — but it
+    // is the first object this seam makes that resolves handles into two *different*
+    // tables (its layout and its compute module) and where the shader is bound to
+    // the layout, so group Q has evidence group P does not: `getBindGroupLayout(0)`,
+    // the derived layout only a genuinely-built pipeline answers. So beyond
+    // `instanceof GPUComputePipeline` — which no stub can satisfy, node having no
+    // such binding — the gate calls `getBindGroupLayout(0)` and reads the device's
+    // error queue after a settle. `gpu-replay.mjs` proves the descriptor — its two
+    // resolved handles and, the field that matters most, no workgroup-size member —
+    // and the two distinct resolution refusals against a stub; only this asks a real
+    // device to build the pipeline from a real compute shader.
+    group('Q — a compute pipeline is built on the real device');
 
-  const computePipelineStart = await evaluate(
-    page,
-    `(async () => {
+    const computePipelineStart = await evaluate(
+      page,
+      `(async () => {
        const { startComputePipelineProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -4240,12 +4305,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const computePipelineProbe = computePipelineStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const computePipelineProbe = computePipelineStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${computePipelineStart.replayed} && !stats.failure) {
@@ -4280,72 +4345,72 @@ try {
                label: pipeline?.label,
              };
            })()`
+          )
         )
-      )
-    : null;
+      : null;
 
-  // Read the device error queue a moment after the replay rather than during it,
-  // for the reason groups K–P spell out: WebGPU raises a validation error "in a
-  // future task", and `createComputePipeline` reports a bad entry point or a
-  // shader/layout mismatch through `uncapturederror` a task later — so a queue
-  // read in the evaluation that saw the replay finish is empty whatever happened.
-  const computePipelineReport = computePipelineProbe
-    ? await evaluate(
-        page,
-        `(async () => {
+    // Read the device error queue a moment after the replay rather than during it,
+    // for the reason groups K–P spell out: WebGPU raises a validation error "in a
+    // future task", and `createComputePipeline` reports a bad entry point or a
+    // shader/layout mismatch through `uncapturederror` a task later — so a queue
+    // read in the evaluation that saw the replay finish is empty whatever happened.
+    const computePipelineReport = computePipelineProbe
+      ? await evaluate(
+          page,
+          `(async () => {
            await new Promise((settle) =>
              requestAnimationFrame(() => requestAnimationFrame(settle))
            );
            return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
          })()`
-      )
-    : null;
-  check(
-    'Q',
-    'wasm encoded a compute pipeline creation and the demo loop replayed it',
-    computePipelineProbe?.commands?.join(',') ===
-      'CreateShaderModule,CreatePipelineLayout,CreateComputePipeline' &&
-      Number.isInteger(computePipelineProbe.handle),
-    computePipelineProbe
-      ? `the loop replayed [${computePipelineProbe.commands.join(', ')}] for compute pipeline ${computePipelineProbe.handle}` +
-          `${computePipelineProbe.failure ? ` — ${computePipelineProbe.failure}` : ''}`
-      : computePipelineStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'Q',
-    'a real GPUComputePipeline came back from the device and answered getBindGroupLayout',
-    computePipelineProbe?.isRealPipeline === true &&
-      computePipelineProbe?.derivedLayout === true &&
-      computePipelineProbe?.label === PROBE_COMPUTE_PIPELINE_LABEL &&
-      computePipelineReport?.waited === true &&
-      computePipelineReport?.error === null,
-    computePipelineReport?.waited !== true
-      ? 'the page never got as far as reading the device error queue'
-      : computePipelineProbe?.isRealPipeline &&
-          computePipelineProbe?.derivedLayout &&
-          computePipelineReport.error === null
-        ? `an instance of this browser's GPUComputePipeline labelled ${JSON.stringify(computePipelineProbe.label)}, its getBindGroupLayout(0) a real GPUBindGroupLayout, of ${computePipelineProbe.held} held, and the device reported nothing`
-        : `instanceof GPUComputePipeline: ${computePipelineProbe?.isRealPipeline}, getBindGroupLayout(0) real: ${computePipelineProbe?.derivedLayout}, label ${JSON.stringify(computePipelineProbe?.label)}` +
-          `${computePipelineReport?.error ? ` — ${computePipelineReport.error}` : ''}`
-  );
+        )
+      : null;
+    check(
+      'Q',
+      'wasm encoded a compute pipeline creation and the demo loop replayed it',
+      computePipelineProbe?.commands?.join(',') ===
+        'CreateShaderModule,CreatePipelineLayout,CreateComputePipeline' &&
+        Number.isInteger(computePipelineProbe.handle),
+      computePipelineProbe
+        ? `the loop replayed [${computePipelineProbe.commands.join(', ')}] for compute pipeline ${computePipelineProbe.handle}` +
+            `${computePipelineProbe.failure ? ` — ${computePipelineProbe.failure}` : ''}`
+        : computePipelineStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'Q',
+      'a real GPUComputePipeline came back from the device and answered getBindGroupLayout',
+      computePipelineProbe?.isRealPipeline === true &&
+        computePipelineProbe?.derivedLayout === true &&
+        computePipelineProbe?.label === PROBE_COMPUTE_PIPELINE_LABEL &&
+        computePipelineReport?.waited === true &&
+        computePipelineReport?.error === null,
+      computePipelineReport?.waited !== true
+        ? 'the page never got as far as reading the device error queue'
+        : computePipelineProbe?.isRealPipeline &&
+            computePipelineProbe?.derivedLayout &&
+            computePipelineReport.error === null
+          ? `an instance of this browser's GPUComputePipeline labelled ${JSON.stringify(computePipelineProbe.label)}, its getBindGroupLayout(0) a real GPUBindGroupLayout, of ${computePipelineProbe.held} held, and the device reported nothing`
+          : `instanceof GPUComputePipeline: ${computePipelineProbe?.isRealPipeline}, getBindGroupLayout(0) real: ${computePipelineProbe?.derivedLayout}, label ${JSON.stringify(computePipelineProbe?.label)}` +
+            `${computePipelineReport?.error ? ` — ${computePipelineReport.error}` : ''}`
+    );
 
-  // A `GPURenderPipeline` answers `getBindGroupLayout(0)` like a compute pipeline
-  // — but it is the *largest* descriptor on the seam, so group R is what puts its
-  // whole nested tree (a `TriangleList` primitive, a reversed-Z depth-stencil, a
-  // single-sampled multisample state, and a blended `Rgba8Unorm` target) in front
-  // of a real device. `gpu-replay.mjs` proves the descriptor and every "WebGPU
-  // cannot express it" refusal against a stub; only this asks a real device to
-  // build the pipeline from a real vertex and fragment shader. Beyond
-  // `instanceof GPURenderPipeline` — which no stub can satisfy, node having no
-  // such binding — the gate calls `getBindGroupLayout(0)` and reads the device's
-  // error queue after a settle.
-  group('R — a graphics pipeline is built on the real device');
+    // A `GPURenderPipeline` answers `getBindGroupLayout(0)` like a compute pipeline
+    // — but it is the *largest* descriptor on the seam, so group R is what puts its
+    // whole nested tree (a `TriangleList` primitive, a reversed-Z depth-stencil, a
+    // single-sampled multisample state, and a blended `Rgba8Unorm` target) in front
+    // of a real device. `gpu-replay.mjs` proves the descriptor and every "WebGPU
+    // cannot express it" refusal against a stub; only this asks a real device to
+    // build the pipeline from a real vertex and fragment shader. Beyond
+    // `instanceof GPURenderPipeline` — which no stub can satisfy, node having no
+    // such binding — the gate calls `getBindGroupLayout(0)` and reads the device's
+    // error queue after a settle.
+    group('R — a graphics pipeline is built on the real device');
 
-  const graphicsPipelineStart = await evaluate(
-    page,
-    `(async () => {
+    const graphicsPipelineStart = await evaluate(
+      page,
+      `(async () => {
        const { startGraphicsPipelineProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -4354,12 +4419,12 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  const graphicsPipelineProbe = graphicsPipelineStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(() => {
+    );
+    const graphicsPipelineProbe = graphicsPipelineStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(() => {
              const { gpu } = globalThis.crcbl;
              const stats = gpu.stats();
              if (stats.replayed <= ${graphicsPipelineStart.replayed} && !stats.failure) {
@@ -4394,79 +4459,79 @@ try {
                label: pipeline?.label,
              };
            })()`
+          )
         )
-      )
-    : null;
+      : null;
 
-  // Read the device error queue a moment after the replay, for group Q's reason:
-  // `createRenderPipeline` reports a bad shader/layout or an unexpressible field
-  // through `uncapturederror` a task later, so a queue read in the evaluation that
-  // saw the replay finish is empty whatever happened.
-  const graphicsPipelineReport = graphicsPipelineProbe
-    ? await evaluate(
-        page,
-        `(async () => {
+    // Read the device error queue a moment after the replay, for group Q's reason:
+    // `createRenderPipeline` reports a bad shader/layout or an unexpressible field
+    // through `uncapturederror` a task later, so a queue read in the evaluation that
+    // saw the replay finish is empty whatever happened.
+    const graphicsPipelineReport = graphicsPipelineProbe
+      ? await evaluate(
+          page,
+          `(async () => {
            await new Promise((settle) =>
              requestAnimationFrame(() => requestAnimationFrame(settle))
            );
            return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
          })()`
-      )
-    : null;
-  check(
-    'R',
-    'wasm encoded a graphics pipeline creation and the demo loop replayed it',
-    graphicsPipelineProbe?.commands?.join(',') ===
-      'CreateShaderModule,CreatePipelineLayout,CreateGraphicsPipeline' &&
-      Number.isInteger(graphicsPipelineProbe.handle),
-    graphicsPipelineProbe
-      ? `the loop replayed [${graphicsPipelineProbe.commands.join(', ')}] for graphics pipeline ${graphicsPipelineProbe.handle}` +
-          `${graphicsPipelineProbe.failure ? ` — ${graphicsPipelineProbe.failure}` : ''}`
-      : graphicsPipelineStart?.started
-        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
-        : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'R',
-    'a real GPURenderPipeline came back from the device and answered getBindGroupLayout',
-    graphicsPipelineProbe?.isRealPipeline === true &&
-      graphicsPipelineProbe?.derivedLayout === true &&
-      graphicsPipelineProbe?.label === PROBE_GRAPHICS_PIPELINE_LABEL &&
-      graphicsPipelineReport?.waited === true &&
-      graphicsPipelineReport?.error === null,
-    graphicsPipelineReport?.waited !== true
-      ? 'the page never got as far as reading the device error queue'
-      : graphicsPipelineProbe?.isRealPipeline &&
-          graphicsPipelineProbe?.derivedLayout &&
-          graphicsPipelineReport.error === null
-        ? `an instance of this browser's GPURenderPipeline labelled ${JSON.stringify(graphicsPipelineProbe.label)}, its getBindGroupLayout(0) a real GPUBindGroupLayout, of ${graphicsPipelineProbe.held} held, and the device reported nothing`
-        : `instanceof GPURenderPipeline: ${graphicsPipelineProbe?.isRealPipeline}, getBindGroupLayout(0) real: ${graphicsPipelineProbe?.derivedLayout}, label ${JSON.stringify(graphicsPipelineProbe?.label)}` +
-          `${graphicsPipelineReport?.error ? ` — ${graphicsPipelineReport.error}` : ''}`
-  );
+        )
+      : null;
+    check(
+      'R',
+      'wasm encoded a graphics pipeline creation and the demo loop replayed it',
+      graphicsPipelineProbe?.commands?.join(',') ===
+        'CreateShaderModule,CreatePipelineLayout,CreateGraphicsPipeline' &&
+        Number.isInteger(graphicsPipelineProbe.handle),
+      graphicsPipelineProbe
+        ? `the loop replayed [${graphicsPipelineProbe.commands.join(', ')}] for graphics pipeline ${graphicsPipelineProbe.handle}` +
+            `${graphicsPipelineProbe.failure ? ` — ${graphicsPipelineProbe.failure}` : ''}`
+        : graphicsPipelineStart?.started
+          ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+          : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'R',
+      'a real GPURenderPipeline came back from the device and answered getBindGroupLayout',
+      graphicsPipelineProbe?.isRealPipeline === true &&
+        graphicsPipelineProbe?.derivedLayout === true &&
+        graphicsPipelineProbe?.label === PROBE_GRAPHICS_PIPELINE_LABEL &&
+        graphicsPipelineReport?.waited === true &&
+        graphicsPipelineReport?.error === null,
+      graphicsPipelineReport?.waited !== true
+        ? 'the page never got as far as reading the device error queue'
+        : graphicsPipelineProbe?.isRealPipeline &&
+            graphicsPipelineProbe?.derivedLayout &&
+            graphicsPipelineReport.error === null
+          ? `an instance of this browser's GPURenderPipeline labelled ${JSON.stringify(graphicsPipelineProbe.label)}, its getBindGroupLayout(0) a real GPUBindGroupLayout, of ${graphicsPipelineProbe.held} held, and the device reported nothing`
+          : `instanceof GPURenderPipeline: ${graphicsPipelineProbe?.isRealPipeline}, getBindGroupLayout(0) real: ${graphicsPipelineProbe?.derivedLayout}, label ${JSON.stringify(graphicsPipelineProbe?.label)}` +
+            `${graphicsPipelineReport?.error ? ` — ${graphicsPipelineReport.error}` : ''}`
+    );
 
-  // **THE DECISIVE GATE OF THE WHOLE TRACK, AND THE FIRST THAT READS PIXELS.**
-  // Everything above builds objects — a buffer, a texture, a pipeline — and
-  // proves the browser accepted the descriptor this seam encoded. None of them
-  // proves the backend puts the *right pixels* in memory, because none of them
-  // renders and reads back. This does: wasm records a clear of a 64×64 texture to
-  // a colour exact in 8 bits, a copy of it into a host-readable buffer, a submit
-  // and a readback request; the demo's own loop replays it; the browser's
-  // `mapAsync` resolves a few frames later; and the bytes that come back on the
-  // reply channel are asserted to be that colour, every pixel.
-  //
-  // `gpu-replay.mjs` cannot reach here: its stub buffer hands back whatever bytes
-  // it likes, so a readback against it proves the bookkeeping and nothing about
-  // the pixels. Only a real device clears a real texture, and only a real
-  // `copyTextureToBuffer` and `mapAsync` carry the result back — which is why
-  // this check is the one that a stub silently substituted for the backend fails.
-  group('S — cleared pixels are read back from memory as the clear colour');
+    // **THE DECISIVE GATE OF THE WHOLE TRACK, AND THE FIRST THAT READS PIXELS.**
+    // Everything above builds objects — a buffer, a texture, a pipeline — and
+    // proves the browser accepted the descriptor this seam encoded. None of them
+    // proves the backend puts the *right pixels* in memory, because none of them
+    // renders and reads back. This does: wasm records a clear of a 64×64 texture to
+    // a colour exact in 8 bits, a copy of it into a host-readable buffer, a submit
+    // and a readback request; the demo's own loop replays it; the browser's
+    // `mapAsync` resolves a few frames later; and the bytes that come back on the
+    // reply channel are asserted to be that colour, every pixel.
+    //
+    // `gpu-replay.mjs` cannot reach here: its stub buffer hands back whatever bytes
+    // it likes, so a readback against it proves the bookkeeping and nothing about
+    // the pixels. Only a real device clears a real texture, and only a real
+    // `copyTextureToBuffer` and `mapAsync` carry the result back — which is why
+    // this check is the one that a stub silently substituted for the backend fails.
+    group('S — cleared pixels are read back from memory as the clear colour');
 
-  const PROBE_READBACK_PIXELS = 64 * 64;
-  const PROBE_READBACK_CLEAR_BYTES = [64, 128, 191, 255];
+    const PROBE_READBACK_PIXELS = 64 * 64;
+    const PROBE_READBACK_CLEAR_BYTES = [64, 128, 191, 255];
 
-  const readbackStart = await evaluate(
-    page,
-    `(async () => {
+    const readbackStart = await evaluate(
+      page,
+      `(async () => {
        const { startReadbackProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
@@ -4475,18 +4540,18 @@ try {
          replayed: before.replayed,
        };
      })()`
-  );
-  // Poll across frames the way group G/H wait for the device: the demo's rAF loop
-  // replays the poll and delivers its reply between these evaluations, and each
-  // evaluation drains what has arrived, then queues another poll while the map is
-  // still resolving. `readReadbackProbe` drains first, so a reply delivered since
-  // the last frame is absorbed before another poll is queued — and a second poll
-  // is never queued while one is unanswered, which `poll_readback` enforces.
-  const readback = readbackStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(async () => {
+    );
+    // Poll across frames the way group G/H wait for the device: the demo's rAF loop
+    // replays the poll and delivers its reply between these evaluations, and each
+    // evaluation drains what has arrived, then queues another poll while the map is
+    // still resolving. `readReadbackProbe` drains first, so a reply delivered since
+    // the last frame is absorbed before another poll is queued — and a second poll
+    // is never queued while one is unanswered, which `poll_readback` enforces.
+    const readback = readbackStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(async () => {
              const { readReadbackProbe, pollReadbackProbe, READBACK } =
                await import('/engine/gpu-probe.js');
              const { exports, gpu } = globalThis.crcbl;
@@ -4522,67 +4587,69 @@ try {
                error: gpu.replayer.takeError(),
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'S',
-    'wasm encoded the readback setup frame — clear, copy, submit, request',
-    readbackStart?.started === true,
-    readbackStart?.started
-      ? 'the clear-and-read frame is on the stream'
-      : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'S',
-    'the cleared pixels came back from memory as the clear colour, every one',
-    readback?.done === true &&
-      readback.allMatch === true &&
-      readback.len === PROBE_READBACK_PIXELS * 4,
-    readback?.done !== true
-      ? `no readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
-      : readback.allMatch
-        ? `${readback.len} bytes, every texel [${PROBE_READBACK_CLEAR_BYTES.join(', ')}]`
-        : `state ${readback.state}, ${readback.len ?? 0} bytes, ` +
-          `first wrong at byte ${readback.firstWrong} (sample ${JSON.stringify(readback.sample)} ` +
-          `against [${PROBE_READBACK_CLEAR_BYTES.join(', ')}])` +
-          `${readback.error ? ` — ${readback.error}` : ''}`
-  );
+      : null;
+    check(
+      'S',
+      'wasm encoded the readback setup frame — clear, copy, submit, request',
+      readbackStart?.started === true,
+      readbackStart?.started
+        ? 'the clear-and-read frame is on the stream'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'S',
+      'the cleared pixels came back from memory as the clear colour, every one',
+      readback?.done === true &&
+        readback.allMatch === true &&
+        readback.len === PROBE_READBACK_PIXELS * 4,
+      readback?.done !== true
+        ? `no readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : readback.allMatch
+          ? `${readback.len} bytes, every texel [${PROBE_READBACK_CLEAR_BYTES.join(', ')}]`
+          : `state ${readback.state}, ${readback.len ?? 0} bytes, ` +
+            `first wrong at byte ${readback.firstWrong} (sample ${JSON.stringify(readback.sample)} ` +
+            `against [${PROBE_READBACK_CLEAR_BYTES.join(', ')}])` +
+            `${readback.error ? ` — ${readback.error}` : ''}`
+    );
 
-  // **THE DRAW GATE, AND THE FIRST THAT PROVES A DRAW.** Group S proves a clear
-  // reaches host memory. This proves a `setPipeline` + `draw` *overwrites* that
-  // clear: wasm records a colour-only pipeline, a pass that clears the 64×64
-  // texture to the blue clear and then binds the pipeline and draws a fullscreen
-  // triangle whose fragment shader writes constant red, a copy into a host
-  // buffer, a submit and a readback; the demo's loop replays it; and the bytes
-  // that come back are asserted to be the red draw colour, every pixel — not the
-  // blue clear underneath. A stub that skips the draw leaves blue and fails here;
-  // only a real draw leaves red. `gpu-replay.mjs` cannot reach this for group S's
-  // reason: only a real device rasterises a triangle into a real texture.
-  group('T — a drawn triangle is read back as the draw colour, not the clear');
+    // **THE DRAW GATE, AND THE FIRST THAT PROVES A DRAW.** Group S proves a clear
+    // reaches host memory. This proves a `setPipeline` + `draw` *overwrites* that
+    // clear: wasm records a colour-only pipeline, a pass that clears the 64×64
+    // texture to the blue clear and then binds the pipeline and draws a fullscreen
+    // triangle whose fragment shader writes constant red, a copy into a host
+    // buffer, a submit and a readback; the demo's loop replays it; and the bytes
+    // that come back are asserted to be the red draw colour, every pixel — not the
+    // blue clear underneath. A stub that skips the draw leaves blue and fails here;
+    // only a real draw leaves red. `gpu-replay.mjs` cannot reach this for group S's
+    // reason: only a real device rasterises a triangle into a real texture.
+    group(
+      'T — a drawn triangle is read back as the draw colour, not the clear'
+    );
 
-  const PROBE_DRAW_PIXELS = 64 * 64;
-  const PROBE_DRAW_COLOR_BYTES = [255, 0, 0, 255];
-  const PROBE_DRAW_CLEAR_BYTES = [64, 128, 191, 255];
+    const PROBE_DRAW_PIXELS = 64 * 64;
+    const PROBE_DRAW_COLOR_BYTES = [255, 0, 0, 255];
+    const PROBE_DRAW_CLEAR_BYTES = [64, 128, 191, 255];
 
-  const drawStart = await evaluate(
-    page,
-    `(async () => {
+    const drawStart = await evaluate(
+      page,
+      `(async () => {
        const { startDrawProbe } = await import('/engine/gpu-probe.js');
        const { exports } = globalThis.crcbl;
        return { started: startDrawProbe({ exports }) };
      })()`
-  );
-  // Poll across frames exactly as group S does: the demo's rAF loop replays the
-  // poll and delivers its reply between these evaluations, and each evaluation
-  // drains what has arrived, then queues another poll while the map is still
-  // resolving. `readDrawProbe` drains first, so a reply delivered since the last
-  // frame is absorbed before another poll is queued.
-  const draw = drawStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(async () => {
+    );
+    // Poll across frames exactly as group S does: the demo's rAF loop replays the
+    // poll and delivers its reply between these evaluations, and each evaluation
+    // drains what has arrived, then queues another poll while the map is still
+    // resolving. `readDrawProbe` drains first, so a reply delivered since the last
+    // frame is absorbed before another poll is queued.
+    const draw = drawStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(async () => {
              const { readDrawProbe, pollDrawProbe, DRAW } =
                await import('/engine/gpu-probe.js');
              const { exports, gpu } = globalThis.crcbl;
@@ -4618,67 +4685,67 @@ try {
                error: gpu.replayer.takeError(),
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'T',
-    'wasm encoded the draw setup frame — pipeline, clear, bind, draw, copy, request',
-    drawStart?.started === true,
-    drawStart?.started
-      ? 'the draw-and-read frame is on the stream'
-      : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'T',
-    'the drawn pixels came back as the draw colour, not the clear, every one',
-    draw?.done === true &&
-      draw.allMatch === true &&
-      draw.len === PROBE_DRAW_PIXELS * 4,
-    draw?.done !== true
-      ? `no draw readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
-      : draw.allMatch
-        ? `${draw.len} bytes, every texel [${PROBE_DRAW_COLOR_BYTES.join(', ')}] (red), not the clear [${PROBE_DRAW_CLEAR_BYTES.join(', ')}] (blue)`
-        : `state ${draw.state}, ${draw.len ?? 0} bytes, ` +
-          `first wrong at byte ${draw.firstWrong} (sample ${JSON.stringify(draw.sample)} ` +
-          `against [${PROBE_DRAW_COLOR_BYTES.join(', ')}]; the clear was [${PROBE_DRAW_CLEAR_BYTES.join(', ')}])` +
-          `${draw.error ? ` — ${draw.error}` : ''}`
-  );
+      : null;
+    check(
+      'T',
+      'wasm encoded the draw setup frame — pipeline, clear, bind, draw, copy, request',
+      drawStart?.started === true,
+      drawStart?.started
+        ? 'the draw-and-read frame is on the stream'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'T',
+      'the drawn pixels came back as the draw colour, not the clear, every one',
+      draw?.done === true &&
+        draw.allMatch === true &&
+        draw.len === PROBE_DRAW_PIXELS * 4,
+      draw?.done !== true
+        ? `no draw readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : draw.allMatch
+          ? `${draw.len} bytes, every texel [${PROBE_DRAW_COLOR_BYTES.join(', ')}] (red), not the clear [${PROBE_DRAW_CLEAR_BYTES.join(', ')}] (blue)`
+          : `state ${draw.state}, ${draw.len ?? 0} bytes, ` +
+            `first wrong at byte ${draw.firstWrong} (sample ${JSON.stringify(draw.sample)} ` +
+            `against [${PROBE_DRAW_COLOR_BYTES.join(', ')}]; the clear was [${PROBE_DRAW_CLEAR_BYTES.join(', ')}])` +
+            `${draw.error ? ` — ${draw.error}` : ''}`
+    );
 
-  // **THE DISPATCH GATE, AND THE FIRST THAT PROVES A COMPUTE SHADER RAN.** Group T
-  // proves a draw overwrites a clear. This proves a `dispatchWorkgroups` writes a
-  // storage buffer: wasm records a compute pipeline whose shader sets every slot
-  // of a 64-`u32` storage buffer to 0xDEADBEEF, a pass that binds and dispatches
-  // it, a buffer→buffer copy into a host buffer, a submit and a readback; the
-  // demo's loop replays it; and the 256 bytes that come back are asserted to be
-  // 0xDEADBEEF in every 4-byte little-endian word. A fresh WebGPU buffer is
-  // zero-initialised, so a stub that skips the dispatch reads back all zeros —
-  // only a dispatch that actually ran writes the pattern. `gpu-replay.mjs` cannot
-  // reach this: only a real device runs a compute shader into a real buffer.
-  group('U — a compute shader’s storage-buffer writes are read back');
+    // **THE DISPATCH GATE, AND THE FIRST THAT PROVES A COMPUTE SHADER RAN.** Group T
+    // proves a draw overwrites a clear. This proves a `dispatchWorkgroups` writes a
+    // storage buffer: wasm records a compute pipeline whose shader sets every slot
+    // of a 64-`u32` storage buffer to 0xDEADBEEF, a pass that binds and dispatches
+    // it, a buffer→buffer copy into a host buffer, a submit and a readback; the
+    // demo's loop replays it; and the 256 bytes that come back are asserted to be
+    // 0xDEADBEEF in every 4-byte little-endian word. A fresh WebGPU buffer is
+    // zero-initialised, so a stub that skips the dispatch reads back all zeros —
+    // only a dispatch that actually ran writes the pattern. `gpu-replay.mjs` cannot
+    // reach this: only a real device runs a compute shader into a real buffer.
+    group('U — a compute shader’s storage-buffer writes are read back');
 
-  const PROBE_DISPATCH_WORDS = 64;
-  // 0xDEADBEEF as the little-endian bytes a `u32` holds it as.
-  const PROBE_DISPATCH_PATTERN_BYTES = [0xef, 0xbe, 0xad, 0xde];
+    const PROBE_DISPATCH_WORDS = 64;
+    // 0xDEADBEEF as the little-endian bytes a `u32` holds it as.
+    const PROBE_DISPATCH_PATTERN_BYTES = [0xef, 0xbe, 0xad, 0xde];
 
-  const computeStart = await evaluate(
-    page,
-    `(async () => {
+    const computeStart = await evaluate(
+      page,
+      `(async () => {
        const { startComputeProbe } = await import('/engine/gpu-probe.js');
        const { exports } = globalThis.crcbl;
        return { started: startComputeProbe({ exports }) };
      })()`
-  );
-  // Poll across frames exactly as group T does: the demo's rAF loop replays the
-  // poll and delivers its reply between these evaluations, and each evaluation
-  // drains what has arrived, then queues another poll while the map is still
-  // resolving. `readComputeProbe` drains first, so a reply delivered since the
-  // last frame is absorbed before another poll is queued.
-  const compute = computeStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(async () => {
+    );
+    // Poll across frames exactly as group T does: the demo's rAF loop replays the
+    // poll and delivers its reply between these evaluations, and each evaluation
+    // drains what has arrived, then queues another poll while the map is still
+    // resolving. `readComputeProbe` drains first, so a reply delivered since the
+    // last frame is absorbed before another poll is queued.
+    const compute = computeStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(async () => {
              const { readComputeProbe, pollComputeProbe, COMPUTE } =
                await import('/engine/gpu-probe.js');
              const { exports, gpu } = globalThis.crcbl;
@@ -4714,65 +4781,65 @@ try {
                error: gpu.replayer.takeError(),
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'U',
-    'wasm encoded the dispatch setup frame — pipeline, pass, bind, dispatch, copy, request',
-    computeStart?.started === true,
-    computeStart?.started
-      ? 'the dispatch-and-read frame is on the stream'
-      : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'U',
-    'the dispatched storage buffer came back as 0xDEADBEEF, every word',
-    compute?.done === true &&
-      compute.allMatch === true &&
-      compute.len === PROBE_DISPATCH_WORDS * 4,
-    compute?.done !== true
-      ? `no dispatch readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
-      : compute.allMatch
-        ? `${compute.len} bytes, every word 0xDEADBEEF [${PROBE_DISPATCH_PATTERN_BYTES.join(', ')}], not the zero-init a stub reads back`
-        : `state ${compute.state}, ${compute.len ?? 0} bytes, ` +
-          `first wrong at byte ${compute.firstWrong} (sample ${JSON.stringify(compute.sample)} ` +
-          `against [${PROBE_DISPATCH_PATTERN_BYTES.join(', ')}])` +
-          `${compute.error ? ` — ${compute.error}` : ''}`
-  );
+      : null;
+    check(
+      'U',
+      'wasm encoded the dispatch setup frame — pipeline, pass, bind, dispatch, copy, request',
+      computeStart?.started === true,
+      computeStart?.started
+        ? 'the dispatch-and-read frame is on the stream'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'U',
+      'the dispatched storage buffer came back as 0xDEADBEEF, every word',
+      compute?.done === true &&
+        compute.allMatch === true &&
+        compute.len === PROBE_DISPATCH_WORDS * 4,
+      compute?.done !== true
+        ? `no dispatch readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : compute.allMatch
+          ? `${compute.len} bytes, every word 0xDEADBEEF [${PROBE_DISPATCH_PATTERN_BYTES.join(', ')}], not the zero-init a stub reads back`
+          : `state ${compute.state}, ${compute.len ?? 0} bytes, ` +
+            `first wrong at byte ${compute.firstWrong} (sample ${JSON.stringify(compute.sample)} ` +
+            `against [${PROBE_DISPATCH_PATTERN_BYTES.join(', ')}])` +
+            `${compute.error ? ` — ${compute.error}` : ''}`
+    );
 
-  // **THE COPY-CHAIN GATE, AND THE FIRST THAT PROVES A BUFFER→IMAGE AND AN
-  // IMAGE→IMAGE COPY RAN.** wasm records a dispatch that fills a storage buffer
-  // with red (`0xFF0000FF` per texel), a `pipeline_barrier` transitioning that
-  // buffer from `ShaderWrite` to `TransferSrc`, a `copyBufferToTexture` into a
-  // 64×64 texture, a `copyTextureToTexture` to a second texture, a
-  // `copyTextureToBuffer` out to a host buffer, a submit and a readback; the
-  // demo's loop replays it; and the 16384 bytes that come back are asserted red
-  // in every texel. A fresh WebGPU texture is zero-initialised, so a stub that
-  // skips EITHER copy reads back zeros — only both copies running carries the red
-  // all the way out. The `pipeline_barrier` is the documented no-op: it sits
-  // mid-frame between the dispatch and the first copy, and the red readback ALSO
-  // proves it did not disturb replay. `gpu-replay.mjs` cannot reach the copies:
-  // only a real device runs them.
-  group('V — a buffer→image→image→buffer copy chain is read back red');
+    // **THE COPY-CHAIN GATE, AND THE FIRST THAT PROVES A BUFFER→IMAGE AND AN
+    // IMAGE→IMAGE COPY RAN.** wasm records a dispatch that fills a storage buffer
+    // with red (`0xFF0000FF` per texel), a `pipeline_barrier` transitioning that
+    // buffer from `ShaderWrite` to `TransferSrc`, a `copyBufferToTexture` into a
+    // 64×64 texture, a `copyTextureToTexture` to a second texture, a
+    // `copyTextureToBuffer` out to a host buffer, a submit and a readback; the
+    // demo's loop replays it; and the 16384 bytes that come back are asserted red
+    // in every texel. A fresh WebGPU texture is zero-initialised, so a stub that
+    // skips EITHER copy reads back zeros — only both copies running carries the red
+    // all the way out. The `pipeline_barrier` is the documented no-op: it sits
+    // mid-frame between the dispatch and the first copy, and the red readback ALSO
+    // proves it did not disturb replay. `gpu-replay.mjs` cannot reach the copies:
+    // only a real device runs them.
+    group('V — a buffer→image→image→buffer copy chain is read back red');
 
-  const PROBE_COPYCHAIN_TEXELS = 64 * 64;
-  // Opaque red as the little-endian bytes an `rgba8unorm` texel holds it as.
-  const PROBE_COPYCHAIN_PATTERN_BYTES = [255, 0, 0, 255];
+    const PROBE_COPYCHAIN_TEXELS = 64 * 64;
+    // Opaque red as the little-endian bytes an `rgba8unorm` texel holds it as.
+    const PROBE_COPYCHAIN_PATTERN_BYTES = [255, 0, 0, 255];
 
-  const copyChainStart = await evaluate(
-    page,
-    `(async () => {
+    const copyChainStart = await evaluate(
+      page,
+      `(async () => {
        const { startCopyChainProbe } = await import('/engine/gpu-probe.js');
        const { exports } = globalThis.crcbl;
        return { started: startCopyChainProbe({ exports }) };
      })()`
-  );
-  const copyChain = copyChainStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(async () => {
+    );
+    const copyChain = copyChainStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(async () => {
              const { readCopyChainProbe, pollCopyChainProbe, COPYCHAIN } =
                await import('/engine/gpu-probe.js');
              const { exports, gpu } = globalThis.crcbl;
@@ -4806,77 +4873,77 @@ try {
                error: gpu.replayer.takeError(),
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'V',
-    'wasm encoded the copy-chain setup frame — dispatch, pipeline_barrier, buffer→image, image→image, image→buffer, request',
-    copyChainStart?.started === true,
-    copyChainStart?.started
-      ? 'the copy-chain frame is on the stream'
-      : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'V',
-    'the copy chain came back red in every texel — both new copies ran',
-    copyChain?.done === true &&
-      copyChain.allMatch === true &&
-      copyChain.len === PROBE_COPYCHAIN_TEXELS * 4,
-    copyChain?.done !== true
-      ? `no copy-chain readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
-      : copyChain.allMatch
-        ? `${copyChain.len} bytes, every texel [${PROBE_COPYCHAIN_PATTERN_BYTES.join(', ')}] (red), not the zero-init a stub reads back`
-        : `state ${copyChain.state}, ${copyChain.len ?? 0} bytes, ` +
-          `first wrong at byte ${copyChain.firstWrong} (sample ${JSON.stringify(copyChain.sample)} ` +
-          `against [${PROBE_COPYCHAIN_PATTERN_BYTES.join(', ')}])` +
-          `${copyChain.error ? ` — ${copyChain.error}` : ''}`
-  );
-  // The same readback, read for what it says about the no-op: the frame carries a
-  // `pipeline_barrier` between the dispatch and the first copy, and a red result
-  // means replay recognised it, recorded nothing, and carried on — a barrier that
-  // threw or corrupted the encoder would leave this red-everywhere check failing
-  // above. That it holds is the browser-frame evidence the barrier is inert.
-  check(
-    'V',
-    'the pipeline_barrier mid-frame did not disturb replay — the barriered frame is still red',
-    copyChain?.done === true &&
-      copyChain.allMatch === true &&
-      copyChain.len === PROBE_COPYCHAIN_TEXELS * 4,
-    copyChain?.allMatch === true
-      ? 'the frame with a pipeline_barrier in it read back red in every texel — the no-op is inert'
-      : 'the barriered frame did not come back red — see the copy-chain check above for the bytes'
-  );
+      : null;
+    check(
+      'V',
+      'wasm encoded the copy-chain setup frame — dispatch, pipeline_barrier, buffer→image, image→image, image→buffer, request',
+      copyChainStart?.started === true,
+      copyChainStart?.started
+        ? 'the copy-chain frame is on the stream'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'V',
+      'the copy chain came back red in every texel — both new copies ran',
+      copyChain?.done === true &&
+        copyChain.allMatch === true &&
+        copyChain.len === PROBE_COPYCHAIN_TEXELS * 4,
+      copyChain?.done !== true
+        ? `no copy-chain readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : copyChain.allMatch
+          ? `${copyChain.len} bytes, every texel [${PROBE_COPYCHAIN_PATTERN_BYTES.join(', ')}] (red), not the zero-init a stub reads back`
+          : `state ${copyChain.state}, ${copyChain.len ?? 0} bytes, ` +
+            `first wrong at byte ${copyChain.firstWrong} (sample ${JSON.stringify(copyChain.sample)} ` +
+            `against [${PROBE_COPYCHAIN_PATTERN_BYTES.join(', ')}])` +
+            `${copyChain.error ? ` — ${copyChain.error}` : ''}`
+    );
+    // The same readback, read for what it says about the no-op: the frame carries a
+    // `pipeline_barrier` between the dispatch and the first copy, and a red result
+    // means replay recognised it, recorded nothing, and carried on — a barrier that
+    // threw or corrupted the encoder would leave this red-everywhere check failing
+    // above. That it holds is the browser-frame evidence the barrier is inert.
+    check(
+      'V',
+      'the pipeline_barrier mid-frame did not disturb replay — the barriered frame is still red',
+      copyChain?.done === true &&
+        copyChain.allMatch === true &&
+        copyChain.len === PROBE_COPYCHAIN_TEXELS * 4,
+      copyChain?.allMatch === true
+        ? 'the frame with a pipeline_barrier in it read back red in every texel — the no-op is inert'
+        : 'the barriered frame did not come back red — see the copy-chain check above for the bytes'
+    );
 
-  // **THE FILL GATE, AND THE FIRST THAT PROVES `clearBuffer` ZEROES EXACTLY ITS
-  // SUB-RANGE.** wasm records a dispatch that fills a 256-byte storage buffer with
-  // `0xDEADBEEF`, a `fill_buffer(offset 0, size 128, value 0)` that maps to
-  // `clearBuffer` over the first half, a copy to a host buffer, a submit and a
-  // readback; the demo's loop replays it; and the 256 bytes that come back are
-  // asserted zero in bytes 0..128 and still `0xDEADBEEF` in bytes 128..256. A stub
-  // `clearBuffer` leaves the pattern in the half that should be zero; a fill that
-  // ran too far zeroes the pattern beyond its size. `gpu-replay.mjs` cannot reach
-  // this: only a real device runs a compute shader and a clear into a real buffer.
-  group('W — clearBuffer zeroes its sub-range and leaves the rest');
+    // **THE FILL GATE, AND THE FIRST THAT PROVES `clearBuffer` ZEROES EXACTLY ITS
+    // SUB-RANGE.** wasm records a dispatch that fills a 256-byte storage buffer with
+    // `0xDEADBEEF`, a `fill_buffer(offset 0, size 128, value 0)` that maps to
+    // `clearBuffer` over the first half, a copy to a host buffer, a submit and a
+    // readback; the demo's loop replays it; and the 256 bytes that come back are
+    // asserted zero in bytes 0..128 and still `0xDEADBEEF` in bytes 128..256. A stub
+    // `clearBuffer` leaves the pattern in the half that should be zero; a fill that
+    // ran too far zeroes the pattern beyond its size. `gpu-replay.mjs` cannot reach
+    // this: only a real device runs a compute shader and a clear into a real buffer.
+    group('W — clearBuffer zeroes its sub-range and leaves the rest');
 
-  const PROBE_FILL_WORDS = 64;
-  const PROBE_FILL_ZEROED_BYTES = 128;
-  // 0xDEADBEEF as the little-endian bytes a `u32` holds it as.
-  const PROBE_FILL_PATTERN_BYTES = [0xef, 0xbe, 0xad, 0xde];
+    const PROBE_FILL_WORDS = 64;
+    const PROBE_FILL_ZEROED_BYTES = 128;
+    // 0xDEADBEEF as the little-endian bytes a `u32` holds it as.
+    const PROBE_FILL_PATTERN_BYTES = [0xef, 0xbe, 0xad, 0xde];
 
-  const fillStart = await evaluate(
-    page,
-    `(async () => {
+    const fillStart = await evaluate(
+      page,
+      `(async () => {
        const { startFillProbe } = await import('/engine/gpu-probe.js');
        const { exports } = globalThis.crcbl;
        return { started: startFillProbe({ exports }) };
      })()`
-  );
-  const fill = fillStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(async () => {
+    );
+    const fill = fillStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(async () => {
              const { readFillProbe, pollFillProbe, FILL } =
                await import('/engine/gpu-probe.js');
              const { exports, gpu } = globalThis.crcbl;
@@ -4920,55 +4987,55 @@ try {
                error: gpu.replayer.takeError(),
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'W',
-    'wasm encoded the fill setup frame — dispatch, fill_buffer, copy, request',
-    fillStart?.started === true,
-    fillStart?.started
-      ? 'the fill frame is on the stream'
-      : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'W',
-    'the fill zeroed the first half and left the second half as 0xDEADBEEF',
-    fill?.done === true &&
-      fill.firstHalfZero === true &&
-      fill.secondHalfPattern === true &&
-      fill.len === PROBE_FILL_WORDS * 4,
-    fill?.done !== true
-      ? `no fill readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
-      : fill.firstHalfZero && fill.secondHalfPattern
-        ? `${fill.len} bytes, first ${PROBE_FILL_ZEROED_BYTES} zero and the rest 0xDEADBEEF [${PROBE_FILL_PATTERN_BYTES.join(', ')}]`
-        : `state ${fill.state}, ${fill.len ?? 0} bytes, ` +
-          `first wrong at byte ${fill.firstWrong} (sample around the boundary ${JSON.stringify(fill.sample)}; ` +
-          `want zero then [${PROBE_FILL_PATTERN_BYTES.join(', ')}])` +
-          `${fill.error ? ` — ${fill.error}` : ''}`
-  );
+      : null;
+    check(
+      'W',
+      'wasm encoded the fill setup frame — dispatch, fill_buffer, copy, request',
+      fillStart?.started === true,
+      fillStart?.started
+        ? 'the fill frame is on the stream'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'W',
+      'the fill zeroed the first half and left the second half as 0xDEADBEEF',
+      fill?.done === true &&
+        fill.firstHalfZero === true &&
+        fill.secondHalfPattern === true &&
+        fill.len === PROBE_FILL_WORDS * 4,
+      fill?.done !== true
+        ? `no fill readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : fill.firstHalfZero && fill.secondHalfPattern
+          ? `${fill.len} bytes, first ${PROBE_FILL_ZEROED_BYTES} zero and the rest 0xDEADBEEF [${PROBE_FILL_PATTERN_BYTES.join(', ')}]`
+          : `state ${fill.state}, ${fill.len ?? 0} bytes, ` +
+            `first wrong at byte ${fill.firstWrong} (sample around the boundary ${JSON.stringify(fill.sample)}; ` +
+            `want zero then [${PROBE_FILL_PATTERN_BYTES.join(', ')}])` +
+            `${fill.error ? ` — ${fill.error}` : ''}`
+    );
 
-  // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**
-  // Every gate above rendered into a texture this replayer created; this one
-  // renders into the frame a *canvas* handed back. wasm records a surface on the
-  // a dedicated OffscreenCanvas the probe owns (see below), a swapchain
-  // configured on it (a `configure` with COPY_SRC in the usage), an acquire
-  // (`getCurrentTexture`), a pass that clears the acquired view to red, a copy of
-  // that frame into a host buffer, a submit, a present (a no-op the browser
-  // composites on rAF), and a readback; the demo's loop replays it; and the 16384
-  // bytes that come back are asserted to be red, every pixel. A stub that skipped
-  // the configure/acquire/render leaves a black/zero canvas and fails here; only
-  // the real path — `context.configure`, `getCurrentTexture`, render,
-  // `copyTextureToBuffer` off the acquired texture — leaves red. `gpu-replay.mjs`
-  // cannot reach this: only a real browser has a canvas context.
-  group('X — a presented canvas frame is read back as the render colour');
+    // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**
+    // Every gate above rendered into a texture this replayer created; this one
+    // renders into the frame a *canvas* handed back. wasm records a surface on the
+    // a dedicated OffscreenCanvas the probe owns (see below), a swapchain
+    // configured on it (a `configure` with COPY_SRC in the usage), an acquire
+    // (`getCurrentTexture`), a pass that clears the acquired view to red, a copy of
+    // that frame into a host buffer, a submit, a present (a no-op the browser
+    // composites on rAF), and a readback; the demo's loop replays it; and the 16384
+    // bytes that come back are asserted to be red, every pixel. A stub that skipped
+    // the configure/acquire/render leaves a black/zero canvas and fails here; only
+    // the real path — `context.configure`, `getCurrentTexture`, render,
+    // `copyTextureToBuffer` off the acquired texture — leaves red. `gpu-replay.mjs`
+    // cannot reach this: only a real browser has a canvas context.
+    group('X — a presented canvas frame is read back as the render colour');
 
-  const PROBE_PRESENT_PIXELS = 64 * 64;
-  const PROBE_PRESENT_COLOR_BYTES = [255, 0, 0, 255];
+    const PROBE_PRESENT_PIXELS = 64 * 64;
+    const PROBE_PRESENT_COLOR_BYTES = [255, 0, 0, 255];
 
-  const presentStart = await evaluate(
-    page,
-    `(async () => {
+    const presentStart = await evaluate(
+      page,
+      `(async () => {
        const { startPresentProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        // The present probe needs a canvas IT owns. Configuring the demo's own
@@ -4986,16 +5053,16 @@ try {
          started: startPresentProbe({ exports, canvasId: PRESENT_CANVAS_ID }),
        };
      })()`
-  );
-  // Poll across frames exactly as the draw gate does: the demo's rAF loop replays
-  // the poll and delivers its reply between these evaluations. `readPresentProbe`
-  // drains first, so a reply delivered since the last frame is absorbed before
-  // another poll is queued.
-  const present = presentStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(async () => {
+    );
+    // Poll across frames exactly as the draw gate does: the demo's rAF loop replays
+    // the poll and delivers its reply between these evaluations. `readPresentProbe`
+    // drains first, so a reply delivered since the last frame is absorbed before
+    // another poll is queued.
+    const present = presentStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(async () => {
              const { readPresentProbe, pollPresentProbe, PRESENT } =
                await import('/engine/gpu-probe.js');
              const { exports, gpu } = globalThis.crcbl;
@@ -5031,51 +5098,51 @@ try {
                error: gpu.replayer.takeError(),
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'X',
-    'wasm encoded the present setup frame — surface, swapchain, acquire, clear, copy, present, request',
-    presentStart?.started === true,
-    presentStart?.started
-      ? 'the present-and-read frame is on the stream'
-      : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'X',
-    'the presented canvas frame came back from memory as the render colour, every pixel',
-    present?.done === true &&
-      present.allMatch === true &&
-      present.len === PROBE_PRESENT_PIXELS * 4,
-    present?.done !== true
-      ? `no present readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
-      : present.allMatch
-        ? `${present.len} bytes, every texel [${PROBE_PRESENT_COLOR_BYTES.join(', ')}] (red) from the acquired canvas frame`
-        : `state ${present.state}, ${present.len ?? 0} bytes, ` +
-          `first wrong at byte ${present.firstWrong} (sample ${JSON.stringify(present.sample)} ` +
-          `against [${PROBE_PRESENT_COLOR_BYTES.join(', ')}])` +
-          `${present.error ? ` — ${present.error}` : ''}`
-  );
+      : null;
+    check(
+      'X',
+      'wasm encoded the present setup frame — surface, swapchain, acquire, clear, copy, present, request',
+      presentStart?.started === true,
+      presentStart?.started
+        ? 'the present-and-read frame is on the stream'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'X',
+      'the presented canvas frame came back from memory as the render colour, every pixel',
+      present?.done === true &&
+        present.allMatch === true &&
+        present.len === PROBE_PRESENT_PIXELS * 4,
+      present?.done !== true
+        ? `no present readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : present.allMatch
+          ? `${present.len} bytes, every texel [${PROBE_PRESENT_COLOR_BYTES.join(', ')}] (red) from the acquired canvas frame`
+          : `state ${present.state}, ${present.len ?? 0} bytes, ` +
+            `first wrong at byte ${present.firstWrong} (sample ${JSON.stringify(present.sample)} ` +
+            `against [${PROBE_PRESENT_COLOR_BYTES.join(', ')}])` +
+            `${present.error ? ` — ${present.error}` : ''}`
+    );
 
-  // **THE RECONFIGURE GATE.** Group X proved a presented canvas frame reads back
-  // as the render colour; this one proves a swapchain reconfigured in place takes
-  // the NEW format. wasm creates the swapchain `Rgba8Unorm`, reconfigures it
-  // `Bgra8Unorm`, then acquires, clears red, copies out and reads back on its own
-  // dedicated OffscreenCanvas. Red in an `Rgba8Unorm` frame reads back as
-  // [255, 0, 0, 255]; red in a `Bgra8Unorm` frame reads back in BGRA byte order as
-  // [0, 0, 255, 255]. Asserting the latter is the proof the reconfigure actually
-  // re-ran `context.configure` with the new format — a stub that skipped it leaves
-  // the swapchain `Rgba8Unorm` and fails here. `gpu-replay.mjs` cannot reach this:
-  // only a real browser has a canvas context.
-  group('Y — a reconfigured swapchain presents in the new format');
+    // **THE RECONFIGURE GATE.** Group X proved a presented canvas frame reads back
+    // as the render colour; this one proves a swapchain reconfigured in place takes
+    // the NEW format. wasm creates the swapchain `Rgba8Unorm`, reconfigures it
+    // `Bgra8Unorm`, then acquires, clears red, copies out and reads back on its own
+    // dedicated OffscreenCanvas. Red in an `Rgba8Unorm` frame reads back as
+    // [255, 0, 0, 255]; red in a `Bgra8Unorm` frame reads back in BGRA byte order as
+    // [0, 0, 255, 255]. Asserting the latter is the proof the reconfigure actually
+    // re-ran `context.configure` with the new format — a stub that skipped it leaves
+    // the swapchain `Rgba8Unorm` and fails here. `gpu-replay.mjs` cannot reach this:
+    // only a real browser has a canvas context.
+    group('Y — a reconfigured swapchain presents in the new format');
 
-  const PROBE_RECONFIG_PIXELS = 64 * 64;
-  const PROBE_RECONFIG_COLOR_BYTES = [0, 0, 255, 255];
+    const PROBE_RECONFIG_PIXELS = 64 * 64;
+    const PROBE_RECONFIG_COLOR_BYTES = [0, 0, 255, 255];
 
-  const reconfigStart = await evaluate(
-    page,
-    `(async () => {
+    const reconfigStart = await evaluate(
+      page,
+      `(async () => {
        const { startReconfigureProbe } = await import('/engine/gpu-probe.js');
        const { exports, gpu } = globalThis.crcbl;
        // Its own canvas, for group X's reason: configuring a canvas the demo or
@@ -5090,14 +5157,14 @@ try {
          started: startReconfigureProbe({ exports, canvasId: RECONFIG_CANVAS_ID }),
        };
      })()`
-  );
-  // Poll across frames exactly as the present gate does: the demo's rAF loop
-  // replays the poll and delivers its reply between these evaluations.
-  const reconfig = reconfigStart?.started
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(async () => {
+    );
+    // Poll across frames exactly as the present gate does: the demo's rAF loop
+    // replays the poll and delivers its reply between these evaluations.
+    const reconfig = reconfigStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(async () => {
              const { readReconfigureProbe, pollReconfigureProbe, RECONFIG } =
                await import('/engine/gpu-probe.js');
              const { exports, gpu } = globalThis.crcbl;
@@ -5134,32 +5201,33 @@ try {
                error: gpu.replayer.takeError(),
              };
            })()`
+          )
         )
-      )
-    : null;
-  check(
-    'Y',
-    'wasm encoded the reconfigure setup frame — surface, swapchain, reconfigure, acquire, clear, copy, present, request',
-    reconfigStart?.started === true,
-    reconfigStart?.started
-      ? 'the reconfigure-and-read frame is on the stream'
-      : 'wasm would not encode it — no device has opened, or another channel is installed'
-  );
-  check(
-    'Y',
-    'the reconfigured canvas frame came back in the new format, every pixel',
-    reconfig?.done === true &&
-      reconfig.allMatch === true &&
-      reconfig.len === PROBE_RECONFIG_PIXELS * 4,
-    reconfig?.done !== true
-      ? `no reconfigure readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
-      : reconfig.allMatch
-        ? `${reconfig.len} bytes, every texel [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}] (bgra red) from the reconfigured canvas frame`
-        : `state ${reconfig.state}, ${reconfig.len ?? 0} bytes, ` +
-          `first wrong at byte ${reconfig.firstWrong} (sample ${JSON.stringify(reconfig.sample)} ` +
-          `against [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}])` +
-          `${reconfig.error ? ` — ${reconfig.error}` : ''}`
-  );
+      : null;
+    check(
+      'Y',
+      'wasm encoded the reconfigure setup frame — surface, swapchain, reconfigure, acquire, clear, copy, present, request',
+      reconfigStart?.started === true,
+      reconfigStart?.started
+        ? 'the reconfigure-and-read frame is on the stream'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'Y',
+      'the reconfigured canvas frame came back in the new format, every pixel',
+      reconfig?.done === true &&
+        reconfig.allMatch === true &&
+        reconfig.len === PROBE_RECONFIG_PIXELS * 4,
+      reconfig?.done !== true
+        ? `no reconfigure readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : reconfig.allMatch
+          ? `${reconfig.len} bytes, every texel [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}] (bgra red) from the reconfigured canvas frame`
+          : `state ${reconfig.state}, ${reconfig.len ?? 0} bytes, ` +
+            `first wrong at byte ${reconfig.firstWrong} (sample ${JSON.stringify(reconfig.sample)} ` +
+            `against [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}])` +
+            `${reconfig.error ? ` — ${reconfig.error}` : ''}`
+    );
+  } // end of the crcbl-webgpu probe groups, skipped in webgpu mode
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a

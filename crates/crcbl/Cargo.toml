@@ -147,3 +147,14 @@ render-e2e = []
 # `apps/lumen` is the one that does; every other sample leaves it off and links
 # no glTF parser, which `cargo tree -p <sample> -e normal` is what says.
 scene = ["dep:crcbl-scene"]
+
+# Flips the browser's auto-selected backend from `crcbl-wgpu` to `crcbl-webgpu`.
+# **Off by default**, so a plain build is byte-for-byte what it was: `wgpu` is
+# still the browser's automatic backend and `webgpu` still refuses by name on
+# every target. Turning it on makes `crcbl-webgpu` the `wasm32` auto-backend
+# and `wgpu` opt-in there — the permanent form of the temporary registry flip
+# the WebGPU render was proven through. It is a no-op on native: the flip is
+# `#[cfg(target_arch = "wasm32")]`-gated in `src/backend.rs`, so a native build
+# with `--all-features` sees `webgpu` refuse exactly as it does without it.
+# `web/build.sh` passes `--features crcbl/webgpu` when `CRCBL_WEB_BACKEND=webgpu`.
+webgpu = []

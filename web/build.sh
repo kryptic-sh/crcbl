@@ -95,12 +95,29 @@ done
 profile_flag=()
 [ "$PROFILE" = "release" ] && profile_flag=(--release)
 
+# Which browser GPU backend the wasm links. `wgpu` is the default and builds
+# exactly as before; `webgpu` turns on the umbrella's `webgpu` feature, which
+# flips the auto-selected backend from `crcbl-wgpu` to `crcbl-webgpu` (see
+# `crates/crcbl/src/backend.rs`). A `--features crcbl/webgpu` on a `-p breakout`
+# build is valid — it names the umbrella the sample already depends on.
+feature_flag=()
+BACKEND="${CRCBL_WEB_BACKEND:-wgpu}"
+case "$BACKEND" in
+  wgpu) ;;
+  webgpu) feature_flag=(--features crcbl/webgpu) ;;
+  *)
+    echo "web/build.sh: CRCBL_WEB_BACKEND='$BACKEND' is not one of wgpu, webgpu" >&2
+    exit 1
+    ;;
+esac
+echo "==> browser GPU backend: $BACKEND"
+
 for row in "${DEMOS[@]}"; do
   IFS=: read -r crate lib dest <<<"$row"
-  echo "==> cargo build --lib -p $crate --target $TARGET ($PROFILE)"
+  echo "==> cargo build --lib -p $crate --target $TARGET ($PROFILE, $BACKEND)"
   # `--lib`: the package also has a bin, and building both writes two files with
   # the same name. See `apps/breakout/Cargo.toml`.
-  (cd "$REPO" && cargo build --locked --lib -p "$crate" --target "$TARGET" "${profile_flag[@]}")
+  (cd "$REPO" && cargo build --locked --lib -p "$crate" --target "$TARGET" "${profile_flag[@]}" "${feature_flag[@]}")
 
   wasm="$REPO/target/$TARGET/$PROFILE/$lib.wasm"
   echo "==> wasm-bindgen $lib.wasm"

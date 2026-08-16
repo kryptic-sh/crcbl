@@ -2945,10 +2945,6 @@ export class Replayer {
    *
    *   * an `adapter` id no enumeration granted — the id is a position in the
    *     list this replayer answered with, and there is nothing to open;
-   *   * a `compatibleSurface` — the seam's surfaces are a table this replayer
-   *     does not have yet, so a request that names one cannot be honoured and
-   *     must not be honoured *silently*, which would open a headless device for
-   *     a caller that asked for a presentable one;
    *   * a required feature with no `GPUFeatureName` behind it. `requiredFeatures`
    *     can only carry names, so such a bit cannot be passed on, and dropping it
    *     would grant a device the caller declared it could not use.
@@ -2996,13 +2992,13 @@ export class Replayer {
             `no adapter ${command.adapter} has been enumerated`
           );
         }
-        if (command.compatibleSurface) {
-          throw new DeviceRequestError(
-            'ForeignSurface',
-            `compatible_surface names surface ${command.compatibleSurface.index}, ` +
-              'and this replayer has no surface table yet'
-          );
-        }
+        // A `compatibleSurface` is *dropped*, not refused. WebGPU has no
+        // surface-specific device — `requestDevice` takes no surface and every
+        // device a browser opens can present to any canvas — so the field is a
+        // carried-over Vulkan-ism with no WebGPU meaning. Refusing over it would
+        // fail device-open under the real engine, which passes the surface it
+        // just created; ignoring it opens the same device the caller would get
+        // by omitting it, which is the correct one.
         const required = webgpuFeaturesFor(command.requiredFeatures);
         if (required.unsatisfiable !== 0n) {
           throw new DeviceRequestError(

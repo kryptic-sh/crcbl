@@ -10,34 +10,35 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 `WebGpuDevice`, `WebGpuCommandEncoder`, opened through `WebGpuInstanceOpen`).
 What remains for the browser slices:
 
-- **Registry + JS shim wiring.** Nothing registers the backend or installs the
-  channel so the shim reaches it. `SharedChannel::install` is a real
-  `crate::web::install` on wasm and a no-op off it; the registry entry
-  (`backend.rs`'s `open: fn() -> InstanceFuture`) and the page that drives the
-  rAF poll loop are unbuilt. `SharedChannel` is a `Rc` on wasm (installable) and
-  an `Arc<Mutex>` off it (the `Send + Sync` the seam demands where the job
-  system runs) — the same split wgpu's web types make.
+- **Registry wiring shipped behind the `webgpu` feature.** `backend.rs`'s
+  registry entry now wires `open: fn() -> InstanceFuture` to
+  `crcbl_webgpu::WebGpuInstanceOpen` on wasm, and the umbrella's off-by-default
+  `webgpu` feature flips `wasm32` auto-selection from `wgpu` to `webgpu`. The
+  rAF poll loop that drives it already exists (the render below proves it). What
+  is still not wired is a _runtime_ choice — see the "browser default" part
+  below; the feature is a build-time flip, not a JS-settable one.
+  `SharedChannel` is a `Rc` on wasm (installable) and an `Arc<Mutex>` off it
+  (the `Send + Sync` the seam demands where the job system runs) — the same
+  split wgpu's web types make.
 - **`StreamChannel::commit_replies`** (added in `web.rs`) is the in-process
   reply path the native HAL tests use in place of the shim's pointer pair. It is
   also what a native replayer would call; it is not wasm-only.
-- **The backend renders — breakout was driven through it end to end.** With the
-  registry temporarily flipped to WebGpu (not committed), breakout boots to
-  `STATUS_RUNNING` and draws moving, correct frames through the stream. Getting
-  there wired the five commands the frame reached — `WriteBuffer`,
-  `SetViewport`, `SetScissor`, `BindIndexBuffer`, `DrawIndexed` (shipped, commit
-  `d2d32ef`). The integration that makes it the browser default and CI-gates it
-  is unbuilt, and has three parts a later slice must handle: **(a) browser
-  backend selection** — `request_open` reads `CRCBL_GPU` via `std::env::var`,
-  which is empty in a browser, so the page always takes the `auto` backend;
-  selecting WebGpu needs a JS-settable override the demo reads. **(b) the
-  probe/engine channel conflict** — the browser-gate probe groups and the
-  engine's `WebGpuDevice` each `StreamChannel::install`, and only one channel
-  can be installed, so a WebGpu gate mode must not run the probes while the
-  engine owns the channel. **(c) the swapchain format** — `surface_caps` lists
-  `Bgra8Unorm` first, so the engine configures the canvas with it; where the
-  browser prefers `rgba8unorm` (swiftshader does) this is a benign perf warning,
-  not an error, but the deferred fix is to prefer the browser's
-  `getPreferredCanvasFormat()`.
+- **The backend renders, and breakout is now CI-gated through it.** Breakout
+  boots to `STATUS_RUNNING` and draws moving, correct frames through the stream;
+  the five commands the frame reached shipped in commit `d2d32ef`. Building with
+  `CRCBL_WEB_BACKEND=webgpu` (which turns on the `webgpu` feature) and running
+  `web/run-browser-e2e.sh` in its webgpu mode is the permanent, gated form of
+  the once-temporary flip, and `pages.yml` runs it for breakout. Two of the
+  three integration parts this used to list are done: **the probe/engine channel
+  conflict** — the webgpu gate mode skips the probe groups so the engine owns
+  the one channel — and **the swapchain-format warning** (its own entry below
+  carries the proper fix; the gate filters it meanwhile). What remains: **(a)
+  making WebGpu the browser default.** The flip is a build-time feature,
+  deliberately not the default — `request_open` reads `CRCBL_GPU` via
+  `std::env::var`, empty in a browser, so a JS-settable override is still needed
+  before WebGpu can be selected at runtime without a rebuild. **(b) the other
+  samples** — only breakout renders through WebGpu today; flappy, asteroids,
+  horde, hud and lumen are later slices, so only breakout is gated.
 - **Loud-unsupported, needing a stream command (a later slice wires each).**
   `Device`: `update_bind_group`, `create_query_set`, `query_results` return
   `HalError::Unsupported`. `CommandEncoder` records the op and fails at
@@ -58,6 +59,28 @@ What remains for the browser slices:
   `(0, 0)` for a swapchain this device never configured. Fine while acquire has
   no reply, but revisit if a browser ever reports a pinned canvas size that
   differs from the requested extent.
+
+### WebGpu surface_caps should prefer the browser's canvas format
+
+`WebGpuInstance::surface_caps` (in `crcbl-webgpu`'s `hal/instance.rs`) returns a
+fixed `formats: [Bgra8Unorm, Rgba8Unorm]`, so the engine's `preferred_format`
+configures the canvas `Bgra8Unorm`. Under SwiftShader — every GPU-less CI runner
+— the browser prefers `rgba8unorm`, and Chrome emits a WebGPU **warning**
+("configured with a different format than is preferred by this device… requires
+an extra copy"). It is a performance warning, not an error: the frame renders
+and reads back correctly.
+
+The browser gate filters that one warning string (`BENIGN_FORMAT_WARNING` in
+`web/tools/browser-e2e.mjs`, dropped from group D's device-error check) so a
+clean render is not failed by it. That is a **stopgap**. The proper fix is for
+the backend to return the browser's own
+`navigator.gpu.getPreferredCanvasFormat()` first from `surface_caps`, so no
+mismatch and no warning is produced. The format is browser-global and could be
+prefetched during instance-open, alongside adapter enumeration — but that means
+a new reply/field on the command stream, and the stream has committed fixtures
+(`stream-decode.mjs`, `reply-encode.mjs`, `gpu-replay.mjs`) that a format
+prefetch has to be threaded through. It was too large for the CI-gating slice;
+when it lands, delete the filter and the stopgap comment with it.
 
 ### `dispatch_indirect` has no command or replay yet
 
@@ -279,21 +302,6 @@ and it has nothing to enforce them against: it sees the descriptor and not the
 seam's intent. What is needed is a decision about where each belongs — the
 descriptor's constructor, a debug assertion in the HAL, or explicitly the
 backend's — not more prose.
-
-### `#requestDevice`'s `ForeignSurface` refusal now gives a reason that is no longer true
-
-`web/engine/gpu-replay.js` refuses a `RequestDevice` whose `compatibleSurface`
-names a surface, and its message says "this replayer has no surface table yet".
-It has one now. The refusal itself may well still be right — WebGPU has no
-compatible-surface concept at `requestDevice` at all, since any device can
-present to any canvas and the pairing happens at `configure` — but the stated
-reason has become false, which is worse than a blunt refusal.
-
-The decision needed: whether a `compatibleSurface` naming a **live** surface
-should now be accepted and ignored, accepted and recorded, or still refused with
-a message about WebGPU rather than about this file. The same sentence appears in
-`web/tools/gpu-replay.mjs`'s header. Both were left alone rather than
-drive-by-edited on the way past.
 
 ### The sweep for test-restated isolation defaults is finished, and three candidates were declined
 
