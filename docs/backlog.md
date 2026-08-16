@@ -20,16 +20,34 @@ What remains for the browser slices:
 - **`StreamChannel::commit_replies`** (added in `web.rs`) is the in-process
   reply path the native HAL tests use in place of the shim's pointer pair. It is
   also what a native replayer would call; it is not wasm-only.
+- **The backend renders — breakout was driven through it end to end.** With the
+  registry temporarily flipped to WebGpu (not committed), breakout boots to
+  `STATUS_RUNNING` and draws moving, correct frames through the stream. Getting
+  there wired the five commands the frame reached — `WriteBuffer`,
+  `SetViewport`, `SetScissor`, `BindIndexBuffer`, `DrawIndexed` (shipped, commit
+  `d2d32ef`). The integration that makes it the browser default and CI-gates it
+  is unbuilt, and has three parts a later slice must handle: **(a) browser
+  backend selection** — `request_open` reads `CRCBL_GPU` via `std::env::var`,
+  which is empty in a browser, so the page always takes the `auto` backend;
+  selecting WebGpu needs a JS-settable override the demo reads. **(b) the
+  probe/engine channel conflict** — the browser-gate probe groups and the
+  engine's `WebGpuDevice` each `StreamChannel::install`, and only one channel
+  can be installed, so a WebGpu gate mode must not run the probes while the
+  engine owns the channel. **(c) the swapchain format** — `surface_caps` lists
+  `Bgra8Unorm` first, so the engine configures the canvas with it; where the
+  browser prefers `rgba8unorm` (swiftshader does) this is a benign perf warning,
+  not an error, but the deferred fix is to prefer the browser's
+  `getPreferredCanvasFormat()`.
 - **Loud-unsupported, needing a stream command (a later slice wires each).**
-  `Device`: `write_buffer`, `update_bind_group`, `create_query_set`,
-  `query_results` return `HalError::Unsupported`. `CommandEncoder` records the
-  op and fails at `finish`: `end_debug_label`, `insert_debug_marker`,
-  `set_viewport`, `set_scissor`, `set_stencil_reference`, `bind_index_buffer`,
-  `draw_indexed`, `draw_indirect`, `draw_indexed_indirect`,
-  `draw_indirect_count`, `draw_indexed_indirect_count`, `draw_mesh_tasks`,
-  `draw_mesh_tasks_indirect`, `dispatch_indirect`, `reset_query_set`,
-  `write_timestamp`, `resolve_query_set`. (`dispatch_indirect`'s deeper block is
-  its own entry below.)
+  `Device`: `update_bind_group`, `create_query_set`, `query_results` return
+  `HalError::Unsupported`. `CommandEncoder` records the op and fails at
+  `finish`: `end_debug_label`, `insert_debug_marker`, `set_stencil_reference`,
+  `draw_indirect`, `draw_indexed_indirect`, `draw_indirect_count`,
+  `draw_indexed_indirect_count`, `draw_mesh_tasks`, `draw_mesh_tasks_indirect`,
+  `dispatch_indirect`, `reset_query_set`, `write_timestamp`,
+  `resolve_query_set`. None is used by breakout; the 3D forward renderer and
+  profiling reach them. (`dispatch_indirect`'s deeper block is its own entry
+  below.)
 - **Legitimately refused, not a gap.** `create_mesh_pipeline` (WebGPU has no
   mesh stage); the semaphore calls are no-ops (WebGPU auto-synchronises).
 - **`Device::take_error` returns `None`** — live-device error reporting
