@@ -131,11 +131,13 @@ const COPY_BUFFER_TO_IMAGE_TAG = 0x7a;
 const COPY_IMAGE_TO_IMAGE_TAG = 0x7b;
 const FILL_BUFFER_TAG = 0x7c;
 // The presentation family: configuring a canvas swapchain, acquiring its frame,
-// presenting (a no-op the browser composites on rAF), and unconfiguring.
+// presenting (a no-op the browser composites on rAF), unconfiguring, and
+// reconfiguring an already-configured swapchain in place.
 const CREATE_SWAPCHAIN_TAG = 0x88;
 const ACQUIRE_NEXT_FRAME_TAG = 0x89;
 const PRESENT_TAG = 0x8a;
 const DESTROY_SWAPCHAIN_TAG = 0x8b;
+const RECONFIGURE_SWAPCHAIN_TAG = 0x8c;
 const ENUMERATE_ADAPTERS_TAG = 0x90;
 const REQUEST_DEVICE_TAG = 0x91;
 const SURFACE_CAPS_TAG = 0x92;
@@ -2179,6 +2181,38 @@ function decodeCommand(r) {
         name: 'DestroySwapchain',
         swapchain: r.readHandle('DestroySwapchain::swapchain'),
       };
+    case RECONFIGURE_SWAPCHAIN_TAG: {
+      // The same `SwapchainDesc` layout `CreateSwapchain` decodes, behind the
+      // handle of the swapchain to re-configure. Parallel to that arm rather than
+      // sharing a helper: the two produce different command names and the fixture
+      // round-trip is what proves they stay in step.
+      const swapchain = r.readHandle('ReconfigureSwapchain::swapchain');
+      const label = r.readOptString('SwapchainDesc::label');
+      const surface = r.readHandle('SwapchainDesc::surface');
+      const format = r.readEnum('SwapchainDesc::format', IMAGE_FORMAT);
+      const width = r.readU32();
+      const height = r.readU32();
+      const imageCount = r.readU32();
+      const presentMode = r.readEnum(
+        'SwapchainDesc::present_mode',
+        SWAPCHAIN_PRESENT_MODE
+      );
+      const compositeAlpha = r.readEnum(
+        'SwapchainDesc::composite_alpha',
+        SWAPCHAIN_COMPOSITE_ALPHA
+      );
+      return {
+        name: 'ReconfigureSwapchain',
+        swapchain,
+        label,
+        surface,
+        format,
+        extent: { width, height },
+        imageCount,
+        presentMode,
+        compositeAlpha,
+      };
+    }
     case PIPELINE_BARRIER_TAG: {
       // The `Barriers` batch: the counted buffer list, the counted image list,
       // then the `global` flag. Decoded whole for wire fidelity — the replayer

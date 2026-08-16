@@ -1210,6 +1210,32 @@ impl<'a> StreamReader<'a> {
             tag::DESTROY_SWAPCHAIN_TAG => Ok(Command::DestroySwapchain {
                 swapchain: r.read_handle("DestroySwapchain::swapchain")?,
             }),
+            tag::RECONFIGURE_SWAPCHAIN_TAG => {
+                // The same `SwapchainDesc` layout `CreateSwapchain` decodes, behind
+                // the handle of the swapchain to re-configure. Parallel to that arm
+                // rather than sharing a helper: the two build different variants and
+                // the round-trip corpus is what proves they stay in step — see
+                // `Command::ReconfigureSwapchain`.
+                let swapchain = r.read_handle("ReconfigureSwapchain::swapchain")?;
+                let label = r.read_opt_string("SwapchainDesc::label")?;
+                let surface = r.read_handle("SwapchainDesc::surface")?;
+                let format = r.read_format("SwapchainDesc::format")?;
+                let width = r.read_u32()?;
+                let height = r.read_u32()?;
+                let image_count = r.read_u32()?;
+                let present_mode = r.read_present_mode("SwapchainDesc::present_mode")?;
+                let composite_alpha = r.read_composite_alpha("SwapchainDesc::composite_alpha")?;
+                Ok(Command::ReconfigureSwapchain {
+                    swapchain,
+                    label,
+                    surface,
+                    format,
+                    extent: (width, height),
+                    image_count,
+                    present_mode,
+                    composite_alpha,
+                })
+            }
             tag::CREATE_COMMAND_ENCODER_TAG => {
                 // No handle: the encoder is the replayer's implicit-current one,
                 // as `crcbl-hal`'s recording methods assume no receiver. `queue`

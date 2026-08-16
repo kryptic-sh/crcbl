@@ -82,6 +82,11 @@
 //! | [`__crcbl_web_gpu_probe_present_state`](shim::__crcbl_web_gpu_probe_present_state) | `() -> i32` | Drain, and answer one of the `PRESENT_*` codes. |
 //! | [`__crcbl_web_gpu_probe_present_bytes_ptr`](shim::__crcbl_web_gpu_probe_present_bytes_ptr) | `() -> i32` | Where the presented bytes start, once [`__crcbl_web_gpu_probe_present_state`](shim::__crcbl_web_gpu_probe_present_state) answers [`PRESENT_READY`]. |
 //! | [`__crcbl_web_gpu_probe_present_bytes_len`](shim::__crcbl_web_gpu_probe_present_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the present probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_reconfigure`](shim::__crcbl_web_gpu_probe_reconfigure) | `(i32) -> i32` | Encode one frame — a surface on the canvas `canvas_id` names, a swapchain configured `Rgba8Unorm`, that swapchain reconfigured `Bgra8Unorm`, the acquired frame, a pass that clears it to [`PROBE_RECONFIG_COLOR`], the copy, submit, present, and a `request_readback` against [`PROBE_RECONFIG_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_reconfigure_poll`](shim::__crcbl_web_gpu_probe_reconfigure_poll) | `() -> i32` | Poll the reconfigure probe's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_reconfigure_state`](shim::__crcbl_web_gpu_probe_reconfigure_state) | `() -> i32` | Drain, and answer one of the `RECONFIG_*` codes. |
+//! | [`__crcbl_web_gpu_probe_reconfigure_bytes_ptr`](shim::__crcbl_web_gpu_probe_reconfigure_bytes_ptr) | `() -> i32` | Where the reconfigured bytes start, once [`__crcbl_web_gpu_probe_reconfigure_state`](shim::__crcbl_web_gpu_probe_reconfigure_state) answers [`RECONFIG_READY`]. |
+//! | [`__crcbl_web_gpu_probe_reconfigure_bytes_len`](shim::__crcbl_web_gpu_probe_reconfigure_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the reconfigure probe has not answered. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -525,6 +530,31 @@ pub const PRESENT_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`COMPUTE_UNDECODABLE`]'s twin.
 pub const PRESENT_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const RECONFIG_UNASKED: u32 = 0;
+/// The setup frame — a surface, a swapchain configured `Rgba8Unorm`, that same
+/// swapchain *reconfigured* `Bgra8Unorm`, the acquired frame, the host buffer,
+/// an encoder, a render pass that clears the acquired view to red, the copy, the
+/// submit, the present, and the request — is on the stream, and no poll has been
+/// issued.
+pub const RECONFIG_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const RECONFIG_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const RECONFIG_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_reconfigure_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_reconfigure_bytes_len`] carry them — 64×64
+/// `Bgra8Unorm` texels, every one [`PROBE_RECONFIG_COLOR_BYTES`] if the
+/// reconfigure re-ran `configure` with the new format. A stub that skipped it
+/// leaves the swapchain `Rgba8Unorm` and reads back `[255, 0, 0, 255]` instead.
+pub const RECONFIG_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`COMPUTE_UNDECODABLE`]'s twin.
+pub const RECONFIG_UNDECODABLE: u32 = 5;
 
 /// The side of the square texture the readback probe clears and reads back.
 ///
@@ -2527,6 +2557,142 @@ pub const fn probe_present_copy() -> BufferImageCopy {
     }
 }
 
+// The reconfigure probe (group Y): the present probe's frame with one command
+// more — the swapchain is created `Rgba8Unorm`, then RECONFIGURED `Bgra8Unorm`
+// before the acquire. The bytes read back prove the reconfigure re-ran
+// `configure`: a swapchain left `Rgba8Unorm` reads red back as `[255, 0, 0, 255]`,
+// while one actually reconfigured to `Bgra8Unorm` reads the same red back in BGRA
+// byte order, `[0, 0, 255, 255]`. Every handle it names is `6 << 32` — a
+// generation past the present probe's `5 << 32` — so the two never collide in the
+// shared page and can both run.
+
+/// The colour the reconfigure probe clears the acquired frame to — opaque red,
+/// the same [`PROBE_PRESENT_COLOR`] the present probe uses. The format the bytes
+/// come back in is what differs, not the colour.
+pub const PROBE_RECONFIG_COLOR: [f32; 4] = PROBE_PRESENT_COLOR;
+
+/// Red as the bytes a `Bgra8Unorm` texel holds — B, G, R, A, so `[0, 0, 255, 255]`
+/// for opaque red. THE OBSERVABLE: only a reconfigure that actually re-ran
+/// `configure` with `Bgra8Unorm` produces these; a stub that skipped it leaves the
+/// swapchain `Rgba8Unorm` and reads back [`PROBE_PRESENT_COLOR_BYTES`] instead.
+pub const PROBE_RECONFIG_COLOR_BYTES: [u8; 4] = [0, 0, 255, 255];
+
+/// The surface the reconfigure probe creates on the page's canvas. `6 << 32`.
+pub const PROBE_RECONFIG_SURFACE: SurfaceHandle = match SurfaceHandle::from_bits(6 << 32) {
+    Some(surface) => surface,
+    None => panic!("generation 6 is not zero"),
+};
+
+/// The swapchain the reconfigure probe configures, then reconfigures. `6 << 32`.
+pub const PROBE_RECONFIG_SWAPCHAIN: SwapchainHandle = match SwapchainHandle::from_bits(6 << 32) {
+    Some(swapchain) => swapchain,
+    None => panic!("generation 6 is not zero"),
+};
+
+/// The descriptor the reconfigure probe first *creates* its swapchain with — a
+/// 64×64 [`Format::Rgba8Unorm`] surface, `Fifo` and `Opaque`, on
+/// [`PROBE_RECONFIG_SURFACE`]. [`probe_reconfigure_swapchain_desc`] is what it is
+/// then reconfigured to.
+#[must_use]
+pub const fn probe_reconfigure_create_desc() -> SwapchainDesc<'static> {
+    SwapchainDesc {
+        label: Some("crcbl-webgpu reconfigure swapchain"),
+        surface: PROBE_RECONFIG_SURFACE,
+        format: Format::Rgba8Unorm,
+        extent: (PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    }
+}
+
+/// The descriptor the reconfigure probe *reconfigures* its swapchain to — the
+/// create descriptor with the format changed to [`Format::Bgra8Unorm`]. The
+/// format change is the whole point: the acquired frame comes back in BGRA byte
+/// order, which is what [`PROBE_RECONFIG_COLOR_BYTES`] checks.
+#[must_use]
+pub const fn probe_reconfigure_swapchain_desc() -> SwapchainDesc<'static> {
+    SwapchainDesc {
+        format: Format::Bgra8Unorm,
+        ..probe_reconfigure_create_desc()
+    }
+}
+
+/// The image handle the acquired frame is filed under. `6 << 32`.
+pub const PROBE_RECONFIG_IMAGE: ImageHandle = match ImageHandle::from_bits(6 << 32) {
+    Some(image) => image,
+    None => panic!("generation 6 is not zero"),
+};
+
+/// The image-view handle the acquired frame's view is filed under, and the pass
+/// clears. `6 << 32`.
+pub const PROBE_RECONFIG_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(6 << 32) {
+    Some(view) => view,
+    None => panic!("generation 6 is not zero"),
+};
+
+/// The buffer handle the presented pixels are copied into and read back from.
+/// `6 << 32`.
+pub const PROBE_RECONFIG_BUFFER: BufferHandle = match BufferHandle::from_bits(6 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 6 is not zero"),
+};
+
+/// The buffer the presented pixels are copied into and read back from — the
+/// readback buffer's shape (`64 * 64 * 4` bytes, [`MemoryLocation::HostReadback`],
+/// [`BufferUsage::TRANSFER_DST`]) under [`PROBE_RECONFIG_BUFFER`].
+#[must_use]
+pub const fn probe_reconfigure_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu reconfigure buffer"),
+        size: (PROBE_READBACK_SIZE as u64) * (PROBE_READBACK_SIZE as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The queue the reconfigure probe names in its command encoder. `6 << 32`.
+pub const PROBE_RECONFIG_QUEUE: QueueHandle = match QueueHandle::from_bits(6 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 6 is not zero"),
+};
+
+/// The command buffer the reconfigure probe finishes its encoder into. `6 << 32`.
+pub const PROBE_RECONFIG_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(6 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 6 is not zero"),
+    };
+
+/// The in-flight readback the reconfigure probe requests and polls. `6 << 32`.
+pub const PROBE_RECONFIG_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(6 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 6 is not zero"),
+};
+
+/// The image→buffer copy that moves the acquired-and-cleared pixels into the
+/// readback buffer — tightly packed (`64 × 4 = 256` bytes per row), the whole
+/// 64×64 mip-0 slice, under the reconfigure probe's own image and buffer handles.
+/// [`probe_present_copy`]'s twin on the reconfigure handles.
+#[must_use]
+pub const fn probe_reconfigure_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_RECONFIG_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_RECONFIG_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -3024,6 +3190,69 @@ impl PresentProbe {
     }
 }
 
+/// One reconfigure-and-read-back — [`PresentProbe`]'s state machine again, on the
+/// reconfigure path.
+///
+/// The frame it encodes is the present frame with one command more: the swapchain
+/// is created `Rgba8Unorm` and then RECONFIGURED `Bgra8Unorm` before the acquire.
+/// It ends in the same `request_readback` and is answered by the same replies, so
+/// the transitions mirror [`PresentProbe`]'s exactly — only the bytes it expects
+/// differ, being BGRA rather than RGBA red.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum ReconfigProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — 64×64 `Bgra8Unorm` texels, every one
+        /// [`PROBE_RECONFIG_COLOR_BYTES`] if the reconfigure re-ran `configure`.
+        bytes: Vec<u8>,
+    },
+}
+
+impl ReconfigProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`PresentProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -3077,6 +3306,10 @@ struct Probe {
     /// A decode error the present drain hit, for [`PRESENT_UNDECODABLE`]. Its own
     /// string for [`reason`](Self::reason)'s reason.
     present_reason: String,
+    reconfig: ReconfigProbe,
+    /// A decode error the reconfigure drain hit, for [`RECONFIG_UNDECODABLE`]. Its
+    /// own string for [`reason`](Self::reason)'s reason.
+    reconfig_reason: String,
 }
 
 impl Probe {
@@ -3101,6 +3334,8 @@ impl Probe {
             fill_reason: String::new(),
             present: PresentProbe::Unasked,
             present_reason: String::new(),
+            reconfig: ReconfigProbe::Unasked,
+            reconfig_reason: String::new(),
         }
     }
 
@@ -3520,6 +3755,7 @@ impl Probe {
                 self.copychain.absorb(&replies);
                 self.fill.absorb(&replies);
                 self.present.absorb(&replies);
+                self.reconfig.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -3999,6 +4235,142 @@ impl Probe {
     fn present_bytes(&self) -> &[u8] {
         match &self.present {
             PresentProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the reconfigure setup frame: [`request_present`](Self::request_present)'s
+    /// frame with one command more — the swapchain is created `Rgba8Unorm`, then
+    /// *reconfigured* `Bgra8Unorm` before the acquire, so the acquired frame comes
+    /// back in BGRA byte order.
+    ///
+    /// **One frame, many commands, no reply.** It records the surface (naming the
+    /// canvas `canvas_id` is the page's key for), the swapchain created
+    /// [`Format::Rgba8Unorm`] ([`probe_reconfigure_create_desc`]), the *reconfigure*
+    /// of that same swapchain to [`Format::Bgra8Unorm`]
+    /// ([`probe_reconfigure_swapchain_desc`]), the acquire (a `getCurrentTexture`
+    /// that now hands back a `Bgra8Unorm` texture under [`PROBE_RECONFIG_IMAGE`]),
+    /// the host buffer, an encoder, a render pass that clears
+    /// [`PROBE_RECONFIG_VIEW`] to red, the copy out, the finish, the submit, the
+    /// present (a no-op) and the `request_readback` under [`PROBE_RECONFIG_READBACK`].
+    ///
+    /// **The reconfigure is the load-bearing command**: without it the acquired
+    /// frame is `Rgba8Unorm` and reads red back as [`PROBE_PRESENT_COLOR_BYTES`];
+    /// with it the frame is `Bgra8Unorm` and the same red reads back as
+    /// [`PROBE_RECONFIG_COLOR_BYTES`]. That byte-order difference is the whole
+    /// observable — see [`shim::__crcbl_web_gpu_probe_reconfigure`].
+    ///
+    /// `false` until a device has opened, [`request_present`](Self::request_present)'s
+    /// ordering rule.
+    fn request_reconfigure(&mut self, canvas_id: u32) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_surface(PROBE_RECONFIG_SURFACE, canvas_id);
+                stream.create_swapchain(PROBE_RECONFIG_SWAPCHAIN, &probe_reconfigure_create_desc());
+                stream.reconfigure_swapchain(
+                    PROBE_RECONFIG_SWAPCHAIN,
+                    &probe_reconfigure_swapchain_desc(),
+                );
+                stream.acquire_next_frame(
+                    PROBE_RECONFIG_SWAPCHAIN,
+                    PROBE_RECONFIG_IMAGE,
+                    PROBE_RECONFIG_VIEW,
+                );
+                stream.create_buffer(PROBE_RECONFIG_BUFFER, &probe_reconfigure_buffer_desc());
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu reconfigure encoder"),
+                    queue: PROBE_RECONFIG_QUEUE,
+                });
+                let attachments = [ColorAttachment {
+                    view: PROBE_RECONFIG_VIEW,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(PROBE_RECONFIG_COLOR),
+                }];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu reconfigure clear"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                });
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_reconfigure_copy());
+                stream.finish(PROBE_RECONFIG_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_RECONFIG_COMMAND_BUFFER]));
+                stream.present(&PresentInfo {
+                    swapchain: PROBE_RECONFIG_SWAPCHAIN,
+                    waits: &[],
+                    present_id: None,
+                });
+                stream.request_readback(
+                    PROBE_RECONFIG_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu reconfigure readback"),
+                        buffer: PROBE_RECONFIG_BUFFER,
+                        offset: 0,
+                        size: probe_reconfigure_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.reconfig = ReconfigProbe::Requested;
+            self.reconfig_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// reconfigure's readback and register its wait, unless it is already waiting
+    /// or ready — [`poll_present`](Self::poll_present)'s protocol on the
+    /// reconfigure's handle.
+    fn poll_reconfigure(&mut self) -> bool {
+        if !matches!(
+            self.reconfig,
+            ReconfigProbe::Requested | ReconfigProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_RECONFIG_READBACK))
+        else {
+            return false;
+        };
+        self.reconfig = ReconfigProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the reconfigure readback has got to.
+    fn reconfigure_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.reconfig_reason = error.to_string();
+            return RECONFIG_UNDECODABLE;
+        }
+        match &self.reconfig {
+            ReconfigProbe::Unasked => RECONFIG_UNASKED,
+            ReconfigProbe::Requested => RECONFIG_REQUESTED,
+            ReconfigProbe::Waiting { .. } => RECONFIG_WAITING,
+            ReconfigProbe::Pending => RECONFIG_PENDING,
+            ReconfigProbe::Ready { .. } => RECONFIG_READY,
+        }
+    }
+
+    /// The bytes the reconfigure readback came back with, or an empty slice if it
+    /// has not.
+    fn reconfigure_bytes(&self) -> &[u8] {
+        match &self.reconfig {
+            ReconfigProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -5449,6 +5821,78 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Ask the page to reconfigure a swapchain and present a frame in the new
+    /// format, and start reading it back on the device it opened.
+    ///
+    /// `1` when the setup frame — the surface, a swapchain configured `Rgba8Unorm`,
+    /// that swapchain *reconfigured* `Bgra8Unorm`, the acquired frame, the host
+    /// buffer, an encoder, a pass that clears the acquired view red, the copy,
+    /// finish, submit, present and `request_readback` — is on the stream; `0` when
+    /// no device has opened yet, the probe is re-entered, or another channel is
+    /// installed.
+    ///
+    /// **This is the decisive observation point of the reconfigure arm.** A stub
+    /// that skipped the reconfigure leaves the swapchain `Rgba8Unorm`, and reading
+    /// back [`PROBE_PRESENT_COLOR_BYTES`](super::PROBE_PRESENT_COLOR_BYTES) rather
+    /// than [`PROBE_RECONFIG_COLOR_BYTES`](super::PROBE_RECONFIG_COLOR_BYTES) is how
+    /// that shows: only a `configure` re-run with `Bgra8Unorm` hands back a frame
+    /// whose red is the BGRA `[0, 0, 255, 255]`.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_reconfigure(canvas_id: u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_reconfigure(canvas_id)),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the reconfigure probe's in-flight readback, once, on the reply channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for. A
+    /// no-op until the previous poll is answered, so the gate can call it blindly.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_reconfigure_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_reconfigure()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the reconfigure probe's readback has got
+    /// to — one of the `RECONFIG_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_reconfigure_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.reconfigure_state(),
+            Err(_) => super::RECONFIG_UNASKED,
+        })
+    }
+
+    /// A pointer into wasm memory to the bytes the reconfigure probe's readback
+    /// came back with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_reconfigure_bytes_len`] bytes from here, and
+    /// only once [`__crcbl_web_gpu_probe_reconfigure_state`] has answered
+    /// [`RECONFIG_READY`](super::RECONFIG_READY). Nothing here grows wasm memory,
+    /// so the pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_reconfigure_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.reconfigure_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_reconfigure_bytes_ptr`] points at —
+    /// the reconfigure probe's readback length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_reconfigure_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.reconfigure_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -5480,11 +5924,13 @@ mod tests {
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
         __crcbl_web_gpu_probe_present, __crcbl_web_gpu_probe_present_bytes_len,
         __crcbl_web_gpu_probe_present_bytes_ptr, __crcbl_web_gpu_probe_present_poll,
-        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_sampler,
-        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_reconfigure,
+        __crcbl_web_gpu_probe_reconfigure_bytes_len, __crcbl_web_gpu_probe_reconfigure_bytes_ptr,
+        __crcbl_web_gpu_probe_reconfigure_poll, __crcbl_web_gpu_probe_reconfigure_state,
+        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -6906,6 +7352,210 @@ mod tests {
         )]);
         assert!(!advanced);
         assert_eq!(present, PresentProbe::Waiting { sequence: 7 });
+    }
+
+    /// The reconfigure probe's bytes, read the way JS reads them.
+    fn reconfigure_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_reconfigure_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_reconfigure_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the reconfigure answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::reconfig` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **Every reconfigure handle is a generation past the present probe's** — the
+    /// whole point of `6 << 32`: the two probes can both run in the shared page
+    /// without one's live resource landing in the other's slot.
+    #[test]
+    fn the_reconfigure_handles_are_a_generation_past_the_present_probe() {
+        for bits in [
+            PROBE_RECONFIG_SURFACE.to_bits(),
+            PROBE_RECONFIG_SWAPCHAIN.to_bits(),
+            PROBE_RECONFIG_IMAGE.to_bits(),
+            PROBE_RECONFIG_VIEW.to_bits(),
+            PROBE_RECONFIG_BUFFER.to_bits(),
+            PROBE_RECONFIG_COMMAND_BUFFER.to_bits(),
+            PROBE_RECONFIG_QUEUE.to_bits(),
+            PROBE_RECONFIG_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 6, "every reconfigure handle is generation six");
+        }
+        assert_ne!(
+            PROBE_RECONFIG_IMAGE.to_bits(),
+            PROBE_PRESENT_IMAGE.to_bits()
+        );
+        assert_ne!(
+            PROBE_RECONFIG_READBACK.to_bits(),
+            PROBE_PRESENT_READBACK.to_bits()
+        );
+    }
+
+    /// The reconfigure half: **one export, a whole frame** that creates a surface,
+    /// configures a swapchain `Rgba8Unorm`, RECONFIGURES it `Bgra8Unorm`, acquires
+    /// the frame, clears it, copies it out, submits, presents and reads back. The
+    /// reconfigure is the command the present frame does not have.
+    #[test]
+    fn the_reconfigure_export_encodes_the_create_reconfigure_acquire_and_present() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure(7), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateSurface",
+                "CreateSwapchain",
+                "ReconfigureSwapchain",
+                "AcquireNextFrame",
+                "CreateBuffer",
+                "CreateCommandEncoder",
+                "BeginRenderPass",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "Present",
+                "RequestReadback",
+            ],
+            "the frame creates, reconfigures, acquires, clears, copies, submits, presents and reads back"
+        );
+        // The swapchain is created `Rgba8Unorm` and then reconfigured `Bgra8Unorm`
+        // — the format change that is the whole observable — on the same handle.
+        assert!(commands.contains(&Command::CreateSwapchain {
+            swapchain: PROBE_RECONFIG_SWAPCHAIN,
+            label: Some("crcbl-webgpu reconfigure swapchain".into()),
+            surface: PROBE_RECONFIG_SURFACE,
+            format: Format::Rgba8Unorm,
+            extent: (PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        }));
+        assert!(commands.contains(&Command::ReconfigureSwapchain {
+            swapchain: PROBE_RECONFIG_SWAPCHAIN,
+            label: Some("crcbl-webgpu reconfigure swapchain".into()),
+            surface: PROBE_RECONFIG_SURFACE,
+            format: Format::Bgra8Unorm,
+            extent: (PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        }));
+    }
+
+    /// **A device has to have opened first**, the present probe's ordering rule:
+    /// every command after the surface is a device method.
+    #[test]
+    fn a_reconfigure_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure(7), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure_state(), RECONFIG_UNASKED);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure(7), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The whole reconfigure exchange through the exports alone: request, poll, and
+    /// a `ReadbackReady` carrying the reconfigured pixels — which reach the bytes
+    /// exports as the BGRA present colour, `[0, 0, 255, 255]`, not RGBA's
+    /// `[255, 0, 0, 255]`. That byte order is the proof the reconfigure ran.
+    #[test]
+    fn the_reconfigure_readback_reaches_the_bytes_exports_as_the_bgra_present_colour() {
+        // `open_device` spends sequences 0 and 1, so the setup frame starts at 2
+        // and its poll is the command after the frame's own — read the length off
+        // the frame rather than hard-wiring it.
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure(7), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(
+            __crcbl_web_gpu_probe_reconfigure_state(),
+            RECONFIG_REQUESTED
+        );
+
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure_state(), RECONFIG_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_RECONFIG_READBACK,
+            }]
+        );
+
+        let mut reconfigured = Vec::new();
+        for _ in 0..(PROBE_READBACK_SIZE * PROBE_READBACK_SIZE) {
+            reconfigured.extend_from_slice(&PROBE_RECONFIG_COLOR_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_RECONFIG_READBACK, &reconfigured);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure_state(), RECONFIG_READY);
+        assert_eq!(reconfigure_bytes(), reconfigured);
+        assert_eq!(&reconfigure_bytes()[..4], PROBE_RECONFIG_COLOR_BYTES);
+        // And it is the BGRA red, not RGBA's — a stub that skipped the reconfigure
+        // would have left the swapchain `Rgba8Unorm` and answered this instead.
+        assert_ne!(&reconfigure_bytes()[..4], PROBE_PRESENT_COLOR_BYTES);
+    }
+
+    /// A `ReadbackPending` for the poll's sequence drops the reconfigure back to
+    /// `Pending`, so the next frame polls again — [`ReconfigProbe::absorb`]'s
+    /// pending arm, tested at the enum because the sequence is known there.
+    #[test]
+    fn a_readback_pending_reply_drops_the_reconfigure_back_to_pending() {
+        let mut reconfig = ReconfigProbe::Waiting { sequence: 7 };
+        let advanced = reconfig.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_RECONFIG_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(reconfig, ReconfigProbe::Pending);
+    }
+
+    /// A `ReadbackReady` for the poll's sequence carries the bytes into `Ready`.
+    #[test]
+    fn a_readback_ready_reply_carries_the_reconfigure_bytes_into_ready() {
+        let mut reconfig = ReconfigProbe::Waiting { sequence: 7 };
+        let bytes = vec![0, 0, 255, 255];
+        let advanced = reconfig.absorb(&[(
+            7,
+            Reply::ReadbackReady {
+                readback: PROBE_RECONFIG_READBACK,
+                data: bytes.clone(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(reconfig, ReconfigProbe::Ready { bytes });
+    }
+
+    /// A reply for another sequence leaves the reconfigure waiting, exactly as it
+    /// leaves every other probe.
+    #[test]
+    fn a_reconfigure_probe_ignores_a_reply_for_another_sequence() {
+        let mut reconfig = ReconfigProbe::Waiting { sequence: 7 };
+        let advanced = reconfig.absorb(&[(
+            8,
+            Reply::ReadbackReady {
+                readback: PROBE_RECONFIG_READBACK,
+                data: vec![1, 2, 3, 4],
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(reconfig, ReconfigProbe::Waiting { sequence: 7 });
     }
 
     /// The dispatch probe's bytes, read the way JS reads them.

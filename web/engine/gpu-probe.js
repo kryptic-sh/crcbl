@@ -142,6 +142,25 @@ export const PRESENT = Object.freeze({
 });
 
 /**
+ * The `RECONFIG_*` codes `__crcbl_web_gpu_probe_reconfigure_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The reconfigure probe is the present probe with one command more, so it too is
+ * a readback at heart and its codes mirror {@link READBACK} exactly. `READY`
+ * carries the reconfigured pixels, which the gate checks are the BGRA present
+ * colour — the proof that the reconfigure re-ran `configure` with the new format
+ * rather than leaving the swapchain in its created one.
+ */
+export const RECONFIG = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
  * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1067,6 +1086,81 @@ export function readPresentProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: presentStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the reconfigure codes. Its own function
+ * for {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function reconfigureStateName(state) {
+  const found = Object.entries(RECONFIG).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to reconfigure a swapchain and present a frame in the new format, and
+ * start reading it back on the device it opened.
+ *
+ * {@link startPresentProbe}'s sibling with one command more: the swapchain is
+ * created `Rgba8Unorm` and then reconfigured `Bgra8Unorm` before the acquire, so
+ * the frame that comes back is in BGRA byte order. {@link pollReconfigureProbe}
+ * drives the poll and {@link readReconfigureProbe} reads the bytes when they land.
+ * Its answer is *data* and it needs a **device**, so `false` before one has opened
+ * is ordering rather than failure.
+ *
+ * `canvasId` must be a key the registry holds, exactly as
+ * {@link startPresentProbe}'s must.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {number} options.canvasId The registry key of the canvas to present to.
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startReconfigureProbe({ exports, canvasId }) {
+  return exports.__crcbl_web_gpu_probe_reconfigure(canvasId) === 1;
+}
+
+/**
+ * Poll the reconfigure's in-flight readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_reconfigure_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollReconfigureProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_reconfigure_poll() === 1;
+}
+
+/**
+ * Read where the reconfigure readback has got to, and its bytes once it is
+ * `READY`.
+ *
+ * {@link readPresentProbe}'s sibling, and `state` first for its reason — draining
+ * allocates and may detach a view built before it, so the `Uint8Array` is built
+ * after the state call and copied out with `slice`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readReconfigureProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_reconfigure_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_reconfigure_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_reconfigure_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: reconfigureStateName(state), bytes };
 }
 
 /**

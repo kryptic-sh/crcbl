@@ -2813,6 +2813,9 @@ export class Replayer {
         case 'DestroySwapchain':
           this.#destroySwapchain(command);
           break;
+        case 'ReconfigureSwapchain':
+          this.#reconfigureSwapchain(sequence, command);
+          break;
         case 'CreateCommandEncoder':
           this.#createCommandEncoder(sequence, command);
           break;
@@ -3137,22 +3140,15 @@ export class Replayer {
    * yet. Both exist now: the device is open and the descriptor carries the
    * format. Synchronous and with no reply, as the surface pair is.
    *
-   * THE `COPY_SRC` IN THE USAGE IS DELIBERATE AND LOAD-BEARING. `SwapchainDesc`
-   * carries no usage field, and a canvas context defaults to `RENDER_ATTACHMENT`
-   * only — which cannot be copied *from*. The WebGPU backend configures the canvas
-   * as a copy source as well, a benign superset of the render-target usage, so an
-   * acquired frame can be read back and used as a copy source. Without it the
-   * present probe's `copyTextureToBuffer` off the acquired texture would be a
-   * validation error, and the golden-image path could never read a presented
-   * frame.
-   *
    * `imageCount` AND `presentMode` ARE CARRIED AND DROPPED, the way a compute
    * pipeline's `workgroupSize` is: a browser only offers fifo and manages its own
    * buffering, so a canvas `configure` has no knob for either. `extent` is
    * informational too — the canvas owns its size — so it is read for nothing here.
    * Everything that can go wrong goes to {@link Replayer#takeError}: no device, a
    * surface that resolves to no context, a format or alpha mode a canvas cannot
-   * express, or a `configure` that throws.
+   * express, or a `configure` that throws — the last four in
+   * {@link Replayer#configureSwapchain}, which
+   * {@link Replayer#reconfigureSwapchain} shares.
    *
    * @param {bigint} sequence
    * @param {object} command
@@ -3171,6 +3167,69 @@ export class Replayer {
       );
       return;
     }
+    this.#configureSwapchain(named, command, context);
+  }
+
+  /**
+   * Re-configures an already-configured swapchain in place — the same descriptor
+   * {@link Replayer#createSwapchain} takes, on a swapchain this replayer already
+   * holds.
+   *
+   * WEBGPU HAS NO SEPARATE RECONFIGURE: it is `context.configure(...)` called a
+   * second time, so the format, usage and alpha mode change while the canvas keeps
+   * its size and the handle stays valid. This resolves the EXISTING swapchain
+   * entry rather than the surface — the context to reconfigure is the one already
+   * filed — and re-runs the same map-and-`configure` body
+   * {@link Replayer#configureSwapchain} holds, which OVERWRITES the stored
+   * `{ context, format }` so a later acquire or copy sees the new format.
+   *
+   * A RECONFIGURE NAMING NO CONFIGURED SWAPCHAIN GOES TO THE ERROR QUEUE, as a
+   * far-side ordering bug rather than a throw — the same treatment
+   * {@link Replayer#acquireNextFrame} gives an unresolved swapchain.
+   *
+   * @param {bigint} sequence
+   * @param {object} command
+   */
+  #reconfigureSwapchain(sequence, command) {
+    const named = `swapchain ${command.swapchain.index}.${command.swapchain.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was reconfigured before any device opened`);
+      return;
+    }
+    const entry = this.#swapchains.get(command.swapchain);
+    if (entry === undefined) {
+      this.#deviceError(
+        `${named} was reconfigured, and this replayer holds none configured under it`
+      );
+      return;
+    }
+    this.#configureSwapchain(named, command, entry.context);
+  }
+
+  /**
+   * Maps the descriptor's format and alpha, calls `configure` on `context`, and
+   * files `{ context, format }` under the command's swapchain handle — the body
+   * {@link Replayer#createSwapchain} and {@link Replayer#reconfigureSwapchain}
+   * share.
+   *
+   * THE `COPY_SRC` IN THE USAGE IS DELIBERATE AND LOAD-BEARING. `SwapchainDesc`
+   * carries no usage field, and a canvas context defaults to `RENDER_ATTACHMENT`
+   * only — which cannot be copied *from*. The WebGPU backend configures the canvas
+   * as a copy source as well, a benign superset of the render-target usage, so an
+   * acquired frame can be read back and used as a copy source. Without it the
+   * present probe's `copyTextureToBuffer` off the acquired texture would be a
+   * validation error, and the golden-image path could never read a presented
+   * frame.
+   *
+   * {@link HandleTable#insert} REPLACES whatever the index held, so a reconfigure
+   * updates the stored format in place — which is the point, since a later acquire
+   * or copy must see the format the reconfigure changed to.
+   *
+   * @param {string} named A phrase naming the swapchain and command, for errors.
+   * @param {object} command
+   * @param {GPUCanvasContext} context The context to configure.
+   */
+  #configureSwapchain(named, command, context) {
     const format = webgpuTextureFormatFor(
       command.format,
       this.#device.features

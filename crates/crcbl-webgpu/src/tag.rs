@@ -433,6 +433,10 @@ pub const PRESENT_TAG: u8 = 0x8A;
 /// [`Command::DestroySwapchain`](crate::Command::DestroySwapchain) — unconfigures
 /// the canvas context and releases the handle.
 pub const DESTROY_SWAPCHAIN_TAG: u8 = 0x8B;
+/// [`Command::ReconfigureSwapchain`](crate::Command::ReconfigureSwapchain) — the
+/// same descriptor [`CREATE_SWAPCHAIN_TAG`] carries, naming an already-configured
+/// swapchain to re-`configure` in place. The handle stays valid across it.
+pub const RECONFIGURE_SWAPCHAIN_TAG: u8 = 0x8C;
 /// [`Command::EnumerateAdapters`](crate::Command::EnumerateAdapters).
 pub const ENUMERATE_ADAPTERS_TAG: u8 = 0x90;
 /// [`Command::RequestDevice`](crate::Command::RequestDevice).
@@ -1771,7 +1775,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 53] = [
+    const TAGS: [(&str, u8, u8); 54] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1876,6 +1880,11 @@ mod tests {
         ("AcquireNextFrame", ACQUIRE_NEXT_FRAME_TAG, FAMILY_PRESENT),
         ("Present", PRESENT_TAG, FAMILY_PRESENT),
         ("DestroySwapchain", DESTROY_SWAPCHAIN_TAG, FAMILY_PRESENT),
+        (
+            "ReconfigureSwapchain",
+            RECONFIGURE_SWAPCHAIN_TAG,
+            FAMILY_PRESENT,
+        ),
         ("EnumerateAdapters", ENUMERATE_ADAPTERS_TAG, FAMILY_INSTANCE),
         ("RequestDevice", REQUEST_DEVICE_TAG, FAMILY_INSTANCE),
         ("SurfaceCaps", SURFACE_CAPS_TAG, FAMILY_INSTANCE),

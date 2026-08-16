@@ -1250,6 +1250,21 @@ pub fn every_command() -> Vec<Command> {
         Command::DestroySwapchain {
             swapchain: handle(190, 191),
         },
+        // Reconfigure in place — the same descriptor as `CreateSwapchain` above,
+        // with a DIFFERENT format (`Rgba8Unorm`, not the create's `Bgra8UnormSrgb`)
+        // and a different extent, present mode and composite alpha, so an arm that
+        // decoded a create's fields into a reconfigure — or dropped or swapped one
+        // — decodes to a different value rather than the same one.
+        Command::ReconfigureSwapchain {
+            swapchain: handle(192, 193),
+            label: Some("reconfigured swapchain".into()),
+            surface: handle(194, 195),
+            format: Format::Rgba8Unorm,
+            extent: (1024, 768),
+            image_count: 2,
+            present_mode: PresentMode::Immediate,
+            composite_alpha: CompositeAlpha::Opaque,
+        },
         // **Body-less, and deliberately not last.** Its whole encoding is one
         // byte, so a decoder that read a field that is no longer there would
         // consume the `EnumerateAdapters` below it and end the stream one
@@ -1573,6 +1588,27 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             present_id: *present_id,
         }),
         Command::DestroySwapchain { swapchain } => stream.destroy_swapchain(*swapchain),
+        Command::ReconfigureSwapchain {
+            swapchain,
+            label,
+            surface,
+            format,
+            extent,
+            image_count,
+            present_mode,
+            composite_alpha,
+        } => stream.reconfigure_swapchain(
+            *swapchain,
+            &SwapchainDesc {
+                label: label.as_deref(),
+                surface: *surface,
+                format: *format,
+                extent: *extent,
+                image_count: *image_count,
+                present_mode: *present_mode,
+                composite_alpha: *composite_alpha,
+            },
+        ),
         Command::CreateCommandEncoder { label, queue } => {
             stream.create_command_encoder(&CommandEncoderDesc {
                 label: label.as_deref(),

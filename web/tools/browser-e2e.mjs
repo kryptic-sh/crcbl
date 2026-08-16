@@ -5058,6 +5058,109 @@ try {
           `${present.error ? ` — ${present.error}` : ''}`
   );
 
+  // **THE RECONFIGURE GATE.** Group X proved a presented canvas frame reads back
+  // as the render colour; this one proves a swapchain reconfigured in place takes
+  // the NEW format. wasm creates the swapchain `Rgba8Unorm`, reconfigures it
+  // `Bgra8Unorm`, then acquires, clears red, copies out and reads back on its own
+  // dedicated OffscreenCanvas. Red in an `Rgba8Unorm` frame reads back as
+  // [255, 0, 0, 255]; red in a `Bgra8Unorm` frame reads back in BGRA byte order as
+  // [0, 0, 255, 255]. Asserting the latter is the proof the reconfigure actually
+  // re-ran `context.configure` with the new format — a stub that skipped it leaves
+  // the swapchain `Rgba8Unorm` and fails here. `gpu-replay.mjs` cannot reach this:
+  // only a real browser has a canvas context.
+  group('Y — a reconfigured swapchain presents in the new format');
+
+  const PROBE_RECONFIG_PIXELS = 64 * 64;
+  const PROBE_RECONFIG_COLOR_BYTES = [0, 0, 255, 255];
+
+  const reconfigStart = await evaluate(
+    page,
+    `(async () => {
+       const { startReconfigureProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       // Its own canvas, for group X's reason: configuring a canvas the demo or
+       // the present probe already drives collides over the one GPUCanvasContext.
+       // A fresh 64x64 OffscreenCanvas under a fresh id, distinct from the present
+       // probe's 0x50, so both gates can run in the one page.
+       const RECONFIG_CANVAS_ID = 0x51;
+       if (!gpu.canvases.has(RECONFIG_CANVAS_ID)) {
+         gpu.canvases.set(RECONFIG_CANVAS_ID, new OffscreenCanvas(64, 64));
+       }
+       return {
+         started: startReconfigureProbe({ exports, canvasId: RECONFIG_CANVAS_ID }),
+       };
+     })()`
+  );
+  // Poll across frames exactly as the present gate does: the demo's rAF loop
+  // replays the poll and delivers its reply between these evaluations.
+  const reconfig = reconfigStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+             const { readReconfigureProbe, pollReconfigureProbe, RECONFIG } =
+               await import('/engine/gpu-probe.js');
+             const { exports, gpu } = globalThis.crcbl;
+             const r = readReconfigureProbe({ exports, memory: exports.memory });
+             if (r.state === RECONFIG.UNDECODABLE) {
+               return { done: true, state: r.name, error: gpu.replayer.takeError() };
+             }
+             if (r.state !== RECONFIG.READY) {
+               // Not yet — queue another poll for the loop to replay, and wait.
+               pollReconfigureProbe({ exports });
+               return null;
+             }
+             // Ready: check every pixel here rather than shipping 16384 numbers
+             // out. \`want\` is the BGRA red the reconfigured (bgra8unorm) frame
+             // holds; an rgba8unorm frame that skipped the reconfigure reads back
+             // [255, 0, 0, 255] and fails.
+             const want = ${JSON.stringify(PROBE_RECONFIG_COLOR_BYTES)};
+             let allMatch = r.bytes.length === ${PROBE_RECONFIG_PIXELS} * 4;
+             let firstWrong = -1;
+             for (let i = 0; i < r.bytes.length && allMatch; i += 1) {
+               if (r.bytes[i] !== want[i % 4]) {
+                 allMatch = false;
+                 firstWrong = i;
+               }
+             }
+             return {
+               done: true,
+               state: r.name,
+               len: r.bytes.length,
+               allMatch,
+               firstWrong,
+               // The first two texels, for a failure message a human can read.
+               sample: [...r.bytes.slice(0, 8)],
+               error: gpu.replayer.takeError(),
+             };
+           })()`
+        )
+      )
+    : null;
+  check(
+    'Y',
+    'wasm encoded the reconfigure setup frame — surface, swapchain, reconfigure, acquire, clear, copy, present, request',
+    reconfigStart?.started === true,
+    reconfigStart?.started
+      ? 'the reconfigure-and-read frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'Y',
+    'the reconfigured canvas frame came back in the new format, every pixel',
+    reconfig?.done === true &&
+      reconfig.allMatch === true &&
+      reconfig.len === PROBE_RECONFIG_PIXELS * 4,
+    reconfig?.done !== true
+      ? `no reconfigure readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : reconfig.allMatch
+        ? `${reconfig.len} bytes, every texel [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}] (bgra red) from the reconfigured canvas frame`
+        : `state ${reconfig.state}, ${reconfig.len ?? 0} bytes, ` +
+          `first wrong at byte ${reconfig.firstWrong} (sample ${JSON.stringify(reconfig.sample)} ` +
+          `against [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}])` +
+          `${reconfig.error ? ` — ${reconfig.error}` : ''}`
+  );
+
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.

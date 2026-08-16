@@ -1447,11 +1447,15 @@ async function main() {
   const destroySwapchain = commands.find(
     (command) => command.name === 'DestroySwapchain'
   );
+  const reconfigureSwapchain = commands.find(
+    (command) => command.name === 'ReconfigureSwapchain'
+  );
   check(
     createSwapchain !== undefined &&
       acquireNextFrame !== undefined &&
       presents.length === 2 &&
-      destroySwapchain !== undefined,
+      destroySwapchain !== undefined &&
+      reconfigureSwapchain !== undefined,
     `the committed stream carries the presentation family (${presents.length} Presents)`
   );
   const [presentWithWaits, presentEmpty] = presents;
@@ -1856,13 +1860,15 @@ async function main() {
       'DestroyReadback',
       'DestroyCommandBuffer',
       // The presentation family. CreateSwapchain configures, AcquireNextFrame
-      // acquires, DestroySwapchain unconfigures; Present is the documented no-op
-      // that neither throws nor touches the encoder or device (its own gate below
-      // observes that), and a non-empty `waits` routes to the error queue.
+      // acquires, DestroySwapchain unconfigures, ReconfigureSwapchain re-configures
+      // in place; Present is the documented no-op that neither throws nor touches
+      // the encoder or device (its own gate below observes that), and a non-empty
+      // `waits` routes to the error queue.
       'CreateSwapchain',
       'AcquireNextFrame',
       'Present',
       'DestroySwapchain',
+      'ReconfigureSwapchain',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -2419,6 +2425,48 @@ async function main() {
     check(
       replayer.images.size === 0 && String(reason).includes('swapchain'),
       `AcquireNextFrame with no configured swapchain is refused and named (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **ReconfigureSwapchain re-configures in place.** The swapchain is created
+    // (configure #1, the fixture's `bgra8unorm-srgb`), then reconfigured on the
+    // SAME handle with the fixture reconfigure's DIFFERENT format (`rgba8unorm`):
+    // a second `configure`, still `RENDER_ATTACHMENT | COPY_SRC`, and the stored
+    // format updated so a later acquire or copy sees the new one. The reconfigure
+    // reaches the existing context, so its own surface field is irrelevant — what
+    // makes it load-bearing is that `configure` runs twice and the stored format
+    // changes.
+    const { replayer, canvas, device } = await readyWithSurface();
+    replayer.replay(frameOf(swapchainOnSurface, 3n));
+    replayer.replay(
+      frameOf(
+        { ...reconfigureSwapchain, swapchain: createSwapchain.swapchain },
+        4n
+      )
+    );
+    const configured = canvas.context.configured;
+    check(
+      canvas.context.configures === 2 &&
+        configured?.device === device &&
+        configured?.format === 'rgba8unorm' &&
+        configured?.usage === (0x10 | 0x01) &&
+        replayer.swapchains.get(createSwapchain.swapchain)?.format ===
+          'rgba8unorm' &&
+        replayer.takeError() === null,
+      `ReconfigureSwapchain configures a second time with the new format and RENDER_ATTACHMENT|COPY_SRC, updating the stored format (${JSON.stringify({ configures: canvas.context.configures, format: configured?.format, stored: replayer.swapchains.get(createSwapchain.swapchain)?.format })})`
+    );
+  }
+  {
+    // **ReconfigureSwapchain naming no configured swapchain goes to the error
+    // queue.** The fixture's own reconfigure names a swapchain this replayer never
+    // configured — an ordering bug on the far side, refused rather than thrown,
+    // exactly as the acquire above is.
+    const { replayer } = await readyWithSurface();
+    replayer.replay(frameOf(reconfigureSwapchain, 3n));
+    const reason = replayer.takeError();
+    check(
+      replayer.swapchains.size === 0 && String(reason).includes('swapchain'),
+      `ReconfigureSwapchain with no configured swapchain is refused and named (${JSON.stringify(reason)})`
     );
   }
 

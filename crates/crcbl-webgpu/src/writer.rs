@@ -1471,6 +1471,35 @@ impl StreamWriter {
         desc: &SwapchainDesc<'_>,
     ) -> u64 {
         let sequence = self.push_tag(tag::CREATE_SWAPCHAIN_TAG);
+        self.put_swapchain_desc(swapchain, desc);
+        sequence
+    }
+
+    /// [`Device::reconfigure_swapchain`](crcbl_hal::Device::reconfigure_swapchain)
+    /// — re-configures an already-configured swapchain in place.
+    ///
+    /// **The same wire as [`create_swapchain`](Self::create_swapchain)** — one
+    /// [`SwapchainDesc`] behind the handle — differing only in the tag and the
+    /// semantic: `swapchain` names an existing configured swapchain, which stays
+    /// valid across the reconfigure. See
+    /// [`Command::ReconfigureSwapchain`](crate::Command::ReconfigureSwapchain).
+    pub fn reconfigure_swapchain(
+        &mut self,
+        swapchain: SwapchainHandle,
+        desc: &SwapchainDesc<'_>,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::RECONFIGURE_SWAPCHAIN_TAG);
+        self.put_swapchain_desc(swapchain, desc);
+        sequence
+    }
+
+    /// The body [`create_swapchain`](Self::create_swapchain) and
+    /// [`reconfigure_swapchain`](Self::reconfigure_swapchain) share after their
+    /// tag: the handle, then [`SwapchainDesc`]'s fields in declaration order — the
+    /// label, the surface, the format, the extent's two components, the image
+    /// count, then the present-mode and composite-alpha enum codes. One place so
+    /// the two commands cannot drift on what a swapchain descriptor is.
+    fn put_swapchain_desc(&mut self, swapchain: SwapchainHandle, desc: &SwapchainDesc<'_>) {
         self.bytes.put_handle(swapchain);
         self.bytes.put_opt_str(desc.label);
         self.bytes.put_handle(desc.surface);
@@ -1481,7 +1510,6 @@ impl StreamWriter {
         self.bytes.put_u8(tag::present_mode_code(desc.present_mode));
         self.bytes
             .put_u8(tag::composite_alpha_code(desc.composite_alpha));
-        sequence
     }
 
     /// [`Device::acquire_next_frame`](crcbl_hal::Device::acquire_next_frame) — the

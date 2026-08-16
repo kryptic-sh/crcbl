@@ -1110,6 +1110,42 @@ pub enum Command {
         /// Id to release.
         swapchain: SwapchainHandle,
     },
+    /// [`Device::reconfigure_swapchain`](crcbl_hal::Device::reconfigure_swapchain)
+    /// — re-configures an already-configured swapchain in place.
+    ///
+    /// **The same descriptor as [`CreateSwapchain`](Self::CreateSwapchain)**,
+    /// flattened identically behind the swapchain handle; the only difference is
+    /// the semantic — [`swapchain`](Self::ReconfigureSwapchain::swapchain) names an
+    /// *existing* configured swapchain rather than an id to file a new one under.
+    /// The handle stays valid across the reconfigure, so callers above do not
+    /// re-fetch it across a resize storm.
+    ///
+    /// On WebGPU this is `context.configure(...)` called a second time. Like
+    /// `CreateSwapchain`, [`extent`](Self::ReconfigureSwapchain::extent) is
+    /// informational — the canvas owns its size — so a reconfigure changes the
+    /// format, usage and alpha mode, not the size; and
+    /// [`image_count`](Self::ReconfigureSwapchain::image_count) and
+    /// [`present_mode`](Self::ReconfigureSwapchain::present_mode) cross whole and
+    /// the replayer drops them. See `web/engine/gpu-replay.js`.
+    ReconfigureSwapchain {
+        /// The already-configured swapchain to re-configure.
+        swapchain: SwapchainHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Surface the swapchain presents to.
+        surface: SurfaceHandle,
+        /// Display format the canvas is re-configured with.
+        format: Format,
+        /// Requested size in pixels. Informational; the canvas owns its size.
+        extent: (u32, u32),
+        /// Requested image count. Carried and dropped — a browser manages its own
+        /// buffering.
+        image_count: u32,
+        /// Requested pacing. Carried and dropped — a browser only offers `fifo`.
+        present_mode: PresentMode,
+        /// Desktop compositing mode, mapped to the canvas `alphaMode`.
+        composite_alpha: CompositeAlpha,
+    },
 }
 
 impl Command {
@@ -1174,6 +1210,7 @@ impl Command {
             Self::AcquireNextFrame { .. } => "AcquireNextFrame",
             Self::Present { .. } => "Present",
             Self::DestroySwapchain { .. } => "DestroySwapchain",
+            Self::ReconfigureSwapchain { .. } => "ReconfigureSwapchain",
         }
     }
 }

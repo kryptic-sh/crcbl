@@ -1185,6 +1185,21 @@ const EXPECTED = [
     presentId: null,
   },
   { name: 'DestroySwapchain', swapchain: handle(190, 191) },
+  // Reconfigure in place — the same descriptor as `CreateSwapchain`, with a
+  // DIFFERENT format (`RGBA8_UNORM`, not the create's `BGRA8_UNORM_SRGB`) and a
+  // different extent, present mode and composite alpha, so an arm that decoded a
+  // create's fields — or dropped or swapped one — decodes to a different value.
+  {
+    name: 'ReconfigureSwapchain',
+    swapchain: handle(192, 193),
+    label: 'reconfigured swapchain',
+    surface: handle(194, 195),
+    format: 'RGBA8_UNORM',
+    extent: { width: 1024, height: 768 },
+    imageCount: 2,
+    presentMode: 'IMMEDIATE',
+    compositeAlpha: 'OPAQUE',
+  },
   // Body-less: the surface and the adapter the HAL call takes are validated
   // against an impl's own tables and never cross. A decoder that still read
   // them would consume the twelve bytes after this tag, which are the command
