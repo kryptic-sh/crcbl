@@ -491,11 +491,84 @@ works — but nothing a caller records can ever write to those pools.
   hang a caller can reach without doing anything unusual, and the seam method
   says nothing about it.
 
-Fixing the first two is a seam change — a begin/end pair, and a results API that
-knows a query's stride — and they are worth doing together, since a statistics
-pool nobody can write is not worth being able to read. Until then, treat
-`OcclusionQuery` and `PipelineStatisticsQuery` as declarations about set
-creation, which is what the suite now asserts and says.
+**The design is settled** (2026-08-18, read out of the resolved `ash`,
+`windows`, `objc2-metal` and `wgpu-core` sources rather than recalled). What it
+decided, and why each is not the obvious answer:
+
+- **`WAIT` is not the defect — `WAIT` over a range this command stream did not
+  write is.** Over a written range the wait is what makes results final and is
+  bounded by work already recorded. `wgpu-core` solves it by tracking written
+  slots per encoder and splitting a resolve into runs: written runs copy with
+  `WAIT`, unwritten runs get a **zero fill**, so an unwritten query resolves to
+  a defined value rather than stale bytes or a stall. D3D12 gets this free —
+  `ResolveQueryData` has no wait parameter at all.
+- **The stride comes off the set, not off a second declaration.** A new
+  `Device::query_set_layout` answers `values_per_query` for the set the device
+  actually built, and it is the only number the read and resolve paths may size
+  from. `crcbl-vk` cannot keep using ash's `get_query_pool_results` helper: it
+  derives `queryCount` from `data.len()` and the stride from `size_of::<T>()`,
+  which _is_ the defect. The `statistics` a layout reports may be a **superset**
+  of what was asked — D3D12's struct is a fixed 11 fields and Metal's a fixed 8,
+  neither selectable.
+- **`query_results` returns `Pending`/`Ready` and leaves `out` untouched**,
+  mirroring `ReadbackState`. It replaces a zero-fill-on-`NOT_READY` that made
+  "two zeros" mean both "unsupported" and "a wrong `Support::Yes`".
+- **The narrowest backend picks the shape.** WebGPU cannot name the set at the
+  begin call, so the set is named on `RenderPassDesc` — which is Metal's shape
+  too (`visibilityResultBuffer` on the pass descriptor). Vulkan and D3D12 serve
+  that trivially; the reverse is not true. Two verb pairs, not one generic
+  `begin_query`, because occlusion is render-pass-only with the set on the pass
+  and statistics is legal in either pass kind with the set at the call.
+- **Two new capabilities, both from real refusals:** `PreciseOcclusionCount`
+  (WebGPU's occlusion result is documented as 0/1, not a sample count) and
+  `PipelineStatisticsSelection` (D3D12 and Metal hand back fixed structs).
+  **Deliberately no capability for the wait** — a backend that reintroduces it
+  would answer `Yes` and then hang, so the refusal channel cannot express it.
+  That is what the test below is for.
+
+**How a hang is caught by a test rather than by a user**, which is the part
+worth reading twice: a hang does not fail, it never returns. The test converts
+it into a value by never using an unbounded wait — resolve an unwritten range,
+submit signalling a timeline semaphore, then `wait_semaphores` with a deadline,
+which the seam already promises answers `Ok(false)` on timeout rather than
+erroring. A wedged queue becomes `Ok(false)` in bounded time. **And the fixture
+must be `mem::forget`ed before the failing assertion**: `Headless::drop` calls
+`wait_idle` while panicking, which against a wedged queue hangs a second time
+and destroys the output the `Drop` exists to produce. Without that line the test
+detects the hang and then hangs. Backends with no timeline (dx12, WebGPU) get
+the weaker form — a watchdog thread that aborts the process with a named message
+— and they refuse query sets today anyway.
+
+**Slice order** (1 and 2 are independent of the capability and test agents; 5
+and 6 must sequence after them):
+
+1. The types — `PipelineStatistics`, `QuerySetLayout`, `QueryState`,
+   `query_set_layout`, `query_results` taking a `Range<u32>`. No behaviour
+   change; `crcbl-render`'s `timing.rs` follows the signature.
+2. **The hang fix** — written-slot tracking, run splitting, the correct stride
+   in both read paths. Its layer-1 test is a pure function
+   (`resolve_flags(Unwritten)` must not contain `WAIT`), which turns a
+   wall-clock event into a value comparison that runs with no driver.
+3. `RenderPassDesc::occlusion_queries` plus the occlusion verbs — mechanical
+   across the `RenderPassDesc` construction sites, and the compiler finds them.
+4. The statistics verbs.
+5. The two capabilities and their `DIVERGENCES` rows.
+6. The exercises and the hang test.
+
+**One exercise is honestly out of reach here:** a non-zero occlusion count needs
+a raster pipeline the seam suite does not have. What the suite _can_ prove is
+that the pool was written — a zero-sample query is still a written query, so
+zero-and-not-poison separates it from silently ignored — and the count assertion
+belongs in `render_e2e`, which has the fixture. Statistics, by contrast, is
+fully drivable there today: begin/end around the existing compute probe and
+assert the invocation count equals `workgroups * workgroup_size`. That is why
+the five-bit statistics set must include `COMPUTE_SHADER_INVOCATIONS`, which the
+current hard-coded three do not.
+
+**A separate defect found and not folded in:** `crcbl-vk` maps
+`Features::OCCLUSION_QUERY` to Vulkan's `occlusionQueryPrecise`. Occlusion
+queries are core in Vulkan and only the _precise count_ is optional, so a device
+without it is currently reported as having no occlusion queries at all.
 
 ### Metal and dx12 refuse with the wrong error variant
 
