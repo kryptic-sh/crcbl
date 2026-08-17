@@ -3,6 +3,44 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Run the WebGPU browser gates on Windows and macOS, not just Linux
+
+**Every WebGPU browser test in the repository runs in one job**, `pages/build`
+on `ubuntu-latest`: the five demo gates, the seam probe groups and the golden
+parity harness. The browser backend is now what the samples ship on, so its
+entire browser-side evidence comes from a single OS and a single Chromium build.
+Windows and macOS runners already exist in `ci.yml` (`win32-e2e`, `dx12-e2e`,
+`vk-e2e-windows` on `windows-latest`; `mtl-e2e` on `macos-latest`) and none of
+them runs any of this.
+
+That matters because the parts most likely to differ per platform are exactly
+the parts a browser owns: which adapter Dawn picks, what
+`getPreferredCanvasFormat()` returns, the limits an adapter advertises, and how
+the canvas is composited. A backend that passes on Linux/SwiftShader is not
+thereby proven on Windows/D3D12-backed Dawn or macOS/Metal-backed Dawn.
+
+**Feasibility, in the order worth attempting:**
+
+- **The golden parity harness (`web/run-render-harness-e2e.sh`) is the most
+  portable and the most valuable.** It is headless, needs no Xvfb — it reads
+  pixels out of wasm memory rather than snapshotting a canvas — and it is the
+  only gate that compares against references. Its driver finds a browser by name
+  and honours `CRCBL_CHROMIUM`, so a runner-specific path is the main work. Note
+  nine of eleven scenes need more storage buffers per stage than a software
+  adapter offers until the draw-args reduction lands, so on a GPU-less runner
+  expect the two 2D scenes until then.
+- **The demo gates (`web/run-browser-e2e.sh`) need a display on Linux via
+  Xvfb**; on Windows and macOS headless Chrome should not, but the script wires
+  Xvfb unconditionally for Linux and will need a per-OS branch. Both scripts are
+  bash; `ci.yml` already runs bash steps on `windows-latest` (`shell: bash`), so
+  that part is precedent rather than new ground.
+- **The seam probe groups** ride the same driver, so they follow whichever of
+  the above lands.
+
+If a platform turns out not to support it in CI, run it locally on that machine
+and say so plainly here rather than leaving the impression it is covered — a
+gate that exists on one OS is coverage for one OS.
+
 ### The office PC's `VK_ERROR_OUT_OF_DEVICE_MEMORY` — wgpu only, so not worth fixing
 
 On a dual-GPU laptop the web samples flood the console with
