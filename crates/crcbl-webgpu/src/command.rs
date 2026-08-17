@@ -724,6 +724,50 @@ pub enum Command {
         /// Instance range: `instanceCount` is its span, `firstInstance` its start.
         instances: Range<u32>,
     },
+    /// [`draw_indirect`](crcbl_hal::CommandEncoder::draw_indirect) — an indirect
+    /// non-indexed draw with a CPU-known count, on the open render pass.
+    ///
+    /// **Unrolled on replay.** WebGPU's `drawIndirect(indirectBuffer,
+    /// indirectOffset)` is a SINGLE draw — multi-draw-indirect is not core WebGPU
+    /// — so a HAL multi-draw becomes `draw_count` calls, the `i`th reading its
+    /// argument structure at `offset + i * stride`. `draw_count == 1` is the
+    /// common case and is one call; a `draw_count > 1` is that many WebGPU calls.
+    /// The argument structure WebGPU reads is `[vertexCount, instanceCount,
+    /// firstVertex, firstInstance]` (four `u32`), the standard indirect layout.
+    /// `buffer`, `offset`, `draw_count` and `stride` cross as distinct values so a
+    /// transposition among them is visible.
+    DrawIndirect {
+        /// Buffer holding the argument structures.
+        buffer: BufferHandle,
+        /// Byte offset of the first argument structure.
+        offset: u64,
+        /// Number of argument structures to read — the unroll count on replay.
+        draw_count: u32,
+        /// Bytes between consecutive argument structures.
+        stride: u32,
+    },
+    /// [`draw_indexed_indirect`](crcbl_hal::CommandEncoder::draw_indexed_indirect)
+    /// — an indirect indexed draw with a CPU-known count, on the open render pass;
+    /// [`GeometryPath::IndirectPerBatch`](crcbl_hal::GeometryPath::IndirectPerBatch)'s
+    /// draw path.
+    ///
+    /// **Unrolled on replay**, exactly as [`DrawIndirect`](Self::DrawIndirect) is:
+    /// WebGPU's `drawIndexedIndirect(indirectBuffer, indirectOffset)` is a single
+    /// draw, so `draw_count` calls are emitted, the `i`th reading `offset + i *
+    /// stride`. The argument structure WebGPU reads here is `[indexCount,
+    /// instanceCount, firstIndex, baseVertex, firstInstance]` (five `u32`), the
+    /// standard indexed-indirect layout. Fields cross distinct so a transposition
+    /// among them is visible.
+    DrawIndexedIndirect {
+        /// Buffer holding the argument structures.
+        buffer: BufferHandle,
+        /// Byte offset of the first argument structure.
+        offset: u64,
+        /// Number of argument structures to read — the unroll count on replay.
+        draw_count: u32,
+        /// Bytes between consecutive argument structures.
+        stride: u32,
+    },
     /// [`begin_compute_pass`](crcbl_hal::CommandEncoder::begin_compute_pass).
     ///
     /// The whole of [`ComputePassDesc`](crcbl_hal::ComputePassDesc), which is
@@ -1269,6 +1313,8 @@ impl Command {
             Self::BindIndexBuffer { .. } => "BindIndexBuffer",
             Self::Draw { .. } => "Draw",
             Self::DrawIndexed { .. } => "DrawIndexed",
+            Self::DrawIndirect { .. } => "DrawIndirect",
+            Self::DrawIndexedIndirect { .. } => "DrawIndexedIndirect",
             Self::BeginComputePass { .. } => "BeginComputePass",
             Self::BindComputePipeline { .. } => "BindComputePipeline",
             Self::Dispatch { .. } => "Dispatch",

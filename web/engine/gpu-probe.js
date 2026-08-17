@@ -161,6 +161,25 @@ export const RECONFIG = Object.freeze({
 });
 
 /**
+ * The `INDIRECT_*` codes `__crcbl_web_gpu_probe_indirect_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The indirect-draw probe is a readback at heart — its setup frame ends in the
+ * same `request_readback` — so its codes mirror {@link READBACK} exactly. `READY`
+ * carries the drawn pixels, which the gate checks are the draw colour and not the
+ * clear, proving an indirect `drawIndexedIndirect` put exactly what a direct draw
+ * would.
+ */
+export const INDIRECT = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
  * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1161,6 +1180,78 @@ export function readReconfigureProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: reconfigureStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the indirect codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function indirectStateName(state) {
+  const found = Object.entries(INDIRECT).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to render a frame with an INDIRECT draw and start reading it back on
+ * the device it opened.
+ *
+ * {@link startDrawProbe}'s indirect sibling: the same fullscreen-triangle
+ * pipeline, but the draw reads its counts from an args buffer
+ * (`drawIndexedIndirect`) that a `write_buffer` filled, over an index buffer a
+ * second `write_buffer` filled. {@link pollIndirectProbe} drives the poll and
+ * {@link readIndirectProbe} reads the bytes when they land. Its answer is *data*
+ * and it needs a **device**, so `false` before one has opened is ordering rather
+ * than failure — wait for {@link readDeviceProbe} to say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startIndirectProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_indirect() === 1;
+}
+
+/**
+ * Poll the indirect draw's in-flight readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_indirect_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollIndirectProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_indirect_poll() === 1;
+}
+
+/**
+ * Read where the indirect-draw readback has got to, and its bytes once it is
+ * `READY`.
+ *
+ * {@link readDrawProbe}'s indirect sibling, and `state` first for its reason —
+ * draining allocates and may detach a view built before it, so the `Uint8Array`
+ * is built after the state call and copied out with `slice`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readIndirectProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_indirect_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_indirect_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_indirect_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: indirectStateName(state), bytes };
 }
 
 /**

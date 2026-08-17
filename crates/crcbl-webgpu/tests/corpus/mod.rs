@@ -1005,6 +1005,23 @@ pub fn every_command() -> Vec<Command> {
             base_vertex: -7,
             instances: 2..6,
         },
+        // The indirect draws — a CPU-known count the replayer unrolls into that
+        // many single-draw WebGPU calls. `draw_count` is 2 (not the common 1) so
+        // the unroll is exercised, and `buffer`, `offset`, `draw_count` and
+        // `stride` are all distinct so a transposition among the four is visible.
+        // The two commands differ in every field so a fold between the tags shows.
+        Command::DrawIndirect {
+            buffer: handle(204, 205),
+            offset: 64,
+            draw_count: 2,
+            stride: 16,
+        },
+        Command::DrawIndexedIndirect {
+            buffer: handle(206, 207),
+            offset: 80,
+            draw_count: 3,
+            stride: 20,
+        },
         // The compute-pass commands. `BeginComputePass` carries only a label —
         // compute has no attachments — and its labelled form is paired with the
         // `None` twin below. The dispatch's three counts are all distinct so a
@@ -1587,6 +1604,18 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             base_vertex,
             instances,
         } => stream.draw_indexed(indices.clone(), *base_vertex, instances.clone()),
+        Command::DrawIndirect {
+            buffer,
+            offset,
+            draw_count,
+            stride,
+        } => stream.draw_indirect(*buffer, *offset, *draw_count, *stride),
+        Command::DrawIndexedIndirect {
+            buffer,
+            offset,
+            draw_count,
+            stride,
+        } => stream.draw_indexed_indirect(*buffer, *offset, *draw_count, *stride),
         Command::BeginComputePass { label } => stream.begin_compute_pass(&ComputePassDesc {
             label: label.as_deref(),
         }),

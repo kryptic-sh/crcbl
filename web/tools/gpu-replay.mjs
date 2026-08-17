@@ -770,6 +770,16 @@ function stubRenderPass() {
      *   `drawIndexed`, in order.
      */
     indexedDraws: [],
+    /**
+     * @type {Array<{ buffer: object, offset: number }>} Every `drawIndirect`, in
+     *   order — one entry per unrolled single-draw call.
+     */
+    indirectDraws: [],
+    /**
+     * @type {Array<{ buffer: object, offset: number }>} Every
+     *   `drawIndexedIndirect`, in order — one entry per unrolled single-draw call.
+     */
+    indexedIndirectDraws: [],
     ended: 0,
     /** @param {object} pipeline */
     setPipeline(pipeline) {
@@ -846,6 +856,20 @@ function stubRenderPass() {
         baseVertex,
         firstInstance,
       });
+    },
+    /**
+     * @param {object} buffer
+     * @param {number} offset
+     */
+    drawIndirect(buffer, offset) {
+      pass.indirectDraws.push({ buffer, offset });
+    },
+    /**
+     * @param {object} buffer
+     * @param {number} offset
+     */
+    drawIndexedIndirect(buffer, offset) {
+      pass.indexedIndirectDraws.push({ buffer, offset });
     },
     end() {
       pass.ended += 1;
@@ -1940,6 +1964,8 @@ async function main() {
       'BindIndexBuffer',
       'Draw',
       'DrawIndexed',
+      'DrawIndirect',
+      'DrawIndexedIndirect',
       'BeginComputePass',
       'EndComputePass',
       'BindComputePipeline',
@@ -5909,6 +5935,125 @@ async function main() {
     check(
       error !== null && error.includes('no render pass open'),
       `a DrawIndexed with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A DrawIndirect with drawCount 2 UNROLLS into two drawIndirect calls**, at
+    // `offset` and `offset + stride`. WebGPU's `drawIndirect` is single-draw, so a
+    // HAL multi-draw becomes one call per argument structure the stride steps
+    // over — the case that fails if the arm emitted one call or forgot the stride.
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(90, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    const buffer = replayer.buffers.get(bufH);
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'DrawIndirect',
+          buffer: bufH,
+          offset: 64n,
+          drawCount: 2,
+          stride: 16,
+        },
+        602n
+      )
+    );
+    checkEqual(
+      pass.indirectDraws,
+      [
+        { buffer, offset: 64 },
+        { buffer, offset: 80 },
+      ],
+      'a DrawIndirect of drawCount 2 unrolls into drawIndirect(buffer, 64) and drawIndirect(buffer, 80)'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid DrawIndirect leaves the error queue empty'
+    );
+  }
+  {
+    // **A DrawIndirect of an unresolvable buffer is named on the error queue** and
+    // draws nothing — {@link bindIndexBuffer}'s judgement.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'DrawIndirect',
+          buffer: handle(90, 1),
+          offset: 0n,
+          drawCount: 1,
+          stride: 16,
+        },
+        602n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('90.1') &&
+        pass.indirectDraws.length === 0,
+      `a DrawIndirect of an unresolvable buffer names it and draws nothing (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A DrawIndexedIndirect with drawCount 2 UNROLLS into two
+    // drawIndexedIndirect calls**, at `offset` and `offset + stride` — the indexed
+    // twin of the DrawIndirect unroll above.
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(91, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    const buffer = replayer.buffers.get(bufH);
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'DrawIndexedIndirect',
+          buffer: bufH,
+          offset: 80n,
+          drawCount: 2,
+          stride: 20,
+        },
+        602n
+      )
+    );
+    checkEqual(
+      pass.indexedIndirectDraws,
+      [
+        { buffer, offset: 80 },
+        { buffer, offset: 100 },
+      ],
+      'a DrawIndexedIndirect of drawCount 2 unrolls into drawIndexedIndirect(buffer, 80) and drawIndexedIndirect(buffer, 100)'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid DrawIndexedIndirect leaves the error queue empty'
+    );
+  }
+  {
+    // **A DrawIndexedIndirect of an unresolvable buffer is named on the error
+    // queue** and draws nothing.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'DrawIndexedIndirect',
+          buffer: handle(91, 1),
+          offset: 0n,
+          drawCount: 1,
+          stride: 20,
+        },
+        602n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('91.1') &&
+        pass.indexedIndirectDraws.length === 0,
+      `a DrawIndexedIndirect of an unresolvable buffer names it and draws nothing (${JSON.stringify(error)})`
     );
   }
   {

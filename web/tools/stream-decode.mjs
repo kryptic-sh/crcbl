@@ -982,6 +982,23 @@ const EXPECTED = [
     baseVertex: -7,
     instances: { start: 2, end: 6 },
   },
+  // The indirect draws the geometry path unrolls. `drawCount` is 2/3 (not the
+  // common 1) so the unroll is exercised; buffer, offset, drawCount and stride
+  // are all distinct so a transposition shows, and `offset` is a `BigInt`.
+  {
+    name: 'DrawIndirect',
+    buffer: handle(204, 205),
+    offset: 64n,
+    drawCount: 2,
+    stride: 16,
+  },
+  {
+    name: 'DrawIndexedIndirect',
+    buffer: handle(206, 207),
+    offset: 80n,
+    drawCount: 3,
+    stride: 20,
+  },
   // The compute-pass commands. `BeginComputePass` is a label only — compute has
   // no attachments — with its `None` twin below; the dispatch's three counts are
   // distinct so a transposition among x/y/z is visible.

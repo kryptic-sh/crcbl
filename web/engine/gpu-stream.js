@@ -128,6 +128,11 @@ const BIND_INDEX_BUFFER_TAG = 0x4e;
 const DRAW_TAG = 0x60;
 // The indexed draw the UI pass records, on the open render pass as `drawIndexed`.
 const DRAW_INDEXED_TAG = 0x61;
+// The indirect draws the geometry path records, on the open render pass. WebGPU's
+// `drawIndirect`/`drawIndexedIndirect` are single-draw, so the replayer unrolls
+// `draw_count` into that many calls at `offset + i * stride`.
+const DRAW_INDIRECT_TAG = 0x62;
+const DRAW_INDEXED_INDIRECT_TAG = 0x63;
 // The dispatch family: the workgroup counts for a compute dispatch.
 const DISPATCH_TAG = 0x70;
 const COPY_IMAGE_TO_BUFFER_TAG = 0x78;
@@ -2317,6 +2322,26 @@ function decodeCommand(r) {
         baseVertex,
         instances: { start: firstInstance, end: lastInstance },
       };
+    }
+    case DRAW_INDIRECT_TAG: {
+      // The argument buffer, its byte offset (`u64`, `BigInt`), the CPU-known
+      // draw count, then the stride. The replayer unrolls the count into that
+      // many single-draw calls. See `gpu-replay.js`.
+      const buffer = r.readHandle('DrawIndirect::buffer');
+      const offset = r.readU64();
+      const drawCount = r.readU32();
+      const stride = r.readU32();
+      return { name: 'DrawIndirect', buffer, offset, drawCount, stride };
+    }
+    case DRAW_INDEXED_INDIRECT_TAG: {
+      // The same four fields `DRAW_INDIRECT_TAG` carries, in the same order —
+      // only the argument layout the replayer's call reads differs. See
+      // `gpu-replay.js`.
+      const buffer = r.readHandle('DrawIndexedIndirect::buffer');
+      const offset = r.readU64();
+      const drawCount = r.readU32();
+      const stride = r.readU32();
+      return { name: 'DrawIndexedIndirect', buffer, offset, drawCount, stride };
     }
     case SUBMIT_TAG: {
       // The command buffers, then the counted waits and signals. The two

@@ -190,12 +190,20 @@ impl CommandEncoder for WebGpuCommandEncoder {
             .with(|c| c.encode(|stream| stream.draw_indexed(indices, base_vertex, instances)));
     }
 
-    fn draw_indirect(&mut self, _draw: &DrawIndirect) {
-        self.record_unsupported("draw_indirect is not yet wired into the WebGPU stream");
+    fn draw_indirect(&mut self, draw: &DrawIndirect) {
+        self.channel.with(|c| {
+            c.encode(|stream| {
+                stream.draw_indirect(draw.args, draw.offset, draw.draw_count, draw.stride)
+            })
+        });
     }
 
-    fn draw_indexed_indirect(&mut self, _draw: &DrawIndirect) {
-        self.record_unsupported("draw_indexed_indirect is not yet wired into the WebGPU stream");
+    fn draw_indexed_indirect(&mut self, draw: &DrawIndirect) {
+        self.channel.with(|c| {
+            c.encode(|stream| {
+                stream.draw_indexed_indirect(draw.args, draw.offset, draw.draw_count, draw.stride)
+            })
+        });
     }
 
     fn draw_indirect_count(&mut self, _draw: &DrawIndirectCount) {

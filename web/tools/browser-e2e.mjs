@@ -5227,6 +5227,107 @@ try {
             `against [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}])` +
             `${reconfig.error ? ` — ${reconfig.error}` : ''}`
     );
+
+    // **THE INDIRECT-DRAW GATE, AND THE FIRST THAT PROVES AN INDIRECT DRAW RAN.**
+    // Group T proved a direct `draw` overwrites a clear. This proves a
+    // `drawIndexedIndirect` — the live 3D-forward geometry path — puts exactly the
+    // same pixels there: wasm records the same fullscreen-triangle pipeline, fills
+    // an indirect-args buffer with `[3,1,0,0,0]` (a 3-index single draw) and an
+    // index buffer with `[0,1,2,0]` via `write_buffer`, clears the texture blue,
+    // binds the pipeline and index buffer, and records `drawIndexedIndirect`
+    // reading its counts from the buffer; the demo's loop replays it; and the
+    // bytes that come back are the red draw colour, every pixel — not the blue
+    // clear. A stub that skips the draw leaves blue; only an indirect draw that
+    // actually rasterised leaves red. `gpu-replay.mjs` cannot reach this for group
+    // S's reason: only a real device reads args from a buffer and rasterises.
+    group(
+      'Z — an indirect-drawn triangle is read back as the draw colour, not the clear'
+    );
+
+    const PROBE_INDIRECT_PIXELS = 64 * 64;
+    const PROBE_INDIRECT_COLOR_BYTES = [255, 0, 0, 255];
+    const PROBE_INDIRECT_CLEAR_BYTES = [64, 128, 191, 255];
+
+    const indirectStart = await evaluate(
+      page,
+      `(async () => {
+       const { startIndirectProbe } = await import('/engine/gpu-probe.js');
+       const { exports } = globalThis.crcbl;
+       return { started: startIndirectProbe({ exports }) };
+     })()`
+    );
+    // Poll across frames exactly as group T does: the demo's rAF loop replays the
+    // poll and delivers its reply between these evaluations, and each evaluation
+    // drains what has arrived, then queues another poll while the map is still
+    // resolving. `readIndirectProbe` drains first, so a reply delivered since the
+    // last frame is absorbed before another poll is queued.
+    const indirect = indirectStart?.started
+      ? await until(async () =>
+          evaluate(
+            page,
+            `(async () => {
+             const { readIndirectProbe, pollIndirectProbe, INDIRECT } =
+               await import('/engine/gpu-probe.js');
+             const { exports, gpu } = globalThis.crcbl;
+             const r = readIndirectProbe({ exports, memory: exports.memory });
+             if (r.state === INDIRECT.UNDECODABLE) {
+               return { done: true, state: r.name, error: gpu.replayer.takeError() };
+             }
+             if (r.state !== INDIRECT.READY) {
+               // Not yet — queue another poll for the loop to replay, and wait.
+               pollIndirectProbe({ exports });
+               return null;
+             }
+             // Ready: check every pixel here rather than shipping 16384 numbers
+             // out. \`want\` is the fragment's constant red; the clear beneath it
+             // was blue, so a texel still blue is an indirect draw that did not
+             // happen.
+             const want = ${JSON.stringify(PROBE_INDIRECT_COLOR_BYTES)};
+             let allMatch = r.bytes.length === ${PROBE_INDIRECT_PIXELS} * 4;
+             let firstWrong = -1;
+             for (let i = 0; i < r.bytes.length && allMatch; i += 1) {
+               if (r.bytes[i] !== want[i % 4]) {
+                 allMatch = false;
+                 firstWrong = i;
+               }
+             }
+             return {
+               done: true,
+               state: r.name,
+               len: r.bytes.length,
+               allMatch,
+               firstWrong,
+               // The first two texels, for a failure message a human can read.
+               sample: [...r.bytes.slice(0, 8)],
+               error: gpu.replayer.takeError(),
+             };
+           })()`
+          )
+        )
+      : null;
+    check(
+      'Z',
+      'wasm encoded the indirect setup frame — pipeline, args and index writes, clear, bind, indirect draw, copy, request',
+      indirectStart?.started === true,
+      indirectStart?.started
+        ? 'the indirect-draw-and-read frame is on the stream'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+    );
+    check(
+      'Z',
+      'the indirect-drawn pixels came back as the draw colour, not the clear, every one',
+      indirect?.done === true &&
+        indirect.allMatch === true &&
+        indirect.len === PROBE_INDIRECT_PIXELS * 4,
+      indirect?.done !== true
+        ? `no indirect readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : indirect.allMatch
+          ? `${indirect.len} bytes, every texel [${PROBE_INDIRECT_COLOR_BYTES.join(', ')}] (red), not the clear [${PROBE_INDIRECT_CLEAR_BYTES.join(', ')}] (blue)`
+          : `state ${indirect.state}, ${indirect.len ?? 0} bytes, ` +
+            `first wrong at byte ${indirect.firstWrong} (sample ${JSON.stringify(indirect.sample)} ` +
+            `against [${PROBE_INDIRECT_COLOR_BYTES.join(', ')}]; the clear was [${PROBE_INDIRECT_CLEAR_BYTES.join(', ')}])` +
+            `${indirect.error ? ` — ${indirect.error}` : ''}`
+    );
   } // end of the crcbl-webgpu probe groups, skipped in webgpu mode
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

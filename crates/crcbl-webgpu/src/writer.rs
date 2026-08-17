@@ -1392,6 +1392,46 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`draw_indirect`](crcbl_hal::CommandEncoder::draw_indirect), on the open
+    /// render pass — the argument buffer, its byte offset, the CPU-known
+    /// `draw_count`, then the `stride`. The replayer unrolls the count into that
+    /// many single-draw WebGPU calls. See
+    /// [`Command::DrawIndirect`](crate::Command::DrawIndirect).
+    pub fn draw_indirect(
+        &mut self,
+        buffer: BufferHandle,
+        offset: u64,
+        draw_count: u32,
+        stride: u32,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::DRAW_INDIRECT_TAG);
+        self.bytes.put_handle(buffer);
+        self.bytes.put_u64(offset);
+        self.bytes.put_u32(draw_count);
+        self.bytes.put_u32(stride);
+        sequence
+    }
+
+    /// [`draw_indexed_indirect`](crcbl_hal::CommandEncoder::draw_indexed_indirect),
+    /// on the open render pass — the same four fields
+    /// [`draw_indirect`](Self::draw_indirect) carries, in the same order; only the
+    /// argument layout the replayer's single-draw call reads differs. See
+    /// [`Command::DrawIndexedIndirect`](crate::Command::DrawIndexedIndirect).
+    pub fn draw_indexed_indirect(
+        &mut self,
+        buffer: BufferHandle,
+        offset: u64,
+        draw_count: u32,
+        stride: u32,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::DRAW_INDEXED_INDIRECT_TAG);
+        self.bytes.put_handle(buffer);
+        self.bytes.put_u64(offset);
+        self.bytes.put_u32(draw_count);
+        self.bytes.put_u32(stride);
+        sequence
+    }
+
     // ── Submission and readback ──────────────────────────────────────────────
 
     /// [`Device::submit`](crcbl_hal::Device::submit).

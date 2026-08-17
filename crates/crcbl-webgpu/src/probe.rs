@@ -87,6 +87,11 @@
 //! | [`__crcbl_web_gpu_probe_reconfigure_state`](shim::__crcbl_web_gpu_probe_reconfigure_state) | `() -> i32` | Drain, and answer one of the `RECONFIG_*` codes. |
 //! | [`__crcbl_web_gpu_probe_reconfigure_bytes_ptr`](shim::__crcbl_web_gpu_probe_reconfigure_bytes_ptr) | `() -> i32` | Where the reconfigured bytes start, once [`__crcbl_web_gpu_probe_reconfigure_state`](shim::__crcbl_web_gpu_probe_reconfigure_state) answers [`RECONFIG_READY`]. |
 //! | [`__crcbl_web_gpu_probe_reconfigure_bytes_len`](shim::__crcbl_web_gpu_probe_reconfigure_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the reconfigure probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_indirect`](shim::__crcbl_web_gpu_probe_indirect) | `() -> i32` | Encode one frame — the draw probe's pipeline, a `write_buffer` filling an indirect-args buffer with [`PROBE_INDIRECT_ARGS_BYTES`] and an index buffer with [`PROBE_INDIRECT_INDEX_BYTES`], a pass that clears to [`PROBE_INDIRECT_CLEAR`] then binds the pipeline and index buffer and records a `drawIndexedIndirect`, the copy, and a `request_readback` against [`PROBE_INDIRECT_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_indirect_poll`](shim::__crcbl_web_gpu_probe_indirect_poll) | `() -> i32` | Poll the indirect draw's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_indirect_state`](shim::__crcbl_web_gpu_probe_indirect_state) | `() -> i32` | Drain, and answer one of the `INDIRECT_*` codes. |
+//! | [`__crcbl_web_gpu_probe_indirect_bytes_ptr`](shim::__crcbl_web_gpu_probe_indirect_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_indirect_state`](shim::__crcbl_web_gpu_probe_indirect_state) answers [`INDIRECT_READY`]. |
+//! | [`__crcbl_web_gpu_probe_indirect_bytes_len`](shim::__crcbl_web_gpu_probe_indirect_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the indirect draw has not answered. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -326,7 +331,7 @@ use crcbl_hal::{
     ComputePipelineHandle, CullMode, DepthBias, DepthStencilState, DeviceDesc, Extent3d, Features,
     FilterMode, Format, FrontFace, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect,
     ImageCopy, ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, LoadOp, MemoryLocation,
+    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
     MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PresentInfo,
     PresentMode, PrimitiveState, PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle,
     Rect2d, RenderPassDesc, ResourceState, SampleType, SamplerAddressMode, SamplerDesc,
@@ -555,6 +560,29 @@ pub const RECONFIG_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`COMPUTE_UNDECODABLE`]'s twin.
 pub const RECONFIG_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const INDIRECT_UNASKED: u32 = 0;
+/// The setup frame — the pipeline, the args and index buffers filled by
+/// `write_buffer`, a clear, a bound pipeline, a bound index buffer, an indexed
+/// indirect draw, the copy, the submit and the request — is on the stream, and no
+/// poll has been issued.
+pub const INDIRECT_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const INDIRECT_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const INDIRECT_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_indirect_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_indirect_bytes_len`] carry them — one drawn texel
+/// per four, which the gate checks is the draw colour and not the clear, proving
+/// an indirect draw put exactly what a direct draw would on the frame.
+pub const INDIRECT_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`DRAW_UNDECODABLE`]'s twin.
+pub const INDIRECT_UNDECODABLE: u32 = 5;
 
 /// The side of the square texture the readback probe clears and reads back.
 ///
@@ -2693,6 +2721,269 @@ pub const fn probe_reconfigure_copy() -> BufferImageCopy {
     }
 }
 
+// The indirect-draw probe (group Z): the draw probe's frame with the draw made
+// INDIRECT. Instead of `draw(0..3, 0..1)` it fills an indirect-args buffer and an
+// index buffer with `write_buffer`, binds the index buffer, and records a
+// `draw_indexed_indirect` — the live 3D-forward geometry path
+// (`GeometryPath::IndirectPerBatch`). The pixels read back are still the
+// fragment's red, so a read-back of the draw colour proves the indirect draw put
+// exactly what the direct draw would. Every handle it names is `7 << 32` — a
+// generation past the reconfigure probe's `6 << 32` — so its live resources never
+// land in another probe's slot in the shared page. It creates *three* buffers
+// (host readback, indirect args, index), which the one type that carries several
+// here distinguishes by index; every other resource is a different type, so a
+// shared `7 << 32` is distinct by kind.
+
+/// The clear the indirect pass loads with — the colour the indirect draw must
+/// overwrite. [`PROBE_DRAW_CLEAR`]'s blue, decisive for its reason: a stub that
+/// records no draw leaves these bytes, so reading the draw colour back is what
+/// proves the indirect draw ran.
+pub const PROBE_INDIRECT_CLEAR: [f32; 4] = PROBE_DRAW_CLEAR;
+
+/// The colour the fragment shader writes, as the bytes a `Rgba8Unorm` texel holds
+/// — opaque red, [`PROBE_DRAW_COLOR_BYTES`]'s value. What the gate checks every
+/// pixel against, and what only a real indirect draw of the fullscreen triangle
+/// produces.
+pub const PROBE_INDIRECT_COLOR_BYTES: [u8; 4] = PROBE_DRAW_COLOR_BYTES;
+
+/// The `VkDrawIndexedIndirectCommand` the args buffer is filled with, as the 20
+/// little-endian bytes WebGPU's `drawIndexedIndirect` reads: `indexCount = 3`,
+/// `instanceCount = 1`, then `firstIndex = 0`, `baseVertex = 0`,
+/// `firstInstance = 0`. Three indices of one instance from the origin — exactly
+/// the direct `draw_indexed(0..3, 0, 0..1)` the fullscreen triangle would make.
+pub const PROBE_INDIRECT_ARGS_BYTES: [u8; 20] = [
+    3, 0, 0, 0, // indexCount = 3
+    1, 0, 0, 0, // instanceCount = 1
+    0, 0, 0, 0, // firstIndex = 0
+    0, 0, 0, 0, // baseVertex = 0
+    0, 0, 0, 0, // firstInstance = 0
+];
+
+/// The index buffer's contents, as the 8 little-endian bytes of four `Uint16`
+/// indices `[0, 1, 2, 0]`. The draw reads the first three — vertex indices 0, 1
+/// and 2, the fullscreen triangle's corners — and the fourth pads the write to the
+/// 4-byte multiple `queue.writeBuffer` requires.
+pub const PROBE_INDIRECT_INDEX_BYTES: [u8; 8] = [0, 0, 1, 0, 2, 0, 0, 0];
+
+/// The queue the indirect probe names in its command encoder. `7 << 32`.
+pub const PROBE_INDIRECT_QUEUE: QueueHandle = match QueueHandle::from_bits(7 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 7 is not zero"),
+};
+
+/// The command buffer the indirect probe finishes its encoder into. `7 << 32`.
+pub const PROBE_INDIRECT_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(7 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 7 is not zero"),
+    };
+
+/// The in-flight readback the indirect probe requests and polls. `7 << 32`.
+pub const PROBE_INDIRECT_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(7 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 7 is not zero"),
+};
+
+/// The image the indirect probe renders into and copies out of — the draw probe's
+/// 64×64 [`Format::Rgba8Unorm`] colour target and copy source, under its own
+/// handle.
+#[must_use]
+pub const fn probe_indirect_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu indirect image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The image handle the indirect probe renders into. `7 << 32`.
+pub const PROBE_INDIRECT_IMAGE: ImageHandle = match ImageHandle::from_bits(7 << 32) {
+    Some(image) => image,
+    None => panic!("generation 7 is not zero"),
+};
+
+/// The image-view handle the indirect probe's pass clears and draws into.
+/// `7 << 32`.
+pub const PROBE_INDIRECT_IMAGE_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(7 << 32) {
+    Some(view) => view,
+    None => panic!("generation 7 is not zero"),
+};
+
+/// The view of [`probe_indirect_image_desc`]'s image the indirect pass renders
+/// into.
+pub const PROBE_INDIRECT_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu indirect view"),
+    image: PROBE_INDIRECT_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The buffer handle the drawn pixels are copied into and read back from.
+/// `7 << 32`, index `0`.
+pub const PROBE_INDIRECT_BUFFER: BufferHandle = match BufferHandle::from_bits(7 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 7 is not zero"),
+};
+
+/// The buffer the drawn pixels are copied into and read back from — the readback
+/// buffer's shape (`64 * 64 * 4` bytes, [`MemoryLocation::HostReadback`],
+/// [`BufferUsage::TRANSFER_DST`]) under [`PROBE_INDIRECT_BUFFER`].
+#[must_use]
+pub const fn probe_indirect_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu indirect buffer"),
+        size: (PROBE_READBACK_SIZE as u64) * (PROBE_READBACK_SIZE as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The indirect-args buffer handle `write_buffer` fills and
+/// `draw_indexed_indirect` reads. `7 << 32`, index `1`.
+pub const PROBE_INDIRECT_ARGS_BUFFER: BufferHandle = match BufferHandle::from_bits((7 << 32) | 1) {
+    Some(buffer) => buffer,
+    None => panic!("generation 7 is not zero"),
+};
+
+/// The indirect-args buffer — [`PROBE_INDIRECT_ARGS_BYTES`]'s 20 bytes on the
+/// device, [`BufferUsage::INDIRECT`] so it can back the draw and
+/// [`BufferUsage::TRANSFER_DST`] so `queue.writeBuffer` can fill it.
+#[must_use]
+pub const fn probe_indirect_args_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu indirect args buffer"),
+        size: PROBE_INDIRECT_ARGS_BYTES.len() as u64,
+        usage: BufferUsage::INDIRECT.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The index buffer handle `write_buffer` fills and `bind_index_buffer` binds.
+/// `7 << 32`, index `2`.
+pub const PROBE_INDIRECT_INDEX_BUFFER: BufferHandle = match BufferHandle::from_bits((7 << 32) | 2) {
+    Some(buffer) => buffer,
+    None => panic!("generation 7 is not zero"),
+};
+
+/// The index buffer — [`PROBE_INDIRECT_INDEX_BYTES`]'s 8 bytes on the device,
+/// [`BufferUsage::INDEX`] so the pass can bind it and
+/// [`BufferUsage::TRANSFER_DST`] so `queue.writeBuffer` can fill it.
+#[must_use]
+pub const fn probe_indirect_index_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu indirect index buffer"),
+        size: PROBE_INDIRECT_INDEX_BYTES.len() as u64,
+        usage: BufferUsage::INDEX.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The image→buffer copy that moves the drawn pixels into the readback buffer —
+/// [`probe_draw_copy`]'s shape under the indirect probe's own handles.
+#[must_use]
+pub const fn probe_indirect_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_INDIRECT_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_INDIRECT_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+    }
+}
+
+/// The shader module the indirect probe's frame creates for its pipeline — the
+/// draw probe's fullscreen-triangle WGSL ([`PROBE_DRAW_WGSL`]), filed at
+/// [`PROBE_INDIRECT_SHADER_MODULE`].
+pub const PROBE_INDIRECT_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu indirect shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_DRAW_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The shader-module handle the indirect probe's pipeline names. `7 << 32`.
+pub const PROBE_INDIRECT_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(7 << 32) {
+        Some(module) => module,
+        None => panic!("generation 7 is not zero"),
+    };
+
+/// The pipeline-layout handle the indirect probe's pipeline is built against.
+/// `7 << 32`.
+pub const PROBE_INDIRECT_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(7 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 7 is not zero"),
+    };
+
+/// The pipeline layout the indirect probe's frame creates. **Empty** — the shaders
+/// bind nothing, [`PROBE_DRAW_PIPELINE_LAYOUT_DESC`]'s shape.
+pub const PROBE_INDIRECT_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu indirect pipeline layout"),
+    bind_group_layouts: &[],
+    push_constants: None,
+};
+
+/// The graphics-pipeline handle the indirect probe binds and draws with.
+/// `7 << 32`.
+pub const PROBE_INDIRECT_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits(7 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 7 is not zero"),
+    };
+
+/// The one colour target [`PROBE_INDIRECT_PIPELINE_DESC`] writes —
+/// [`PROBE_DRAW_COLOR_TARGETS`]'s opaque `Rgba8Unorm` target.
+pub const PROBE_INDIRECT_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTargetState {
+    format: Format::Rgba8Unorm,
+    blend: None,
+    write_mask: ColorWrites::ALL,
+}];
+
+/// The pipeline the indirect probe binds before its indirect draw —
+/// [`PROBE_DRAW_PIPELINE_DESC`]'s colour-only fullscreen-triangle pipeline under
+/// the indirect probe's own handles.
+pub const PROBE_INDIRECT_PIPELINE_DESC: GraphicsPipelineDesc<'static> = GraphicsPipelineDesc {
+    label: Some("crcbl-webgpu indirect pipeline"),
+    layout: PROBE_INDIRECT_PIPELINE_LAYOUT,
+    vertex: ShaderEntry {
+        module: PROBE_INDIRECT_SHADER_MODULE,
+        entry_point: "vsMain",
+    },
+    fragment: Some(ShaderEntry {
+        module: PROBE_INDIRECT_SHADER_MODULE,
+        entry_point: "fsMain",
+    }),
+    primitive: PrimitiveState {
+        topology: PrimitiveTopology::TriangleList,
+        front_face: FrontFace::Ccw,
+        cull_mode: CullMode::None,
+        polygon_mode: PolygonMode::Fill,
+        depth_clamp: false,
+    },
+    depth_stencil: None,
+    multisample: MultisampleState {
+        samples: 1,
+        mask: !0,
+        alpha_to_coverage: false,
+    },
+    color_targets: &PROBE_INDIRECT_COLOR_TARGETS,
+};
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -3253,6 +3544,70 @@ impl ReconfigProbe {
     }
 }
 
+/// One indirect-draw-and-read-back, from the frame that drew to the bytes read
+/// back — [`DrawProbe`]'s state machine again, on the indirect path.
+///
+/// The two probes differ only in the frame they encode: a draw rasterises a
+/// triangle with `draw`, this one fills an args buffer and records a
+/// `draw_indexed_indirect`. Both end in the same `request_readback` and are
+/// answered by the same [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
+/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so the transitions
+/// mirror [`DrawProbe`]'s exactly.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum IndirectProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — one `Rgba8Unorm` texel per four, every one the
+        /// drawn colour if the indirect draw ran.
+        bytes: Vec<u8>,
+    },
+}
+
+impl IndirectProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`DrawProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -3310,6 +3665,10 @@ struct Probe {
     /// A decode error the reconfigure drain hit, for [`RECONFIG_UNDECODABLE`]. Its
     /// own string for [`reason`](Self::reason)'s reason.
     reconfig_reason: String,
+    indirect: IndirectProbe,
+    /// A decode error the indirect-draw drain hit, for [`INDIRECT_UNDECODABLE`].
+    /// Its own string for [`reason`](Self::reason)'s reason.
+    indirect_reason: String,
 }
 
 impl Probe {
@@ -3336,6 +3695,8 @@ impl Probe {
             present_reason: String::new(),
             reconfig: ReconfigProbe::Unasked,
             reconfig_reason: String::new(),
+            indirect: IndirectProbe::Unasked,
+            indirect_reason: String::new(),
         }
     }
 
@@ -3756,6 +4117,7 @@ impl Probe {
                 self.fill.absorb(&replies);
                 self.present.absorb(&replies);
                 self.reconfig.absorb(&replies);
+                self.indirect.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -4371,6 +4733,155 @@ impl Probe {
     fn reconfigure_bytes(&self) -> &[u8] {
         match &self.reconfig {
             ReconfigProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the indirect-draw setup frame: [`request_draw`](Self::request_draw)'s
+    /// frame with the draw made INDIRECT.
+    ///
+    /// **One frame, many commands, no reply** — the draw probe's shape on the
+    /// indirect path, the live 3D-forward geometry path
+    /// ([`GeometryPath::IndirectPerBatch`](crcbl_hal::GeometryPath::IndirectPerBatch)).
+    /// It records the image, its view, the host readback buffer, the indirect-args
+    /// buffer ([`BufferUsage::INDIRECT`]) and the index buffer
+    /// ([`BufferUsage::INDEX`]), the pipeline's three resources, then **fills the
+    /// args and index buffers with [`write_buffer`](crate::StreamWriter::write_buffer)**
+    /// — the args are [`PROBE_INDIRECT_ARGS_BYTES`] (a 3-index single draw), the
+    /// indices [`PROBE_INDIRECT_INDEX_BYTES`]. A command encoder, a render pass that
+    /// clears [`PROBE_INDIRECT_VIEW_DESC`]'s view to [`PROBE_INDIRECT_CLEAR`], binds
+    /// the pipeline, binds the index buffer and records
+    /// [`draw_indexed_indirect`](crate::StreamWriter::draw_indexed_indirect) reading
+    /// the args at offset 0 with `draw_count` 1. The copy out, the finish, the
+    /// submit, and the `request_readback` under [`PROBE_INDIRECT_READBACK`] close it.
+    ///
+    /// The writes are recorded before the encoder so `queue.writeBuffer` is ordered
+    /// on the queue ahead of the submit that reads the buffers.
+    ///
+    /// None is answered — every handle is caller-allocated — so it is
+    /// [`encode`](StreamChannel::encode); the poll is what is awaited.
+    ///
+    /// `false` until a device has opened, [`request_draw`](Self::request_draw)'s
+    /// ordering rule — every command after the resources is a device method.
+    fn request_indirect(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(PROBE_INDIRECT_IMAGE, &probe_indirect_image_desc());
+                stream.create_image_view(PROBE_INDIRECT_IMAGE_VIEW, &PROBE_INDIRECT_VIEW_DESC);
+                stream.create_buffer(PROBE_INDIRECT_BUFFER, &probe_indirect_buffer_desc());
+                stream.create_buffer(
+                    PROBE_INDIRECT_ARGS_BUFFER,
+                    &probe_indirect_args_buffer_desc(),
+                );
+                stream.create_buffer(
+                    PROBE_INDIRECT_INDEX_BUFFER,
+                    &probe_indirect_index_buffer_desc(),
+                );
+                stream.create_shader_module(
+                    PROBE_INDIRECT_SHADER_MODULE,
+                    &PROBE_INDIRECT_SHADER_MODULE_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_INDIRECT_PIPELINE_LAYOUT,
+                    &PROBE_INDIRECT_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_graphics_pipeline(
+                    PROBE_INDIRECT_PIPELINE,
+                    &PROBE_INDIRECT_PIPELINE_DESC,
+                );
+                stream.write_buffer(PROBE_INDIRECT_ARGS_BUFFER, 0, &PROBE_INDIRECT_ARGS_BYTES);
+                stream.write_buffer(PROBE_INDIRECT_INDEX_BUFFER, 0, &PROBE_INDIRECT_INDEX_BYTES);
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu indirect encoder"),
+                    queue: PROBE_INDIRECT_QUEUE,
+                });
+                let attachments = [ColorAttachment {
+                    view: PROBE_INDIRECT_IMAGE_VIEW,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(PROBE_INDIRECT_CLEAR),
+                }];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu indirect pass"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                });
+                stream.bind_graphics_pipeline(PROBE_INDIRECT_PIPELINE);
+                stream.bind_index_buffer(PROBE_INDIRECT_INDEX_BUFFER, 0, IndexFormat::Uint16);
+                stream.draw_indexed_indirect(PROBE_INDIRECT_ARGS_BUFFER, 0, 1, 0);
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_indirect_copy());
+                stream.finish(PROBE_INDIRECT_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_INDIRECT_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_INDIRECT_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu indirect readback"),
+                        buffer: PROBE_INDIRECT_BUFFER,
+                        offset: 0,
+                        size: probe_indirect_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.indirect = IndirectProbe::Requested;
+            self.indirect_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// indirect draw's readback and register its wait, unless it is already waiting
+    /// or ready — [`poll_draw`](Self::poll_draw)'s protocol on the indirect handle.
+    fn poll_indirect(&mut self) -> bool {
+        if !matches!(
+            self.indirect,
+            IndirectProbe::Requested | IndirectProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_INDIRECT_READBACK))
+        else {
+            return false;
+        };
+        self.indirect = IndirectProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the indirect-draw readback has got to.
+    fn indirect_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.indirect_reason = error.to_string();
+            return INDIRECT_UNDECODABLE;
+        }
+        match &self.indirect {
+            IndirectProbe::Unasked => INDIRECT_UNASKED,
+            IndirectProbe::Requested => INDIRECT_REQUESTED,
+            IndirectProbe::Waiting { .. } => INDIRECT_WAITING,
+            IndirectProbe::Pending => INDIRECT_PENDING,
+            IndirectProbe::Ready { .. } => INDIRECT_READY,
+        }
+    }
+
+    /// The bytes the indirect-draw readback came back with, or an empty slice if it
+    /// has not.
+    fn indirect_bytes(&self) -> &[u8] {
+        match &self.indirect {
+            IndirectProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -5893,6 +6404,80 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Ask the page to render one frame with an INDIRECT draw and start reading it
+    /// back on the device it opened.
+    ///
+    /// `1` when the setup frame — the pipeline's three resources, image, view,
+    /// host buffer, indirect-args and index buffers, the two `write_buffer` fills,
+    /// an encoder, a render pass that clears then binds the pipeline and index
+    /// buffer and records a `drawIndexedIndirect`, the copy, finish, submit and
+    /// `request_readback` — is on the stream; `0` when no device has opened yet,
+    /// the probe is re-entered, or another channel is installed.
+    ///
+    /// **This is the decisive observation point of the indirect-draw arms**: the
+    /// draw probe proves a direct `draw` overwrites a clear, and this proves an
+    /// indirect `drawIndexedIndirect` reading its counts from a buffer puts exactly
+    /// the same pixels there — the fragment's colour, not the clear's, and a stub
+    /// that skips the draw cannot forge them.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_indirect() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_indirect()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the indirect draw's in-flight readback, once, on the reply channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for — no
+    /// indirect draw requested, a poll already unanswered, or the bytes already in
+    /// — or when the channel would not take it. A no-op until the previous poll is
+    /// answered, so the gate can call it blindly each frame.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_indirect_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_indirect()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the indirect-draw readback has got to —
+    /// one of the `INDIRECT_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_indirect_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.indirect_state(),
+            Err(_) => super::INDIRECT_UNASKED,
+        })
+    }
+
+    /// A pointer into wasm memory to the bytes the indirect-draw readback came back
+    /// with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_indirect_bytes_len`] bytes from here, and only
+    /// once [`__crcbl_web_gpu_probe_indirect_state`] has answered
+    /// [`INDIRECT_READY`](super::INDIRECT_READY): before that the length is `0` and
+    /// this points at an empty buffer. Nothing here grows wasm memory, so the
+    /// pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_indirect_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.indirect_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_indirect_bytes_ptr`] points at — the
+    /// indirect-draw readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_indirect_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.indirect_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -5921,16 +6506,19 @@ mod tests {
         __crcbl_web_gpu_probe_fill_bytes_ptr, __crcbl_web_gpu_probe_fill_poll,
         __crcbl_web_gpu_probe_fill_state, __crcbl_web_gpu_probe_graphics_pipeline,
         __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
-        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
-        __crcbl_web_gpu_probe_present, __crcbl_web_gpu_probe_present_bytes_len,
-        __crcbl_web_gpu_probe_present_bytes_ptr, __crcbl_web_gpu_probe_present_poll,
-        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_reconfigure,
-        __crcbl_web_gpu_probe_reconfigure_bytes_len, __crcbl_web_gpu_probe_reconfigure_bytes_ptr,
-        __crcbl_web_gpu_probe_reconfigure_poll, __crcbl_web_gpu_probe_reconfigure_state,
-        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
-        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
-        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
-        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_indirect, __crcbl_web_gpu_probe_indirect_bytes_len,
+        __crcbl_web_gpu_probe_indirect_bytes_ptr, __crcbl_web_gpu_probe_indirect_poll,
+        __crcbl_web_gpu_probe_indirect_state, __crcbl_web_gpu_probe_max_image_2d,
+        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_present,
+        __crcbl_web_gpu_probe_present_bytes_len, __crcbl_web_gpu_probe_present_bytes_ptr,
+        __crcbl_web_gpu_probe_present_poll, __crcbl_web_gpu_probe_present_state,
+        __crcbl_web_gpu_probe_reconfigure, __crcbl_web_gpu_probe_reconfigure_bytes_len,
+        __crcbl_web_gpu_probe_reconfigure_bytes_ptr, __crcbl_web_gpu_probe_reconfigure_poll,
+        __crcbl_web_gpu_probe_reconfigure_state, __crcbl_web_gpu_probe_sampler,
+        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
+        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
+        __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -7147,6 +7735,195 @@ mod tests {
         )]);
         assert!(!advanced);
         assert_eq!(draw, DrawProbe::Waiting { sequence: 7 });
+    }
+
+    /// The indirect probe's bytes, read the way JS reads them —
+    /// [`draw_bytes`]'s indirect sibling.
+    fn indirect_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_indirect_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_indirect_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the indirect probe answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::indirect` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **Every indirect handle is a generation past every other probe's** — the
+    /// point of `7 << 32`: the indirect frame has an image, a view, three buffers,
+    /// a shader module, a pipeline layout, a pipeline, a command buffer, a queue
+    /// and a readback live at once, and none may land in another probe's slot in
+    /// the shared page. The three buffers share the generation but not the index.
+    #[test]
+    fn the_indirect_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_INDIRECT_IMAGE.to_bits(),
+            PROBE_INDIRECT_IMAGE_VIEW.to_bits(),
+            PROBE_INDIRECT_BUFFER.to_bits(),
+            PROBE_INDIRECT_ARGS_BUFFER.to_bits(),
+            PROBE_INDIRECT_INDEX_BUFFER.to_bits(),
+            PROBE_INDIRECT_SHADER_MODULE.to_bits(),
+            PROBE_INDIRECT_PIPELINE_LAYOUT.to_bits(),
+            PROBE_INDIRECT_PIPELINE.to_bits(),
+            PROBE_INDIRECT_COMMAND_BUFFER.to_bits(),
+            PROBE_INDIRECT_QUEUE.to_bits(),
+            PROBE_INDIRECT_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 7, "every indirect handle is generation seven");
+        }
+        // The three buffers are distinct by index within the shared generation.
+        assert_ne!(
+            PROBE_INDIRECT_BUFFER.to_bits(),
+            PROBE_INDIRECT_ARGS_BUFFER.to_bits()
+        );
+        assert_ne!(
+            PROBE_INDIRECT_ARGS_BUFFER.to_bits(),
+            PROBE_INDIRECT_INDEX_BUFFER.to_bits()
+        );
+        // And a generation clear of the draw probe it mirrors.
+        assert_ne!(PROBE_INDIRECT_IMAGE.to_bits(), PROBE_DRAW_IMAGE.to_bits());
+        assert_ne!(
+            PROBE_INDIRECT_READBACK.to_bits(),
+            PROBE_DRAW_READBACK.to_bits()
+        );
+    }
+
+    /// The indirect half: **one export, a whole frame** that fills the args and
+    /// index buffers with `WriteBuffer`, then clears, binds the pipeline and index
+    /// buffer, and records a `DrawIndexedIndirect` — the draw probe's frame with
+    /// the draw made indirect. The two writes land before the encoder so
+    /// `queue.writeBuffer` is ordered ahead of the submit that reads them.
+    #[test]
+    fn the_indirect_export_encodes_the_writes_the_bind_and_the_indirect_draw() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_indirect(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateShaderModule",
+                "CreatePipelineLayout",
+                "CreateGraphicsPipeline",
+                "WriteBuffer",
+                "WriteBuffer",
+                "CreateCommandEncoder",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "BindIndexBuffer",
+                "DrawIndexedIndirect",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the frame builds the pipeline, fills the buffers, binds and draws indirect, then reads back"
+        );
+        // The args write carries the 3-index single-draw command, and the indirect
+        // draw reads it at offset 0 with a CPU-known count of one.
+        assert!(commands.contains(&Command::WriteBuffer {
+            buffer: PROBE_INDIRECT_ARGS_BUFFER,
+            offset: 0,
+            data: PROBE_INDIRECT_ARGS_BYTES.to_vec(),
+        }));
+        assert!(commands.contains(&Command::DrawIndexedIndirect {
+            buffer: PROBE_INDIRECT_ARGS_BUFFER,
+            offset: 0,
+            draw_count: 1,
+            stride: 0,
+        }));
+    }
+
+    /// **A device has to have opened first**, the draw probe's ordering rule:
+    /// every command the frame carries is a device method.
+    #[test]
+    fn an_indirect_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_indirect(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_indirect_state(), INDIRECT_UNASKED);
+    }
+
+    /// The whole indirect exchange through the exports alone: request, poll, and a
+    /// `ReadbackReady` carrying the drawn pixels — which reach the bytes exports as
+    /// the draw colour, proving the indirect draw put exactly what a direct draw
+    /// would. The browser gate's path with the replayer replaced by a
+    /// `ReplyWriter`, as a `cargo test` has no `navigator.gpu`.
+    #[test]
+    fn the_indirect_readback_reaches_the_bytes_exports_as_the_drawn_colour() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_indirect(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_indirect_state(), INDIRECT_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_indirect_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_indirect_state(), INDIRECT_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_INDIRECT_READBACK,
+            }]
+        );
+
+        let mut drawn = Vec::new();
+        for _ in 0..(PROBE_READBACK_SIZE * PROBE_READBACK_SIZE) {
+            drawn.extend_from_slice(&PROBE_INDIRECT_COLOR_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_INDIRECT_READBACK, &drawn);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_indirect_state(), INDIRECT_READY);
+        assert_eq!(indirect_bytes(), drawn);
+        assert_eq!(&indirect_bytes()[..4], PROBE_INDIRECT_COLOR_BYTES);
+        // The draw colour is not the clear the pass loaded with — the whole
+        // evidence the gate reads back from the browser.
+        assert_ne!(PROBE_INDIRECT_COLOR_BYTES, PROBE_READBACK_CLEAR_BYTES);
+    }
+
+    /// A `ReadbackPending` for the poll's sequence drops the indirect probe back
+    /// to `Pending`, so the next frame polls again — [`IndirectProbe::absorb`]'s
+    /// pending arm.
+    #[test]
+    fn a_readback_pending_reply_drops_the_indirect_probe_back_to_pending() {
+        let mut indirect = IndirectProbe::Waiting { sequence: 7 };
+        let advanced = indirect.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_INDIRECT_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(indirect, IndirectProbe::Pending);
+    }
+
+    /// A `ReadbackReady` for the poll's sequence carries the bytes into `Ready`.
+    #[test]
+    fn a_readback_ready_reply_carries_the_indirect_bytes_into_ready() {
+        let mut indirect = IndirectProbe::Waiting { sequence: 7 };
+        let bytes = vec![255, 0, 0, 255];
+        let advanced = indirect.absorb(&[(
+            7,
+            Reply::ReadbackReady {
+                readback: PROBE_INDIRECT_READBACK,
+                data: bytes.clone(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(indirect, IndirectProbe::Ready { bytes });
     }
 
     /// The present probe's bytes, read the way JS reads them.

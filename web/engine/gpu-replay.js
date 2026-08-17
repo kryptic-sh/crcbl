@@ -2849,6 +2849,12 @@ export class Replayer {
         case 'DrawIndexed':
           this.#drawIndexed(sequence, command);
           break;
+        case 'DrawIndirect':
+          this.#drawIndirect(sequence, command);
+          break;
+        case 'DrawIndexedIndirect':
+          this.#drawIndexedIndirect(sequence, command);
+          break;
         case 'BeginComputePass':
           this.#beginComputePass(sequence, command);
           break;
@@ -5057,6 +5063,78 @@ export class Replayer {
       baseVertex,
       instances.start
     );
+  }
+
+  /**
+   * Records an indirect non-indexed draw on the open render pass — `DrawIndirect`
+   * → one or more `drawIndirect(indirectBuffer, indirectOffset)`.
+   *
+   * UNROLLED, because WebGPU's `drawIndirect` is a SINGLE draw — multi-draw
+   * indirect is not core WebGPU — so a HAL `drawCount` becomes that many calls,
+   * the `i`th reading its argument structure at `offset + i * stride`.
+   * `drawCount === 1` is the common case and one call. Each call reads
+   * `[vertexCount, instanceCount, firstVertex, firstInstance]` from the buffer.
+   *
+   * ON THE PASS, for {@link Replayer#draw}'s reason, and a draw with none open
+   * goes to the error queue. An unresolvable argument buffer is named there too,
+   * mirroring {@link Replayer#bindIndexBuffer}, rather than throwing.
+   *
+   * @param {bigint} sequence
+   * @param {{ buffer: { index: number, generation: number }, offset: bigint,
+   *   drawCount: number, stride: number }} command
+   */
+  #drawIndirect(sequence, command) {
+    const named = `an indirect draw (command ${sequence})`;
+    if (!this.#currentPass) {
+      this.#deviceError(`${named} was recorded with no render pass open`);
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
+      this.#deviceError(
+        `${named} reads args from buffer ${command.buffer.index}.${command.buffer.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    const offset = Number(command.offset);
+    for (let i = 0; i < command.drawCount; i += 1) {
+      this.#currentPass.drawIndirect(buffer, offset + i * command.stride);
+    }
+  }
+
+  /**
+   * Records an indirect indexed draw on the open render pass —
+   * `DrawIndexedIndirect` → one or more `drawIndexedIndirect(indirectBuffer,
+   * indirectOffset)`.
+   *
+   * {@link Replayer#drawIndirect}'s indexed twin and unrolled for its reason; the
+   * only difference is the argument structure each call reads: `[indexCount,
+   * instanceCount, firstIndex, baseVertex, firstInstance]`. Needs a bound index
+   * buffer, exactly as {@link Replayer#drawIndexed} does.
+   *
+   * @param {bigint} sequence
+   * @param {{ buffer: { index: number, generation: number }, offset: bigint,
+   *   drawCount: number, stride: number }} command
+   */
+  #drawIndexedIndirect(sequence, command) {
+    const named = `an indexed indirect draw (command ${sequence})`;
+    if (!this.#currentPass) {
+      this.#deviceError(`${named} was recorded with no render pass open`);
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
+      this.#deviceError(
+        `${named} reads args from buffer ${command.buffer.index}.${command.buffer.generation}, ` +
+          'which this replayer holds no live buffer under'
+      );
+      return;
+    }
+    const offset = Number(command.offset);
+    for (let i = 0; i < command.drawCount; i += 1) {
+      this.#currentPass.drawIndexedIndirect(buffer, offset + i * command.stride);
+    }
   }
 
   /**

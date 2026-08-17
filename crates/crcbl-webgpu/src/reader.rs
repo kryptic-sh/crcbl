@@ -1175,6 +1175,34 @@ impl<'a> StreamReader<'a> {
                     instances: first_instance..last_instance,
                 })
             }
+            tag::DRAW_INDIRECT_TAG => {
+                // The argument buffer, its byte offset, the CPU-known draw count,
+                // then the stride. See `Command::DrawIndirect`.
+                let buffer = r.read_handle("DrawIndirect::buffer")?;
+                let offset = r.read_u64()?;
+                let draw_count = r.read_u32()?;
+                let stride = r.read_u32()?;
+                Ok(Command::DrawIndirect {
+                    buffer,
+                    offset,
+                    draw_count,
+                    stride,
+                })
+            }
+            tag::DRAW_INDEXED_INDIRECT_TAG => {
+                // The same four fields `DRAW_INDIRECT_TAG` carries, in the same
+                // order. See `Command::DrawIndexedIndirect`.
+                let buffer = r.read_handle("DrawIndexedIndirect::buffer")?;
+                let offset = r.read_u64()?;
+                let draw_count = r.read_u32()?;
+                let stride = r.read_u32()?;
+                Ok(Command::DrawIndexedIndirect {
+                    buffer,
+                    offset,
+                    draw_count,
+                    stride,
+                })
+            }
             tag::BEGIN_COMPUTE_PASS_TAG => {
                 let label = r.read_opt_string("ComputePassDesc::label")?;
                 Ok(Command::BeginComputePass { label })

@@ -1650,12 +1650,13 @@ fn every_command_has_its_own_name() {
     // remaining copies and fill (CopyBufferToImage, CopyImageToImage, FillBuffer),
     // the host→buffer upload (WriteBuffer), the dynamic viewport and scissor the
     // graph sets on every pass (SetViewport, SetScissor), the UI pass's indexed
-    // draw (BindIndexBuffer, DrawIndexed), the no-op barrier
+    // draw (BindIndexBuffer, DrawIndexed), the indirect draws the geometry path
+    // unrolls (DrawIndirect, DrawIndexedIndirect), the no-op barrier
     // (PipelineBarrier, twice but one name), and the presentation
     // family (CreateSwapchain, AcquireNextFrame, DestroySwapchain and
     // ReconfigureSwapchain) — so the distinct-name count is what the writer has
     // methods for.
-    assert_eq!(names.len(), 59);
+    assert_eq!(names.len(), 61);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

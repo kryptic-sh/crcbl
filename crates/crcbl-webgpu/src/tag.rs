@@ -412,6 +412,19 @@ pub const DRAW_TAG: u8 = 0x60;
 /// which becomes `drawIndexed(indexCount, instanceCount, firstIndex, baseVertex,
 /// firstInstance)`.
 pub const DRAW_INDEXED_TAG: u8 = 0x61;
+/// [`Command::DrawIndirect`](crate::Command::DrawIndirect) — an indirect
+/// non-indexed draw with a CPU-known count. WebGPU has only a single-draw
+/// `drawIndirect(indirectBuffer, indirectOffset)`, so the replayer unrolls a
+/// `draw_count > 1` into that many calls, one per argument structure the
+/// `stride` steps over.
+pub const DRAW_INDIRECT_TAG: u8 = 0x62;
+/// [`Command::DrawIndexedIndirect`](crate::Command::DrawIndexedIndirect) — an
+/// indirect indexed draw with a CPU-known count,
+/// [`GeometryPath::IndirectPerBatch`](crcbl_hal::GeometryPath::IndirectPerBatch)'s
+/// draw path. WebGPU has only a single-draw `drawIndexedIndirect(indirectBuffer,
+/// indirectOffset)`, so the replayer unrolls a `draw_count > 1` into that many
+/// calls, one per argument structure the `stride` steps over.
+pub const DRAW_INDEXED_INDIRECT_TAG: u8 = 0x63;
 /// [`Command::Dispatch`](crate::Command::Dispatch) — the first tag of the
 /// dispatch family, [`FAMILY_DISPATCH`].
 pub const DISPATCH_TAG: u8 = 0x70;
@@ -1831,7 +1844,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 59] = [
+    const TAGS: [(&str, u8, u8); 61] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1930,6 +1943,12 @@ mod tests {
         ("BindIndexBuffer", BIND_INDEX_BUFFER_TAG, FAMILY_ENCODER),
         ("Draw", DRAW_TAG, FAMILY_DRAW),
         ("DrawIndexed", DRAW_INDEXED_TAG, FAMILY_DRAW),
+        ("DrawIndirect", DRAW_INDIRECT_TAG, FAMILY_DRAW),
+        (
+            "DrawIndexedIndirect",
+            DRAW_INDEXED_INDIRECT_TAG,
+            FAMILY_DRAW,
+        ),
         ("Dispatch", DISPATCH_TAG, FAMILY_DISPATCH),
         ("CopyImageToBuffer", COPY_IMAGE_TO_BUFFER_TAG, FAMILY_COPY),
         ("CopyBufferToBuffer", COPY_BUFFER_TO_BUFFER_TAG, FAMILY_COPY),
