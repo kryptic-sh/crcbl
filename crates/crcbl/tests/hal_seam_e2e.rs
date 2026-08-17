@@ -59,9 +59,9 @@ use crcbl::core::SurfaceTarget;
 use crcbl::hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
     CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
-    ImageAspect, ImageBarrier, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
-    ImageUsage, Instance, LoadOp, MemoryLocation, Offset3d, PresentInfo, PresentMode, QueryKind,
-    QuerySetDesc, QuerySetHandle, ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc,
+    ImageAspect, ImageBarrier, ImageCopy, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
+    ImageType, ImageUsage, Instance, LoadOp, MemoryLocation, Offset3d, PresentInfo, PresentMode,
+    QueryKind, QuerySetDesc, QuerySetHandle, ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc,
     ResourceState, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
 };
 
@@ -1924,6 +1924,81 @@ const SEMAPHORE_DEADLINE_NS: u64 = 20_000_000_000;
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
 fn a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
+    let headless = Headless::open();
+    let has_timeline = headless
+        .device
+        .caps()
+        .features
+        .contains(Features::TIMELINE_SEMAPHORE);
+
+    for claim in [TimelineClaim::Counter, TimelineClaim::CpuWait] {
+        match exercise_timeline(&headless, claim) {
+            Exercise::Worked => assert!(
+                has_timeline,
+                "{claim:?}: this device reports no TIMELINE_SEMAPHORE and the timeline ran \
+                 anyway, so either the feature report or the refusal is wrong"
+            ),
+            Exercise::Refused(error) => {
+                assert!(
+                    !has_timeline,
+                    "{claim:?}: this device reports TIMELINE_SEMAPHORE and then refused it — \
+                     {error}"
+                );
+                assert!(
+                    matches!(error, HalError::Unsupported { .. }),
+                    "{claim:?}: a backend without timelines refuses by name, so a caller can \
+                     branch on it rather than discovering a semaphore that never signals: {error}"
+                );
+            }
+            outcome => panic!(
+                "{claim:?}: the timeline was driven as {outcome:?} on a device that reports \
+                 TIMELINE_SEMAPHORE = {has_timeline}"
+            ),
+        }
+    }
+
+    headless.finish();
+}
+
+/// Which half of the timeline [`exercise_timeline`] reports on.
+///
+/// The two are separate [`crcbl::hal::Capability`] variants because a backend
+/// can hand out a counter a submission signals while having no host-side wait to
+/// offer, so one exercise cannot answer for both — the *sequence* is shared, the
+/// verdict is not.
+#[derive(Clone, Copy, Debug)]
+enum TimelineClaim {
+    /// [`Capability::TimelineSemaphore`]: the counter a submission advances and
+    /// [`Device::semaphore_value`] reports.
+    Counter,
+    /// [`Capability::CpuTimelineWait`]: [`Device::wait_semaphores`] blocking on
+    /// the CPU until that counter arrives.
+    CpuWait,
+}
+
+/// Drives one `claim` about a timeline semaphore and reports what happened.
+///
+/// Owns the sequence
+/// [`a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it`] used
+/// to spell inline, so the capability table and that test assert the same thing
+/// rather than two copies of it: create with a non-zero initial value, signal a
+/// higher one from a submission, and observe it.
+///
+/// # What each outcome means
+///
+/// * [`Exercise::Refused`] — `create_semaphore` would not hand out a timeline,
+///   which is what `crcbl-dx12` does and what any device without
+///   [`Features::TIMELINE_SEMAPHORE`] must do. Both claims refuse there for the
+///   same reason: there is no counter to read and none to wait on.
+/// * [`Exercise::SilentlyIgnored`] — a handle came back and the value never
+///   arrived. [`Capability::TimelineSemaphore`]'s own documentation names this
+///   as the failure it exists to catch ("a backend that hands out a handle whose
+///   value never moves has not got this, whatever its return codes say"), and
+///   the wait's equivalent is `Ok(false)`: the seam calls a timeout a normal
+///   outcome, so it is not an error, but a wait that timed out on a value
+///   already submitted observed nothing.
+/// * [`Exercise::Worked`] — the counter moved to what the submission signalled.
+fn exercise_timeline(headless: &Headless, claim: TimelineClaim) -> Exercise {
     /// What the semaphore is created holding. Non-zero, so a backend that
     /// ignored `initial_value` and started at zero is visible immediately.
     const INITIAL: u64 = 5;
@@ -1931,35 +2006,16 @@ fn a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
     /// moves forwards.
     const SIGNALLED: u64 = 9;
 
-    let headless = Headless::open();
     let device = headless.device.as_ref();
-
-    let desc = crcbl::hal::SemaphoreDesc {
+    let timeline = match device.create_semaphore(&crcbl::hal::SemaphoreDesc {
         label: Some("crcbl hal seam e2e timeline"),
         kind: crcbl::hal::SemaphoreKind::Timeline {
             initial_value: INITIAL,
         },
+    }) {
+        Ok(timeline) => timeline,
+        Err(error) => return Exercise::Refused(error),
     };
-    if !device
-        .caps()
-        .features
-        .contains(Features::TIMELINE_SEMAPHORE)
-    {
-        let error = device
-            .create_semaphore(&desc)
-            .expect_err("a device that reports no timeline must not hand one out");
-        assert!(
-            matches!(error, HalError::Unsupported { .. }),
-            "a backend without timelines refuses by name, so a caller can branch on it \
-             rather than discovering a semaphore that never signals: {error}"
-        );
-        headless.finish();
-        return;
-    }
-
-    let timeline = device
-        .create_semaphore(&desc)
-        .expect("a timeline semaphore");
     assert_eq!(
         device
             .semaphore_value(timeline)
@@ -1985,29 +2041,38 @@ fn a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
         )
         .expect("a signal-only submission");
 
-    assert!(
-        device
-            .wait_semaphores(
-                &[crcbl::hal::SemaphoreWait {
-                    semaphore: timeline,
-                    value: SIGNALLED,
-                }],
-                SEMAPHORE_DEADLINE_NS,
-            )
-            .expect("waiting on a signal that was submitted is not a failure"),
-        "the submission signalled {SIGNALLED} and the wait timed out, so either the signal \
-         never reached the queue or the wait is not reading the same counter"
-    );
-    assert_eq!(
-        device
-            .semaphore_value(timeline)
-            .expect("a timeline has one"),
-        SIGNALLED,
-        "the CPU-side read disagrees with the wait that just succeeded"
-    );
+    let outcome = match claim {
+        TimelineClaim::CpuWait => match device.wait_semaphores(
+            &[crcbl::hal::SemaphoreWait {
+                semaphore: timeline,
+                value: SIGNALLED,
+            }],
+            SEMAPHORE_DEADLINE_NS,
+        ) {
+            Ok(true) => Exercise::Worked,
+            Ok(false) => Exercise::SilentlyIgnored,
+            Err(error) => Exercise::Refused(error),
+        },
+        // `wait_idle` rather than the wait above, so the counter is read on its
+        // own: a backend whose CPU wait is the thing that is missing must still
+        // fail this claim only if the *value* did not move.
+        TimelineClaim::Counter => {
+            device.wait_idle().expect("idle");
+            match device.semaphore_value(timeline) {
+                Ok(SIGNALLED) => Exercise::Worked,
+                Ok(INITIAL) => Exercise::SilentlyIgnored,
+                Ok(value) => panic!(
+                    "the submission signalled {SIGNALLED} and the timeline reads {value}, which \
+                     is neither that nor the {INITIAL} it was created with — the counter moved \
+                     and moved to the wrong place"
+                ),
+                Err(error) => Exercise::Refused(error),
+            }
+        }
+    };
 
     device.destroy_semaphore(timeline);
-    headless.finish();
+    outcome
 }
 
 // --- the capability seam ----------------------------------------------------
@@ -2175,6 +2240,291 @@ fn exercise_fill(headless: &Headless, value: u32) -> Exercise {
     device.destroy_buffer(staging);
     device.destroy_buffer(target);
     device.destroy_buffer(prime);
+    outcome
+}
+
+/// The colour format the image-to-image exercise moves.
+///
+/// `crcbl-webgpu`'s copy-chain probe — the browser-side copy of this same claim,
+/// `probe_copychain_image_desc` — moves `Rgba8Unorm`, and this follows it rather
+/// than picking a second format: it is the one colour format every API on this
+/// seam stores as four tightly packed bytes with no reinterpretation, so a texel
+/// that came back changed is the copy's doing and not a conversion's.
+const IMAGE_COPY_FORMAT: Format = Format::Rgba8Unorm;
+
+/// Texels across the two images the exercise copies between.
+///
+/// **256 is what picks this number**, exactly as it picks
+/// [`DEPTH_COPY_WIDTH`]: the image is loaded and read back through buffer
+/// copies, and WebGPU — with `wgpu` behind it, which is a backend this suite
+/// runs — requires a buffer↔image copy's row pitch to be a multiple of 256
+/// bytes. An [`IMAGE_COPY_FORMAT`] row this wide is exactly 256 bytes.
+const IMAGE_COPY_WIDTH: u32 = 64;
+
+/// Rows the exercise copies.
+///
+/// More than one, so an image-to-image copy that moved a single row, or that
+/// read one image at the other's pitch, fails instead of passing on row 0.
+const IMAGE_COPY_HEIGHT: u32 = 4;
+
+/// The texel the destination image is primed with before the image-to-image
+/// copy.
+///
+/// [`FILL_POISON`]'s job for a texture: a destination that still holds this
+/// after `copy_image_to_image` proves the call was accepted and dropped rather
+/// than performed, which is the [`Exercise::SilentlyIgnored`] the seam's rule
+/// against a quiet no-op exists to catch. Distinct from [`POISON`] as well as
+/// from the pattern, so "the destination was never overwritten" stays separable
+/// from "nothing reached the readback at all".
+const IMAGE_COPY_POISON: u32 = 0x3C3C_3C3C;
+
+/// Drives [`Capability::ImageToImageCopy`] and reports whether the destination
+/// image ended up holding what the source held.
+///
+/// # Why this creates its own images
+///
+/// The fixture's images are the swapchain's, which this suite does not own and
+/// cannot make a copy destination. Two `TRANSFER_SRC | TRANSFER_DST` images
+/// created here are the whole fixture the capability needs — nothing renders
+/// into either, so this asks about
+/// [`copy_image_to_image`](crcbl::hal::CommandEncoder::copy_image_to_image)
+/// alone rather than about a pass.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// The shape is `crcbl-webgpu`'s copy-chain probe (`probe.rs`'s
+/// `probe_copychain_*`, gated in the browser as group V of
+/// `web/tools/probe-groups.mjs`): a pattern goes into a source image, the source
+/// is copied to a destination image, and the destination is copied back out to a
+/// buffer and read. The browser's copy relies on a fresh WebGPU texture being
+/// zero-initialised to tell a dropped copy from a performed one; nothing on this
+/// seam promises that, so the destination is **primed** with
+/// [`IMAGE_COPY_POISON`] through a buffer→image copy of its own first. That is
+/// what makes the three outcomes separable, and every one of them is closed:
+///
+/// * the pattern in the readback means both copies ran — [`Exercise::Worked`];
+/// * [`IMAGE_COPY_POISON`] means the prime landed and the image-to-image copy
+///   was accepted and dropped — [`Exercise::SilentlyIgnored`];
+/// * an error out of [`finish`](crcbl::hal::CommandEncoder::finish) means it was
+///   refused, which is what `crcbl-dx12` does.
+///
+/// Every texel of the pattern differs from every other, so a copy that moved
+/// row 0 into every row, or that read either image at the wrong pitch, comes
+/// back as values that are neither the pattern nor the poison and panics rather
+/// than passing.
+fn exercise_image_to_image_copy(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let texels = (IMAGE_COPY_WIDTH * IMAGE_COPY_HEIGHT) as usize;
+    let bytes = (texels * 4) as u64;
+
+    // An odd multiplier, so no two of these texels are equal: a repeated row and
+    // a shifted pitch are both visible in the comparison rather than folded into
+    // it.
+    let pattern: Vec<u8> = (0..texels)
+        .flat_map(|index| ((index as u32).wrapping_mul(2_654_435_761) ^ 0x5AA5_0FF0).to_le_bytes())
+        .collect();
+    // The premise the SilentlyIgnored arm rests on. A pattern texel that
+    // happened to equal the poison would make a dropped copy read back as a
+    // performed one for that texel, which is the exact confusion the priming
+    // exists to remove.
+    assert!(
+        pattern
+            .chunks_exact(4)
+            .all(|texel| texel != IMAGE_COPY_POISON.to_le_bytes()),
+        "a texel of this exercise's pattern equals IMAGE_COPY_POISON ({IMAGE_COPY_POISON:#010x}), \
+         so a copy that was dropped and one that ran are no longer distinguishable"
+    );
+    let primer: Vec<u8> = IMAGE_COPY_POISON
+        .to_le_bytes()
+        .iter()
+        .copied()
+        .cycle()
+        .take(bytes as usize)
+        .collect();
+
+    let host_buffer = |label, usage, memory| BufferDesc {
+        label: Some(label),
+        size: bytes,
+        usage,
+        memory,
+    };
+    let upload = device
+        .create_buffer(&host_buffer(
+            "image copy upload",
+            BufferUsage::TRANSFER_SRC,
+            MemoryLocation::HostUpload,
+        ))
+        .expect("a host-upload buffer");
+    let prime = device
+        .create_buffer(&host_buffer(
+            "image copy prime",
+            BufferUsage::TRANSFER_SRC,
+            MemoryLocation::HostUpload,
+        ))
+        .expect("a host-upload buffer");
+    let staging = device
+        .create_buffer(&host_buffer(
+            "image copy staging",
+            BufferUsage::TRANSFER_DST,
+            MemoryLocation::HostReadback,
+        ))
+        .expect("a host-readback buffer");
+    device
+        .write_buffer(upload, 0, &pattern)
+        .expect("a host-upload buffer is what write_buffer is for");
+    device
+        .write_buffer(prime, 0, &primer)
+        .expect("a host-upload buffer is what write_buffer is for");
+
+    let describe = |label| ImageDesc {
+        label: Some(label),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(IMAGE_COPY_WIDTH, IMAGE_COPY_HEIGHT),
+        format: IMAGE_COPY_FORMAT,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+    };
+    let source = device
+        .create_image(&describe("image copy source"))
+        .expect("a transfer-only colour image");
+    let destination = device
+        .create_image(&describe("image copy destination"))
+        .expect("a transfer-only colour image");
+
+    let subresource = ImageSubresourceLayers {
+        aspect: ImageAspect::COLOR,
+        mip: 0,
+        base_layer: 0,
+        layer_count: 1,
+    };
+    // Whole-subresource, tightly packed and at offset zero, for the same reason
+    // the depth exercise's copies are: the row pitch and the buffer offset both
+    // carry alignments a partial copy would have to satisfy by hand.
+    let buffer_copy = |buffer, image| BufferImageCopy {
+        buffer,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image,
+        image_subresource: subresource,
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(IMAGE_COPY_WIDTH, IMAGE_COPY_HEIGHT),
+    };
+    let range = ImageSubresourceRange {
+        aspect: ImageAspect::COLOR,
+        base_mip: 0,
+        mip_count: 1,
+        base_layer: 0,
+        layer_count: 1,
+    };
+    let barrier = |image, from, to| ImageBarrier::new(image, range, from, to);
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("image copy exercise"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        images: &[
+            barrier(source, ResourceState::Undefined, ResourceState::TransferDst),
+            barrier(
+                destination,
+                ResourceState::Undefined,
+                ResourceState::TransferDst,
+            ),
+        ],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_image(&buffer_copy(upload, source));
+    encoder.copy_buffer_to_image(&buffer_copy(prime, destination));
+    // The destination stays a transfer destination across its second write, so
+    // this pair is the write-after-write barrier between the prime and the copy
+    // under test — the same shape `exercise_fill` puts between its prime and its
+    // fill.
+    encoder.pipeline_barrier(&Barriers {
+        images: &[
+            barrier(
+                source,
+                ResourceState::TransferDst,
+                ResourceState::TransferSrc,
+            ),
+            barrier(
+                destination,
+                ResourceState::TransferDst,
+                ResourceState::TransferDst,
+            ),
+        ],
+        ..Barriers::default()
+    });
+    encoder.copy_image_to_image(&ImageCopy {
+        src: source,
+        src_subresource: subresource,
+        src_offset: Offset3d { x: 0, y: 0, z: 0 },
+        dst: destination,
+        dst_subresource: subresource,
+        dst_offset: Offset3d { x: 0, y: 0, z: 0 },
+        extent: Extent3d::d2(IMAGE_COPY_WIDTH, IMAGE_COPY_HEIGHT),
+    });
+    encoder.pipeline_barrier(&Barriers {
+        images: &[barrier(
+            destination,
+            ResourceState::TransferDst,
+            ResourceState::TransferSrc,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_image_to_buffer(&buffer_copy(staging, destination));
+
+    let outcome = match encoder.finish() {
+        Err(error) => Exercise::Refused(error),
+        Ok(commands) => {
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+
+            let mut read = poisoned(bytes as usize);
+            headless.readback(staging, bytes, &mut read);
+            if read == pattern {
+                Exercise::Worked
+            } else if read == primer {
+                Exercise::SilentlyIgnored
+            } else if read.iter().all(|byte| *byte == POISON) {
+                // Not a capability verdict: the prime is a buffer→image copy and
+                // the read is an image→buffer one, and every backend here
+                // performs both. All-poison means neither reached the staging
+                // buffer, so this exercise is broken rather than the
+                // image-to-image copy refused.
+                panic!(
+                    "the staging buffer still holds {POISON:#04x} in all {bytes} bytes, so \
+                     nothing was copied out of the destination image at all — neither the prime \
+                     nor the readback landed, and this exercise proves nothing about \
+                     copy_image_to_image either way"
+                );
+            } else {
+                let wrong = read
+                    .iter()
+                    .zip(&pattern)
+                    .position(|(got, want)| got != want)
+                    .expect("the two differ, so some byte differs");
+                panic!(
+                    "the destination image came back changed: byte {wrong} of {bytes} is {:#04x} \
+                     and the source held {:#04x}. It is neither the pattern nor the \
+                     {IMAGE_COPY_POISON:#010x} the destination was primed with, so the copy moved \
+                     something and moved the wrong thing — a pitch, an offset or a subresource \
+                     one side read differently from the other.",
+                    read[wrong], pattern[wrong],
+                );
+            }
+        }
+    };
+
+    device.destroy_image(destination);
+    device.destroy_image(source);
+    device.destroy_buffer(staging);
+    device.destroy_buffer(prime);
+    device.destroy_buffer(upload);
     outcome
 }
 
@@ -2840,10 +3190,7 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::BufferFillRepeatedByte => exercise_fill(headless, 0xABAB_ABAB),
         // Four different bytes: what only a word-wide fill can encode.
         C::BufferFillWord => exercise_fill(headless, 0x1234_5678),
-        C::ImageToImageCopy => Exercise::Unexercised(
-            "needs two images with matching formats and a readback of the destination; the \
-             fixture's images are swapchain-owned",
-        ),
+        C::ImageToImageCopy => exercise_image_to_image_copy(headless),
         C::DepthImageCopy => exercise_depth_image_copy(headless),
         C::MsaaResolveAttachment => Exercise::Unexercised(NEEDS_MSAA_TARGET),
         C::StencilReference => Exercise::Unexercised(NEEDS_PIPELINE),
@@ -2869,9 +3216,17 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::PipelineStatisticsQuery => {
             exercise_query_set_creation(headless, QueryKind::PipelineStatistics)
         }
-        C::TimelineSemaphore | C::BinarySemaphore | C::CpuTimelineWait => Exercise::Unexercised(
-            "covered by a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it, which \
-             asserts the same claim directly rather than through this table",
+        C::TimelineSemaphore => exercise_timeline(headless, TimelineClaim::Counter),
+        C::CpuTimelineWait => exercise_timeline(headless, TimelineClaim::CpuWait),
+        // **Not covered by the timeline test**, which creates only a
+        // `SemaphoreKind::Timeline` — the enum keeps the two apart precisely
+        // because a device with no timeline must still hand out a binary one,
+        // and the timeline test would pass either way.
+        C::BinarySemaphore => Exercise::Unexercised(
+            "the observable claim is ordering between two submissions, and on a one-queue \
+             backend a dropped binary semaphore is indistinguishable from an honoured one \
+             because submission order already provides it; creation alone would assert that a \
+             handle came back and nothing about what it does",
         ),
         C::TimelineWaitBeforeSignal => Exercise::Unexercised(NEEDS_TWO_SUBMISSIONS),
     }
