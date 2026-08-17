@@ -9834,83 +9834,31 @@ a `libaddr2line` conflict, but the target's std is present in the toolchain
 sysroot and builds fine — rustup's metadata is out of step with its own files,
 so believe `cargo build --target wasm32-unknown-unknown`, not `rustup`.
 
-## The WebGPU parity gate: 2/11 scenes match, one shading bug left
+## The WebGPU parity gate passes — wire it into CI
 
 `./web/run-render-harness-e2e.sh` drives all eleven golden `Scene`s through
 `crcbl-webgpu` in headless Chromium, reads each frame back, and compares it
 against `crcbl/tests/golden/<name>.png` with `crcbl-golden`'s comparator at
-`Tolerance::RASTERISER`. **All eleven render with zero device errors**, and
-`sprite` and `ui` **match** at max channel delta 1 — so the gate's green branch
-is now observed end to end, not merely its red one.
+`Tolerance::RASTERISER`. **All eleven match** on this machine's GPU; `dunes` and
+`probes` are pixel-identical, and the three with any residual (`spot_shadow`,
+`point_shadow`, `ssr`) differ only on shadow-comparison and march-crossing
+pixels, inside tolerance. The gate exits 0.
 
-Closed since this was first written: the missing `requiredLimits`, the stencil
-ops on a depth-only attachment, and the linear offscreen swapchain format.
+**What is owed: a CI step.** The gate is still not wired in, and the reason is
+no longer that it fails — it is that a CI runner has no GPU, and SwiftShader's
+storage-buffer ceiling stops nine of the eleven scenes from drawing at all (see
+the ceiling entry below). Two ways forward, and they are not exclusive:
 
-### What is left: a shading discontinuity at exactly half the frame
+- **Wire it now for the two scenes SwiftShader can draw** (`sprite`, `ui`). That
+  needs a scene filter on the harness — it drives `GreyboxSprite::ALL`-style
+  whole-set today — and would catch a regression in the 2D path, the offscreen
+  surface, the readback and the comparator, which is most of the machinery.
+- **Split the draw-args bind group** so the forward path fits the guaranteed
+  floor, after which all eleven run on a software adapter and the gate covers
+  the whole set in CI. That is the durable answer.
 
-The other nine scenes draw correct geometry — `dunes` is recognisably the golden
-terrain — but the shading breaks on an exact half-frame boundary, **x = 128** of
-256 for `dunes`/`spot_shadow`/`ao` and additionally **y = 96** of 192 for `ao`.
-In `dunes` the left half is nearly black against a uniformly lit golden.
-Residual error per quadrant leaves one quadrant essentially exact while the
-others are far off, and _which_ quadrant is correct differs per scene:
-
-| scene  | TL    | TR       | BL    | BR       |
-| ------ | ----- | -------- | ----- | -------- |
-| dunes  | 7.84  | 2.96     | 27.83 | **0.37** |
-| spot   | 17.02 | **0.86** | 44.94 | 32.22    |
-| ao     | 15.81 | 8.27     | 44.11 | 28.11    |
-| probes | 24.73 | 7.11     | 72.60 | 46.22    |
-
-The same scenes pass on vk, mtl and dx12, so this is WebGPU-only.
-
-**Measured, and it rules out the obvious causes.** x=128 and y=96 are exactly
-**NDC x=0 and NDC y=0** — the frustum-centre planes, not tile boundaries. There
-are exactly two seams in the whole frame and nothing anywhere else: in a flat
-interior region of `lights` there is one column jump and one row jump, nothing
-at 64/192 or y=64/128, against a noise floor where a 1-LSB seam would still
-show. Within each quadrant the error is a near-pure **per-channel multiplier on
-radiance**, one quadrant fitting 1.0000 exactly. It scales the **direct** term
-too: in `spot`'s worst quadrant the ratio climbs only 0.164 -> 0.296 from
-ambient background to the centre of the spot pool, where a missing light would
-collapse the pool to ambient and an ambient-only bug would leave it at 1.0.
-
-Falsified with cited evidence, so do not re-derive them:
-
-- **Workgroup-size divergence.** Every compute entry declares `64,1,1` on every
-  target and `CLUSTER_WORKGROUP_SIZE` agrees; no dispatch derives its extent
-  from the render extent, and the stream passes x/y/z through untransformed.
-- **Cluster-grid indexing.** The grid is 4x3x24 at `CLUSTER_TILE_PIXELS = 64`
-  for this frame, and no scalar tile size puts boundaries at x=128 and y=96 and
-  nowhere else. Builder and reader share one `Grid` value.
-- **Half-resolution buffers.** SSAO/SSR take their size from
-  `textureDimensions`, and `dunes`/`probes` show the seam without using AO.
-
-**The live lead**, and a caution against assuming it: nothing in `mesh.wgsl`'s
-fragment stage consumes NDC — its only screen-space input is
-`@builtin(position)`, which is correctly declared. But `cube` spans the frame
-centre and shows a flat multiplier with **no quadrant structure at all**, which
-is what you would expect if the boundary lives in **view space** rather than
-screen space: for a centred camera the view planes x=0 and y=0 project to
-exactly screen x=128 and y=96. So a selection keyed on the sign of a view- or
-world-space coordinate — a cube-map face, a cascade region, a probe octant —
-fits the picture as well as a bad pixel coordinate does. The experiment that
-splits them is to write a screen-space ramp to `lit` and read it back on both
-backends.
-
-### Coverage the gate still does not have
-
-- **CI cannot run the nine forward scenes.** They need more storage buffers per
-  stage than SwiftShader offers — see the ceiling entry below. Only `sprite` and
-  `ui` are reachable on a CI runner; the numbers above come from running the
-  gate against this machine's GPU with
-  `CRCBL_CHROMIUM_FLAGS="--ignore-gpu-blocklist --use-angle=vulkan --use-webgpu-adapter=default --use-vulkan=native"`.
-- **The gate is not wired into CI at all yet**, deliberately, because it exits 1
-  while nine scenes fail. Wire it once they pass — or wire it now restricted to
-  the two scenes that do, which would at least catch a regression in them.
-- The read-only depth-stencil path and the stencil-ful attachment branch are
-  covered by the node replay gate only; no golden scene exercises either on real
-  hardware.
+Until one of them lands, the eleven-scene result is a thing someone ran by hand
+on hardware, not a thing CI defends — so it can silently regress.
 
 ## The forward path binds more storage buffers than WebGPU guarantees
 
