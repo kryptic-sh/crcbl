@@ -39,14 +39,15 @@ use ash::{ext, khr, vk};
 use crcbl_core::{Handle, Pool};
 use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
-    BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
-    CommandEncoder, CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
-    DeviceCaps, DeviceDesc, DisplayTiming, Features, Format, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageViewDesc, ImageViewHandle,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QueryKind, QuerySetDesc,
-    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
-    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait,
-    ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
+    BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, Capability,
+    CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
+    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming, Features, Format,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageViewDesc,
+    ImageViewHandle, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
+    QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
+    ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind,
+    SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support, SurfaceError,
+    SwapchainDesc, SwapchainHandle,
 };
 
 use crate::adapter::AdapterRecord;
@@ -1513,6 +1514,109 @@ fn not_yet(what: &'static str) -> HalError {
 impl Device for VkDevice {
     fn backend(&self) -> BackendKind {
         BackendKind::Vulkan
+    }
+
+    /// What this backend does with each seam behaviour.
+    ///
+    /// **Vulkan is the reference implementation**, so almost every arm is
+    /// [`Support::Yes`] and the rest are the device's own report rather than
+    /// this backend's limits — `crcbl-vk` refuses a capability only where the
+    /// adapter said the device has not got it, which is
+    /// [`crcbl_hal::Features`] doing its job and not a divergence. That is why
+    /// `crcbl_hal::DIVERGENCES` names Vulkan nowhere.
+    ///
+    /// Exhaustive with no wildcard arm, and `deny`-ed as such: a capability
+    /// added to the enum must be answered here, and an arm that swept the rest
+    /// under a `_` would put this backend back where the enum found it.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn supports(&self, capability: Capability) -> Support {
+        let has = self.inner.caps.features;
+        let gated = |feature: Features, why: &'static str| -> Support {
+            Support::granted(has, feature, why)
+        };
+
+        match capability {
+            // `vkCmdFillBuffer` takes a `uint32_t` and writes it whole, which is
+            // the seam's own wording and the reason the three fill capabilities
+            // are separable at all: this is the backend that has all three.
+            Capability::BufferFillZero
+            | Capability::BufferFillRepeatedByte
+            | Capability::BufferFillWord => Support::Yes,
+            Capability::ImageToImageCopy => Support::Yes,
+            // `VkRenderingAttachmentInfo` carries `resolveImageView` and
+            // `resolveMode`, filled from `ColorAttachment::resolve`.
+            Capability::MsaaResolveAttachment => Support::Yes,
+            Capability::StencilReference => Support::Yes,
+            Capability::DrawIndirectCount => gated(
+                Features::DRAW_INDIRECT_COUNT,
+                "this device reports no DRAW_INDIRECT_COUNT, so vkCmdDrawIndirectCount is not \
+                 available on it",
+            ),
+            // `vkCmdDrawIndirect` takes `stride` and honours it.
+            Capability::IndirectArgumentPaddedStride => Support::Yes,
+            Capability::MeshShading => gated(
+                Features::MESH_SHADER,
+                "this device reports no MESH_SHADER, so VK_EXT_mesh_shader was not enabled on it",
+            ),
+            Capability::TaskShaderStage => gated(
+                Features::TASK_SHADER,
+                "this device reports no TASK_SHADER, so its mesh-shader extension has no task \
+                 stage",
+            ),
+            // Refused per *layout*, on the UPDATE_AFTER_BIND flag the caller
+            // built it with — writing a set a pending command buffer might
+            // reference is otherwise undefined behaviour. The operation exists.
+            Capability::UpdateBindGroup => Support::Yes,
+            Capability::PushConstants => gated(
+                Features::PUSH_CONSTANTS,
+                "this device reports no PUSH_CONSTANTS",
+            ),
+            Capability::BindlessDescriptorArray => gated(
+                Features::DESCRIPTOR_INDEXING,
+                "this device reports no DESCRIPTOR_INDEXING, so it has no runtime-sized descriptor \
+                 array",
+            ),
+            Capability::StorageImageBinding => Support::Yes,
+            Capability::PolygonModeLine => gated(
+                Features::POLYGON_MODE_LINE,
+                "this device reports no POLYGON_MODE_LINE, so `fillModeNonSolid` was not enabled \
+                 on it",
+            ),
+            Capability::DepthClamp => gated(
+                Features::DEPTH_CLAMP,
+                "this device reports no DEPTH_CLAMP, so `depthClamp` was not enabled on it",
+            ),
+            Capability::SamplerAnisotropy => gated(
+                Features::SAMPLER_ANISOTROPY,
+                "this device reports no SAMPLER_ANISOTROPY, so `samplerAnisotropy` was not enabled \
+                 on it",
+            ),
+            Capability::TimestampQuery => gated(
+                Features::TIMESTAMP_QUERY,
+                "this device reports no TIMESTAMP_QUERY",
+            ),
+            Capability::OcclusionQuery => gated(
+                Features::OCCLUSION_QUERY,
+                "this device reports no OCCLUSION_QUERY",
+            ),
+            Capability::PipelineStatisticsQuery => gated(
+                Features::PIPELINE_STATISTICS_QUERY,
+                "this device reports no PIPELINE_STATISTICS_QUERY",
+            ),
+            // `crcbl-vk` requires Vulkan 1.3, where `timelineSemaphore` is core,
+            // so the flag is reported by every device this backend opens — but
+            // the answer is still the device's rather than a constant, because a
+            // backend claiming a capability its own caps deny is the exact lie
+            // this enum exists to catch.
+            Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
+                Features::TIMELINE_SEMAPHORE,
+                "this device reports no TIMELINE_SEMAPHORE",
+            ),
+            Capability::BinarySemaphore => Support::Yes,
+            // A real `VkSemaphore` blocks until somebody signals it, so a wait
+            // may be recorded or submitted before the signal exists.
+            Capability::TimelineWaitBeforeSignal => Support::Yes,
+        }
     }
 
     fn caps(&self) -> DeviceCaps {

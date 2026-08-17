@@ -203,6 +203,7 @@
 //! # Ok::<(), crcbl_hal::HalError>(())
 //! ```
 
+pub mod capability;
 pub mod caps;
 pub mod command;
 pub mod device;
@@ -218,6 +219,7 @@ pub mod swapchain;
 pub mod sync;
 pub mod threading;
 
+pub use capability::{Capability, DIVERGENCES, Divergence, Support, divergence, is_parity_gap};
 pub use caps::{
     AdapterId, AdapterInfo, BackendKind, BindingModel, DeviceCaps, DeviceType, Downgrade,
     Downgrades, Features, GeometryPath, LightingPath, Limits, SelectedPath, downgrades,

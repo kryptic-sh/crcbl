@@ -37,15 +37,15 @@ use std::time::{Duration, Instant};
 use crcbl_core::{Handle, Pool};
 use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
-    BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, BufferUsage,
+    BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, BufferUsage, Capability,
     CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
     ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming, Features, Format,
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageType,
     ImageViewDesc, ImageViewHandle, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle,
     PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
     ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
-    SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, SurfaceError,
-    SwapchainDesc, SwapchainHandle,
+    SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support,
+    SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -1000,6 +1000,100 @@ impl Device for MetalDevice {
 
     fn caps(&self) -> DeviceCaps {
         self.inner.caps
+    }
+
+    /// What this backend does with each seam behaviour.
+    ///
+    /// Two kinds of refusal live here and the reasons keep them apart, because
+    /// the answer to "should this be fixed?" is opposite:
+    ///
+    /// * **Metal has not got it.** The GPU-side draw count and the byte-wide
+    ///   buffer fill are the API, not this crate, and no slice will change them.
+    /// * **This crate has not built it.** Mesh pipelines and query sets exist in
+    ///   Metal and are owed here; the reason names the slice that owes them.
+    ///
+    /// Exhaustive with no wildcard arm, and `deny`-ed as such: a capability
+    /// added to the enum must be answered here.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn supports(&self, capability: Capability) -> Support {
+        let has = self.inner.caps.features;
+        let gated = |feature: Features, why: &'static str| -> Support {
+            Support::granted(has, feature, why)
+        };
+
+        match capability {
+            // `MTLBlitCommandEncoder fillBuffer:range:value:` takes a `uint8_t`,
+            // so a word whose bytes agree has an encoding and one whose bytes
+            // differ has none. This is the backend that makes the three fill
+            // capabilities three rather than one.
+            Capability::BufferFillZero | Capability::BufferFillRepeatedByte => Support::Yes,
+            Capability::BufferFillWord => Support::No(
+                "MTLBlitCommandEncoder fillBuffer:range:value: repeats a single byte, so only a \
+                 u32 whose four bytes are equal has an encoding",
+            ),
+            Capability::ImageToImageCopy => Support::Yes,
+            // `MTLRenderPassColorAttachmentDescriptor` carries `resolveTexture`
+            // and a `MTLStoreAction` that resolves.
+            Capability::MsaaResolveAttachment => Support::Yes,
+            Capability::StencilReference => Support::Yes,
+            Capability::DrawIndirectCount => Support::No(
+                "Metal's only GPU-side count is an MTLIndirectCommandBuffer whose commands a \
+                 compute pass must encode before the render pass begins (the Metal ICB slice)",
+            ),
+            // A multi-draw is a loop over the argument structures, so a stride
+            // larger than one of them is exactly what the loop steps by.
+            Capability::IndirectArgumentPaddedStride => Support::Yes,
+            Capability::MeshShading => Support::No(
+                "Metal has the object/mesh stages and Slang emits them, but this backend builds \
+                 no MTLMeshRenderPipelineDescriptor (the Metal mesh slice)",
+            ),
+            Capability::TaskShaderStage => Support::No(
+                "no mesh pipeline to put an object stage in front of (the Metal mesh slice)",
+            ),
+            Capability::UpdateBindGroup => Support::Yes,
+            Capability::PushConstants => Support::No(
+                "setVertexBytes:length:atIndex: is Metal's closest fit, and the committed MSL puts \
+                 its push-constant block at buffer(0) — ahead of every bound buffer, which no \
+                 flattening of this descriptor can reproduce",
+            ),
+            Capability::BindlessDescriptorArray => Support::No(
+                "this backend binds Metal's flat argument tables, which have a fixed length and \
+                 no runtime-sized array (the Metal argument-buffer slice)",
+            ),
+            Capability::StorageImageBinding => Support::Yes,
+            Capability::PolygonModeLine => gated(
+                Features::POLYGON_MODE_LINE,
+                "this device reports no POLYGON_MODE_LINE",
+            ),
+            Capability::DepthClamp => {
+                gated(Features::DEPTH_CLAMP, "this device reports no DEPTH_CLAMP")
+            }
+            Capability::SamplerAnisotropy => gated(
+                Features::SAMPLER_ANISOTROPY,
+                "this device reports no SAMPLER_ANISOTROPY",
+            ),
+            // One refusal, three capabilities: `create_query_set` is not built
+            // at all, because `supportsCounterSampling:` answers per sampling
+            // point and the seam's query set does not describe one.
+            Capability::TimestampQuery
+            | Capability::OcclusionQuery
+            | Capability::PipelineStatisticsQuery => Support::No(
+                "no query sets are built on this backend; supportsCounterSampling: answers per \
+                 sampling point, which the seam's query set does not describe (the Metal query \
+                 slice)",
+            ),
+            // `MTLSharedEvent` is the seam's timeline almost verbatim.
+            Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
+                Features::TIMELINE_SEMAPHORE,
+                "this device reports no TIMELINE_SEMAPHORE",
+            ),
+            Capability::BinarySemaphore => Support::Yes,
+            Capability::TimelineWaitBeforeSignal => Support::No(
+                "this backend runs one queue and the seam gives no way to signal an MTLSharedEvent \
+                 from the CPU, so only an earlier submission can satisfy such a wait — it would \
+                 stop the queue rather than wait",
+            ),
+        }
     }
 
     /// The graphics queue, and only ever the graphics queue.

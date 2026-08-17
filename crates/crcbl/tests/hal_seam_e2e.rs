@@ -86,6 +86,13 @@ const CLEAR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
 /// that nothing was copied over it.
 const POISON: u8 = 0xA5;
 
+/// The optional features [`Headless::open`] asks for.
+///
+/// The set a renderer actually wants, so the fixture exercises the device a
+/// frame would get. [`Headless::open_with_every_optional_feature`] is the one
+/// exception and says why it needs a wider ask.
+const DEFAULT_OPTIONAL: Features = Features::GPU_DRIVEN.union(Features::TIMESTAMP_QUERY);
+
 /// A readback destination of `len` bytes, filled with [`POISON`].
 fn poisoned(len: usize) -> Vec<u8> {
     vec![POISON; len]
@@ -197,6 +204,23 @@ impl Headless {
     }
 
     fn open_with(extent: (u32, u32), image_count: u32) -> Self {
+        Self::open_full(extent, image_count, DEFAULT_OPTIONAL)
+    }
+
+    /// The fixture with **every** optional feature asked for.
+    ///
+    /// What the capability tests open, and the distinction matters there and
+    /// nowhere else: a device is granted the intersection of what the adapter
+    /// has and what the caller *asked for*, so a feature nobody requested reads
+    /// back identically to one the adapter lacks. Every other test in this file
+    /// wants the narrow ask, because it is the ask a renderer makes; the parity
+    /// report wants the wide one, or it reports this fixture's shopping list as
+    /// though it were the hardware's limits.
+    fn open_with_every_optional_feature() -> Self {
+        Self::open_full(EXTENT, 2, Features::all())
+    }
+
+    fn open_full(extent: (u32, u32), image_count: u32, optional_features: Features) -> Self {
         let instance = instance();
         let adapter = select_adapter(instance.as_ref());
 
@@ -219,7 +243,7 @@ impl Headless {
                 // GPU and on a software rasteriser and the tests branch on what
                 // actually came back.
                 required_features: Features::empty(),
-                optional_features: Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY,
+                optional_features,
                 compatible_surface: Some(surface),
             })
             .expect("a device opens");
@@ -1982,5 +2006,409 @@ fn a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
     );
 
     device.destroy_semaphore(timeline);
+    headless.finish();
+}
+
+// --- the capability seam ----------------------------------------------------
+//
+// `crcbl_hal::Capability` is the enum every backend answers for through an
+// exhaustive `match`, so a seam behaviour added to one backend fails to compile
+// on the four that have not said what they do about it. That property is the
+// compiler's. What the compiler cannot check is whether an answer is *true* —
+// a backend claiming a capability it refuses at the call site, or refusing one
+// it never declared, compiles perfectly. These three tests are that half.
+
+/// What driving one [`Capability`] against a real device produced.
+///
+/// Four outcomes rather than two, because "accepted and did nothing" is a real
+/// failure mode this seam has had — a fill that returns cleanly and writes no
+/// bytes is indistinguishable from a working one at the return value, and only
+/// reading the memory back tells them apart. It is never a pass: the seam's own
+/// rule is that a backend fails loudly rather than dropping a request, so a
+/// silent no-op is wrong whether the capability was declared or not.
+#[derive(Debug)]
+enum Exercise {
+    /// The behaviour ran and produced what the seam documents.
+    Worked,
+    /// The behaviour was refused, carrying the error the backend gave.
+    Refused(HalError),
+    /// The call was accepted and nothing observable happened.
+    SilentlyIgnored,
+    /// Not drivable from this suite, with the reason stated rather than skipped.
+    Unexercised(&'static str),
+}
+
+/// The byte pattern a fill destination holds before the fill, so that a fill
+/// which did nothing is distinguishable from one that worked.
+///
+/// Not `0`, and not any of the fill values below: a destination that still holds
+/// this after a `fill_buffer` proves the call was dropped rather than performed.
+const FILL_POISON: u32 = 0x5A5A_5A5A;
+
+/// Drives [`CommandEncoder::fill_buffer`](crcbl::hal::CommandEncoder::fill_buffer)
+/// with `value` and reports what actually reached memory.
+///
+/// The destination is primed with [`FILL_POISON`] through a copy first, so the
+/// three outcomes are separable: the fill's value means it worked, the poison
+/// means the call was accepted and dropped, and an error out of `finish` means
+/// it was refused.
+fn exercise_fill(headless: &Headless, value: u32) -> Exercise {
+    const BYTES: u64 = 16;
+    let device = headless.device.as_ref();
+
+    let prime = device
+        .create_buffer(&BufferDesc {
+            label: Some("fill prime"),
+            size: BYTES,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a host-upload buffer");
+    let target = device
+        .create_buffer(&BufferDesc {
+            label: Some("fill target"),
+            size: BYTES,
+            usage: BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a device-local buffer");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("fill staging"),
+            size: BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+
+    let primer: Vec<u8> = FILL_POISON
+        .to_le_bytes()
+        .iter()
+        .copied()
+        .cycle()
+        .take(BYTES as usize)
+        .collect();
+    device
+        .write_buffer(prime, 0, &primer)
+        .expect("a host-upload buffer is what write_buffer is for");
+
+    let barrier = |buffer, from, to| crcbl::hal::BufferBarrier {
+        buffer,
+        from,
+        to,
+        queue_transfer: None,
+    };
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("fill exercise"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            target,
+            ResourceState::Undefined,
+            ResourceState::TransferDst,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: prime,
+        src_offset: 0,
+        dst: target,
+        dst_offset: 0,
+        size: BYTES,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            target,
+            ResourceState::TransferDst,
+            ResourceState::TransferDst,
+        )],
+        ..Barriers::default()
+    });
+    encoder.fill_buffer(target, 0, BYTES, value);
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            target,
+            ResourceState::TransferDst,
+            ResourceState::TransferSrc,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: target,
+        src_offset: 0,
+        dst: staging,
+        dst_offset: 0,
+        size: BYTES,
+    });
+
+    let outcome = match encoder.finish() {
+        Err(error) => Exercise::Refused(error),
+        Ok(commands) => {
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+
+            let mut bytes = poisoned(BYTES as usize);
+            headless.readback(staging, BYTES, &mut bytes);
+            let words: Vec<u32> = bytes
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                .collect();
+            if words.iter().all(|word| *word == value) {
+                Exercise::Worked
+            } else if words.iter().all(|word| *word == FILL_POISON) {
+                Exercise::SilentlyIgnored
+            } else {
+                panic!(
+                    "fill_buffer({value:#010x}) left {words:#010x?}, which is neither the value \
+                     asked for nor the {FILL_POISON:#010x} the destination was primed with — so \
+                     the fill wrote something, and wrote the wrong thing"
+                );
+            }
+        }
+    };
+
+    device.destroy_buffer(staging);
+    device.destroy_buffer(target);
+    device.destroy_buffer(prime);
+    outcome
+}
+
+/// Drives `capability` against this device, or says why it cannot be.
+///
+/// **Exhaustive with no wildcard arm**, so a capability added to
+/// [`crcbl::hal::Capability`] has to be given an exercise or an explicit reason
+/// it has none. That is what stops the coverage half of this mechanism rotting
+/// the way the capabilities themselves did: a new behaviour cannot arrive here
+/// as a silence.
+#[deny(clippy::wildcard_enum_match_arm)]
+fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise {
+    use crcbl::hal::Capability as C;
+
+    // Every reason below names what an exercise would need, not merely that
+    // there isn't one — an unexercised capability is a coverage gap, and a gap
+    // nobody can act on is worse than one nobody wrote down.
+    const NEEDS_PIPELINE: &str = "needs a graphics pipeline and committed shader artifacts for every backend; this suite \
+         has a compute probe and no raster one, and building one here would duplicate \
+         tests/render_e2e.rs's fixture rather than reuse it";
+    const NEEDS_MESH_ARTIFACTS: &str = "needs committed mesh/task shader artifacts per backend; only crcbl-vk can run one today, \
+         so an exercise would assert nothing on four of the five";
+    const NEEDS_MSAA_TARGET: &str = "needs a multisampled colour target and a pipeline that renders into it; the fixture's \
+         ring is single-sampled";
+    const NEEDS_TWO_SUBMISSIONS: &str = "needs a submission whose wait can outlive the test if the backend hangs rather than \
+         refuses, so driving it wants a timeout the seam's wait_semaphores only offers in \
+         nanoseconds and a backend that blocks in submit would deadlock this suite";
+
+    match capability {
+        C::BufferFillZero => exercise_fill(headless, 0),
+        // Four equal bytes: what Metal's byte-wide `fillBuffer:` can encode.
+        C::BufferFillRepeatedByte => exercise_fill(headless, 0xABAB_ABAB),
+        // Four different bytes: what only a word-wide fill can encode.
+        C::BufferFillWord => exercise_fill(headless, 0x1234_5678),
+        C::ImageToImageCopy => Exercise::Unexercised(
+            "needs two images with matching formats and a readback of the destination; the \
+             fixture's images are swapchain-owned",
+        ),
+        C::MsaaResolveAttachment => Exercise::Unexercised(NEEDS_MSAA_TARGET),
+        C::StencilReference => Exercise::Unexercised(NEEDS_PIPELINE),
+        C::DrawIndirectCount | C::IndirectArgumentPaddedStride => {
+            Exercise::Unexercised(NEEDS_PIPELINE)
+        }
+        C::MeshShading | C::TaskShaderStage => Exercise::Unexercised(NEEDS_MESH_ARTIFACTS),
+        C::UpdateBindGroup
+        | C::PushConstants
+        | C::BindlessDescriptorArray
+        | C::StorageImageBinding => Exercise::Unexercised(
+            "needs a bind-group layout built for the capability and a shader that reads it; the \
+             compute probe's layout is a fixed three-buffer one",
+        ),
+        C::PolygonModeLine | C::DepthClamp | C::SamplerAnisotropy => {
+            Exercise::Unexercised(NEEDS_PIPELINE)
+        }
+        C::TimestampQuery | C::OcclusionQuery | C::PipelineStatisticsQuery => {
+            Exercise::Unexercised(
+                "needs a query set and a resolve into a buffer; drivable here and not yet written",
+            )
+        }
+        C::TimelineSemaphore | C::BinarySemaphore | C::CpuTimelineWait => Exercise::Unexercised(
+            "covered by a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it, which \
+             asserts the same claim directly rather than through this table",
+        ),
+        C::TimelineWaitBeforeSignal => Exercise::Unexercised(NEEDS_TWO_SUBMISSIONS),
+    }
+}
+
+/// **A backend does what it says it does.** Both directions, per capability.
+///
+/// The half the compiler cannot check. `Device::supports` is an exhaustive
+/// `match`, so every backend has an *answer*; nothing in the type system makes
+/// the answer true. Here a declared capability must actually work and a declared
+/// refusal must actually refuse — a backend that claims a fill it drops fails,
+/// and so does one that quietly performs something it declared absent.
+///
+/// A capability with no exercise is reported by name, not skipped: the run
+/// prints what it covered and what it did not, so "this passed" never silently
+/// means "this asked nothing".
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn every_declared_capability_behaves_the_way_it_was_declared() {
+    use crcbl::hal::{Capability, Support};
+
+    let headless = Headless::open_with_every_optional_feature();
+    let backend = headless.device.backend();
+
+    let mut driven = 0usize;
+    let mut unexercised: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    for capability in Capability::ALL {
+        let declared = headless.device.supports(*capability);
+        let outcome = exercise(&headless, *capability);
+        match (&declared, &outcome) {
+            // The reason is printed, not counted. A coverage gap nobody can act
+            // on is worse than one nobody wrote down, so the run has to carry
+            // what an exercise would take rather than a tally.
+            (_, Exercise::Unexercised(why)) => {
+                unexercised.push(format!("{capability} ({why})"));
+            }
+            (Support::Yes, Exercise::Worked) | (Support::No(_), Exercise::Refused(_)) => {
+                driven += 1;
+            }
+            (Support::Yes, Exercise::Refused(error)) => failures.push(format!(
+                "{capability}: {backend} declares it supported and refused it — {error}"
+            )),
+            (Support::Yes, Exercise::SilentlyIgnored) => failures.push(format!(
+                "{capability}: {backend} declares it supported, accepted the call and changed \
+                 nothing. This is the failure the declaration exists to catch: every return value \
+                 said success."
+            )),
+            (Support::No(why), Exercise::Worked) => failures.push(format!(
+                "{capability}: {backend} declares it unsupported ({why}) and then performed it. \
+                 Either the declaration is stale or something else answered."
+            )),
+            (Support::No(why), Exercise::SilentlyIgnored) => failures.push(format!(
+                "{capability}: {backend} declares it unsupported ({why}) and dropped the call \
+                 silently instead of refusing it. The seam requires a loud refusal — a dropped \
+                 request is a wrong picture with a clean log."
+            )),
+        }
+
+        // A refusal must be nameable by a caller. `InvalidHandle` or a lost
+        // device would mean this exercise broke rather than the backend refused,
+        // which would make every `No` above pass for the wrong reason.
+        if let Exercise::Refused(error) = &outcome {
+            assert!(
+                matches!(
+                    error,
+                    HalError::Unsupported { .. } | HalError::InvalidDescriptor(_)
+                ),
+                "{capability}: {backend} refused with {error}, which is neither the \
+                 HalError::Unsupported the seam documents for \"this backend cannot\" nor the \
+                 InvalidDescriptor some backends still use for it. An InvalidHandle or a lost \
+                 device here means this exercise is broken, not the backend."
+            );
+        }
+    }
+
+    eprintln!(
+        "crcbl hal seam e2e: capability coverage on {backend}: {driven} driven, {} unexercised of \
+         {}. Not exercised here:\n  {}",
+        unexercised.len(),
+        Capability::ALL.len(),
+        unexercised.join("\n  "),
+    );
+    // The mismatches first, and the vacuity guard second. A backend that drops
+    // every exercised call has *both* problems at once, and reporting "nothing
+    // was driven" would hide the twenty lines saying which calls were dropped —
+    // which is what happened the first time this order was the other way round.
+    assert!(
+        failures.is_empty(),
+        "{} of {backend}'s capability declarations do not match what it does:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+    assert!(
+        driven > 0,
+        "no capability was driven at all, so this test asserted nothing about {backend}"
+    );
+
+    headless.finish();
+}
+
+/// **Divergence is deliberate or it is a bug.** The parity report.
+///
+/// Every capability this backend refuses must be accounted for: either the
+/// device itself reports the gating [`Features`] flag clear — which is
+/// `Features` doing its job and logged as a downgrade at device creation — or
+/// the pair is in `crcbl_hal::DIVERGENCES` with a written reason.
+///
+/// And the converse, which is what stops the list becoming a museum: a
+/// capability the list says this backend lacks, and which it turns out to have,
+/// fails until the entry is deleted.
+///
+/// The whole matrix is printed either way, so a CI log carries the report rather
+/// than only the verdict.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn the_parity_report_matches_the_reviewed_divergence_list() {
+    use crcbl::hal::{Capability, Support, divergence, is_parity_gap};
+
+    let headless = Headless::open_with_every_optional_feature();
+    let backend = headless.device.backend();
+    let features = headless.device.caps().features;
+
+    let mut unreviewed: Vec<String> = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+    let mut report = String::new();
+
+    for capability in Capability::ALL {
+        let declared = headless.device.supports(*capability);
+        let listed = divergence(*capability, backend);
+        report.push_str(&format!("\n  {capability:<30} {declared}"));
+
+        match declared {
+            Support::Yes => {
+                if let Some(entry) = listed {
+                    stale.push(format!(
+                        "{capability}: DIVERGENCES says {backend} lacks it — {} — and this device \
+                         has it. Delete the entry.",
+                        entry.why
+                    ));
+                }
+            }
+            Support::No(why) => {
+                if let Some(entry) = listed {
+                    report.push_str(&format!("  [reviewed: {}]", entry.why));
+                } else if is_parity_gap(*capability, backend, features) {
+                    unreviewed.push(format!(
+                        "{capability}: {backend} refuses it ({why}) on a device that reports \
+                         {:?}, and no DIVERGENCES entry says why. Add one with the reason, or fix \
+                         the backend.",
+                        capability.gating_feature()
+                    ));
+                } else {
+                    report.push_str("  [this device lacks the gating feature]");
+                }
+            }
+        }
+    }
+
+    eprintln!("crcbl hal seam e2e: capability parity on {backend}:{report}");
+    assert!(
+        unreviewed.is_empty(),
+        "{} unreviewed divergence(s) on {backend}:\n  {}",
+        unreviewed.len(),
+        unreviewed.join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "{} stale DIVERGENCES entr(ies) for {backend}:\n  {}",
+        stale.len(),
+        stale.join("\n  ")
+    );
+
     headless.finish();
 }

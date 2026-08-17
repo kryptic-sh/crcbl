@@ -51,6 +51,25 @@ pub enum BackendKind {
     Null,
 }
 
+impl BackendKind {
+    /// Whether this backend actually drives a GPU.
+    ///
+    /// [`Null`](Self::Null) records commands instead of executing them, so it is
+    /// outside the parity model in [`crate::capability`]: a recorder accepting
+    /// everything is not evidence that anything works, and listing it beside the
+    /// five real backends would make a parity sweep read one wider than it is.
+    ///
+    /// A `match` rather than `!matches!(self, Self::Null)`, so a backend added
+    /// later has to say which side it is on.
+    #[must_use]
+    pub const fn is_gpu(self) -> bool {
+        match self {
+            Self::Vulkan | Self::Wgpu | Self::WebGpu | Self::Metal | Self::Dx12 => true,
+            Self::Null => false,
+        }
+    }
+}
+
 impl fmt::Display for BackendKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {

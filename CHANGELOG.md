@@ -16,6 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_hal::Device` gained a required `supports` method, and every backend
+  must answer for every seam behaviour.** The new `crcbl_hal::Capability` enum
+  names one seam behaviour per variant — the three different `fill_buffer`
+  promises, the GPU-read draw count, a padded indirect stride, mesh and task
+  stages, update-after-bind, push constants, bindless arrays, storage-image
+  bindings, the three query kinds, the two semaphore kinds and the two kinds of
+  timeline wait — and `Device::supports(capability)` answers `Support::Yes` or
+  `Support::No(reason)` through an exhaustive `match` with no wildcard arm.
+
+  This is deliberately **not** a `Features` bit. `Features` stays what it is:
+  optional capabilities a _caller requests_ at device creation, negotiated per
+  device. A bitflag cannot make a _backend_ answer — a backend that never sets a
+  new bit compiles and silently reports the capability absent — so adding a
+  behaviour to one backend used to cost nothing anywhere else. Adding a
+  `Capability` variant is now a compile error in every backend until each one
+  says what it does about it.
+
+  Anyone implementing `crcbl_hal::Device` outside this workspace must add a
+  `supports` implementation. There is deliberately no default: a default would
+  restore exactly the silence the enum removes.
+
 - **A `wasm32` build links `crcbl-webgpu` and nothing else, and the browser no
   longer needs `wasm-bindgen`.** `crcbl-wgpu` is now a native-only dependency of
   the umbrella, so `crcbl`'s `webgpu` feature and `web/build.sh`'s
@@ -502,6 +523,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **A reviewed parity contract between the backends: `crcbl_hal::DIVERGENCES`.**
+  Every capability a backend knowingly lacks on every device it can open is a
+  listed `(capability, backend, why)` row — Metal's absent GPU-side draw count,
+  D3D12's missing buffer fill, `crcbl-wgpu`'s zero-only fill, WebGPU's immutable
+  bind groups, and thirty-odd more. `crcbl_hal::is_parity_gap` is the rule that
+  reads it: a refusal is accounted for when the device itself reports the gating
+  `Features` flag clear, or when the pair is on the list with a reason.
+
+  `crates/crcbl/tests/hal_seam_e2e.rs` enforces both directions against a real
+  device, so divergence stays possible and stops being accidental — a backend
+  that starts refusing something new fails until somebody writes down why, and a
+  backend that starts _supporting_ something listed fails until the row is
+  deleted. The same file drives the capability declarations against the
+  hardware: a backend that claims a behaviour and refuses it fails, one that
+  declares a behaviour absent and performs it fails, and one that accepts a call
+  and silently does nothing fails hardest — every return value says success,
+  which is how the `fill_buffer` divergence reached CI in the first place.
+
+  `crcbl_hal::BackendKind::is_gpu` is new alongside it: `Null` records rather
+  than executes, so it is outside the parity model.
 
 - **A glTF file now reaches pixels.**
   `crcbl_scene::gltf_render::build_render_scene` turns an imported `GltfScene`

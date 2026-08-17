@@ -26,14 +26,15 @@ use std::sync::Mutex;
 
 use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
-    BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
-    CommandEncoder, CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
-    DeviceCaps, DeviceRequestState, DisplayTiming, GraphicsPipelineDesc, GraphicsPipelineHandle,
-    HalError, ImageDesc, ImageHandle, ImageViewDesc, ImageViewHandle, MeshPipelineDesc,
-    PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc,
-    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
-    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreWait, ShaderModuleDesc,
-    ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
+    BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, Capability,
+    CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
+    ComputePipelineHandle, Device, DeviceCaps, DeviceRequestState, DisplayTiming, Features,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageViewDesc,
+    ImageViewHandle, MeshPipelineDesc, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle,
+    PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
+    ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
+    SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support, SurfaceError,
+    SwapchainDesc, SwapchainHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -302,6 +303,98 @@ impl Device for WebGpuDevice {
 
     fn caps(&self) -> DeviceCaps {
         self.caps
+    }
+
+    /// What this backend does with each seam behaviour.
+    ///
+    /// **The answer is about behaviour, not about return codes**, and on this
+    /// backend the two come apart more than anywhere else: a command crosses the
+    /// stream and the browser executes it a turn later, so a method can return
+    /// `Ok` here and be refused there. The semaphores are the clearest case —
+    /// [`create_semaphore`](Self::create_semaphore) hands out a handle and
+    /// [`semaphore_value`](Self::semaphore_value) answers `0` forever, so a
+    /// caller watching a counter advance never sees one, whatever the `Result`
+    /// said. This method reports the behaviour.
+    ///
+    /// A consequence worth stating: several refusals below are *declarations*
+    /// this crate cannot demonstrate, because the seam suite is a native binary
+    /// and this backend runs in a browser. The browser gate is what holds them
+    /// to it.
+    ///
+    /// Exhaustive with no wildcard arm, and `deny`-ed as such.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn supports(&self, capability: Capability) -> Support {
+        let has = self.caps.features;
+        let gated = |feature: Features, why: &'static str| -> Support {
+            Support::granted(has, feature, why)
+        };
+        const NO_VALUE_FILL: &str = "WebGPU's only fill is GPUCommandEncoder.clearBuffer, which writes zero; the stream \
+             carries the value so the replayer can refuse a non-zero one rather than write the \
+             wrong bytes";
+        const NO_MESH: &str = "WebGPU has no mesh stage";
+        const NOT_STREAMED: &str = "not yet wired into the WebGPU command stream";
+
+        match capability {
+            Capability::BufferFillZero => Support::Yes,
+            Capability::BufferFillRepeatedByte | Capability::BufferFillWord => {
+                Support::No(NO_VALUE_FILL)
+            }
+            Capability::ImageToImageCopy => Support::Yes,
+            Capability::MsaaResolveAttachment => Support::Yes,
+            Capability::StencilReference => Support::No(NOT_STREAMED),
+            Capability::DrawIndirectCount => {
+                Support::No("WebGPU has no count-buffer draw, and the stream has no tag for one")
+            }
+            Capability::IndirectArgumentPaddedStride => Support::No(
+                "WebGPU's drawIndirect reads one tightly packed argument structure and has no \
+                 stride parameter to honour",
+            ),
+            Capability::MeshShading | Capability::TaskShaderStage => Support::No(NO_MESH),
+            Capability::UpdateBindGroup => Support::No(
+                "WebGPU bind groups are immutable once created; the stream has no \
+                 update_bind_group command and could not carry one that worked",
+            ),
+            Capability::PushConstants => Support::No(
+                "WebGPU has no push constants; the substitute is a dynamic-offset uniform buffer, \
+                 which the seam already carries as bind-group dynamic offsets",
+            ),
+            Capability::BindlessDescriptorArray => {
+                Support::No("WebGPU has no binding arrays at all")
+            }
+            Capability::StorageImageBinding => Support::No(
+                "GPUStorageTextureBindingLayout requires a texel format and view dimension at \
+                 layout creation, and BindingKind::StorageImage carries neither — the same gap in \
+                 the seam's descriptor that crcbl-wgpu names",
+            ),
+            Capability::PolygonModeLine => {
+                Support::No("WebGPU has no core expression for a wireframe fill mode")
+            }
+            Capability::DepthClamp => gated(
+                Features::DEPTH_CLAMP,
+                "this device reports no DEPTH_CLAMP; WebGPU's depth-clip-control unclips rather \
+                 than clamps",
+            ),
+            Capability::SamplerAnisotropy => gated(
+                Features::SAMPLER_ANISOTROPY,
+                "this device reports no SAMPLER_ANISOTROPY",
+            ),
+            Capability::TimestampQuery
+            | Capability::OcclusionQuery
+            | Capability::PipelineStatisticsQuery => Support::No(NOT_STREAMED),
+            Capability::TimelineSemaphore => Support::No(
+                "WebGPU has no semaphores; create_semaphore hands out a handle and \
+                 semaphore_value always answers 0, so the counter never advances however the \
+                 calls succeed",
+            ),
+            // WebGPU serialises queue submission and inserts its own hazard
+            // barriers, so a wait is satisfied by the time anything can ask —
+            // which is the answer `crcbl_hal::sync` prescribes for this
+            // backend, and it holds for a value nothing has signalled yet for
+            // the same reason.
+            Capability::BinarySemaphore
+            | Capability::CpuTimelineWait
+            | Capability::TimelineWaitBeforeSignal => Support::Yes,
+        }
     }
 
     fn queue(&self, kind: QueueKind) -> Option<QueueHandle> {

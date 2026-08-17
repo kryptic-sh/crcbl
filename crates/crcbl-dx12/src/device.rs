@@ -75,14 +75,14 @@ use crcbl_core::Pool;
 use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BindingResource, BufferDesc, BufferHandle,
-    CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
-    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming, Extent3d, Format,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
+    Capability, CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
+    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming, Extent3d, Features,
+    Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
     MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc,
     QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
     SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
-    ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
+    ShaderModuleHandle, SubmitInfo, Support, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY};
@@ -1552,6 +1552,99 @@ impl Device for Dx12Device {
 
     fn caps(&self) -> DeviceCaps {
         self.inner.caps
+    }
+
+    /// What this backend does with each seam behaviour.
+    ///
+    /// **This is the backend mid-build, and the reasons say so.** D3D12 has
+    /// every capability below; what is missing is this crate's expression of it,
+    /// and each refusal names the slice that owes it — the one exception being
+    /// the buffer fill, which is a deliberate non-fix argued at
+    /// [`fill_buffer`](crate::Dx12CommandEncoder) rather than an unwritten
+    /// slice.
+    ///
+    /// The honest reading of this list is that `crcbl-dx12` is the furthest from
+    /// parity of the five, and the point of writing it down is that the number
+    /// is now visible instead of being spread across twenty-six refusal sites.
+    ///
+    /// Exhaustive with no wildcard arm, and `deny`-ed as such.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn supports(&self, capability: Capability) -> Support {
+        let has = self.inner.caps.features;
+        let gated = |feature: Features, why: &'static str| -> Support {
+            Support::granted(has, feature, why)
+        };
+        // One sentence for the three fills and one for the three queries: they
+        // are three capabilities refused at one site apiece, and three
+        // paraphrases of one obstacle would read like three obstacles.
+        const NO_FILL: &str = "D3D12's fill is ClearUnorderedAccessViewUint, which takes a descriptor from a \
+             shader-visible heap that crcbl_dx12::descriptor does not create. A deliberate \
+             non-fix: crcbl-render zeroes its counters with a clear dispatch, which runs anywhere \
+             that can dispatch";
+        const NO_QUERIES: &str = "no query sets are built on this backend; the timestamp period only a queue can answer \
+             is the missing piece (the DX12 query slice)";
+        const NO_SEMAPHORES: &str = "ID3D12Fence is the seam's timeline almost verbatim, but ID3D12CommandQueue::Wait and \
+             a submission to attach it to are not built, so a semaphore handed out now would be a \
+             counter nothing can signal from the GPU (the DX12 command slice)";
+
+        match capability {
+            Capability::BufferFillZero
+            | Capability::BufferFillRepeatedByte
+            | Capability::BufferFillWord => Support::No(NO_FILL),
+            Capability::ImageToImageCopy => Support::No(
+                "both sides are texture locations with their own subresource and box, and neither \
+                 is the placed footprint plan_copy builds (the DX12 pipeline slice)",
+            ),
+            Capability::MsaaResolveAttachment => Support::No(
+                "the render-pass path binds render-target views directly and emits no \
+                 ResolveSubresource, so a resolve view has nothing to attach to (the DX12 pipeline \
+                 slice)",
+            ),
+            Capability::StencilReference => Support::Yes,
+            Capability::DrawIndirectCount => gated(
+                Features::DRAW_INDIRECT_COUNT,
+                "this device reports no DRAW_INDIRECT_COUNT",
+            ),
+            // An `ID3D12CommandSignature` is built per stride, so a padded one
+            // is described rather than assumed away.
+            Capability::IndirectArgumentPaddedStride => Support::Yes,
+            Capability::MeshShading => Support::No(
+                "D3D12 has the stages and the DXIL is committed, but this backend builds no \
+                 pipeline state stream for them (the DX12 mesh slice)",
+            ),
+            Capability::TaskShaderStage => Support::No(
+                "no mesh pipeline to put an amplification stage in front of (the DX12 mesh slice)",
+            ),
+            Capability::UpdateBindGroup => Support::Yes,
+            Capability::PushConstants => Support::No(
+                "D3D12's root constants are the equivalent, and nothing here knows which root \
+                 parameter slot the committed DXIL puts one at (the DX12 root-constant slice)",
+            ),
+            Capability::BindlessDescriptorArray => gated(
+                Features::DESCRIPTOR_INDEXING,
+                "this device reports no DESCRIPTOR_INDEXING, so its resource binding tier is below \
+                 3",
+            ),
+            Capability::StorageImageBinding => Support::Yes,
+            Capability::PolygonModeLine => gated(
+                Features::POLYGON_MODE_LINE,
+                "this device reports no POLYGON_MODE_LINE",
+            ),
+            Capability::DepthClamp => {
+                gated(Features::DEPTH_CLAMP, "this device reports no DEPTH_CLAMP")
+            }
+            Capability::SamplerAnisotropy => gated(
+                Features::SAMPLER_ANISOTROPY,
+                "this device reports no SAMPLER_ANISOTROPY",
+            ),
+            Capability::TimestampQuery
+            | Capability::OcclusionQuery
+            | Capability::PipelineStatisticsQuery => Support::No(NO_QUERIES),
+            Capability::TimelineSemaphore
+            | Capability::BinarySemaphore
+            | Capability::CpuTimelineWait
+            | Capability::TimelineWaitBeforeSignal => Support::No(NO_SEMAPHORES),
+        }
     }
 
     /// The graphics queue, and only ever the graphics queue.

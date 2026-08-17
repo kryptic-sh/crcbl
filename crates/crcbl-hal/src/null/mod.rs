@@ -91,17 +91,18 @@ use crcbl_core::{Handle, SurfaceTarget};
 use crate::{
     AcquiredFrame, AdapterId, AdapterInfo, BackendKind, Barriers, BindGroupDesc, BindGroupEntry,
     BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutHandle, BufferCopy, BufferDesc,
-    BufferHandle, BufferImageCopy, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
-    CompositeAlpha, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
-    DeviceCaps, DeviceDesc, DeviceRequestState, DeviceType, DisplayTiming, DrawIndirect,
-    DrawIndirectCount, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError,
-    ImageCopy, ImageDesc, ImageHandle, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle,
-    IndexFormat, Instance, Limits, MemoryLocation, MeshPipelineDesc, PendingDevice,
-    PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, PresentMode, QueryKind, QuerySetDesc,
-    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d,
-    RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind,
-    SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages, SubmitInfo,
-    SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
+    BufferHandle, BufferImageCopy, Capability, CommandBufferHandle, CommandEncoder,
+    CommandEncoderDesc, CompositeAlpha, ComputePassDesc, ComputePipelineDesc,
+    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DeviceRequestState, DeviceType,
+    DisplayTiming, DrawIndirect, DrawIndirectCount, Features, Format, GraphicsPipelineDesc,
+    GraphicsPipelineHandle, HalError, ImageCopy, ImageDesc, ImageHandle, ImageType, ImageUsage,
+    ImageViewDesc, ImageViewHandle, IndexFormat, Instance, Limits, MemoryLocation,
+    MeshPipelineDesc, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
+    PresentMode, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
+    ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
+    SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderSources, ShaderStages, SubmitInfo, Support, SurfaceCaps,
+    SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
 };
 
 /// Formats a null surface reports, and therefore the only ones a swapchain on
@@ -720,6 +721,99 @@ impl Device for NullDevice {
 
     fn caps(&self) -> DeviceCaps {
         self.caps
+    }
+
+    /// What this recorder does with each seam behaviour.
+    ///
+    /// **"Supported" here means recorded faithfully, not executed.** This
+    /// backend has no GPU, so a [`Support::Yes`] is the claim that the call is
+    /// accepted with all of its arguments and appears in the stream a test reads
+    /// back — which is exactly the property the graph's unit suite asserts
+    /// against, and all a recorder can promise.
+    ///
+    /// The refusals are the ones this backend already has, and every one of them
+    /// is a feature the preset did not grant: `NullInstance::portable` and
+    /// `NullInstance::gpu_driven` differ, so this answer differs between two
+    /// devices of the same backend, which is the shape a real backend's answer
+    /// has too.
+    ///
+    /// Exhaustive with no wildcard arm, and `deny`-ed as such: a capability
+    /// added to the enum has to be answered here as well as in the five GPU
+    /// backends, because a recorder that silently accepted a command nothing
+    /// implements would be the first place the rot could hide.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn supports(&self, capability: Capability) -> Support {
+        let has = self.caps.features;
+        // One place the "the preset did not grant it" sentence is written, so
+        // fourteen arms cannot word it fourteen ways.
+        let gated = |feature: Features, why: &'static str| -> Support {
+            Support::granted(has, feature, why)
+        };
+
+        match capability {
+            // Recorded verbatim, arguments and all.
+            Capability::BufferFillZero
+            | Capability::BufferFillRepeatedByte
+            | Capability::BufferFillWord
+            | Capability::ImageToImageCopy
+            | Capability::MsaaResolveAttachment
+            | Capability::StencilReference
+            | Capability::IndirectArgumentPaddedStride
+            | Capability::BinarySemaphore
+            | Capability::TimelineWaitBeforeSignal
+            | Capability::StorageImageBinding => Support::Yes,
+            // `update_bind_group` is refused per *layout*, on the UPDATE_AFTER_BIND
+            // flag it was built with, so the backend has the operation.
+            Capability::UpdateBindGroup => Support::Yes,
+            Capability::DrawIndirectCount => gated(
+                Features::DRAW_INDIRECT_COUNT,
+                "this preset did not grant DRAW_INDIRECT_COUNT",
+            ),
+            Capability::MeshShading => gated(
+                Features::MESH_SHADER,
+                "this preset did not grant MESH_SHADER",
+            ),
+            Capability::TaskShaderStage => gated(
+                Features::TASK_SHADER,
+                "this preset did not grant TASK_SHADER",
+            ),
+            Capability::PushConstants => gated(
+                Features::PUSH_CONSTANTS,
+                "this preset did not grant PUSH_CONSTANTS",
+            ),
+            Capability::BindlessDescriptorArray => gated(
+                Features::DESCRIPTOR_INDEXING,
+                "this preset did not grant DESCRIPTOR_INDEXING",
+            ),
+            Capability::PolygonModeLine => gated(
+                Features::POLYGON_MODE_LINE,
+                "this preset did not grant POLYGON_MODE_LINE",
+            ),
+            Capability::DepthClamp => gated(
+                Features::DEPTH_CLAMP,
+                "this preset did not grant DEPTH_CLAMP",
+            ),
+            Capability::SamplerAnisotropy => gated(
+                Features::SAMPLER_ANISOTROPY,
+                "this preset did not grant SAMPLER_ANISOTROPY",
+            ),
+            Capability::TimestampQuery => gated(
+                Features::TIMESTAMP_QUERY,
+                "this preset did not grant TIMESTAMP_QUERY",
+            ),
+            Capability::OcclusionQuery => gated(
+                Features::OCCLUSION_QUERY,
+                "this preset did not grant OCCLUSION_QUERY",
+            ),
+            Capability::PipelineStatisticsQuery => gated(
+                Features::PIPELINE_STATISTICS_QUERY,
+                "this preset did not grant PIPELINE_STATISTICS_QUERY",
+            ),
+            Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
+                Features::TIMELINE_SEMAPHORE,
+                "this preset did not grant TIMELINE_SEMAPHORE",
+            ),
+        }
     }
 
     /// Whatever [`Recorder::report_device_error`] queued, oldest first.

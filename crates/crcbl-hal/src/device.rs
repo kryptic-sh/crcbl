@@ -512,6 +512,37 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`DeviceCaps::geometry_path`] and its siblings.
     fn caps(&self) -> DeviceCaps;
 
+    /// Whether this backend performs `capability` on this device, and why not
+    /// when it does not.
+    ///
+    /// **The seam's anti-rot mechanism, and the reason it has no default.** A
+    /// backend answers with an exhaustive `match` over
+    /// [`Capability`](crate::Capability) and no wildcard arm, so a variant added
+    /// to that enum fails to compile in every backend until each has said what
+    /// it does. A default here — or a `_ =>` arm there — would restore exactly
+    /// the silence the enum exists to remove, which is why neither is written.
+    ///
+    /// Costs one virtual call and a jump table; see [`crate::capability`] for
+    /// why this is separate from [`Features`], what it deliberately does not
+    /// model, and how [`DIVERGENCES`](crate::DIVERGENCES) turns the answers into
+    /// a reviewed parity contract.
+    ///
+    /// ```
+    /// use crcbl_hal::null::NullInstance;
+    /// use crcbl_hal::{AdapterId, Capability, DeviceDesc, Instance};
+    ///
+    /// let instance = NullInstance::gpu_driven();
+    /// let device = instance.create_device(&DeviceDesc::for_adapter(AdapterId(0)))?;
+    ///
+    /// // Every capability has an answer, and a refusal always carries a reason.
+    /// for capability in Capability::ALL {
+    ///     let support = device.supports(*capability);
+    ///     assert_eq!(support.is_yes(), support.reason().is_none());
+    /// }
+    /// # Ok::<(), crcbl_hal::HalError>(())
+    /// ```
+    fn supports(&self, capability: crate::Capability) -> crate::Support;
+
     /// A queue of the given kind.
     ///
     /// Returns `None` when the device has no such queue — check

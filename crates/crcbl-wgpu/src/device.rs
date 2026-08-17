@@ -325,6 +325,98 @@ impl Device for WgpuDevice {
     fn caps(&self) -> DeviceCaps {
         self.caps
     }
+
+    /// What this backend does with each seam behaviour.
+    ///
+    /// **Almost every refusal here is WebGPU's, not wgpu's.** wgpu is a portable
+    /// abstraction over the same drivers `crcbl-vk` and `crcbl-dx12` reach, and
+    /// what it declines to expose is what WebGPU has no expression for — the
+    /// zero-only buffer fill, immutable bind groups, the packed indirect
+    /// argument stride. That is worth reading off this list, because it is also
+    /// the list `crcbl-webgpu` should converge on.
+    ///
+    /// Exhaustive with no wildcard arm, and `deny`-ed as such.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn supports(&self, capability: hal::Capability) -> hal::Support {
+        use hal::Capability as C;
+
+        let has = self.caps.features;
+        let gated = |feature: hal::Features, why: &'static str| -> hal::Support {
+            hal::Support::granted(has, feature, why)
+        };
+        const NO_VALUE_FILL: &str =
+            "wgpu's only fill is clear_buffer, which writes zero and takes no value";
+        const NO_MESH: &str = "WebGPU has no mesh stage and wgpu exposes none";
+        const NO_QUERIES: &str = "this backend enables neither wgpu's TIMESTAMP_QUERY nor its statistics features, so \
+             no query set can be created even on an adapter that has them";
+
+        match capability {
+            C::BufferFillZero => hal::Support::Yes,
+            C::BufferFillRepeatedByte | C::BufferFillWord => hal::Support::No(NO_VALUE_FILL),
+            C::ImageToImageCopy => hal::Support::Yes,
+            C::MsaaResolveAttachment => hal::Support::Yes,
+            C::StencilReference => hal::Support::Yes,
+            // Mapped from wgpu's own MULTI_DRAW_INDIRECT_COUNT at adapter
+            // enumeration, so this reads the device's answer rather than a
+            // constant — a native adapter has it and a browser one does not.
+            C::DrawIndirectCount => gated(
+                hal::Features::DRAW_INDIRECT_COUNT,
+                "this device did not enable wgpu's MULTI_DRAW_INDIRECT_COUNT feature",
+            ),
+            C::IndirectArgumentPaddedStride => hal::Support::No(
+                "wgpu's multi_draw_indirect family reads its own tightly packed argument structs \
+                 and takes no stride, so a padded one would read the wrong words silently",
+            ),
+            C::MeshShading | C::TaskShaderStage => hal::Support::No(NO_MESH),
+            C::UpdateBindGroup => hal::Support::No(
+                "WebGPU bind groups are immutable once created and wgpu exposes no \
+                 update-after-bind path; rebuild the group instead",
+            ),
+            // Not `gated`: `hal_features_for` never reports PUSH_CONSTANTS, even
+            // on an adapter with wgpu's IMMEDIATES, so reading the flag here
+            // would be a constant wearing a device's clothes.
+            C::PushConstants => hal::Support::No(
+                "wgpu calls them immediates and gates them behind its own IMMEDIATES feature, \
+                 which this backend does not enable, so a pipeline layout has no immediate block \
+                 to write",
+            ),
+            C::BindlessDescriptorArray => hal::Support::No(
+                "wgpu's binding arrays need a fixed count in the layout and offer no partial \
+                 binding, so the runtime-sized form the seam describes has no expression",
+            ),
+            C::StorageImageBinding => hal::Support::No(
+                "wgpu needs the texel format and view dimension at bind-group-layout creation and \
+                 BindingKind::StorageImage carries neither",
+            ),
+            C::PolygonModeLine => gated(
+                hal::Features::POLYGON_MODE_LINE,
+                "this device did not enable wgpu's POLYGON_MODE_LINE feature",
+            ),
+            C::DepthClamp => gated(
+                hal::Features::DEPTH_CLAMP,
+                "this device did not enable wgpu's DEPTH_CLIP_CONTROL feature",
+            ),
+            C::SamplerAnisotropy => gated(
+                hal::Features::SAMPLER_ANISOTROPY,
+                "this device reports no SAMPLER_ANISOTROPY",
+            ),
+            C::TimestampQuery | C::OcclusionQuery | C::PipelineStatisticsQuery => {
+                hal::Support::No(NO_QUERIES)
+            }
+            // Emulated over per-submission completion, which is enough to
+            // observe a counter advance and not enough for the arm below.
+            C::TimelineSemaphore | C::CpuTimelineWait => gated(
+                hal::Features::TIMELINE_SEMAPHORE,
+                "this device reports no TIMELINE_SEMAPHORE",
+            ),
+            C::BinarySemaphore => hal::Support::Yes,
+            C::TimelineWaitBeforeSignal => hal::Support::No(
+                "wgpu has no standalone semaphore object; a timeline here is per-submission \
+                 completion, so a wait on a value nothing submitted will signal can only hang",
+            ),
+        }
+    }
+
     fn take_error(&self) -> Option<String> {
         self.errors.take()
     }
