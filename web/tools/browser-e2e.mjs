@@ -558,8 +558,25 @@ const STATUS_PAUSED = 6;
  */
 const CLIMB_ABOVE = 4;
 
-/** The control page's clear colour, and what it must read back as. */
+/**
+ * The control page's clear colour, and what it must read back as.
+ *
+ * These are the **unencoded** bytes — `0.2 x 255 = 51`, `0.8 x 255 = 204` — and
+ * that is the right answer here, because the control configures a plain
+ * `bgra8unorm` canvas of its own with no sRGB view. A canvas that wrongly
+ * encoded would read back near `124, 200`, far outside the tolerance below, so
+ * this check does discriminate; only do not read it as asserting an encode.
+ */
 const CONTROL_RGB = [0, 51, 204];
+
+/**
+ * How far a control channel may drift, per channel.
+ *
+ * The PNG round trip is exact and the clear is one colour, so the only source
+ * of drift is the rasteriser's last bits and whether the canvas format is 8-bit
+ * sRGB one way round or the other.
+ */
+const CONTROL_TOLERANCE = 8;
 
 /** Where the harness's own control page lives on its server. */
 const CONTROL_PATH = '/__crcbl-readback-control__';
@@ -645,7 +662,7 @@ try {
             view: context.getCurrentTexture().createView(),
             loadOp: 'clear',
             storeOp: 'store',
-            // sRGB-encoded ${CONTROL_RGB.join(', ')} once the canvas is read back.
+            // Reads back as ${CONTROL_RGB.join(', ')}: no sRGB view, so no encode.
             clearValue: { r: 0, g: 0.2, b: 0.8, a: 1 },
           },
         ],
@@ -1194,15 +1211,15 @@ async function preflight(binary, mode, origin) {
       };
 
     const sample = await evaluate(page, SAMPLE_CANVAS('#canvas'));
-    // One clear, so one colour, and it must be the one the control asked for.
-    // Within 4 per channel: the canvas format may be 8-bit sRGB either way
-    // round and the PNG round trip is exact, but a rasteriser is allowed the
-    // last bit.
+    // One clear, so one colour, and it must be the one the control asked for,
+    // within `CONTROL_TOLERANCE` per channel.
     const seen = sample?.top?.[0]?.rgb ?? [-1, -1, -1];
     const matches =
       sample &&
       sample.top[0].share > 0.99 &&
-      seen.every((value, i) => Math.abs(value - CONTROL_RGB[i]) <= 8);
+      seen.every(
+        (value, i) => Math.abs(value - CONTROL_RGB[i]) <= CONTROL_TOLERANCE
+      );
     return {
       mode,
       ...platform,
