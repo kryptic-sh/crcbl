@@ -440,6 +440,40 @@ order:
   suite is a native binary, so the browser's answers are assertions no test has
   confirmed. The standalone probe page is where they could be driven.
 
+### The seam cannot use occlusion or pipeline-statistics queries at all
+
+Exercising the query capabilities turned up three defects in the query seam
+itself. The declarations are honest — they claim only that `create_query_set`
+works — but nothing a caller records can ever write to those pools.
+
+- **There is no begin/end query verb.** `crcbl::hal::CommandEncoder`'s entire
+  query vocabulary is `reset_query_set`, `write_timestamp` and
+  `resolve_query_set`. Every API scopes occlusion and statistics with a
+  begin/end pair around a draw — `vkCmdBeginQuery`, D3D12 `BeginQuery`, Metal
+  `setVisibilityResultMode:`, WebGPU `beginOcclusionQuery` — and the seam
+  exposes none of them. So an `OcclusionQuery: Yes` means "a set can be
+  created", and nothing more.
+- **`query_results` and `resolve_query_set` assume one `u64` per query, which is
+  wrong for pipeline statistics.** `crcbl-vk` enables three counters
+  (`VERTEX_SHADER_INVOCATIONS | FRAGMENT_SHADER_INVOCATIONS | CLIPPING_PRIMITIVES`),
+  so a Vulkan statistics pool is **24 bytes per query**, while `query_results`
+  passes `out.len() * 8` and `resolve_query_set` strides by `size_of::<u64>()`.
+  The validation layer says so directly:
+  `VUID-vkGetQueryPoolResults-dataSize-00817: specified dataSize 16 which is less than 32`.
+  **No `out` length satisfies both Vulkan and the seam's own
+  `first_query + out.len() <= count` bound**, so a statistics pool cannot be
+  read through this seam at all.
+- **`resolve_query_set` sets `WAIT` unconditionally**, so resolving a query that
+  was reset and never written blocks for ever rather than returning. That is a
+  hang a caller can reach without doing anything unusual, and the seam method
+  says nothing about it.
+
+Fixing the first two is a seam change — a begin/end pair, and a results API that
+knows a query's stride — and they are worth doing together, since a statistics
+pool nobody can write is not worth being able to read. Until then, treat
+`OcclusionQuery` and `PipelineStatisticsQuery` as declarations about set
+creation, which is what the suite now asserts and says.
+
 ### Metal and dx12 refuse with the wrong error variant
 
 `crcbl-hal` documents `HalError::Unsupported` for "this backend cannot do this",
