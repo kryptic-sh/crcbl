@@ -327,7 +327,9 @@ impl CullProbe {
         let sentinel = device
             .create_buffer(&BufferDesc {
                 label: Some("cull sentinel"),
-                size: u64::from(capacity) * 4,
+                // One word past the list: the counter's zero lives there, so a
+                // run needs no buffer fill at all — see the write below.
+                size: u64::from(capacity) * 4 + 4,
                 usage: BufferUsage::TRANSFER_SRC,
                 memory: MemoryLocation::HostUpload,
             })
@@ -339,7 +341,12 @@ impl CullProbe {
             .write_buffer(
                 sentinel,
                 0,
-                &VISIBLE_SENTINEL.to_le_bytes().repeat(capacity as usize),
+                &VISIBLE_SENTINEL
+                    .to_le_bytes()
+                    .repeat(capacity as usize)
+                    .into_iter()
+                    .chain(0u32.to_le_bytes())
+                    .collect::<Vec<u8>>(),
             )
             .expect("write");
 
@@ -535,13 +542,25 @@ impl CullProbe {
             dst_offset: 0,
             size: visible_bytes,
         });
-        // A zero fill, which every backend has — see [`VISIBLE_SENTINEL`] for
-        // why the sentinel above it cannot be one.
-        // The shader only ever adds to the counter, so the zero has to come
-        // from here. A counter left holding the previous run's total is the
-        // defect this fill exists to prevent, and it is why every test below
-        // that runs twice checks the second answer as hard as the first.
-        encoder.fill_buffer(self.counter, 0, 4, 0);
+        // **The counter's zero is a copy, not a fill.** `CommandEncoder::
+        // fill_buffer` is documented as writing a repeating 32-bit value, and
+        // three of the four backends cannot honour that: `crcbl-dx12` has no
+        // buffer fill at all, `crcbl-mtl`'s takes a byte rather than a word, and
+        // `crcbl-wgpu` refuses any non-zero value. A zero fill is not the safe
+        // subset either — dx12 refuses that too. So the zero comes from the same
+        // `HostUpload` staging buffer as the sentinel, one word past the list.
+        //
+        // The shader only ever adds to the counter, so the zero has to come from
+        // here. A counter left holding the previous run's total is the defect
+        // this exists to prevent, and it is why every test below that runs twice
+        // checks the second answer as hard as the first.
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+            src: self.sentinel,
+            src_offset: u64::from(self.capacity) * 4,
+            dst: self.counter,
+            dst_offset: 0,
+            size: 4,
+        });
         // `ShaderReadWrite` rather than a write-only state: a storage-buffer
         // descriptor permits reads whatever the source does with it, and naming
         // only the write leaves the fill unsynchronised against one.
