@@ -207,15 +207,20 @@ What remains for the browser slices:
   same reason it is out of the wgpu gate: its draw-argument compute stage binds
   more storage buffers than a GPU-less runner's SwiftShader adapter allows.
 - **Loud-unsupported, needing a stream command (a later slice wires each).**
-  `Device`: `update_bind_group`, `create_query_set`, `query_results` return
-  `HalError::Unsupported`. `CommandEncoder` records the op and fails at
-  `finish`: `end_debug_label`, `insert_debug_marker`, `set_stencil_reference`,
-  `draw_indirect`, `draw_indexed_indirect`, `draw_indirect_count`,
-  `draw_indexed_indirect_count`, `draw_mesh_tasks`, `draw_mesh_tasks_indirect`,
-  `dispatch_indirect`, `reset_query_set`, `write_timestamp`,
-  `resolve_query_set`. None is used by breakout; the 3D forward renderer and
-  profiling reach them. (`dispatch_indirect`'s deeper block is its own entry
-  below.)
+  **`draw_indirect` and `draw_indexed_indirect` are WIRED and no longer belong
+  on this list** — every demo logs `geometry IndirectPerBatch` and exercises
+  them each frame. What is still refused: `Device`'s `update_bind_group`,
+  `create_query_set`, `query_results`; and, recorded then failed at `finish`,
+  `end_debug_label`, `insert_debug_marker`, `set_stencil_reference`,
+  `draw_indirect_count`, `draw_indexed_indirect_count`, `draw_mesh_tasks`,
+  `draw_mesh_tasks_indirect`, `dispatch_indirect`, `reset_query_set`,
+  `write_timestamp`, `resolve_query_set`. An audit traced every caller: none is
+  reachable from the five demos or the engine's ordinary frame path.
+  `create_query_set` degrades gracefully — `PassTimers::new` only asks when the
+  device reports `TIMESTAMP_QUERY` and returns `None` on refusal — and the
+  mesh-pipeline refusal is legitimate, since WebGPU has no mesh stage to report.
+  None is used by breakout; the 3D forward renderer and profiling reach them.
+  (`dispatch_indirect`'s deeper block is its own entry below.)
 - **Legitimately refused, not a gap.** `create_mesh_pipeline` (WebGPU has no
   mesh stage); the semaphore calls are no-ops (WebGPU auto-synchronises).
 - **`Device::take_error` returns `None`** — live-device error reporting
@@ -9983,3 +9988,69 @@ neither should be fixed on one backend alone.
 The suite that would hold all four to an answer already exists
 (`crates/crcbl/tests/hal_seam_e2e.rs`, run by CI on WARP, lavapipe, Metal and
 wgpu), so these are decisions rather than infrastructure.
+
+## Switching the web samples to `crcbl-webgpu` — audited, go with four preconditions
+
+All five demos (`breakout`, `flappy`, `asteroids`, `horde`, `hud`) pass through
+`crcbl-webgpu` in a real browser — 43/39/35/44/33 checks, zero device errors —
+and group B confirms the _right_ backend from the log line
+(`hal: webgpu adapter "google swiftshader"`), not merely that some backend
+opened. Every still-refused command was traced to its callers and none is
+reachable from a demo or the ordinary frame path.
+
+**What "passes" does and does not mean.** The demo gate asserts the canvas has a
+backing store, is not one flat colour, changes across sixteen samples, and that
+the browser reported no WebGPU device errors. `browser-e2e.mjs` states its own
+ceiling: _"WHAT GROUP D DOES NOT PROVE: that the frame is the right image."_ The
+eleven golden `Scene`s DO compare pixel-for-pixel against the native goldens,
+but through `apps/render-harness`, not through the demos. So "looks right" for
+the demos rests on that parity generalising to their draw paths — reasonable,
+since they share the renderer, but not directly checked.
+
+**Preconditions, in order:**
+
+1. **`take_error` must land first.** `crcbl::engine`'s `acquire()` calls it at
+   the top of _every frame_, and its own comment says why: on WebGPU it is the
+   only way a failed pipeline is ever heard from, and without it the answer was
+   "a black canvas over a game that reported itself as playing". Today it
+   returns `None`. Deploying on a backend that cannot report a device failure is
+   how the office-machine OOM would have looked with no diagnosis at all.
+2. **Fix the canvas format preference.** Every passing run logs
+   `WebGPU canvas configured with a different format than is preferred by this device ("rgba8unorm"). This requires an extra copy`
+   — `surface_caps` offers a fixed `[Bgra8Unorm, Rgba8Unorm]` while the browser
+   prefers `rgba8unorm`. It is a per-frame full-canvas copy that would ship to
+   every visitor. Cheap insurance before the flip rather than after, and the
+   offscreen path already learned this lesson.
+3. **Keep one wgpu demo step in CI, and rename it so nobody deletes it.** Twelve
+   guard groups (G through S) assert `crcbl-webgpu`'s own seam in a real browser
+   — stream, surface, buffer, image, sampler, bind group layout, bind group,
+   shader module, pipeline layout, both pipelines, and group S's cleared-pixel
+   readback, the only real pixel check in that harness. **They run only in wgpu
+   mode**, because in webgpu mode the engine's own device owns the single stream
+   channel and a probe cannot install a second. Deleting the wgpu run would
+   delete the only browser gate on the new backend's seam — it is a
+   `crcbl-webgpu` gate wearing a wgpu costume.
+4. **Move the three defaults together, or none.** `web/build.sh`,
+   `web/run-browser-e2e.sh` and `web/tools/browser-e2e.mjs` each default
+   `CRCBL_WEB_BACKEND` to `wgpu`, and they are coupled: flip the build alone and
+   the driver waits for a `hal: wgpu adapter` line that never comes, then
+   demands guard strings the site never printed. **Preferred: change none of
+   them, and set `CRCBL_WEB_BACKEND=webgpu` at the `pages.yml` call sites
+   instead** — the env var is already the single knob, the deployed artifact is
+   whatever `web/build.sh` writes to `target/site`, and a developer running the
+   script bare keeps a consistent default.
+
+**What the switch does NOT buy.** `crcbl-wgpu` is an unconditional dependency of
+the umbrella, so it stays linked into every wasm: the webgpu artifacts measure
+3–10 KB _larger_, and `wasm-bindgen` is still required because `wgpu` pulls
+`web-sys`. Making it per-target or optional is a separate change with the real
+payoff — a much smaller download, possibly no `wasm-bindgen` at all — and should
+not be conflated with this one.
+
+**A tripwire found while auditing.** `web/engine/gpu-replay.js` grants
+`DEBUG_MARKERS` unconditionally in `CORE_FEATURES`, but the encoder refuses
+`insert_debug_marker` and `end_debug_label` and fails at `finish`. So the device
+advertises a capability it cannot serve. Nothing calls those today, but the
+first code that branches on `Features::DEBUG_MARKERS` will take down a whole
+command buffer, a frame away from the call. Either wire the two commands or stop
+advertising the feature.
