@@ -62,15 +62,37 @@ rows — dx12 16, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
 "28 declared `Features` bits and roughly 96 refusal sites", said the same thing
 less precisely and is superseded.)
 
-**Triaged by kind, which is what the goal turns on.** Roughly 16 of those rows
-are API absences no work removes — Metal's `fillBuffer:range:value:` takes a
-byte, WebGPU has no mesh stage and no pipeline-statistics query type. So
-**parity can never mean "`DIVERGENCES` is empty"**. The only checkable
-definition is: _every row on a keeper backend is either a permanent API absence
-or a device-gated `Features` refusal, and no row remains that means "our code
-has not done it yet"._ A slice is in flight adding that kind to the data and a
-`crcbl-hal` test that fails when the blocker set changes; until it lands, the
-list has to be re-triaged by hand every time somebody asks what is left.
+**Every row now carries a kind, and the goal has a number.** `Divergence` gained
+`DivergenceKind`: `ApiAbsence` (the API cannot express it — its reason must
+carry the evidence), `Unwritten`, `Declined`, and `Unclassified` for rows that
+cannot be settled without hardware nobody here has. Of the 57: **21
+`ApiAbsence`, 31 `Unwritten`, 3 `Declined`, 2 `Unclassified`.**
+
+`parity_blockers()` is the query — a row on vk, dx12, Metal or WebGPU whose kind
+is anything but `ApiAbsence` — and `crcbl-wgpu` is excluded **by construction**
+rather than by a reader remembering. A snapshot test fails when that set
+changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
+which its failure message names.
+
+**Twenty-nine blockers: dx12 16, Metal 9, WebGPU 4.** That is what stands
+between here and the deletion, and it can now be asked rather than re-derived.
+
+**Five contradictions were settled against the installed interfaces**, not
+recall — and two of them had been recorded in this file the wrong way round:
+**wgpu 30 does have mesh shaders** (`EXPERIMENTAL_MESH_SHADER`,
+`create_mesh_pipeline`, `draw_mesh_tasks`), so the rows saying it exposes none
+were false; and **Metal can express an indirect count** through
+`executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:`, which reads its
+execution range from GPU memory — it has no `countBuffer:` draw, but the count
+is expressible and only the encoding is missing, so that row is `Unwritten` and
+the backend's "(the Metal ICB slice)" was right where this list was wrong.
+
+**The two `Unclassified` rows are Metal's counter-sampled queries.** Whether the
+seam's arbitrary-point `write_timestamp` is reachable depends on which
+`MTLCounterSamplingPoint` values a device reports, and whether
+`MTLCommonCounterSetStatistic` exists depends on that device's `counterSets`.
+Both need a Mac. They block parity deliberately: a guess would have read exactly
+like a checked classification, and "nobody has looked" is not "done".
 
 **Why `Features` cannot be the mechanism on its own.** It is `bitflags`, and a
 bitflag has no exhaustiveness: a backend that never sets a new bit compiles
