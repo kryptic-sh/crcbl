@@ -9903,3 +9903,53 @@ format is fixed; it may vanish with the cause.
   debug-marker, `update_bind_group` or stencil-reference refusal has appeared,
   because crack 1 stops the forward path before it reaches them. Expect more
   once limits are carried.
+
+## Drift the seam merge exposed — two backend bugs and a contradictory doc
+
+Collapsing the per-backend HAL-seam copies into
+`crates/crcbl/tests/hal_seam_e2e.rs` turned up places where two copies of the
+same claim disagreed. Each was a question nothing was asking, because every
+backend was marking its own homework. The merged suite asserts only what all
+backends agree on; these are what it had to leave out.
+
+- **`crcbl-vk` does not refuse a backwards timeline signal.** wgpu and mtl both
+  return `InvalidDescriptor` for a signal value at or below the semaphore's
+  current one; vk passes it to the driver, which reports
+  `VUID-VkSubmitInfo2-semaphore-03882`. A monotonicity violation deadlocks every
+  waiter past that value, so **vk is the bug** — it should refuse at the seam
+  like the others. The assertion is in wgpu's suite, not the shared one, until
+  vk is fixed.
+- **An unsatisfiable timeline wait: wgpu returns `Err(Unsupported)`, mtl returns
+  `Ok(false)`.** `Device::wait_semaphores` documents a timeout as "a normal
+  outcome for a frame-pacing poll, not an error", so **mtl matches the contract
+  and wgpu departs from it.** Same treatment: pinned per-backend until wgpu is
+  fixed.
+- **`write_buffer` on a `HostReadback` buffer — needs a decision.** wgpu asserts
+  it must be _refused_; mtl and dx12 depend on it _succeeding_ (both use it for
+  their poison fill). The HAL doc contradicts itself: the prose says "Only valid
+  for `HostUpload`" while the Errors clause says `InvalidDescriptor` "if the
+  buffer is not host-visible" — and `HostReadback` _is_ host-visible. Decide
+  which the seam means, then make the three backends agree and move the test in.
+
+Also worth knowing:
+
+- **Coverage holes the duplication hid.** vk had no test for `write_buffer`
+  refusal, readback-range refusal, or present-without-acquire — all three
+  implemented. mtl had no readback-descriptor test at all, its indexed-draw
+  lacks the decoy half wgpu/dx12 carry, and its compute dispatch lacks the
+  empty-pass arm. dx12 has no foreign-surface test. The shared suite closes
+  these for every backend at once, which is the point of merging.
+- **The mtl/dx12 in-src copies were NOT deleted**, deliberately: they cover six
+  of the merged behaviours, and neither they nor the new suite has been run on
+  that hardware from here, so deleting would trade executed coverage for
+  unexecuted coverage. Now that CI runs `run-hal-seam-e2e.sh` on Metal and WARP,
+  a green run there is the signal to delete them. Note mtl/dx12 assert exact
+  texels on `Rgba8Unorm` where the shared test asserts channel ordering on the
+  ring's preferred format; carry that exactness over first.
+- **Not migrated:** indexed draw (a ~280-line inline pipeline build, its own
+  slice) and shader-won't-compile (wgpu expects `HalError::Backend`, mtl
+  `ShaderCompilation`, vk a byte-swapped-SPIR-V message, and dx12 consumes
+  precompiled DXIL with no source path — settle the variant first).
+- **`crates/crcbl/tests/tiling_e2e.rs` never runs in CI.** Its doc says
+  `run-render-e2e.sh` runs it, but that script passes `--test render_e2e`, so
+  the physical-tiling assertion has only ever been run by hand. Pre-existing.
