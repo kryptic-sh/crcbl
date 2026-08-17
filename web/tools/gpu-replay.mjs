@@ -5702,6 +5702,138 @@ async function main() {
     replayer.replay(frameOf(openPass, 601n));
     return device.createdEncoders.at(-1).pass;
   };
+
+  // ---- a depth-stencil attachment describes only the planes its view has ---
+  //
+  // **THE COST OF GETTING THIS WRONG IS THE WHOLE FRAME**, which is why it has
+  // its own section. WebGPU refuses a depth-stencil attachment that carries
+  // load/store ops for a plane the view does not have, and it refuses it at
+  // `finish()` — so one stray `stencilLoadOp` on a `depth32float` shadow atlas
+  // invalidates the command buffer and nothing in the frame is submitted at all,
+  // including every pass that had nothing to do with it.
+  //
+  // `crcbl_hal::DepthStencilAttachment` carries all four ops whatever the
+  // format, because the format already says which planes exist, so the replayer
+  // has to put that back together — and from the *view*, not from the format
+  // alone: a `depth-only` view of `depth24plus-stencil8` has no stencil plane
+  // either. All three cases are driven here, against one `Format` that has no
+  // stencil plane and one that has both, restricted two ways.
+  {
+    const { replayer, device } = await readyWithImages(images);
+    // Built off the fixture's stencil view so the image handle resolves; the
+    // format and aspect are what each case is about.
+    const viewOf = (index, format, aspect) => ({
+      ...stencilView,
+      view: handle(index, 1),
+      format,
+      range: { ...stencilView.range, aspect },
+    });
+    const shadowAtlas = viewOf(200, 'D32_FLOAT', ['DEPTH']);
+    const gbuffer = viewOf(201, 'D24_UNORM_S8_UINT', ['DEPTH', 'STENCIL']);
+    const depthPlane = viewOf(202, 'D24_UNORM_S8_UINT', ['DEPTH']);
+    replayer.replay(frameOf(shadowAtlas, 620n));
+    replayer.replay(frameOf(gbuffer, 621n));
+    replayer.replay(frameOf(depthPlane, 622n));
+    replayer.replay(frameOf(encoderCommand, 623n));
+    // One attachment description for all three, so the only thing that differs
+    // between the passes below is which view it names.
+    const passOver = (view) => ({
+      ...openPass,
+      depthStencilAttachment: {
+        view,
+        readOnly: false,
+        depthLoad: 'Clear',
+        depthStore: 'Store',
+        stencilLoad: 'Clear',
+        stencilStore: 'Discard',
+        clear: { color: [0, 0, 0, 0], depth: 1, stencil: 9 },
+      },
+    });
+    let sequence = 624n;
+    for (const created of [shadowAtlas, gbuffer, depthPlane]) {
+      replayer.replay(frameOf(passOver(created.view), sequence));
+      replayer.replay(frameOf({ name: 'EndRenderPass' }, sequence + 1n));
+      sequence += 2n;
+    }
+    const [onAtlas, onGbuffer, onDepthPlane] =
+      device.createdEncoders.at(-1).beganPasses;
+    checkEqual(
+      onAtlas?.depthStencilAttachment,
+      {
+        view: replayer.imageViews.get(shadowAtlas.view),
+        depthReadOnly: false,
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+        depthClearValue: 1,
+      },
+      'a depth-only format reaches WebGPU with its depth ops and no stencil member at all'
+    );
+    checkEqual(
+      onGbuffer?.depthStencilAttachment,
+      {
+        view: replayer.imageViews.get(gbuffer.view),
+        depthReadOnly: false,
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+        depthClearValue: 1,
+        stencilReadOnly: false,
+        stencilLoadOp: 'clear',
+        stencilStoreOp: 'discard',
+        stencilClearValue: 9,
+      },
+      'and a format with both planes keeps all four ops, which omitting them always would break'
+    );
+    checkEqual(
+      onDepthPlane?.depthStencilAttachment,
+      {
+        view: replayer.imageViews.get(depthPlane.view),
+        depthReadOnly: false,
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+        depthClearValue: 1,
+      },
+      'and a depth-only *view* of that same format drops them too, which the format alone cannot tell'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'and none of the three leaves a line on the error queue'
+    );
+  }
+  {
+    // **A depth-stencil attachment whose planes are unknown is refused**, rather
+    // than described as having none. Every path that files a view files its
+    // planes beside it, so this is unreachable through a `CreateImageView` —
+    // it is reached here by putting a view into the table behind the replayer's
+    // back, which is what a future creation path that forgot would amount to.
+    const { replayer, device } = await readyWithImages(images);
+    const smuggled = handle(203, 1);
+    replayer.imageViews.insert(smuggled, { of: 'a view from nowhere' });
+    replayer.replay(frameOf(encoderCommand, 640n));
+    replayer.replay(
+      frameOf(
+        {
+          ...openPass,
+          depthStencilAttachment: {
+            view: smuggled,
+            readOnly: false,
+            depthLoad: 'Clear',
+            depthStore: 'Store',
+            stencilLoad: 'Clear',
+            stencilStore: 'Discard',
+            clear: { color: [0, 0, 0, 0], depth: 1, stencil: 9 },
+          },
+        },
+        641n
+      )
+    );
+    const reason = replayer.takeError();
+    check(
+      device.createdEncoders.at(-1).beganPasses.length === 0 &&
+        String(reason).includes('no plane record for'),
+      `a view with no plane record opens no pass and says so (${JSON.stringify(reason)})`
+    );
+  }
+
   const drawOf = (vertices, instances) => ({
     name: 'Draw',
     vertices,

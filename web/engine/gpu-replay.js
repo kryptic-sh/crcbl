@@ -767,6 +767,13 @@ export function webgpuTextureUsageFor(usage) {
  * sampled ones a core device can make perfectly well. A render attachment a
  * device cannot render to is refused by the browser, which is where a
  * usage-dependent rule belongs.
+ *
+ * THE DEPTH ROWS ALSO CARRY WHICH PLANES THEY HAVE, because
+ * {@link attachmentPlanesFor} needs that and nothing else in this file knows it.
+ * A colour row carries neither flag and answers "no depth, no stencil", which is
+ * what a colour format is for the attachment rule. It lives on the rows rather
+ * than in a second table keyed by `GPUTextureFormat` name so there is one place
+ * that says which seam formats are depth formats — two would be free to drift.
  */
 const TEXTURE_FORMAT = Object.freeze({
   R8_UNORM: { name: 'r8unorm' },
@@ -785,13 +792,19 @@ const TEXTURE_FORMAT = Object.freeze({
   RGBA32_FLOAT: { name: 'rgba32float' },
   R32_UINT: { name: 'r32uint' },
   RG32_UINT: { name: 'rg32uint' },
-  D32_FLOAT: { name: 'depth32float' },
+  D32_FLOAT: { name: 'depth32float', depth: true },
   D32_FLOAT_S8_UINT: {
     name: 'depth32float-stencil8',
     feature: 'depth32float-stencil8',
+    depth: true,
+    stencil: true,
   },
-  D24_UNORM_S8_UINT: { name: 'depth24plus-stencil8' },
-  D16_UNORM: { name: 'depth16unorm' },
+  D24_UNORM_S8_UINT: {
+    name: 'depth24plus-stencil8',
+    depth: true,
+    stencil: true,
+  },
+  D16_UNORM: { name: 'depth16unorm', depth: true },
   BC1_RGBA_UNORM: { name: 'bc1-rgba-unorm', feature: 'texture-compression-bc' },
   BC1_RGBA_UNORM_SRGB: {
     name: 'bc1-rgba-unorm-srgb',
@@ -912,6 +925,48 @@ export function webgpuTextureAspectFor(aspect) {
       "which is no GPUTextureAspect: WebGPU has 'all', 'depth-only' and " +
       "'stencil-only' and no way to spell a colour plane beside a depth or " +
       'stencil one, or no plane at all',
+  };
+}
+
+/**
+ * Which planes a view of `format` restricted to `aspect` presents to a render
+ * pass — the two facts WebGPU decides a depth-stencil attachment's load and
+ * store ops by.
+ *
+ * **A PLANE THE ATTACHMENT DOES NOT HAVE MUST HAVE ITS OPS ABSENT**, not set to
+ * some harmless-looking value, and a plane it does have must have both unless
+ * that plane is read-only. WebGPU rejects the whole `finish()` otherwise — not
+ * the pass, the command buffer — so a `stencilLoadOp` on a `depth32float`
+ * attachment costs every command in the frame, including the ones nowhere near
+ * it. `crcbl_hal::DepthStencilAttachment` carries all four ops whatever the
+ * format, because a HAL that names `Format::D32Float` has already said which
+ * planes exist; this is where that gets put back together.
+ *
+ * IT TAKES THE ASPECT AS WELL AS THE FORMAT because the view narrows the
+ * format: a `'depth-only'` view of `depth24plus-stencil8` is an attachment with
+ * no stencil plane, exactly as a `depth32float` one is, and answering from the
+ * format alone would set stencil ops on it.
+ *
+ * Neither fact survives into the `GPUTextureView` — WebGPU puts no `format` or
+ * `aspect` on a view object — so a caller that wants this must ask while it
+ * still has the descriptor, which is what {@link Replayer} does at creation.
+ *
+ * A format with no row answers no planes. That is a refusal
+ * {@link webgpuTextureFormatFor} has already made by the time any view exists,
+ * so it is unreachable through a created view rather than a case with a
+ * meaningful answer.
+ *
+ * @param {string} format A `crcbl_hal::Format` name, as `gpu-stream.js` decodes
+ *   it.
+ * @param {string} aspect The `GPUTextureAspect` the view was created with, as
+ *   {@link webgpuTextureAspectFor} answers one.
+ * @returns {{ depth: boolean, stencil: boolean }}
+ */
+export function attachmentPlanesFor(format, aspect) {
+  const row = TEXTURE_FORMAT[format];
+  return {
+    depth: (row?.depth ?? false) && aspect !== 'stencil-only',
+    stencil: (row?.stencil ?? false) && aspect !== 'depth-only',
   };
 }
 
@@ -2337,6 +2392,26 @@ export class Replayer {
    */
   #imageViews = new HandleTable();
   /**
+   * Which depth and stencil planes each live `GPUTextureView` presents, for
+   * {@link attachmentPlanesFor}'s rule.
+   *
+   * **KEYED ON THE VIEW OBJECT RATHER THAN ON ITS HANDLE**, which is what makes
+   * this a record and not a second table to keep in step with
+   * {@link Replayer#imageViews}: two `HandleTable`s written by the same creates
+   * and read by the same destroys are two chances to forget one, and what they
+   * would disagree about — whether an attachment has a stencil plane — is
+   * silently wrong rather than loud. A `WeakMap` cannot drift: the planes are
+   * filed against the view itself, at the one moment the format and aspect are
+   * both in hand, and they go when it does.
+   *
+   * Every path that files a view files its planes, so a view found in
+   * {@link Replayer#imageViews} and missing here is this class's own bug, and
+   * `#beginRenderPass` says so rather than guessing.
+   *
+   * @type {WeakMap<GPUTextureView, { depth: boolean, stencil: boolean }>}
+   */
+  #viewPlanes = new WeakMap();
+  /**
    * The `GPUSampler` behind each live sampler handle.
    *
    * Its own table for the reason every table here is its own, and the probe's
@@ -3522,7 +3597,14 @@ export class Replayer {
       }
     }
     this.#images.insert(command.image, texture);
-    this.#imageViews.insert(command.view, texture.createView());
+    const view = texture.createView();
+    this.#imageViews.insert(command.view, view);
+    // A swapchain frame is a colour target and has neither plane: WebGPU has no
+    // presentable depth format, so `GPUCanvasConfiguration.format` and the
+    // offscreen ring's are colour by construction. Recorded rather than left out
+    // so that every view in `#imageViews` has an entry in `#viewPlanes`, which
+    // is what lets a missing one be a bug rather than a shrug.
+    this.#viewPlanes.set(view, { depth: false, stencil: false });
   }
 
   /**
@@ -3862,6 +3944,10 @@ export class Replayer {
       return;
     }
     this.#imageViews.insert(command.view, view);
+    this.#viewPlanes.set(
+      view,
+      attachmentPlanesFor(command.format, aspect.aspect)
+    );
   }
 
   /**
@@ -5041,26 +5127,53 @@ export class Replayer {
         );
         return;
       }
+      // **EACH PLANE IS DESCRIBED ONLY IF THE ATTACHMENT HAS IT.** See
+      // {@link attachmentPlanesFor}: the seam carries four ops whatever the
+      // format, and WebGPU refuses the whole `finish()` — every command in the
+      // frame, not just this pass — if ops are set for a plane the attachment
+      // does not have. A `depth32float` shadow atlas is the case that costs a
+      // frame: it has no stencil plane, so `stencilLoadOp` and `stencilStoreOp`
+      // must be *absent* rather than any value.
+      const planes = this.#viewPlanes.get(view);
+      if (planes === undefined) {
+        this.#deviceError(
+          `${named} depth-stencil attachment names image view ` +
+            `${ds.view.index}.${ds.view.generation}, which this replayer holds no ` +
+            'plane record for'
+        );
+        return;
+      }
       // `read_only` maps to both `depthReadOnly` and `stencilReadOnly`: the HAL
       // carries one flag because a read-only depth attachment is read-only in
-      // both planes. WebGPU forbids load/store ops on a read-only plane, so they
-      // are omitted then. This path is not exercised by a browser gate in this
-      // slice — the readback pass has no depth attachment — so it is written to
-      // the seam's contract rather than to a test.
+      // both planes. WebGPU forbids load/store ops on a read-only plane too, so
+      // a read-only attachment reaches the browser with none of the four — the
+      // same absence as an absent plane, for the other reason.
       descriptor.depthStencilAttachment = {
         view,
-        depthReadOnly: ds.readOnly,
-        stencilReadOnly: ds.readOnly,
-        ...(ds.readOnly
-          ? {}
-          : {
-              depthLoadOp: LOAD_OP[ds.depthLoad],
-              depthStoreOp: STORE_OP[ds.depthStore],
-              depthClearValue: ds.clear.depth,
-              stencilLoadOp: LOAD_OP[ds.stencilLoad],
-              stencilStoreOp: STORE_OP[ds.stencilStore],
-              stencilClearValue: ds.clear.stencil,
-            }),
+        ...(planes.depth
+          ? {
+              depthReadOnly: ds.readOnly,
+              ...(ds.readOnly
+                ? {}
+                : {
+                    depthLoadOp: LOAD_OP[ds.depthLoad],
+                    depthStoreOp: STORE_OP[ds.depthStore],
+                    depthClearValue: ds.clear.depth,
+                  }),
+            }
+          : {}),
+        ...(planes.stencil
+          ? {
+              stencilReadOnly: ds.readOnly,
+              ...(ds.readOnly
+                ? {}
+                : {
+                    stencilLoadOp: LOAD_OP[ds.stencilLoad],
+                    stencilStoreOp: STORE_OP[ds.stencilStore],
+                    stencilClearValue: ds.clear.stencil,
+                  }),
+            }
+          : {}),
       };
     }
     this.#currentPass = this.#currentEncoder.beginRenderPass(descriptor);
