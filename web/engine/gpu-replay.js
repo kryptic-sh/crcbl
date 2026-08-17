@@ -2713,19 +2713,24 @@ export class Replayer {
   /**
    * In-flight readbacks, filed by {@link Replayer#requestReadback} at the handle
    * wasm allocated. Each entry is
-   * `{ buffer, offset, size, state, bytes, reason }`: `state` is `'mapping'`
-   * until `mapAsync` settles and `'ready'` or `'failed'` after, `bytes` is the
-   * copied-out `Uint8Array` a `PollReadback` answers with, and `reason` is the
-   * text it answers with instead when the map settled the wrong way. A request
-   * this replayer refused outright is filed `'failed'` with no `buffer` at all —
-   * the browser was never asked.
+   * `{ buffer, offset, size, state, bytes, reason, abandoned }`: `state` is
+   * `'mapping'` until `mapAsync` settles and `'ready'` or `'failed'` after,
+   * `bytes` is the copied-out `Uint8Array` a `PollReadback` answers with, and
+   * `reason` is the text it answers with instead when the map settled the wrong
+   * way. A request this replayer refused outright is filed `'failed'` with no
+   * `buffer` at all — the browser was never asked.
+   *
+   * `abandoned` is set by {@link Replayer#destroyReadback} and read by the map's
+   * own handlers, which is the one piece of this state that outlives the entry:
+   * the entry leaves the table on the destroy while the promise it belongs to is
+   * still to settle, and the handlers hold their own reference to it.
    *
    * **Not the persistent-object tables' shape**, which is the whole reason it is
    * separate: those hold a browser object for the frames between its create and
    * its destroy, and this holds transient poll state that a `mapAsync` promise
    * mutates a turn of the event loop later.
    *
-   * @type {HandleTable<{ buffer: GPUBuffer | null, offset: number, size: number, state: 'mapping' | 'ready' | 'failed', bytes: Uint8Array | null, reason: string | null }>}
+   * @type {HandleTable<{ buffer: GPUBuffer | null, offset: number, size: number, state: 'mapping' | 'ready' | 'failed', bytes: Uint8Array | null, reason: string | null, abandoned: boolean }>}
    */
   #readbacks = new HandleTable();
   /**
@@ -6499,6 +6504,16 @@ export class Replayer {
    * `poll_readback` answering `Pending` every frame to a caller that had no
    * other way to stop.
    *
+   * NEITHER DESTINATION HEARS FROM A READBACK THAT WAS ABANDONED. A caller may
+   * {@link Replayer#destroyReadback} one whose map has not settled — the seam
+   * allows it, and `crcbl-render`'s culling-statistics ring releases a slot's
+   * request once per frame whether or not it settled — and the `unmap` that
+   * release consists of is specified to reject the map in flight with an
+   * `AbortError`. That rejection is this replayer cancelling its
+   * own request, not the device reporting a fault, so the handlers below leave
+   * on the flag rather than filing it; see {@link Replayer#destroyReadback} for
+   * why there is nothing to tell it apart from a genuine one by.
+   *
    * @param {bigint} sequence
    * @param {object} command
    */
@@ -6537,12 +6552,19 @@ export class Replayer {
       state: 'mapping',
       bytes: null,
       reason: null,
+      abandoned: false,
     };
     this.#readbacks.insert(command.readback, entry);
     this.#inFlight += 1;
     buffer
       .mapAsync(GPU_MAP_READ, offset, size)
       .then(() => {
+        // Resolved and then destroyed, in that order and inside one turn of the
+        // event loop: the destroy has already unmapped, so there is nothing left
+        // to copy out and `getMappedRange` would throw on a buffer whose mapping
+        // is gone. Nobody can ask for the bytes either — the entry left the
+        // table with the destroy.
+        if (entry.abandoned) return;
         // A fresh copy: `getMappedRange` is a view onto memory `unmap` reclaims,
         // so the bytes have to leave it before a destroy can.
         entry.bytes = new Uint8Array(
@@ -6554,6 +6576,13 @@ export class Replayer {
         // The `.catch` covers the `.then` above it as well as the map, which is
         // deliberate: a buffer destroyed between the two makes `getMappedRange`
         // throw, and that is the same outcome for the same request.
+        //
+        // Except when the request was abandoned, where the rejection is the
+        // destroy's own `unmap` arriving back. Filing it made the ordinary
+        // release of an outstanding readback look like a device fault, and
+        // `Engine::acquire` takes any `take_error` message as a reason to stop
+        // the frame loop.
+        if (entry.abandoned) return;
         const reason = `${named} could not be mapped: ${String(error)}`;
         this.#deviceError(reason);
         entry.state = 'failed';
@@ -6584,6 +6613,7 @@ export class Replayer {
       state: 'failed',
       bytes: null,
       reason,
+      abandoned: false,
     });
   }
 
@@ -6644,11 +6674,36 @@ export class Replayer {
    * `undefined` for both. A request refused before it reached the browser has no
    * buffer to unmap either: nothing was ever mapped for it.
    *
+   * DESTROYING ONE WHOSE MAP HAS NOT SETTLED IS LEGAL, AND IT IS WHAT `abandoned`
+   * IS FOR. `unmap()`'s first specified step is "if `this.[[pending_map]]` is not
+   * null, reject `this.[[pending_map]]` with an `AbortError`", so cancelling a
+   * map in flight is not a misuse of WebGPU — it *is* WebGPU's cancellation, and
+   * the rejection is the acknowledgement rather than a failure. The flag is set
+   * before the `unmap` so that {@link Replayer#requestReadback}'s handlers, which
+   * hold this same entry, can leave rather than file it. Without it a caller that
+   * gave up on an outstanding readback got the cancellation back as a device
+   * error, which is what `Engine::acquire` stops the frame loop over.
+   *
+   * NOTHING TELLS THAT REJECTION APART FROM A GENUINE ONE, which is why the flag
+   * and not a check of the error. WebGPU rejects a map with an `AbortError` when
+   * the device is lost too, and the specification's map-failure steps say so in
+   * as many words: "this is the same error type produced by cancelling the map
+   * using `unmap()`". A device lost is not this queue's news anyway — see
+   * {@link Replayer#requestDevice} on why `GPUDevice.lost` is deliberately not
+   * watched here.
+   *
+   * THE SETTLED STATES NEED NO BRANCH. The same steps end "if `this.[[mapping]]`
+   * is null, return", so unmapping a request whose map rejected — mapped nothing,
+   * holds nothing — is a no-op rather than an error, and a `'ready'` one has had
+   * its bytes copied out already.
+   *
    * @param {{ readback: { index: number, generation: number } }} command
    */
   #destroyReadback(command) {
     const entry = this.#readbacks.remove(command.readback);
-    if (entry?.buffer) entry.buffer.unmap();
+    if (!entry?.buffer) return;
+    entry.abandoned = true;
+    entry.buffer.unmap();
   }
 
   /**

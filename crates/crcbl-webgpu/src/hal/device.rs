@@ -448,6 +448,13 @@ impl Device for WebGpuDevice {
     }
 
     fn destroy_readback(&self, readback: ReadbackHandle) {
+        // Quiet even when the map is still out, which is the case
+        // `crcbl-render`'s culling-statistics ring is in every frame: the
+        // replayer's `unmap` cancels a `mapAsync` in flight, WebGPU
+        // acknowledges that by rejecting the promise with an `AbortError`, and
+        // the replayer marks the request abandoned first so the rejection is
+        // not filed as a device error. Before it did, releasing an outstanding
+        // readback surfaced through `take_error` and stopped the frame loop.
         self.channel
             .with(|channel| channel.encode(|stream| stream.destroy_readback(readback)));
         self.readbacks

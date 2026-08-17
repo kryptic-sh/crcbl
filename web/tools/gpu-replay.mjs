@@ -532,12 +532,18 @@ function deviceLimits() {
  * descriptor with no label produces a buffer whose label is the empty string,
  * which is why WebGPU cannot tell `None` from `Some("")`.
  *
- * THE MAP IS SETTABLE AFTER THE FACT — `mapRejects` and `rangeThrows` are
- * mutable members rather than constructor options, because the check that needs
- * them only has the buffer once a `CreateBuffer` has been replayed through the
- * device. A test reaches for `replayer.buffers.get(handle)` and sets one before
- * the `RequestReadback` goes past. Both default to `null`, which is a map that
- * resolves — the ordinary path.
+ * THE MAP IS SETTABLE AFTER THE FACT — `mapRejects`, `rangeThrows` and
+ * `mapDefers` are mutable members rather than constructor options, because the
+ * check that needs them only has the buffer once a `CreateBuffer` has been
+ * replayed through the device. A test reaches for
+ * `replayer.buffers.get(handle)` and sets one before the `RequestReadback` goes
+ * past. All three default to the ordinary path: a map that resolves at once.
+ *
+ * IT MODELS `mapState` AND WHAT `unmap()` DOES TO A MAP IN FLIGHT, because that
+ * is the whole of the interaction a destroyed readback runs into and a stub that
+ * left it out would agree with any replayer at all. Two specified steps, and
+ * only those: `unmap()` rejects a pending map with an `AbortError`, and
+ * `getMappedRange` on a buffer whose mapping is gone throws.
  *
  * @param {{ label?: string, size: number, usage: number }} desc
  */
@@ -555,6 +561,23 @@ function stubBuffer(desc) {
     mapRejects: null,
     /** @type {unknown} What `getMappedRange` throws, or `null` to answer bytes. */
     rangeThrows: null,
+    /**
+     * Whether `mapAsync` hands back a promise that stays pending until the test
+     * settles it with {@link settleMap}, rather than one already resolved.
+     *
+     * The only way to express "a command arrived while the map was still out",
+     * which no amount of awaiting can produce from a promise that is resolved
+     * before the replayer even sees it.
+     */
+    mapDefers: false,
+    /**
+     * Settles the deferred map, or `null` when none is out.
+     *
+     * @type {((rejection?: unknown) => void) | null}
+     */
+    settleMap: null,
+    /** Whether a map has resolved and nothing has unmapped it since. */
+    mapped: false,
     /** @type {{ mode: number, offset: number, size: number }[]} Every map asked for. */
     maps: [],
     /** How many times the replayer unmapped it. */
@@ -567,7 +590,21 @@ function stubBuffer(desc) {
     mapAsync(mode, offset, size) {
       buffer.maps.push({ mode, offset, size });
       if (buffer.mapRejects !== null) return Promise.reject(buffer.mapRejects);
-      return Promise.resolve();
+      if (!buffer.mapDefers) {
+        buffer.mapped = true;
+        return Promise.resolve();
+      }
+      return new Promise((resolve, reject) => {
+        buffer.settleMap = (rejection) => {
+          buffer.settleMap = null;
+          if (rejection === undefined) {
+            buffer.mapped = true;
+            resolve(undefined);
+          } else {
+            reject(rejection);
+          }
+        };
+      });
     },
     /**
      * The mapped bytes, as an `ArrayBuffer` — which is what a real
@@ -580,12 +617,27 @@ function stubBuffer(desc) {
      */
     getMappedRange(offset, size) {
       if (buffer.rangeThrows !== null) throw buffer.rangeThrows;
+      if (!buffer.mapped) {
+        throw new Error('getMappedRange on a buffer that is not mapped');
+      }
       const bytes = new Uint8Array(size);
       for (let i = 0; i < size; i += 1) bytes[i] = (offset + i) % 251;
       return bytes.buffer;
     },
     unmap() {
       buffer.unmaps += 1;
+      buffer.mapped = false;
+      // `unmap()`'s first specified step, and the reason a readback destroyed
+      // while its map was out used to reach `take_error`. The words are the ones
+      // Chromium rejects with, so a check reading the reason back is reading what
+      // a browser would really have said.
+      buffer.settleMap?.(
+        new DOMException(
+          "Failed to execute 'mapAsync' on 'GPUBuffer': " +
+            'Buffer was unmapped before mapping was resolved.',
+          'AbortError'
+        )
+      );
     },
   };
   return buffer;
@@ -3574,6 +3626,75 @@ async function main() {
       answered?.tag === 'ReadbackFailed' &&
         String(answered.reason).includes('buffer is destroyed'),
       `a mapped range that throws is a failed readback, not a stuck one (${shown(answered)})`
+    );
+  }
+  {
+    // **A readback destroyed while its map is still out.** This is the ordinary
+    // way for a caller to give one up: `crcbl-render`'s culling-statistics ring
+    // polls a slot once, when the ring comes round to it, and releases it
+    // whatever that poll answered — so on a frame heavy enough that the map has
+    // not settled in a whole turn of the ring, the release lands on a request
+    // still in flight. The release *is* an `unmap`, and `unmap` cancels a map in
+    // flight by rejecting it with an `AbortError`, so it arrives at the same
+    // `.catch` a device lost mid-map would.
+    //
+    // Filing it there is what the lumen demo hit: `readback … could not be
+    // mapped: AbortError: … Buffer was unmapped before mapping was resolved` on
+    // the device error queue, and any message `take_error` hands back is
+    // something `Engine::acquire` stops the frame loop over. So an abandoned
+    // readback took the demo down with it. What has to hold is that the buffer
+    // is still released and that neither reader of the queue hears a word.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(readbackBuffer, 68n));
+    const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
+    buffer.mapDefers = true;
+    replayer.replay(frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 69n));
+    check(
+      buffer?.maps.length === 1 && buffer.settleMap !== null,
+      `the map is out and has not settled (${buffer?.maps.length} asked for)`
+    );
+    replayer.replay(frameOf({ ...destroyReadback, readback: MAPPED }, 70n));
+    check(
+      buffer?.unmaps === 1 && buffer.mapped === false,
+      `the destroy still unmaps it, so no mapped buffer is left behind (${buffer?.unmaps} unmaps)`
+    );
+    await settle();
+    replayer.clear();
+    replayer.replay(frameOf({ name: 'TakeError' }, 71n));
+    checkEqual(
+      decodeOneReply(replayer.replies),
+      { tag: 'DeviceErrors', sequence: 71n, messages: [] },
+      'and the cancellation it caused reaches wasm as no error at all'
+    );
+    const gate = replayer.takeError();
+    check(
+      gate === null,
+      `nor does it reach the gate's own cursor (${JSON.stringify(gate)})`
+    );
+  }
+  {
+    // **A map that resolved and a destroy in the same turn of the event loop.**
+    // The promise has already settled, so this one does not land in the `.catch`
+    // at all: the `.then` runs a microtask later, against a buffer the destroy
+    // has since unmapped, and `getMappedRange` on one whose mapping is gone
+    // throws — into that same `.catch`, one moment further on. The same
+    // abandonment, and it has to be as quiet.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(readbackBuffer, 72n));
+    const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
+    buffer.mapDefers = true;
+    replayer.replay(frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 73n));
+    // Settled and destroyed without yielding in between, which is the whole of
+    // this case: the replayer's `.then` has not had a turn yet.
+    buffer.settleMap();
+    replayer.replay(frameOf({ ...destroyReadback, readback: MAPPED }, 74n));
+    await settle();
+    replayer.clear();
+    replayer.replay(frameOf({ name: 'TakeError' }, 75n));
+    checkEqual(
+      decodeOneReply(replayer.replies),
+      { tag: 'DeviceErrors', sequence: 75n, messages: [] },
+      'a map that resolved into a destroy is silent too, rather than a range that threw'
     );
   }
   {
