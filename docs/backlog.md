@@ -3,43 +3,37 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### BUG — the browser renders too dark: the canvas never encodes sRGB
+### A demo whose colours are all wrong still passes every browser check
 
-**Reported from the deployed demos.** Everything on `crcbl-webgpu` renders
-darker than it should. This is a regression against `crcbl-wgpu`, which handled
-it internally, and it is the same defect the offscreen path already hit and
-fixed.
+The sRGB canvas bug itself is fixed — `gpu-replay.js` configures the browser's
+preferred base format and attaches its `-srgb` view format, the agnostic seam
+suite asserts on every backend that a surface offers an sRGB format, that
+`preferred_format` picks it, and that a clear lands the **exact encoded bytes**,
+and the user confirmed the deployed demos look right. What has not changed is
+the reason it reached a user at all.
 
-**Cause.** Every pass above the seam writes display-referred values and leaves
-the encode to the hardware, so the target must be an sRGB format. A WebGPU
-**canvas cannot be configured as sRGB**: `GPUCanvasConfiguration.format` takes
-only `bgra8unorm`, `rgba8unorm` or `rgba16float`. The sRGB output path is to
-configure the base format with `viewFormats: ['<base>-srgb']` and then create
-the frame's view _in the sRGB format_. `web/engine/gpu-replay.js` does neither —
-its own comment says why: `ImageViewDesc::format` is documented as free to
-differ "for sRGB reinterpretation", but `ImageDesc` has no field carrying the
-permission, so every texture is created with WebGPU's default empty
-`viewFormats` and a reinterpreting view is refused.
+**`web/tools/browser-e2e.mjs` never compares a demo's pixels to a reference.**
+Its per-demo expectations are log lines and HUD text — that the game started,
+that a key press moved something, that cull statistics answered. The only pixel
+assertion in the file is the **readback control**, which clears a canvas of its
+own (`CONTROL_RGB = [0, 51, 204]`, matched within 8 per channel) purely to
+decide whether an adapter can be read back at all. It is not the engine's canvas
+and it says nothing about the engine's encode.
 
-**Note this interacts with a change made deliberately.** `surface_caps` was
-recently made to answer a canvas with the browser's own
-`getPreferredCanvasFormat()` first, to stop a full-canvas copy every frame. That
-format is linear, so the canvas is now firmly linear. The fix must keep both
-properties: configure the browser's preferred **base** format (no copy) and
-attach its `-srgb` view format (correct encode). Those are not in tension —
-`viewFormats` is exactly the mechanism for having both.
+So the coverage split is: the golden harness compares pixels but renders
+**offscreen**, which is the path that already worked; the browser gate drives
+the **canvas** path but only looks at text. The bug lived exactly in the gap.
 
-**The offscreen path is already correct** and must not regress: it answers sRGB
-formats directly, because an offscreen ring is textures the replayer creates and
-no canvas constrains. The eleven-scene golden parity proves that half; the demos
-are what proves this half, and nothing currently does — see the coverage note
-below.
+Worth noting the control's comment is wrong in a way that would mislead the next
+reader: it says the clear is "sRGB-encoded 0, 51, 204", but 51 is `0.2 × 255`,
+i.e. the value an **unencoded** canvas produces — an sRGB view would give
+about 123. The check does discriminate (123 is far outside the tolerance of 8);
+only the comment has the sign backwards.
 
-**No gate catches this.** The demo gates assert the canvas is not blank and
-changes; they do not compare against a reference. The golden harness compares
-pixels but renders offscreen, which is the path that already works. **A demo
-whose colours are all wrong passes every check we have** — that is the more
-important finding than the bug itself, and it is why this reached a user.
+**What would close it:** one demo screenshot compared against a golden through
+the canvas path, at a colour that is not a fixed point of the transfer function.
+That is the same missing piece as the entry below about dx12's and Metal's
+presented path, and probably the same harness.
 
 ### TOP PRIORITY — backend feature parity, enforced so it cannot rot
 
