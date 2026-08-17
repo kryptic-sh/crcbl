@@ -1,0 +1,42 @@
+# A 4x4 checkerboard of two greys, for reading scale and UVs.
+crpix: 32 32 1 2 1
+
+palette:
+  d c #5a5a5a
+  l c #adadad
+
+frame checker:
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  llllllllddddddddlllllllldddddddd
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+  ddddddddllllllllddddddddllllllll
+
+sample: pixel

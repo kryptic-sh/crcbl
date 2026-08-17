@@ -470,6 +470,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-greybox`, a prototyping asset pack sized in reality.** A crate of
+  ready-to-drop blockout assets so a game can stand up a level before it has
+  art. The 3D half is procedural geometry sized in metres — cube, wall, doorway,
+  ramp, stairs, column, cylinder, sphere, a 1.8m human-scale capsule, platform —
+  with a `scene3d()` `SceneDesc` and index constants. The 2D half, behind the
+  default `bake` feature, is a set of committed `.crpix` sprites baked into the
+  crate and read back as `Loaded` sheets: grid tile, solid, circle, checker,
+  thin and one-way platforms, 45° and 2:1 slopes, ladder, spike, a 1×2-tile
+  player and an enemy placeholder in a magenta actor tint, pickup, and an arrow.
+  They are authored at a 32-texel base tile, so a game that sets its own
+  `TEXELS_PER_UNIT = 32` gets one tile per world unit; `GreyboxSprite::texels`
+  gives each sprite's size and `GreyboxSprite::ALL` the whole set.
+  `--no-default-features` drops the 2D half for a geometry-only pack.
+
 - **`crcbl-webgpu`, a new crate holding the command-stream encoding** the coming
   browser backend will speak: wasm serialises HAL calls into a buffer it owns
   and JS decodes and replays them. This first piece is the encoding alone — a

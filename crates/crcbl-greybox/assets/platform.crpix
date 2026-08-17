@@ -1,0 +1,18 @@
+# A one-tile-wide floor bar, 32x8.
+crpix: 32 8 1 2 1
+
+palette:
+  o c #3a3a3a
+  g c #7a7a7a
+
+frame platform:
+  oooooooooooooooooooooooooooooooo
+  oggggggggggggggggggggggggggggggo
+  oggggggggggggggggggggggggggggggo
+  oggggggggggggggggggggggggggggggo
+  oggggggggggggggggggggggggggggggo
+  oggggggggggggggggggggggggggggggo
+  oggggggggggggggggggggggggggggggo
+  oooooooooooooooooooooooooooooooo
+
+sample: pixel

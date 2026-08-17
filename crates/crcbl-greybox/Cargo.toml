@@ -6,6 +6,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# The 2D half of the pack, on by default. `bake` gates the sprite primitives:
+# the build script bakes `assets/*.crpix` and `src/sprite.rs` reads the result
+# back, so both hang off this one switch. `--no-default-features` gives a pure
+# 3D blockout kit that pulls in neither the sprite loader nor the PNG encoder —
+# the same separation `crcbl-render` keeps between the reader and `bake`'s
+# encoder, one level up as a feature because a greybox pack is host data a game
+# may want without the 2D art at all.
+[features]
+default = ["bake"]
+bake = ["dep:crcbl-sprite"]
+
 # Procedural geometry only: `crcbl-shaders` for the runtime vertex, material and
 # meshlet records, `crcbl-render` for the scene description a game hands the
 # renderer, and `glam` for the transforms a caller places instances with. No
@@ -15,6 +26,17 @@ repository.workspace = true
 crcbl-shaders = { workspace = true }
 crcbl-render = { workspace = true }
 glam = { workspace = true }
+# The sprite loader for `Sheet`/`load_baked`, behind `bake` because the baked
+# PNGs it reads are only produced when the build script runs — there is nothing
+# to load without them. `load` is the same reader `crcbl-render` takes.
+crcbl-sprite = { workspace = true, features = ["load"], optional = true }
 
 [lints]
 workspace = true
+
+# The other half, and the other feature. Cargo resolves build-dependency
+# features separately from normal ones, so `bake`'s PNG encoder reaches the
+# build script and not a game that links this crate. The script itself skips
+# baking unless the `bake` feature is on — see `build.rs`.
+[build-dependencies]
+crcbl-sprite = { workspace = true, features = ["bake"] }

@@ -30,11 +30,23 @@
 //! [`greybox_material`] is the plain grey a blockout wears; [`grid_material`]
 //! shows the metric grid of [`grid_page`], a quarter-metre ruler on the surface.
 //! See the [`material`] module for the grid's one-metre-tile convention.
+//!
+//! # The 2D half
+//!
+//! Behind the default `bake` feature, [`sprite`] is the same idea for a 2D game:
+//! committed `.crpix` prototyping sprites — tiles, slopes, ladders, props and
+//! magenta actor placeholders — baked into the crate and loaded back as
+//! [`Loaded`](crcbl_sprite::load::Loaded) sheets. They are authored at a
+//! 32-texel base tile, so a game that sets its own `TEXELS_PER_UNIT` to 32 gets
+//! one tile per world unit; [`GreyboxSprite::texels`] is each sprite's size.
+//! `--no-default-features` drops the 2D half for a 3D-only pack.
 
 mod build;
 pub mod material;
 pub mod primitives;
 pub mod scene;
+#[cfg(feature = "bake")]
+pub mod sprite;
 
 pub use build::GREYBOX_ALBEDO;
 pub use material::{
@@ -50,3 +62,5 @@ pub use scene::{
     GREYBOX_GRID, GREYBOX_MESH_COUNT, GREYBOX_PLATFORM, GREYBOX_QUAD, GREYBOX_RAMP, GREYBOX_SPHERE,
     GREYBOX_STAIRS, GREYBOX_WALL, scene3d,
 };
+#[cfg(feature = "bake")]
+pub use sprite::{GreyboxSprite, TEXELS_PER_UNIT, load};
