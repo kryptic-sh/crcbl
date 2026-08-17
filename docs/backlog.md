@@ -3,25 +3,42 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### TOP OF QUEUE — WebGPU full-parity as a wgpu replacement, then the flip
+### TOP OF QUEUE — testing parity across all backends (the diagnostic), then WebGPU feature parity, then the flip
 
-crcbl-webgpu renders every 2D browser demo (breakout/flappy/asteroids/horde/hud)
-but is NOT yet a full replacement for what wgpu did in the browser. Close these
-before flipping the default and deleting crcbl-wgpu (that flip is the LAST step,
-and it removes wasm-bindgen's second and final root — `wgpu`). Audited against
-the WebGPU spec and the engine's actual usage.
+The primary focus is TEST PARITY: the same tests running on every GPU backend
+(vk, mtl, dx12, webgpu), because that suite is what SHOWS the cracks — a feature
+a backend is missing surfaces as a scene or a seam test it fails. Build the test
+parity first; the feature gaps below are what it will expose, fixed as they
+surface. Only once webgpu genuinely passes the same suite as the others do we
+flip the default and delete crcbl-wgpu (the LAST step — it removes
+wasm-bindgen's second and final root, `wgpu`).
 
-**Validation harness (prep — do early, it proves every gap below).** The
-backend-agnostic golden suite already exists: `crates/crcbl/tests/render_e2e.rs`
-runs every `Scene` through whichever backend `crcbl::backend::open` selects
-(vk/mtl/dx12), reads back, and compares against `crcbl/tests/golden`. WebGpu is
-browser-only, so it cannot run this native test. Build a **browser harness that
-runs the same `Scene` set through WebGpu**, reads each back, and compares
-against the same goldens — the vehicle that proves parity scene-by-scene. Then
-consolidate any non-backend-specific golden coverage from
-`crcbl-vk/tests/vk_e2e` and `crcbl-wgpu/tests/wgpu_e2e.rs` into `render_e2e`'s
-`Scene` set; genuinely backend-specific tests (a driver quirk, a vk-only
-capability) stay put — there should not be many.
+**1. Make the agnostic suite async so ALL backends run it.**
+`crates/crcbl/tests/render_e2e.rs` already runs every `Scene` through whichever
+backend `crcbl::backend::open` selects (vk/mtl/dx12) and compares against
+`crcbl/tests/golden`. But `crcbl::screenshot::OffscreenSetup`
+(`crcbl/src/screenshot.rs`) is `#[cfg(not(target_arch = "wasm32"))]` and blocks
+on device-open and readback, so webgpu (browser, single-threaded, no blocking)
+cannot run it. Refactor it ASYNC — poll the `PendingDevice`/`PendingInstance`
+and `poll_readback` instead of blocking — so the identical suite runs on all
+four backends, webgpu via a browser harness. This async suite is the diagnostic.
+
+**2. Unify agnostic-in-nature tests into the shared suite.**
+`crcbl-vk/tests/vk_e2e/` and `crcbl-wgpu/tests/wgpu_e2e.rs` hold two kinds of
+test: HAL-seam behaviour every backend implements (render-pass clear reaching
+host memory, readback ordering, ring/swapchain reuse, present cycling, universal
+refusals, indexed/indirect draw correctness, sprite/mesh golden pixels) — these
+should run on ALL backends and move into the shared suite — versus genuinely
+backend-specific tests (a vk mesh-shader capability, a driver quirk) which stay
+per-backend. Split them by the coverage audit and consolidate.
+
+**3. Equal coverage across backends.** `crcbl-mtl` and `crcbl-dx12` currently
+get golden coverage only through `render_e2e` and lack the backend-specific e2e
+and unit tests `crcbl-vk`/`crcbl-wgpu` have — a real gap. Bring every backend to
+the same unit-test AND backend-specific-e2e coverage: the shared suite for what
+is agnostic, and a matching per-backend set for what is genuinely
+backend-specific. (The exact agnostic-vs-specific split and the precise mtl/dx12
+gap come from the coverage audit in flight; fill this in when it lands.)
 
 **Parity gaps (WebGPU CAN express these; crcbl-webgpu currently refuses).** Each
 is refused via `hal/encoder.rs::record_unsupported` (fails `finish`) or an
