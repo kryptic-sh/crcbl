@@ -9867,41 +9867,73 @@ on hardware, not a thing CI defends — so it can silently regress.
 
 ## The forward path binds more storage buffers than WebGPU guarantees
 
-`crcbl-render`'s "draw args" pass (`crates/crcbl-render/src/draw_gen.rs`, the
-`gen_layout` binding `storage(1..14)`) binds **14 storage buffers in one compute
-stage**. Opening the browser device with the adapter's own ceilings — which
-`requiredLimitsFor` now does — is necessary but does not help where the
-adapter's ceiling is itself below 14:
+`crcbl-render`'s "draw args" compute pass binds **14 storage buffers in one
+stage** (`crates/crcbl-render/src/draw_gen.rs`, the `gen_layout`). WebGPU's
+guaranteed `maxStorageBuffersPerShaderStage` is **8**; SwiftShader — what CI has
+— offers 10; this machine's RDNA-3 offers 16. So the browser backend runs the
+forward renderer only on generous hardware, and CI cannot defend the
+eleven-scene parity result at all.
 
-| adapter                                    | `maxStorageBuffersPerShaderStage` | forward path |
-| ------------------------------------------ | --------------------------------- | ------------ |
-| WebGPU spec default (the guaranteed floor) | 8                                 | refused      |
-| SwiftShader (what the parity gate pins)    | 10                                | refused      |
-| this machine's RDNA-3                      | 16                                | runs         |
+**Splitting the bindings across bind groups does NOT fix this. Tried, measured,
+reverted.** `maxStorageBuffersPerShaderStage` is not a per-bind-group limit:
+WebGPU validates it at `createPipelineLayout`, as a **sum over every bind group
+layout in the pipeline layout, per shader stage**. Split into `draw args frame`
+(1 uniform + 7 storage) and `draw args scene` (7 storage), Dawn refused with the
+identical message and the identical number —
+`The number of storage buffers (14) in the Compute stage exceeds the maximum per-stage limit (10)`,
+raised from `CreatePipelineLayout` rather than from a bind group. If the limit
+were per group it would have said 7. The split was verified to be really in the
+wasm before the message was believed.
 
-So this is **not a SwiftShader quirk, it is a portability defect for the web
-target**: 8 is the number every WebGPU implementation must support, and anything
-above it is a negotiation that some devices will lose. Measured by probing each
-adapter's `limits` directly in headless Chromium.
+Everything else about that experiment was green — 26/26 `render_e2e`, 92/92
+`vk_e2e`, 13/13 seam on vk and wgpu, no golden moved, and both `crcbl-mtl` and
+`crcbl-dx12` flattened `(set, binding)` correctly with no changes — so the
+multi-set mechanism is sound. It simply buys no headroom. **The count itself has
+to come down from 14 to 8.**
 
-Two consequences, and the second is a decision:
+**Costed reduction, ordered by blast radius** (each figure is what the pass
+drops to):
 
-- **The parity gate cannot exercise nine of eleven scenes under SwiftShader**,
-  which is what CI has. Running the gate on real hardware is possible
-  (`CRCBL_CHROMIUM_FLAGS="--ignore-gpu-blocklist --use-angle=vulkan --use-webgpu-adapter=default --use-vulkan=native"`
-  works here) but a CI runner has no GPU, so a green CI gate would only ever
-  cover `sprite` and `ui`.
-- **Splitting "draw args" across bind groups is the durable fix** and the
-  recommendation: `maxBindGroups` is 4 and the pass uses 1, so the same 14
-  buffers spread over two groups sit inside even the guaranteed floor of 8. That
-  is a `crcbl-render` change affecting every backend's layout, so it wants its
-  own slice and its own golden re-verification — but until it happens, the web
-  backend only runs the forward renderer on generous hardware, which is not what
-  "a full replacement for wgpu" means.
+- `bucket_meshes` + `bucket_clusters` → one `uint2` buffer. Saves 1 → **13**.
+  Entirely inside `draw_gen.slang` / `draw_gen.rs`.
+- The three level tables (`mesh_levels`, `level_groups`, `level_meshes`) → one
+  word buffer with host-computed offsets. Saves 2 → **11**. Costs the typed
+  `StructuredBuffer`s (floats through `asfloat`) and ripples into
+  `mesh_cluster.slang` and `forward.rs`, which bind the same tables.
+- `args` + `draw_counts` + `mesh_args` → one buffer with three regions. Saves 2
+  → **9**. The risky one: it touches `clear_counters.slang`, every backend's
+  indirect draw/count path, and the `IndirectPerBatch`/`IndirectCount` split
+  that exists _because_ `counts` is a separate buffer.
+- `visible` + `visible_count` → one buffer. Saves 1 → **8**, but `visible_count`
+  is the shared cull-stats buffer `mesh_cluster.slang` writes and the readback
+  ring reads.
 
-Declined for now: raising nothing and simply pinning the gate to hardware. It
-would make the gate un-runnable in CI, which is where regressions are actually
-caught.
+`meshes` cannot move — `mesh_pool` owns it and `cull.slang`/`mesh.slang` read
+it. Reaching 8 therefore means giving up typed structured buffers in places and
+merging the indirect argument and count buffers: **decisions, not mechanics.**
+
+**A landmine worth knowing about now.** `forward.rs`'s `mesh frame` layout is 13
+storage buffers on the MESH stage (16 on MESH and TASK when `culls_clusters`),
+but `crcbl-wgpu` never advertises `Features::MESH_SHADER`, so on WebGPU it is
+always its raster shape — **exactly 8 on VERTEX, at the guaranteed floor with
+zero headroom**. One more storage binding on the raster path breaks WebGPU on
+every device. `crcbl-vk/tests/vk_e2e/depth_probe.rs`'s `probe` layout mirrors it
+at 8.
+
+**And nothing in the workspace can catch this class of defect.**
+`crcbl_hal::Limits` carries only `max_storage_buffer_range` — there is no
+per-stage storage-buffer field — and `BindGroupLayoutDesc::check_entries` never
+counts storage bindings per stage. The first thing that notices is a backend
+refusing a pipeline layout at runtime. A seam-level check, counting per stage
+across a pipeline layout against a documented floor of 8, would turn every one
+of these into a compile-or-test-time failure. That is probably worth more than
+the reduction itself.
+
+**Also measured: CI could reach at most 10/11 even with `draw args` fixed.** On
+SwiftShader `ui` fails for an unrelated reason — 506 pixels over tolerance, ssim
+0.983, a genuine software-rasteriser difference rather than a pipeline refusal.
+So "wire the gate into CI and cover the whole set" was never available; the
+honest target is ten scenes plus a known-different `ui`.
 
 ## Nothing enforces prettier, and files have drifted
 
