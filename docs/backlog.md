@@ -374,6 +374,26 @@ a group would prove something.
 Note adding a group changes the check count `run-probe-e2e.sh` asserts (55
 today), which is why the wiring slice deliberately left the probe alone.
 
+### The sRGB encode is still unproven on dx12's and Metal's presented path
+
+The swapchain now must offer an sRGB format and `preferred_format` must pick it,
+asserted on every backend, and the clear test asserts the encoded bytes exactly.
+Two gaps remain in the same bug class:
+
+- **dx12's flip-model path is uncovered.** `buffer_format` creates linear back
+  buffers and casts to an sRGB RTV — the same "the view is where the encode
+  happens" mechanism that broke on WebGPU — but every GPU suite here creates
+  `SurfaceTarget::Offscreen`, whose ring uses real sRGB resources and never
+  exercises the cast. `crcbl-mtl`'s `CAMetalLayer` path versus its offscreen
+  ring is the same shape. **No windowed GPU e2e exists on any backend** and
+  there is no compositor in the test environment, so closing this needs a
+  windowed harness, not another assertion.
+- **Probe group Y (reconfigure) asserts red**, which is a fixed point of the
+  sRGB transfer function, so it cannot tell an encoded reconfigure from an
+  unencoded one. Low risk only because `#reconfigureSwapchain` shares
+  `#configureSwapchain` with the path group X does cover. Use mid-tones there
+  too.
+
 ### Smaller things the WebGPU work surfaced and did not fix
 
 - **A device error names no command.** `Reply::DeviceErrors` carries the
@@ -5547,14 +5567,27 @@ instead of a guess.
 ### Declined for now: a golden frame per sample
 
 `docs/plan/12-testing.md` asks every sample for a determinism check _and_ a
-golden frame. The determinism half is met everywhere. The golden half needs each
-sample to expose a screenshot path it does not have, which is a feature in every
-sample rather than a test — and the samples are already pinned by replay hashes,
-which catch the same regressions a golden would catch for gameplay and catch
-them deterministically.
+golden frame. The determinism half is met everywhere.
 
-Left undone deliberately. If it is taken up, the cheap version is one shared
-`--screenshot` flag in the sample scaffold rather than five implementations.
+**The argument that used to close this entry was wrong, and a shipped bug is the
+proof.** It said the samples "are already pinned by replay hashes, which catch
+the same regressions a golden would catch". They do not catch _rendering_
+regressions: there is no `replay_hash` in the tree, and what exists — tuple
+comparison of simulation state, horde's `state_hash` over kills/HP/positions,
+and `crcbl-server::sim_hash::hash_world` over tick id, system names and
+component bytes — contains **no pixel at all**. All of them pass unchanged if
+the frame is black, the tonemap is wrong or a shader is swapped. Every browser
+demo rendered a transfer function too dark for several commits and every gate
+stayed green; a user reported it.
+
+**And the cost is lower than this entry assumed, because the pattern already
+ships.** `apps/lumen/tests/golden.rs` with `golden/room.png` and
+`run-lumen-golden.sh` renders lumen's own scene through
+`OffscreenSetup::open_forward_with` and diffs it with `crcbl-golden`, wired into
+CI. Replicating that per demo needs each sample to expose its scene construction
+— no engine feature. The `--screenshot` route is the alternative: one field on
+`Common` in `crates/crcbl/src/args.rs` plus one arm in `Common::consume`,
+reaching all seven apps. Either would have caught this bug at zero tolerance.
 
 ### The seam does not describe what `wait_semaphores` does with an impossible wait
 
