@@ -25,10 +25,12 @@
 //                            root, whose user namespaces a sandbox needs).
 //
 // EXIT CODES
-//   0  every scene rendered (reached `opened`) — the state once the offscreen
-//      surface command lands.
-//   1  the harness ran but at least one scene did not render; the per-scene
-//      table names the crack. This is the expected state today.
+//   0  every scene rendered (reached `opened`) with the device reporting
+//      nothing — the state once the offscreen surface command lands.
+//   1  the harness ran but at least one scene did not render, or opened while
+//      the device was refusing its commands; the per-scene table names the
+//      crack. A refused command does not throw, so the state alone cannot tell
+//      the two apart — the device errors are listed under the table.
 //   2  the harness could not run at all (no browser, no adapter, wasm failed).
 
 import { spawn } from 'node:child_process';
@@ -250,11 +252,19 @@ function printTable(scenes) {
   console.log(`\n${pad('scene', nameWidth)}  rendered  state    detail`);
   console.log('-'.repeat(nameWidth + 2 + 8 + 2 + 7 + 2 + 40));
   for (const scene of scenes) {
-    const detail = scene.replayFailure
-      ? `replay: ${scene.replayFailure.split('\n')[0]}`
-      : scene.timedOut
-        ? `timed out after ${scene.frames} frames`
-        : scene.error || '';
+    // The fatal comes first: a scene that aborted the module has no state worth
+    // reading, and it is the only line that says why.
+    const refused = scene.deviceErrors ?? [];
+    const detail = scene.fatal
+      ? `fatal: ${scene.fatal.split('\n')[0]}`
+      : scene.replayFailure
+        ? `replay: ${scene.replayFailure.split('\n')[0]}`
+        : scene.timedOut
+          ? `timed out after ${scene.frames} frames`
+          : scene.error ||
+            (refused.length > 0
+              ? `device: ${refused[0]}${refused.length > 1 ? ` (+${refused.length - 1} more)` : ''}`
+              : '');
     console.log(
       `${pad(scene.scene, nameWidth)}  ${pad(scene.rendered ? 'yes' : 'no', 8)}  ${pad(
         scene.stateName,
@@ -314,16 +324,49 @@ async function main() {
       `\nrender-harness-e2e: ${rendered}/${scenes.length} scene(s) rendered through the browser backend`
     );
 
+    // WHENEVER IT IS SET, NOT ONLY WHEN THE HARNESS NEVER STARTED. A page that
+    // booted, drove a scene and then had the wasm module abort under it sets
+    // `started` *and* `fatal`, and printing only the table left the run looking
+    // like a silent nothing — the reason was reachable only by reading
+    // `window.harnessResult` over the DevTools protocol by hand.
+    if (result.fatal) {
+      console.error(`\nrender-harness-e2e: fatal: ${result.fatal}`);
+    }
+
     if (scenes.length === 0) {
       console.error('render-harness-e2e: no scenes were driven');
       process.exitCode = 1;
       return;
     }
+    // A SCENE THAT OPENED WHILE THE DEVICE WAS REFUSING ITS COMMANDS HAS NOT
+    // RENDERED. WebGPU reports a refused command out of band rather than by
+    // throwing, so the offscreen open completes either way and the state alone
+    // cannot tell the two apart. Without this the gate could be wired green over
+    // a backend whose every draw was rejected.
+    const refused = scenes.filter((s) => (s.deviceErrors ?? []).length > 0);
+    if (refused.length > 0) {
+      console.error(
+        `\nrender-harness-e2e: ${refused.length} scene(s) reported device errors:`
+      );
+      for (const scene of refused) {
+        for (const error of scene.deviceErrors) {
+          console.error(`  ${scene.scene}: ${error}`);
+        }
+        if (scene.deviceErrorsDropped > 0) {
+          console.error(
+            `  ${scene.scene}: and ${scene.deviceErrorsDropped} further error(s), not recorded`
+          );
+        }
+      }
+      process.exitCode = 1;
+    }
+
     if (rendered < scenes.length) {
       // The expected state until the offscreen surface command lands: every
       // scene refused at the same wall. Printed as the crack list, exit 1 so
       // the gate cannot be wired green while the wall stands.
       const firstError =
+        scenes.find((s) => s.fatal)?.fatal?.split('\n')[0] ??
         scenes.find((s) => s.error)?.error ??
         scenes.find((s) => s.replayFailure)?.replayFailure ??
         'no error text';
@@ -333,9 +376,11 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    console.log(
-      'render-harness-e2e: every scene rendered through the browser backend'
-    );
+    if (refused.length === 0) {
+      console.log(
+        'render-harness-e2e: every scene rendered through the browser backend'
+      );
+    }
   } finally {
     if (page) page.close();
     await server.close();

@@ -110,6 +110,15 @@ pub const REPLY_SEQUENCE_BYTES: usize = 8;
 /// defect it prevents is the same one either way, a corrupt length driving an
 /// allocation the stream has no bytes for. The writer asserts against it too, so
 /// nothing this crate encodes can be something it refuses to decode.
+///
+/// **It bounds a field, never a payload.** A host→buffer upload is caller data
+/// with no size a cap could be chosen for — a golden scene's vertex and index
+/// buffers are past this on their own — so
+/// [`StreamWriter::write_buffer`](crate::StreamWriter::write_buffer) splits one
+/// into as many `WriteBuffer` commands at increasing offsets as it takes, rather
+/// than this number growing to chase whichever scene is largest today. The two
+/// halves therefore keep agreeing on it without either ever having to hold a
+/// whole upload.
 pub const MAX_FIELD_BYTES: usize = 1 << 20;
 
 /// Largest element count in a length-prefixed array — dynamic offsets, colour

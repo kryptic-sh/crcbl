@@ -32,6 +32,7 @@
 //!   with [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) naming the
 //!   gap rather than a silent success. [`device`] and [`encoder`] list which.
 
+mod bounds;
 pub mod channel;
 pub mod device;
 pub mod encoder;

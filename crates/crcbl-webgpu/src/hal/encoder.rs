@@ -14,6 +14,11 @@
 //! naming the first one. A frame that stays inside the wired ops finishes
 //! normally; one that reaches an unwired op fails loudly at the boundary, which
 //! is where a fix goes to wire the missing command.
+//!
+//! A *wired* op with a field past the stream's caps takes the same route, for a
+//! different reason: the writer would assert, and on wasm an assert is
+//! `unreachable` — the module dies mid-frame with nothing to read. See the
+//! `super::bounds` module.
 
 use core::ops::Range;
 
@@ -35,6 +40,16 @@ pub struct WebGpuCommandEncoder {
     /// The first unwired op recorded, or `None`. `finish` fails naming it — see
     /// the [module docs](self).
     unsupported: Option<&'static str>,
+    /// The first field this encoder refused for being past the stream's caps,
+    /// or `None`.
+    ///
+    /// The same mechanism [`unsupported`](Self::unsupported) is, for the other
+    /// reason a unit-returning recording method cannot go through: the op is
+    /// wired, but the bytes it was handed are longer than a stream field
+    /// carries. Left to the writer that is an assert — `unreachable` on wasm,
+    /// so the module dies mid-frame — and here it is a message
+    /// [`finish`](CommandEncoder::finish) reports.
+    refused: Option<String>,
 }
 
 impl WebGpuCommandEncoder {
@@ -50,6 +65,7 @@ impl WebGpuCommandEncoder {
             channel,
             pool,
             unsupported: None,
+            refused: None,
         }
     }
 
@@ -59,6 +75,14 @@ impl WebGpuCommandEncoder {
     fn record_unsupported(&mut self, op: &'static str) {
         if self.unsupported.is_none() {
             self.unsupported = Some(op);
+        }
+    }
+
+    /// Record that a field was past a stream cap. The first one wins, for
+    /// [`record_unsupported`](Self::record_unsupported)'s reason.
+    fn record_refused(&mut self, why: &HalError) {
+        if self.refused.is_none() {
+            self.refused = Some(why.to_string());
         }
     }
 }
@@ -174,6 +198,14 @@ impl CommandEncoder for WebGpuCommandEncoder {
         // Wired: the command crosses whole. WebGPU has no push constants, so the
         // replayer refuses it by name — which is where the refusal belongs, per
         // the stream's own rule that the writer carries what the caller gives.
+        //
+        // The block is caller data, though, so its length is measured first:
+        // past a stream field the writer would assert, and this method has no
+        // `Result` to say so through, so `finish` reports it.
+        if let Err(error) = super::bounds::field("push_constants data", data.len()) {
+            self.record_refused(&error);
+            return;
+        }
         self.channel
             .with(|c| c.encode(|stream| stream.push_constants(stages, offset, data, layout)));
     }
@@ -273,6 +305,11 @@ impl CommandEncoder for WebGpuCommandEncoder {
     // --- finish ---
 
     fn finish(self: Box<Self>) -> Result<CommandBufferHandle, HalError> {
+        // A refusal comes first: it names bytes the caller actually handed over,
+        // which is a fix in the caller, where an unwired op is a fix here.
+        if let Some(why) = self.refused {
+            return Err(HalError::InvalidDescriptor(why));
+        }
         if let Some(op) = self.unsupported {
             return Err(HalError::Unsupported {
                 backend: BackendKind::WebGpu,

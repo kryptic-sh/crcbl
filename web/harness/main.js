@@ -37,6 +37,13 @@ const STATE_NAME = { 0: 'idle', 1: 'opening', 2: 'opened', 3: 'failed' };
  */
 const MAX_FRAMES = 600;
 
+/**
+ * How many device errors one scene records before the rest are only counted.
+ * A device that starts refusing usually refuses every frame, and sixty copies
+ * of one line say nothing the first copy did not.
+ */
+const MAX_SCENE_DEVICE_ERRORS = 8;
+
 /** Reads a UTF-8 string out of wasm memory; empty when the pointer is null. */
 function readUtf8(memory, ptr, len) {
   if (!ptr || !len) return '';
@@ -60,7 +67,9 @@ async function main() {
    *   fatal: string | null,
    *   scenes: Array<{ scene: string, state: number, stateName: string,
    *                   rendered: boolean, error: string, frames: number,
-   *                   timedOut: boolean, replayFailure: string | null }>,
+   *                   timedOut: boolean, replayFailure: string | null,
+   *                   fatal: string | null, deviceErrors: string[],
+   *                   deviceErrorsDropped: number }>,
    * }}
    */
   const result = {
@@ -106,6 +115,10 @@ async function main() {
     const gpuStream = { exports, memory };
     /** What a replay threw during the current scene, or null. */
     let replayFailure = null;
+    /** What the device reported out of band during the current scene. */
+    let deviceErrors = [];
+    /** How many further device errors this scene produced past the cap. */
+    let deviceErrorsDropped = 0;
 
     /** Drain the command stream, replay it, deliver whatever replies resulted. */
     function pump() {
@@ -124,7 +137,36 @@ async function main() {
         // than throwing sixty times a second.
         replayFailure = String(error && error.stack ? error.stack : error);
       }
+      // WHAT `Device::take_error` WOULD HAND BACK, READ HERE BECAUSE NOTHING
+      // ELSE READS IT. A command WebGPU refuses does not throw — the replayer
+      // queues the reason, and the stream has no command yet to carry it into
+      // wasm, so `WebGpuDevice::take_error` answers `None`. Left undrained, a
+      // scene whose every draw was refused still reaches `opened` and this gate
+      // calls it rendered. Draining it here is what makes that verdict mean
+      // something.
+      for (
+        let error = replayer.takeError();
+        error !== null;
+        error = replayer.takeError()
+      ) {
+        if (deviceErrors.length < MAX_SCENE_DEVICE_ERRORS)
+          deviceErrors.push(error);
+        else deviceErrorsDropped += 1;
+      }
     }
+
+    // THE SCENE THAT ABORTS THE MODULE MUST NOT TAKE THE TABLE WITH IT. A Rust
+    // panic compiles to `unreachable` on wasm, so it arrives here as a thrown
+    // RuntimeError and — before this was caught per scene — unwound the whole
+    // loop into the outer `catch`, leaving `scenes` empty and the gate printing
+    // an empty table with no reason in it. A trap also poisons the instance:
+    // every later export call traps at once, so the scenes after it genuinely
+    // cannot be driven and are recorded as such rather than run and misreported
+    // as eight separate cracks.
+    /** The scene whose abort trapped the module, or null. */
+    let abortedAt = null;
+    /** That scene's whole thrown text, stack included. */
+    let abortedWith = '';
 
     for (let i = 0; i < count; i += 1) {
       const name = readUtf8(
@@ -132,24 +174,52 @@ async function main() {
         exports.__crcbl_render_harness_scene_name_ptr(i),
         exports.__crcbl_render_harness_scene_name_len(i)
       );
-      replayFailure = null;
-      exports.__crcbl_render_harness_start(i);
-
-      let frames = 0;
-      let state = exports.__crcbl_render_harness_state();
-      while (state === STATE.OPENING || state === STATE.IDLE) {
-        await nextFrame();
-        state = exports.__crcbl_render_harness_step();
-        pump();
-        frames += 1;
-        if (frames >= MAX_FRAMES) break;
+      if (abortedAt !== null) {
+        result.scenes.push({
+          scene: name,
+          state: STATE.IDLE,
+          stateName: STATE_NAME[STATE.IDLE],
+          rendered: false,
+          error: '',
+          frames: 0,
+          timedOut: false,
+          replayFailure: null,
+          fatal: `not driven — ${abortedAt} aborted the wasm module`,
+          deviceErrors: [],
+          deviceErrorsDropped: 0,
+        });
+        continue;
       }
 
-      const error = readUtf8(
-        memory,
-        exports.__crcbl_render_harness_error_ptr(),
-        exports.__crcbl_render_harness_error_len()
-      );
+      replayFailure = null;
+      deviceErrors = [];
+      deviceErrorsDropped = 0;
+      /** What the module threw while this scene was being driven, or null. */
+      let fatal = null;
+      let frames = 0;
+      let state = STATE.IDLE;
+      let error = '';
+      try {
+        exports.__crcbl_render_harness_start(i);
+        state = exports.__crcbl_render_harness_state();
+        while (state === STATE.OPENING || state === STATE.IDLE) {
+          await nextFrame();
+          state = exports.__crcbl_render_harness_step();
+          pump();
+          frames += 1;
+          if (frames >= MAX_FRAMES) break;
+        }
+        error = readUtf8(
+          memory,
+          exports.__crcbl_render_harness_error_ptr(),
+          exports.__crcbl_render_harness_error_len()
+        );
+      } catch (thrown) {
+        fatal = String(thrown && thrown.stack ? thrown.stack : thrown);
+        abortedAt = name;
+        abortedWith = fatal;
+      }
+
       const timedOut =
         frames >= MAX_FRAMES &&
         state !== STATE.OPENED &&
@@ -163,12 +233,22 @@ async function main() {
         frames,
         timedOut,
         replayFailure,
+        fatal,
+        deviceErrors,
+        deviceErrorsDropped,
       });
       say(
         `${i + 1}/${count} scenes driven; last: ${name} → ${
-          STATE_NAME[state] ?? state
+          fatal ? 'aborted' : (STATE_NAME[state] ?? state)
         }`
       );
+    }
+    // The whole thrown text, not its first line: an `unreachable` says nothing
+    // on its own, and the frames under it — `__rust_start_panic`, then the
+    // encoder method that reached the assert — are the entire diagnosis. The
+    // table's detail column has room for one line, so this is where it goes.
+    if (abortedAt !== null) {
+      result.fatal = `${abortedAt} aborted the wasm module:\n${abortedWith}`;
     }
   } catch (error) {
     result.fatal = String(error && error.stack ? error.stack : error);

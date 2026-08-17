@@ -29,8 +29,7 @@
 //!    installs the stream channel, so the pump has something to drain from the
 //!    very first frame.
 //! 2. When the instance is open, `poll` synchronously creates the offscreen
-//!    surface, selects the adapter, and starts the device request. **This is
-//!    where the WebGPU backend refuses today** — see the note below.
+//!    surface, selects the adapter, and starts the device request.
 //! 3. When the device is ready, `poll` hands over the
 //!    [`OffscreenSetup`] and the harness
 //!    reaches `State::Opened`.
@@ -39,23 +38,19 @@
 //!
 //! It stops at `State::Opened`: it does not yet drive
 //! [`OffscreenSetup::begin_readback`]
-//! and its `PendingReadback` to a frame of pixels. Two reasons, and the second
-//! makes the first moot:
+//! and its `PendingReadback` to a frame of pixels. The readback drive has to
+//! persist a `PendingReadback` — which borrows its `OffscreenSetup` — across rAF
+//! frames, a self-referential hold that wants its own careful slice.
 //!
-//! - The readback drive has to persist a `PendingReadback` — which borrows its
-//!   `OffscreenSetup` — across rAF frames, a self-referential hold that wants
-//!   its own careful slice.
-//! - **No backend in the browser can reach it to be tested.** `crcbl-webgpu`'s
-//!   HAL refuses the offscreen surface `State::Opened` needs before a single
-//!   pixel is drawn: `crates/crcbl-webgpu/src/hal/instance.rs`'s `create_surface`
-//!   returns `HalError::Unsupported` for `SurfaceTarget::Offscreen`, and
-//!   `crates/crcbl-webgpu/src/command.rs`'s `CreateSurface` doc says the
-//!   offscreen variant "gets its own command when the parity gate needs to read
-//!   frames back". So opening is the whole of what the mechanism can be driven
-//!   through today, and opening is exactly where the wall is.
-//!
-//! The pixel-readback half of the ABI is the follow-up slice, unblocked once
-//! that offscreen surface command lands.
+//! **So what a green run proves, and what it does not.** Every scene reaching
+//! `State::Opened` with the device reporting no error means the whole open path
+//! — adapter enumeration, the offscreen surface, the swapchain ring, the
+//! renderer's uploads and pipeline construction — replayed on a real WebGPU
+//! device without a refusal. It does **not** mean the image is right: no pixels
+//! are read back, so nothing here is compared against
+//! `crcbl/tests/golden/<name>.png` the way the native `vk`/`mtl`/`dx12`
+//! `render_e2e` suite does. That comparison is the follow-up slice, and until it
+//! lands this gate is a replay check rather than a golden one.
 //!
 //! # ABI
 //!

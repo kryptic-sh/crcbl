@@ -2584,6 +2584,96 @@ fn a_graphics_pipelines_stencil_reference_is_carried_rather_than_resolved() {
     }
 }
 
+// ── Host→buffer uploads ───────────────────────────────────────────────────────
+
+/// **An upload larger than one field crosses as several commands, and the
+/// pieces reassemble at the offsets they name.**
+///
+/// [`tag::MAX_FIELD_BYTES`] bounds one length-prefixed field, and a golden
+/// scene's vertex, index or instance upload is past it on its own — so before
+/// the writer split them, driving those scenes through this backend hit the
+/// encoder's own assert, which on wasm is `unreachable`: the module died
+/// mid-frame with no diagnosis to read.
+///
+/// What is asserted is the property the split has to preserve, not the number of
+/// pieces for its own sake: no chunk is past the cap the *reader* enforces, and
+/// writing each chunk at the offset its own command names — which is exactly
+/// what `queue.writeBuffer` does on the far side — reproduces the caller's bytes
+/// at the caller's offset.
+#[test]
+fn an_upload_past_the_field_cap_crosses_as_chunks_that_reassemble() {
+    let buffer = handle(0x51, 0x0C);
+    // Two whole fields and a remainder, so the last chunk is a partial one: a
+    // length that divided evenly would not catch a final offset off by a chunk.
+    let len = tag::MAX_FIELD_BYTES * 2 + 1234;
+    let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+    // Not zero, so a chunk offset written relative to the upload rather than to
+    // the buffer is visible.
+    let base = 4096u64;
+
+    let mut stream = StreamWriter::new();
+    let first = stream.write_buffer(buffer, base, &data);
+    assert_eq!(
+        first, 0,
+        "the sequence answered is the first chunk's, so an upload occupies the run from it"
+    );
+
+    let decoded = decode_stream(stream.bytes()).expect("a stream this crate wrote decodes");
+    assert_eq!(
+        decoded.len(),
+        len.div_ceil(tag::MAX_FIELD_BYTES),
+        "the upload crosses as one command per field's worth of it"
+    );
+
+    let mut rebuilt = vec![0u8; len];
+    let mut covered = 0usize;
+    for command in &decoded {
+        let Command::WriteBuffer {
+            buffer: written,
+            offset,
+            data: chunk,
+        } = command
+        else {
+            panic!("expected WriteBuffer, got {}", command.name());
+        };
+        assert_eq!(*written, buffer, "every chunk names the caller's buffer");
+        assert!(
+            chunk.len() <= tag::MAX_FIELD_BYTES,
+            "a {} byte chunk is past the cap the reader enforces",
+            chunk.len()
+        );
+        let start = usize::try_from(offset - base).expect("a chunk offset is within the upload");
+        rebuilt[start..start + chunk.len()].copy_from_slice(chunk);
+        covered += chunk.len();
+    }
+    assert_eq!(covered, len, "the chunks neither overlap nor leave a gap");
+    // Compared with `==` rather than `assert_eq!`: a mismatch here would print
+    // two megabytes.
+    assert!(rebuilt == data, "the chunks reassemble into the upload");
+}
+
+/// An upload that fits stays one command, byte for byte what it always was —
+/// the case the fixture is blessed on, and the one a split must not disturb.
+#[test]
+fn an_upload_within_the_field_cap_stays_a_single_command() {
+    let buffer = handle(0x51, 0x0C);
+    for len in [0, 1, tag::MAX_FIELD_BYTES] {
+        let data = vec![0xA5; len];
+        let mut stream = StreamWriter::new();
+        stream.write_buffer(buffer, 64, &data);
+        let decoded = decode_stream(stream.bytes()).expect("a stream this crate wrote decodes");
+        assert_eq!(
+            decoded,
+            vec![Command::WriteBuffer {
+                buffer,
+                offset: 64,
+                data,
+            }],
+            "a {len} byte upload is one command, not a split"
+        );
+    }
+}
+
 // ── Malformed streams ─────────────────────────────────────────────────────────
 
 #[test]

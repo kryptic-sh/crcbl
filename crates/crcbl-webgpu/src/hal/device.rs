@@ -14,8 +14,12 @@
 //! * **Loudly unsupported** — the stream has no command for it *yet*, so a
 //!   `Result`-returning method returns [`HalError::Unsupported`] naming the gap
 //!   rather than a silent success a caller would mistake for a working device.
-//!   `write_buffer`, `update_bind_group` and the query methods are here; a later
-//!   slice wires them.
+//!   `update_bind_group` and the query methods are here; a later slice wires
+//!   them.
+//!
+//! A wired method may still refuse a descriptor the stream cannot carry — see
+//! the `super::bounds` module for which fields are measured, and why the refusal
+//! is a [`HalError`] rather than the writer's assert.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -263,8 +267,21 @@ impl Device for WebGpuDevice {
 
     fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
         // Wired: the upload becomes `queue.writeBuffer(buffer, offset, data)` on
-        // the replayer. The bytes cross whole on the stream — see
-        // `StreamWriter::write_buffer`.
+        // the replayer. The bytes cross as however many `WriteBuffer` commands
+        // at increasing offsets the stream's field cap needs, so an upload of
+        // any size goes over — see `StreamWriter::write_buffer`.
+        //
+        // The one thing refused here is an upload whose end address does not fit
+        // a `u64`. That is the chunk arithmetic's precondition, and a caller bug
+        // rather than a limit of the stream, so it comes back as an error the
+        // caller can report instead of the writer's assert — which on wasm would
+        // take the whole module down.
+        if offset.checked_add(data.len() as u64).is_none() {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a {} byte upload at offset {offset} runs past the end of the u64 address space",
+                data.len()
+            )));
+        }
         self.channel
             .with(|channel| channel.encode(|stream| stream.write_buffer(buffer, offset, data)));
         Ok(())
@@ -375,6 +392,10 @@ impl Device for WebGpuDevice {
         &self,
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
+        // The one descriptor here carrying compiled output rather than program
+        // text, so its artifacts are measured against the stream's caps before
+        // anything is encoded — see `super::bounds`.
+        super::bounds::shader_module(desc)?;
         let handle: ShaderModuleHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_shader_module(handle, desc)));

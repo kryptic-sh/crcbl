@@ -371,10 +371,20 @@ impl ByteWriter {
 /// Every method here panics on a field longer than [`tag::MAX_FIELD_BYTES`] or
 /// an array longer than [`tag::MAX_ELEMENT_COUNT`]. Those are the caps the
 /// reader enforces, so encoding past one would produce a buffer this crate
-/// refuses to decode; and no legitimate call can reach one — a push-constant
-/// block is bounded by the device limit and a debug label is a string literal at
-/// almost every call site. A caller that does hit one has a bug that a silent
-/// truncation would bury.
+/// refuses to decode, and a silent truncation would bury the bug rather than
+/// report it.
+///
+/// **This is the layer that asserts, not the layer a caller's data reaches.** On
+/// wasm a `panic!` is `unreachable`: the module dies mid-frame and the page is
+/// left with a trap where a diagnosis should be. So the HAL seam measures every
+/// caller-supplied field whose length is *data* before a byte of the command is
+/// written — the `hal::bounds` module — and answers a
+/// [`HalError`](crcbl_hal::HalError) the caller can report. The one upload with
+/// no bound at all is [`write_buffer`](Self::write_buffer)'s, which splits
+/// itself across as many commands as the field cap needs rather than refusing.
+/// What is left asserting here is the fields whose length the program that
+/// wrote them fixes: a debug label, an entry point name, an attachment list the
+/// device's own limits bound.
 #[derive(Debug)]
 pub struct StreamWriter {
     bytes: ByteWriter,
@@ -1343,10 +1353,59 @@ impl StreamWriter {
     ///
     /// Not an encoder command — `write_buffer` is a [`Device`](crcbl_hal::Device)
     /// method, and the replayer submits it to the queue rather than recording it
-    /// on the implicit-current encoder. The bytes cross whole, as
-    /// [`push_constants`](Self::push_constants)' do. See
+    /// on the implicit-current encoder. See
     /// [`Command::WriteBuffer`](crate::Command::WriteBuffer).
+    ///
+    /// # An upload past the field cap crosses as several commands
+    ///
+    /// This is the one command whose payload is caller *data* rather than
+    /// program text: a scene's vertex, index or instance upload is routinely
+    /// larger than [`tag::MAX_FIELD_BYTES`], which bounds one length-prefixed
+    /// field. Raising that cap would only move the wall — any fixed number is a
+    /// scene size waiting to exceed it — so the upload is **split** instead.
+    /// Each chunk is a whole `WriteBuffer` naming `offset` plus the bytes
+    /// already sent, and the replayer's `queue.writeBuffer` applies them in
+    /// order with no notion that they were ever one call. So the stream this
+    /// crate encodes stays one it can decode, and neither half ever holds the
+    /// whole upload as a single field.
+    ///
+    /// Every chunk consumes a sequence number of its own; the one returned is
+    /// the **first**, so an upload occupies the consecutive run starting there.
+    /// An empty upload is still one command carrying a zero-length field, which
+    /// is what keeps `write_buffer(b, o, &[])` distinguishable from no call at
+    /// all.
+    ///
+    /// # Panics
+    ///
+    /// If `offset + data.len()` would run past the end of the `u64` address
+    /// space, which is the chunk arithmetic's precondition and no buffer is
+    /// large enough to reach. It is a caller bug rather than a stream limit, and
+    /// [`WebGpuDevice::write_buffer`](crate::hal::WebGpuDevice) refuses it with
+    /// a [`HalError`](crcbl_hal::HalError) before it can get here.
     pub fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> u64 {
+        assert!(
+            offset.checked_add(data.len() as u64).is_some(),
+            "a {} byte upload at offset {offset} runs past the end of the u64 address space",
+            data.len()
+        );
+        // `chunks` yields nothing for an empty slice, and an empty upload is
+        // still one command — so the head is written unconditionally and the
+        // rest of the split follows it.
+        let (head, rest) = data.split_at(data.len().min(tag::MAX_FIELD_BYTES));
+        let first = self.put_write_buffer(buffer, offset, head);
+        let mut next_offset = offset + head.len() as u64;
+        for chunk in rest.chunks(tag::MAX_FIELD_BYTES) {
+            self.put_write_buffer(buffer, next_offset, chunk);
+            next_offset += chunk.len() as u64;
+        }
+        first
+    }
+
+    /// One `WriteBuffer` command — the buffer, its byte offset, then the bytes.
+    ///
+    /// `data` is at most [`tag::MAX_FIELD_BYTES`]; splitting an upload that is
+    /// longer is [`write_buffer`](Self::write_buffer)'s job.
+    fn put_write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> u64 {
         let sequence = self.push_tag(tag::WRITE_BUFFER_TAG);
         self.bytes.put_handle(buffer);
         self.bytes.put_u64(offset);
