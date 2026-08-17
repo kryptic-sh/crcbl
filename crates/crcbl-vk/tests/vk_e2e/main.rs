@@ -35,15 +35,18 @@
 // needed. (The alternative, a top-level `tests/vk_e2e.rs` root, has to name
 // each file with `#[path]`, because a crate root's modules otherwise resolve
 // beside the root file, which is `tests/` itself.)
+//
+// `depth_probe`, `lights` and `shadow` are **not** here any more: they are
+// `crates/crcbl/tests/forward_e2e/`, which runs the same assertions on every
+// backend rather than on Vulkan alone. They named no Vulkan type, so the move
+// was a move.
 mod button_skin;
 mod compute;
-mod depth_probe;
 mod device_request;
 mod draw_gen;
 mod frame_loop_sequences;
 mod harness;
 mod indirect;
-mod lights;
 mod menu;
 mod mesh;
 mod mesh_shader;
@@ -53,7 +56,6 @@ mod queries;
 mod recording;
 mod retire;
 mod seam_obligations;
-mod shadow;
 mod sprite;
 mod swapchain;
 mod triangle;

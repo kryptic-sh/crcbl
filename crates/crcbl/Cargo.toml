@@ -193,6 +193,21 @@ hal-seam-e2e = []
 # that can run one has to run all of them.
 draw-gen-e2e = []
 
+# `tests/forward_e2e/` — the forward pass's own state (the froxel grid and its
+# overflow counter, the shadow atlas as depth, the reversed-Z convention and the
+# reflectivity attachment) on whichever backend `CRCBL_GPU` names, driven by
+# `tests/run-forward-e2e.sh`. Gated and `#[ignore]`d for exactly the reason
+# `render-e2e` above is.
+#
+# The gate it closes is that every check in it reads something **no picture
+# shows** — a counter, an atlas texel, a second colour target — and until this
+# existed they lived in `crates/crcbl-vk/tests/vk_e2e/` and ran on Vulkan alone.
+# A fourth feature rather than more of `draw-gen-e2e` because the two ask
+# different questions and are separate CI steps: that suite checks what the cull
+# and draw-argument passes computed, this one what the forward pass shaded and
+# wrote. They share `tests/gpu_scene/harness.rs` and nothing else.
+forward-e2e = []
+
 # `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
 # and `build_cluster_dag`. **Off by default**, and the reason is the same one
 # `crcbl-sprite` is linked as `load` and not `bake`: the crate depends on `gltf`,

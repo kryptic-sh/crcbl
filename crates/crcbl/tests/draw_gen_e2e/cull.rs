@@ -19,13 +19,30 @@
 
 use crate::harness::{Headless, poisoned};
 use crcbl::hal::{
-    Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, MemoryLocation, ResourceState,
+    Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, Features, MemoryLocation, ResourceState,
     SubmitInfo,
 };
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::cull::{Frustum, visible_instances};
 use crcbl::render::{Camera, InstanceHandle, InstancePool, InstancePoolDesc, Projection};
 use crcbl::shaders::mesh::{GpuInstance, GpuMesh, INSTANCE_STRIDE, MESH_ENTRY_STRIDE};
+
+/// The size this module's frustums are built for.
+///
+/// `vk_e2e`'s fixture's own extent, kept rather than rounded: small enough that
+/// a software rasteriser is fast, and neither dimension is a multiple of 256, so
+/// a readback whose rows a backend padded to its own alignment cannot be
+/// mistaken for a tightly packed one.
+///
+/// It lives here rather than in the shared fixture because this is the only
+/// module that renders at it: `tests/forward_e2e/` and the rest of this suite
+/// are mesh scenes at [`MESH_EXTENT`](crate::harness::MESH_EXTENT).
+const EXTENT: (u32, u32) = (64, 48);
+
+/// The cull probe's ring: [`EXTENT`], and nothing required.
+fn open_probe() -> Headless {
+    Headless::open_at(EXTENT, Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY)
+}
 
 /// What the visible list holds before every dispatch.
 ///
@@ -178,7 +195,7 @@ fn turned_camera() -> Camera {
 /// The aspect ratio every frustum here is built for. The offscreen ring's, so
 /// the numbers match what the rest of the suite renders at.
 fn aspect() -> f32 {
-    crate::harness::EXTENT.0 as f32 / crate::harness::EXTENT.1 as f32
+    EXTENT.0 as f32 / EXTENT.1 as f32
 }
 
 /// Everything the cull pass needs on the device, plus the readback path.
@@ -679,7 +696,7 @@ impl CullProbe {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn the_gpu_visible_list_matches_the_cpu_reference() {
-    let headless = Headless::open();
+    let headless = open_probe();
     let (instances, meshes) = (scene(), meshes());
     let probe = CullProbe::new(&headless, &instances, &meshes, VISIBLE_CAPACITY);
 
@@ -729,7 +746,7 @@ fn the_gpu_visible_list_matches_the_cpu_reference() {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn the_visible_set_changes_with_the_camera() {
-    let headless = Headless::open();
+    let headless = open_probe();
     let (instances, meshes) = (scene(), meshes());
     let probe = CullProbe::new(&headless, &instances, &meshes, VISIBLE_CAPACITY);
 
@@ -779,7 +796,7 @@ fn the_visible_set_changes_with_the_camera() {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn a_finite_far_plane_culls_what_an_infinite_one_keeps() {
-    let headless = Headless::open();
+    let headless = open_probe();
     let (instances, meshes) = (scene(), meshes());
     let probe = CullProbe::new(&headless, &instances, &meshes, VISIBLE_CAPACITY);
 
@@ -827,7 +844,7 @@ fn a_finite_far_plane_culls_what_an_infinite_one_keeps() {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn an_overflowing_list_still_counts_every_survivor() {
-    let headless = Headless::open();
+    let headless = open_probe();
     let (instances, meshes) = (scene(), meshes());
     let frustum = Frustum::from_view_projection(scene_camera().view_projection(aspect()));
     let expected = visible_instances(&frustum, &instances, &meshes);
@@ -950,7 +967,7 @@ fn host_array(pool: &InstancePool, handles: &[Option<InstanceHandle>]) -> Vec<Gp
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn a_removed_instance_is_not_in_the_visible_list() {
-    let headless = Headless::open();
+    let headless = open_probe();
     let device = headless.device.as_ref();
     let meshes = meshes();
     let (mut pool, handles) = pooled_scene(&headless);
@@ -1030,7 +1047,7 @@ fn a_removed_instance_is_not_in_the_visible_list() {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn a_slot_reused_after_a_removal_draws_its_new_contents() {
-    let headless = Headless::open();
+    let headless = open_probe();
     let device = headless.device.as_ref();
     let meshes = meshes();
     let (mut pool, handles) = pooled_scene(&headless);

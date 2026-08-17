@@ -7,9 +7,14 @@
 //! `mesh_ortho.png`, `mesh_second.png` and `mesh_clusters.png`.
 //!
 //! It is also the suite's shared scene, which is why it is one module rather
-//! than several: `queries`, `draw_gen` and `depth_probe` all import its extent,
-//! camera or spin constant instead of inventing their own, so the scene the
-//! goldens were blessed on is the scene those modules measure against.
+//! than several: the modules beside it import its extent, camera, spin constant
+//! or frame helper instead of inventing their own, so the scene the goldens were
+//! blessed on is the scene those modules measure against.
+//!
+//! The backend-agnostic half of those helpers is
+//! `crates/crcbl/tests/gpu_scene/harness.rs`, which is where `lights`, `shadow`
+//! and `depth_probe` went when they left this suite. This copy stays because the
+//! goldens above are blessed on Vulkan.
 //!
 //! The tests worth reading are the ones a golden cannot make. A shader that
 //! returned the vertex colour unchanged would pass a golden the day it was

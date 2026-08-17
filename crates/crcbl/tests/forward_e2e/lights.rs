@@ -1,4 +1,5 @@
-//! `docs/plan/18-render-features.md`'s light list, on a real device.
+//! `docs/plan/18-render-features.md`'s light list, on whichever backend
+//! `CRCBL_GPU` names.
 //!
 //! Two things a golden image cannot say, and this module exists for both:
 //!
@@ -11,16 +12,17 @@
 //!   clusters and contributes nothing is the failure mode of every step in this
 //!   slice at once, and only pixels can see it.
 
-use crcbl_hal::{
+use crcbl::hal::{
     Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, Features, MemoryLocation, ResourceState,
     SubmitInfo,
 };
-use crcbl_render::{Light, PointLight, SpotLight};
-use crcbl_shaders::light::{CLUSTER_LIGHT_CAPACITY, CLUSTER_OVERFLOW_WORD, CLUSTER_STRIDE};
-use glam::Vec3;
+use crcbl::math::Vec3;
+use crcbl::render::{Light, PointLight, SpotLight};
+use crcbl::shaders::light::{CLUSTER_LIGHT_CAPACITY, CLUSTER_OVERFLOW_WORD, CLUSTER_STRIDE};
 
-use crate::harness::{Headless, poisoned};
-use crate::mesh::{MESH_EXTENT, mesh_camera, place_cube, read_stats_word, render_mesh};
+use crate::harness::{
+    Headless, MESH_EXTENT, mesh_camera, place_cube, poisoned, read_stats_word, render_mesh,
+};
 
 /// Where the cube is, and where a light has to be to reach it.
 ///
@@ -45,8 +47,8 @@ const EVERYWHERE: f32 = 1.0e4;
 const CROWD: u32 = 20;
 
 /// A camera whose frame is the one `MESH_EXTENT` sizes.
-fn camera() -> crcbl_render::Camera {
-    mesh_camera(crcbl_render::Projection::default())
+fn camera() -> crcbl::render::Camera {
+    mesh_camera(crcbl::render::Projection::default())
 }
 
 /// A light that covers the whole frustum, so every froxel lists it.
@@ -76,12 +78,12 @@ fn everywhere(index: u32) -> Light {
 /// The zero case is asserted first and in the same frame shape, because a
 /// counter wired to a constant passes the interesting half on its own.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn a_froxel_that_runs_out_of_budget_counts_what_it_refused() {
     let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
     let device = headless.device.as_ref();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("a forward renderer");
     place_cube(&mut renderer);
     let camera = camera();
@@ -126,7 +128,7 @@ fn a_froxel_that_runs_out_of_budget_counts_what_it_refused() {
     assert_eq!(overflowed, 1440, "and that product is this number");
 
     eprintln!(
-        "vk e2e: lights — {lights} lights over {} froxels refused {overflowed} assignment(s)",
+        "crcbl forward e2e: lights — {lights} lights over {} froxels refused {overflowed} assignment(s)",
         grid.froxels()
     );
 
@@ -159,7 +161,7 @@ const SPOT_OUTER: f32 = 0.22;
 /// terms exactly: the graph leaves the grid in [`ResourceState::ShaderRead`],
 /// which is where the next frame on that slot expects it, so this moves it out
 /// and puts it straight back.
-fn assignments(headless: &Headless, renderer: &crcbl_render::ForwardRenderer) -> u32 {
+fn assignments(headless: &Headless, renderer: &crcbl::render::ForwardRenderer) -> u32 {
     let device = headless.device.as_ref();
     let grid = renderer.light_grid_buffer(renderer.frame());
     let words = renderer.grid().froxels() * CLUSTER_STRIDE;
@@ -178,7 +180,7 @@ fn assignments(headless: &Headless, renderer: &crcbl_render::ForwardRenderer) ->
         queue: headless.queue,
     });
     let barrier = |from: ResourceState, to: ResourceState| {
-        [crcbl_hal::BufferBarrier {
+        [crcbl::hal::BufferBarrier {
             buffer: grid,
             from,
             to,
@@ -191,7 +193,7 @@ fn assignments(headless: &Headless, renderer: &crcbl_render::ForwardRenderer) ->
         buffers: &out,
         ..Barriers::default()
     });
-    encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
         src: grid,
         src_offset: 0,
         dst: staging,
@@ -238,17 +240,17 @@ fn assignments(headless: &Headless, renderer: &crcbl_render::ForwardRenderer) ->
 ///   render suite is where that claim is made across a whole surface; this is
 ///   the half of it that lives beside the number.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
     let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
     let device = headless.device.as_ref();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("a forward renderer");
     place_cube(&mut renderer);
     let camera = camera();
 
-    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera).image;
+    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera);
     let sun_only = assignments(&headless, &renderer);
 
     renderer.set_lights(&[Light::Point(PointLight {
@@ -268,12 +270,12 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
         inner_angle: SPOT_INNER,
         outer_angle: SPOT_OUTER,
     })]);
-    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera).image;
+    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera);
     let with_cone = assignments(&headless, &renderer);
 
     let froxels = renderer.grid().froxels();
     eprintln!(
-        "vk e2e: lights — {froxels} froxels list {sun_only} assignment(s) for the sun alone, \
+        "crcbl forward e2e: lights — {froxels} froxels list {sun_only} assignment(s) for the sun alone, \
          {with_sphere} with a point light beside it and {with_cone} with the same light as a \
          narrow spot"
     );
@@ -319,7 +321,7 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
     let (x, y) = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
     let before = dark.pixel(x, y).expect("inside the frame");
     let after = lit.pixel(x, y).expect("inside the frame");
-    eprintln!("vk e2e: lights — cube centre under the spot {before:?} → {after:?}");
+    eprintln!("crcbl forward e2e: lights — cube centre under the spot {before:?} → {after:?}");
     assert!(
         after[0] > before[0],
         "the spot is aimed at the cube and must brighten it: {before:?} → {after:?}"
@@ -340,17 +342,17 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
 /// light everywhere regardless of the froxel leaves the *far* side changed too,
 /// which the second assertion is what refuses.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn a_point_light_brightens_the_face_it_is_beside_and_not_the_frame() {
     let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
     let device = headless.device.as_ref();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("a forward renderer");
     place_cube(&mut renderer);
     let camera = camera();
 
-    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera).image;
+    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera);
 
     renderer.set_lights(&[Light::Point(PointLight {
         position: LIGHT_AT,
@@ -359,13 +361,13 @@ fn a_point_light_brightens_the_face_it_is_beside_and_not_the_frame() {
         // `DirectionalLight::default` already puts above 1.0.
         color: Vec3::new(4.0, 1.0, 1.0),
     })]);
-    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera).image;
+    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera);
 
     // The cube's centre, which faces the camera and is on the light's side.
     let (x, y) = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
     let before = dark.pixel(x, y).expect("inside the frame");
     let after = lit.pixel(x, y).expect("inside the frame");
-    eprintln!("vk e2e: lights — cube centre {before:?} → {after:?}");
+    eprintln!("crcbl forward e2e: lights — cube centre {before:?} → {after:?}");
     assert!(
         after[0] > before[0],
         "a red point light beside the cube must brighten its red channel: \

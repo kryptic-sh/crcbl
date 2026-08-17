@@ -1,4 +1,13 @@
-//! The fixture the rest of the suite opens with — not a test module.
+//! The fixture the backend-agnostic GPU suites open with — not a test module,
+//! and not a test target either: `tests/gpu_scene/` holds no `main.rs`, so Cargo
+//! compiles nothing here on its own.
+//!
+//! **Two suites pull this in with `#[path]`** — `tests/draw_gen_e2e/` and
+//! `tests/forward_e2e/` — because they open the same device, place the same
+//! meshes and read back the same frames, and a second copy of that is a second
+//! place a fix has to land. Each names itself in a `SUITE` constant at its own
+//! crate root, which is what every line this file prints and every debug label
+//! it sets is built from; there is nothing else suite-specific in here.
 //!
 //! [`Headless`] is an offscreen surface, a device and a swapchain-shaped image
 //! ring, opened on whatever [`crcbl::backend::open`] selects. It is the
@@ -16,18 +25,17 @@
 //!   did not carry actually arrives, and on Vulkan, Metal and D3D12 the trait's
 //!   default answers `None`.
 //!
-//! [`select_adapter`] prints a `crcbl draw gen e2e: device on adapter …` line,
-//! and that line is load-bearing outside this file: `tests/run-draw-gen-e2e.sh`
-//! greps the first one to report which device really ran and to check that a
-//! `CRCBL_ADAPTER` it exported actually arrived. Rewording it turns a green
-//! suite into a failed harness run.
+//! [`select_adapter`] prints a `<SUITE>: device on adapter …` line, and that
+//! line is load-bearing outside this file: each suite's runner greps the first
+//! one to report which device really ran and to check that a `CRCBL_ADAPTER` it
+//! exported actually arrived. Rewording it turns a green suite into a failed
+//! harness run.
 //!
 //! The scene helpers below the fixture — [`MESH_EXTENT`], [`mesh_camera`],
-//! [`place`], [`render_mesh`], [`read_stats_word`] — are `vk_e2e/mesh.rs`'s,
-//! moved here because `cull_stats` and `draw_gen` are the modules that import
-//! them. `render_mesh` reads back only the swapchain image: the `Rgba16Float`
-//! probe pass its Vulkan original also runs exists for lighting assertions that
-//! live in `mesh.rs` and have not moved.
+//! [`place`], [`render_mesh`], [`read_stats_word`] — are `vk_e2e/mesh.rs`'s.
+//! `render_mesh` reads back only the swapchain image: the `Rgba16Float` probe
+//! pass its Vulkan original also runs exists for lighting assertions that live
+//! in `mesh.rs` and have not moved.
 
 use core::ops::Deref;
 use std::time::{Duration, Instant};
@@ -43,14 +51,6 @@ use crcbl::hal::{
 };
 use crcbl::math::Mat4;
 use crcbl::render::{Camera, ForwardRenderer, InstanceDesc, InstanceHandle, TransientPool};
-
-/// The size the cull probe's frustums are built for.
-///
-/// `vk_e2e`'s fixture's own extent, kept rather than rounded: small enough that
-/// a software rasteriser is fast, and neither dimension is a multiple of 256, so
-/// a readback whose rows a backend padded to its own alignment cannot be
-/// mistaken for a tightly packed one.
-pub(crate) const EXTENT: (u32, u32) = (64, 48);
 
 /// The byte every readback destination is filled with before it is polled.
 ///
@@ -113,7 +113,8 @@ fn select_adapter(instance: &dyn Instance) -> crcbl::hal::AdapterInfo {
         .unwrap_or_else(|miss| panic!("{miss}"))
         .clone();
     eprintln!(
-        "crcbl draw gen e2e: device on adapter {id} {name:?} type={kind:?} ({ADAPTER_ENV_VAR}={pin})",
+        "{suite}: device on adapter {id} {name:?} type={kind:?} ({ADAPTER_ENV_VAR}={pin})",
+        suite = crate::SUITE,
         id = adapter.id.0,
         name = adapter.name,
         kind = adapter.device_type,
@@ -166,11 +167,6 @@ pub(crate) struct Headless {
 }
 
 impl Headless {
-    /// The cull probe's ring: [`EXTENT`], and nothing required.
-    pub(crate) fn open() -> Self {
-        Self::open_at(EXTENT, Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY)
-    }
-
     /// A ring the mesh scenes render into, on the best geometry path the
     /// adapter offers.
     pub(crate) fn open_for_mesh() -> Self {
@@ -192,7 +188,11 @@ impl Headless {
         )
     }
 
-    fn open_at(extent: (u32, u32), optional_features: Features) -> Self {
+    /// A ring of `extent`, with `optional_features` asked for and none required.
+    ///
+    /// `pub(crate)` because a suite whose probe is not a mesh scene builds its
+    /// own ring out of it — `draw_gen_e2e/cull.rs` is the one that does.
+    pub(crate) fn open_at(extent: (u32, u32), optional_features: Features) -> Self {
         let instance = instance();
         let adapter = select_adapter(instance.as_ref());
 
@@ -205,16 +205,15 @@ impl Headless {
         let caps = instance
             .surface_caps(surface, adapter.id)
             .expect("the offscreen ring reports its own caps");
-        // The ring's preferred format rather than a pinned `Rgba8UnormSrgb`.
-        // `vk_e2e`'s fixture pins one because it compares against a golden
-        // blessed in it; nothing in this suite commits an image, and the two
-        // frames `every_geometry_path…` compares are drawn through the same
-        // choice.
+        // The ring's preferred format rather than a pinned `Rgba8UnormSrgb` —
+        // which is what `vk_e2e`'s fixture asks for too. No suite on this
+        // harness commits an image, and every pair of frames compared here is
+        // drawn through the same choice.
         let format = caps.preferred_format().expect("some format is offered");
 
         let device = instance
             .create_device(&DeviceDesc {
-                label: Some("crcbl draw gen e2e"),
+                label: Some(crate::SUITE),
                 adapter: adapter.id,
                 // Nothing is required, so the same fixture opens on a discrete
                 // GPU and on a software rasteriser and the tests branch on what
@@ -228,9 +227,10 @@ impl Headless {
             .queue(crcbl::hal::QueueKind::Graphics)
             .expect("a graphics queue always exists");
 
+        let ring = format!("{} ring", crate::SUITE);
         let swapchain = device
             .create_swapchain(&SwapchainDesc {
-                label: Some("crcbl draw gen e2e ring"),
+                label: Some(&ring),
                 surface,
                 format,
                 extent,
@@ -254,9 +254,10 @@ impl Headless {
     /// rather than sleeping — `docs/plan/12-testing.md`.
     pub(crate) fn readback(&self, staging: crcbl::hal::BufferHandle, size: u64, out: &mut [u8]) {
         let device = self.device.as_ref();
+        let label = format!("{} readback", crate::SUITE);
         let readback = device
             .request_readback(&ReadbackDesc {
-                label: Some("crcbl draw gen e2e readback"),
+                label: Some(&label),
                 buffer: staging,
                 offset: 0,
                 size,
@@ -320,9 +321,10 @@ impl Drop for Headless {
         if !std::thread::panicking() {
             return;
         }
+        let suite = crate::SUITE;
         eprintln!(
-            "crcbl draw gen e2e: the fixture was dropped by a panicking test, so `finish` \
-             never ran. What it can still see:"
+            "{suite}: the fixture was dropped by a panicking test, so `finish` never ran. \
+             What it can still see:"
         );
         match self.device.0.as_ref() {
             // The distinction a flake needs: a lost device is a driver-side
@@ -331,24 +333,23 @@ impl Drop for Headless {
             Some(device) => {
                 match device.wait_idle() {
                     Ok(()) => eprintln!(
-                        "crcbl draw gen e2e:   wait_idle: Ok — the device is alive and idle, \
-                         so the submission completed and the failure is in what it produced"
+                        "{suite}:   wait_idle: Ok — the device is alive and idle, so the \
+                         submission completed and the failure is in what it produced"
                     ),
                     Err(HalError::DeviceLost(detail)) => eprintln!(
-                        "crcbl draw gen e2e:   wait_idle: device lost ({detail}) — nothing \
-                         this test read back means anything"
+                        "{suite}:   wait_idle: device lost ({detail}) — nothing this test \
+                         read back means anything"
                     ),
-                    Err(error) => eprintln!("crcbl draw gen e2e:   wait_idle: {error}"),
+                    Err(error) => eprintln!("{suite}:   wait_idle: {error}"),
                 }
                 match device.take_error() {
-                    Some(error) => eprintln!("crcbl draw gen e2e:   out-of-band error: {error}"),
-                    None => eprintln!("crcbl draw gen e2e:   out-of-band error: none"),
+                    Some(error) => eprintln!("{suite}:   out-of-band error: {error}"),
+                    None => eprintln!("{suite}:   out-of-band error: none"),
                 }
             }
-            None => eprintln!(
-                "crcbl draw gen e2e:   wait_idle: not asked, `finish` already destroyed the \
-                 device"
-            ),
+            None => {
+                eprintln!("{suite}:   wait_idle: not asked, `finish` already destroyed the device")
+            }
         }
     }
 }
@@ -488,7 +489,7 @@ pub(crate) fn render_mesh(
         // the barriers open where the last frame left off.
         graph.compile(&*pool).expect("a legal frame")
     };
-    eprintln!("crcbl draw gen e2e: {}", compiled.dump());
+    eprintln!("{}: {}", crate::SUITE, compiled.dump());
     compiled
         .execute(device, pool, encoder.as_mut(), None)
         .expect("the graph executed");

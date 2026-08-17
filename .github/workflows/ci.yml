@@ -765,6 +765,23 @@ jobs:
           CRCBL_DX12_VALIDATION: '1'
         run: crates/crcbl/tests/run-draw-gen-e2e.sh
 
+      # The forward pass's own state: the froxel grid and its overflow counter,
+      # the shadow atlas read back as depth, the reflectivity attachment, and
+      # reversed-Z discriminated against a conventional projection. Same
+      # consolidation and same migration as the two steps above —
+      # `crates/crcbl/tests/forward_e2e/` is what `vk_e2e`'s `lights.rs`,
+      # `shadow.rs` and `depth_probe.rs` became — and until this step existed
+      # D3D12 had no check on a single atlas texel or froxel count.
+      #
+      # It needs the same device the ForwardRenderer step needs and nothing more.
+      - name: Check the forward pass on WARP
+        shell: bash
+        env:
+          CRCBL_GPU: dx12
+          CRCBL_ADAPTER: cpu
+          CRCBL_DX12_VALIDATION: '1'
+        run: crates/crcbl/tests/run-forward-e2e.sh
+
       # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
       # never run anywhere but by hand: its own header claimed
       # `run-render-e2e.sh` supplied the backend, and that script passes
@@ -967,6 +984,18 @@ jobs:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-draw-gen-e2e.sh
+
+      # The forward pass's own state — the froxel grid, the shadow atlas as
+      # depth, the reflectivity attachment, reversed-Z against a conventional
+      # control. This is the Vulkan arm of the suite `vk_e2e`'s `lights.rs`,
+      # `shadow.rs` and `depth_probe.rs` became: the same checks the step above
+      # this job's `run-vk-e2e.sh` used to make, now made from a binary that
+      # names no backend so the other three jobs make them too.
+      - name: Check the forward pass on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-forward-e2e.sh
 
       # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
       # never run in CI at all: its own header claimed `run-render-e2e.sh`
@@ -1526,6 +1555,19 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-draw-gen-e2e.sh
 
+      # The forward pass's own state on this backend. Unlike the step above it,
+      # this one needed no seam change to run here: every check passed on wgpu
+      # unmodified the first time it was pointed at one, and the numbers the
+      # suite prints — froxel assignments, written texels per atlas tile, the two
+      # projections' centre pixels — matched Vulkan's on the same machine. That
+      # is a finding rather than a formality: it is the first evidence that this
+      # backend's shadow atlas is written at all.
+      - name: Check the forward pass on wgpu
+        env:
+          CRCBL_GPU: wgpu
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-forward-e2e.sh
+
       # The physical-tiling count on this backend, the same step the other three
       # backends have. `CRCBL_VK_ICD` rather than `CRCBL_WGPU_ICD` for the
       # reason the step above it gives: the harness resolves the name with
@@ -1882,6 +1924,22 @@ jobs:
           MTL_DEBUG_LAYER_ERROR_MODE: nslog
           MTL_DEBUG_LAYER_WARNING_MODE: nslog
         run: crates/crcbl/tests/run-draw-gen-e2e.sh
+
+      # The forward pass's own state on Metal. Until this step existed no Metal
+      # run had read a single shadow-atlas texel or froxel count: the goldens the
+      # ForwardRenderer step compares are exactly what a shadow pass that
+      # rendered nothing produces, because every surface is then lit and no
+      # artifact appears anywhere.
+      #
+      # Same validation switches as the renderer steps, for the reason argued at
+      # the ForwardRenderer one — `MTL_SHADER_VALIDATION` deliberately absent.
+      - name: Check the forward pass on Metal
+        env:
+          CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+        run: crates/crcbl/tests/run-forward-e2e.sh
 
       # The physical-tiling count on Metal. It draws through `ForwardRenderer`,
       # so the same validation switches the step above sets apply here and for

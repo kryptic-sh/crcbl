@@ -23,22 +23,21 @@
 //! already hold. So this file reads that attachment back and says what it found.
 //!
 //! **A 1×1 occlusion image reads as its one texel, everywhere.** That is what
-//! `crcbl_render::forward`'s ambient-occlusion off-switch is, and an unclamped
+//! `crcbl::render::forward`'s ambient-occlusion off-switch is, and an unclamped
 //! `Load` at `SV_Position.xy` does not do it — the fetch lands outside a
 //! one-texel image at every pixel but the origin and yields zero, which reads as
 //! total occlusion. The probe already binds exactly that placeholder, so the
 //! question is asked here by darkening the light list until ambient is the whole
 //! of the frame's colour.
 //!
-//! It borrows `mesh`'s extent and shader but is not part of that module,
-//! because none of the three is a picture of a scene: the conventional projection
+//! It borrows the fixture's extent and the engine's shader but draws no scene:
+//! none of the three is a picture of one. The conventional projection
 //! built for the control is one nothing in the engine ever constructs, the
 //! reflectivity frame is deliberately shaded through a row that makes the colour
 //! target nearly black, and the occlusion frame has no direct light in it at all.
 
-use crate::harness::{Headless, POISON, poisoned};
-use crate::mesh::MESH_EXTENT;
-use crcbl_hal::{
+use crate::harness::{Headless, MESH_EXTENT, POISON, poisoned};
+use crcbl::hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Device, Extent3d,
     Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,
     SampleType, SubmitInfo,
@@ -59,33 +58,33 @@ use crcbl_hal::{
 /// test would still leave the near one on top by draw order, and the test would
 /// pass for the wrong reason.
 struct DepthProbe {
-    vertices: crcbl_hal::BufferHandle,
-    indices: crcbl_hal::BufferHandle,
-    uniforms: crcbl_hal::BufferHandle,
+    vertices: crcbl::hal::BufferHandle,
+    indices: crcbl::hal::BufferHandle,
+    uniforms: crcbl::hal::BufferHandle,
     /// One `GpuInstance` at identity. `mesh.slang` reads its transform out of
     /// this rather than out of the uniform block, and the probe's geometry is
     /// already in world space — so the transform is a constant.
     ///
     /// Written per frame rather than at construction, because its
-    /// [`material`](crcbl_shaders::mesh::GpuInstance::material) is the one field
+    /// [`material`](crcbl::shaders::mesh::GpuInstance::material) is the one field
     /// that varies: it is how a frame says which row of [`PROBE_MATERIALS`] its
     /// fragments shade through, and the reflectivity assertion exists to check
     /// that the row named here is the row that arrives.
-    instances: crcbl_hal::BufferHandle,
+    instances: crcbl::hal::BufferHandle,
     /// One `DrawConstants` block naming instance zero. The probe has one
     /// instance, so this is the identity — but `mesh.slang` reads the block
     /// unconditionally, and a set that did not bind it is a pipeline that draws
     /// nothing.
-    draw_constants: crcbl_hal::BufferHandle,
+    draw_constants: crcbl::hal::BufferHandle,
     /// A one-entry mesh table, and it is the identity for the same reason: the
     /// probe's geometry starts at vertex 0, so entry 0 is all zeroes and the
     /// instance's mesh id is 0. What it proves is that the *path* is bound —
     /// the vertex stage resolves its base vertex through here on every draw in
     /// the engine, this one included.
-    mesh_table: crcbl_hal::BufferHandle,
-    materials: crcbl_hal::BufferHandle,
-    lights: crcbl_hal::BufferHandle,
-    light_grid: crcbl_hal::BufferHandle,
+    mesh_table: crcbl::hal::BufferHandle,
+    materials: crcbl::hal::BufferHandle,
+    lights: crcbl::hal::BufferHandle,
+    light_grid: crcbl::hal::BufferHandle,
     /// A one-row irradiance probe table, left **zeroed**.
     ///
     /// `mesh.slang` reads it unconditionally and clamps every fetch into it, so
@@ -93,30 +92,30 @@ struct DepthProbe {
     /// because the frame block's volume is the default one: the grid evaluates
     /// to exactly zero and this probe's ambient answers stay the answers it
     /// recorded before there was a grid at all.
-    probes: crcbl_hal::BufferHandle,
+    probes: crcbl::hal::BufferHandle,
     /// A one-entry run of visible instances, holding the index 0.
     ///
     /// `mesh.slang` reads its instance out of a run rather than naming one,
     /// because the engine's own draws come out of `draw_gen.slang` — see
-    /// `crcbl_render::draw_gen`. This probe records an ordinary `draw_indexed`
+    /// `crcbl::render::draw_gen`. This probe records an ordinary `draw_indexed`
     /// of one instance, so `SV_InstanceID` is 0, the block's base is 0, and this
     /// entry is what sends it to instance 0.
-    visible_instances: crcbl_hal::BufferHandle,
+    visible_instances: crcbl::hal::BufferHandle,
     /// A one-layer `D2Array` page of one white texel, and its view.
     ///
     /// `mesh.slang` samples `base_color_textures` unconditionally, so the probe
     /// has to bind *something*; white is the one thing that leaves the two
     /// quads the colours this test asserts, because the material row names
     /// layer 0 and the shader multiplies by what it finds there.
-    base_color_page: crcbl_render::UploadedTexture,
-    /// `mesh.slang`'s occlusion channel, one white texel — `crcbl_render::forward`'s
+    base_color_page: crcbl::render::UploadedTexture,
+    /// `mesh.slang`'s occlusion channel, one white texel — `crcbl::render::forward`'s
     /// own placeholder, and the subject of this file's third question.
     ///
     /// **Deliberately smaller than the frame**, which is the whole point: the
     /// shader has to clamp its fetch to reach this texel at all, and every frame
     /// this file renders is drawn through it.
-    occlusion: crcbl_render::UploadedTexture,
-    base_color_sampler: crcbl_hal::SamplerHandle,
+    occlusion: crcbl::render::UploadedTexture,
+    base_color_sampler: crcbl::hal::SamplerHandle,
     /// A 1×1 `D32Float` image standing in for topic 18's shadow atlas, and its
     /// **comparison** sampler.
     ///
@@ -129,9 +128,9 @@ struct DepthProbe {
     /// to zero, so every fragment takes `sun_visibility`'s "past the last split"
     /// path and is fully lit — which is what keeps this probe's depth answers
     /// the ones it recorded before shadows existed.
-    shadow_atlas: crcbl_hal::ImageHandle,
-    shadow_atlas_view: crcbl_hal::ImageViewHandle,
-    shadow_sampler: crcbl_hal::SamplerHandle,
+    shadow_atlas: crcbl::hal::ImageHandle,
+    shadow_atlas_view: crcbl::hal::ImageViewHandle,
+    shadow_sampler: crcbl::hal::SamplerHandle,
     /// What the last frame left [`DepthProbe::shadow_atlas`] in.
     ///
     /// The probe outlives its frames and this image is not a swapchain image, so
@@ -139,12 +138,12 @@ struct DepthProbe {
     /// [`ResourceState::Undefined`] every frame would give the incoming layout
     /// transition `srcStageMask = NONE` and leave it racing the previous frame's
     /// sampled read. `ForwardRenderer` carries the same field for the same
-    /// reason — see `crcbl_render::ForwardRenderer`'s `shadow_imported`.
+    /// reason — see `crcbl::render::ForwardRenderer`'s `shadow_imported`.
     shadow_imported: ResourceState,
-    layout: crcbl_hal::BindGroupLayoutHandle,
-    group: crcbl_hal::BindGroupHandle,
-    pipeline_layout: crcbl_hal::PipelineLayoutHandle,
-    pipeline: crcbl_hal::GraphicsPipelineHandle,
+    layout: crcbl::hal::BindGroupLayoutHandle,
+    group: crcbl::hal::BindGroupHandle,
+    pipeline_layout: crcbl::hal::PipelineLayoutHandle,
+    pipeline: crcbl::hal::GraphicsPipelineHandle,
 }
 
 /// Where the probe's camera sits, on the +Z axis looking at the origin.
@@ -193,12 +192,12 @@ const PROBE_AMBIENT: [f32; 4] = [0.2, 0.2, 0.2, 0.0];
 /// differ in both fields and by a wide margin, which is what lets the assertion
 /// be a tolerance around one value rather than a preference between two close
 /// ones.
-const PROBE_MATERIALS: [crcbl_shaders::mesh::GpuMaterial; 2] = [
+const PROBE_MATERIALS: [crcbl::shaders::mesh::GpuMaterial; 2] = [
     // The row this probe has always shaded through. Its `F0` is the flat
     // dielectric 0.04 and its roughness is 0.5, so it is far from the row below
     // in every channel of the attachment.
-    crcbl_shaders::mesh::GpuMaterial::UNTINTED,
-    crcbl_shaders::mesh::GpuMaterial {
+    crcbl::shaders::mesh::GpuMaterial::UNTINTED,
+    crcbl::shaders::mesh::GpuMaterial {
         // **Not `[1.0; 4]`, and the blue factor is the reason.** `F0` here is
         // the quad's own albedo, and the near quad's green and blue are equal —
         // two equal channels are two a swizzle could swap unseen. Scaling one of
@@ -214,8 +213,8 @@ const PROBE_MATERIALS: [crcbl_shaders::mesh::GpuMaterial; 2] = [
         roughness: 0.25,
         // Authored UV, like the untextured row above: this probe scene samples
         // no page, so physical tiling has nothing to tile.
-        tiling: crcbl_shaders::mesh::GpuMaterial::TILING_AUTHORED,
-        tile_metres: crcbl_shaders::mesh::GpuMaterial::UNTINTED.tile_metres,
+        tiling: crcbl::shaders::mesh::GpuMaterial::TILING_AUTHORED,
+        tile_metres: crcbl::shaders::mesh::GpuMaterial::UNTINTED.tile_metres,
     },
 ];
 
@@ -248,7 +247,7 @@ const REFLECTIVITY_TOLERANCE: f32 = 2.0 / 255.0;
 const OCCLUSION_TOLERANCE: f32 = 3.0 / 255.0;
 
 impl DepthProbe {
-    /// The two quads, near-first, in `crcbl_shaders::mesh::MeshVertex` layout,
+    /// The two quads, near-first, in `crcbl::shaders::mesh::MeshVertex` layout,
     /// with the box they fit in.
     ///
     /// The bounds are accumulated from the same loop that writes the vertices
@@ -286,7 +285,7 @@ impl DepthProbe {
                 for value in [color[0], color[1], color[2], 1.0] {
                     vertices.extend_from_slice(&value.to_le_bytes());
                 }
-                // The fourth `float4` of `crcbl_shaders::mesh::MeshVertex`:
+                // The fourth `float4` of `crcbl::shaders::mesh::MeshVertex`:
                 // the base-colour UV, the corner's own position mapped to
                 // `0..=1`. It selects nothing here — the probe's page has one
                 // white layer — but it has to be *written*, because the stride
@@ -332,7 +331,7 @@ impl DepthProbe {
                 label: Some("probe upload"),
                 queue: headless.queue,
             });
-            encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
                 src: staging,
                 src_offset: 0,
                 dst: target,
@@ -340,7 +339,7 @@ impl DepthProbe {
                 size,
             });
             encoder.pipeline_barrier(&Barriers {
-                buffers: &[crcbl_hal::BufferBarrier::new(
+                buffers: &[crcbl::hal::BufferBarrier::new(
                     target,
                     ResourceState::TransferDst,
                     state,
@@ -372,7 +371,7 @@ impl DepthProbe {
         let uniforms = device
             .create_buffer(&BufferDesc {
                 label: Some("probe uniforms"),
-                size: crcbl_shaders::mesh::FRAME_UNIFORMS_SIZE as u64,
+                size: crcbl::shaders::mesh::FRAME_UNIFORMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
             })
@@ -380,7 +379,7 @@ impl DepthProbe {
         let instances = device
             .create_buffer(&BufferDesc {
                 label: Some("probe instances"),
-                size: crcbl_shaders::mesh::INSTANCE_STRIDE as u64,
+                size: crcbl::shaders::mesh::INSTANCE_STRIDE as u64,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
             })
@@ -389,7 +388,7 @@ impl DepthProbe {
         let draw_constants = device
             .create_buffer(&BufferDesc {
                 label: Some("probe draw constants"),
-                size: crcbl_shaders::mesh::DRAW_CONSTANTS_SIZE as u64,
+                size: crcbl::shaders::mesh::DRAW_CONSTANTS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
             })
@@ -398,7 +397,7 @@ impl DepthProbe {
             .write_buffer(
                 draw_constants,
                 0,
-                &crcbl_shaders::mesh::DrawConstants::default().to_bytes(),
+                &crcbl::shaders::mesh::DrawConstants::default().to_bytes(),
             )
             .expect("write");
 
@@ -409,7 +408,7 @@ impl DepthProbe {
         let materials = device
             .create_buffer(&BufferDesc {
                 label: Some("probe materials"),
-                size: (PROBE_MATERIALS.len() * crcbl_shaders::mesh::MATERIAL_STRIDE) as u64,
+                size: (PROBE_MATERIALS.len() * crcbl::shaders::mesh::MATERIAL_STRIDE) as u64,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
             })
@@ -418,7 +417,7 @@ impl DepthProbe {
             device
                 .write_buffer(
                     materials,
-                    (row * crcbl_shaders::mesh::MATERIAL_STRIDE) as u64,
+                    (row * crcbl::shaders::mesh::MATERIAL_STRIDE) as u64,
                     &material.to_bytes(),
                 )
                 .expect("write");
@@ -427,7 +426,7 @@ impl DepthProbe {
         let mesh_table = device
             .create_buffer(&BufferDesc {
                 label: Some("probe mesh table"),
-                size: crcbl_shaders::mesh::MESH_ENTRY_STRIDE as u64,
+                size: crcbl::shaders::mesh::MESH_ENTRY_STRIDE as u64,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
             })
@@ -436,7 +435,7 @@ impl DepthProbe {
             .write_buffer(
                 mesh_table,
                 0,
-                &crcbl_shaders::mesh::GpuMesh {
+                &crcbl::shaders::mesh::GpuMesh {
                     base_vertex: 0,
                     base_index: 0,
                     index_count: u32::try_from(index_bytes.len() / 4).expect("twelve indices"),
@@ -476,7 +475,7 @@ impl DepthProbe {
         let lights = device
             .create_buffer(&BufferDesc {
                 label: Some("probe lights"),
-                size: crcbl_shaders::light::LIGHT_STRIDE as u64,
+                size: crcbl::shaders::light::LIGHT_STRIDE as u64,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
             })
@@ -487,9 +486,9 @@ impl DepthProbe {
 
         let grid = PROBE_GRID;
         let mut grid_words =
-            vec![0u32; (grid.froxels() * crcbl_shaders::light::CLUSTER_STRIDE) as usize];
+            vec![0u32; (grid.froxels() * crcbl::shaders::light::CLUSTER_STRIDE) as usize];
         for froxel in 0..grid.froxels() {
-            let base = (froxel * crcbl_shaders::light::CLUSTER_STRIDE) as usize;
+            let base = (froxel * crcbl::shaders::light::CLUSTER_STRIDE) as usize;
             grid_words[base] = 1;
             grid_words[base + 1] = 0;
         }
@@ -513,79 +512,79 @@ impl DepthProbe {
         let probes = device
             .create_buffer(&BufferDesc {
                 label: Some("probe irradiance probes"),
-                size: crcbl_shaders::probe::PROBE_STRIDE as u64,
+                size: crcbl::shaders::probe::PROBE_STRIDE as u64,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
             })
             .expect("a probe table");
         device
-            .write_buffer(probes, 0, &crcbl_shaders::probe::GpuProbe::ZERO.to_bytes())
+            .write_buffer(probes, 0, &crcbl::shaders::probe::GpuProbe::ZERO.to_bytes())
             .expect("write");
 
         // §3.2's texture side, in its smallest honest form: one layer, one
-        // texel, opaque white. `Rgba8UnormSrgb` for `crcbl_render::forward`'s
+        // texel, opaque white. `Rgba8UnormSrgb` for `crcbl::render::forward`'s
         // reason — the format is the sRGB decode, and `0xFF` decodes to exactly
         // 1.0 — so the sample multiplies the albedo by one and this probe's
         // depth answers stay the answers it recorded before there was a page.
-        let base_color_page = crcbl_render::upload_texture_layers(
+        let base_color_page = crcbl::render::upload_texture_layers(
             device,
             headless.queue,
             "probe base colour",
-            crcbl_hal::Format::Rgba8UnormSrgb,
+            crcbl::hal::Format::Rgba8UnormSrgb,
             1,
             1,
             &[&[0xFF, 0xFF, 0xFF, 0xFF]],
         )
         .expect("a one-layer page");
         let base_color_sampler = device
-            .create_sampler(&crcbl_hal::SamplerDesc {
+            .create_sampler(&crcbl::hal::SamplerDesc {
                 label: Some("probe base colour"),
-                mag_filter: crcbl_hal::FilterMode::Nearest,
-                min_filter: crcbl_hal::FilterMode::Nearest,
-                mip_filter: crcbl_hal::FilterMode::Nearest,
-                address_mode: [crcbl_hal::SamplerAddressMode::ClampToEdge; 3],
-                ..crcbl_hal::SamplerDesc::default()
+                mag_filter: crcbl::hal::FilterMode::Nearest,
+                min_filter: crcbl::hal::FilterMode::Nearest,
+                mip_filter: crcbl::hal::FilterMode::Nearest,
+                address_mode: [crcbl::hal::SamplerAddressMode::ClampToEdge; 3],
+                ..crcbl::hal::SamplerDesc::default()
             })
             .expect("a sampler");
 
         let shadow_atlas = device
-            .create_image(&crcbl_hal::ImageDesc {
+            .create_image(&crcbl::hal::ImageDesc {
                 label: Some("probe shadow atlas"),
-                image_type: crcbl_hal::ImageType::D2,
+                image_type: crcbl::hal::ImageType::D2,
                 extent: Extent3d::d2(1, 1),
                 format: Format::D32Float,
                 mip_levels: 1,
                 samples: 1,
-                usage: crcbl_hal::ImageUsage::DEPTH_STENCIL_ATTACHMENT
-                    .union(crcbl_hal::ImageUsage::SAMPLED),
+                usage: crcbl::hal::ImageUsage::DEPTH_STENCIL_ATTACHMENT
+                    .union(crcbl::hal::ImageUsage::SAMPLED),
             })
             .expect("a depth image");
         let shadow_atlas_view = device
-            .create_image_view(&crcbl_hal::ImageViewDesc {
+            .create_image_view(&crcbl::hal::ImageViewDesc {
                 label: Some("probe shadow atlas"),
                 image: shadow_atlas,
-                view_type: crcbl_hal::ImageViewType::D2,
+                view_type: crcbl::hal::ImageViewType::D2,
                 format: Format::D32Float,
-                range: crcbl_hal::ImageSubresourceRange::all(Format::D32Float),
+                range: crcbl::hal::ImageSubresourceRange::all(Format::D32Float),
             })
             .expect("a depth view");
         let shadow_sampler = device
-            .create_sampler(&crcbl_hal::SamplerDesc {
+            .create_sampler(&crcbl::hal::SamplerDesc {
                 label: Some("probe shadow comparison"),
                 // `Some` is what makes it a comparison sampler, and the layout
                 // below says the same thing in the vocabulary WebGPU needs.
-                compare: Some(crcbl_hal::CompareOp::Greater),
-                ..crcbl_hal::SamplerDesc::default()
+                compare: Some(crcbl::hal::CompareOp::Greater),
+                ..crcbl::hal::SamplerDesc::default()
             })
             .expect("a comparison sampler");
 
         // `mesh.slang`'s occlusion channel, bound white so the probe's ambient
-        // term is unscaled — `crcbl_render::forward`'s placeholder, by hand,
+        // term is unscaled — `crcbl::render::forward`'s placeholder, by hand,
         // because this file builds its own layout out of the same shader. One
         // texel against a frame of `MESH_EXTENT`, so the ambient term is unscaled
         // only if the shader clamps its fetch; see the field, and the test that
         // asks.
-        let occlusion = crcbl_render::upload_texture(
+        let occlusion = crcbl::render::upload_texture(
             device,
             headless.queue,
             "probe ssao placeholder",
@@ -597,263 +596,263 @@ impl DepthProbe {
         .expect("a one-texel white image");
 
         let entries = [
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::UniformBuffer { dynamic: false },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: crcbl_hal::ShaderStages::VERTEX,
-                kind: crcbl_hal::BindingKind::StorageBuffer {
+                visibility: crcbl::hal::ShaderStages::VERTEX,
+                kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 2,
-                visibility: crcbl_hal::ShaderStages::VERTEX,
-                kind: crcbl_hal::BindingKind::StorageBuffer {
+                visibility: crcbl::hal::ShaderStages::VERTEX,
+                kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 3,
-                visibility: crcbl_hal::ShaderStages::VERTEX,
-                // Not dynamic, unlike `crcbl_render::ForwardRenderer`'s: the
+                visibility: crcbl::hal::ShaderStages::VERTEX,
+                // Not dynamic, unlike `crcbl::render::ForwardRenderer`'s: the
                 // probe records one draw, so there is nothing for an offset to
                 // select between.
-                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                kind: crcbl::hal::BindingKind::UniformBuffer { dynamic: false },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 4,
-                visibility: crcbl_hal::ShaderStages::VERTEX,
-                kind: crcbl_hal::BindingKind::StorageBuffer {
+                visibility: crcbl::hal::ShaderStages::VERTEX,
+                kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 5,
-                visibility: crcbl_hal::ShaderStages::VERTEX,
-                kind: crcbl_hal::BindingKind::StorageBuffer {
+                visibility: crcbl::hal::ShaderStages::VERTEX,
+                kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
             // The material table, §3.2's factors half. This probe shades
             // nothing per material, but a pipeline layout that does not cover
             // a binding the module declares is refused outright, so the entry
             // has to exist even though one untinted row is all it points at.
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 6,
                 // Both stages: `mesh.slang` reads the table in the fragment
                 // stage, and Slang's Metal backend still hands it to the vertex
                 // entry point whether it reads it or not. A layout that covers
                 // only one is refused at pipeline creation.
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::StorageBuffer {
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
             // The base-colour page and its sampler. **A layout that leaves
             // these out is not a validation message here — it is a
             // `SIGSEGV`**: lavapipe takes an undeclared descriptor at face
             // value and dereferences whatever the set happens to hold, so a
             // missing entry crashes the runner instead of naming itself.
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 7,
                 // Both stages, for binding 6's reason: Slang's Metal backend
                 // materialises every global in every entry point, so the vertex
                 // half has to stay even though only `fragmentMain` samples it.
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
                 // `D2Array`, matching the view above and the shader's
                 // `Texture2DArray`. Vulkan reads the dimension off the view and
                 // ignores this, but the seam is one declaration for every
                 // backend and WebGPU refuses a layout that disagrees.
-                kind: crcbl_hal::BindingKind::SampledImage {
-                    view_type: crcbl_hal::ImageViewType::D2Array,
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2Array,
                     sample_type: SampleType::Float,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 8,
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::Sampler { comparison: false },
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::Sampler { comparison: false },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 15,
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::SampledImage {
-                    view_type: crcbl_hal::ImageViewType::D2,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2,
                     sample_type: SampleType::Depth,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 16,
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::Sampler { comparison: true },
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::Sampler { comparison: true },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 20,
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::StorageBuffer {
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 21,
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::StorageBuffer {
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 22,
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::SampledImage {
-                    view_type: crcbl_hal::ImageViewType::D2,
-                    sample_type: crcbl_hal::SampleType::Float,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2,
+                    sample_type: crcbl::hal::SampleType::Float,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 23,
-                visibility: crcbl_hal::ShaderStages::VERTEX
-                    .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::StorageBuffer {
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
                 },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
         ];
         let layout = device
-            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
                 label: Some("probe"),
                 entries: &entries,
             })
             .expect("a layout");
         let group_entries = [
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 0,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(uniforms),
+                resource: crcbl::hal::BindingResource::whole_buffer(uniforms),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 1,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(vertices),
+                resource: crcbl::hal::BindingResource::whole_buffer(vertices),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 2,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(instances),
+                resource: crcbl::hal::BindingResource::whole_buffer(instances),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 3,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(draw_constants),
+                resource: crcbl::hal::BindingResource::whole_buffer(draw_constants),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 4,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(mesh_table),
+                resource: crcbl::hal::BindingResource::whole_buffer(mesh_table),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 5,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(visible_instances),
+                resource: crcbl::hal::BindingResource::whole_buffer(visible_instances),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 6,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(materials),
+                resource: crcbl::hal::BindingResource::whole_buffer(materials),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 7,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::ImageView(base_color_page.view),
+                resource: crcbl::hal::BindingResource::ImageView(base_color_page.view),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 8,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::Sampler(base_color_sampler),
+                resource: crcbl::hal::BindingResource::Sampler(base_color_sampler),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 15,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::ImageView(shadow_atlas_view),
+                resource: crcbl::hal::BindingResource::ImageView(shadow_atlas_view),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 16,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::Sampler(shadow_sampler),
+                resource: crcbl::hal::BindingResource::Sampler(shadow_sampler),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 20,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(lights),
+                resource: crcbl::hal::BindingResource::whole_buffer(lights),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 21,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(light_grid),
+                resource: crcbl::hal::BindingResource::whole_buffer(light_grid),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 22,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::ImageView(occlusion.view),
+                resource: crcbl::hal::BindingResource::ImageView(occlusion.view),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 23,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(probes),
+                resource: crcbl::hal::BindingResource::whole_buffer(probes),
             },
         ];
         let group = device
-            .create_bind_group(&crcbl_hal::BindGroupDesc {
+            .create_bind_group(&crcbl::hal::BindGroupDesc {
                 label: Some("probe"),
                 layout,
                 entries: &group_entries,
@@ -862,7 +861,7 @@ impl DepthProbe {
             .expect("a bind group");
         let set_layouts = [layout];
         let pipeline_layout = device
-            .create_pipeline_layout(&crcbl_hal::PipelineLayoutDesc {
+            .create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
                 label: Some("probe"),
                 bind_group_layouts: &set_layouts,
                 push_constants: None,
@@ -870,11 +869,11 @@ impl DepthProbe {
             .expect("a pipeline layout");
 
         let module = device
-            .create_shader_module(&crcbl_hal::ShaderModuleDesc {
+            .create_shader_module(&crcbl::hal::ShaderModuleDesc {
                 label: Some("mesh.slang"),
-                spirv: crcbl_shaders::MESH.spirv(),
-                wgsl: crcbl_shaders::MESH.wgsl(),
-                msl: crcbl_shaders::MESH.msl(),
+                spirv: crcbl::shaders::MESH.spirv(),
+                wgsl: crcbl::shaders::MESH.wgsl(),
+                msl: crcbl::shaders::MESH.msl(),
                 dxil: &[],
             })
             .expect("the committed SPIR-V is accepted");
@@ -883,34 +882,34 @@ impl DepthProbe {
         // under WebGPU's rules and, on Vulkan, a warning at best — so a
         // hand-built pipeline that kept one target would be this suite passing
         // while the real forward pass gained an output. The second's format is
-        // the one `crcbl_render::TransientImageDesc::reflectivity` names, and
+        // the one `crcbl::render::TransientImageDesc::reflectivity` names, and
         // the pass below attaches an image of exactly that description.
         let color_targets = [
-            crcbl_hal::ColorTargetState::opaque(headless.format),
-            crcbl_hal::ColorTargetState::opaque(Format::Rgba8Unorm),
+            crcbl::hal::ColorTargetState::opaque(headless.format),
+            crcbl::hal::ColorTargetState::opaque(Format::Rgba8Unorm),
         ];
-        let pipeline = device.create_graphics_pipeline(&crcbl_hal::GraphicsPipelineDesc {
+        let pipeline = device.create_graphics_pipeline(&crcbl::hal::GraphicsPipelineDesc {
             label: Some("depth probe"),
             layout: pipeline_layout,
-            vertex: crcbl_hal::ShaderEntry {
+            vertex: crcbl::hal::ShaderEntry {
                 module,
                 entry_point: "vertexMain",
             },
-            fragment: Some(crcbl_hal::ShaderEntry {
+            fragment: Some(crcbl::hal::ShaderEntry {
                 module,
                 entry_point: "fragmentMain",
             }),
-            primitive: crcbl_hal::PrimitiveState {
+            primitive: crcbl::hal::PrimitiveState {
                 // No culling: the point is the depth test, and a winding
                 // mistake would otherwise delete a quad and look like one.
-                cull_mode: crcbl_hal::CullMode::None,
-                ..crcbl_hal::PrimitiveState::default()
+                cull_mode: crcbl::hal::CullMode::None,
+                ..crcbl::hal::PrimitiveState::default()
             },
             // The seam's default, unchanged: `Greater` on `D32Float` with
             // writes on. **This is what the two projections are tested
             // against, and it is not adjusted between runs.**
-            depth_stencil: Some(crcbl_hal::DepthStencilState::default()),
-            multisample: crcbl_hal::MultisampleState::default(),
+            depth_stencil: Some(crcbl::hal::DepthStencilState::default()),
+            multisample: crcbl::hal::MultisampleState::default(),
             color_targets: &color_targets,
         });
         device.destroy_shader_module(module);
@@ -975,7 +974,7 @@ impl DepthProbe {
 /// makes the slice count irrelevant to the picture either way. The tiles are the
 /// ordinary ones for this extent, so `mesh.slang`'s `froxel_of` divides its pixel
 /// down exactly as it does in a real frame.
-const PROBE_GRID: crcbl_render::Grid = crcbl_render::Grid {
+const PROBE_GRID: crcbl::render::Grid = crcbl::render::Grid {
     x: 4,
     y: 3,
     slices: 1,
@@ -995,14 +994,14 @@ const _: () = assert!(
 /// The same direction and colour this probe carried in the frame block before
 /// `docs/plan/18-render-features.md`'s light list existed, so its depth answers
 /// are the answers it recorded then.
-fn probe_sun() -> crcbl_shaders::light::GpuLight {
-    crcbl_shaders::light::GpuLight {
+fn probe_sun() -> crcbl::shaders::light::GpuLight {
+    crcbl::shaders::light::GpuLight {
         position: [0.0; 4],
         color: [0.8, 0.8, 0.8, 0.0],
         direction: [0.0, 0.0, 1.0, 0.0],
-        kind: crcbl_shaders::light::KIND_DIRECTIONAL,
+        kind: crcbl::shaders::light::KIND_DIRECTIONAL,
         cos_inner: 0.0,
-        shadow_tile: crcbl_shaders::light::NO_SHADOW_TILE,
+        shadow_tile: crcbl::shaders::light::NO_SHADOW_TILE,
         pad1: 0,
     }
 }
@@ -1062,8 +1061,8 @@ struct ProbeFrame {
 fn render_probe(
     headless: &Headless,
     probe: &mut DepthProbe,
-    pool: &mut crcbl_render::TransientPool,
-    view_proj: glam::Mat4,
+    pool: &mut crcbl::render::TransientPool,
+    view_proj: crcbl::math::Mat4,
     material: usize,
 ) -> ProbeFrame {
     let device = headless.device.as_ref();
@@ -1076,16 +1075,16 @@ fn render_probe(
         .write_buffer(
             probe.instances,
             0,
-            &crcbl_shaders::mesh::GpuInstance {
-                transform: glam::Mat4::IDENTITY.to_cols_array(),
+            &crcbl::shaders::mesh::GpuInstance {
+                transform: crcbl::math::Mat4::IDENTITY.to_cols_array(),
                 material: u32::try_from(material).expect("a table of a few rows"),
-                ..crcbl_shaders::mesh::GpuInstance::default()
+                ..crcbl::shaders::mesh::GpuInstance::default()
             }
             .to_bytes(),
         )
         .expect("write");
 
-    let uniforms = crcbl_shaders::mesh::FrameUniforms {
+    let uniforms = crcbl::shaders::mesh::FrameUniforms {
         view_proj: view_proj.to_cols_array(),
         camera_position: [0.0, 0.0, PROBE_EYE, 1.0],
         ambient: PROBE_AMBIENT,
@@ -1094,8 +1093,8 @@ fn render_probe(
         // reach say that plainly: a fragment whose eye distance is past every
         // split takes the shader's "outside the cascade" path, which is fully
         // lit — the same picture the probe asserted before shadows existed.
-        shadow_view_proj: [glam::Mat4::IDENTITY.to_cols_array();
-            crcbl_shaders::mesh::SHADOW_CASCADES],
+        shadow_view_proj: [crcbl::math::Mat4::IDENTITY.to_cols_array();
+            crcbl::shaders::mesh::SHADOW_CASCADES],
         cascade_far: [0.0; 4],
         shadow_params: [0.0; 4],
         // The grid the host filled above, so the fragment stage looks itself up
@@ -1103,13 +1102,13 @@ fn render_probe(
         cluster_grid: PROBE_GRID.to_frame_block(),
         // No shadowed light either, and the row above says so: `probe_sun`
         // carries `NO_SHADOW_TILE`, so nothing in this frame reads these.
-        light_view_proj: [glam::Mat4::IDENTITY.to_cols_array();
-            crcbl_shaders::mesh::SHADOW_LIGHT_TILES],
+        light_view_proj: [crcbl::math::Mat4::IDENTITY.to_cols_array();
+            crcbl::shaders::mesh::SHADOW_LIGHT_TILES],
         // No irradiance grid: this probe's own pipeline binds a single zeroed
         // probe row, and the default volume is what makes the fragment stage
         // add exactly nothing to `PROBE_AMBIENT` — see
-        // `crcbl_shaders::probe`.
-        probes: crcbl_shaders::probe::ProbeVolume::default(),
+        // `crcbl::shaders::probe`.
+        probes: crcbl::shaders::probe::ProbeVolume::default(),
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())
@@ -1139,7 +1138,7 @@ fn render_probe(
     // there is nothing to write down before the frame runs. `Cell` rather than a
     // channel: the pass body runs synchronously inside `execute`, on this
     // thread — `mesh`'s HDR probe reads its target back the same way.
-    let reflectivity_handle: std::cell::Cell<Option<crcbl_hal::ImageHandle>> =
+    let reflectivity_handle: std::cell::Cell<Option<crcbl::hal::ImageHandle>> =
         std::cell::Cell::new(None);
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
@@ -1147,10 +1146,10 @@ fn render_probe(
         queue: headless.queue,
     });
     let compiled = {
-        let mut graph = crcbl_render::RenderGraph::new(headless.queue);
+        let mut graph = crcbl::render::RenderGraph::new(headless.queue);
         let target = graph.import_image(
             "swapchain",
-            crcbl_render::ImportedImage {
+            crcbl::render::ImportedImage {
                 image: acquired.image,
                 view: acquired.view,
                 format: headless.format,
@@ -1161,7 +1160,7 @@ fn render_probe(
         );
         let depth = graph.create_image(
             "probe-depth",
-            crcbl_render::TransientImageDesc::scene_depth(MESH_EXTENT),
+            crcbl::render::TransientImageDesc::scene_depth(MESH_EXTENT),
         );
         // Declared so the graph gives the placeholder atlas a shader-read
         // layout before the set is bound. Nothing samples it — see the field —
@@ -1175,7 +1174,7 @@ fn render_probe(
         // the same image: `SYNC-HAZARD-WRITE-AFTER-READ`. See the field.
         let shadow = graph.import_image(
             "probe-shadow-atlas",
-            crcbl_render::ImportedImage {
+            crcbl::render::ImportedImage {
                 image: probe.shadow_atlas,
                 view: probe.shadow_atlas_view,
                 format: Format::D32Float,
@@ -1189,7 +1188,7 @@ fn render_probe(
         // is the real transient rather than a lookalike declared here.
         let reflectivity = graph.create_image(
             "probe-reflectivity",
-            crcbl_render::TransientImageDesc::reflectivity(MESH_EXTENT),
+            crcbl::render::TransientImageDesc::reflectivity(MESH_EXTENT),
         );
         graph
             .add_render_pass("probe")
@@ -1206,7 +1205,7 @@ fn render_probe(
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(probe.pipeline);
                 encoder.bind_group(0, probe.group, &[], probe.pipeline_layout);
-                encoder.bind_index_buffer(probe.indices, 0, crcbl_hal::IndexFormat::Uint32);
+                encoder.bind_index_buffer(probe.indices, 0, crcbl::hal::IndexFormat::Uint32);
                 encoder.draw_indexed(0..12, 0, 0..1);
             });
         // One declaration, and the graph works out that the reflectivity target
@@ -1239,7 +1238,7 @@ fn render_probe(
         buffer_image_height: 0,
         image: acquired.image,
         image_subresource: layers,
-        image_offset: crcbl_hal::Offset3d::default(),
+        image_offset: crcbl::hal::Offset3d::default(),
         image_extent: Extent3d::d2(width, height),
     });
     encoder.copy_image_to_buffer(&BufferImageCopy {
@@ -1251,7 +1250,7 @@ fn render_probe(
             .get()
             .expect("the reflectivity probe pass ran"),
         image_subresource: layers,
-        image_offset: crcbl_hal::Offset3d::default(),
+        image_offset: crcbl::hal::Offset3d::default(),
         image_extent: Extent3d::d2(width, height),
     });
     let commands = encoder.finish().expect("recorded");
@@ -1323,18 +1322,18 @@ fn render_probe(
 /// each composing their own would be two places for that to stop being true.
 /// The centre of the near quad is where both tests sample, and it is the same
 /// pixel in both because the camera is.
-fn probe_projections() -> (glam::Mat4, glam::Mat4) {
+fn probe_projections() -> (crcbl::math::Mat4, crcbl::math::Mat4) {
     #[allow(clippy::cast_precision_loss)]
     let aspect = MESH_EXTENT.0 as f32 / MESH_EXTENT.1 as f32;
-    let view = glam::camera::rh::view::look_at_mat4(
-        glam::Vec3::new(0.0, 0.0, PROBE_EYE),
-        glam::Vec3::ZERO,
-        glam::Vec3::Y,
+    let view = crcbl::math::camera::rh::view::look_at_mat4(
+        crcbl::math::Vec3::new(0.0, 0.0, PROBE_EYE),
+        crcbl::math::Vec3::ZERO,
+        crcbl::math::Vec3::Y,
     );
     let fov = core::f32::consts::FRAC_PI_4;
 
     // The engine's own projection, straight out of `crcbl-render`.
-    let reversed = crcbl_render::Projection::Perspective {
+    let reversed = crcbl::render::Projection::Perspective {
         fov_y: fov,
         near: PROBE_NEAR,
     }
@@ -1344,7 +1343,8 @@ fn probe_projections() -> (glam::Mat4, glam::Mat4) {
     // `crcbl-render` deliberately has no constructor for this, which is why the
     // suite reaches for glam directly.
     let standard =
-        glam::camera::rh::proj::directx::perspective(fov, aspect, PROBE_NEAR, PROBE_FAR) * view;
+        crcbl::math::camera::rh::proj::directx::perspective(fov, aspect, PROBE_NEAR, PROBE_FAR)
+            * view;
     (reversed, standard)
 }
 
@@ -1366,11 +1366,11 @@ const PROBE_CENTRE: (u32, u32) = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
 /// So this test would fail under standard-Z, in the direction that says which
 /// convention is in force — which is the point.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
     let headless = Headless::open_for_mesh();
     let mut probe = DepthProbe::new(&headless);
-    let mut pool = crcbl_render::TransientPool::new();
+    let mut pool = crcbl::render::TransientPool::new();
 
     let (reversed, standard) = probe_projections();
     let centre = PROBE_CENTRE;
@@ -1466,7 +1466,7 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
     );
 
     eprintln!(
-        "vk e2e: reversed-Z centre {:?}, conventional-Z centre {:?} — the same \
+        "crcbl forward e2e: reversed-Z centre {:?}, conventional-Z centre {:?} — the same \
          pipeline, the same compare op, only the projection differs",
         reversed_frame.pixel(centre.0, centre.1).expect("inside"),
         standard_frame.pixel(centre.0, centre.1).expect("inside"),
@@ -1497,11 +1497,11 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 /// * A corner no fragment covered is exactly zero — the clear the design asks
 ///   for, so a later march cannot start from a pixel that has no material.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing_drew() {
     let headless = Headless::open_for_mesh();
     let mut probe = DepthProbe::new(&headless);
-    let mut pool = crcbl_render::TransientPool::new();
+    let mut pool = crcbl::render::TransientPool::new();
 
     let (reversed, _) = probe_projections();
     let frame = render_probe(
@@ -1523,7 +1523,7 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
         NEAR_QUAD_COLOR[0] * row.base_color[0],
         NEAR_QUAD_COLOR[1] * row.base_color[1],
         NEAR_QUAD_COLOR[2] * row.base_color[2],
-        (1.0 - row.roughness / crcbl_shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0),
+        (1.0 - row.roughness / crcbl::shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0),
     ];
 
     let centre = PROBE_CENTRE;
@@ -1557,7 +1557,7 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
     );
     let sharpness = f32::from(pixel[3]) / 255.0;
     let plain_sharpness =
-        (1.0 - plain.roughness / crcbl_shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0);
+        (1.0 - plain.roughness / crcbl::shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0);
     assert!(
         (sharpness - expected[3]).abs() < (sharpness - plain_sharpness).abs(),
         "the reflectivity alpha at {centre:?} is {sharpness}, which is nearer row \
@@ -1581,7 +1581,7 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
     );
 
     eprintln!(
-        "vk e2e: reflectivity at {centre:?} is {pixel:?} — row \
+        "crcbl forward e2e: reflectivity at {centre:?} is {pixel:?} — row \
          {PROBE_REFLECTIVE_ROW}'s F0 {:?} and sharpness {}",
         [expected[0], expected[1], expected[2]],
         expected[3],
@@ -1594,7 +1594,7 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
 
 /// **A fragment reading a 1×1 occlusion image gets that image's one texel.**
 ///
-/// This is the property `crcbl_render::forward`'s AO off-switch rests on, and it
+/// This is the property `crcbl::render::forward`'s AO off-switch rests on, and it
 /// is the one that was not true: `mesh.slang` fetches the occlusion channel with
 /// a `Load` at `SV_Position.xy`, and a `Load` outside a texture's extent yields
 /// **zero** rather than the nearest texel. Bound to a frame larger than one
@@ -1618,12 +1618,12 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
 /// * The colour is the ambient term. An unclamped `Load` fails this at every
 ///   channel with a pixel of zeroes.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn a_fragment_reads_the_one_texel_occlusion_placeholder_as_no_occlusion() {
     let headless = Headless::open_for_mesh();
     let device = headless.device.as_ref();
     let mut probe = DepthProbe::new(&headless);
-    let mut pool = crcbl_render::TransientPool::new();
+    let mut pool = crcbl::render::TransientPool::new();
 
     // The one light darkened rather than removed. The froxel grid this fixture
     // fills by hand lists light zero, so an empty list would change what the
@@ -1633,7 +1633,7 @@ fn a_fragment_reads_the_one_texel_occlusion_placeholder_as_no_occlusion() {
         .write_buffer(
             probe.lights,
             0,
-            &crcbl_shaders::light::GpuLight {
+            &crcbl::shaders::light::GpuLight {
                 color: [0.0; 4],
                 ..probe_sun()
             }
@@ -1703,7 +1703,7 @@ fn a_fragment_reads_the_one_texel_occlusion_placeholder_as_no_occlusion() {
     }
 
     eprintln!(
-        "vk e2e: a 1×1 occlusion image bound to a {MESH_EXTENT:?} frame reads as \
+        "crcbl forward e2e: a 1×1 occlusion image bound to a {MESH_EXTENT:?} frame reads as \
          no occlusion — centre {pixel:?}, ambient-only expectation {expected:?}"
     );
 

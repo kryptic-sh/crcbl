@@ -50,10 +50,25 @@
 
 #![cfg(feature = "draw-gen-e2e")]
 
+/// What this binary calls itself in every line it prints and every debug label
+/// it sets.
+///
+/// Read by `tests/gpu_scene/harness.rs`, which is shared with
+/// `tests/forward_e2e/` and therefore cannot name either of them. **This string
+/// is `tests/run-draw-gen-e2e.sh`'s grep**: the runner finds the adapter line by
+/// its prefix, so changing it turns a green suite into a failed harness run.
+pub(crate) const SUITE: &str = "crcbl draw gen e2e";
+
 // The suite's areas, one module each, all in `tests/draw_gen_e2e/`. The root is
 // `tests/draw_gen_e2e/main.rs`, so Cargo compiles the directory as one test
 // binary named `draw_gen_e2e` and every `mod` here resolves beside the root.
 mod cull;
 mod cull_stats;
 mod draw_gen;
+
+// The fixture, out of `tests/gpu_scene/` rather than beside the root, because
+// `tests/forward_e2e/` opens the same device and draws the same scenes and a
+// second copy is a second place a fix has to land. That directory holds no
+// `main.rs`, so Cargo builds no target of its own from it.
+#[path = "../gpu_scene/harness.rs"]
 mod harness;
