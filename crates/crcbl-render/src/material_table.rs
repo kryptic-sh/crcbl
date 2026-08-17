@@ -411,10 +411,10 @@ mod tests {
     /// row index, from the material number and from every factor in the row: an
     /// index read out of the wrong word cannot come out right by coincidence.
     ///
-    /// The two shading factors are on the same scheme, and they are the two the
-    /// scheme most has to cover: they sit in what used to be the row's trailing
-    /// padding, so a writer that still stops at the texture index leaves them
-    /// zero and this is what says so.
+    /// The shading factors and the tiling pair are on the same scheme, and they
+    /// are the ones the scheme most has to cover: they sit past the texture
+    /// index, so a writer that still stops there leaves them zero and this is
+    /// what says so.
     fn material(n: u32) -> GpuMaterial {
         let base = n as f32;
         GpuMaterial {
@@ -422,6 +422,8 @@ mod tests {
             base_color_texture: n + 7,
             metallic: base + 0.5,
             roughness: base + 0.625,
+            tiling: n % 2,
+            tile_metres: base + 0.75,
         }
     }
 

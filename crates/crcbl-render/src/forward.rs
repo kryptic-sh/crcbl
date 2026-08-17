@@ -1838,18 +1838,25 @@ impl ForwardRenderer {
         )?;
         rollback.textures.push(base_color_page);
 
-        // Nearest and clamped, like the tonemap's sampler below and for a
-        // reason of its own: the page has one mip level, because §3.2 makes mip
-        // generation a compute pass of its own, and filtering a page with no
-        // mips buys a shimmer rather than a smoother picture. A second sampler
-        // object rather than sharing that one, so a capture names each for what
-        // it filters.
+        // Nearest for the tonemap's reason of its own: the page has one mip
+        // level, because §3.2 makes mip generation a compute pass of its own,
+        // and filtering a page with no mips buys a shimmer rather than a
+        // smoother picture. A second sampler object rather than sharing the
+        // tonemap's, so a capture names each for what it filters.
+        //
+        // **`Repeat`, not `ClampToEdge`**, and that is what `mesh.slang`'s
+        // `TILING_PHYSICAL` needs: a physical UV runs to `world_extent /
+        // tile_metres`, past `0..1` on any face wider than one tile, and only a
+        // wrapping address mode makes the page tile across it rather than
+        // smearing its edge row. `TILING_AUTHORED` is unaffected — its UV is the
+        // vertex's, which the meshes author inside `0..1`, so a wrapped and a
+        // clamped read return the same nearest texel for it.
         let base_color_sampler = device.create_sampler(&SamplerDesc {
             label: Some("material base colour"),
             mag_filter: FilterMode::Nearest,
             min_filter: FilterMode::Nearest,
             mip_filter: FilterMode::Nearest,
-            address_mode: [SamplerAddressMode::ClampToEdge; 3],
+            address_mode: [SamplerAddressMode::Repeat; 3],
             ..SamplerDesc::default()
         })?;
         rollback.samplers.push(base_color_sampler);

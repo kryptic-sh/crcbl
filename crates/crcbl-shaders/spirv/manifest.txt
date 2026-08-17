@@ -75,26 +75,26 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = a24796c610e948835824b5bd51cb1654cc7ff05390df013978ee369d225222fd
+source-sha256 = b7d61e1ae2be8f4fff28af7093d746685ca57705ce592bbf61fe12c686035e52
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = c6889b7a4ac47df9298a06f7eb7ae613b4ff4e1f3246c2f26824caea95d6f7d6
+spirv-sha256 = 0c1c5cebad8272620697ea882a238527b21bcd6461a3290cff82e5add532e6f1
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 0760b140b5a002b04bb2c0354d61fddc95184c066cc426d24a2bf47cce411413
+wgsl-sha256 = 229e128d2776a833f3a5619bd7e9b7cd3a7d75a9c627fe6d7ba8951ef6fe0494
 msl = msl/mesh.metal
-msl-sha256 = dd4df48d48e26b1c79231c8988eaab46b63e67cf41f6833de0f8f7fc829f2cc5
+msl-sha256 = 8b376ea648918e81fcae3ee322e4697b35e3f9fcbfe10d958390c9c772cab9c0
 dxil = vertexMain:dxil/mesh.vertexMain.dxil:a631c5927b021acb104d8951a8b895f93edda9dc4b2a38320c61b05804535812
-dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:d463f0be9458def9c7e286c8f10b9cfbe179942bfc84fadfadf8f39a700f2bf2
+dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:f9e8ec3c4fb8e986b407ddc486e6e23677e478e125a2dd1a1d69f5ec54bf46a0
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
-source-sha256 = 542a110f2e655c70fd08b305d0990ffa336919fa3988227d0a9f296b33ccf519
+source-sha256 = b94c460a5aab351a7585832c7510e0350f70b19f1deb638ee0dcfac26bca5ff5
 targets = spirv, msl, dxil
 spirv = spirv/mesh_cluster.spv
 spirv-sha256 = ce28781e7aa7e98f45078015d0bd130f877848ce30e77af8ca70e20e4c92085d
 msl = msl/mesh_cluster.metal
-msl-sha256 = 2d175647f1876fbf206992848646f44aaac87d85b5f7c16fbdb71b9e499093fa
+msl-sha256 = 79b6b0f29d1231d9015ba9c73cdb1a2dbb8a2aac9d3e0dc6e64dd068681ebf79
 dxil = meshMain:dxil/mesh_cluster.meshMain.dxil:e02d0ffbbf1a411a1207510ee778831e0796aa02fe57ff155616b74e7936358f
 dxil = taskMain:dxil/mesh_cluster.taskMain.dxil:30934399b52c83b1a56b50e9018af9ab80317ae45426c858b827adb84dc2d90c
 dxil = amplifiedMeshMain:dxil/mesh_cluster.amplifiedMeshMain.dxil:1e05ae1daaecfb95fece28caf9b8eca1581c7de2c0be70a8578f13814614f8f5

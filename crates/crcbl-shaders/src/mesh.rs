@@ -150,12 +150,13 @@ pub const MESH_ENTRY_STRIDE: usize = 36;
 /// Bytes per [`GpuMaterial`], and the stride of the material-table storage
 /// buffer.
 ///
-/// One `float4`, one `uint`, two `float` and one more `uint` of padding — 32
-/// rather than 28, because the row's alignment is the `float4`'s 16 and
+/// One `float4`, one `uint`, two `float`, then the tiling pair — one `uint`
+/// selector and one `float` of tile size — and three `uint` of padding: 48
+/// rather than 36, because the row's alignment is the `float4`'s 16 and
 /// `std430` rounds the size up to a multiple of it. Checked against the
 /// `ArrayStride` and the `Offset` decorations `slangc` emits by this module's
 /// `the_material_layout_matches_the_offsets_slangc_emits`.
-pub const MATERIAL_STRIDE: usize = 32;
+pub const MATERIAL_STRIDE: usize = 48;
 
 /// Bytes in one draw's constant block.
 ///
@@ -636,7 +637,7 @@ impl GpuMesh {
 /// column existed, and it is still nothing anyone would mistake for a material
 /// they authored.
 ///
-/// `PartialEq` but not `Eq`, for [`GpuMesh`]'s reason: three fields are floats.
+/// `PartialEq` but not `Eq`, for [`GpuMesh`]'s reason: several fields are floats.
 ///
 /// [`BindingModel::Bindless`]: https://docs.rs/crcbl-hal
 /// [`ArrayPages`]: https://docs.rs/crcbl-hal
@@ -685,6 +686,32 @@ pub struct GpuMaterial {
     /// are roughly equal steps in the look — and clamps it away from zero,
     /// which a normal distribution divides by.
     pub roughness: f32,
+    /// How the base-colour texture's sampling UV is derived: which of
+    /// [`GpuMaterial::TILING_AUTHORED`] or [`GpuMaterial::TILING_PHYSICAL`] the
+    /// fragment stage takes.
+    ///
+    /// [`TILING_AUTHORED`](Self::TILING_AUTHORED) is `0`, so a row nobody wrote
+    /// — and every material authored before this field existed, which spreads
+    /// [`UNTINTED`](Self::UNTINTED) and leaves this at its `0` — samples the
+    /// vertex UV exactly as it always did. [`TILING_PHYSICAL`](Self::TILING_PHYSICAL)
+    /// instead derives the UV from the surface's world-space extent divided by
+    /// [`tile_metres`](Self::tile_metres), so a texture cell measures one
+    /// [`tile_metres`](Self::tile_metres) of surface however large the face is —
+    /// which is what makes a greybox grid read as a metric ruler. See
+    /// `physical_tile_uv` in `shaders/mesh.slang`.
+    pub tiling: u32,
+    /// How many world-space metres one repeat of the texture spans under
+    /// [`TILING_PHYSICAL`](Self::TILING_PHYSICAL); unread under
+    /// [`TILING_AUTHORED`](Self::TILING_AUTHORED).
+    ///
+    /// `1.0` is one texture cell per metre, so a 2 m face shows a 2×2 grid of
+    /// the tile and a 1 m face shows one. [`UNTINTED`](Self::UNTINTED) carries
+    /// `1.0` so a row spread from it and switched to physical tiling gets the
+    /// one-metre default without naming it. The shader clamps it off zero before
+    /// dividing, so a physical row that left it at [`default`](Self::default)'s
+    /// `0.0` collapses the whole surface onto one texel rather than dividing by
+    /// zero.
+    pub tile_metres: f32,
 }
 
 impl GpuMaterial {
@@ -709,12 +736,28 @@ impl GpuMaterial {
         base_color_texture: 0,
         metallic: 0.0,
         roughness: 0.5,
+        tiling: Self::TILING_AUTHORED,
+        tile_metres: 1.0,
     };
+
+    /// [`tiling`](Self::tiling): sample the base-colour texture at the vertex's
+    /// own UV, the way every material did before physical tiling existed.
+    ///
+    /// Zero, so it is what [`default`](Self::default) and every `..UNTINTED`
+    /// spread that does not name a mode already carry — this mode is the added
+    /// branch, not a replacement.
+    pub const TILING_AUTHORED: u32 = 0;
+
+    /// [`tiling`](Self::tiling): derive the UV from the surface's world-space
+    /// extent, so the texture repeats once per [`tile_metres`](Self::tile_metres).
+    ///
+    /// See `physical_tile_uv` in `shaders/mesh.slang` for the projection.
+    pub const TILING_PHYSICAL: u32 = 1;
 
     /// The bytes one material-table element holds, in `std430` order.
     ///
-    /// The trailing `uint` of padding the shader's struct spells out is left as
-    /// the zero the array starts as; nothing reads it.
+    /// The three trailing `uint`s of padding the shader's struct spells out are
+    /// left as the zero the array starts as; nothing reads them.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; MATERIAL_STRIDE] {
         let mut bytes = [0u8; MATERIAL_STRIDE];
@@ -729,7 +772,11 @@ impl GpuMaterial {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        debug_assert_eq!(at + 4, MATERIAL_STRIDE);
+        bytes[at..at + 4].copy_from_slice(&self.tiling.to_le_bytes());
+        at += 4;
+        bytes[at..at + 4].copy_from_slice(&self.tile_metres.to_le_bytes());
+        at += 4;
+        debug_assert_eq!(at + 12, MATERIAL_STRIDE);
         bytes
     }
 
@@ -747,15 +794,20 @@ impl GpuMaterial {
                     .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
             )
         };
-        Self {
-            base_color: [float_at(0), float_at(4), float_at(8), float_at(12)],
-            base_color_texture: u32::from_le_bytes(
-                bytes[16..20]
+        let uint_at = |offset: usize| {
+            u32::from_le_bytes(
+                bytes[offset..offset + 4]
                     .try_into()
                     .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
-            ),
+            )
+        };
+        Self {
+            base_color: [float_at(0), float_at(4), float_at(8), float_at(12)],
+            base_color_texture: uint_at(16),
             metallic: float_at(20),
             roughness: float_at(24),
+            tiling: uint_at(28),
+            tile_metres: float_at(32),
         }
     }
 }
@@ -1829,23 +1881,28 @@ mod tests {
     /// the only reason the table exists at all.
     #[test]
     fn the_material_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 32`, and
+        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 48`, and
         // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0` / `1 Offset 16` /
-        // `2 Offset 20` / `3 Offset 24`. Thirty-two rather than twenty-eight:
-        // the row's alignment is the `float4`'s sixteen, so the last member is
-        // followed by four bytes the shader's own struct spells out as `pad0`.
-        assert_eq!(MATERIAL_STRIDE, 32);
+        // `2 Offset 20` / `3 Offset 24` / `4 Offset 28` / `5 Offset 32`.
+        // Forty-eight rather than thirty-six: the row's alignment is the
+        // `float4`'s sixteen, so the last member is followed by twelve bytes the
+        // shader's own struct spells out as `pad0`/`pad1`/`pad2`.
+        assert_eq!(MATERIAL_STRIDE, 48);
 
         let material = GpuMaterial {
             base_color: [0.25, 0.5, 0.75, 1.0],
             base_color_texture: 3,
             metallic: 0.125,
             roughness: 0.375,
+            tiling: GpuMaterial::TILING_PHYSICAL,
+            tile_metres: 2.0,
         };
         let bytes = material.to_bytes();
         assert_eq!(bytes.len(), MATERIAL_STRIDE);
         let float_at =
             |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        let uint_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         for (channel, expected) in material.base_color.iter().enumerate() {
             assert_eq!(
                 float_at(channel * 4),
@@ -1858,21 +1915,23 @@ mod tests {
         // wrote at some other offset would still round-trip through
         // `from_bytes`, so this is asserted against the bytes rather than
         // against the decode.
-        assert_eq!(
-            u32::from_le_bytes(bytes[16..20].try_into().expect("4")),
-            3,
-            "base_color_texture at offset 16"
-        );
-        // **The two shading factors went into the padding the row already had**,
-        // which is what kept the stride at 32 across the change that added them
-        // — so every golden that moved did so for the BRDF and not for a table
-        // the shader started reading at a different pitch.
+        assert_eq!(uint_at(16), 3, "base_color_texture at offset 16");
         assert_eq!(float_at(20), 0.125, "metallic at offset 20");
         assert_eq!(float_at(24), 0.375, "roughness at offset 24");
+        // **The tiling pair went into the padding the row had plus the twelve
+        // `std430` rounded the size up by**, so the mode selector is at 28 and
+        // the tile size at 32 — the offsets `slangc` decorates the shader's
+        // struct with, checked against the bytes rather than the decode.
         assert_eq!(
-            bytes[28..MATERIAL_STRIDE],
-            [0u8; 4],
-            "the pad word the shader declares must stay zero"
+            uint_at(28),
+            GpuMaterial::TILING_PHYSICAL,
+            "tiling at offset 28"
+        );
+        assert_eq!(float_at(32), 2.0, "tile_metres at offset 32");
+        assert_eq!(
+            bytes[36..MATERIAL_STRIDE],
+            [0u8; 12],
+            "the three pad words the shader declares must stay zero"
         );
         assert_eq!(GpuMaterial::from_bytes(&bytes), material);
 
@@ -1894,7 +1953,17 @@ mod tests {
         // painted surface the row is meant to be — see its docs.
         assert_eq!(GpuMaterial::UNTINTED.metallic, 0.0);
         assert_eq!(GpuMaterial::UNTINTED.roughness, 0.5);
+        // **The untinted row samples the authored UV**, so it and every row
+        // spread from it render exactly as they did before physical tiling — the
+        // new mode is the added branch, not a replacement. Its `tile_metres` is
+        // the one-metre default a row switched to physical tiling inherits.
+        assert_eq!(GpuMaterial::UNTINTED.tiling, GpuMaterial::TILING_AUTHORED);
+        assert_eq!(GpuMaterial::TILING_AUTHORED, 0);
+        assert_eq!(GpuMaterial::UNTINTED.tile_metres, 1.0);
         assert_ne!(GpuMaterial::UNTINTED, GpuMaterial::default());
+        // The zeroed row is authored-UV, so no unwritten material silently tiles
+        // by world extent.
+        assert_eq!(GpuMaterial::default().tiling, GpuMaterial::TILING_AUTHORED);
 
         // Two materials differing in nothing but their texture are different
         // rows, which is the whole of what the second column buys.

@@ -16,6 +16,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`GpuMaterial` gained two fields and its GPU row grew from 32 to 48 bytes.**
+  `tiling` (`TILING_AUTHORED`, the `0` default, or `TILING_PHYSICAL`) and
+  `tile_metres` select and size physical tiling. Code that spreads
+  `..GpuMaterial::UNTINTED` — which is nearly all of it — is unaffected and
+  renders identically, because `TILING_AUTHORED` is zero and samples the vertex
+  UV exactly as before. A construction site that spells out **every** field
+  without the spread no longer compiles until it names the two new ones or
+  adopts the spread. `MATERIAL_STRIDE` moved with it, so anything writing the
+  material table by hand must use the constant rather than a literal 32.
+
+- **The base-colour sampler wraps instead of clamping.** Physical tiling needs a
+  repeating address mode to tile past `0..1`; authored UVs stay inside `0..1`,
+  so a wrapped and a clamped read return the same texel for them and no existing
+  frame changes.
+
 - **`"webgpu"` no longer means `wgpu`.** `GpuBackend::from_name("webgpu")`
   returned `GpuBackend::Wgpu` — an alias — and now returns the new
   `GpuBackend::WebGpu`. Anything using `CRCBL_GPU=webgpu` or `--backend webgpu`
@@ -469,6 +484,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **Physical-size texture tiling, so an asset's size reads at a glance.** A
+  material whose `tiling` is `GpuMaterial::TILING_PHYSICAL` derives its sampling
+  UV from the surface's world-space extent instead of the authored UV, repeating
+  the texture once per `tile_metres` (default `1.0`). A 1×1×1 m cube then shows
+  one texture cell per side and a 2×2×2 m cube shows 2×2 of them, where an
+  authored UV stretches the single cell across a face of any size. The mesh
+  shader projects onto the dominant normal axis, exact for the axis-aligned
+  faces a blockout is built from. `crcbl-greybox` ships seven 1024×1024 gridded
+  one-metre tiles using it — grey, red, green, blue, orange, brown and black —
+  through `GreyboxColor`, `greybox_page()` and `greybox_color_material()`, so a
+  greybox surface reads as a metric ruler at any scale.
 
 - **`crcbl-greybox`, a prototyping asset pack sized in reality.** A crate of
   ready-to-drop blockout assets so a game can stand up a level before it has

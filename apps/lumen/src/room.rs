@@ -720,6 +720,7 @@ pub fn room() -> SceneDesc<'static> {
                 base_color_texture: UNTEXTURED_LAYER,
                 metallic: BRASS_METALLIC,
                 roughness: BRASS_ROUGHNESS,
+                ..GpuMaterial::UNTINTED
             },
         ],
         page,

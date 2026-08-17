@@ -14,16 +14,24 @@
 //! is first, so a primitive placed without a named material is grey rather than
 //! gridded.
 //!
-//! # The grid is a one-metre reference tile
+//! # Two grids, and the difference is the tiling mode
 //!
-//! The engine's base-colour page samples with `ClampToEdge` and no mip chain, so
-//! a UV outside `0..1` does not repeat — the grid cannot tile across a face by
-//! itself. It is therefore authored as **one `0..1` tile** standing for a one
-//! metre square, divided into [`GRID_CELLS`] cells of [`GRID_CELL_M`] each. On
-//! the default one-metre primitives a face reads true to scale; on a larger face
-//! the single tile stretches to cover it, which is the honest limit of a clamped
-//! page and is documented rather than hidden. A truly metric grid at any size
-//! wants a `Repeat` sampler the page does not offer today.
+//! [`grid_material`] is the original **authored-UV** grid: one `0..1` tile
+//! standing for a one-metre square, divided into [`GRID_CELLS`] cells of
+//! [`GRID_CELL_M`] each. A mesh authors its UV in `0..1`, so on a one-metre face
+//! the tile reads true to scale, and on a larger face the single tile stretches
+//! to cover it — the honest limit of an authored UV.
+//!
+//! [`greybox_color_material`] instead uses [`GpuMaterial::TILING_PHYSICAL`]: the
+//! shader derives the sampling UV from the surface's world-space extent, so one
+//! [`greybox_page`] tile measures [`GREYBOX_TILE_M`] of surface however large the
+//! face is — a 2 m face shows a 2×2 grid of the tile where a 1 m face shows one.
+//! That is a **truly metric** grid at any size, and it is what the base-colour
+//! sampler being `Repeat` (rather than the `ClampToEdge` it once was) buys: a
+//! physical UV runs past `0..1`, and only a wrapping sampler tiles the page
+//! across it. The seven [`GreyboxColor`] tiles are that grid in the blockout
+//! palette — grey, red, green, blue, orange, brown and black — each a
+//! [`GREYBOX_TILE_EXTENT`]² image with a [`GREYBOX_TILE_CELL_M`] sub-grid.
 
 use std::borrow::Cow;
 
@@ -103,4 +111,192 @@ pub fn grid_page() -> PageDesc<'static> {
         "the grid is the one layer past the white one"
     );
     page
+}
+
+// ---------------------------------------------------------------------------
+// The physical-tiling colour tiles
+// ---------------------------------------------------------------------------
+
+/// The side of one greybox colour tile, in texels.
+///
+/// 1024, so a physically-tiled face carries a sharp ruler even where one tile
+/// covers many metres of surface — the grid lines below are drawn several texels
+/// thick, which a coarser page could not spare.
+pub const GREYBOX_TILE_EXTENT: u32 = 1024;
+
+/// How many world-space metres one greybox colour tile spans — the
+/// [`tile_metres`](GpuMaterial::tile_metres) every [`greybox_color_material`]
+/// carries.
+///
+/// One metre, so a texture cell measures one metre of surface: the whole point
+/// of physical tiling, and what makes a 2 m face show a 2×2 grid of the tile.
+pub const GREYBOX_TILE_M: f32 = 1.0;
+
+/// How many cells the tile is divided into on each axis.
+pub const GREYBOX_TILE_CELLS: u32 = 4;
+
+/// The metric one cell of a greybox tile stands for, in metres: a quarter of a
+/// metre, [`GREYBOX_TILE_M`] split [`GREYBOX_TILE_CELLS`] ways.
+pub const GREYBOX_TILE_CELL_M: f32 = GREYBOX_TILE_M / GREYBOX_TILE_CELLS as f32;
+
+/// How many texels thick a tile's grid lines and border are.
+///
+/// Eight, so the ruler stays visible when physical tiling spreads one tile
+/// across a large face and the page is sampled far below one texel per pixel.
+const GREYBOX_TILE_LINE_TEXELS: u32 = 8;
+
+/// One of the seven greybox tile colours a blockout is painted in.
+///
+/// Each is a [`GREYBOX_TILE_EXTENT`]² grid tile — a coloured field ruled with a
+/// [`GREYBOX_TILE_CELL_M`] sub-grid — sampled through
+/// [`GpuMaterial::TILING_PHYSICAL`], so the grid reads as a measured one-metre
+/// ruler across a surface of any size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GreyboxColor {
+    /// Neutral grey, the default blockout shade.
+    Grey,
+    /// Red.
+    Red,
+    /// Green.
+    Green,
+    /// Blue.
+    Blue,
+    /// Orange.
+    Orange,
+    /// Brown.
+    Brown,
+    /// Black.
+    Black,
+}
+
+impl GreyboxColor {
+    /// Every colour, in the order [`greybox_page`] lays them out — so `ALL[i]`
+    /// occupies page layer `i + 1`, past the white untextured layer 0.
+    pub const ALL: [GreyboxColor; 7] = [
+        Self::Grey,
+        Self::Red,
+        Self::Green,
+        Self::Blue,
+        Self::Orange,
+        Self::Brown,
+        Self::Black,
+    ];
+
+    /// Which layer of [`greybox_page`] this colour's tile occupies — the number
+    /// a [`greybox_color_material`] row's
+    /// [`base_color_texture`](GpuMaterial::base_color_texture) carries.
+    ///
+    /// Layer 0 is the page's white untextured layer, so the colours start at 1,
+    /// in [`ALL`](Self::ALL) order.
+    #[must_use]
+    pub const fn layer(self) -> u32 {
+        match self {
+            Self::Grey => 1,
+            Self::Red => 2,
+            Self::Green => 3,
+            Self::Blue => 4,
+            Self::Orange => 5,
+            Self::Brown => 6,
+            Self::Black => 7,
+        }
+    }
+
+    /// A short human-readable name, used in scene labels and test failures.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Grey => "grey",
+            Self::Red => "red",
+            Self::Green => "green",
+            Self::Blue => "blue",
+            Self::Orange => "orange",
+            Self::Brown => "brown",
+            Self::Black => "black",
+        }
+    }
+
+    /// The sRGB field colour of the tile's cells — the lit area inside the grid.
+    const fn field(self) -> [u8; 4] {
+        match self {
+            Self::Grey => [0xB0, 0xB0, 0xB0, 0xFF],
+            Self::Red => [0xC2, 0x3B, 0x38, 0xFF],
+            Self::Green => [0x3C, 0xA0, 0x4A, 0xFF],
+            Self::Blue => [0x3B, 0x5B, 0xC8, 0xFF],
+            Self::Orange => [0xE0, 0x86, 0x24, 0xFF],
+            Self::Brown => [0x7A, 0x4F, 0x2C, 0xFF],
+            Self::Black => [0x1E, 0x1E, 0x1E, 0xFF],
+        }
+    }
+
+    /// The sRGB colour of the tile's grid lines and border.
+    ///
+    /// A dark line over the coloured field, except on [`Black`](Self::Black),
+    /// whose field is already dark — there the line is *lighter* so the ruler
+    /// stays legible rather than vanishing into the field.
+    const fn line(self) -> [u8; 4] {
+        match self {
+            Self::Black => [0x5A, 0x5A, 0x5A, 0xFF],
+            _ => [0x2A, 0x2A, 0x2A, 0xFF],
+        }
+    }
+}
+
+/// The texels of one [`GreyboxColor`] tile: a [`GREYBOX_TILE_EXTENT`]² RGBA8 sRGB
+/// image, the colour's field ruled with a [`GREYBOX_TILE_CELLS`]-cell sub-grid
+/// and a border, both `GREYBOX_TILE_LINE_TEXELS` texels thick.
+#[must_use]
+pub fn greybox_color_texels(color: GreyboxColor) -> Vec<u8> {
+    let extent = GREYBOX_TILE_EXTENT;
+    let cell = extent / GREYBOX_TILE_CELLS;
+    let thickness = GREYBOX_TILE_LINE_TEXELS;
+    let field = color.field();
+    let line = color.line();
+    let mut texels = Vec::with_capacity((extent * extent) as usize * 4);
+    for y in 0..extent {
+        for x in 0..extent {
+            // A line at the near edge of every cell — which covers the tile's
+            // left and top border — plus the far edge, so the outer border is
+            // closed on all four sides.
+            let on_line = x % cell < thickness
+                || y % cell < thickness
+                || x >= extent - thickness
+                || y >= extent - thickness;
+            texels.extend_from_slice(if on_line { &line } else { &field });
+        }
+    }
+    texels
+}
+
+/// The base-colour page the greybox colour tiles upload: the white untextured
+/// layer 0, then the seven [`GreyboxColor`] tiles in [`GreyboxColor::ALL`] order,
+/// so [`GreyboxColor::layer`] names each one.
+#[must_use]
+pub fn greybox_page() -> PageDesc<'static> {
+    let mut page = PageDesc::opaque_white(GREYBOX_TILE_EXTENT);
+    for color in GreyboxColor::ALL {
+        let layer = page.push_layer(Cow::Owned(greybox_color_texels(color)));
+        debug_assert_eq!(
+            layer,
+            color.layer(),
+            "the colour tiles follow the white layer in ALL order"
+        );
+    }
+    page
+}
+
+/// A physical-tiling material for one [`GreyboxColor`]: [`greybox_material`]
+/// pointed at the colour's [`greybox_page`] layer and switched to
+/// [`GpuMaterial::TILING_PHYSICAL`] at [`GREYBOX_TILE_M`] per tile.
+///
+/// So a surface it shades shows the colour's one-metre ruler true to scale at any
+/// size — one cell of the grid per [`GREYBOX_TILE_CELL_M`] of surface, one tile
+/// per metre.
+#[must_use]
+pub fn greybox_color_material(color: GreyboxColor) -> GpuMaterial {
+    GpuMaterial {
+        base_color_texture: color.layer(),
+        tiling: GpuMaterial::TILING_PHYSICAL,
+        tile_metres: GREYBOX_TILE_M,
+        ..GpuMaterial::UNTINTED
+    }
 }

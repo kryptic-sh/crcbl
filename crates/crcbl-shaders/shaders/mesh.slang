@@ -460,16 +460,45 @@ struct GpuMaterial
     /// usual perceptual parameterisation, and clamped away from zero — the
     /// normal distribution divides by `alpha` squared.
     float roughness;
-    /// Pads the row to 32 bytes, which is what `std430` rounds it to anyway:
-    /// the struct's alignment is the `float4`'s 16, so a 28-byte row would be
-    /// read at a stride of 32 by a shader while the CPU wrote it at 28. Spelled
-    /// out rather than implied, exactly as `DrawConstants` below spells its own.
+    /// How `fragmentMain` derives this material's sampling UV: `TILING_AUTHORED`
+    /// reads the vertex UV, `TILING_PHYSICAL` derives it from the surface's
+    /// world-space extent. Matching `crcbl_shaders::mesh::GpuMaterial::tiling`.
     ///
-    /// **There were three of these**, and the two shading factors above went
-    /// into two of them — so the row gained a material model without the table's
-    /// stride moving and without a single golden shifting for a layout reason.
+    /// Zero is `TILING_AUTHORED`, so a row nobody wrote and every material
+    /// authored before this field existed samples the vertex UV exactly as it
+    /// always did — the physical branch is added, not substituted.
+    uint tiling;
+    /// How many world-space metres one repeat of the texture spans under
+    /// `TILING_PHYSICAL`; unread under `TILING_AUTHORED`. Matching
+    /// `crcbl_shaders::mesh::GpuMaterial::tile_metres`.
+    ///
+    /// `physical_tile_uv` clamps it off zero before dividing, so a physical row
+    /// left at zero collapses the surface onto one texel rather than dividing by
+    /// zero.
+    float tile_metres;
+    /// Pads the row to 48 bytes, which is what `std430` rounds it to anyway: the
+    /// struct's alignment is the `float4`'s 16, so a 36-byte row would be read
+    /// at a stride of 48 by a shader while the CPU wrote it at 36. Spelled out
+    /// rather than implied, exactly as `DrawConstants` below spells its own.
+    ///
+    /// **There was one of these**, and it plus the twelve bytes `std430` rounds
+    /// the size up by is where `tiling` and `tile_metres` went — so the row
+    /// gained physical tiling without any earlier member's offset moving.
     uint pad0;
+    uint pad1;
+    uint pad2;
 };
+
+/// `GpuMaterial::tiling`: sample the base-colour texture at the vertex's own UV.
+///
+/// Zero, matching `crcbl_shaders::mesh::GpuMaterial::TILING_AUTHORED`, so it is
+/// the value an unwritten row and every `..UNTINTED` spread already carry.
+static const uint TILING_AUTHORED = 0;
+
+/// `GpuMaterial::tiling`: derive the UV from the surface's world-space extent, so
+/// the texture repeats once per `tile_metres` — see `physical_tile_uv`. Matching
+/// `crcbl_shaders::mesh::GpuMaterial::TILING_PHYSICAL`.
+static const uint TILING_PHYSICAL = 1;
 
 /// One irradiance probe, matching `crcbl_shaders::probe::GpuProbe`.
 ///
@@ -653,13 +682,21 @@ StructuredBuffer<GpuMaterial> materials;
 [[vk::binding(7, 0)]]
 Texture2DArray<float4> base_color_textures;
 
-/// The one sampler the page is read through: nearest, clamped.
+/// The one sampler the page is read through: nearest, **wrapped**.
 ///
 /// Nearest because these are material *pages* rather than photographs — there
 /// is no mip chain (§3.2's mip generation is a compute pass of its own) and a
 /// filtered read of a page with no mips is a shimmer, not a smoother picture.
 /// One sampler and no choice, for `sprite.slang`'s reason: a shader cannot ask
 /// which filter it got, so a second one would be a second pipeline.
+///
+/// **`Repeat`, not `ClampToEdge`**, and that is what `TILING_PHYSICAL` needs: a
+/// physical UV runs to `world_extent / tile_metres`, well past `0..1` on any
+/// face larger than one tile, and only a wrapping sampler makes the page tile
+/// across it rather than smearing its edge row. `TILING_AUTHORED` is
+/// unaffected — its UV is the vertex's, which the meshes author in `0..1`, so a
+/// wrapped and a clamped read return the same texel for it. `crcbl_render`'s
+/// forward pass is what sets the address mode and says so.
 [[vk::binding(8, 0)]]
 SamplerState base_color_sampler;
 
@@ -1542,6 +1579,46 @@ struct FragmentOutput
     float4 reflectivity : SV_Target1;
 };
 
+/// `TILING_PHYSICAL`'s sampling UV: the surface's world-space position along the
+/// two axes of its dominant face plane, divided by `tile_metres`.
+///
+/// The texture then repeats once per `tile_metres` of surface, so one texture
+/// cell measures one `tile_metres` however large the face is — a 2 m face under
+/// a 1 m tile shows a 2×2 grid, a 1 m face shows one. That is the whole of what
+/// physical tiling buys over the authored UV, which a mesh fixes to `0..1` and
+/// so stretches one tile across a face of any size.
+///
+/// **The plane is chosen by the dominant normal axis**, the ordinary planar
+/// projection: a face whose normal points mostly along X is sampled by its world
+/// `z,y`, one along Y by `x,z`, one along Z by `x,y`. That is exact for the
+/// axis-aligned faces a greybox is built from, and continuous enough elsewhere
+/// that a grid still reads as a ruler. The projection is unsigned — which world
+/// axis maps to `u` versus `v`, and its direction, do not matter to a symmetric
+/// grid, and the cell *count* a surface shows is `extent / tile_metres` either
+/// way, which is what the tiling is judged by.
+///
+/// `tile_metres` is clamped off zero so a physical row that never set it — the
+/// zero a `default`-constructed row carries — collapses onto one texel rather
+/// than dividing by zero.
+float2 physical_tile_uv(float3 world_position, float3 normal, float tile_metres)
+{
+    float3 axis = abs(normal);
+    float2 planar;
+    if (axis.x >= axis.y && axis.x >= axis.z)
+    {
+        planar = world_position.zy;
+    }
+    else if (axis.y >= axis.z)
+    {
+        planar = world_position.xz;
+    }
+    else
+    {
+        planar = world_position.xy;
+    }
+    return planar / max(tile_metres, 1e-4);
+}
+
 [shader("fragment")]
 FragmentOutput fragmentMain(VertexOutput input)
 {
@@ -1565,8 +1642,18 @@ FragmentOutput fragmentMain(VertexOutput input)
     // The texel arrives **linear** — the page is an sRGB-format image, so the
     // sampler decoded it — which is the space `base_color` and `input.color`
     // are in. See the binding above.
+    //
+    // The UV is the vertex's under `TILING_AUTHORED` and derived from the
+    // surface's world extent under `TILING_PHYSICAL` — the added branch that
+    // makes a tile measure `tile_metres` of surface. The wrapped sampler is what
+    // lets the physical UV, which runs past `0..1`, repeat rather than smear.
+    float2 uv = input.uv;
+    if (material.tiling == TILING_PHYSICAL)
+    {
+        uv = physical_tile_uv(input.world_position, normal, material.tile_metres);
+    }
     float4 texel = base_color_textures.Sample(
-        base_color_sampler, float3(input.uv, float(material.base_color_texture)));
+        base_color_sampler, float3(uv, float(material.base_color_texture)));
     float4 albedo = input.color * material.base_color * texel;
 
     // The row's two shading factors, clamped once for the fragment rather than

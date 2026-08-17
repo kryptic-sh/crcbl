@@ -6,12 +6,13 @@
 use crcbl_greybox::{
     GREYBOX_CAPSULE, GREYBOX_COLUMN, GREYBOX_CUBE, GREYBOX_CYLINDER, GREYBOX_DOORWAY, GREYBOX_GREY,
     GREYBOX_GRID, GREYBOX_MESH_COUNT, GREYBOX_PLATFORM, GREYBOX_QUAD, GREYBOX_RAMP, GREYBOX_SPHERE,
-    GREYBOX_STAIRS, GREYBOX_WALL, GRID_EXTENT, GRID_LAYER, capsule, column, cube, cylinder,
-    doorway, greybox_material, grid_material, platform, quad, ramp, scene3d, sphere, stairs,
-    unit_cube, wall,
+    GREYBOX_STAIRS, GREYBOX_TILE_EXTENT, GREYBOX_TILE_M, GREYBOX_WALL, GRID_EXTENT, GRID_LAYER,
+    GreyboxColor, capsule, column, cube, cylinder, doorway, greybox_color_material,
+    greybox_color_texels, greybox_material, greybox_page, grid_material, platform, quad, ramp,
+    scene3d, sphere, stairs, unit_cube, wall,
 };
 use crcbl_render::scene::{Geometry, PageDesc};
-use crcbl_shaders::mesh::VERTEX_STRIDE;
+use crcbl_shaders::mesh::{GpuMaterial, VERTEX_STRIDE};
 use crcbl_shaders::meshlet::{MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES};
 use glam::Vec3;
 
@@ -363,4 +364,96 @@ fn scene3d_fits_inside_the_capacities_it_reserves() {
     );
     assert!(scene.meshes.len() <= scene.capacities.meshes as usize);
     assert!(scene.materials.len() <= scene.capacities.materials as usize);
+}
+
+/// The seven colour tiles, their layers, page and materials stay in lockstep:
+/// `ALL` order is layer order, every material names its own physical-tiling row,
+/// and the page holds the white layer plus one tile per colour at the declared
+/// extent.
+#[test]
+fn every_greybox_colour_tiles_by_physical_size_out_of_its_own_layer() {
+    assert_eq!(
+        GreyboxColor::ALL.len(),
+        7,
+        "grey, red, green, blue, orange, brown, black"
+    );
+
+    let page = greybox_page();
+    assert_eq!(
+        page.extent(),
+        GREYBOX_TILE_EXTENT,
+        "the colour page is authored at the declared extent"
+    );
+    assert_eq!(
+        page.layers().len(),
+        GreyboxColor::ALL.len() + 1,
+        "the white untextured layer plus one tile per colour"
+    );
+
+    let texel_count = (GREYBOX_TILE_EXTENT * GREYBOX_TILE_EXTENT) as usize * 4;
+    for (index, color) in GreyboxColor::ALL.into_iter().enumerate() {
+        let layer = color.layer();
+        assert_eq!(
+            layer as usize,
+            index + 1,
+            "{}'s layer must be its ALL position past the white layer 0",
+            color.label()
+        );
+
+        // The material a caller picks samples exactly that layer, physically
+        // tiled at one metre — which is what makes the grid a metric ruler.
+        let material = greybox_color_material(color);
+        assert_eq!(
+            material.base_color_texture,
+            layer,
+            "{} names its own layer",
+            color.label()
+        );
+        assert_eq!(
+            material.tiling,
+            GpuMaterial::TILING_PHYSICAL,
+            "{} must tile by physical size",
+            color.label()
+        );
+        assert_eq!(
+            material.tile_metres,
+            GREYBOX_TILE_M,
+            "{} tiles one metre",
+            color.label()
+        );
+
+        // The layer bytes are a full RGBA8 image of the page's extent, and the
+        // page holds exactly them — so an upload of `extent² × 4` bytes lands.
+        let texels = greybox_color_texels(color);
+        assert_eq!(
+            texels.len(),
+            texel_count,
+            "{} is a full page-sized image",
+            color.label()
+        );
+        assert_eq!(page.layers()[layer as usize].as_ref(), texels.as_slice());
+
+        // A ruled tile is not a flat field: it has both line and field texels,
+        // or there is no grid to read a size off.
+        let distinct: std::collections::BTreeSet<[u8; 4]> = texels
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2], p[3]])
+            .collect();
+        assert!(
+            distinct.len() >= 2,
+            "{}'s tile is a flat field with no grid lines",
+            color.label()
+        );
+    }
+
+    // Distinct colours are distinct materials and distinct tiles — a blockout
+    // that paints two volumes different colours must be able to tell them apart.
+    assert_ne!(
+        greybox_color_material(GreyboxColor::Red),
+        greybox_color_material(GreyboxColor::Blue)
+    );
+    assert_ne!(
+        greybox_color_texels(GreyboxColor::Red),
+        greybox_color_texels(GreyboxColor::Blue)
+    );
 }

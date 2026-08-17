@@ -29,7 +29,10 @@
 //!
 //! [`greybox_material`] is the plain grey a blockout wears; [`grid_material`]
 //! shows the metric grid of [`grid_page`], a quarter-metre ruler on the surface.
-//! See the [`material`] module for the grid's one-metre-tile convention.
+//! [`greybox_color_material`] is that ruler in the seven-colour blockout palette
+//! ([`GreyboxColor`]) and **physically tiled** — one metre of surface per tile
+//! at any face size, out of the 1024² [`greybox_page`]. See the [`material`]
+//! module for the two tiling modes.
 //!
 //! # The 2D half
 //!
@@ -50,8 +53,9 @@ pub mod sprite;
 
 pub use build::GREYBOX_ALBEDO;
 pub use material::{
-    GRID_CELL_M, GRID_CELLS, GRID_EXTENT, GRID_LAYER, greybox_material, grid_material, grid_page,
-    grid_texels,
+    GREYBOX_TILE_CELL_M, GREYBOX_TILE_CELLS, GREYBOX_TILE_EXTENT, GREYBOX_TILE_M, GRID_CELL_M,
+    GRID_CELLS, GRID_EXTENT, GRID_LAYER, GreyboxColor, greybox_color_material,
+    greybox_color_texels, greybox_material, greybox_page, grid_material, grid_page, grid_texels,
 };
 pub use primitives::{
     RAMP_ANGLES_DEG, RAMP_WIDTH_M, UNIT_CUBE_M, capsule, column, cube, cylinder, doorway, platform,

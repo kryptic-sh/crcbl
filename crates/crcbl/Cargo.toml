@@ -120,6 +120,10 @@ crcbl-dx12 = { workspace = true }
 # "it reaches no shipped binary".
 [dev-dependencies]
 crcbl-golden = { workspace = true }
+# For `tests/tiling_e2e.rs`, which draws greybox floor quads under the physical
+# tiling material to prove a 2 m surface shows twice the grid cells of a 1 m one.
+# A dev-dependency because no shipped `crcbl` binary references the greybox pack.
+crcbl-greybox = { workspace = true }
 
 [lints]
 workspace = true

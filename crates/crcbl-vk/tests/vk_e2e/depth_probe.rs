@@ -212,6 +212,10 @@ const PROBE_MATERIALS: [crcbl_shaders::mesh::GpuMaterial; 2] = [
         // beside it — so a wrong row fails on the alpha and a swap of the `rgb`
         // and `a` halves fails on all four.
         roughness: 0.25,
+        // Authored UV, like the untextured row above: this probe scene samples
+        // no page, so physical tiling has nothing to tile.
+        tiling: crcbl_shaders::mesh::GpuMaterial::TILING_AUTHORED,
+        tile_metres: crcbl_shaders::mesh::GpuMaterial::UNTINTED.tile_metres,
     },
 ];
 

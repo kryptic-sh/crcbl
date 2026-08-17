@@ -499,6 +499,11 @@ fn build(
                 // document that varies gloss over a surface arrives with the
                 // factor applied flat across it.
                 base_color_texture: GpuMaterial::UNTINTED.base_color_texture,
+                // glTF texture coordinates are authored per vertex, so an
+                // imported material samples the vertex UV — physical tiling is
+                // the engine's own greybox mode, not something glTF describes.
+                tiling: GpuMaterial::TILING_AUTHORED,
+                tile_metres: GpuMaterial::UNTINTED.tile_metres,
             }
         })
         .collect();
@@ -715,6 +720,8 @@ mod tests {
         base_color_texture: 0,
         metallic: 1.0,
         roughness: 1.0,
+        tiling: GpuMaterial::TILING_AUTHORED,
+        tile_metres: 1.0,
     };
 
     #[test]
