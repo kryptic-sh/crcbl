@@ -209,6 +209,9 @@ const EXPECTATIONS = {
   // stays in the HUD line for a bug report, and `run: 1` in `waiting` is what
   // says the demo booted a fresh run rather than a restarted one.
   horde: {
+    // Draws mesh instances, so the cull pass has something to count and
+    // its stats readback must come back — see group D.
+    culls: true,
     key: 'Space',
     waiting: (line) =>
       line.includes('WaitingToStart') && line.includes('run: 1'),
@@ -274,6 +277,9 @@ const EXPECTATIONS = {
   // and still quick enough that consecutive heartbeats differ far above the two
   // decimal places the line prints them to.
   lumen: {
+    // Draws mesh instances, so the cull pass has something to count and
+    // its stats readback must come back — see group D.
+    culls: true,
     key: null,
     waiting: (line) =>
       line.includes('[HUD] tick: 60') && line.includes('lighting: Rasterised'),
@@ -1673,17 +1679,27 @@ try {
   // once and released it on the next line threw every answer away unread, and
   // the panel's culling rows were empty for ever here while every native backend
   // passed. Nothing else in this file would notice: the canvas looks identical.
-  await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_TRACE}), true)`);
-  const culled = await until(
-    async () => consoleLines.find((line) => CULL_STATS_LINE.test(line)) ?? null
-  );
-  await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_INFO}), true)`);
-  check(
-    'D',
-    'the culling statistics come back off the GPU',
-    Boolean(culled),
-    culled?.trim() ?? 'the cull-stats readback never answered'
-  );
+  // **Only a demo that culls something can report having culled it.** The ring
+  // records a stats copy when the cull pass runs over mesh instances; a demo
+  // whose frame is sprites and text builds a `ForwardRenderer` all the same but
+  // gives that pass nothing to count, so the readback correctly never arrives
+  // and asserting it here would be asserting a thing that is not true. `culls`
+  // in EXPECTATIONS names the demos with mesh geometry — the ones this claim is
+  // about — rather than skipping the check quietly everywhere else.
+  if (EXPECTED.culls) {
+    await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_TRACE}), true)`);
+    const culled = await until(
+      async () =>
+        consoleLines.find((line) => CULL_STATS_LINE.test(line)) ?? null
+    );
+    await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_INFO}), true)`);
+    check(
+      'D',
+      'the culling statistics come back off the GPU',
+      Boolean(culled),
+      culled?.trim() ?? 'the cull-stats readback never answered'
+    );
+  }
 
   group('E — focus and pause');
 
