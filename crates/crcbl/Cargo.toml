@@ -139,6 +139,17 @@ crcbl-golden = { workspace = true }
 # tiling material to prove a 2 m surface shows twice the grid cells of a 1 m one.
 # A dev-dependency because no shipped `crcbl` binary references the greybox pack.
 crcbl-greybox = { workspace = true }
+# `tests/gltf_e2e.rs` builds a `.glb` and imports it through the real
+# `DirSource`, so it needs a real directory to put it in and the asset seam it
+# reads through. The same pair `crcbl-scene`'s own fixtures use, and for the same
+# reason: the key rule a document's own uris have to satisfy is the production
+# one rather than one written for a mock.
+crcbl-assets = { workspace = true }
+tempfile = "3"
+# That suite's texture is a PNG it encodes rather than a blob it vendors, on
+# `crcbl-scene`'s `gltf_fixture` argument: a checked-in binary is a fixture
+# nobody reviewing a change can read.
+png = { workspace = true }
 
 [lints]
 workspace = true
@@ -176,7 +187,14 @@ hal-seam-e2e = []
 # and gets the builders whose output `render::scene::Geometry` is spelled in.
 # `apps/lumen` is the one that does; every other sample leaves it off and links
 # no glTF parser, which `cargo tree -p <sample> -e normal` is what says.
-scene = ["dep:crcbl-scene"]
+#
+# `crcbl-scene/render` comes with it — `crcbl_scene::gltf_render`, the bridge
+# from an imported document to a `SceneDesc` — because this crate already
+# depends on `crcbl-render` unconditionally, so the only thing that feature adds
+# to a build that has the umbrella is the module. Turning on the glTF importer
+# and leaving out the one thing that renders what it imports would be a switch
+# nobody wants either half of.
+scene = ["dep:crcbl-scene", "crcbl-scene/render"]
 
 # THERE IS NO `webgpu` FEATURE ANY MORE, AND ITS ABSENCE IS THE POINT.
 #

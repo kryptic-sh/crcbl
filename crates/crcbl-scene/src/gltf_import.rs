@@ -1,9 +1,10 @@
-//! glTF 2.0 import: bytes through [`AssetSource`], geometry and material
-//! factors out.
+//! glTF 2.0 import: bytes through [`AssetSource`], geometry, material factors
+//! and encoded images out.
 //!
 //! This is the first half of step 3 of `docs/plan/06-assets-scenes.md`. It ends
-//! at host memory: there is no GPU pool upload, no texture decode and no mip
+//! at host memory: there is no GPU pool upload, no image *decode* and no mip
 //! generation here, and the types below are what the upload step consumes.
+//! [`crate::gltf_render`] is that step for the forward renderer.
 //!
 //! # Everything arrives through the asset seam
 //!
@@ -44,10 +45,33 @@
 //! says it means.
 //!
 //! The row also has a `base_color_texture` column, and **this importer leaves
-//! it at the untextured layer**. glTF's `baseColorTexture` is an image, and
-//! nothing here decodes one, uploads one or owns a layer of the renderer's
-//! page — so a material arrives with its factor and the page's white layer,
-//! which is exactly what an imported material shaded before the column existed.
+//! it at the untextured layer**. That column is a layer of the renderer's page,
+//! and which layer an image lands in is decided by whoever builds the page —
+//! [`crate::gltf_render`], which owns both. What this module supplies instead is
+//! the link the page builder needs: [`GltfScene::base_color_textures`] says
+//! which of [`GltfScene::images`] each material's `baseColorTexture` names, and
+//! [`GltfScene::images`] carries that image's **encoded** bytes.
+//!
+//! `metallicRoughnessTexture`, `normalTexture`, `occlusionTexture` and
+//! `emissiveTexture` are not extracted. Not an oversight and not a decode
+//! question: [`GpuMaterial`] has one texture column, so there is nowhere for a
+//! second map to go — see `docs/backlog.md`'s "The material table has both
+//! halves". The one whose absence is *visible* is the metallic-roughness map: a
+//! document that varies gloss over a surface arrives with its factor applied
+//! flat across it.
+//!
+//! # An image that will not resolve is skipped, where a buffer that will not is
+//! refused
+//!
+//! [`GltfImage::bytes`] is a `Result`, and a document whose image is missing,
+//! outside the asset root or embedded in a `data:` URI still imports — with that
+//! image carrying the reason instead of the bytes, and a warning naming the file
+//! and the image. A buffer in the same state is an error that fails the whole
+//! import. The asymmetry is deliberate and it is about what is lost: a buffer is
+//! the geometry, so a file without it has nothing to draw, where an image is a
+//! surface's colour and a file without it draws the surface white. The viewer's
+//! own exit criterion — load the sample suite, log what could not be used — is
+//! the second of those, not the first.
 //!
 //! # The node table is the whole node array, not the scene graph
 //!
@@ -63,9 +87,13 @@
 //!
 //! Skins and animations are in the format and are not read: the plan has them
 //! "parsed but unused until the animation feature lands", and a type nothing
-//! fills is worse than no type. Textures are step 3's second half. Vertex
-//! colours, tangents, `TEXCOORD_1` and morph targets are read by nothing here
-//! and so are not extracted.
+//! fills is worse than no type. Vertex colours, tangents, `TEXCOORD_1` and
+//! morph targets are read by nothing here and so are not extracted.
+//!
+//! **Each of those is warned about when a document actually uses it**, naming
+//! the file and the feature, rather than being silently absent from the result.
+//! A viewer that shows a rigged character in its bind pose has to be able to say
+//! so, and the only place that knows the document had a skin at all is here.
 //!
 //! `MSFT_lod` is the one extension read, and only where it sits on a **node**.
 //! The extension is also defined on materials — a material chain for a mesh
@@ -99,6 +127,8 @@ use crate::gltf_check::{check_document, check_glb_header, malformed};
 pub struct GltfScene {
     meshes: Vec<GltfMesh>,
     materials: Vec<GpuMaterial>,
+    base_color_textures: Vec<Option<GltfTexture>>,
+    images: Vec<GltfImage>,
     nodes: Vec<GltfNode>,
     instances: Vec<GltfInstance>,
 }
@@ -120,6 +150,31 @@ impl GltfScene {
     #[must_use]
     pub fn materials(&self) -> &[GpuMaterial] {
         &self.materials
+    }
+
+    /// Which image each material's `baseColorTexture` names, **parallel to
+    /// [`materials`](Self::materials)**: entry `n` belongs to material `n`.
+    ///
+    /// `None` where the material names no base-colour texture, which is every
+    /// material of an untextured document. Every [`GltfTexture::image`] is a
+    /// valid index into [`images`](Self::images) — one that is not makes the
+    /// document malformed rather than making this array shorter.
+    ///
+    /// A second array rather than a field on the row because the row is
+    /// [`GpuMaterial`], the shader's own record, and its
+    /// `base_color_texture` column is a page layer — a number this module
+    /// cannot know. See the [module docs](self).
+    #[inline]
+    #[must_use]
+    pub fn base_color_textures(&self) -> &[Option<GltfTexture>] {
+        &self.base_color_textures
+    }
+
+    /// The document's `images` array, in file order, each still encoded.
+    #[inline]
+    #[must_use]
+    pub fn images(&self) -> &[GltfImage] {
+        &self.images
     }
 
     /// The document's `nodes` array, in file order — every node, not only the
@@ -191,6 +246,95 @@ impl GltfNode {
     #[must_use]
     pub fn lod_nodes(&self) -> &[usize] {
         &self.lod_nodes
+    }
+}
+
+/// A material's reference to one of [`GltfScene::images`], and which UV set it
+/// samples with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GltfTexture {
+    image: usize,
+    tex_coord: u32,
+}
+
+impl GltfTexture {
+    /// Which of [`GltfScene::images`] carries the bytes.
+    ///
+    /// Several materials naming one image is ordinary and is not deduplicated
+    /// here: this is the document's own index, so whoever packs a page can see
+    /// that two rows want the same layer.
+    #[inline]
+    #[must_use]
+    pub const fn image(&self) -> usize {
+        self.image
+    }
+
+    /// The `TEXCOORD_n` set this texture is sampled with — the glTF `texCoord`
+    /// field, which defaults to `0`.
+    ///
+    /// **Anything but `0` is a set this importer does not read.**
+    /// [`GltfPrimitive::tex_coords`] is `TEXCOORD_0` alone, so a material asking
+    /// for set 1 has no coordinates to sample with and whoever consumes this has
+    /// to say so rather than sample the wrong ones. It is reported instead of
+    /// refused because the rest of the material — its factors, and its geometry
+    /// — is perfectly usable.
+    #[inline]
+    #[must_use]
+    pub const fn tex_coord(&self) -> u32 {
+        self.tex_coord
+    }
+}
+
+/// One entry of the document's `images` array: what it is called, what it is
+/// encoded as, and either the encoded bytes or why they are not here.
+///
+/// **Encoded, not decoded.** These are the PNG or JPEG bytes exactly as the file
+/// carries them, whether they came out of a `bufferView` of a `.glb` or a file
+/// beside a `.gltf`. Turning them into texels is the page builder's job — see
+/// the [module docs](self) for why the decode is not here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GltfImage {
+    name: Option<String>,
+    mime: Option<String>,
+    bytes: Result<Vec<u8>, String>,
+}
+
+impl GltfImage {
+    /// The name the document gave this image, if it gave one.
+    #[inline]
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The `mimeType` the document declared, if it declared one.
+    ///
+    /// Required by the specification for an image in a `bufferView` and optional
+    /// for one in a URI, so this is `None` only for the second kind. **It is a
+    /// claim, not a fact**: a decoder should recognise the bytes it was given
+    /// and use this to say what the file *said* when it cannot.
+    #[inline]
+    #[must_use]
+    pub fn mime(&self) -> Option<&str> {
+        self.mime.as_deref()
+    }
+
+    /// The encoded bytes, or the reason the import could not get them.
+    ///
+    /// The `Err` is a sentence naming what went wrong — a `data:` URI, a key
+    /// outside the asset root, a file the source does not have. It has already
+    /// been logged at warning level with the document's key; it is returned as
+    /// well so a tool can show it beside the image it belongs to.
+    ///
+    /// # Errors
+    ///
+    /// Never fails at call time: the `Result` is stored, not computed.
+    #[inline]
+    pub fn bytes(&self) -> Result<&[u8], &str> {
+        match &self.bytes {
+            Ok(bytes) => Ok(bytes),
+            Err(why) => Err(why),
+        }
     }
 }
 
@@ -378,7 +522,7 @@ pub fn import_gltf(source: &dyn AssetSource, key: &Path) -> Result<GltfScene, St
     let blob = document.blob.take();
     let buffers = resolve_buffers(source, key, &document, blob)?;
     check_document(document.document.as_json(), &buffers, key)?;
-    build(&document.document, &buffers, key)
+    build(source, &document.document, &buffers, key)
 }
 
 /// Deserialize without `gltf`'s validation, which cannot be used — see
@@ -472,10 +616,25 @@ fn resolve_buffers(
 }
 
 fn build(
+    source: &dyn AssetSource,
     document: &gltf::Document,
     buffers: &[Vec<u8>],
     key: &Path,
 ) -> Result<GltfScene, StorageError> {
+    warn_dropped_features(document, key);
+    let images = read_images(source, document, buffers, key)?;
+    let base_color_textures = document
+        .materials()
+        .map(|material| {
+            material
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .map(|info| GltfTexture {
+                    image: info.texture().source().index(),
+                    tex_coord: info.tex_coord(),
+                })
+        })
+        .collect();
     let materials = document
         .materials()
         .map(|material| {
@@ -487,17 +646,13 @@ fn build(
                 metallic: pbr.metallic_factor(),
                 roughness: pbr.roughness_factor(),
                 // **The factors only; `base_color_texture` is left untextured.**
-                // glTF's `baseColorTexture` is an image this crate does not
-                // decode, upload or own a page layer in — see
-                // `docs/backlog.md`'s "The material table has both halves".
-                // Naming layer 0 is the honest value for that: it is the page's
-                // white layer, so an imported material shades with its factors
-                // and nothing else.
-                //
-                // `metallicRoughnessTexture` is left out for exactly the same
-                // reason, and it is the one whose absence is *visible*: a
-                // document that varies gloss over a surface arrives with the
-                // factor applied flat across it.
+                // This column is a *page layer*, and which layer an image lands
+                // in is known only to whoever builds the page. The document's
+                // own answer — which image this material wants — is carried
+                // beside the row in `base_color_textures` instead. Naming layer
+                // 0 here is the honest value in the meantime: it is the page's
+                // white layer, so a row nobody re-pointed shades with its
+                // factors and nothing else.
                 base_color_texture: GpuMaterial::UNTINTED.base_color_texture,
                 // glTF texture coordinates are authored per vertex, so an
                 // imported material samples the vertex UV — physical tiling is
@@ -536,7 +691,113 @@ fn build(
         instances: flatten(document, key)?,
         meshes,
         materials,
+        base_color_textures,
+        images,
     })
+}
+
+/// Warn, once per feature, about everything the document uses and this importer
+/// does not read.
+///
+/// A log line rather than a field on [`GltfScene`], because there is nothing for
+/// a caller to *do* with a skin this crate did not parse — the value is that a
+/// character standing in its bind pose has an explanation somewhere. The
+/// counts are the document's own, and the key is what makes a line actionable
+/// when a hundred files went past.
+fn warn_dropped_features(document: &gltf::Document, key: &Path) {
+    let root = document.as_json();
+    let morph_targets: usize = root
+        .meshes
+        .iter()
+        .flat_map(|mesh| &mesh.primitives)
+        .map(|primitive| primitive.targets.as_ref().map_or(0, Vec::len))
+        .sum();
+    for (count, feature, effect) in [
+        (
+            root.skins.len(),
+            "skins",
+            "every skinned mesh draws in its bind pose",
+        ),
+        (
+            root.animations.len(),
+            "animations",
+            "nothing moves; playback is a post-MVP engine feature",
+        ),
+        (
+            morph_targets,
+            "morph targets",
+            "every mesh draws at its base shape",
+        ),
+    ] {
+        if count > 0 {
+            crcbl_core::log::warn!(
+                "{}: skipping {count} {feature}: this importer does not read them, so {effect}",
+                key.display(),
+            );
+        }
+    }
+}
+
+/// The encoded bytes of every image the document names, in order.
+///
+/// Two sources, and only one of them touches the asset seam: an image in a
+/// `bufferView` is a slice of a buffer already resolved, and an image with a
+/// `uri` is a key beside the document read the same way an external `.bin` is.
+///
+/// Anything that stops a URI resolving becomes that image's stored reason and a
+/// warning, rather than the import's failure — see the [module docs](self).
+/// [`StorageError::Pending`] is the one exception and propagates: "not resident
+/// yet" is not a defect in the file, and answering it as a skipped texture would
+/// bake a missing image into a scene that would have had one next frame.
+fn read_images(
+    source: &dyn AssetSource,
+    document: &gltf::Document,
+    buffers: &[Vec<u8>],
+    key: &Path,
+) -> Result<Vec<GltfImage>, StorageError> {
+    let parent = uri_parent(key);
+    let mut images = Vec::with_capacity(document.images().len());
+    for image in document.images() {
+        let index = image.index();
+        let name = image.name().map(str::to_owned);
+        let (mime, bytes) = match image.source() {
+            gltf::image::Source::View { view, mime_type } => {
+                // `check_views` put every view inside its own buffer and
+                // `check_images` put this view inside the document, so the
+                // slice below is in range by construction.
+                let buffer = &buffers[view.buffer().index()];
+                let start = view.offset();
+                let bytes = buffer[start..start + view.length()].to_vec();
+                (Some(mime_type.to_owned()), Ok(bytes))
+            }
+            gltf::image::Source::Uri { uri, mime_type } => {
+                let bytes = if uri.starts_with("data:") {
+                    Err(
+                        "its bytes are a data: URI, which needs a base64 decoder this build \
+                         does not have"
+                            .to_owned(),
+                    )
+                } else {
+                    match source.read(Path::new(&uri_sibling(parent, uri))) {
+                        Ok(bytes) => Ok(bytes),
+                        Err(pending @ StorageError::Pending(_)) => return Err(pending),
+                        Err(error) => Err(format!("{uri:?} could not be read: {error}")),
+                    }
+                };
+                (mime_type.map(str::to_owned), bytes)
+            }
+        };
+        if let Err(why) = &bytes {
+            crcbl_core::log::warn!(
+                "{}: skipping image {index} {:?}: {why}; every material naming it shades \
+                 untextured",
+                key.display(),
+                name.as_deref().unwrap_or("<unnamed>"),
+            );
+        }
+        images.push(GltfImage { name, mime, bytes });
+    }
+    Ok(images)
 }
 
 /// The document's `nodes` array, name and mesh and `MSFT_lod` each.
@@ -701,8 +962,9 @@ fn flatten(document: &gltf::Document, key: &Path) -> Result<Vec<GltfInstance>, S
 mod tests {
     use super::*;
     use crate::gltf_fixture::{
-        BASE_COLOR, BIN_CHUNK_BUFFER, EXTERNAL_BUFFER, INDICES, NORMALS, POSITIONS, TEX_COORDS,
-        import_glb, import_gltf_text, replacing, triangle_bin, triangle_json,
+        Assets, BASE_COLOR, BIN_CHUNK_BUFFER, EXTERNAL_BUFFER, IMAGE_TEXELS, INDICES, NORMALS,
+        POSITIONS, TEX_COORDS, glb, import_glb, import_glb_bytes, import_gltf_text, png_bytes,
+        replacing, textured_glb, textured_parts, triangle_bin, triangle_json,
     };
 
     /// The row a glTF material with no `pbrMetallicRoughness` block imports as:
@@ -1002,5 +1264,143 @@ mod tests {
             .insert("triangle.bin".to_string(), triangle_bin());
         let scene = import_gltf(&source, Path::new("model.gltf")).unwrap();
         assert_eq!(scene.meshes()[0].primitives()[0].positions(), POSITIONS);
+    }
+
+    #[test]
+    fn a_documents_images_arrive_encoded_beside_the_material_that_names_them() {
+        let png = png_bytes(2, 2, &IMAGE_TEXELS);
+        let scene = import_glb_bytes(&textured_glb(&png, "image/png", 0)).unwrap();
+
+        assert_eq!(scene.images().len(), 1);
+        let image = &scene.images()[0];
+        assert_eq!(image.name(), Some("paint"));
+        assert_eq!(image.mime(), Some("image/png"));
+        assert_eq!(
+            image.bytes(),
+            Ok(&png[..]),
+            "the bytes are the file's own, byte for byte and still encoded"
+        );
+
+        assert_eq!(scene.base_color_textures().len(), scene.materials().len());
+        let texture = scene.base_color_textures()[0].expect("the material names a texture");
+        assert_eq!(texture.image(), 0);
+        assert_eq!(texture.tex_coord(), 0);
+        assert_eq!(
+            scene.materials()[0].base_color_texture,
+            GpuMaterial::UNTINTED.base_color_texture,
+            "the row's texture column stays at the untextured layer: a page layer is not \
+             something this module can know"
+        );
+    }
+
+    #[test]
+    fn a_material_naming_no_texture_has_no_entry_beside_it() {
+        let scene = import_glb(&triangle_json(BIN_CHUNK_BUFFER)).unwrap();
+        assert_eq!(scene.images(), []);
+        assert_eq!(scene.base_color_textures(), [None]);
+    }
+
+    #[test]
+    fn the_texcoord_a_material_asks_for_is_reported_rather_than_assumed() {
+        let png = png_bytes(2, 2, &IMAGE_TEXELS);
+        let scene = import_glb_bytes(&textured_glb(&png, "image/png", 1)).unwrap();
+        assert_eq!(
+            scene.base_color_textures()[0]
+                .expect("a texture")
+                .tex_coord(),
+            1,
+            "TEXCOORD_1 is not read, and a silent 0 here would sample the wrong UVs \
+             instead of saying so"
+        );
+    }
+
+    /// The asymmetry the module docs argue for: a buffer that will not resolve
+    /// fails the import, and an image that will not resolve is a skipped image.
+    #[test]
+    fn an_image_uri_the_source_cannot_read_is_skipped_and_the_document_still_imports() {
+        let (json, bin) = textured_parts(b"unused", "image/png", 0);
+        let json = replacing(
+            &json,
+            r#"{ "name": "paint", "bufferView": 4, "mimeType": "image/png" }"#,
+            r#"{ "name": "paint", "uri": "paint.png" }"#,
+        );
+        let scene = import_glb_bytes(&glb(&json, Some(&bin)))
+            .expect("a missing texture is not a missing model");
+
+        let why = scene.images()[0]
+            .bytes()
+            .expect_err("the file is not beside the document");
+        assert!(
+            why.contains("paint.png") && why.contains("could not be read"),
+            "the reason names the uri that failed: {why}"
+        );
+        assert_eq!(
+            scene.meshes()[0].primitives()[0].positions(),
+            POSITIONS,
+            "the geometry is untouched by the texture that was not there"
+        );
+    }
+
+    #[test]
+    fn a_data_uri_image_is_skipped_where_a_data_uri_buffer_is_refused() {
+        let (json, bin) = textured_parts(b"unused", "image/png", 0);
+        let json = replacing(
+            &json,
+            r#"{ "name": "paint", "bufferView": 4, "mimeType": "image/png" }"#,
+            r#"{ "name": "paint", "uri": "data:image/png;base64,iVBORw0KGgo=" }"#,
+        );
+        let scene = import_glb_bytes(&glb(&json, Some(&bin))).expect("still imports");
+        let why = scene.images()[0].bytes().unwrap_err();
+        assert!(
+            why.contains("base64"),
+            "the reason says what is missing: {why}"
+        );
+    }
+
+    #[test]
+    fn an_image_uri_resolves_beside_the_document_like_a_buffer_uri_does() {
+        let png = png_bytes(2, 2, &IMAGE_TEXELS);
+        let (json, bin) = textured_parts(b"unused", "image/png", 0);
+        let json = replacing(
+            &json,
+            r#"{ "name": "paint", "bufferView": 4, "mimeType": "image/png" }"#,
+            r#"{ "name": "paint", "uri": "paint.png" }"#,
+        );
+
+        let assets = Assets::new();
+        assets.write("meshes/model.glb", &glb(&json, Some(&bin)));
+        assets.write("meshes/paint.png", &png);
+        let scene = assets.import("meshes/model.glb").unwrap();
+
+        assert_eq!(
+            scene.images()[0].bytes(),
+            Ok(&png[..]),
+            "`meshes/paint.png`, not `paint.png`: a uri is relative to the document's key"
+        );
+        assert_eq!(
+            scene.images()[0].mime(),
+            None,
+            "a uri image may declare no mimeType, and this one does not"
+        );
+    }
+
+    #[test]
+    fn an_image_uri_escaping_the_asset_root_is_skipped_rather_than_read() {
+        let (json, bin) = textured_parts(b"unused", "image/png", 0);
+        let json = replacing(
+            &json,
+            r#"{ "name": "paint", "bufferView": 4, "mimeType": "image/png" }"#,
+            r#"{ "name": "paint", "uri": "../../secret.png" }"#,
+        );
+        let assets = Assets::new();
+        assets.write("meshes/model.glb", &glb(&json, Some(&bin)));
+        std::fs::write(assets.outside().join("secret.png"), b"not yours").unwrap();
+
+        let scene = assets.import("meshes/model.glb").unwrap();
+        let why = scene.images()[0].bytes().unwrap_err();
+        assert!(
+            why.contains("secret.png"),
+            "the reason names the key that was refused: {why}"
+        );
     }
 }

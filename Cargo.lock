@@ -262,6 +262,7 @@ dependencies = [
 name = "crcbl"
 version = "0.1.0"
 dependencies = [
+ "crcbl-assets",
  "crcbl-audio",
  "crcbl-client",
  "crcbl-core",
@@ -288,6 +289,8 @@ dependencies = [
  "crcbl-wgpu",
  "glam",
  "log",
+ "png",
+ "tempfile",
  "thiserror 2.0.20",
 ]
 
@@ -462,9 +465,12 @@ version = "0.1.0"
 dependencies = [
  "crcbl-assets",
  "crcbl-core",
+ "crcbl-render",
  "crcbl-shaders",
+ "crcbl-sprite",
  "glam",
  "gltf",
+ "png",
  "tempfile",
  "thiserror 2.0.20",
 ]

@@ -503,6 +503,58 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A glTF file now reaches pixels.**
+  `crcbl_scene::gltf_render::build_render_scene` turns an imported `GltfScene`
+  into the `SceneDesc` a `ForwardRenderer` makes resident and the
+  `InstanceDesc`s that place it — the piece that was missing, since
+  `import_gltf` had no consumer in the workspace but the LOD command and
+  `crcbl-render` did not know it existed. Behind `crcbl-scene`'s new `render`
+  feature, which `crcbl`'s `scene` feature turns on, so `crcbl-cli` still links
+  no renderer.
+
+  One `MeshDesc` per glTF primitive and one instance per node/primitive pair,
+  because a material is per primitive and an `InstanceDesc` carries one of each;
+  node transforms arrive composed from the root, rotation and scale included.
+  Material row 0 is the glTF specification's own default material — an untinted
+  fully rough conductor — so the document's material `n` is row `n + 1`. A
+  primitive with no `NORMAL` is de-indexed and given flat face normals, as the
+  specification requires of a client. Pool capacities are measured off the
+  description rather than taken from `Capacities::default`.
+
+  **Textures work.** `import_gltf` now carries each image's encoded bytes
+  (`GltfScene::images`) and which one a material's `baseColorTexture` names
+  (`GltfScene::base_color_textures`), and the bridge decodes the PNGs, resamples
+  them onto one square page extent — the largest side of the largest image,
+  capped at `MAX_PAGE_EXTENT` — and points each material row at its layer. The
+  resampler averages in linear light and weights by alpha, so a downscale is not
+  darkened by averaging sRGB bytes.
+
+  **Everything unsupported is skipped loudly**, which is
+  `docs/plan/sample/05-viewer.md`'s exit criterion: `RenderScene::skipped` lists
+  every one as a `Skip` naming the feature, where in the document it was, and
+  what happened instead, and each is logged with the file's key as it is found.
+  The conversion itself cannot fail — a document nothing could be made of gives
+  an empty scene and a full list of why. Skipped today: images that are not PNG
+  (JPEG in particular — there is no JPEG decoder in the workspace), images whose
+  URI will not resolve or is a `data:` URI, `texCoord` sets other than 0,
+  non-uniform node scale (the object still draws; its normals light wrongly),
+  and any primitive the meshlet builder refuses. `import_gltf` additionally
+  warns when a document carries skins, animations or morph targets, which it
+  does not read.
+
+  An image that will not resolve is now a skipped image rather than a failed
+  import — a buffer in the same state still fails, because a file without its
+  geometry has nothing to draw where one without its texture draws white.
+
+  `crcbl_scene::gltf_check` grew the refusals the texture side needs, on its
+  existing terms — every index the `gltf` crate resolves with an `unwrap` is
+  checked before that crate is allowed near it. A malformed image, texture,
+  sampler or material texture reference is now a `StorageError::Other` naming
+  the file and the defect, where it would otherwise abort the process. That
+  includes a `textures` entry with no `source`, which `gltf-json` defaults to
+  `u32::MAX` rather than modelling as absent, and which is what a document
+  supplying its image through `KHR_texture_basisu` looks like.
+
 - **Physical-size texture tiling, so an asset's size reads at a glance.** A
   material whose `tiling` is `GpuMaterial::TILING_PHYSICAL` derives its sampling
   UV from the surface's world-space extent instead of the authored UV, repeating

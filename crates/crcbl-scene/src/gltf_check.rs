@@ -117,7 +117,10 @@ pub(crate) fn check_glb_header(bytes: &[u8], key: &Path) -> Result<(), StorageEr
 ///    in its view;
 /// 3. every mesh primitive names accessors that exist and carry the types the
 ///    reader will cast them to;
-/// 4. every node, scene and default-scene index exists.
+/// 4. every node, scene and default-scene index exists;
+/// 5. every image says where its bytes are;
+/// 6. every texture names an image and a sampler that exist;
+/// 7. every material's texture references name a texture that exists.
 pub(crate) fn check_document(
     root: &Root,
     buffers: &[Vec<u8>],
@@ -126,7 +129,10 @@ pub(crate) fn check_document(
     check_views(root, buffers, key)?;
     check_accessors(root, key)?;
     check_meshes(root, key)?;
-    check_nodes(root, key)
+    check_nodes(root, key)?;
+    check_images(root, key)?;
+    check_textures(root, key)?;
+    check_materials(root, key)
 }
 
 /// A `u64` from the file as a `usize`, or a refusal.
@@ -475,12 +481,154 @@ fn check_nodes(root: &Root, key: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Every image says where its bytes are, in a form
+/// [`gltf::image::Image::source`] can answer without panicking.
+///
+/// That method is three `unwrap`s over file contents: a `bufferView` is
+/// resolved with `views().nth(index).unwrap()` and its `mimeType` is
+/// `unwrap()`ed as *required*, and an image with no `bufferView` at all
+/// `unwrap()`s `uri`. So an image with neither, one whose view does not exist,
+/// or one that puts its bytes in a view without saying what they are, aborts
+/// the process rather than returning — which is this module's whole reason to
+/// exist.
+fn check_images(root: &Root, key: &Path) -> Result<(), StorageError> {
+    for (index, image) in root.images.iter().enumerate() {
+        match (&image.buffer_view, &image.uri) {
+            (Some(view), _) => {
+                if view.value() >= root.buffer_views.len() {
+                    return Err(malformed(
+                        key,
+                        format!(
+                            "image {index} names bufferView {}, and there are {}",
+                            view.value(),
+                            root.buffer_views.len()
+                        ),
+                    ));
+                }
+                if image.mime_type.is_none() {
+                    return Err(malformed(
+                        key,
+                        format!(
+                            "image {index} puts its bytes in a bufferView and declares no \
+                             mimeType, which the specification requires there"
+                        ),
+                    ));
+                }
+            }
+            (None, Some(_)) => {}
+            (None, None) => {
+                return Err(malformed(
+                    key,
+                    format!("image {index} has neither a uri nor a bufferView"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every texture names an image and a sampler that exist.
+///
+/// [`gltf::Texture::source`] is `images().nth(json.source.value()).unwrap()` and
+/// [`gltf::Texture::sampler`] is the same shape over `samplers`. `source` is
+/// **not** an `Option` in the JSON model: `gltf-json` gives it a `serde` default
+/// of `u32::MAX`, so a texture that omits it — which is what
+/// `KHR_texture_basisu` and friends produce, the image being supplied by the
+/// extension instead — arrives as an index far past the end and panics on the
+/// way out. It is refused here rather than skipped, because a texture with no
+/// readable image is a material pointing at nothing.
+fn check_textures(root: &Root, key: &Path) -> Result<(), StorageError> {
+    for (index, texture) in root.textures.iter().enumerate() {
+        if texture.source.value() >= root.images.len() {
+            return Err(malformed(
+                key,
+                format!(
+                    "texture {index} names image {}, and there are {}",
+                    texture.source.value(),
+                    root.images.len()
+                ),
+            ));
+        }
+        if let Some(sampler) = &texture.sampler
+            && sampler.value() >= root.samplers.len()
+        {
+            return Err(malformed(
+                key,
+                format!(
+                    "texture {index} names sampler {}, and there are {}",
+                    sampler.value(),
+                    root.samplers.len()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every texture reference a material carries names a texture that exists.
+///
+/// [`gltf::material::PbrMetallicRoughness::base_color_texture`] resolves the
+/// index with `textures().nth(index).unwrap()`, and each of the other four
+/// slots is the same call in a different accessor. All five are checked rather
+/// than only the one [`crate::gltf_import`] reads today: they are one loop, and
+/// the alternative is a panic waiting for whichever slot is read next.
+fn check_materials(root: &Root, key: &Path) -> Result<(), StorageError> {
+    for (index, material) in root.materials.iter().enumerate() {
+        let pbr = &material.pbr_metallic_roughness;
+        let slots = [
+            (
+                "baseColorTexture",
+                pbr.base_color_texture.as_ref().map(|info| info.index),
+            ),
+            (
+                "metallicRoughnessTexture",
+                pbr.metallic_roughness_texture
+                    .as_ref()
+                    .map(|info| info.index),
+            ),
+            (
+                "normalTexture",
+                material
+                    .normal_texture
+                    .as_ref()
+                    .map(|texture| texture.index),
+            ),
+            (
+                "occlusionTexture",
+                material
+                    .occlusion_texture
+                    .as_ref()
+                    .map(|texture| texture.index),
+            ),
+            (
+                "emissiveTexture",
+                material.emissive_texture.as_ref().map(|info| info.index),
+            ),
+        ];
+        for (slot, texture) in slots {
+            if let Some(texture) = texture
+                && texture.value() >= root.textures.len()
+            {
+                return Err(malformed(
+                    key,
+                    format!(
+                        "material {index}'s {slot} names texture {}, and there are {}",
+                        texture.value(),
+                        root.textures.len()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::GLB_HEADER_LEN;
     use crate::gltf_fixture::{
         Assets, BIN_CHUNK_BUFFER, EXTERNAL_BUFFER, glb, import_glb, import_glb_bytes,
-        import_gltf_text, replacing, triangle_bin, triangle_json,
+        import_gltf_text, replacing, textured_parts, triangle_bin, triangle_json,
     };
     use crcbl_assets::StorageError;
 
@@ -664,6 +812,117 @@ mod tests {
             assert!(
                 reason.contains(because),
                 "{from:?} -> {to:?} was refused, but for {reason:?} rather than {because:?}"
+            );
+        }
+    }
+
+    /// The texture side, table-driven on its own base document — the triangle
+    /// fixture has no images, textures or samplers to put a foot wrong in.
+    ///
+    /// **Every one of these is a `.unwrap()` in `gltf` 1.4.1**, not a tidiness
+    /// rule: `Image::source` resolves its `bufferView` with
+    /// `views().nth(index).unwrap()` and `unwrap()`s the `mimeType` beside it,
+    /// `Texture::source` and `Texture::sampler` are the same shape over `images`
+    /// and `samplers`, and `PbrMetallicRoughness::base_color_texture` is
+    /// `textures().nth(index).unwrap()`. A document that reaches one of those
+    /// aborts the process instead of being refused.
+    ///
+    /// The empty-`textures`-entry case is the one worth naming: `source` is not
+    /// an `Option` in `gltf-json`'s model — it carries a `serde` default of
+    /// `u32::MAX` — so a texture that omits it, which is what a document
+    /// supplying its image through `KHR_texture_basisu` looks like, arrives as
+    /// an index four billion past the end.
+    #[test]
+    fn every_malformed_texture_reference_is_refused_with_the_reason_it_was_refused_for() {
+        let (base, bin) = textured_parts(b"not really a png", "image/png", 0);
+        for (from, to, because) in [
+            (
+                "\"textures\": [{ \"source\": 0 }]",
+                "\"textures\": [{ \"source\": 9 }]",
+                "texture 0 names image 9, and there are 1",
+            ),
+            (
+                "\"textures\": [{ \"source\": 0 }]",
+                "\"textures\": [{ }]",
+                "texture 0 names image 4294967295, and there are 1",
+            ),
+            (
+                "\"textures\": [{ \"source\": 0 }]",
+                "\"textures\": [{ \"source\": 0, \"sampler\": 3 }]",
+                "texture 0 names sampler 3, and there are 0",
+            ),
+            (
+                "\"baseColorTexture\": { \"index\": 0",
+                "\"baseColorTexture\": { \"index\": 9",
+                "material 0's baseColorTexture names texture 9, and there are 1",
+            ),
+            (
+                "\"bufferView\": 4, \"mimeType\": \"image/png\"",
+                "\"bufferView\": 9, \"mimeType\": \"image/png\"",
+                "image 0 names bufferView 9, and there are 5",
+            ),
+            (
+                "\"bufferView\": 4, \"mimeType\": \"image/png\"",
+                "\"bufferView\": 4",
+                "image 0 puts its bytes in a bufferView and declares no mimeType",
+            ),
+            (
+                "\"name\": \"paint\", \"bufferView\": 4, \"mimeType\": \"image/png\"",
+                "\"name\": \"paint\"",
+                "image 0 has neither a uri nor a bufferView",
+            ),
+        ] {
+            let json = replacing(&base, from, to);
+            let bytes = glb(&json, Some(&bin));
+            let reason = match import_glb_bytes(&bytes) {
+                Err(error) => error.to_string(),
+                Ok(scene) => {
+                    panic!(
+                        "{from:?} -> {to:?} should have been refused, and it imported: {scene:?}"
+                    )
+                }
+            };
+            assert!(
+                reason.contains(because),
+                "{from:?} -> {to:?} was refused, but for {reason:?} rather than {because:?}"
+            );
+        }
+    }
+
+    /// The other four material texture slots reach the same `unwrap` as
+    /// `baseColorTexture` and are checked with it, even though nothing reads
+    /// them yet.
+    #[test]
+    fn a_material_texture_slot_the_importer_does_not_read_is_still_checked() {
+        let (base, bin) = textured_parts(b"not really a png", "image/png", 0);
+        for slot in [
+            "\"normalTexture\": { \"index\": 9 }",
+            "\"occlusionTexture\": { \"index\": 9 }",
+            "\"emissiveTexture\": { \"index\": 9 }",
+            "\"metallicRoughnessTexture\": { \"index\": 9 }",
+        ] {
+            // The metallic-roughness one lives inside the PBR block and the
+            // other three beside it, which is where each is spliced in.
+            let json = if slot.starts_with("\"metallicRoughness") {
+                replacing(
+                    &base,
+                    "\"baseColorFactor\"",
+                    &format!("{slot}, \"baseColorFactor\""),
+                )
+            } else {
+                replacing(
+                    &base,
+                    "\"name\": \"painted\"",
+                    &format!("\"name\": \"painted\", {slot}"),
+                )
+            };
+            let reason = match import_glb_bytes(&glb(&json, Some(&bin))) {
+                Err(error) => error.to_string(),
+                Ok(scene) => panic!("{slot} should have been refused, and it imported: {scene:?}"),
+            };
+            assert!(
+                reason.contains("names texture 9, and there are 1"),
+                "{slot} was refused for {reason:?}"
             );
         }
     }

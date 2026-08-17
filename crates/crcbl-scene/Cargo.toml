@@ -6,6 +6,29 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# `crcbl_scene::gltf_render` — the bridge from an imported `GltfScene` to the
+# `SceneDesc` a `ForwardRenderer` makes resident, textures included. **Off by
+# default**, and the direction is the point: `crcbl-render` must not depend on
+# this crate (it would pull `gltf` into the renderer, which is the argument
+# `crcbl_render::scene::Geometry` already records for the meshlet build being a
+# bake step), so the bridge lives on this side and names the renderer. That is
+# `crcbl-greybox`'s shape exactly — host data that describes a scene, depending
+# on the crate whose vocabulary a scene is described in.
+#
+# A feature rather than a plain dependency so this crate stays usable on its
+# own. It is the *bake* side — glTF import, meshlet clustering, decimation, the
+# cluster DAG — and every one of those ends at host memory; a build script, a
+# content pipeline or a wasm build that cooks geometry and describes no scene
+# should not link the forward renderer, the HAL and the UI to do it. Off, this
+# crate's dependency list is the parser and the maths and nothing else, which is
+# what `cargo tree -p crcbl-cli -e normal -f "{p} [{f}]"` shows today: that
+# binary reaches `crcbl-scene` with no features at all.
+#
+# (It reaches `crcbl-render` anyway, through the `crcbl` umbrella. The feature is
+# about what a *direct* dependant is forced to take, not about that binary.)
+[features]
+render = ["dep:crcbl-render", "dep:crcbl-sprite"]
+
 [dependencies]
 # The IO seam every byte arrives through, and `StorageError`, which is this
 # crate's error type too — a glTF that will not parse is a `StorageError::Other`
@@ -30,6 +53,15 @@ glam = { workspace = true }
 # `extensions` feature list is empty, and the `serde_json` the map is made of is
 # already a non-optional dependency of both.
 gltf = { workspace = true, features = ["extensions"] }
+# The scene vocabulary `gltf_render` converts *into* — `SceneDesc`, `MeshDesc`,
+# `PageDesc`, `InstanceDesc` — behind the `render` feature above.
+crcbl-render = { workspace = true, optional = true }
+# `load::decode_png`, which is the only image decoder in the workspace and is
+# exactly what a glTF `image/png` needs. `crcbl-render` already links this crate
+# with the same feature, so a build that has the renderer gains nothing new; a
+# second PNG decoder beside it is what `[workspace.dependencies]`'s note about
+# `gltf`'s `image` dependency exists to avoid.
+crcbl-sprite = { workspace = true, features = ["load"], optional = true }
 # `MeshletError`, which is not a `StorageError`: the meshlet builder reads no
 # bytes, so every storage variant but `Other` is unreachable from it and
 # `Other(String)` would erase which caller bug it hit.
@@ -42,3 +74,8 @@ workspace = true
 # The fixtures import through a real `DirSource` over a real directory, so the
 # key rule a buffer URI has to satisfy is the production one.
 tempfile = "3"
+# The textured fixtures encode a real PNG rather than checking one in, for
+# `gltf_fixture`'s stated reason: a binary blob in the tree is a fixture nobody
+# reviewing a change can read. The same `png` `crcbl-sprite`'s decoder is built
+# on, so the bytes under test are ones that decoder actually accepts.
+png = { workspace = true }

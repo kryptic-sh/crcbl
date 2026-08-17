@@ -286,6 +286,114 @@ pub(crate) fn lod_glb(nodes: &[LodNode<'_>], scene: &[usize]) -> Vec<u8> {
     glb(&json, Some(&bin))
 }
 
+/// The four texels [`textured_glb`]'s image carries, RGBA8 row-major.
+///
+/// No two alike and none of them grey, so a layer that arrived flipped, halved,
+/// or from the wrong image is a different set of numbers rather than the same
+/// one — the argument `crcbl_render::scene::CHECKER_TEXELS` records for the
+/// engine's own page.
+pub(crate) const IMAGE_TEXELS: [u8; 16] = [
+    0xFF, 0x00, 0x00, 0xFF, // (0, 0) red
+    0x00, 0xFF, 0x00, 0xFF, // (1, 0) green
+    0x00, 0x00, 0xFF, 0xFF, // (0, 1) blue
+    0xFF, 0xFF, 0x00, 0xFF, // (1, 1) yellow
+];
+
+/// `pixels` as a `width`×`height` RGBA8 PNG.
+///
+/// Encoded rather than checked in, for this module's opening argument: a
+/// vendored binary is a fixture nobody reviewing a change can read, where four
+/// named texels above are.
+pub(crate) fn png_bytes(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(pixels).unwrap();
+    }
+    bytes
+}
+
+/// [`textured_parts`] closed into a `.glb`, which is what a test that does not
+/// mean to mutate the document wants.
+pub(crate) fn textured_glb(image: &[u8], mime: &str, tex_coord: u32) -> Vec<u8> {
+    let (json, bin) = textured_parts(image, mime, tex_coord);
+    glb(&json, Some(&bin))
+}
+
+/// The JSON and the `BIN` chunk of a one-triangle document whose material
+/// carries a `baseColorTexture`, with the image's bytes in a `bufferView`.
+///
+/// `image` is the encoded bytes — [`png_bytes`] for the usual case, and anything
+/// at all for the "this is not a format we decode" ones. `mime` is what the
+/// document *claims* they are, which is deliberately separable from what they
+/// are. `tex_coord` is the material's `texCoord`, so a set this importer does
+/// not read is a fixture too.
+///
+/// The two halves are returned separately rather than as a container so a
+/// refusal test can put one thing wrong in the JSON with [`replacing`] and close
+/// it with [`glb`] afterwards — the same shape [`triangle_json`] has, and for
+/// the same reason.
+pub(crate) fn textured_parts(image: &[u8], mime: &str, tex_coord: u32) -> (String, Vec<u8>) {
+    let mut bin = triangle_bin();
+    // The spec requires a bufferView holding image data to be four-byte aligned
+    // like any other, and an unaligned one would be this fixture's bug rather
+    // than the importer's.
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let image_offset = bin.len();
+    bin.extend_from_slice(image);
+
+    let json = format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0] }}],
+  "nodes": [
+    {{ "name": "root", "translation": [10.0, 0.0, 0.0], "children": [1] }},
+    {{ "name": "leaf", "mesh": 0, "translation": [0.0, 5.0, 0.0] }}
+  ],
+  "meshes": [{{
+    "name": "triangle",
+    "primitives": [{{
+      "attributes": {{ "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }},
+      "indices": 3,
+      "material": 0
+    }}]
+  }}],
+  "materials": [{{
+    "name": "painted",
+    "pbrMetallicRoughness": {{
+      "baseColorFactor": [0.25, 0.5, 0.75, 1.0],
+      "baseColorTexture": {{ "index": 0, "texCoord": {tex_coord} }}
+    }}
+  }}],
+  "textures": [{{ "source": 0 }}],
+  "images": [{{ "name": "paint", "bufferView": 4, "mimeType": "{mime}" }}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3" }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" }},
+    {{ "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" }},
+    {{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": 36 }},
+    {{ "buffer": 0, "byteOffset": 36, "byteLength": 36 }},
+    {{ "buffer": 0, "byteOffset": 72, "byteLength": 24 }},
+    {{ "buffer": 0, "byteOffset": 96, "byteLength": 6 }},
+    {{ "buffer": 0, "byteOffset": {image_offset}, "byteLength": {} }}
+  ],
+  "buffers": [{{ "byteLength": {} }}]
+}}"#,
+        image.len(),
+        bin.len(),
+    );
+    (json, bin)
+}
+
 /// A directory of assets, read through the real [`DirSource`] rather than a
 /// mock — so the key rule a buffer URI has to satisfy is the one that will
 /// apply in production, not one written for the test.
