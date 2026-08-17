@@ -216,24 +216,28 @@ about: **a browser without WebGPU now has no fallback at all.** The WebGL2 path
 came from `wgpu`, which is no longer linkable there, so on such a browser the
 engine has no backend to open rather than a slower one.
 
-Considered and deliberately out of scope for that slice, because re-linking
-`wgpu` to keep it would give back the whole 49% size win and `wasm-bindgen` with
-it. The options, none free:
+**Detect-and-message shipped**, which was the recommendation. `demo.js`'s `main`
+answers a missing `navigator.gpu` with "This browser has no WebGPU" and the
+browsers that have it, and — the case that actually happens — answers a
+`requestAdapter()` that resolves to `null` with a sentence aimed at a person,
+before the megabytes of wasm load. A blank canvas is now an explanation.
+
+**What remains undecided is only the fallback itself**, and it is a real choice
+rather than an oversight:
 
 - **Accept it.** WebGPU shipped in Chrome, Edge and Firefox; Safari has it
-  from 26. The floor rises on its own, and the engine already refuses
-  gracefully.
-- **Detect and message.** Cheapest real improvement: notice `navigator.gpu` is
-  absent and say so in the page rather than failing to boot. Costs almost
-  nothing and turns a blank canvas into an explanation.
+  from 26. The floor rises on its own, and the engine now refuses gracefully.
 - **A second artifact.** Build a wgpu/WebGL2 wasm alongside and pick at load
   time — keeps the fallback and the small default, at the cost of two builds,
   two toolchains (that build needs `wasm-bindgen` back) and a loader that
-  chooses.
+  chooses. Note this option **dies with `crcbl-wgpu`**: once that crate is
+  deleted there is no WebGL2 path left to build, so choosing it later means
+  reviving a deleted backend, not re-enabling a flag.
 
-**Recommendation: detect and message now, revisit a second artifact only if
-someone reports a browser that needs it.** Nothing in the samples requires
-WebGL2, and no telemetry says anyone is on such a browser.
+**Recommendation stands: accept it, and revisit only if someone reports a
+browser that needs it.** Nothing in the samples requires WebGL2, and no
+telemetry says anyone is on such a browser. Worth deciding before the deletion
+rather than after, since the deletion forecloses the alternative.
 
 ### The browser probes cannot say why a readback failed
 
