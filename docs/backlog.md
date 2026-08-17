@@ -117,9 +117,19 @@ at the exact moment it is most needed. Order:
 2. Narrow `fill_buffer`, and sweep the refusal sites for other over-promises.
 3. Add the both-directions rule to the seam suite: a capability present must
    work, and absent must refuse with the documented error.
-4. Then delete `crcbl-wgpu`, its `wgpu-e2e` suite and its CI job — and remove
-   `wgpu`/`naga` from the dependency graph, which is a real build-time and
-   advisory-surface win.
+4. Then **delete `crcbl-wgpu` entirely** — the crate, its `wgpu-e2e` suite, its
+   CI job, its registry entry and `CRCBL_GPU=wgpu` — and drop `wgpu`/`naga` from
+   the dependency graph, which is a real build-time and advisory-surface win.
+
+**The coverage model afterwards**, which is what makes the deletion safe: the
+agnostic e2e suites (`hal_seam_e2e`, `draw_gen_e2e`, `render_e2e`, `tiling_e2e`,
+`gltf_e2e`) run on **every** backend — vk, dx12, Metal, WebGPU — and are where a
+behaviour every backend owes is asserted exactly once. Bespoke per-backend tests
+stay only for what cannot be expressed there: validation and debug-layer wiring
+(one per API), API-quirk refusals, adapter and limit enumeration, and
+capability-specific paths like Vulkan's mesh-shader tier. Anything that ends up
+in a bespoke test _and_ is a behaviour other backends also owe is a bug in the
+split, not a per-backend test.
 
 ### After the WebGPU migration: features, then the sample that proves them
 
