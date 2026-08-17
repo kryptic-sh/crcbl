@@ -3,6 +3,44 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### After the WebGPU migration: features, then the sample that proves them
+
+The standing pattern from the roadmap — build the feature, then ship the sample
+that consumes it — resumes once the migration and its test coverage are done.
+Built so far: breakout, asteroids, flappy, horde, hud, lumen. **The next unbuilt
+sample in sequence is `docs/plan/sample/05-viewer.md`**, a glTF model viewer:
+open a file, orbit it, inspect it. It is the asset pipeline's acceptance test
+and the editor viewport's warm-up act.
+
+**What it needs that does not exist yet**, sliced so each lands on its own:
+
+- **V-F1 — glTF reaches the renderer.** `crcbl_scene::gltf_import::import_gltf`
+  already produces a `GltfScene` (meshes, materials, nodes, instances), but its
+  only consumer in the workspace is `crcbl-cli`'s `lod_cmd.rs`; no app and not
+  `crcbl-render`. Nothing turns it into a `SceneDesc` the `ForwardRenderer`
+  draws, including the texture side (glTF images → `PageDesc` layers →
+  `GpuMaterial` rows). **This is the foundational slice** — the viewer is
+  impossible without it and every later sample that loads real assets wants it.
+- **V-F2 — orbit camera controls.** Orbit, pan, zoom, frame-selected. The plan
+  calls for writing it properly once here because the stage-8 editor reuses it,
+  so it belongs in a crate rather than in the app.
+- **V-F3 — UI for tools, not just a debug overlay.** Node/mesh tree, material
+  and texture listing with sizes and triangle counts, a stats panel. Audit what
+  `crcbl-ui` already offers before adding widgets.
+- **V-F4 — asset hot reload.** Re-export from Blender, viewer picks it up. The
+  artist-loop demo, and the first user-facing use of reload.
+- **V-F5 — opening a file.** Path argument natively, drop target in the browser.
+
+Then **V-S**, the sample itself, against the plan's own exit criteria: ≥90% of
+the Khronos glTF-Sample-Models suite loads without crashing, unsupported
+features log actionable skip messages, and the Blender re-export loop updates
+live.
+
+Two things the plan settles that are easy to get wrong: the viewer is the one
+sanctioned exception to the server-authoritative rule (it is a tool and
+simulates nothing), and it is exempt from the `.crpix` art rule, because the
+whole point is that it shows _the user's_ asset unadorned.
+
 ### Run the WebGPU browser gates on Windows and macOS, not just Linux
 
 **Every WebGPU browser test in the repository runs in one job**, `pages/build`
