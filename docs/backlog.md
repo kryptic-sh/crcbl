@@ -9810,66 +9810,64 @@ instead, and `poll` becomes `absorb` plus a match when `Device` lands.
 - **Pre-existing drift, untouched:** `web/tools/browser-e2e.mjs`'s header still
   says "Five groups" while A through G exist.
 
-## The WebGPU parity gate is blocked on `SurfaceTarget::Offscreen`
+## The WebGPU parity gate: `write_buffer` aborts on any upload past 1 MiB
 
 `apps/render-harness` (a wasm `cdylib`), `web/harness/{index.html,main.js}`,
 `web/run-render-harness-e2e.sh` and `web/tools/render-harness-e2e.mjs` are the
 browser end of the cross-backend parity gate: they drive `crcbl::screenshot`'s
 non-blocking `OffscreenSetup` poll API over the whole golden `Scene` set through
 `crcbl-webgpu`, and are meant to read each frame back and compare it against
-`crcbl/tests/golden/<name>.png` at `Tolerance::RASTERISER`, the same goldens the
-native `vk`/`mtl`/`dx12` `render_e2e` suite passes.
+`crcbl/tests/golden/<name>.png`, the same goldens the native `vk`/`mtl`/`dx12`
+`render_e2e` suite passes.
 
-**It cannot render a single scene, and the wall is one unimplemented command.**
-`OffscreenSetup::start_device` (`crcbl/src/screenshot.rs`) opens the frame with
-`instance.create_surface(&SurfaceTarget::Offscreen)`, and `crcbl-webgpu`'s HAL
-`create_surface` (`crcbl-webgpu/src/hal/instance.rs`) refuses every target but
-`SurfaceTarget::Web { canvas_id }` with `HalError::Unsupported`. Run
-`./web/run-render-harness-e2e.sh` (chromium under SwiftShader, no GPU needed)
-and all 11 scenes report the same failure before a pixel is drawn:
+The offscreen-surface wall is **closed** — `CreateOffscreenSurface` and the
+replayer's texture ring landed, so the open now gets past `create_surface`,
+opens the device and starts building the scene. It reaches the next crack
+instead, observed by running the gate under headless Chromium and reading
+`window.harnessResult` over CDP:
 
-> HAL: unsupported by the webgpu backend: only a Web canvas surface is reachable
-> on the WebGPU stream; the pointer-carrying targets never cross the wasm
-> boundary
+```
+RuntimeError: unreachable
+  at __rust_start_panic
+  at <crcbl_webgpu::bytes::ByteWriter>::put_bytes
+  at <crcbl_webgpu::writer::StreamWriter>::write_buffer
+```
 
-This is the mechanism working right up to the missing slice, not a broken
-harness: the stream channel installs, adapter enumeration is replayed and its
-replies delivered, and the instance opens — the refusal is the very next call.
-The gate exits 1 by design while the wall stands, so it is deliberately **not**
-wired into CI yet.
+**Two defects, and the second is why this was invisible.**
 
-**What it takes to close it**, and `crcbl-webgpu/src/command.rs`'s
-`CreateSurface` doc already names this as the slice "when the parity gate needs
-to read frames back":
+- **The cap is the wrong size for what it guards.** `ByteWriter::put_bytes`
+  asserts a field is at most `tag::MAX_FIELD_BYTES` (1 MiB), whose own doc
+  describes what it is for: "a label, a push-constant block". But
+  `StreamWriter::write_buffer` sends an entire host→buffer upload through it,
+  and a golden scene's vertex/index/instance upload is larger than that. Decide
+  between raising the cap and chunking a large upload across several
+  `WriteBuffer` commands — chunking is the more durable answer, since any fixed
+  cap is a scene size waiting to exceed it, and the replayer can apply
+  consecutive chunks at increasing offsets without holding the whole upload.
+  Whatever is chosen must keep the writer and the reader agreeing, since the
+  reader enforces the same cap.
+- **It aborts instead of failing.** The `assert!` panics, and a panic in wasm is
+  `unreachable` — the whole module dies mid-frame. The gate showed an empty
+  table and "no scenes were driven" with no reason, because the harness's outer
+  catch records `fatal` while `render-harness-e2e.mjs` only prints `fatal` when
+  `started` is false. Two fixes: the backend should refuse an oversized field as
+  a `HalError` the caller can report, and the driver should surface
+  `result.fatal` whenever it is set, not only before start-up.
 
-- A stream command for the offscreen target — call it `CreateOffscreenSurface` —
-  carrying no canvas key, and the encoder/reader/tag/writer entries beside the
-  existing `CreateSurface`. The replayer's job differs: it has no canvas to
-  resolve and must allocate a ring of textures nothing presents.
-- `create_surface` in the HAL instance stops refusing `Offscreen` and encodes
-  the new command; `surface_caps` and the swapchain path (`create_swapchain`,
-  `acquire_next_frame`, `present`) must work against that ring.
-- Then the harness's readback half: `apps/render-harness` stops at
-  `State::Opened` today and does **not** drive
-  `OffscreenSetup::begin_readback` + `PendingReadback::poll`, because nothing in
-  the browser can reach it to test. That drive has to persist a
-  `PendingReadback` — which borrows its `OffscreenSetup` — across rAF frames (a
-  self-referential hold), then expose the RGBA/BGRA bytes + extent + channel
-  order over the ABI. Phase 3 is then: save the readback as a PNG (via
-  `crcbl-golden`'s `Image::from_readback` + `save_png`) and run `crcbl-golden`'s
-  `compare-png` example against the golden — the exact comparator and tolerance
-  the native suite uses, so no pixel diff is reimplemented in JS.
+Once uploads cross, the per-scene table will finally separate the 2D scenes
+(Sprite, Ui) from the forward-renderer ones (Cube, Lights, Spot, shadows, Ao,
+Ssr, Probes) and name whatever each still needs — the crack list this gate
+exists to produce.
 
-Only once frames render will the per-scene table separate the 2D scenes (Sprite,
-Ui) from the forward-renderer scenes (Cube, Lights, Spot, shadows, Ao, Ssr,
-Probes) and surface whatever WebGPU commands each of those still needs — the
-crack list this gate exists to produce. Today every scene fails identically at
-surface creation, so that list has exactly one entry.
+Still owed after that, unchanged: the harness stops at `State::Opened` and does
+not drive `OffscreenSetup::begin_readback` + `PendingReadback::poll`, which
+needs a self-referential `PendingReadback` hold across rAF frames, then the
+pixels over the ABI and a `crcbl-golden` `compare-png` against the golden.
 
-**Verified:** the harness builds to wasm with `--features crcbl/webgpu`, its
-eight exports are present, and it runs end-to-end in headless Chromium under
-SwiftShader, reporting the wall for all 11 scenes. Native
-`cargo clippy -p render-harness --all-targets --all-features` and `cargo fmt`
-are clean; `npx prettier --check` passes on the JS. **Not verified:** the
-readback and golden-compare path (Phases 2–3 pixel work), which no browser
-backend can reach yet.
+**Verified:** the gate builds and runs end-to-end under headless Chromium with
+SwiftShader; the panic above is its current observed output. **Note for anyone
+hitting the same wall:** `rustup target list --installed` does **not** list
+`wasm32-unknown-unknown` on this machine and `rustup target add` refuses it with
+a `libaddr2line` conflict, but the target's std is present in the toolchain
+sysroot and builds fine — rustup's metadata is out of step with its own files,
+so believe `cargo build --target wasm32-unknown-unknown`, not `rustup`.
