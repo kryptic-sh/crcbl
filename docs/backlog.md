@@ -214,181 +214,61 @@ report from a user cannot say which GPU produced it.
 lines come from `contentscript.js` / `inpage.js` — a MetaMask content script
 injected into the page. Unrelated to crcbl.
 
-### TOP OF QUEUE — testing parity across all backends (the diagnostic), then WebGPU feature parity, then the flip
+### Smaller things the WebGPU work surfaced and did not fix
 
-The primary focus is TEST PARITY: the same tests running on every GPU backend
-(vk, mtl, dx12, webgpu), because that suite is what SHOWS the cracks — a feature
-a backend is missing surfaces as a scene or a seam test it fails. Build the test
-parity first; the feature gaps below are what it will expose, fixed as they
-surface. Only once webgpu genuinely passes the same suite as the others do we
-flip the default and delete crcbl-wgpu (the LAST step — it removes
-wasm-bindgen's second and final root, `wgpu`).
+- **A device error names no command.** `Reply::DeviceErrors` carries the
+  browser's prose, but `uncapturederror` arrives with no sequence, so nothing
+  says _which_ encoded command caused it — which is why the errors ride a
+  command that asks rather than being pushed. `docs/plan/41-webgpu-stream.md`'s
+  attribution section is still open. It is the difference between "the device
+  reported an invalid bind group" and "command 4,182 did".
+- **`take_error` answers a frame late, by construction.** Nothing here may block
+  on a browser, so the reply to this frame's ask lands in the next one:
+  `Gpu::acquire` refuses to record a frame when it answers `Some`, so the frame
+  _after_ a failure still records and the one after that stops. Documented at
+  the call site. Not fixable without blocking; worth knowing when reading a
+  trace.
+- **`GPUDevice.lost` is deliberately unwatched.** It means the device is gone
+  and this seam has no device-lost path, so feeding it to the error queue would
+  report a dead device as one more line to log and carry on from. Revisit when
+  the HAL grows a device-lost story.
+- **The error queue's carry-over path is untested through a browser.** The JS
+  log caps at 64 pending and one reply carries at most 64, so the log's cap
+  always bites first and the reply's "wrote fewer than asked, carry the rest"
+  branch is exercised only by the Rust and JS writer unit tests. Raising the log
+  cap would exercise it for real.
+- **`web/tools/wasm-loader.js` is now ours to maintain.** Dropping
+  `wasm-bindgen` replaced a generated 72 KB glue with a hand-written 3 KB
+  loader. It is small and does one thing, but it is a hand-rolled module loader
+  on the path every demo boots through — worth remembering it exists when a
+  browser changes how `WebAssembly.instantiateStreaming` behaves.
+- **The Pages deploy for the un-link commit never ran.** GitHub returned 503 on
+  `actions/deploy-pages` during an outage; the _build_ job passed every gate.
+  The site on Pages is therefore one commit behind until that deploy is re-run.
 
-**1. Make the agnostic suite async so ALL backends run it.**
-`crates/crcbl/tests/render_e2e.rs` already runs every `Scene` through whichever
-backend `crcbl::backend::open` selects (vk/mtl/dx12) and compares against
-`crcbl/tests/golden`. But `crcbl::screenshot::OffscreenSetup`
-(`crcbl/src/screenshot.rs`) is `#[cfg(not(target_arch = "wasm32"))]` and blocks
-on device-open and readback, so webgpu (browser, single-threaded, no blocking)
-cannot run it. Refactor it ASYNC — poll the `PendingDevice`/`PendingInstance`
-and `poll_readback` instead of blocking — so the identical suite runs on all
-four backends, webgpu via a browser harness. This async suite is the diagnostic.
+### What the WebGPU migration left: white-box tests are still vk-only
 
-**2. Unify agnostic-in-nature tests into the shared suite.**
-`crcbl-vk/tests/vk_e2e/` and `crcbl-wgpu/tests/wgpu_e2e.rs` hold two kinds of
-test: HAL-seam behaviour every backend implements (render-pass clear reaching
-host memory, readback ordering, ring/swapchain reuse, present cycling, universal
-refusals, indexed/indirect draw correctness, sprite/mesh golden pixels) — these
-should run on ALL backends and move into the shared suite — versus genuinely
-backend-specific tests (a vk mesh-shader capability, a driver quirk) which stay
-per-backend. Split them by the coverage audit and consolidate.
+The migration is done — the agnostic suite is async and runs on all four
+backends, the seam copies are merged into `crates/crcbl/tests/hal_seam_e2e.rs`,
+the samples deploy on `crcbl-webgpu`, and `crcbl-wgpu` is off the wasm build
+entirely. **One item from that plan did not ship.**
 
-**3. Equal coverage across backends.** The audit corrected the premise: mtl/dx12
-are NOT missing seam tests — each has ~75 in-src `#[ignore]`d device tests
-(`crcbl-mtl/src/{device,binding,swapchain,instance,fault}.rs`,
-`crcbl-dx12/src/{device,debug,instance}.rs`, run by `run-{mtl,dx12}-e2e.sh`).
-The two real gaps are:
+`crcbl-vk/tests/vk_e2e/`'s `cull.rs`, `cull_stats.rs`, `draw_gen.rs`,
+`lights.rs`, `mesh.rs`, `shadow.rs`, `depth_probe.rs`, `sprite/`, `menu.rs`,
+`nine_slice.rs` and `button_skin.rs` drive `crcbl-render::ForwardRenderer` and
+read back internal GPU buffers and golden pixels. They name only `crcbl-render`
+types, so they **can** be agnostic — but only vk runs them white-box. mtl, dx12
+and webgpu get `render_e2e`'s black-box goldens and nothing else, so a bug in
+the cull pass or the draw-args buffers on those backends surfaces as "some scene
+looks wrong" rather than "this buffer holds the wrong value".
 
-- **Three divergent seam suites.** `crcbl-vk/tests/vk_e2e/`,
-  `crcbl-wgpu/tests/wgpu_e2e.rs`, and the mtl/dx12 in-src tests each cover the
-  SAME HAL-seam behaviour as separate hand-maintained copies that drift (~17
-  pairs literally overlap — clear→host, ring reuse, foreign-handle,
-  foreign-surface, compute + indirect dispatch, indexed draw, timeline
-  semaphore, destroyed-handle no-alias, write_buffer map/refuse,
-  readback-wrong-range refused, shader-won't- compile refused, zero-extent
-  refused, present-without-acquire refused). Collapse to ONE agnostic seam suite
-  run under `CRCBL_GPU` + WebGpu.
-- **White-box render-graph tests are vk-only.** `vk_e2e/`'s `cull.rs`,
-  `cull_stats.rs`, `draw_gen.rs`, `lights.rs`, `mesh.rs`, `shadow.rs`,
-  `depth_probe.rs`, `sprite/`, `menu.rs`, `nine_slice.rs`, `button_skin.rs`
-  drive `crcbl-render::ForwardRenderer` and read back internal GPU
-  buffers/golden pixels — they name only `crcbl-render` types, so they CAN be
-  agnostic, but today only vk runs them white-box; mtl/dx12/wgpu get only
-  `render_e2e`'s black-box goldens. Make them agnostic so all four backends get
-  white-box render coverage.
+That gap is now bigger than it was: the draw-args packing rewrote those buffers'
+layout, and vk is the only backend whose tests read them.
 
-**Genuinely per-backend (stays, and there are not many):** mesh/amplification-
-shader capability (vk `mesh_shader.rs`; mtl has a native analog worth its own
-test); the validation/debug-layer wiring (vk `validation_gate.rs`, mtl
-`fault.rs`, dx12 `debug.rs` — one per API); API-quirk refusals (wgpu
-descriptor-array expressiveness cluster + push-constant/indirect-stride limits,
-dx12 root-signature budget / descriptor-heap / WARP enumeration, mtl
-memory-location + anisotropy caps, vk memory-type / descriptor-indexing tier);
-and per-backend adapter/limit enumeration.
-
-**The async enabler.** `crcbl::screenshot::OffscreenSetup`
-(`crcbl/src/screenshot.rs`, gated `#[cfg(not(target_arch="wasm32"))]` at
-`lib.rs:247`) blocks in three spots: `backend::open()` → `.block()`
-(`screenshot.rs:2045`), `instance.create_device` (`:2184`), and a
-`thread::sleep` `poll_readback` loop (`:2503`). The HAL already has the polled
-forms (`request_open`, `request_device`, `poll_readback` — proven non-blocking
-by `crcbl-hal/tests/seam_from_outside.rs:559`). Make these async so all four
-backends run the same suite; WebGpu drives the poll from the browser event loop.
-
-**Slice order (testing-parity track):** (1) async `OffscreenSetup`/`render_e2e`,
-native still green on vk; (2) WebGpu `render_e2e` browser harness — runs the
-agnostic scenes through WebGpu and SHOWS the cracks; (3) unify the three seam
-suites into one agnostic set; (4) make the render-graph white-box tests
-agnostic; (5) per-backend gap-fill for what genuinely stays specific. The WebGPU
-feature gaps below are what steps 2-4 expose, fixed as they surface.
-
-**Parity gaps (WebGPU CAN express these; crcbl-webgpu currently refuses).** Each
-is refused via `hal/encoder.rs::record_unsupported` (fails `finish`) or an
-inline `HalError::Unsupported` in `hal/device.rs`.
-
-- **A — `draw_indexed_indirect`** → `GPURenderPassEncoder.drawIndexedIndirect`.
-  On the LIVE 3D-forward path (`crcbl-render/src/forward.rs:1413`,
-  `EmitTail::PerBatch`). Highest priority. Needs a stream command.
-  `draw_indirect` too (unused by scenes but cheap alongside). A single-draw
-  indirect maps cleanly (WebGPU takes offset only, no count/stride).
-- **C — `dispatch_indirect`** → `dispatchWorkgroupsIndirect`. The backlog's old
-  "blocked on a buffer-write" note is STALE — `write_buffer` shipped
-  (`d2d32ef`), so it is now just unwired. Unused by current scenes.
-- **D — query sets** (`create_query_set`/`query_results`/`resolve_query_set`/
-  `reset_query_set`/`write_timestamp`) for the profiler HUD. Core WebGPU, but
-  timestamps are pass-scoped `timestampWrites`, not an encoder `writeTimestamp`,
-  so the replayer must adapt. Degrades gracefully today (profiler returns None),
-  so lower urgency.
-- **E — debug markers + `set_stencil_reference`** (`end_debug_label`,
-  `insert_debug_marker`). Small, core; no current scene issues them; debug
-  markers should likely replay as accept-and-drop, not block `finish`.
-- **F — `update_bind_group`.** WebGPU bind groups are IMMUTABLE, so this is
-  create-a-new-one; the seam's mutate-in-place-while-pending semantics do not
-  hold. Design-first; not on any current scene path.
-
-**Correctly refused — NOT parity gaps** (WebGPU cannot express them, so
-browser-wgpu could not either): mesh shaders (`create_mesh_pipeline`,
-`draw_mesh_tasks*` — the engine must pick a non-mesh `EmitTail` on WebGPU), push
-constants (substitute: dynamic-offset uniforms), semaphores + `wait_idle`
-(WebGPU auto-synchronises), and **multi-draw-indirect-COUNT**
-(`draw_indexed_indirect_count`/`draw_indirect_count` are not core WebGPU; the
-engine's non-count `EmitTail::PerBatch` is the WebGPU path).
-
-### WebGPU HAL impls exist but are not driven in a browser yet
-
-`crate::hal` in `crcbl-webgpu` now holds the `Instance`, `PendingDevice`,
-`Device` and `CommandEncoder` impls (`WebGpuInstance`, `WebGpuPendingDevice`,
-`WebGpuDevice`, `WebGpuCommandEncoder`, opened through `WebGpuInstanceOpen`).
-What remains for the browser slices:
-
-- **Registry wiring shipped behind the `webgpu` feature.** `backend.rs`'s
-  registry entry now wires `open: fn() -> InstanceFuture` to
-  `crcbl_webgpu::WebGpuInstanceOpen` on wasm, and the umbrella's off-by-default
-  `webgpu` feature flips `wasm32` auto-selection from `wgpu` to `webgpu`. The
-  rAF poll loop that drives it already exists (the render below proves it). What
-  is still not wired is a _runtime_ choice — see the "browser default" part
-  below; the feature is a build-time flip, not a JS-settable one.
-  `SharedChannel` is a `Rc` on wasm (installable) and an `Arc<Mutex>` off it
-  (the `Send + Sync` the seam demands where the job system runs) — the same
-  split wgpu's web types make.
-- **`StreamChannel::commit_replies`** (added in `web.rs`) is the in-process
-  reply path the native HAL tests use in place of the shim's pointer pair. It is
-  also what a native replayer would call; it is not wasm-only.
-- **The backend renders, and breakout is now CI-gated through it.** Breakout
-  boots to `STATUS_RUNNING` and draws moving, correct frames through the stream;
-  the five commands the frame reached shipped in commit `d2d32ef`. Building with
-  `CRCBL_WEB_BACKEND=webgpu` (which turns on the `webgpu` feature) and running
-  `web/run-browser-e2e.sh` in its webgpu mode is the permanent, gated form of
-  the once-temporary flip, and `pages.yml` runs it for breakout. Two of the
-  three integration parts this used to list are done: **the probe/engine channel
-  conflict** — the webgpu gate mode skips the probe groups so the engine owns
-  the one channel — and **the swapchain-format warning** (its own entry below
-  carries the proper fix; the gate filters it meanwhile). What remains: **(a)
-  making WebGpu the browser default.** The flip is a build-time feature,
-  deliberately not the default — `request_open` reads `CRCBL_GPU` via
-  `std::env::var`, empty in a browser, so a JS-settable override is still needed
-  before WebGpu can be selected at runtime without a rebuild. **(b) the other
-  samples** — breakout, flappy, asteroids, horde and hud all render through
-  WebGpu and are CI-gated, each reusing the one deployed `target/site` build;
-  they needed no new stream commands beyond breakout's five. lumen stays out for
-  the same reason it is out of the wgpu gate: its draw-argument compute stage
-  binds more storage buffers than a GPU-less runner's SwiftShader adapter
-  allows.
-- **Loud-unsupported, needing a stream command (a later slice wires each).**
-  **`draw_indirect` and `draw_indexed_indirect` are WIRED and no longer belong
-  on this list** — every demo logs `geometry IndirectPerBatch` and exercises
-  them each frame. What is still refused: `Device`'s `update_bind_group`,
-  `create_query_set`, `query_results`; and, recorded then failed at `finish`,
-  `end_debug_label`, `insert_debug_marker`, `set_stencil_reference`,
-  `draw_indirect_count`, `draw_indexed_indirect_count`, `draw_mesh_tasks`,
-  `draw_mesh_tasks_indirect`, `dispatch_indirect`, `reset_query_set`,
-  `write_timestamp`, `resolve_query_set`. An audit traced every caller: none is
-  reachable from the five demos or the engine's ordinary frame path.
-  `create_query_set` degrades gracefully — `PassTimers::new` only asks when the
-  device reports `TIMESTAMP_QUERY` and returns `None` on refusal — and the
-  mesh-pipeline refusal is legitimate, since WebGPU has no mesh stage to report.
-  None is used by breakout; the 3D forward renderer and profiling reach them.
-  (`dispatch_indirect`'s deeper block is its own entry below.)
-- **Legitimately refused, not a gap.** `create_mesh_pipeline` (WebGPU has no
-  mesh stage); the semaphore calls are no-ops (WebGPU auto-synchronises).
-- **`Device::take_error` returns `None`** — live-device error reporting
-  (`uncapturederror`, `GPUDevice.lost`) needs a reply variant this crate does
-  not have yet, and a device held long enough to lose. A named later slice.
-- **`acquire_next_frame` extent** is the size the device last configured the
-  swapchain at, remembered in `WebGpuDevice::swapchains`; it falls back to
-  `(0, 0)` for a swapchain this device never configured. Fine while acquire has
-  no reply, but revisit if a browser ever reports a pinned canvas size that
-  differs from the requested extent.
+Same shape as the seam merge that already worked — move them to
+`crates/crcbl/tests/`, drive through `crcbl::backend::open` under `CRCBL_GPU`,
+and add the four CI steps beside the existing suites. Expect it to find
+divergences, as the seam merge did on dx12.
 
 ### `dispatch_indirect` has no command or replay yet
 
