@@ -1,5 +1,5 @@
 //! Topic 03 §3.6's culling-stats readback, against a real driver: the number on
-//! the panel is the cull's own answer, and it is late by exactly the ring.
+//! the panel is the cull's own answer, a few frames after the frame it is about.
 //!
 //! Every other reader of `DrawGen::visible_count` copies it back by hand,
 //! outside the frame loop, with its own barriers — see
@@ -29,15 +29,26 @@ use crcbl::hal::Features;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{ForwardRenderer, InstanceDesc, InstanceHandle, Projection, TransientPool};
 
-/// How many frames behind [`ForwardRenderer::counters`]' culling half is.
+/// The frames [`ForwardRenderer::counters`]' culling half cannot have arrived
+/// in.
 ///
-/// [`crcbl::render::forward::FRAMES_IN_FLIGHT`] slots plus the one that makes a
-/// reused slot's submission certainly complete — the ring's own length, taken
-/// from the renderer's constant rather than written down, so a change to either
-/// moves this with it.
+/// Two: a frame records the copy, the next requests the readback for it — a
+/// readback covers work already *submitted* — and the third is the first that
+/// can poll anything. Which frame the answer actually lands on past that is the
+/// device's, which is why this is a floor and [`REPORT_BOUND`] is the other end.
 ///
 /// [`ForwardRenderer::counters`]: crcbl::render::ForwardRenderer::counters
-const RING_LATENCY: u64 = crcbl::render::forward::FRAMES_IN_FLIGHT as u64 + 1;
+const REPORT_FLOOR: u64 = 2;
+
+/// Frames a report is given to arrive before this suite calls it a failure.
+///
+/// The number that would have caught the bug this file now guards: a ring that
+/// polls a readback once and releases it whatever it answered reports nothing
+/// **ever** on a backend that cannot answer a first poll, and a test with no
+/// upper bound would have looped rather than gone red. Generous enough that no
+/// working device reaches it — a poll answered across a browser's command stream
+/// costs a frame's round trip, not a dozen.
+const REPORT_BOUND: u64 = 32;
 
 /// The full-screen triangles a forward frame draws: `ssao`'s, `ssao-blur`'s,
 /// `ssr`'s, `ssr-blur`'s and the tonemap's.
@@ -55,14 +66,15 @@ const FULLSCREEN_INSTANCES: u64 = 5;
 /// the camera, so the frustum test has something to reject and the answer is
 /// known before the frame runs. Then:
 ///
-/// * nothing is reported while the ring has not come round — a number here would
-///   be one invented before any readback landed;
+/// * nothing is reported before a readback has been polled at all — a number
+///   there would be one invented before any readback landed — and one does
+///   arrive, within a bounded number of frames rather than never;
 /// * the number that does arrive is the survivor count, not the submitted count,
 ///   and not the pool's size;
 /// * it agrees with a hand copy of the same buffer, which is what makes it *the
 ///   cull's* answer rather than a plausible number from somewhere;
-/// * and it is stamped with the frame it came from, which is the oldest frame in
-///   the ring rather than the one just recorded.
+/// * and it is stamped with the frame it came from rather than the one just
+///   recorded.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
@@ -94,20 +106,32 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
         far_behind(2.0),
     );
 
-    // Frame 1, and every frame up to the ring's length: the copy is in the
-    // graph, the readback is in flight, and there is nothing to report.
-    for frame in 1..=RING_LATENCY {
+    // Frame 1 and frame 2: the copy is in the graph and the request has only
+    // just been made, so nothing can have been polled and the row must say
+    // `indirect`.
+    for frame in 1..=REPORT_FLOOR {
         render_mesh(&headless, &mut renderer, &mut pool, &camera);
         let counters = renderer.counters();
         assert_eq!(
             counters.drawn, None,
-            "frame {frame} is inside the ring's latency, so the row must say `indirect`",
+            "frame {frame} is before the first poll, so the row must say `indirect`",
         );
         assert_eq!(counters.cull_frame, None);
     }
 
-    // And the frame the ring comes round on.
-    render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    // And then it has to arrive, within a bounded number of frames rather than
+    // on a frame this test names: how many polls a readback needs is the
+    // device's business, and that a report arrives at all is the assertion.
+    let mut rendered = REPORT_FLOOR;
+    while renderer.cull_stats().is_none() {
+        assert!(
+            rendered < REPORT_FLOOR + REPORT_BOUND,
+            "no culling report arrived in {REPORT_BOUND} frames; the readback is being polled \
+             and thrown away rather than answered",
+        );
+        render_mesh(&headless, &mut renderer, &mut pool, &camera);
+        rendered += 1;
+    }
     let counters = renderer.counters();
 
     let submitted = counters.instances;
@@ -151,11 +175,16 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
         renderer.culls_clusters(),
     );
 
-    // The stamp: the oldest frame in the ring, not the frame just recorded.
-    let stats = renderer.cull_stats().expect("the ring came round");
-    assert_eq!(
-        stats.frame, 1,
-        "the report is the first frame's, {RING_LATENCY} frames later",
+    // The stamp: a frame whose copy really was recorded and answered, and not
+    // the frame just rendered. A ring that read the slot it had only just
+    // requested would stamp the current frame, and one that never stamped
+    // anything would have had to say so with a `None` this test has already
+    // passed.
+    let stats = renderer.cull_stats().expect("a readback answered");
+    assert!(
+        stats.frame >= 1 && stats.frame < rendered,
+        "the report names frame {} on a run that has drawn {rendered}",
+        stats.frame,
     );
     assert_eq!(counters.cull_frame, Some(stats.frame));
     assert_eq!(u64::from(by_hand), stats.instances);
@@ -182,11 +211,10 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
 
 /// **The counters keep moving, and each frame's report is the next frame's.**
 ///
-/// A ring that resolved once and then stopped — a slot never released, a request
+/// A ring that reported once and then stopped — a slot never released, a request
 /// never made again — would pass the test above and report the same frame
 /// forever. So the scene changes underneath it: the second pyramid comes back
-/// into view, and the survivor count has to follow it up, still late by the same
-/// ring.
+/// into view, and the survivor count has to follow it up, a few frames later.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
@@ -209,19 +237,25 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
         .add_instance(&pyramid_at(Vec3::new(0.0, 0.0, 500.0)))
         .expect("an instance pool of thousands has room for the pyramid");
 
-    // Long enough for the ring to come round on the culled scene.
-    for _ in 0..=RING_LATENCY {
+    // Long enough for the first readback to answer on the culled scene.
+    let mut rendered = 0;
+    while renderer.cull_stats().is_none() {
+        assert!(
+            rendered < REPORT_FLOOR + REPORT_BOUND,
+            "no culling report arrived in {REPORT_BOUND} frames",
+        );
         render_mesh(&headless, &mut renderer, &mut pool, &camera);
+        rendered += 1;
     }
-    let culled = renderer.cull_stats().expect("the ring came round");
+    let culled = renderer.cull_stats().expect("a readback answered");
     assert_eq!(
         culled.instances, 1,
         "only the cube is in front of the camera"
     );
 
     // Now bring it back where the camera can see it. The count must not change
-    // on the very next frame — the ring is still carrying the old frames — and
-    // must have changed once the ring has turned over.
+    // on the very next frame — the report in hand is an older frame's — and must
+    // have changed a few frames later.
     renderer.set_instance(pyramid, &pyramid_at(Vec3::new(0.9, 0.0, 0.0)));
     render_mesh(&headless, &mut renderer, &mut pool, &camera);
     let straight_after = renderer.cull_stats().expect("still reporting");
@@ -229,18 +263,29 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
         straight_after.instances, 1,
         "the next frame's report is still an old frame's: {straight_after:?}",
     );
-    assert!(
-        straight_after.frame > culled.frame,
-        "and it is a different frame, so the ring did advance",
-    );
 
-    for _ in 0..=RING_LATENCY {
+    // And it does change, which is the half a ring that reported once and froze
+    // fails: a slot never released, or a request never made again, leaves the
+    // count on 1 for ever.
+    let mut visible = straight_after;
+    for frame in 0..REPORT_BOUND {
         render_mesh(&headless, &mut renderer, &mut pool, &camera);
+        visible = renderer.cull_stats().expect("still reporting");
+        assert!(
+            visible.instances == 1 || visible.instances == 2,
+            "the survivor count is neither scene's: {visible:?}",
+        );
+        if visible.instances == 2 {
+            break;
+        }
+        assert!(
+            frame + 1 < REPORT_BOUND,
+            "the count never followed the scene: {visible:?}",
+        );
     }
-    let visible = renderer.cull_stats().expect("still reporting");
-    assert_eq!(
-        visible.instances, 2,
-        "both instances are in front of the camera now: {visible:?}",
+    assert!(
+        visible.frame > culled.frame,
+        "and the reports are different frames, so the ring did keep turning",
     );
     assert_eq!(
         renderer.counters().drawn,

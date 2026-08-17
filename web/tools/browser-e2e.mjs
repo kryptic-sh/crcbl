@@ -310,6 +310,17 @@ const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
 const SAMPLE_COUNT = 16;
 
 /**
+ * The culling-statistics line `crcbl_render::cull_stats` logs when a readback
+ * answers.
+ *
+ * Both numbers are matched rather than the prefix alone: that module's other
+ * lines — the one it says when a device refuses a readback, and the one for a
+ * request nothing ever answered — also begin `cull stats:`, and either of those
+ * is the failure this check exists to catch rather than the success.
+ */
+const CULL_STATS_LINE = /cull stats: frame \d+ kept \d+ instances/;
+
+/**
  * How long the focus/pause group watches for a HUD heartbeat.
  *
  * Both samples log one every sixty ticks — a second of *simulated* time. Under
@@ -364,6 +375,15 @@ const LOG_DEBUG = 4;
 
 /** …and the level the demos boot at, restored once the contacts are read. */
 const LOG_INFO = 3;
+
+/**
+ * The engine's `LevelFilter::Trace`, the level `CULL_STATS_LINE` needs.
+ *
+ * Raised for that one check and lowered again: it is the only per-frame line the
+ * engine logs, and a run left at trace would push the rest of this file's
+ * evidence out of the page's bounded log queue.
+ */
+const LOG_TRACE = 5;
 
 /**
  * How far a logged contact may sit from where it was dispatched, in device
@@ -1635,6 +1655,34 @@ try {
     'the canvas changes between frames while the simulation runs',
     frames.size > 1,
     `${frames.size} distinct frame(s) across ${samples.length} samples`
+  );
+
+  // **A number that only comes back if a readback completed**, and the one
+  // check here that is about the GPU answering rather than about pixels.
+  //
+  // `crcbl_render::cull_stats` copies the cull's survivor count into a
+  // host-readable buffer and polls for it across frames; what it gets reaches
+  // the debug panel, which is *glyphs on the canvas* — there is no DOM element,
+  // no wasm export and nothing in `crcbl.gpu.stats()` carrying it. So the ring's
+  // own `trace!` line, emitted where the answer lands, is the only thing a page
+  // can be asked for, and it is turned on for the length of this check alone.
+  //
+  // It is worth a check because this failed **in a browser and nowhere else**:
+  // `crcbl-webgpu` answers the first `poll_readback` on a handle with `Pending`
+  // and sends the real answer back a frame later, so a ring that polled a slot
+  // once and released it on the next line threw every answer away unread, and
+  // the panel's culling rows were empty for ever here while every native backend
+  // passed. Nothing else in this file would notice: the canvas looks identical.
+  await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_TRACE}), true)`);
+  const culled = await until(
+    async () => consoleLines.find((line) => CULL_STATS_LINE.test(line)) ?? null
+  );
+  await evaluate(page, `(globalThis.crcbl.logLevel(${LOG_INFO}), true)`);
+  check(
+    'D',
+    'the culling statistics come back off the GPU',
+    Boolean(culled),
+    culled?.trim() ?? 'the cull-stats readback never answered'
   );
 
   group('E — focus and pause');

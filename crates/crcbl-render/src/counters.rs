@@ -52,9 +52,10 @@
 //! - `draws recorded`, `instances submitted` and `triangles drawn` are the
 //!   previous frame's, uniformly — see below.
 //! - `instances drawn` and `clusters drawn` carry the GPU's answer from the
-//!   frame named in `cull frame`, which is
-//!   [`CullStatsRing::latency`](crate::cull_stats::CullStatsRing::latency)
-//!   frames older again.
+//!   frame named in `cull frame`, which is a few frames older again — how many
+//!   is the device's to decide, since [`crate::cull_stats`] reports a readback
+//!   when it answers rather than on a fixed schedule, and `cull frame` is what
+//!   says which frame it really was.
 //!
 //! A frame that mixes an indirect pass with direct ones has a `drawn` total
 //! whose GPU-sourced part is that old and whose CPU-sourced part is not.

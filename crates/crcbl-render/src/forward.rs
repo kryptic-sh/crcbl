@@ -7028,7 +7028,7 @@ mod tests {
     /// move — fails too.
     ///
     /// `drawn` and `triangles` are asserted [`None`] **on the frames this test
-    /// runs**, which are inside [`crate::cull_stats`]'s latency: nothing has come
+    /// runs**, which are inside [`CULL_STATS_FLOOR`]: nothing has come
     /// back off the GPU yet, and a `drawn` that was `Some` here would be a
     /// number invented before any readback landed. That is the assertion that
     /// catches the tempting version of this method: an instance count taken from
@@ -7102,8 +7102,8 @@ mod tests {
     /// really kept is asserted against a real GPU, in `crcbl-vk`'s and
     /// `crcbl-wgpu`'s end-to-end suites, where a scene is culled on purpose.
     ///
-    /// The frame number is the assertion with teeth here: a resolve that read
-    /// the slot it had just written would report the frame it is on, and a
+    /// The frame number is the assertion with teeth here: a ring that read the
+    /// slot it had just written would report the frame it is on, and a
     /// `cull_frame` left at `None` would put a latent number on the panel with
     /// nothing to say how old it is.
     #[test]
@@ -7111,15 +7111,14 @@ mod tests {
         let (_recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
-        let latency = CULL_STATS_LATENCY;
 
         let mut frames = Vec::new();
-        for _ in 0..latency {
+        for _ in 0..CULL_STATS_FLOOR {
             frames.push(frame(device.as_ref(), &mut renderer, queue));
             assert_eq!(
                 renderer.counters().drawn,
                 None,
-                "inside the ring's latency there is nothing back yet",
+                "no readback has even been polled yet, so there is nothing back",
             );
         }
 
@@ -7134,9 +7133,9 @@ mod tests {
         assert_eq!(
             counters.cull_frame,
             Some(1),
-            "the report is the oldest frame in the ring, not the frame just recorded",
+            "the report is the frame whose copy answered, not the frame just recorded",
         );
-        assert_eq!(renderer.cull_stats().expect("the ring came round").frame, 1,);
+        assert_eq!(renderer.cull_stats().expect("a readback answered").frame, 1,);
 
         for frame in frames {
             frame.release(device.as_ref());
@@ -7144,10 +7143,14 @@ mod tests {
         renderer.destroy(device.as_ref());
     }
 
-    /// How many frames behind the culling counters are, as this renderer builds
-    /// its ring — [`FRAMES_IN_FLIGHT`] slots plus the one that makes a reused
-    /// slot's submission certainly complete.
-    const CULL_STATS_LATENCY: usize = FRAMES_IN_FLIGHT + 1;
+    /// The frames a culling counter cannot possibly have arrived in.
+    ///
+    /// Two: the copy is recorded on one frame and the readback for it requested
+    /// on the next, so the earliest frame that can poll anything is the third.
+    /// A device that answers its first poll — the null backend, and every native
+    /// one — reports there; a browser answers later, which is why this is a
+    /// floor rather than a latency. See [`crate::cull_stats`].
+    const CULL_STATS_FLOOR: usize = 2;
 
     /// **A light that takes a shadow tile moves the draw count**, because the
     /// shadow pass records one call per bucket per occupied view.

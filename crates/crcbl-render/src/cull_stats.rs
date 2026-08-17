@@ -1,12 +1,14 @@
-//! The culling statistics, off the GPU and onto a delayed ring.
+//! The culling statistics, off the GPU and onto a ring of readback slots.
 //!
 //! ```text
-//!  add_copy_pass ─▶ copy pass: cull stats ──▶ slot k of the ring   (frame f)
+//!  add_copy_pass ─▶ copy pass: cull stats ──▶ a free slot k        (frame f)
 //!                                                  │
 //!  begin_frame ─────── request_readback(slot k) ───┘               (frame f+1)
-//!                                                  │  … the ring turns …
-//!  begin_frame ─────── poll_readback(slot k) ──────┘               (frame f+N)
-//!                              │
+//!                                                  │
+//!  begin_frame ─────── poll_readback(slot k) ──────┘               (frame f+2,
+//!                              │                                    and every
+//!                              │                                    frame until
+//!                              │                                    it answers)
 //!                              ▼  latest() ──▶ ForwardRenderer::counters()
 //! ```
 //!
@@ -15,21 +17,43 @@
 //! leave the GPU … there is no staging buffer, no copy inside the frame graph,
 //! and no consumer". This is all three.
 //!
-//! # The latency *is* the synchronisation
+//! # The answer *is* the synchronisation
 //!
-//! [`crate::timing::PassTimers`] is the pattern, one resource down: a ring one
-//! longer than the frames the loop keeps in flight, and a slot is only read once
-//! it has come back round — by which point the submission that filled it has
-//! certainly completed. There is no fence here, no `wait_idle`, and no poll in a
-//! loop: [`poll_readback`](Device::poll_readback) is called **once** per slot per
-//! turn of the ring, and a slot that is somehow still pending is dropped rather
-//! than waited for.
+//! A slot is handed back for another copy **when its readback answers**, and not
+//! before. That is the stronger of the two guarantees available: an answered
+//! readback is proof that the copy which filled the slot completed, where a
+//! count of frames is an assumption about how far ahead of the CPU the GPU is
+//! allowed to get. There is no fence here, no `wait_idle` and no poll in a loop
+//! — a slot that has not answered is left alone until the next frame, and a
+//! frame that finds every slot still waiting simply records no copy.
 //!
-//! So the number is about a frame [`CullStatsRing::latency`] frames ago, and it
-//! says which one — [`CullStats::frame`] carries it, and
-//! [`FrameCounters`](crate::counters::FrameCounters) puts it on the panel as its
-//! own row. A latent counter beside live ones without saying so is the whole
+//! So the number is a few frames old — two at the very best, because the copy is
+//! recorded on one frame, requested on the next and first polled on the one
+//! after — and it says which frame it is about: [`CullStats::frame`] carries it,
+//! and [`FrameCounters`](crate::counters::FrameCounters) puts it on the panel as
+//! its own row. A latent counter beside live ones without saying so is the whole
 //! reason that row exists.
+//!
+//! # A poll is a question, and on one backend it is asked across a wire
+//!
+//! Every outstanding slot is polled **once per frame**, which is exactly what
+//! [`poll_readback`](Device::poll_readback) permits and what the browser needs.
+//! `crcbl-webgpu` answers a poll by encoding the question onto the command
+//! stream and returning [`ReadbackState::Pending`], because the answer cannot
+//! arrive until that stream has been replayed and its replies drained: the
+//! **first** poll on a handle there is never `Ready`, whatever the map has
+//! already done. This module used to poll a slot once and release it on the next
+//! line whatever it answered, which threw every browser answer away before it
+//! could arrive — [`latest`](CullStatsRing::latest) stayed [`None`] for ever and
+//! the panel showed no culling statistics at all. The native backends can answer
+//! their first poll, which is why nothing else ever noticed.
+//!
+//! A deadline is the other half of that — `POLL_DEADLINE`, private to this
+//! module. A device that has stopped answering must not end up holding every
+//! slot in the ring mapped for the rest of the process, so a request that has
+//! gone unanswered for that many frames is released and its slot reused. It is
+//! not a wait: nothing blocks on it, and every other slot goes on being polled
+//! meanwhile.
 //!
 //! # Three points in the frame, and why the request is not at the copy
 //!
@@ -90,6 +114,20 @@ use crate::graph::{BufferId, ImportedBuffer, RenderGraph};
 /// something asked for a word it had left behind.
 const SLOT_BYTES: u64 = cull::STATS_WORDS as u64 * 4;
 
+/// Frames a request is given to answer before its slot is taken back.
+///
+/// Long enough that no working device reaches it — a browser answers a poll
+/// across a command stream, which costs a frame's round trip and not two orders
+/// of magnitude of them — and short enough that a device which has *stopped*
+/// answering releases what it holds. There is nothing else to release it: the
+/// ring would otherwise run out of slots, stop recording copies, and hold every
+/// buffer in it mapped until the renderer was destroyed.
+///
+/// The slot is safe to reuse when this expires for the reason the whole module
+/// turns on: the copy that filled it was submitted this many frames ago, which
+/// is far more than the frames the loop keeps in flight.
+const POLL_DEADLINE: u64 = 120;
+
 /// What one frame's culling actually kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CullStats {
@@ -110,9 +148,37 @@ pub struct CullStats {
     /// clearing pass wrote. Reporting that zero as a count would say "every
     /// cluster was rejected" about a frame that drew all of them.
     pub clusters: Option<u64>,
-    /// Which frame these came from — [`CullStatsRing::latency`] frames behind
-    /// the one being recorded.
+    /// Which frame these came from — a few frames behind the one being
+    /// recorded, and how many is the device's to decide rather than this
+    /// module's. See the module docs.
     pub frame: u64,
+}
+
+/// What one slot is doing, which is what decides whether a copy may take it.
+///
+/// A slot is [`Idle`](Self::Idle) only when nothing is outstanding on it at all,
+/// so the state is what keeps this frame's copy off a buffer the last frame's
+/// copy is still on its way into or a readback is still mapping.
+#[derive(Debug)]
+enum SlotState {
+    /// Nothing outstanding; the next copy may take it.
+    Idle,
+    /// Handed to this frame's graph by [`CullStatsRing::add_copy_pass`].
+    ///
+    /// The request is made at the *next* [`CullStatsRing::begin_frame`], by
+    /// which point the copy has been submitted — see below for why it cannot be
+    /// made here — and only if the graph actually ran.
+    Recording,
+    /// A request is out for the copy `frame` recorded, made on frame `since`.
+    Polling {
+        /// The frame whose copy the body stamped into this slot.
+        frame: u64,
+        /// The frame [`request_readback`](Device::request_readback) was called
+        /// on, which is what [`POLL_DEADLINE`] is measured from and what keeps
+        /// the first poll off the frame that made the request.
+        since: u64,
+        readback: ReadbackHandle,
+    },
 }
 
 /// One slot: a host-readable buffer, and whatever is outstanding on it.
@@ -138,17 +204,22 @@ struct Slot {
     /// writes against nothing. Naming `TransferDst` is what gives the graph's
     /// barrier a real prior access to depend on.
     imported: ResourceState,
-    /// The frame whose copy the body stamped into this slot, once it ran.
-    frame: Option<u64>,
-    /// The request made for it, one frame after that copy was recorded.
-    readback: Option<ReadbackHandle>,
+    /// Whether this slot is free, recording, or waiting on an answer.
+    state: SlotState,
 }
 
 /// A ring of host-readable buffers, one per frame in flight plus one.
 #[derive(Debug)]
 pub struct CullStatsRing {
     slots: Vec<Slot>,
-    current: usize,
+    /// Where [`CullStatsRing::take_slot`] starts looking, so consecutive frames
+    /// land in different slots while free ones remain.
+    ///
+    /// Round robin rather than first-free because the buffer a frame copies into
+    /// is the one the *last* frame on that slot copied into, and spreading the
+    /// copies across the ring is what leaves the readback of the slot before it
+    /// a whole frame to answer in before its buffer is wanted again.
+    next: usize,
     /// The frame number the copy pass body stamped, or `0` for "nothing was
     /// recorded". Shared with the body, which runs inside
     /// [`execute`](crate::graph::CompiledGraph::execute) and therefore cannot
@@ -181,8 +252,11 @@ impl CullStatsRing {
         frames_in_flight: usize,
         counts_clusters: bool,
     ) -> Option<Self> {
-        // One more than the frames in flight, so the slot about to be reused is
-        // always one whose submission has completed.
+        // One more than the frames in flight. The depth is how many copies may
+        // be outstanding before a frame has to go without one, and a slot is
+        // busy from the frame its copy is recorded to the frame that answer
+        // lands: three is what keeps a device answering its first poll copying
+        // every frame, with a slot's grace for one that answers a frame later.
         let count = frames_in_flight.max(1) + 1;
         let mut slots = Vec::with_capacity(count);
         for index in 0..count {
@@ -202,8 +276,7 @@ impl CullStatsRing {
                     // may name as a source without ordering anything: there is
                     // nothing to order against yet.
                     imported: ResourceState::Undefined,
-                    frame: None,
-                    readback: None,
+                    state: SlotState::Idle,
                 }),
                 Err(error) => {
                     crcbl_core::log::debug!(
@@ -219,7 +292,7 @@ impl CullStatsRing {
         }
         Some(Self {
             slots,
-            current: 0,
+            next: 0,
             recorded: Arc::new(AtomicU64::new(0)),
             counts_clusters,
             frames: 0,
@@ -229,24 +302,14 @@ impl CullStatsRing {
     }
 
     /// The most recent frame whose statistics have actually landed, or [`None`]
-    /// until the ring has come round once.
+    /// until the first readback has answered.
     #[must_use]
     pub const fn latest(&self) -> Option<CullStats> {
         self.latest
     }
 
-    /// How many frames behind the recording frame a report is.
-    ///
-    /// The ring's length: a slot is copied into on one frame and read when the
-    /// ring next reaches it. What [`CullStats::frame`] is measured against, and
-    /// the number a reader needs to know how stale the panel's row is.
-    #[must_use]
-    pub const fn latency(&self) -> u64 {
-        self.slots.len() as u64
-    }
-
-    /// Starts a frame: requests the readback the last frame's copy earned,
-    /// rotates, and resolves the slot about to be reused.
+    /// Starts a frame: requests the readback the last frame's copy earned, then
+    /// polls everything outstanding.
     ///
     /// Called once per frame, before [`add_copy_pass`](Self::add_copy_pass), and
     /// **after the previous frame was submitted** — which is the frame loop's
@@ -258,39 +321,162 @@ impl CullStatsRing {
             return;
         }
         self.frames += 1;
+        self.request_recorded(device);
+        self.poll_outstanding(device);
+    }
 
-        // The copy this slot was given last frame has been submitted by now, so
-        // a request against it covers work that is really on its way. A slot
-        // nothing stamped is skipped: the graph that would have filled it never
-        // ran, and what is in it belongs to an older turn of the ring.
+    /// Requests the readback for the copy the last frame recorded, or hands that
+    /// slot back if the graph holding it never ran.
+    ///
+    /// The copy the recording slot was given last frame has been submitted by
+    /// now, so a request against it covers work that is really on its way. A slot
+    /// nothing stamped is released unread: the graph that would have filled it
+    /// never ran, and what is in it belongs to an older frame.
+    fn request_recorded(&mut self, device: &dyn Device) {
         let recorded = self.recorded.swap(0, Ordering::Relaxed);
-        if recorded != 0 {
-            let slot = &mut self.slots[self.current];
-            match device.request_readback(&ReadbackDesc {
-                label: Some("cull stats"),
-                buffer: slot.buffer,
-                offset: 0,
-                size: SLOT_BYTES,
-                // Everything submitted so far, which is exactly the copy above
-                // and nothing this ring has to name a timeline value for.
-                after: None,
-            }) {
-                Ok(readback) => {
-                    slot.frame = Some(recorded);
-                    slot.readback = Some(readback);
+        let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| matches!(slot.state, SlotState::Recording))
+        else {
+            return;
+        };
+        if recorded == 0 {
+            self.slots[index].state = SlotState::Idle;
+            return;
+        }
+        let since = self.frames;
+        let request = device.request_readback(&ReadbackDesc {
+            label: Some("cull stats"),
+            buffer: self.slots[index].buffer,
+            offset: 0,
+            size: SLOT_BYTES,
+            // Everything submitted so far, which is exactly the copy above and
+            // nothing this ring has to name a timeline value for.
+            after: None,
+        });
+        match request {
+            Ok(readback) => {
+                self.slots[index].state = SlotState::Polling {
+                    frame: recorded,
+                    since,
+                    readback,
+                };
+            }
+            Err(error) => {
+                self.slots[index].state = SlotState::Idle;
+                self.give_up(device, &format!("request failed ({error})"));
+            }
+        }
+    }
+
+    /// Polls every outstanding slot once, reports what has landed, and releases
+    /// what has run out of time.
+    ///
+    /// **Once per frame per readback, and never on the frame the request was
+    /// made.** Once per frame is what the seam permits and what a backend whose
+    /// polls are themselves asynchronous needs — see the module docs. Not on the
+    /// requesting frame because that poll can only ever say `Pending`: it asks
+    /// about a submission the frame loop has not even reached the end of.
+    ///
+    /// No allocation: the bytes land in one stack buffer reused across the
+    /// slots, which [`poll_readback`](Device::poll_readback) leaves untouched
+    /// unless it answers `Ready`.
+    fn poll_outstanding(&mut self, device: &dyn Device) {
+        let mut bytes = [0u8; SLOT_BYTES as usize];
+        for index in 0..self.slots.len() {
+            let SlotState::Polling {
+                frame,
+                since,
+                readback,
+            } = self.slots[index].state
+            else {
+                continue;
+            };
+            if since >= self.frames {
+                continue;
+            }
+            match device.poll_readback(readback, &mut bytes) {
+                Ok(ReadbackState::Ready) => {
+                    device.destroy_readback(readback);
+                    self.slots[index].state = SlotState::Idle;
+                    self.report(frame, &bytes);
                 }
+                Ok(ReadbackState::Pending) if self.frames - since >= POLL_DEADLINE => {
+                    device.destroy_readback(readback);
+                    self.slots[index].state = SlotState::Idle;
+                    crcbl_core::log::debug!(
+                        "cull stats: frame {frame} was never answered; its slot is back in the ring"
+                    );
+                }
+                Ok(ReadbackState::Pending) => {}
                 Err(error) => {
-                    self.give_up(device, &format!("request failed ({error})"));
+                    self.give_up(device, &format!("poll failed ({error})"));
                     return;
                 }
             }
         }
+    }
 
-        self.current = (self.current + 1) % self.slots.len();
+    /// Files a landed slot's bytes as the report, unless an even later frame has
+    /// already landed.
+    ///
+    /// **The panel's number never goes backwards.** Slots answer in the order
+    /// they were requested on every device seen so far, but nothing in the seam
+    /// promises it: two can land on the same frame, and a device is free to
+    /// answer the newer one first. Reporting whichever spoke last would then walk
+    /// [`CullStats::frame`] back down, which reads as the frame loop having
+    /// stalled.
+    fn report(&mut self, frame: u64, bytes: &[u8; SLOT_BYTES as usize]) {
+        if self.latest.is_some_and(|latest| latest.frame >= frame) {
+            return;
+        }
+        let stats = CullStats {
+            instances: u64::from(word(bytes, cull::INSTANCE_SURVIVOR_WORD)),
+            clusters: self
+                .counts_clusters
+                .then(|| u64::from(word(bytes, cull::CLUSTER_SURVIVOR_WORD))),
+            frame,
+        };
+        // At `trace!` and nowhere near `debug!`: this is a line per frame, and
+        // the module's own rule about the failure path — one line, not one a
+        // frame — cuts the same way here. It earns its place because the panel
+        // is the only other place these numbers exist and the panel is *glyphs*:
+        // a browser cannot read them back at all, and the bug this ring shipped
+        // with was precisely that they silently stopped arriving there.
+        crcbl_core::log::trace!(
+            "cull stats: frame {frame} kept {} instances, {:?} clusters",
+            stats.instances,
+            stats.clusters,
+        );
+        self.latest = Some(stats);
+    }
 
-        // The slot has come round: whatever was requested on it covers a frame
-        // that has completed, so reading it neither stalls nor lies.
-        self.resolve(device);
+    /// The slot this frame's copy goes into, marked as this frame's.
+    ///
+    /// [`None`] when every slot is still waiting on an answer, which is the
+    /// frame that records no copy at all.
+    ///
+    /// A slot found still [`Recording`](SlotState::Recording) is that slot: it
+    /// means two copies were recorded with no [`begin_frame`](Self::begin_frame)
+    /// between them, so nothing ever requested a readback for what is in it and
+    /// the newer copy may simply overwrite it. Taking a fresh slot instead would
+    /// leave that one recording for the life of the ring.
+    fn take_slot(&mut self) -> Option<usize> {
+        let len = self.slots.len();
+        if let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| matches!(slot.state, SlotState::Recording))
+        {
+            return Some(index);
+        }
+        let index = (0..len)
+            .map(|step| (self.next + step) % len)
+            .find(|&index| matches!(self.slots[index].state, SlotState::Idle))?;
+        self.slots[index].state = SlotState::Recording;
+        self.next = (index + 1) % len;
+        Some(index)
     }
 
     /// Adds the copy that takes this frame's statistics off the GPU.
@@ -307,20 +493,24 @@ impl CullStatsRing {
     /// copy scheduled between them reads a total half the frame has not
     /// contributed to yet.
     ///
+    /// Nothing is added on a frame that finds every slot still waiting on an
+    /// answer. The alternative is a copy into a buffer a readback is still
+    /// mapping, and a frame's statistics are worth far less than that: the panel
+    /// keeps the number it has, still stamped with the frame it came from, and
+    /// the next frame after an answer lands records a copy again.
+    ///
     /// # The destination is in the graph too, and it has to be
     ///
-    /// A slot is written by a copy this frame and was written by a copy
-    /// [`latency`](Self::latency) frames ago — **two writes, in two
-    /// submissions, with nothing between them**. That is a write-after-write
-    /// hazard exactly like the one the graph already computes for the depth
-    /// transient across a frame boundary, and it is not made safe by the
-    /// readback's completion point: a timeline gates the *host's read*, which is
-    /// a different edge from the GPU's second write.
+    /// A slot is written by a copy this frame and was written by a copy some
+    /// frames ago — **two writes, in two submissions, with nothing between
+    /// them**. That is a write-after-write hazard exactly like the one the graph
+    /// already computes for the depth transient across a frame boundary, and it
+    /// is not made safe by the readback's completion point: a timeline gates the
+    /// *host's read*, which is a different edge from the GPU's second write.
     ///
-    /// So the slot is imported with what the previous turn of the ring left it
-    /// in — `Undefined` the first time and `TransferDst` thereafter — and the
-    /// copy declares
-    /// [`ResourceState::TransferDst`] on it, which makes the graph emit
+    /// So the slot is imported with what the last frame on it left it in —
+    /// `Undefined` the first time and `TransferDst` thereafter — and the copy
+    /// declares [`ResourceState::TransferDst`] on it, which makes the graph emit
     /// `TransferDst → TransferDst` before the copy: a barrier whose source scope
     /// covers that earlier submission's transfer write. An earlier version of
     /// this function left the destination out on the grounds that "nothing else
@@ -337,9 +527,12 @@ impl CullStatsRing {
         if self.off {
             return;
         }
+        let Some(index) = self.take_slot() else {
+            return;
+        };
         let frame = self.frames;
         let recorded = Arc::clone(&self.recorded);
-        let slot = &mut self.slots[self.current];
+        let slot = &mut self.slots[index];
         let handle = slot.buffer;
         let dst = graph.import_buffer(
             "cull-stats-slot",
@@ -376,44 +569,6 @@ impl CullStatsRing {
             });
     }
 
-    /// Reads the slot the ring has just reached, if anything is outstanding on
-    /// it, and releases the request either way.
-    ///
-    /// One poll, never a loop: a slot that is still pending after a whole turn
-    /// of the ring is a frame's statistics given up on, not a frame to wait for.
-    fn resolve(&mut self, device: &dyn Device) {
-        let slot = &self.slots[self.current];
-        let (Some(readback), Some(frame)) = (slot.readback, slot.frame) else {
-            return;
-        };
-        let mut bytes = [0u8; SLOT_BYTES as usize];
-        let state = device.poll_readback(readback, &mut bytes);
-        device.destroy_readback(readback);
-        let slot = &mut self.slots[self.current];
-        slot.readback = None;
-        slot.frame = None;
-        match state {
-            Ok(ReadbackState::Ready) => {
-                self.latest = Some(CullStats {
-                    instances: u64::from(word(&bytes, cull::INSTANCE_SURVIVOR_WORD)),
-                    clusters: self
-                        .counts_clusters
-                        .then(|| u64::from(word(&bytes, cull::CLUSTER_SURVIVOR_WORD))),
-                    frame,
-                });
-            }
-            // The buffer is about to be copied into again, so there is nothing
-            // to come back to. Last frame's report stands and says which frame
-            // it is from.
-            Ok(ReadbackState::Pending) => {
-                crcbl_core::log::debug!(
-                    "cull stats: frame {frame} was still not back after a whole ring"
-                );
-            }
-            Err(error) => self.give_up(device, &format!("poll failed ({error})")),
-        }
-    }
-
     /// Switches the ring off after a seam error, releasing what it can.
     ///
     /// Once rather than per frame: whatever refused a readback will refuse the
@@ -424,17 +579,17 @@ impl CullStatsRing {
         self.latest = None;
         crcbl_core::log::warn!("cull stats: {why}; the culling counters are off (said once)");
         for slot in &mut self.slots {
-            if let Some(readback) = slot.readback.take() {
+            if let SlotState::Polling { readback, .. } = slot.state {
                 device.destroy_readback(readback);
             }
-            slot.frame = None;
+            slot.state = SlotState::Idle;
         }
     }
 
     /// Releases the ring. The device must be idle.
     pub fn destroy(self, device: &dyn Device) {
         for slot in &self.slots {
-            if let Some(readback) = slot.readback {
+            if let SlotState::Polling { readback, .. } = slot.state {
                 device.destroy_readback(readback);
             }
             device.destroy_buffer(slot.buffer);
@@ -470,6 +625,14 @@ mod tests {
     /// How many frames a caller keeps in flight, and therefore one less than the
     /// ring's length. Two, as every frame loop in this engine runs.
     const FRAMES_IN_FLIGHT: usize = 2;
+
+    /// Frames a test runs before deciding the ring has stopped reporting.
+    ///
+    /// Generous rather than exact: which frame an answer lands on is the
+    /// device's to decide — that is what polling until it answers means — so a
+    /// test that pinned the number would be asserting the null backend's
+    /// readback latency and calling it the ring's behaviour.
+    const BOUND: u64 = 16;
 
     /// A device, a statistics buffer shaped like [`DrawGen`]'s, and a frame that
     /// runs the ring end to end without a driver.
@@ -665,7 +828,7 @@ mod tests {
 
         // The first turn of the ring: this slot has never been written.
         harness.frame(&mut ring);
-        let slot = ring.slots[ring.current].buffer;
+        let slot = recording_slot(&ring);
         assert_eq!(
             barrier_before_the_copy_into(&harness.recorder, slot),
             Some((ResourceState::Undefined, ResourceState::TransferDst)),
@@ -673,18 +836,20 @@ mod tests {
         );
 
         // Round the ring until this same slot comes up again.
-        for _ in 1..ring.latency() {
+        for _ in 1..ring.slots.len() {
             harness.recorder.clear();
             harness.frame(&mut ring);
             assert_ne!(
-                ring.slots[ring.current].buffer, slot,
+                recording_slot(&ring),
+                slot,
                 "the ring must hand out a different slot until it has turned over",
             );
         }
         harness.recorder.clear();
         harness.frame(&mut ring);
         assert_eq!(
-            ring.slots[ring.current].buffer, slot,
+            recording_slot(&ring),
+            slot,
             "the ring has come round and this frame reuses the first slot",
         );
         assert_eq!(
@@ -722,35 +887,89 @@ mod tests {
         None
     }
 
-    /// **A slot is read only once the ring has come back round to it**, and the
-    /// number it reports says which frame it is from.
+    /// The buffer the frame just run handed to its graph.
     ///
-    /// The latency is the ring's length, so nothing is reported for the first
-    /// [`CullStatsRing::latency`] frames — and the frame that finally lands is
-    /// the *oldest* one, not the one just recorded. A resolve that read the slot
-    /// it had only just requested would report frame 2 on frame 2, which is the
-    /// stale-bytes bug this ordering exists to prevent.
+    /// Exactly one slot is [`SlotState::Recording`] between a frame's
+    /// [`CullStatsRing::add_copy_pass`] and the next
+    /// [`CullStatsRing::begin_frame`], which is where every caller of this looks.
+    fn recording_slot(ring: &CullStatsRing) -> BufferHandle {
+        let index = ring
+            .slots
+            .iter()
+            .position(|slot| matches!(slot.state, SlotState::Recording))
+            .expect("a frame that recorded its copy left exactly one slot recording");
+        ring.slots[index].buffer
+    }
+
+    /// How many of this ring's copies a recorded frame holds.
+    ///
+    /// By size rather than by destination, so it counts a copy into any slot:
+    /// which slot a frame took is the ring's own business and the question here
+    /// is only whether a copy was recorded at all.
+    fn stats_copies(recorder: &Recorder) -> usize {
+        recorder
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(command, Command::CopyBufferToBuffer(copy) if copy.size == SLOT_BYTES)
+            })
+            .count()
+    }
+
+    /// Runs frames until the ring reports something, and fails if `bound` frames
+    /// go by without one.
+    ///
+    /// The bound is what makes this a test rather than a hang: a ring that has
+    /// stopped reporting has to go red here rather than spin, which is exactly
+    /// the failure the browser saw.
+    fn run_until_reported(
+        harness: &mut Harness,
+        ring: &mut CullStatsRing,
+        bound: u64,
+    ) -> CullStats {
+        for _ in 0..bound {
+            harness.frame(ring);
+            if let Some(stats) = ring.latest() {
+                return stats;
+            }
+        }
+        panic!("nothing was reported in {bound} frames");
+    }
+
+    /// **Nothing is reported until a readback has actually answered, and the
+    /// number says which frame it is from.**
+    ///
+    /// Three points, in the frames the module documents: the copy is recorded on
+    /// frame 1, the request for it is made on frame 2 — a readback covers work
+    /// already *submitted*, and frame 1's submission is what it covers — and the
+    /// first poll is on frame 3. So a report on frame 1 or 2 would be one
+    /// invented before any readback was even asked for, and the frame it names
+    /// must be the frame whose copy it is rather than the frame it landed on.
+    ///
+    /// The frame numbers are what has teeth here: a ring that read the slot it
+    /// had just requested would report frame 2 on frame 2, and one that reported
+    /// the current frame would say 3.
     #[test]
-    fn a_slot_is_read_only_after_the_ring_has_come_round() {
+    fn nothing_is_reported_until_a_readback_has_answered() {
         let mut harness = Harness::open();
         let mut ring = harness.ring(false);
-        assert_eq!(ring.latency(), FRAMES_IN_FLIGHT as u64 + 1);
         assert_eq!(ring.latest(), None, "nothing has been recorded yet");
 
-        for frame in 1..=ring.latency() {
-            harness.frame(&mut ring);
-            assert_eq!(
-                ring.latest(),
-                None,
-                "frame {frame} is inside the ring's latency and has nothing to report yet",
-            );
-        }
+        harness.frame(&mut ring);
+        assert_eq!(ring.latest(), None, "frame 1 has only recorded its copy");
+        harness.frame(&mut ring);
+        assert_eq!(
+            ring.latest(),
+            None,
+            "frame 2 made the request; polling it here would ask about a frame still being \
+             recorded",
+        );
 
         harness.frame(&mut ring);
-        let stats = ring.latest().expect("the first slot has come round");
+        let stats = ring.latest().expect("the first request has answered");
         assert_eq!(
             stats.frame, 1,
-            "the report is the oldest frame in the ring, not the newest",
+            "the report names the frame whose copy it is, not the frame it landed on",
         );
 
         harness.frame(&mut ring);
@@ -763,12 +982,70 @@ mod tests {
         harness.finish(ring);
     }
 
+    /// **A device whose first poll answers `Pending` still reports, within a
+    /// bounded number of frames.**
+    ///
+    /// This is the browser, and it is the bug this test exists for: `crcbl-webgpu`
+    /// answers a `poll_readback` by *encoding* the question onto the command
+    /// stream, so the first poll on a handle is `Pending` however long the map
+    /// has been ready, and the answer arrives a frame later. A ring that polled a
+    /// slot once and released it on the next line — which this one did — threw
+    /// every answer away unread and reported nothing at all in a browser, for
+    /// ever, while every native backend went on passing because they can answer
+    /// their first poll.
+    ///
+    /// Red against that ring: [`Recorder::set_readback_latency`] makes N polls
+    /// answer `Pending` first, which is the one thing no hardware in CI will
+    /// reproduce. A test that only ran the null backend's instant readback — or a
+    /// real GPU — cannot fail here, which is why neither caught it.
+    ///
+    /// The counts run past the ring's own depth deliberately: three slots and a
+    /// readback that needs four polls means a frame where every slot is still
+    /// waiting, and the ring has to record no copy that frame and carry on rather
+    /// than wedge.
+    #[test]
+    fn a_first_poll_that_answers_pending_still_reports() {
+        for pending_polls in 1..=4u32 {
+            let mut harness = Harness::open();
+            harness.recorder.set_readback_latency(pending_polls);
+            let mut ring = harness.ring(false);
+
+            // Two frames to record and request, one poll per frame after that,
+            // and room for the frames the ring spends with no free slot.
+            let bound = 2 * (2 + u64::from(pending_polls) + ring.slots.len() as u64);
+            let first = run_until_reported(&mut harness, &mut ring, bound);
+            assert_eq!(
+                first.frame, 1,
+                "the first frame's copy is the first thing to answer, {pending_polls} pending \
+                 polls or not",
+            );
+
+            // And it keeps moving: a ring that reported once and stopped —
+            // because it never freed the slot it read — would pass everything
+            // above.
+            let mut later = first;
+            for _ in 0..bound {
+                harness.frame(&mut ring);
+                later = ring.latest().expect("a report never goes back to nothing");
+                if later.frame > first.frame {
+                    break;
+                }
+            }
+            assert!(
+                later.frame > first.frame,
+                "the ring stopped reporting after its first answer: {later:?}",
+            );
+
+            harness.finish(ring);
+        }
+    }
+
     /// **A slot that has not come back reports nothing rather than its bytes.**
     ///
-    /// The null backend's readback latency is the only way to reach this: the
-    /// slot is about to be copied into again, so what it holds belongs to an
-    /// older turn of the ring. Reporting it would put a several-frames-stale
-    /// number on the panel under this frame's label.
+    /// The null backend's readback latency is the only way to reach this. What is
+    /// in the buffer belongs to an older frame — nothing has said otherwise —
+    /// and reporting it would put a stale number on the panel under a fresh
+    /// frame's label.
     #[test]
     fn a_readback_that_never_completes_reports_nothing() {
         let mut harness = Harness::open();
@@ -776,10 +1053,75 @@ mod tests {
         harness.recorder.set_readback_latency(1_000);
         let mut ring = harness.ring(false);
 
-        for _ in 0..(ring.latency() * 3) {
+        for _ in 0..(ring.slots.len() * 3) {
             harness.frame(&mut ring);
             assert_eq!(ring.latest(), None, "a pending slot has nothing to report");
         }
+
+        harness.finish(ring);
+    }
+
+    /// **A device that stops answering does not grow the ring, and does not wedge
+    /// it either.**
+    ///
+    /// Every slot ends up waiting on an answer that never comes, and from there
+    /// two things must hold: the ring holds no more than the buffers and requests
+    /// it already had — one leaked readback per frame is what an unbounded
+    /// version looks like — and [`POLL_DEADLINE`] eventually hands the slots back
+    /// so the frame that follows records a copy again.
+    ///
+    /// The recorded stream is the observable for the second half: no copy while
+    /// every slot is out, and a copy again once the deadline has passed.
+    #[test]
+    fn a_device_that_stops_answering_neither_leaks_slots_nor_wedges_the_ring() {
+        let mut harness = Harness::open();
+        // More polls than any device will ever be asked for, so nothing answers.
+        harness.recorder.set_readback_latency(u32::MAX);
+        let mut ring = harness.ring(false);
+
+        // Enough frames to put every slot out on a request.
+        for _ in 0..=ring.slots.len() {
+            harness.frame(&mut ring);
+        }
+        let live = harness.recorder.total_live_objects();
+
+        // Well inside the deadline: nothing has been handed back, so no frame
+        // may copy into a buffer a readback still holds — and the ring must not
+        // be growing while it waits.
+        for _ in 0..(POLL_DEADLINE / 2) {
+            harness.recorder.clear();
+            harness.frame(&mut ring);
+            assert_eq!(
+                stats_copies(&harness.recorder),
+                0,
+                "a frame with no free slot must record no copy",
+            );
+            assert!(
+                harness.recorder.total_live_objects() <= live,
+                "the ring must not accumulate requests a device never answers",
+            );
+        }
+
+        // And past it: the slots come back and the ring records copies again.
+        let mut copies = 0;
+        for _ in 0..(2 * POLL_DEADLINE) {
+            harness.recorder.clear();
+            harness.frame(&mut ring);
+            copies += stats_copies(&harness.recorder);
+            assert!(
+                harness.recorder.total_live_objects() <= live,
+                "the ring must not accumulate requests a device never answers",
+            );
+        }
+        assert!(
+            copies > 0,
+            "the deadline must hand the slots back, so the ring records copies again",
+        );
+        assert_eq!(
+            ring.latest(),
+            None,
+            "and still reports nothing it never read"
+        );
 
         harness.finish(ring);
     }
@@ -794,9 +1136,7 @@ mod tests {
     fn a_device_that_refuses_the_readback_reports_nothing_rather_than_zero() {
         let mut harness = Harness::open();
         let mut ring = harness.ring(false);
-        for _ in 0..=ring.latency() {
-            harness.frame(&mut ring);
-        }
+        run_until_reported(&mut harness, &mut ring, BOUND);
         assert!(ring.latest().is_some(), "the ring was working");
 
         // The device goes down between frames, so the next request is refused.
@@ -825,13 +1165,8 @@ mod tests {
         for (counts_clusters, expected) in [(false, None), (true, Some(0))] {
             let mut harness = Harness::open();
             let mut ring = harness.ring(counts_clusters);
-            for _ in 0..=ring.latency() {
-                harness.frame(&mut ring);
-            }
-            assert_eq!(
-                ring.latest().expect("the ring came round").clusters,
-                expected,
-            );
+            let stats = run_until_reported(&mut harness, &mut ring, BOUND);
+            assert_eq!(stats.clusters, expected);
             harness.finish(ring);
         }
     }
@@ -848,7 +1183,7 @@ mod tests {
         let harness = Harness::open();
         let mut ring = harness.ring(false);
 
-        for _ in 0..(ring.latency() * 2) {
+        for _ in 0..BOUND {
             ring.begin_frame(harness.device.as_ref());
             let mut graph = RenderGraph::new(harness.queue);
             let stats = graph.import_buffer(

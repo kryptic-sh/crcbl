@@ -2741,8 +2741,9 @@ fn the_ui_panel_is_painted_and_the_bar_blends_over_two_backgrounds(image: &Image
 ///
 /// What it does assert is everything that is backend-shaped:
 ///
-/// * nothing is reported while the ring has not come round, so a number here is
-///   not one the CPU made up before any readback landed;
+/// * nothing is reported before a readback has been polled at all, so a number
+///   here is not one the CPU made up before any readback landed — and one does
+///   arrive, within a bounded number of frames rather than never;
 /// * the number that arrives is the instance survivor **word** — reading the
 ///   cluster word or the light-overflow word beside it, or a buffer no copy ever
 ///   reached, would all give zero, and zero is not this scene;
@@ -2761,27 +2762,40 @@ fn the_culling_counters_come_back_off_the_gpu_on_this_backend() {
         path = setup.caps().geometry_path(),
     );
 
-    // The ring is one longer than the frames the loop keeps in flight, so a slot
-    // is read only once its submission has certainly completed.
-    let latency =
-        u64::try_from(crcbl::render::forward::FRAMES_IN_FLIGHT + 1).expect("a ring of a few slots");
+    // A frame records the copy and the next frame requests the readback for it,
+    // so the third frame is the first that can poll anything: a report before
+    // that is one nothing asked the GPU for.
+    let floor = 2;
 
-    for frame in 1..=latency {
+    for frame in 1..=floor {
         setup.draw_and_readback().expect("the frame renders");
         let counters = setup.counters();
         assert_eq!(
             counters.drawn, None,
-            "frame {frame} is inside the ring's latency, so the row must still say `indirect`",
+            "frame {frame} is before the first poll, so the row must still say `indirect`",
         );
         assert_eq!(counters.cull_frame, None);
     }
 
-    setup.draw_and_readback().expect("the frame renders");
+    // And then it has to arrive. **Bounded, and that is the assertion**: how
+    // many polls a readback needs is the backend's business — wgpu's `map_async`
+    // resolves on a later poll and a browser's answers a frame after the
+    // question — so a ring that throws an unanswered poll away reports nothing
+    // for ever, and a test that waited without a bound would hang rather than
+    // say so.
+    let bound = 32;
+    let mut rendered = floor;
+    while setup.counters().cull_frame.is_none() {
+        assert!(
+            rendered < floor + bound,
+            "no culling report arrived in {bound} frames; the readback is being polled and \
+             released rather than answered",
+        );
+        setup.draw_and_readback().expect("the frame renders");
+        rendered += 1;
+    }
     let counters = setup.counters();
-    eprintln!(
-        "crcbl render e2e: counters after {} frames — {counters:?}",
-        latency + 1,
-    );
+    eprintln!("crcbl render e2e: counters after {rendered} frames — {counters:?}");
     let drawn = counters
         .drawn
         .expect("the ring has come round, so there is a survivor count");
@@ -2794,10 +2808,10 @@ fn the_culling_counters_come_back_off_the_gpu_on_this_backend() {
         drawn > 1,
         "one would be the tonemap's own triangle and nothing else: {counters:?}",
     );
-    assert_eq!(
-        counters.cull_frame,
-        Some(1),
-        "the report is the first frame's, {latency} frames later: {counters:?}",
+    let cull_frame = counters.cull_frame.expect("a readback answered");
+    assert!(
+        cull_frame >= 1 && cull_frame < rendered,
+        "the report names frame {cull_frame} on a run that has drawn {rendered}: {counters:?}",
     );
 
     setup.finish().expect("the device reaches idle");
