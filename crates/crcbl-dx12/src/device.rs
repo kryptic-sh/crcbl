@@ -1527,6 +1527,7 @@ impl Dx12Device {
             format: desc.format,
             buffers: count,
             next_offscreen: 0,
+            acquired: None,
             present_mode: present::resolve_offscreen_present_mode(desc.present_mode),
             flags: swapchain::NO_SWAP_CHAIN_FLAGS,
             images,
@@ -2853,6 +2854,7 @@ impl Device for Dx12Device {
             format: desc.format,
             buffers: created.buffers,
             next_offscreen: 0,
+            acquired: None,
             present_mode: created.present_mode,
             flags: created.flags,
             images,
@@ -3091,7 +3093,7 @@ impl Device for Dx12Device {
         let mut state = self.state();
         self.inner.poll_retire(&mut state);
         let owner = self.inner.owner;
-        let entry = handle::lookup(&state.swapchains, "swapchain", swapchain, owner)?;
+        let entry = handle::lookup_mut(&mut state.swapchains, "swapchain", swapchain, owner)?;
         let index = match entry.raw.as_ref() {
             // SAFETY: `raw` is a live swapchain this device created. The call
             // reads no pointer of ours and returns an index by value.
@@ -3113,6 +3115,13 @@ impl Device for Dx12Device {
                 entry.buffers
             ))));
         };
+        // Recorded only once there is a frame to hand back, so an acquire that
+        // failed does not leave a present looking matched. Overwriting an index
+        // already sitting here is deliberate rather than an oversight: nothing
+        // in DXGI is consumed by an acquire — `GetCurrentBackBufferIndex` is a
+        // read and the ring cursor only moves on a present — so a second
+        // acquire costs nothing and is simply the one the next present matches.
+        entry.acquired = Some(index);
         Ok(AcquiredFrame {
             image,
             view,
@@ -3125,6 +3134,14 @@ impl Device for Dx12Device {
     }
 
     /// Presents the current back buffer, and numbers it if the caller asked.
+    ///
+    /// **There must be an outstanding acquire**, and that is checked here
+    /// rather than left to D3D12, which has nothing to check it with: the
+    /// implicit-acquire shape means `Present` is handed no image at all, so a
+    /// present nothing acquired is a call DXGI serves. The outstanding acquire
+    /// is [`SwapchainEntry::acquired`](crate::swapchain::SwapchainEntry), taken
+    /// here, and a present that finds it empty is
+    /// [`HalError::InvalidDescriptor`].
     ///
     /// The id is recorded **only on a present that succeeded**, which is the
     /// half that makes [`Device::wait_until_presented`]'s "no record of this
@@ -3152,6 +3169,20 @@ impl Device for Dx12Device {
             let mut state = self.state();
             let entry =
                 handle::lookup_mut(&mut state.swapchains, "swapchain", present.swapchain, owner)?;
+            // Before either shape does anything: a present with nothing behind
+            // it is a caller bug, and it has to be named rather than served.
+            // `Present` names no image, so DXGI would happily show the current
+            // back buffer a second time and a ring would rotate onto a frame
+            // nothing drew — both of which look like a rendering fault several
+            // frames later instead of the mistake they are. The sentence is the
+            // one `crcbl-vk` and `crcbl-mtl` already answer with; nothing
+            // asserts the text, but a seam obligation reading differently on
+            // each backend is a message no caller can learn.
+            if entry.acquired.take().is_none() {
+                return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                    "present without a matching acquire_next_frame".to_string(),
+                )));
+            }
             let Some(raw) = entry.raw.clone() else {
                 // "Presenting" a ring image is advancing the ring. The image
                 // stays valid and is reused when the cursor comes back round,

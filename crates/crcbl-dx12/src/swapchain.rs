@@ -148,6 +148,14 @@ pub(crate) struct SwapchainEntry {
     /// against `images` rather than trusting it, which is what makes the window
     /// above safe.
     pub(crate) next_offscreen: u32,
+    /// Image index handed out by the last acquire, if one is outstanding.
+    ///
+    /// Both shapes keep it, because both shapes owe the seam the same answer:
+    /// `present` takes it, and a `None` there is a present with no acquire
+    /// behind it. D3D12 would not otherwise notice — `Present` names no image,
+    /// so it would show whatever `GetCurrentBackBufferIndex` last pointed at
+    /// and a ring would rotate onto a frame nothing drew.
+    pub(crate) acquired: Option<u32>,
     /// The mode this swapchain resolved to, which is what
     /// [`present::pacing`] is asked about on every present.
     pub(crate) present_mode: PresentMode,
@@ -262,12 +270,16 @@ pub(crate) fn check(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u32), HalEr
 ///
 /// # Errors
 ///
-/// [`HalError::InvalidDescriptor`] for a zero extent.
+/// [`HalError::InvalidDescriptor`] for a zero extent. The wording is the one
+/// `crcbl-vk` and `crcbl-mtl` already answer with, because
+/// `crates/crcbl/tests/hal_seam_e2e.rs` holds every backend to the same
+/// sentence — a refusal a caller can match on is only worth having if it reads
+/// the same whichever backend produced it.
 fn check_extent(desc: &SwapchainDesc<'_>) -> Result<(u32, u32), HalError> {
     if desc.extent.0 == 0 || desc.extent.1 == 0 {
         return Err(HalError::InvalidDescriptor(format!(
-            "SwapchainDesc::extent is {:?}; an unconfigured or minimized window means \"do not \
-             create a swapchain yet\" rather than \"pick something\"",
+            "SwapchainDesc::extent is {:?}; an unconfigured or minimized window means 'do not \
+             create one yet' rather than 'pick something'",
             desc.extent
         )));
     }
