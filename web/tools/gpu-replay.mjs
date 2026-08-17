@@ -532,6 +532,13 @@ function deviceLimits() {
  * descriptor with no label produces a buffer whose label is the empty string,
  * which is why WebGPU cannot tell `None` from `Some("")`.
  *
+ * THE MAP IS SETTABLE AFTER THE FACT — `mapRejects` and `rangeThrows` are
+ * mutable members rather than constructor options, because the check that needs
+ * them only has the buffer once a `CreateBuffer` has been replayed through the
+ * device. A test reaches for `replayer.buffers.get(handle)` and sets one before
+ * the `RequestReadback` goes past. Both default to `null`, which is a map that
+ * resolves — the ordinary path.
+ *
  * @param {{ label?: string, size: number, usage: number }} desc
  */
 function stubBuffer(desc) {
@@ -543,6 +550,42 @@ function stubBuffer(desc) {
     destroys: 0,
     destroy() {
       buffer.destroys += 1;
+    },
+    /** @type {unknown} What `mapAsync` rejects with, or `null` to resolve. */
+    mapRejects: null,
+    /** @type {unknown} What `getMappedRange` throws, or `null` to answer bytes. */
+    rangeThrows: null,
+    /** @type {{ mode: number, offset: number, size: number }[]} Every map asked for. */
+    maps: [],
+    /** How many times the replayer unmapped it. */
+    unmaps: 0,
+    /**
+     * @param {number} mode
+     * @param {number} offset
+     * @param {number} size
+     */
+    mapAsync(mode, offset, size) {
+      buffer.maps.push({ mode, offset, size });
+      if (buffer.mapRejects !== null) return Promise.reject(buffer.mapRejects);
+      return Promise.resolve();
+    },
+    /**
+     * The mapped bytes, as an `ArrayBuffer` — which is what a real
+     * `getMappedRange` answers and what the replayer's `.slice(0)` copies.
+     * Filled with a value per byte so a check reading them back is reading this
+     * range rather than a zeroed allocation of the right length.
+     *
+     * @param {number} offset
+     * @param {number} size
+     */
+    getMappedRange(offset, size) {
+      if (buffer.rangeThrows !== null) throw buffer.rangeThrows;
+      const bytes = new Uint8Array(size);
+      for (let i = 0; i < size; i += 1) bytes[i] = (offset + i) % 251;
+      return bytes.buffer;
+    },
+    unmap() {
+      buffer.unmaps += 1;
     },
   };
   return buffer;
@@ -1352,8 +1395,9 @@ function handle(index, generation) {
  * are read out and asserted, and the wording is only ever checked for the part
  * that has to be actionable.
  *
- * Only the two device replies and the two surface-capability ones are
- * understood; anything else is a bug in the check that called this. Of a
+ * The two device replies, the two surface-capability ones, the device errors and
+ * the three a readback poll can answer are understood; anything else is a bug in
+ * the check that called this. Of a
  * `Device` it reads the feature word and the first limit, which are the two the
  * checks below are about — and reading them *out of the buffer* is what makes
  * those checks about the replayer rather than about the mapping function they
@@ -1371,7 +1415,9 @@ function handle(index, generation) {
  * @param {Uint8Array} bytes A whole reply buffer, header included.
  * @returns {{ tag: string, sequence: bigint, features?: bigint,
  *             maxImage2d?: number, reason?: string, unsupported?: bigint,
- *             caps?: object, cause?: number } | undefined}
+ *             caps?: object, cause?: number, messages?: string[],
+ *             readback?: { index: number, generation: number },
+ *             data?: number[] } | undefined}
  */
 function decodeOneReply(bytes) {
   // The header is the magic and the version word; every reply then opens with
@@ -1446,6 +1492,36 @@ function decodeOneReply(bytes) {
         currentExtent,
       },
     };
+  }
+  /** A handle: an index and a generation packed into a `u64`. */
+  const readHandle = () => {
+    const bits = view.getBigUint64(at, true);
+    at += 8;
+    return {
+      index: Number(bits & 0xffff_ffffn),
+      generation: Number(bits >> 32n),
+    };
+  };
+  if (tag === 0x10) {
+    return { tag: 'ReadbackPending', sequence, readback: readHandle() };
+  }
+  if (tag === 0x11) {
+    const readback = readHandle();
+    const length = view.getUint32(at, true);
+    at += 4;
+    return {
+      tag: 'ReadbackReady',
+      sequence,
+      readback,
+      data: [...bytes.subarray(at, at + length)],
+    };
+  }
+  if (tag === 0x12) {
+    // `ReadbackFailed`: the handle, then the reason. Read whole, because the
+    // reason *is* the behaviour here — the point of this reply is that a caller
+    // learns why, rather than being told to poll again for ever.
+    const readback = readHandle();
+    return { tag: 'ReadbackFailed', sequence, readback, reason: string() };
   }
   if (tag === 0x20) {
     // `DeviceErrors`: a count, then that many length-prefixed messages. Read
@@ -1626,6 +1702,28 @@ async function main() {
   );
   const [deviceLocalBuffer, hostUploadBuffer, hostReadbackBuffer] = buffers;
   FROM_FIXTURE.createBuffer = deviceLocalBuffer;
+
+  // The readback family, from the fixture for the same reason: the corpus
+  // carries both `after` cases — a semaphore wait, which WebGPU has no way to
+  // honour, and the `None` that maps onto `mapAsync` — plus the poll and the
+  // destroy. Their handles and offsets are the Rust encoder's, so the checks
+  // below replay what really crosses rather than a literal written here.
+  const requestReadbacks = commands.filter(
+    (command) => command.name === 'RequestReadback'
+  );
+  const pollReadback = commands.find(
+    (command) => command.name === 'PollReadback'
+  );
+  const destroyReadback = commands.find(
+    (command) => command.name === 'DestroyReadback'
+  );
+  check(
+    requestReadbacks.length === 2 &&
+      pollReadback !== undefined &&
+      destroyReadback !== undefined,
+    `the committed stream carries the readback family (${requestReadbacks.length} requests)`
+  );
+  const [readbackAfterSemaphore, readbackImmediate] = requestReadbacks;
 
   // The image commands, from the fixture for the same reason again — and here
   // the corpus buys the most of any command family: three images covering every
@@ -3226,6 +3324,203 @@ async function main() {
         rest.messages[0].includes(String(over)) &&
         rest.messages[0].includes('dropped'),
       `and the next ask names the ${over} there was no room for (${JSON.stringify(rest?.messages)})`
+    );
+  }
+
+  // ---- a readback: the three answers a poll has ---------------------------
+  //
+  // THE CHECKS THAT WOULD HAVE CAUGHT THE HANG. Until `ReadbackFailed` existed, a
+  // `mapAsync` that rejected left the request filed `'mapping'` and every poll
+  // after it answered `Pending` — so `Device::poll_readback` told its caller
+  // "ask again next frame" for the rest of the process, and the caller, which
+  // has no deadline and no other channel, did. The reason reached `take_error`,
+  // which tells the engine its device is unwell and tells the readback nothing.
+  //
+  // So what is asserted below is not that the new reply encodes: it is that one
+  // ARRIVES, for every way a map can settle wrong, and that a poll after it
+  // still says failed rather than dropping back into the loop.
+  //
+  // The fixture's poll and destroy name a readback of their own, so each is
+  // re-aimed at the request the check actually made — a poll of somebody else's
+  // handle is its own case, and it is the last one here.
+  const readbackBuffer = {
+    ...deviceLocalBuffer,
+    memory: 'HostReadback',
+    usage: ['TRANSFER_DST'],
+  };
+  /** The fixture's request, aimed at a buffer the check created. */
+  const readbackOf = (buffer, size) => ({
+    ...readbackImmediate,
+    buffer,
+    offset: 0n,
+    size,
+  });
+  /** @param {{ index: number, generation: number }} readback */
+  const pollFor = (readback) => ({ ...pollReadback, readback });
+  const MAPPED = readbackImmediate.readback;
+  {
+    // The ordinary path first, so the failures below are a difference from
+    // something that works rather than the only behaviour observed.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(readbackBuffer, 50n));
+    const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
+    replayer.replay(frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 51n));
+    replayer.replay(frameOf(pollFor(MAPPED), 52n));
+    checkEqual(
+      decodeOneReply(replayer.replies),
+      { tag: 'ReadbackPending', sequence: 52n, readback: MAPPED },
+      'a poll before the map resolves answers Pending'
+    );
+    await settle();
+    replayer.clear();
+    replayer.replay(frameOf(pollFor(MAPPED), 53n));
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'ReadbackReady' &&
+        answered.data?.length === 16 &&
+        answered.data[1] === 1,
+      `and once it has, the mapped bytes cross (${shown(answered)}, ${answered?.data?.length} bytes)`
+    );
+    check(
+      buffer?.maps.length === 1 &&
+        buffer.maps[0].offset === 0 &&
+        buffer.maps[0].size === 16,
+      `the map asked for the range the request named (${JSON.stringify(buffer?.maps)})`
+    );
+    replayer.replay(frameOf({ ...destroyReadback, readback: MAPPED }, 54n));
+    check(
+      buffer?.unmaps === 1,
+      `and the destroy unmaps it (${buffer?.unmaps})`
+    );
+  }
+  {
+    // **A `mapAsync` that rejects.** A device lost mid-map, a buffer destroyed
+    // before the map resolved, a range the browser will not map: WebGPU reports
+    // all three by rejecting the promise, so this one rejection stands for the
+    // set. What must reach wasm is that the readback is over.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(readbackBuffer, 55n));
+    const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
+    buffer.mapRejects = new Error('Device was lost');
+    replayer.replay(frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 56n));
+    await settle();
+    replayer.clear();
+    replayer.replay(frameOf(pollFor(MAPPED), 57n));
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'ReadbackFailed' &&
+        answered.sequence === 57n &&
+        String(answered.reason).includes('Device was lost'),
+      `a rejected map answers the poll with the failure and the browser's words (${shown(answered)})`
+    );
+    checkEqual(
+      answered?.readback,
+      MAPPED,
+      'and names the readback it was about'
+    );
+    // **And it stays failed.** Answering `Pending` on the second poll would put
+    // the caller straight back in the loop this reply exists to end.
+    replayer.clear();
+    replayer.replay(frameOf(pollFor(MAPPED), 58n));
+    check(
+      decodeOneReply(replayer.replies)?.tag === 'ReadbackFailed',
+      'and a later poll says failed again rather than dropping back to Pending'
+    );
+    // The error queue still hears about it: the engine's health check and the
+    // one caller waiting on these bytes are different readers asking different
+    // questions, and the day this reply landed the queue must not have gone
+    // quiet.
+    check(
+      String(replayer.takeError()).includes('Device was lost'),
+      'and the device error queue still carries the reason too'
+    );
+  }
+  {
+    // **A `getMappedRange` that throws after the map resolved.** The buffer went
+    // away between the two turns of the event loop, which is a different moment
+    // from a rejected map and the same outcome for the request — so it must not
+    // be the one path that leaves the entry `'mapping'`.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(readbackBuffer, 59n));
+    const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
+    buffer.rangeThrows = new Error('buffer is destroyed');
+    replayer.replay(frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 60n));
+    await settle();
+    replayer.clear();
+    replayer.replay(frameOf(pollFor(MAPPED), 61n));
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'ReadbackFailed' &&
+        String(answered.reason).includes('buffer is destroyed'),
+      `a mapped range that throws is a failed readback, not a stuck one (${shown(answered)})`
+    );
+  }
+  {
+    // **The three requests this replayer refuses before the browser is asked.**
+    // Each used to record an error and file nothing, so the poll that followed
+    // found no entry and answered `Pending` — the same dead end by another
+    // route. Every one of them now settles the request it names.
+    const refusals = [
+      {
+        what: 'a request before any device opened',
+        readback: MAPPED,
+        said: 'before any device opened',
+        async build() {
+          const replayer = new Replayer({ gpu: stubGpu(async () => null) });
+          replayer.replay(
+            frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 62n)
+          );
+          return replayer;
+        },
+      },
+      {
+        what: "a request naming an 'after' semaphore",
+        readback: readbackAfterSemaphore.readback,
+        said: "'after' semaphore",
+        async build() {
+          const { replayer } = await readyWithDevice();
+          replayer.replay(frameOf(readbackBuffer, 63n));
+          replayer.replay(frameOf(readbackAfterSemaphore, 64n));
+          return replayer;
+        },
+      },
+      {
+        what: 'a request reading a buffer nothing created',
+        readback: MAPPED,
+        said: 'no live buffer under',
+        async build() {
+          const { replayer } = await readyWithDevice();
+          replayer.replay(frameOf(readbackOf(handle(200, 1), 16n), 65n));
+          return replayer;
+        },
+      },
+    ];
+    for (const { what, readback, said, build } of refusals) {
+      const replayer = await build();
+      replayer.clear();
+      replayer.replay(frameOf(pollFor(readback), 66n));
+      const answered = decodeOneReply(replayer.replies);
+      check(
+        answered?.tag === 'ReadbackFailed' &&
+          String(answered.reason).includes(said),
+        `${what} answers its poll with the refusal (${shown(answered)})`
+      );
+    }
+  }
+  {
+    // **A poll of a handle nothing was requested under.** It cannot become
+    // ready — there is nothing to become ready — so `Pending` is an instruction
+    // to wait for something that does not exist. The sequence is registered on
+    // the far side either way and must be answered, which is why this is a
+    // failure rather than silence. The fixture's own poll names exactly such a
+    // handle, so it is replayed here unchanged.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(pollReadback, 67n));
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'ReadbackFailed' &&
+        String(answered.reason).includes('no in-flight readback under'),
+      `a poll of an unknown readback is answered, and answered as failed (${shown(answered)})`
     );
   }
 

@@ -136,6 +136,17 @@ enum ReadbackTracker {
     Pending,
     /// The bytes are in.
     Ready(Vec<u8>),
+    /// The readback failed and the bytes are never coming, with the reason the
+    /// replayer gave.
+    ///
+    /// **Terminal, like [`Ready`](Self::Ready).** A failed readback is not
+    /// re-polled: the map settled, and it settled the wrong way, so re-issuing
+    /// would ask the replayer about a request it has already answered. Every
+    /// poll from here on reports the same failure until
+    /// [`destroy_readback`](Device::destroy_readback) drops it — which is what
+    /// `poll_readback`'s "polling again after `Ready` yields the same bytes"
+    /// looks like on this side of the answer.
+    Failed(String),
 }
 
 impl ReadbackTracker {
@@ -150,6 +161,7 @@ impl ReadbackTracker {
         *self = match reply {
             Reply::ReadbackReady { data, .. } => Self::Ready(data.clone()),
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed(reason.clone()),
             // A reply of another shape naming this poll is a replayer bug; drop
             // to `Pending` so the next poll re-issues rather than reporting a
             // readiness that never comes.
@@ -411,6 +423,14 @@ impl Device for WebGpuDevice {
                 out.copy_from_slice(bytes);
                 Ok(ReadbackState::Ready)
             }
+            // The map settled the wrong way. `ReadbackState` has no third
+            // variant — `crcbl_hal::readback` says why: a `Failed` state would
+            // drop the reason, which for a device lost or a map rejected is the
+            // only useful part — so this is the `Err` arm `poll_readback`'s own
+            // docs name, and it is what keeps a caller from polling for ever.
+            ReadbackTracker::Failed(reason) => Err(HalError::DeviceLost(format!(
+                "WebGPU readback failed: {reason}"
+            ))),
             // A poll is already out; do not issue a second for the same sequence.
             ReadbackTracker::Waiting(_) => Ok(ReadbackState::Pending),
             // Nothing outstanding: ask again, and remember the sequence so the

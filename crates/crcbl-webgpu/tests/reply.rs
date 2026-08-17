@@ -16,7 +16,7 @@ mod replies;
 
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceType, Features, Format,
-    Limits, PresentMode, SurfaceCaps,
+    Limits, PresentMode, ReadbackHandle, SurfaceCaps,
 };
 use crcbl_webgpu::reply::SurfaceCapsFailure;
 use crcbl_webgpu::{DecodeError, Reply, ReplyReader, ReplyWriter, decode_replies, tag};
@@ -126,9 +126,9 @@ fn every_reply_has_its_own_name() {
     names.dedup();
     // The corpus holds two of several shapes — Adapters, NoAdapters, Devices,
     // DeviceFaileds, ReadbackReadys, QueryResults, SurfaceCapsFaileds — and
-    // three SurfaceCaps and three DeviceErrors, so the distinct-name count is
-    // what the writer has methods for.
-    assert_eq!(names.len(), 10);
+    // three SurfaceCaps, three DeviceErrors and three ReadbackFaileds, so the
+    // distinct-name count is what the writer has methods for.
+    assert_eq!(names.len(), 11);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -1170,6 +1170,92 @@ fn a_device_error_list_past_the_cap_is_refused_by_the_reader() {
         Err(DecodeError::InvalidLength {
             field: "DeviceErrors::messages",
             len: count,
+        }),
+    );
+}
+
+// ── A readback that failed: the same cap, for the same reason ────────────────
+
+/// **An over-long reason is truncated, never refused and never a panic.**
+///
+/// [`ReplyWriter::device_errors`]'s argument all over again — text another
+/// vendor's runtime wrote, of a length nobody here chose — and the stakes are
+/// higher rather than lower: this is the only reply that tells a caller its
+/// readback is never completing, so a writer that asserted on a long
+/// `DOMException` would replace an endless poll loop with an `unreachable`.
+///
+/// The input is built here and the expectation lives in the shared corpus, for
+/// [`a_device_error_past_the_cap_is_truncated_at_a_char_boundary`]'s reason:
+/// `web/tools/reply-encode.mjs` is handed the same untruncated text and has to
+/// arrive at the same bytes, which is what pins the cut across the two
+/// languages.
+#[test]
+fn a_readback_failure_reason_past_the_cap_is_truncated_at_a_char_boundary() {
+    let long = replies::WIDE_CHAR
+        .to_string()
+        .repeat(tag::MAX_DEVICE_ERROR_BYTES);
+    assert!(
+        long.len() > tag::MAX_DEVICE_ERROR_BYTES,
+        "the input has to be past the cap for this to check anything"
+    );
+
+    let mut replies = ReplyWriter::new();
+    replies.readback_failed(13, handle(3, 4), &long);
+
+    let decoded = decode_replies(replies.bytes()).expect("a truncated reason still decodes");
+    assert_eq!(
+        decoded,
+        vec![(
+            13,
+            Reply::ReadbackFailed {
+                readback: handle(3, 4),
+                reason: replies::truncated_message(),
+            }
+        )],
+        "the wire carries the cut prefix and the marker",
+    );
+}
+
+/// An empty reason is a reply, not a short buffer: a browser that rejected
+/// without saying why still has to stop the caller polling.
+#[test]
+fn a_readback_failure_with_no_reason_still_decodes_as_a_failure() {
+    let mut replies = ReplyWriter::new();
+    replies.readback_failed(2, handle(5, 6), "");
+    assert_eq!(
+        decode_replies(replies.bytes()),
+        Ok(vec![(
+            2,
+            Reply::ReadbackFailed {
+                readback: handle(5, 6),
+                reason: String::new(),
+            }
+        )]),
+    );
+}
+
+/// A reply whose reason is past the cap is refused by the reader, at the reply's
+/// own number rather than at the format-wide field cap — the reader enforcing
+/// what both writers keep to, which is what makes it the contract.
+#[test]
+fn a_readback_failure_reason_past_the_cap_is_refused_by_the_reader() {
+    let over = tag::MAX_DEVICE_ERROR_BYTES + 1;
+    let mut buffer = header();
+    buffer.push(tag::READBACK_FAILED_REPLY_TAG);
+    buffer.extend_from_slice(&17u64.to_le_bytes());
+    let readback: ReadbackHandle = handle(7, 8);
+    buffer.extend_from_slice(&readback.to_bits().to_le_bytes());
+    buffer.extend_from_slice(
+        &u32::try_from(over)
+            .expect("the cap fits a u32")
+            .to_le_bytes(),
+    );
+    buffer.resize(buffer.len() + over, b'x');
+    assert_eq!(
+        decode_replies(&buffer),
+        Err(DecodeError::InvalidLength {
+            field: "ReadbackFailed::reason",
+            len: u32::try_from(over).expect("the cap fits a u32"),
         }),
     );
 }

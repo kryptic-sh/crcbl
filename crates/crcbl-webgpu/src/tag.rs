@@ -135,8 +135,20 @@ pub const MAX_ELEMENT_COUNT: usize = 1 << 16;
 /// payload still has room for the replies around it.
 pub const MAX_REPLY_BYTES: usize = 4 * MAX_FIELD_BYTES;
 
-/// The most bytes one device-error message may occupy on the wire, marker
+/// The most bytes one message the browser wrote may occupy on the wire, marker
 /// included.
+///
+/// **Every diagnostic string on this stream, not only a device error.**
+/// [`Reply::DeviceErrors`](crate::Reply::DeviceErrors) is what it was chosen
+/// for and [`Reply::ReadbackFailed`](crate::Reply::ReadbackFailed) shares it,
+/// because it is one decision and not two look-alikes: both fields carry a
+/// `GPUError` or a rejected promise's `DOMException` — another vendor's prose,
+/// of a length nobody on this side chose — and a change to how long one may be
+/// is a change to how long the other may be. The two replies the seam composes
+/// its own reasons for, [`Reply::DeviceFailed`](crate::Reply::DeviceFailed) and
+/// [`Reply::SurfaceCapsFailed`](crate::Reply::SurfaceCapsFailed), are bounded by
+/// [`MAX_FIELD_BYTES`] like any other field: their text is written here, so its
+/// length is this crate's to keep sane.
 ///
 /// **A message past this is truncated, never split and never refused.** A
 /// browser's validation error is prose for a person — its head names the call
@@ -642,6 +654,13 @@ pub const SURFACE_CAPS_FAILED_REPLY_TAG: u8 = 0x05;
 pub const READBACK_PENDING_REPLY_TAG: u8 = 0x10;
 /// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady).
 pub const READBACK_READY_REPLY_TAG: u8 = 0x11;
+/// [`Reply::ReadbackFailed`](crate::Reply::ReadbackFailed).
+///
+/// A *new tag* rather than a new [`REPLY_VERSION`], the distinction that
+/// constant's docs draw: an older decoder meeting this byte answers
+/// [`DecodeError::UnknownTag`](crate::DecodeError::UnknownTag) naming it, and
+/// every reply it does know still decodes.
+pub const READBACK_FAILED_REPLY_TAG: u8 = 0x12;
 /// [`Reply::QueryResults`](crate::Reply::QueryResults).
 pub const QUERY_RESULTS_REPLY_TAG: u8 = 0x18;
 /// [`Reply::DeviceErrors`](crate::Reply::DeviceErrors).
@@ -2064,7 +2083,7 @@ mod tests {
 
     /// Every reply tag this slice defines, with the family its name claims.
     /// Spelled out for the reason [`TAGS`] is.
-    const REPLY_TAGS: [(&str, u8, u8); 9] = [
+    const REPLY_TAGS: [(&str, u8, u8); 10] = [
         ("Adapter", ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         ("NoAdapter", NO_ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         ("Device", DEVICE_REPLY_TAG, REPLY_FAMILY_INSTANCE),
@@ -2087,6 +2106,11 @@ mod tests {
         (
             "ReadbackReady",
             READBACK_READY_REPLY_TAG,
+            REPLY_FAMILY_READBACK,
+        ),
+        (
+            "ReadbackFailed",
+            READBACK_FAILED_REPLY_TAG,
             REPLY_FAMILY_READBACK,
         ),
         ("QueryResults", QUERY_RESULTS_REPLY_TAG, REPLY_FAMILY_QUERY),

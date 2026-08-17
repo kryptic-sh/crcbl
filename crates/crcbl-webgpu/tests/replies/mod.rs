@@ -187,6 +187,41 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                 data: growth_payload(),
             },
         ),
+        // The third answer a poll has, and the one that stops a caller spinning:
+        // the map settled the wrong way and no bytes are coming. The reason is a
+        // browser's own prose, so it carries the wide character every string in
+        // this corpus does.
+        (
+            71,
+            Reply::ReadbackFailed {
+                readback: handle(63, 64),
+                reason: "mapAsync rejected: device was lost — ✱".into(),
+            },
+        ),
+        // A rejection the browser gave no message for. The reason and the handle
+        // are independent halves, as `Reply::DeviceFailed`'s two are, and an
+        // empty one still has to encode as a refusal rather than as a short
+        // buffer.
+        (
+            73,
+            Reply::ReadbackFailed {
+                readback: handle(65, 66),
+                reason: String::new(),
+            },
+        ),
+        // **A reason that did not fit, as the wire carries it.** The same cut as
+        // the device-error message below — the cap, less the marker, walked back
+        // to the start of the character straddling it — because it is the same
+        // rule and not a second one. `reply-encode.mjs` is handed the
+        // *untruncated* text here too, so a JavaScript writer that truncated one
+        // field and not the other is a byte difference.
+        (
+            79,
+            Reply::ReadbackFailed {
+                readback: handle(67, 68),
+                reason: truncated_message(),
+            },
+        ),
         (
             0x0000_0001_0000_002A,
             Reply::QueryResults {
@@ -491,6 +526,9 @@ pub fn encode_reply(replies: &mut ReplyWriter, sequence: u64, reply: &Reply) {
         Reply::ReadbackPending { readback } => replies.readback_pending(sequence, *readback),
         Reply::ReadbackReady { readback, data } => {
             replies.readback_ready(sequence, *readback, data);
+        }
+        Reply::ReadbackFailed { readback, reason } => {
+            replies.readback_failed(sequence, *readback, reason);
         }
         Reply::QueryResults {
             set,

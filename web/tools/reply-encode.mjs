@@ -253,6 +253,22 @@ function encodeCanonicalReplies(replies) {
   );
   replies.readbackReady(23n, handle(55, 56), new Uint8Array());
   replies.readbackReady(31n, handle(61, 62), growthPayload());
+  // The third answer a poll has: the map settled the wrong way, so no bytes are
+  // coming and the far side stops asking. The reason is a browser's own prose —
+  // hence the wide character — and it is independent of the handle, which is
+  // what the empty one below says.
+  replies.readbackFailed(
+    71n,
+    handle(63, 64),
+    'mapAsync rejected: device was lost — ✱'
+  );
+  replies.readbackFailed(73n, handle(65, 66), '');
+  // **The untruncated reason**, handed over whole exactly as the over-long
+  // device error below is: `replies::every_reply` holds the cut form, so
+  // arriving at the same bytes is this writer proving it cuts a readback's
+  // reason where it cuts a device error — one rule, not two that resemble each
+  // other.
+  replies.readbackFailed(79n, handle(67, 68), overLongMessage());
   replies.queryResults(0x0000_0001_0000_002an, handle(57, 58), 4, [
     0xffff_ffff_ffff_ffffn,
     0n,
@@ -391,18 +407,18 @@ function encodeCanonicalReplies(replies) {
   // of the character that straddles it. Every character here is three bytes
   // wide, so a writer that cut at the budget itself would split one and produce
   // a field that is not UTF-8.
-  replies.deviceErrors(67n, [overLongDeviceError()]);
+  replies.deviceErrors(67n, [overLongMessage()]);
 }
 
 /**
- * A device-error message past `MAX_DEVICE_ERROR_BYTES`, made of one repeated
- * three-byte character.
+ * A message past `MAX_DEVICE_ERROR_BYTES`, made of one repeated three-byte
+ * character.
  *
  * The rule is duplicated from `replies::WIDE_CHAR` rather than shared, for
  * `growthPayload`'s reason: an input derived from the expectation would agree
  * with it by construction, and what this pins is the *cut*.
  */
-function overLongDeviceError() {
+function overLongMessage() {
   return '✱'.repeat(MAX_DEVICE_ERROR_BYTES);
 }
 
@@ -787,13 +803,14 @@ async function main() {
     }
   );
 
-  // ---- the device errors are the one payload that is never refused --------
+  // ---- the browser's own messages are never refused -----------------------
   // Everything above this line refuses what the reader would refuse, because
   // every one of those payloads is a caller's mistake. A device-error message is
   // not: it is a browser's own prose about a device that is failing, its length
   // is nobody's choice, and a throw here would lose the report a page with
   // nothing on screen has to go on. So the writer cuts, and says how much of a
-  // flood it carried.
+  // flood it carried. A `ReadbackFailed` reason is the same thing and is checked
+  // below the flood, because it is the same rule.
   {
     const replies = new ReplyWriter();
     const written = replies.deviceErrors(1n, [
@@ -835,6 +852,34 @@ async function main() {
     check(
       view.getUint32(10 + 9, true) === written,
       'and the count on the wire is the number it reported'
+    );
+  }
+  {
+    // **A rejection message is cut, not thrown over**, and this is the reply
+    // where a throw would be worst: it is the only thing that tells a caller its
+    // readback is never completing, so a writer that refused an over-long reason
+    // would leave exactly the loop this reply exists to end. A `DOMException`'s
+    // message is another vendor's prose, so no cap here is one a caller chose.
+    const replies = new ReplyWriter();
+    let thrown = null;
+    try {
+      replies.readbackFailed(
+        1n,
+        handle(1, 1),
+        'x'.repeat(MAX_DEVICE_ERROR_BYTES * 2)
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    // Past the header, the tag, the sequence, the handle and the length prefix.
+    const encoded = new TextDecoder().decode(
+      replies.bytes.subarray(10 + 9 + 8 + 4)
+    );
+    check(
+      thrown === null &&
+        encoded.endsWith(TRUNCATION_MARKER) &&
+        new TextEncoder().encode(encoded).length === MAX_DEVICE_ERROR_BYTES,
+      `a readback reason twice the cap is cut rather than thrown over (${String(thrown)}, ${encoded.length} chars)`
     );
   }
 

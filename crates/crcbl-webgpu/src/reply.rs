@@ -54,6 +54,7 @@
 //! | --- | --- |
 //! | a handle and nothing else | [`Reply::ReadbackPending`] |
 //! | a handle and an unbounded byte payload | [`Reply::ReadbackReady`] |
+//! | a handle and a browser's own message | [`Reply::ReadbackFailed`] |
 //! | a flat record of scalars, strings, an enum code and a bitflags word | [`Reply::Adapter`] |
 //! | a string alone | [`Reply::NoAdapter`] |
 //! | a counted array of fixed-size elements | [`Reply::QueryResults`] |
@@ -83,6 +84,16 @@
 //! than names. Its caps are [`tag::MAX_DEVICE_ERRORS`] and
 //! [`tag::MAX_DEVICE_ERROR_BYTES`], and both are enforced by writer and reader
 //! alike.
+//!
+//! [`Reply::ReadbackFailed`] is the sixth, and brought no shape either — a
+//! handle and a string. What it brought is the third *outcome* of a poll, and
+//! the reply set's whole reason for existing turned around: without it a
+//! readback whose `mapAsync` rejected is answered
+//! [`Reply::ReadbackPending`] for ever, so the caller spins for the rest of the
+//! process on an answer that is never coming. Its reason shares
+//! [`Reply::DeviceErrors`]'s cap and truncation — see [`tag::MAX_DEVICE_ERROR_BYTES`]
+//! — because both fields carry the same thing: text another vendor's runtime
+//! wrote.
 //!
 //! [`Reply::SurfaceCapsFailed`] is the fourth, and brought no shape at all — a
 //! string and an enum code is [`Reply::DeviceFailed`] again. What it brought is
@@ -436,9 +447,9 @@ pub enum SurfaceCapsFailure {
     Backend,
 }
 
-// ── Device errors ─────────────────────────────────────────────────────────────
+// ── Messages the browser wrote ────────────────────────────────────────────────
 
-/// What replaces the tail of a device-error message that did not fit
+/// What replaces the tail of a message that did not fit
 /// [`tag::MAX_DEVICE_ERROR_BYTES`].
 ///
 /// **So that a shortened message reads as shortened.** A validation error that
@@ -451,8 +462,13 @@ pub enum SurfaceCapsFailure {
 /// the fixture pins it to.
 pub const TRUNCATION_MARKER: &str = "… [truncated]";
 
-/// One device-error message, cut to [`tag::MAX_DEVICE_ERROR_BYTES`] if it is
-/// past it.
+/// One message the browser wrote, cut to [`tag::MAX_DEVICE_ERROR_BYTES`] if it
+/// is past it.
+///
+/// Shared by [`Reply::DeviceErrors`] and [`Reply::ReadbackFailed`], which is one
+/// rule and not two: both fields carry another runtime's prose, so the cap, the
+/// marker and the boundary walk are a single decision — see
+/// [`tag::MAX_DEVICE_ERROR_BYTES`].
 ///
 /// **Cut at a `char` boundary**, not at the byte: the field is decoded with
 /// [`String::from_utf8`] and a slice through the middle of a multi-byte
@@ -462,7 +478,7 @@ pub const TRUNCATION_MARKER: &str = "… [truncated]";
 /// multi-byte characters are ordinary here rather than exotic.
 ///
 /// Borrowed unless it was cut, so the common case allocates nothing.
-fn device_error_field(message: &str) -> std::borrow::Cow<'_, str> {
+fn message_field(message: &str) -> std::borrow::Cow<'_, str> {
     if message.len() <= tag::MAX_DEVICE_ERROR_BYTES {
         return std::borrow::Cow::Borrowed(message);
     }
@@ -605,6 +621,39 @@ pub enum Reply {
         /// The bytes read back.
         data: Vec<u8>,
     },
+    /// [`poll_readback`](crcbl_hal::Device::poll_readback) answering neither
+    /// state: this readback will never produce bytes, and here is why.
+    ///
+    /// **The reply that stops a poll loop.** [`ReadbackState`](crcbl_hal::ReadbackState)
+    /// has two variants and its docs say why — a `Failed` state would throw away
+    /// the reason, so failure is an `Err(HalError)` out of `poll_readback`
+    /// instead. But an `Err` needs something to build it from, and without this
+    /// reply a readback whose map rejected is answered [`Reply::ReadbackPending`]
+    /// every frame for ever: the caller polls, is told "not yet", and spins for
+    /// the rest of the process. [`WebGpuDevice`](crate::hal::WebGpuDevice) turns
+    /// this into [`HalError::DeviceLost`](crcbl_hal::HalError::DeviceLost), which
+    /// is the arm `poll_readback`'s own `# Errors` section names for work that
+    /// failed.
+    ///
+    /// **What reaches it**, on `web/engine/gpu-replay.js`: a rejected
+    /// `mapAsync` — a device lost mid-map, a buffer destroyed before the map
+    /// resolved, a range the browser refuses — a `getMappedRange` that throws
+    /// once it has resolved, and the three requests the replayer refuses before
+    /// it ever asks the browser (no device open, an `after` semaphore WebGPU
+    /// cannot wait on, a buffer handle naming nothing live). Every one of them
+    /// used to leave the request filed as still mapping.
+    ///
+    /// **The reason is still only text.** It comes from another vendor's
+    /// runtime by way of a replayer, so it is for a log or a banner and never a
+    /// code to branch on — and it may have been cut at
+    /// [`tag::MAX_DEVICE_ERROR_BYTES`] with [`TRUNCATION_MARKER`] in place of
+    /// the tail, exactly as a [`Reply::DeviceErrors`] message may.
+    ReadbackFailed {
+        /// Which readback.
+        readback: ReadbackHandle,
+        /// What went wrong, as the browser or the replayer put it.
+        reason: String,
+    },
     /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps): what a
     /// canvas surface on this instance will accept.
     ///
@@ -715,6 +764,7 @@ impl Reply {
             Self::DeviceErrors { .. } => "DeviceErrors",
             Self::ReadbackPending { .. } => "ReadbackPending",
             Self::ReadbackReady { .. } => "ReadbackReady",
+            Self::ReadbackFailed { .. } => "ReadbackFailed",
             Self::QueryResults { .. } => "QueryResults",
         }
     }
@@ -830,10 +880,11 @@ impl ReplyWriter {
 
     /// [`Reply::DeviceErrors`], returning how many messages it carried.
     ///
-    /// **The one method here that cannot panic on an over-large argument**, and
-    /// deliberately so — the type's own `# Panics` note is about a caller that
-    /// hands the writer something the reader would refuse, and neither half of
-    /// this reply's payload is such a thing. A message past
+    /// **Cannot panic on an over-large argument**, which it shares only with
+    /// [`readback_failed`](Self::readback_failed) — the type's own `# Panics`
+    /// note is about a caller that hands the writer something the reader would
+    /// refuse, and neither half of this reply's payload is such a thing. A
+    /// message past
     /// [`tag::MAX_DEVICE_ERROR_BYTES`] is truncated (see [`TRUNCATION_MARKER`]),
     /// and past [`tag::MAX_DEVICE_ERRORS`] messages only the first
     /// `MAX_DEVICE_ERRORS` are written. Both are the point of the reply rather
@@ -852,7 +903,7 @@ impl ReplyWriter {
         self.open(tag::DEVICE_ERRORS_REPLY_TAG, sequence);
         self.bytes.put_count(written);
         for message in &messages[..written] {
-            self.bytes.put_bytes(device_error_field(message).as_bytes());
+            self.bytes.put_bytes(message_field(message).as_bytes());
         }
         written
     }
@@ -868,6 +919,22 @@ impl ReplyWriter {
         self.open(tag::READBACK_READY_REPLY_TAG, sequence);
         self.bytes.put_handle(readback);
         self.bytes.put_bytes(data);
+    }
+
+    /// [`Reply::ReadbackFailed`].
+    ///
+    /// **Cannot panic on an over-long reason**, which is
+    /// [`device_errors`](Self::device_errors)'s exemption from the type's
+    /// `# Panics` note and for the same argument: the text is a browser's, so
+    /// its length is nobody's choice here, and the reply that says why a
+    /// readback will never complete is the last thing that may take the module
+    /// down — on wasm a panic is `unreachable`, which would turn the fix for a
+    /// hang into a crash. A reason past [`tag::MAX_DEVICE_ERROR_BYTES`] is cut
+    /// with [`TRUNCATION_MARKER`] in place of the tail.
+    pub fn readback_failed(&mut self, sequence: u64, readback: ReadbackHandle, reason: &str) {
+        self.open(tag::READBACK_FAILED_REPLY_TAG, sequence);
+        self.bytes.put_handle(readback);
+        self.bytes.put_bytes(message_field(reason).as_bytes());
     }
 
     /// [`Reply::QueryResults`].
@@ -1020,6 +1087,23 @@ impl<'a> ReplyReader<'a> {
                 let readback = r.read_handle("ReadbackReady::readback")?;
                 let data = r.read_field("ReadbackReady::data")?.to_vec();
                 Reply::ReadbackReady { readback, data }
+            }
+            tag::READBACK_FAILED_REPLY_TAG => {
+                let readback = r.read_handle("ReadbackFailed::readback")?;
+                // The reply's own cap, enforced here rather than left to
+                // `read_string`'s format-wide `MAX_FIELD_BYTES` — the reason
+                // [`Reply::DeviceErrors`]'s messages are checked against it
+                // below: refusing at the number both writers cut to is what
+                // makes it the contract instead of a convention they happen to
+                // keep.
+                let reason = r.read_string("ReadbackFailed::reason")?;
+                if reason.len() > tag::MAX_DEVICE_ERROR_BYTES {
+                    return Err(DecodeError::InvalidLength {
+                        field: "ReadbackFailed::reason",
+                        len: reason.len() as u32,
+                    });
+                }
+                Reply::ReadbackFailed { readback, reason }
             }
             tag::QUERY_RESULTS_REPLY_TAG => {
                 let set = r.read_handle("QueryResults::set")?;

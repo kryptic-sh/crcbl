@@ -523,6 +523,74 @@ fn a_readback_polls_ready_on_a_readback_reply() {
     assert_eq!(out, [1, 2, 3, 4], "the bytes reach the caller's slice");
 }
 
+/// **The check that would have caught the hang.** Before
+/// [`Reply::ReadbackFailed`](crate::Reply::ReadbackFailed) existed, a rejected
+/// `mapAsync` left the replayer's request filed as still mapping, so every poll
+/// from here to the end of the process answered
+/// [`Pending`](ReadbackState::Pending) — a caller with no deadline spins for
+/// ever on bytes that are never coming. What is asserted is the stop: the poll
+/// returns an `Err`, the reason the browser gave is inside it, and it stays an
+/// `Err` rather than dropping back into the poll loop.
+#[test]
+fn a_failed_readback_reports_the_reason_rather_than_polling_for_ever() {
+    let (channel, device) = device_on_fresh_channel();
+
+    let source: BufferHandle = Handle::from_bits((1 << 32) | 1).expect("a real handle");
+    let desc = ReadbackDesc {
+        label: None,
+        buffer: source,
+        offset: 0,
+        size: 4,
+        after: None,
+    };
+    let readback = device.request_readback(&desc).expect("a readback handle");
+
+    let mut out = [0u8; 4];
+    assert_eq!(
+        device.poll_readback(readback, &mut out).expect("poll"),
+        ReadbackState::Pending,
+    );
+
+    // request_readback is sequence 0 (not awaited), the poll is sequence 1.
+    feed(&channel, |w| {
+        w.readback_failed(1, readback, "mapAsync rejected: device was lost");
+    });
+    let error = device
+        .poll_readback(readback, &mut out)
+        .expect_err("a readback whose map rejected is an error, not another Pending");
+    let HalError::DeviceLost(reason) = &error else {
+        panic!("a failed readback is DeviceLost, the arm poll_readback documents: {error:?}");
+    };
+    assert!(
+        reason.contains("device was lost"),
+        "the browser's own words reach the caller: {reason}"
+    );
+    assert_eq!(
+        out, [0u8; 4],
+        "a failed poll leaves the caller's slice alone"
+    );
+
+    // **And it stays failed.** A second poll re-issuing the command would put
+    // the caller straight back in the loop this reply exists to end — and would
+    // ask the replayer about a request it has already answered.
+    let again = device
+        .poll_readback(readback, &mut out)
+        .expect_err("polling a failed readback reports the same failure");
+    assert!(matches!(again, HalError::DeviceLost(_)), "{again:?}");
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.name() == "PollReadback")
+            .count(),
+        1,
+        "the failure is terminal, so no further poll goes on the stream",
+    );
+}
+
 // ── take_error: the browser's out-of-band failures ─────────────────────────
 
 /// **The check the stub could not fail.** `take_error` answered `None`

@@ -2650,16 +2650,20 @@ export class Replayer {
   #commandBuffers = new HandleTable();
   /**
    * In-flight readbacks, filed by {@link Replayer#requestReadback} at the handle
-   * wasm allocated. Each entry is `{ buffer, offset, size, state, bytes }`:
-   * `state` is `'mapping'` until `mapAsync` resolves and `'ready'` after, and
-   * `bytes` is the copied-out `Uint8Array` a `PollReadback` answers with.
+   * wasm allocated. Each entry is
+   * `{ buffer, offset, size, state, bytes, reason }`: `state` is `'mapping'`
+   * until `mapAsync` settles and `'ready'` or `'failed'` after, `bytes` is the
+   * copied-out `Uint8Array` a `PollReadback` answers with, and `reason` is the
+   * text it answers with instead when the map settled the wrong way. A request
+   * this replayer refused outright is filed `'failed'` with no `buffer` at all —
+   * the browser was never asked.
    *
    * **Not the persistent-object tables' shape**, which is the whole reason it is
    * separate: those hold a browser object for the frames between its create and
    * its destroy, and this holds transient poll state that a `mapAsync` promise
    * mutates a turn of the event loop later.
    *
-   * @type {HandleTable<{ buffer: GPUBuffer, offset: number, size: number, state: 'mapping' | 'ready', bytes: Uint8Array | null }>}
+   * @type {HandleTable<{ buffer: GPUBuffer | null, offset: number, size: number, state: 'mapping' | 'ready' | 'failed', bytes: Uint8Array | null, reason: string | null }>}
    */
   #readbacks = new HandleTable();
   /**
@@ -6226,12 +6230,21 @@ export class Replayer {
    * `unmap`/destroy invalidates, so a poll a frame later would read a detached
    * buffer.
    *
-   * REFUSALS WEBGPU CANNOT EXPRESS, each into the error queue: a request before
-   * any device opened, a `Some` `after` (a semaphore wait — WebGPU's `mapAsync`
-   * is exactly "everything submitted so far", the `None` case, and it has no way
-   * to wait on a value), and an unresolvable buffer. A `mapAsync` that rejects
-   * is recorded there too — this slice has no readback-failed reply, so the
-   * request stays `'mapping'` and the reason surfaces through `take_error`.
+   * REFUSALS WEBGPU CANNOT EXPRESS, each into the error queue AND onto the
+   * request itself: a request before any device opened, a `Some` `after` (a
+   * semaphore wait — WebGPU's `mapAsync` is exactly "everything submitted so
+   * far", the `None` case, and it has no way to wait on a value), and an
+   * unresolvable buffer. A `mapAsync` that rejects — a device lost mid-map, a
+   * buffer destroyed before it resolved, a range the browser will not map — and
+   * a `getMappedRange` that throws after it resolved land there too.
+   *
+   * BOTH DESTINATIONS, AND THEY ANSWER DIFFERENT QUESTIONS. The error queue is
+   * what `Device::take_error` drains, which tells the engine its device is
+   * unwell; {@link Replayer#pollReadback} is what tells the one caller waiting
+   * on *these bytes* that they are never arriving. Recording only the first is
+   * what used to leave a request filed `'mapping'` for ever, with
+   * `poll_readback` answering `Pending` every frame to a caller that had no
+   * other way to stop.
    *
    * @param {bigint} sequence
    * @param {object} command
@@ -6239,11 +6252,15 @@ export class Replayer {
   #requestReadback(sequence, command) {
     const named = `readback ${command.readback.index}.${command.readback.generation} (command ${sequence})`;
     if (!this.#device) {
-      this.#deviceError(`${named} was requested before any device opened`);
+      this.#failReadback(
+        command.readback,
+        `${named} was requested before any device opened`
+      );
       return;
     }
     if (command.after !== null) {
-      this.#deviceError(
+      this.#failReadback(
+        command.readback,
         `${named} names an 'after' semaphore, which WebGPU has no way to wait on — ` +
           'its mapAsync observes everything submitted so far and nothing finer'
       );
@@ -6251,7 +6268,8 @@ export class Replayer {
     }
     const buffer = this.#buffers.get(command.buffer);
     if (buffer === undefined) {
-      this.#deviceError(
+      this.#failReadback(
+        command.readback,
         `${named} reads buffer ${command.buffer.index}.${command.buffer.generation}, which this ` +
           'replayer holds no live buffer under'
       );
@@ -6259,7 +6277,14 @@ export class Replayer {
     }
     const offset = Number(command.offset);
     const size = Number(command.size);
-    const entry = { buffer, offset, size, state: 'mapping', bytes: null };
+    const entry = {
+      buffer,
+      offset,
+      size,
+      state: 'mapping',
+      bytes: null,
+      reason: null,
+    };
     this.#readbacks.insert(command.readback, entry);
     this.#inFlight += 1;
     buffer
@@ -6273,11 +6298,40 @@ export class Replayer {
         entry.state = 'ready';
       })
       .catch((error) => {
-        this.#deviceError(`${named} could not be mapped: ${String(error)}`);
+        // The `.catch` covers the `.then` above it as well as the map, which is
+        // deliberate: a buffer destroyed between the two makes `getMappedRange`
+        // throw, and that is the same outcome for the same request.
+        const reason = `${named} could not be mapped: ${String(error)}`;
+        this.#deviceError(reason);
+        entry.state = 'failed';
+        entry.reason = reason;
       })
       .finally(() => {
         this.#inFlight -= 1;
       });
+  }
+
+  /**
+   * Files a readback as failed before it ever reached the browser, and records
+   * the reason on the error queue too.
+   *
+   * The entry exists so the poll has something to answer: a refusal that filed
+   * nothing leaves {@link Replayer#pollReadback} looking at an absent handle,
+   * which is the same dead end from the caller's side.
+   *
+   * @param {{ index: number, generation: number }} readback
+   * @param {string} reason
+   */
+  #failReadback(readback, reason) {
+    this.#deviceError(reason);
+    this.#readbacks.insert(readback, {
+      buffer: null,
+      offset: 0,
+      size: 0,
+      state: 'failed',
+      bytes: null,
+      reason,
+    });
   }
 
   /**
@@ -6286,14 +6340,18 @@ export class Replayer {
    * ANSWERED WITHIN THE CALL, like {@link Replayer#surfaceCaps}: the map runs on
    * its own promise and this only reads the state it left, so deferring would add
    * a frame for nothing. A `'ready'` request answers {@link ReplyWriter#readbackReady}
-   * with the copied bytes; anything else answers {@link ReplyWriter#readbackPending}.
-   * Every path queues exactly one reply naming this command's sequence, because a
-   * poll that named nothing would leave the far side waiting for ever.
+   * with the copied bytes, a `'failed'` one {@link ReplyWriter#readbackFailed}
+   * with the reason, and anything else {@link ReplyWriter#readbackPending}. Every
+   * path queues exactly one reply naming this command's sequence, because a poll
+   * that named nothing would leave the far side waiting for ever.
    *
-   * A POLL OF A HANDLE NOTHING WAS REQUESTED UNDER still answers — `Pending`, and
-   * an error beside it — rather than staying silent: the sequence is registered
-   * on the far side and must be answered, and `Pending` is the only honest answer
-   * with no bytes to hand back.
+   * PENDING IS ONLY HONEST WHILE SOMETHING IS STILL COMING. `Pending` means "ask
+   * again next frame", so answering it to a request that has settled the wrong
+   * way is an instruction to poll for ever — the caller has no deadline and no
+   * other channel. That is why a rejected map and a handle nothing was requested
+   * under both answer `ReadbackFailed`: neither will ever produce bytes, and the
+   * far side turns the reason into a `HalError::DeviceLost` the caller can act
+   * on. The error queue still gets a copy, for the engine's own health check.
    *
    * @param {bigint} sequence
    * @param {{ readback: { index: number, generation: number } }} command
@@ -6301,17 +6359,19 @@ export class Replayer {
   #pollReadback(sequence, command) {
     const entry = this.#readbacks.get(command.readback);
     if (entry === undefined) {
-      this.#deviceError(
+      const reason =
         `poll (command ${sequence}) names readback ` +
-          `${command.readback.index}.${command.readback.generation}, which this replayer holds ` +
-          'no in-flight readback under'
-      );
-      this.#replies.readbackPending(sequence, command.readback);
+        `${command.readback.index}.${command.readback.generation}, which this replayer holds ` +
+        'no in-flight readback under';
+      this.#deviceError(reason);
+      this.#replies.readbackFailed(sequence, command.readback, reason);
       this.#queued = true;
       return;
     }
     if (entry.state === 'ready') {
       this.#replies.readbackReady(sequence, command.readback, entry.bytes);
+    } else if (entry.state === 'failed') {
+      this.#replies.readbackFailed(sequence, command.readback, entry.reason);
     } else {
       this.#replies.readbackPending(sequence, command.readback);
     }
@@ -6328,13 +6388,14 @@ export class Replayer {
    *
    * A DESTROY THAT NAMES NOTHING LIVE IS A NO-OP, in both of its ways — an empty
    * slot and a stale generation — because {@link HandleTable#remove} answers
-   * `undefined` for both.
+   * `undefined` for both. A request refused before it reached the browser has no
+   * buffer to unmap either: nothing was ever mapped for it.
    *
    * @param {{ readback: { index: number, generation: number } }} command
    */
   #destroyReadback(command) {
     const entry = this.#readbacks.remove(command.readback);
-    if (entry !== undefined) entry.buffer.unmap();
+    if (entry?.buffer) entry.buffer.unmap();
   }
 
   /**

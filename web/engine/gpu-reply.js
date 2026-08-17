@@ -69,8 +69,13 @@ const MAX_FIELD_BYTES = 1 << 20;
 const MAX_ELEMENT_COUNT = 1 << 16;
 
 /**
- * `tag::MAX_DEVICE_ERROR_BYTES` — the most one device-error message may occupy,
- * marker included.
+ * `tag::MAX_DEVICE_ERROR_BYTES` — the most one message the browser wrote may
+ * occupy, marker included.
+ *
+ * EVERY DIAGNOSTIC STRING ON THIS STREAM, not only a device error: a
+ * `DeviceErrors` message and a `ReadbackFailed` reason share it, because both
+ * carry the same thing — a `GPUError` or a rejected promise's `DOMException`,
+ * text this side did not write and whose length nobody here chose.
  *
  * A MESSAGE PAST THIS IS TRUNCATED, NOT REFUSED, which is the one place this
  * writer departs from "refuse what the reader would refuse". Everything else it
@@ -107,6 +112,7 @@ const SURFACE_CAPS_REPLY_TAG = 0x04;
 const SURFACE_CAPS_FAILED_REPLY_TAG = 0x05;
 const READBACK_PENDING_REPLY_TAG = 0x10;
 const READBACK_READY_REPLY_TAG = 0x11;
+const READBACK_FAILED_REPLY_TAG = 0x12;
 const QUERY_RESULTS_REPLY_TAG = 0x18;
 const DEVICE_ERRORS_REPLY_TAG = 0x20;
 
@@ -492,7 +498,13 @@ class ByteWriter {
   }
 
   /**
-   * One device-error message, cut to `MAX_DEVICE_ERROR_BYTES` if it is past it.
+   * One message the browser wrote, cut to `MAX_DEVICE_ERROR_BYTES` if it is past
+   * it.
+   *
+   * Shared by {@link ReplyWriter#deviceErrors} and
+   * {@link ReplyWriter#readbackFailed}, which is one rule rather than two that
+   * resemble each other: both fields carry another runtime's prose, so the cap,
+   * the marker and the boundary walk are a single decision.
    *
    * THE CUT IS AT A CHARACTER BOUNDARY, NOT AT THE BYTE. The far side decodes
    * this field with `String::from_utf8`, so a slice through the middle of a
@@ -510,7 +522,7 @@ class ByteWriter {
    * @param {string} text
    * @param {string} field
    */
-  putDeviceError(text, field) {
+  putMessage(text, field) {
     const bytes = this.#utf8.encode(text);
     if (bytes.length <= MAX_DEVICE_ERROR_BYTES) {
       this.putBytes(bytes, field);
@@ -967,7 +979,7 @@ export class ReplyWriter {
       this.#open(DEVICE_ERRORS_REPLY_TAG, sequence);
       this.#writer.putCount(written, 'DeviceErrors::messages');
       for (let i = 0; i < written; i += 1) {
-        this.#writer.putDeviceError(messages[i], 'DeviceErrors::messages');
+        this.#writer.putMessage(messages[i], 'DeviceErrors::messages');
       }
     });
     return written;
@@ -1002,6 +1014,33 @@ export class ReplyWriter {
       this.#open(READBACK_READY_REPLY_TAG, sequence);
       this.#writer.putHandle(readback, 'ReadbackReady::readback');
       this.#writer.putBytes(data, 'ReadbackReady::data');
+    });
+  }
+
+  /**
+   * `poll_readback` answering neither state: the bytes are never coming, and
+   * here is why.
+   *
+   * THE REPLY THAT STOPS A POLL LOOP. A `mapAsync` that rejects settles the
+   * request the wrong way, and the far side has no other way to learn that: told
+   * `Pending` it polls again next frame, and next frame, for the rest of the
+   * process. `Device::poll_readback` turns this into a `HalError::DeviceLost`
+   * carrying the reason.
+   *
+   * The reason is cut to `MAX_DEVICE_ERROR_BYTES` if it is past it — see
+   * {@link ByteWriter#putMessage}. It is a `DOMException`'s message or a line
+   * this replayer composed, so it is for a log or a banner and never a code to
+   * branch on.
+   *
+   * @param {bigint} sequence
+   * @param {{ index: number, generation: number }} readback
+   * @param {string} reason
+   */
+  readbackFailed(sequence, readback, reason) {
+    this.#atomic(() => {
+      this.#open(READBACK_FAILED_REPLY_TAG, sequence);
+      this.#writer.putHandle(readback, 'ReadbackFailed::readback');
+      this.#writer.putMessage(reason, 'ReadbackFailed::reason');
     });
   }
 
