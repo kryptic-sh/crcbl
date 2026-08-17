@@ -1646,6 +1646,7 @@ name = "render-harness"
 version = "0.1.0"
 dependencies = [
  "crcbl",
+ "crcbl-golden",
 ]
 
 [[package]]

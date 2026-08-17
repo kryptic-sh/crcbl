@@ -2,17 +2,25 @@
 //
 // It drives `apps/render-harness`'s wasm ABI over the whole golden `Scene` set:
 // for each scene it calls `start(i)`, then on every `requestAnimationFrame`
-// frame it `step()`s the offscreen open one poll and pumps the GPU command
-// stream — the same drain→replay→deliver loop the demos run in
-// `web/engine/demo.js`, reusing the very transport and replayer that loop does.
-// When a scene reaches a terminal state (`opened` or `failed`) it records the
-// outcome and moves to the next.
+// frame it `step()`s the drive one poll and pumps the GPU command stream — the
+// same drain→replay→deliver loop the demos run in `web/engine/demo.js`, reusing
+// the very transport and replayer that loop does. One `step` advances the
+// offscreen open, the frame's submission, or the readback copy, whichever the
+// scene is on. When a scene reaches a terminal state (`rendered` or `failed`) it
+// records the outcome, copies the pixels out of wasm memory, and moves on.
 //
 // THE RESULT IS READ OUT OF THE PAGE, NOT SHOWN IN IT. `web/tools/
 // render-harness-e2e.mjs` loads this page in headless Chromium, waits for
-// `window.harnessDone`, and reads `window.harnessResult`. So this file's job is
-// to fill that object and set the flag, whatever happens — a thrown exception is
-// a result too, not a blank page the gate times out on.
+// `window.harnessDone`, reads `window.harnessResult`, and pulls each scene's
+// pixels from `window.harnessPixels`. So this file's job is to fill those and
+// set the flag, whatever happens — a thrown exception is a result too, not a
+// blank page the gate times out on.
+//
+// WHY THE PIXELS ARE BASE64 AND NOT AN ARRAY. They leave the page over the
+// DevTools protocol, which is JSON: a 256x192 frame is 196 608 bytes, and as a
+// JSON array of numbers that is well over a megabyte of digits and commas per
+// scene. Base64 is four characters per three bytes and `Buffer.from(…,
+// 'base64')` at the far end, which is the driver's whole decode.
 //
 // WHY IT REUSES THE ENGINE TRANSPORT. `crcbl-webgpu` renders by emitting a
 // stream of GPU commands that JS replays on the real `GPUDevice`; opening the
@@ -26,8 +34,29 @@ import { Replayer } from '../engine/gpu-replay.js';
 import { putReplyStream, takeCommandStream } from '../engine/gpu-transport.js';
 
 /** Mirrors the state codes in `apps/render-harness/src/lib.rs`. */
-const STATE = { IDLE: 0, OPENING: 1, OPENED: 2, FAILED: 3 };
-const STATE_NAME = { 0: 'idle', 1: 'opening', 2: 'opened', 3: 'failed' };
+const STATE = { IDLE: 0, RUNNING: 1, RENDERED: 2, FAILED: 3 };
+const STATE_NAME = { 0: 'idle', 1: 'running', 2: 'rendered', 3: 'failed' };
+
+/**
+ * How many bytes of a frame are turned into characters at a time.
+ *
+ * `String.fromCharCode.apply` takes its bytes as arguments, and a whole frame at
+ * once overflows the argument limit and throws — the failure that looks like a
+ * GPU problem and is a JS one. 32 768 is well under every engine's limit.
+ */
+const BASE64_CHUNK = 0x8000;
+
+/** A byte array as base64, in chunks small enough to pass as arguments. */
+function toBase64(bytes) {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(offset, offset + BASE64_CHUNK)
+    );
+  }
+  return btoa(binary);
+}
 
 /**
  * A hard ceiling on frames spent driving one scene, so a backend that never
@@ -50,6 +79,35 @@ function readUtf8(memory, ptr, len) {
   return new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
 }
 
+/**
+ * Copies the last scene's readback out of wasm memory.
+ *
+ * Returns `null` when the harness has no frame — which is every state but
+ * `rendered` — rather than an empty one, so a caller cannot mistake "nothing was
+ * read back" for "a zero-byte image was".
+ *
+ * The bytes are COPIED, not viewed: `new Uint8Array(memory.buffer, …)` is a view
+ * into the module's memory, and the very next `start` frees the `Vec` under it.
+ * `slice` is what makes the copy.
+ */
+function readFrame(exports, memory) {
+  const ptr = exports.__crcbl_render_harness_frame_ptr();
+  const len = exports.__crcbl_render_harness_frame_len();
+  if (!ptr || !len) return null;
+  const bytes = new Uint8Array(memory.buffer, ptr, len).slice();
+  return {
+    width: exports.__crcbl_render_harness_frame_width(),
+    height: exports.__crcbl_render_harness_frame_height(),
+    order: readUtf8(
+      memory,
+      exports.__crcbl_render_harness_frame_order_ptr(),
+      exports.__crcbl_render_harness_frame_order_len()
+    ),
+    bytes: len,
+    base64: toBase64(bytes),
+  };
+}
+
 /** Resolves on the next animation frame. */
 function nextFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
@@ -69,7 +127,9 @@ async function main() {
    *                   rendered: boolean, error: string, frames: number,
    *                   timedOut: boolean, replayFailure: string | null,
    *                   fatal: string | null, deviceErrors: string[],
-   *                   deviceErrorsDropped: number }>,
+   *                   deviceErrorsDropped: number,
+   *                   width: number, height: number, order: string,
+   *                   bytes: number }>,
    * }}
    */
   const result = {
@@ -80,6 +140,12 @@ async function main() {
     scenes: [],
   };
   window.harnessResult = result;
+  // Kept beside the result rather than inside it, so the driver can read the
+  // verdict — which it logs — without dragging several megabytes of base64
+  // through one JSON reply. It pulls the pixels one scene at a time instead.
+  /** @type {Record<string, string>} */
+  const pixels = {};
+  window.harnessPixels = pixels;
   window.harnessDone = false;
 
   try {
@@ -187,6 +253,10 @@ async function main() {
           fatal: `not driven — ${abortedAt} aborted the wasm module`,
           deviceErrors: [],
           deviceErrorsDropped: 0,
+          width: 0,
+          height: 0,
+          order: '',
+          bytes: 0,
         });
         continue;
       }
@@ -202,7 +272,7 @@ async function main() {
       try {
         exports.__crcbl_render_harness_start(i);
         state = exports.__crcbl_render_harness_state();
-        while (state === STATE.OPENING || state === STATE.IDLE) {
+        while (state === STATE.RUNNING || state === STATE.IDLE) {
           await nextFrame();
           state = exports.__crcbl_render_harness_step();
           pump();
@@ -220,15 +290,38 @@ async function main() {
         abortedWith = fatal;
       }
 
+      // THE PIXELS ARE COPIED OUT BEFORE THE NEXT SCENE STARTS, because
+      // `start` frees them: the harness clears its frame so a scene that fails
+      // can never hand back the one before it. `frame` is null whenever the
+      // scene did not reach `rendered`, which is also when there is nothing to
+      // copy.
+      let frame = null;
+      if (state === STATE.RENDERED && fatal === null) {
+        try {
+          frame = readFrame(exports, memory);
+          if (frame) pixels[name] = frame.base64;
+        } catch (thrown) {
+          // Reading the frame is three exports and a copy; if that traps, the
+          // module is poisoned exactly as a scene abort poisons it, and the
+          // rest cannot be driven either.
+          fatal = String(thrown && thrown.stack ? thrown.stack : thrown);
+          abortedAt = name;
+          abortedWith = fatal;
+        }
+      }
+
       const timedOut =
         frames >= MAX_FRAMES &&
-        state !== STATE.OPENED &&
+        state !== STATE.RENDERED &&
         state !== STATE.FAILED;
       result.scenes.push({
         scene: name,
         state,
         stateName: STATE_NAME[state] ?? String(state),
-        rendered: state === STATE.OPENED,
+        // A scene that reached `rendered` but whose pixels could not be copied
+        // out has not produced anything to compare, so it is not rendered as
+        // far as this gate is concerned.
+        rendered: state === STATE.RENDERED && frame !== null,
         error,
         frames,
         timedOut,
@@ -236,6 +329,10 @@ async function main() {
         fatal,
         deviceErrors,
         deviceErrorsDropped,
+        width: frame ? frame.width : 0,
+        height: frame ? frame.height : 0,
+        order: frame ? frame.order : '',
+        bytes: frame ? frame.bytes : 0,
       });
       say(
         `${i + 1}/${count} scenes driven; last: ${name} → ${

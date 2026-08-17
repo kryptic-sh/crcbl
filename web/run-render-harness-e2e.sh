@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 # The WebGPU parity gate: drive crcbl's backend-agnostic golden `Scene` set
-# through the `crcbl-webgpu` browser backend, offscreen, and report — per scene —
-# how far the open got. It is the only check that can say whether
-# `crcbl::screenshot`'s offscreen path can be driven through `crcbl-webgpu` at
-# all; the native `vk`/`mtl`/`dx12` render-e2e suites cannot, because there is no
-# browser in them.
+# through the `crcbl-webgpu` browser backend, offscreen, read every frame back,
+# and compare it against the very golden image the native suites compare
+# against. It is the only check that can say whether a browser backend draws the
+# same picture the `vk`/`mtl`/`dx12` render-e2e suites do; those cannot answer
+# it, because there is no browser in them.
 #
 #   ./web/run-render-harness-e2e.sh
 #
-# It builds `apps/render-harness` to wasm with `--features crcbl/webgpu` (so the
-# auto-selected backend is `crcbl-webgpu`), assembles a tiny site next to the
-# engine's GPU transport, and runs `web/tools/render-harness-e2e.mjs`, which
-# loads it in headless Chromium under SwiftShader and reads the per-scene verdict
-# back out of wasm memory over the DevTools protocol.
+# TWO HALVES, RUN BACK TO BACK.
+#
+#   1. `web/tools/render-harness-e2e.mjs` builds nothing and decides nothing: it
+#      loads the harness page in headless Chromium under SwiftShader, drives
+#      every scene, and writes each readback to `$SITE/readback` as
+#      `<scene>.<width>x<height>.<order>.bin`.
+#   2. `cargo run -p render-harness --example compare-readback` compares those
+#      against `crates/crcbl/tests/golden/<scene>.png` with `crcbl-golden`, at
+#      `Tolerance::RASTERISER` — the same comparator and the same numbers the
+#      native golden tests use. Nothing in JS diffs a pixel.
+#
+# Both halves report per scene, and BOTH decide the exit code: a scene that never
+# rendered is the browser half's crack, and a scene that rendered the wrong
+# picture is the comparator's. Either one is a red gate.
+#
+# It builds `apps/render-harness` to wasm with `--features crcbl/webgpu`, which
+# is what flips the auto-selected browser backend to `crcbl-webgpu`.
 #
 # WHAT IT NEEDS
 #   * wasm-bindgen, pinned to the Cargo.lock version, exactly as web/build.sh.
@@ -21,12 +33,15 @@
 #     four names are tried. No Xvfb is needed: the harness reads an offscreen
 #     target back into wasm memory, so there is no canvas to snapshot.
 #
-# EXIT CODES are the driver's: 0 every scene rendered, 1 the harness ran but at
-# least one scene did not (the crack list is on stdout), 2 it could not run.
+# EXIT CODES
+#   0  every scene rendered AND matched its golden.
+#   1  the harness ran, but a scene did not render or did not match. The two
+#      tables are on stdout and name every one.
+#   2  it could not run at all — no browser, no adapter, the wasm failed to load,
+#      or the comparator could not be built.
 #
-# NOT YET A CI STEP. Until the offscreen surface command lands in `crcbl-webgpu`,
-# every scene refuses at the same wall and this exits 1 by design — see
-# docs/backlog.md. The parent wires CI once the wall is closed.
+# NOT YET A CI STEP: the parent wires that once the crack list is short enough to
+# hold to, see docs/backlog.md.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -83,5 +98,34 @@ echo "==> wasm-bindgen $LIB.wasm"
 wasm-bindgen --target web --no-typescript --out-dir "$SITE/harness" \
   "$REPO/target/$TARGET/$PROFILE/$LIB.wasm"
 
+# Inside $SITE, which was just removed and rebuilt, so it starts empty every run
+# — a stale readback from a previous run is a comparison against the wrong frame,
+# and the comparator refuses two files for one scene rather than picking.
+READBACK="$SITE/readback"
+mkdir -p "$READBACK"
+
 echo "==> driving the golden scenes in the browser"
-exec node "$REPO/web/tools/render-harness-e2e.mjs" "$SITE"
+driver=0
+node "$REPO/web/tools/render-harness-e2e.mjs" "$SITE" --readback-dir "$READBACK" || driver=$?
+# A driver that could not run at all leaves nothing to compare, so there is no
+# point building the comparator to tell us the directory is empty.
+if [ "$driver" -eq 2 ]; then
+  exit 2
+fi
+
+echo "==> comparing each readback against crates/crcbl/tests/golden"
+compare=0
+(cd "$REPO" && cargo run --locked -p "$CRATE" --example compare-readback -- "$READBACK") || compare=$?
+# 0 matched, 1 did not, 2 bad usage or unreadable input — anything else is cargo
+# failing to build or run it at all, which is a gate that did not run rather than
+# a gate that passed.
+if [ "$compare" -gt 1 ]; then
+  echo "run-render-harness-e2e.sh: the comparator exited $compare — nothing was compared" >&2
+  exit 2
+fi
+
+if [ "$driver" -ne 0 ] || [ "$compare" -ne 0 ]; then
+  echo "run-render-harness-e2e.sh: FAIL — driver exit $driver, comparator exit $compare" >&2
+  exit 1
+fi
+echo "run-render-harness-e2e.sh: every scene rendered in the browser and matched its golden"

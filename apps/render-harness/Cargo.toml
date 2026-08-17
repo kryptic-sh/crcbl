@@ -11,13 +11,21 @@ publish = false
 # and clippy compile the same code the wasm build does — the exports are
 # `#[unsafe(no_mangle)]` only on `wasm32`, so the module type-checks everywhere
 # and links its symbols only where a browser reaches them. There is no `[[bin]]`:
-# this crate is driven entirely from JS, and its only artifact is the wasm.
+# the wasm is driven entirely from JS, and the one native artifact beside it is
+# `examples/compare-readback.rs`, which never runs in a browser.
 [lib]
 name = "crcbl_render_harness"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 crcbl = { workspace = true }
+
+# The comparator half of the gate. A dev-dependency rather than a dependency
+# because `examples/compare-readback.rs` is the only thing that names it, and it
+# must stay out of the wasm: `crcbl-golden` reads and writes PNGs through
+# `std::fs`, which a browser has none of.
+[dev-dependencies]
+crcbl-golden = { workspace = true }
 
 [lints]
 workspace = true

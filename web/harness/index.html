@@ -21,10 +21,12 @@
   <body>
     <h1>crcbl render harness</h1>
     <p>
-      Drives every golden <code>Scene</code> through the browser GPU backend and
-      reports, per scene, how far the offscreen open got. There is nothing to
-      look at here — the result is read out of the page by
-      <code>web/tools/render-harness-e2e.mjs</code> over the DevTools protocol.
+      Drives every golden <code>Scene</code> through the browser GPU backend,
+      renders it offscreen and reads the frame back into wasm memory. There is
+      nothing to look at here — the verdict and the pixels are both read out of
+      the page by <code>web/tools/render-harness-e2e.mjs</code> over the
+      DevTools protocol, and the pixels are compared against the committed
+      goldens outside the browser.
     </p>
     <pre id="log">starting…</pre>
     <!-- Built next to this page by the gate; see web/run-render-harness-e2e.sh. -->

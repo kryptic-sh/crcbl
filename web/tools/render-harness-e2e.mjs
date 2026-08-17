@@ -1,8 +1,15 @@
 // Loads the render-harness page in a real browser, drives every golden scene
-// through the browser GPU backend, and prints — per scene — how far the
-// offscreen open got. It is the browser end of the WebGPU parity gate: the one
-// check that can say whether `crcbl-webgpu` can be driven through
-// `crcbl::screenshot`'s offscreen path at all, which nothing native can answer.
+// through the browser GPU backend, and writes each frame it read back to disk.
+// It is the browser end of the WebGPU parity gate: the one check that can say
+// whether `crcbl::screenshot`'s offscreen path can be driven through
+// `crcbl-webgpu` at all, which nothing native can answer.
+//
+// IT DOES NOT COMPARE ANYTHING. The pixels go to `--readback-dir` and
+// `apps/render-harness/examples/compare-readback.rs` compares them against
+// `crates/crcbl/tests/golden/<scene>.png` with `crcbl-golden` — the same
+// comparator and tolerance every native golden test uses. A second pixel diff
+// written in JS would be a second thing to tune and a second thing to be wrong;
+// `web/run-render-harness-e2e.sh` runs the two halves back to back.
 //
 // It reads its verdict out of `window.harnessResult` over the DevTools protocol
 // rather than off a canvas — the harness renders to an offscreen target and
@@ -12,10 +19,15 @@
 // SwiftShader is enough.
 //
 // USAGE
-//   node web/tools/render-harness-e2e.mjs <site-dir> [--headed]
+//   node web/tools/render-harness-e2e.mjs <site-dir> [--readback-dir <dir>]
 //
-//   <site-dir>  A directory with `harness/index.html` and the wasm-bindgen
-//               output beside it; `web/run-render-harness-e2e.sh` assembles one.
+//   <site-dir>       A directory with `harness/index.html` and the wasm-bindgen
+//                    output beside it; `web/run-render-harness-e2e.sh`
+//                    assembles one.
+//   --readback-dir   Where to write the readbacks, as
+//                    `<scene>.<width>x<height>.<order>.bin` — everything the
+//                    comparator needs to read the bytes, in the name. Defaults
+//                    to `<site-dir>/readback`.
 //
 // ENVIRONMENT
 //   CRCBL_CHROMIUM           Path to the Chromium/Chrome binary. Otherwise the
@@ -25,16 +37,23 @@
 //                            root, whose user namespaces a sandbox needs).
 //
 // EXIT CODES
-//   0  every scene rendered (reached `opened`) with the device reporting
-//      nothing — the state once the offscreen surface command lands.
-//   1  the harness ran but at least one scene did not render, or opened while
+//   0  every scene rendered and its pixels were written, with the device
+//      reporting nothing.
+//   1  the harness ran but at least one scene did not render, or rendered while
 //      the device was refusing its commands; the per-scene table names the
 //      crack. A refused command does not throw, so the state alone cannot tell
 //      the two apart — the device errors are listed under the table.
 //   2  the harness could not run at all (no browser, no adapter, wasm failed).
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -249,8 +268,10 @@ function pad(text, width) {
 
 function printTable(scenes) {
   const nameWidth = Math.max(5, ...scenes.map((s) => s.scene.length));
-  console.log(`\n${pad('scene', nameWidth)}  rendered  state    detail`);
-  console.log('-'.repeat(nameWidth + 2 + 8 + 2 + 7 + 2 + 40));
+  console.log(
+    `\n${pad('scene', nameWidth)}  rendered  state     frame              detail`
+  );
+  console.log('-'.repeat(nameWidth + 2 + 8 + 2 + 8 + 2 + 18 + 2 + 40));
   for (const scene of scenes) {
     // The fatal comes first: a scene that aborted the module has no state worth
     // reading, and it is the only line that says why.
@@ -265,11 +286,18 @@ function printTable(scenes) {
             (refused.length > 0
               ? `device: ${refused[0]}${refused.length > 1 ? ` (+${refused.length - 1} more)` : ''}`
               : '');
+    // The extent and channel order the frame actually came back in, because
+    // both are how a comparison goes wrong quietly: a different extent compares
+    // nothing to nothing, and the wrong channel order is a red/blue swap that
+    // reads as a shader bug.
+    const frame = scene.rendered
+      ? `${scene.width}x${scene.height} ${scene.order}`
+      : '-';
     console.log(
       `${pad(scene.scene, nameWidth)}  ${pad(scene.rendered ? 'yes' : 'no', 8)}  ${pad(
         scene.stateName,
-        7
-      )}  ${detail}`
+        8
+      )}  ${pad(frame, 18)}  ${detail}`
     );
   }
 }
@@ -278,13 +306,71 @@ function printTable(scenes) {
 // Main
 // ---------------------------------------------------------------------------
 
+/** Parses argv into the site directory and where the readbacks go. */
+function parseArgs(argv) {
+  let site = null;
+  let readbackDir = null;
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--readback-dir') {
+      readbackDir = argv[i + 1];
+      if (!readbackDir) fail('--readback-dir needs a directory');
+      i += 1;
+    } else if (argv[i].startsWith('--')) {
+      fail(`unknown option ${argv[i]}`);
+    } else if (site === null) {
+      site = argv[i];
+    } else {
+      fail(`unexpected argument ${argv[i]}`);
+    }
+  }
+  if (!site) {
+    fail('usage: render-harness-e2e.mjs <site-dir> [--readback-dir <dir>]');
+  }
+  const resolved = resolve(site);
+  return {
+    site: resolved,
+    readbackDir: readbackDir
+      ? resolve(readbackDir)
+      : join(resolved, 'readback'),
+  };
+}
+
+/**
+ * Pulls one scene's pixels out of the page and writes them where the comparator
+ * will look, returning the path or throwing.
+ *
+ * The base64 is fetched per scene rather than with the rest of the result: the
+ * DevTools protocol is JSON, and eleven frames of it in one reply is several
+ * megabytes on one message.
+ */
+async function writeReadback(page, dir, scene) {
+  const base64 = await evaluate(
+    page,
+    `window.harnessPixels[${JSON.stringify(scene.scene)}] ?? null`
+  );
+  if (typeof base64 !== 'string') {
+    throw new Error('the page recorded no pixels for it');
+  }
+  const bytes = Buffer.from(base64, 'base64');
+  if (bytes.length !== scene.bytes) {
+    throw new Error(
+      `${bytes.length} byte(s) arrived where the harness reported ${scene.bytes}`
+    );
+  }
+  const path = join(
+    dir,
+    `${scene.scene}.${scene.width}x${scene.height}.${scene.order}.bin`
+  );
+  writeFileSync(path, bytes);
+  return path;
+}
+
 async function main() {
-  const siteArg = process.argv[2];
-  if (!siteArg) fail('usage: render-harness-e2e.mjs <site-dir>');
-  const site = resolve(siteArg);
+  const { site, readbackDir } = parseArgs(process.argv.slice(2));
   if (!existsSync(join(site, 'harness', 'index.html'))) {
     fail(`${site}/harness/index.html not found — build the site first`);
   }
+  mkdirSync(readbackDir, { recursive: true });
 
   const server = await serve(site, { host: '127.0.0.1' });
   const browser = await launch(findBrowser());
@@ -317,11 +403,26 @@ async function main() {
     }
 
     const scenes = result.scenes ?? [];
+    // Pulled out of the page BEFORE the table is printed, so a scene whose
+    // pixels could not be fetched or written shows in the table as what it is:
+    // a scene that produced nothing to compare. Reported as a crack rather than
+    // skipped — a gate that quietly compares ten of eleven scenes is a gate
+    // that can go green while one is broken.
+    for (const scene of scenes) {
+      if (!scene.rendered) continue;
+      try {
+        await writeReadback(page, readbackDir, scene);
+      } catch (error) {
+        scene.rendered = false;
+        scene.fatal = scene.fatal ?? `readback not saved: ${error.message}`;
+      }
+    }
+
     printTable(scenes);
 
     const rendered = scenes.filter((s) => s.rendered).length;
     console.log(
-      `\nrender-harness-e2e: ${rendered}/${scenes.length} scene(s) rendered through the browser backend`
+      `\nrender-harness-e2e: ${rendered}/${scenes.length} scene(s) rendered and saved to ${readbackDir}`
     );
 
     // WHENEVER IT IS SET, NOT ONLY WHEN THE HARNESS NEVER STARTED. A page that
@@ -362,9 +463,10 @@ async function main() {
     }
 
     if (rendered < scenes.length) {
-      // The expected state until the offscreen surface command lands: every
-      // scene refused at the same wall. Printed as the crack list, exit 1 so
-      // the gate cannot be wired green while the wall stands.
+      // The crack list. Exit 1 so the gate cannot be wired green over a scene
+      // the browser backend cannot get through — and so the comparator that
+      // runs next is never mistaken for the whole verdict, since it can only
+      // speak for the frames that exist.
       const firstError =
         scenes.find((s) => s.fatal)?.fatal?.split('\n')[0] ??
         scenes.find((s) => s.error)?.error ??
@@ -378,7 +480,8 @@ async function main() {
     }
     if (refused.length === 0) {
       console.log(
-        'render-harness-e2e: every scene rendered through the browser backend'
+        'render-harness-e2e: every scene rendered through the browser backend; ' +
+          'compare-readback decides whether the pixels are right'
       );
     }
   } finally {
