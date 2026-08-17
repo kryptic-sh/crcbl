@@ -791,6 +791,12 @@ impl<'a> StreamReader<'a> {
                 let canvas_id = r.read_u32()?;
                 Ok(Command::CreateSurface { surface, canvas_id })
             }
+            tag::CREATE_OFFSCREEN_SURFACE_TAG => {
+                // Only the handle: no canvas key, no extent, no format — see
+                // `Command::CreateOffscreenSurface`.
+                let surface = r.read_handle("CreateOffscreenSurface::surface")?;
+                Ok(Command::CreateOffscreenSurface { surface })
+            }
             tag::CREATE_IMAGE_TAG => {
                 // Spelled out rather than built inline: `mip_levels` and
                 // `samples` are adjacent, identically typed `u32`s and mean

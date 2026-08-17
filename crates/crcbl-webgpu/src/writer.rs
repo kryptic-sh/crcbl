@@ -473,6 +473,23 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Instance::create_surface`](crcbl_hal::Instance::create_surface) for
+    /// [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen), with
+    /// the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason. **The handle is the whole body**, where
+    /// [`create_surface`](Self::create_surface) also writes a `canvas_id`: an
+    /// offscreen target names no canvas key, and it has no extent or format to
+    /// carry either — those belong to the swapchain, not the surface, and reach
+    /// the replayer through [`create_swapchain`](Self::create_swapchain). See
+    /// [`Command::CreateOffscreenSurface`](crate::Command::CreateOffscreenSurface).
+    pub fn create_offscreen_surface(&mut self, surface: SurfaceHandle) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_OFFSCREEN_SURFACE_TAG);
+        self.bytes.put_handle(surface);
+        sequence
+    }
+
     /// [`Device::create_image`](crcbl_hal::Device::create_image), with the
     /// handle the caller allocated for it.
     ///

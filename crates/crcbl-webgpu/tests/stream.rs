@@ -1655,8 +1655,9 @@ fn every_command_has_its_own_name() {
     // (PipelineBarrier, twice but one name), and the presentation
     // family (CreateSwapchain, AcquireNextFrame, DestroySwapchain and
     // ReconfigureSwapchain) — so the distinct-name count is what the writer has
-    // methods for.
-    assert_eq!(names.len(), 61);
+    // methods for. The offscreen surface (CreateOffscreenSurface) is the twin of
+    // CreateSurface and adds one name of its own.
+    assert_eq!(names.len(), 62);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

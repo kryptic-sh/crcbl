@@ -74,6 +74,28 @@ pub enum Command {
         /// rather than a name so no string crosses the boundary.
         canvas_id: u32,
     },
+    /// [`Instance::create_surface`](crcbl_hal::Instance::create_surface) for
+    /// [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen), with
+    /// the handle the caller allocated for it.
+    ///
+    /// **The offscreen counterpart of [`Command::CreateSurface`], and it carries
+    /// only the handle.** Where the canvas command carries a `canvas_id`, this one
+    /// carries nothing more: [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen)
+    /// names no platform object and — deliberately — no size, and a surface is
+    /// created before any device exists and before any swapchain is described. So
+    /// there is no context to resolve, no extent to size a ring by, and no format
+    /// to configure with at this point; all three arrive with
+    /// [`Command::CreateSwapchain`], which is where the replayer allocates the
+    /// ring of textures the canvas path would take from `context.getCurrentTexture()`.
+    /// This command's whole job is to mark the surface id as offscreen, so that a
+    /// later [`Command::CreateSwapchain`] naming it builds an owned ring rather
+    /// than configuring a canvas context. See `web/engine/gpu-replay.js`, whose
+    /// `#createSurface` documents at length why nothing is configured at
+    /// surface-creation time on either path.
+    CreateOffscreenSurface {
+        /// Id the replayer stores the offscreen surface marker at.
+        surface: SurfaceHandle,
+    },
     /// [`Device::create_image`](crcbl_hal::Device::create_image), with the
     /// handle the caller allocated for it.
     ///
@@ -1283,6 +1305,7 @@ impl Command {
         match self {
             Self::CreateBuffer { .. } => "CreateBuffer",
             Self::CreateSurface { .. } => "CreateSurface",
+            Self::CreateOffscreenSurface { .. } => "CreateOffscreenSurface",
             Self::CreateImage { .. } => "CreateImage",
             Self::CreateImageView { .. } => "CreateImageView",
             Self::CreateSampler { .. } => "CreateSampler",

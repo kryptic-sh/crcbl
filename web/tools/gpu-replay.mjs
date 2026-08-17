@@ -1923,6 +1923,7 @@ async function main() {
       'EnumerateAdapters',
       'RequestDevice',
       'CreateSurface',
+      'CreateOffscreenSurface',
       'DestroySurface',
       'SurfaceCaps',
       'CreateBuffer',

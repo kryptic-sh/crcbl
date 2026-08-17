@@ -662,6 +662,19 @@ const GPU_TEXTURE_USAGE = Object.freeze({
 });
 
 /**
+ * The sentinel a `CreateOffscreenSurface` files under its handle, where a
+ * `CreateSurface` files a `GPUCanvasContext`.
+ *
+ * An offscreen surface has no context to resolve — it names no canvas — so its
+ * slot holds this shared marker rather than per-surface state: the ring that
+ * replaces `getCurrentTexture()` is sized and allocated at swapchain creation,
+ * not here, so there is nothing per-surface to keep. A frozen object rather than
+ * a boolean so a lookup that returns it is unambiguous against a real context,
+ * which never carries an `offscreen` property.
+ */
+const OFFSCREEN_SURFACE = Object.freeze({ offscreen: true });
+
+/**
  * Every `crcbl_hal::ImageUsage` flag with a `GPUTextureUsage` bit, and the bit.
  *
  * Keyed by the names `gpu-stream.js` decodes a usage word into, as
@@ -2213,16 +2226,25 @@ export class Replayer {
    */
   #surfaces = new HandleTable();
   /**
-   * What each live swapchain handle configured, as `{ context, format }`.
+   * What each live swapchain handle configured.
    *
    * A table of its own for {@link Replayer#surfaces}'s reason — a swapchain
-   * handle and a surface handle can carry identical bits — holding the configured
-   * `GPUCanvasContext` and the `GPUTextureFormat` string it was configured with,
-   * so `AcquireNextFrame` can reach the context to call `getCurrentTexture` and
-   * `DestroySwapchain` can `unconfigure` it. The format is kept beside the context
-   * because a canvas reports no way back to what it was configured with.
+   * handle and a surface handle can carry identical bits. An entry is one of two
+   * shapes, told apart by which field it carries:
    *
-   * @type {HandleTable<{ context: GPUCanvasContext, format: string }>}
+   *   * A CANVAS swapchain is `{ context, format }` — the configured
+   *     `GPUCanvasContext` and the `GPUTextureFormat` string it was configured
+   *     with, so `AcquireNextFrame` can call `getCurrentTexture` and
+   *     `DestroySwapchain` can `unconfigure`. The format is kept beside the
+   *     context because a canvas reports no way back to what it was configured
+   *     with.
+   *   * An OFFSCREEN swapchain is `{ ring, index, format }` — the owned ring of
+   *     `GPUTexture`s that replaces the canvas's `getCurrentTexture`, the
+   *     next-frame cursor into it, and the format the ring was allocated with.
+   *     Destroying it destroys the textures rather than unconfiguring a context.
+   *
+   * @type {HandleTable<{ context: GPUCanvasContext, format: string } |
+   *   { ring: GPUTexture[], index: number, format: string }>}
    */
   #swapchains = new HandleTable();
   /**
@@ -2735,6 +2757,9 @@ export class Replayer {
         case 'CreateSurface':
           this.#createSurface(sequence, command);
           break;
+        case 'CreateOffscreenSurface':
+          this.#createOffscreenSurface(command);
+          break;
         case 'DestroySurface':
           this.#destroySurface(command);
           break;
@@ -3124,6 +3149,29 @@ export class Replayer {
   }
 
   /**
+   * Marks a surface id as offscreen — the counterpart of {@link Replayer#createSurface}
+   * for a target that names no canvas.
+   *
+   * NOTHING IS RESOLVED AND NOTHING IS ALLOCATED HERE, and for the same reason
+   * `#createSurface` configures no context: a surface is created before any
+   * device exists, and an offscreen ring is `device.createTexture` calls that
+   * need one. There is also no extent or format yet — {@link SurfaceTarget}'s
+   * offscreen variant deliberately carries no size, and the format belongs to
+   * the swapchain — so both arrive with `CreateSwapchain`, which is where the
+   * ring is built. All this does is file {@link OFFSCREEN_SURFACE} under the
+   * handle, so a later `CreateSwapchain` naming it takes the ring branch instead
+   * of the canvas `configure` branch.
+   *
+   * SYNCHRONOUS AND WITH NO REPLY, exactly as the canvas surface pair is: wasm
+   * allocated the handle and moved on.
+   *
+   * @param {{ surface: { index: number, generation: number } }} command
+   */
+  #createOffscreenSurface(command) {
+    this.#surfaces.insert(command.surface, OFFSCREEN_SURFACE);
+  }
+
+  /**
    * Lets go of a surface's context.
    *
    * A DESTROY OF AN EMPTY SLOT IS A NO-OP, not an error, and that is the
@@ -3184,6 +3232,10 @@ export class Replayer {
       );
       return;
     }
+    if (context === OFFSCREEN_SURFACE) {
+      this.#configureOffscreenSwapchain(named, command);
+      return;
+    }
     this.#configureSwapchain(named, command, context);
   }
 
@@ -3218,6 +3270,15 @@ export class Replayer {
       this.#deviceError(
         `${named} was reconfigured, and this replayer holds none configured under it`
       );
+      return;
+    }
+    if (entry.ring !== undefined) {
+      // An offscreen ring has no `configure` to re-run: its size and format are
+      // baked into `GPUTexture`s, so a reconfigure destroys the old ring and
+      // builds a new one at the descriptor's extent and format under the same
+      // handle, exactly as the canvas branch overwrites its stored format.
+      for (const texture of entry.ring) texture.destroy();
+      this.#configureOffscreenSwapchain(named, command);
       return;
     }
     this.#configureSwapchain(named, command, entry.context);
@@ -3280,6 +3341,79 @@ export class Replayer {
   }
 
   /**
+   * Allocates an offscreen swapchain's ring of textures and files it under the
+   * command's swapchain handle — the offscreen counterpart of
+   * {@link Replayer#configureSwapchain}.
+   *
+   * WHERE THE CANVAS BRANCH CALLS `context.configure`, THIS OWNS ITS TEXTURES.
+   * There is no canvas to hand back frames, so the ring is `imageCount`
+   * `GPUTexture`s this replayer creates at the descriptor's extent and format,
+   * and `AcquireNextFrame` hands out the next one in place of
+   * `context.getCurrentTexture()`. `imageCount` and `extent` are the load-bearing
+   * fields here — the canvas branch drops both because a canvas owns its own
+   * buffering and size, but an offscreen ring has neither unless this reads them.
+   *
+   * THE `RENDER_ATTACHMENT | COPY_SRC` USAGE IS THE CANVAS BRANCH'S, and for its
+   * reason: a frame is drawn into as a render target and then read back as a copy
+   * source, so the golden path's `copyTextureToBuffer` off an acquired texture is
+   * valid. See {@link Replayer#configureSwapchain}'s note on that pair.
+   *
+   * EVERYTHING THAT CAN GO WRONG GOES TO {@link Replayer#takeError}: a format the
+   * device cannot express, an `imageCount` of zero (a ring with no textures could
+   * never answer an acquire), or a `createTexture` that throws. The device is
+   * already known present — {@link Replayer#createSwapchain} checks it before
+   * resolving the surface.
+   *
+   * @param {string} named A phrase naming the swapchain and command, for errors.
+   * @param {object} command
+   */
+  #configureOffscreenSwapchain(named, command) {
+    const format = webgpuTextureFormatFor(
+      command.format,
+      this.#device.features
+    );
+    if (format.reason !== null) {
+      this.#deviceError(`${named} ${format.reason}`);
+      return;
+    }
+    if (command.imageCount < 1) {
+      this.#deviceError(
+        `${named} asks for an offscreen ring of ${command.imageCount} textures, and a ring ` +
+          'with none could never answer an acquire'
+      );
+      return;
+    }
+    const { width, height } = command.extent;
+    const ring = [];
+    try {
+      for (let i = 0; i < command.imageCount; i += 1) {
+        ring.push(
+          this.#device.createTexture({
+            label: command.label ?? undefined,
+            size: [width, height, 1],
+            format: format.name,
+            // The canvas branch's usage: a render target that is also readable as
+            // a copy source, so an acquired frame can be read back.
+            usage:
+              GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
+          })
+        );
+      }
+    } catch (error) {
+      for (const texture of ring) texture.destroy();
+      this.#deviceError(
+        `${named} could not allocate its offscreen ring: ${String(error)}`
+      );
+      return;
+    }
+    this.#swapchains.insert(command.swapchain, {
+      ring,
+      index: 0,
+      format: format.name,
+    });
+  }
+
+  /**
    * Acquires the swapchain's current frame and files it and its view under the
    * handles wasm allocated.
    *
@@ -3308,13 +3442,24 @@ export class Replayer {
       return;
     }
     let texture;
-    try {
-      texture = entry.context.getCurrentTexture();
-    } catch (error) {
-      this.#deviceError(
-        `${named} could not get the current texture: ${String(error)}`
-      );
-      return;
+    if (entry.ring !== undefined) {
+      // The offscreen branch hands out the next texture in the ring, in place of
+      // the canvas `getCurrentTexture()`, and advances the index — the way a
+      // canvas rolls its own buffer once a frame is presented. The acquired
+      // texture is filed under `command.image` as a specific object, so a later
+      // readback reads exactly this frame regardless of where the index has since
+      // moved.
+      texture = entry.ring[entry.index];
+      entry.index = (entry.index + 1) % entry.ring.length;
+    } else {
+      try {
+        texture = entry.context.getCurrentTexture();
+      } catch (error) {
+        this.#deviceError(
+          `${named} could not get the current texture: ${String(error)}`
+        );
+        return;
+      }
     }
     this.#images.insert(command.image, texture);
     this.#imageViews.insert(command.view, texture.createView());
@@ -3361,7 +3506,15 @@ export class Replayer {
    * @param {{ swapchain: { index: number, generation: number } }} command
    */
   #destroySwapchain(command) {
-    this.#swapchains.remove(command.swapchain)?.context.unconfigure();
+    const entry = this.#swapchains.remove(command.swapchain);
+    if (entry === undefined) return;
+    if (entry.ring !== undefined) {
+      // An offscreen ring owns its textures, so releasing it is destroying each
+      // one — the counterpart of the canvas branch's `unconfigure`.
+      for (const texture of entry.ring) texture.destroy();
+    } else {
+      entry.context.unconfigure();
+    }
   }
 
   /**

@@ -97,22 +97,35 @@ impl Instance for WebGpuInstance {
     }
 
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
-        // Only `Web { canvas_id }` is reachable in a browser. The four pointer
-        // variants carry `NonNull`s to platform objects, and a pointer sent as
-        // an integer is the one thing this seam refuses outright — the encoder
-        // takes a `u32`, not a `SurfaceTarget`, so the refusal has to land here,
-        // where the target is still whole. `Offscreen` gets its own command in
-        // a later slice.
-        let SurfaceTarget::Web { canvas_id } = *target else {
-            return Err(HalError::Unsupported {
-                backend: BackendKind::WebGpu,
-                what: "only a Web canvas surface is reachable on the WebGPU stream; \
-                       the pointer-carrying targets never cross the wasm boundary",
-            });
-        };
+        // Two targets are reachable in a browser, and each has its own command.
+        // `Web { canvas_id }` resolves a canvas out of the shim's registry;
+        // `Offscreen` names no canvas and needs a ring of textures nothing
+        // presents. The four *pointer* variants carry `NonNull`s to platform
+        // objects, and a pointer sent as an integer is the one thing this seam
+        // refuses outright — the encoders take a `u32` or nothing, never a
+        // `SurfaceTarget`, so the refusal has to land here, where the target is
+        // still whole.
         let surface: SurfaceHandle = self.pool.alloc();
-        self.channel
-            .with(|channel| channel.encode(|stream| stream.create_surface(surface, canvas_id)));
+        match *target {
+            SurfaceTarget::Web { canvas_id } => {
+                self.channel.with(|channel| {
+                    channel.encode(|stream| stream.create_surface(surface, canvas_id))
+                });
+            }
+            SurfaceTarget::Offscreen => {
+                self.channel.with(|channel| {
+                    channel.encode(|stream| stream.create_offscreen_surface(surface))
+                });
+            }
+            _ => {
+                return Err(HalError::Unsupported {
+                    backend: BackendKind::WebGpu,
+                    what: "only a Web canvas or an Offscreen surface is reachable on the \
+                           WebGPU stream; the pointer-carrying targets never cross the \
+                           wasm boundary",
+                });
+            }
+        }
         Ok(surface)
     }
 
@@ -137,6 +150,14 @@ impl Instance for WebGpuInstance {
         // mode a canvas offers, and a browser double-buffers on its own — so
         // this is what the canvas actually accepts. Preferring one format over
         // the other is a later optimisation; returning both is correct now.
+        //
+        // **The same caps serve an offscreen surface**, which the handle alone
+        // cannot be told apart from a canvas one here — the instance keeps no
+        // per-surface kind, and these caps are synthesised rather than queried.
+        // That is correct rather than a shortcut: an offscreen ring is not bound
+        // by a real canvas, so the formats a canvas accepts are a valid subset
+        // for it, `fifo` is what the ring rotates at, and the replayer sizes the
+        // ring from the swapchain descriptor, not from a current extent.
         Ok(SurfaceCaps {
             formats: vec![Format::Bgra8Unorm, Format::Rgba8Unorm],
             present_modes: vec![PresentMode::Fifo],

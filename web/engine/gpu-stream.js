@@ -85,6 +85,11 @@ const CREATE_GRAPHICS_PIPELINE_TAG = 0x0a;
 // sits in the creation family rather than the device one — see `crcbl-webgpu`'s
 // `tag` module.
 const REQUEST_READBACK_TAG = 0x0b;
+// The offscreen twin of `CREATE_SURFACE_TAG`, in the creation family beside it —
+// see `crcbl-webgpu`'s `tag` module. It carries only the surface handle: an
+// offscreen target names no canvas key, and its ring's size and format arrive
+// later with the swapchain, not the surface.
+const CREATE_OFFSCREEN_SURFACE_TAG = 0x0c;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
@@ -1599,6 +1604,15 @@ function decodeCommand(r) {
         name: 'CreateSurface',
         surface: r.readHandle('CreateSurface::surface'),
         canvasId: r.readU32(),
+      };
+    case CREATE_OFFSCREEN_SURFACE_TAG:
+      // The whole body is the handle — no canvas key to resolve, and no extent
+      // or format, which belong to the swapchain rather than the surface. The
+      // replayer marks the id as offscreen so a later swapchain naming it builds
+      // an owned ring of textures instead of configuring a canvas context.
+      return {
+        name: 'CreateOffscreenSurface',
+        surface: r.readHandle('CreateOffscreenSurface::surface'),
       };
     case CREATE_IMAGE_TAG: {
       // Spelled out rather than built inline, for `Draw`'s reason: `mipLevels`

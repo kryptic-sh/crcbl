@@ -198,6 +198,10 @@ const EXPECTED = [
   // from both halves of that handle: a decoder that read it where a handle half
   // is, or dropped it, would not still compare equal here.
   { name: 'CreateSurface', surface: handle(45, 46), canvasId: 19 },
+  // The offscreen twin carries only its handle — no canvas key, extent or
+  // format. Its handle differs from the canvas surface above so a decoder that
+  // confused the two commands would not still compare equal.
+  { name: 'CreateOffscreenSurface', surface: handle(49, 50) },
   // Every `ImageType` and every `ImageViewType` appears below, because a row of
   // either code table in `gpu-stream.js` that the fixture never carries is a
   // row nothing checks. Within each command the extent's three components,

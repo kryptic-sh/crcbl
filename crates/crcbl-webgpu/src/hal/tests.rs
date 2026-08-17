@@ -139,11 +139,39 @@ fn surface_caps_answers_the_constant_canvas_caps_synchronously() {
 #[test]
 fn create_surface_refuses_a_pointer_target() {
     let instance = opened_instance();
-    let refused = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) };
+    // A pointer-carrying target — its `NonNull` never crosses the wasm boundary,
+    // so it is the one shape this seam refuses outright. `dangling` is never
+    // dereferenced; the refusal is decided from the variant alone.
+    let target = SurfaceTarget::AppKit {
+        layer: core::ptr::NonNull::<core::ffi::c_void>::dangling(),
+    };
+    let refused = unsafe { instance.create_surface(&target) };
     assert!(
         matches!(refused, Err(HalError::Unsupported { .. })),
-        "only a Web canvas surface is reachable on the stream"
+        "only a Web canvas or an Offscreen surface is reachable on the stream"
     );
+}
+
+#[test]
+fn create_surface_encodes_an_offscreen_surface_command() {
+    let instance = opened_instance();
+    let channel = instance.channel();
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+        .expect("an offscreen surface is reachable");
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert_eq!(
+        commands.last().map(crate::Command::name),
+        Some("CreateOffscreenSurface"),
+        "the offscreen target encodes a CreateOffscreenSurface command",
+    );
+    let Some(crate::Command::CreateOffscreenSurface { surface: encoded }) = commands.last() else {
+        panic!("the last command is a CreateOffscreenSurface");
+    };
+    assert_eq!(*encoded, surface, "the command names the allocated surface");
 }
 
 // ── (c) device request ─────────────────────────────────────────────────────

@@ -306,6 +306,18 @@ pub const CREATE_GRAPHICS_PIPELINE_TAG: u8 = 0x0A;
 /// split. Written out rather than as `FAMILY_CREATE + 11`, for
 /// [`CREATE_SAMPLER_TAG`]'s reason.
 pub const REQUEST_READBACK_TAG: u8 = 0x0B;
+/// [`Command::CreateOffscreenSurface`](crate::Command::CreateOffscreenSurface).
+///
+/// The offscreen counterpart of [`CREATE_SURFACE_TAG`], and in the creation
+/// family beside it because it too carries the handle the caller allocated for a
+/// surface. Written out rather than as `FAMILY_CREATE + 12`, for
+/// [`CREATE_SAMPLER_TAG`]'s reason. It carries *only* that handle: unlike
+/// [`CREATE_SURFACE_TAG`] there is no canvas key to resolve, and unlike a canvas
+/// there is no extent or format to carry either — a surface is created before
+/// any device exists and before any swapchain is described, so the ring's size
+/// and format arrive later, with [`CREATE_SWAPCHAIN_TAG`]. See
+/// [`Command::CreateOffscreenSurface`](crate::Command::CreateOffscreenSurface).
+pub const CREATE_OFFSCREEN_SURFACE_TAG: u8 = 0x0C;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -1844,9 +1856,14 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 61] = [
+    const TAGS: [(&str, u8, u8); 62] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
+        (
+            "CreateOffscreenSurface",
+            CREATE_OFFSCREEN_SURFACE_TAG,
+            FAMILY_CREATE,
+        ),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
         ("CreateImageView", CREATE_IMAGE_VIEW_TAG, FAMILY_CREATE),
         ("CreateSampler", CREATE_SAMPLER_TAG, FAMILY_CREATE),

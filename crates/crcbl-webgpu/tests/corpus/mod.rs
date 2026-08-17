@@ -70,6 +70,13 @@ pub fn every_command() -> Vec<Command> {
             surface: handle(45, 46),
             canvas_id: 19,
         },
+        // The offscreen twin of the canvas surface: it carries only its handle,
+        // distinct from the canvas one above so a decoder that read the wrong
+        // command would not still compare equal. There is no canvas key, extent
+        // or format to carry — see `Command::CreateOffscreenSurface`.
+        Command::CreateOffscreenSurface {
+            surface: handle(49, 50),
+        },
         // **Every [`ImageType`] appears**, because the code table in
         // `web/engine/gpu-stream.js` is a hand-written list and a row for a
         // code the fixture never carries is a row nothing checks. The three
@@ -1373,6 +1380,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         Command::CreateSurface { surface, canvas_id } => {
             stream.create_surface(*surface, *canvas_id)
         }
+        Command::CreateOffscreenSurface { surface } => stream.create_offscreen_surface(*surface),
         Command::CreateImage {
             image,
             label,
