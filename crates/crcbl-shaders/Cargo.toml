@@ -23,10 +23,19 @@ workspace = true
 # The WGSL validator, and a dev-dependency only — the library above still has no
 # dependencies at all, which is the property that comment protects.
 #
-# It is the validator `crcbl-wgpu` will actually run: `wgpu` compiles WGSL
-# through naga, so a module naga rejects is a pipeline that fails to create.
-# Pinned to the version `wgpu` already resolves so the lockfile gains an edge and
-# no package. `wgsl-in` is not a default feature and is the only one wanted.
+# **It does not leave with `crcbl-wgpu`, and this comment used to imply it
+# would.** The old justification was that `wgpu` compiles WGSL through naga, so
+# naga is the validator that backend would actually run, and that pinning it to
+# the version `wgpu` already resolves costs the lockfile an edge and no package.
+# Both halves expire with that crate. What does not expire is the reason to
+# validate at all: the WGSL checked here is what `crcbl-webgpu` ships to a real
+# browser, and once that is the only browser backend this validation matters
+# more, not less. Expect the pin to become a package of its own in the lockfile
+# when `wgpu` goes — that is the cost, and it is worth paying.
+#
+# The standing caveat: naga accepting a module is not Dawn accepting it, which
+# is exactly how the uniformity bug shipped. `wgsl-in` is not a default feature
+# and is the only one wanted.
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }
 # The cluster-DAG builder the committed `clusters/*.dag` artifact comes out of,

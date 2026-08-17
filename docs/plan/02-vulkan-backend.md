@@ -188,10 +188,11 @@ workaround. Recorded in `docs/backlog.md` rather than argued again here.
    constants where the vertex buffer should have been and the UI pass drew
    nothing on macOS. Today a comment is the only thing preventing a recurrence.
 4. **Validate all four artifacts, not one.** `spirv-val` runs on the SPIR-V;
-   WGSL, MSL and DXIL are checked by nothing. Add naga for WGSL (already in the
-   lockfile via wgpu — with the caveat that naga accepting something is not Dawn
-   accepting it, which is exactly how the uniformity bug shipped), `xcrun metal`
-   on the macOS CI leg, and pipeline creation on WARP for DXIL.
+   WGSL, MSL and DXIL are checked by nothing. Add naga for WGSL (a
+   `crcbl-shaders` dev-dependency, which it stays after `crcbl-wgpu` goes — with
+   the caveat that naga accepting something is not Dawn accepting it, which is
+   exactly how the uniformity bug shipped), `xcrun metal` on the macOS CI leg,
+   and pipeline creation on WARP for DXIL.
 5. **Semantic divergence is caught by rendering, not by reading.**
    `SV_InstanceID` lowers to `InstanceIndex - BaseInstance` on SPIR-V and to a
    bare `@builtin(instance_index)` on WGSL; the source compiles cleanly to both
