@@ -66,70 +66,70 @@ others.
 Reproduce with lumen specifically — the golden harness does one readback per
 scene and never wraps, so it will not show this.
 
-### DECISION — retire `crcbl-wgpu`, and fix the seam weakness it was masking
+### TOP PRIORITY — backend feature parity, enforced so it cannot rot
 
-**Target backend matrix:** vk on Linux, vk and dx12 on Windows, Metal on macOS,
-`crcbl-webgpu` in a browser on all three. `crcbl-wgpu` is not in it. It existed
-to reach the browser before `crcbl-webgpu` did, and to cover hardware the Tier-A
-backends refuse; the browser half is done, and `crcbl-vk`'s `ArrayPages` binding
-model already covers descriptor-indexing-less GPUs.
+**The goal: every render feature works on every backend — vk, dx12, Metal,
+WebGPU — with divergence made impossible to introduce silently. `crcbl-wgpu` is
+dropped once that holds.** It is kept until then, but not as a conformance
+oracle: on Linux it runs Vulkan underneath, so it is a second abstraction over
+the same driver rather than an independent implementation, and agreement between
+them proves less than it appears. What it caught (`fill_buffer` non-zero) came
+from its own refusal policy, not from a different GPU stack — and **Metal
+refuses the same call for a different reason**, since `fillBuffer:range:value:`
+takes a byte, not a word. Two of four backends cannot honour a contract the seam
+documents.
 
-**The objection to removing it, and why it does not hold.** Running the migrated
-draw-generation tests on wgpu immediately found that `crcbl_hal::fill_buffer`
-promises "a repeating 32-bit value" while `crcbl-wgpu` refuses any non-zero
-value. That looks like wgpu earning its place as a conformance oracle. It is not
-— **the same tests would have caught it on Metal**, because
-`crcbl-mtl/src/command.rs` refuses a `u32` whose four bytes differ (Metal's
-`fillBuffer:range:value:` takes a byte, not a word). Two of four backends cannot
-honour that contract. wgpu found it first only because those tests were
-Vulkan-only until now; the defect was **test placement, not backend count**.
+**The structural problem.** Nothing connects "what the seam promises" to "what a
+backend does". A feature added to `crcbl-vk` alone breaks nothing: the other
+backends simply never implement it, their `Unsupported` is invisible until
+something runs, and the agnostic suites only cover behaviours somebody
+remembered to put there. Parity is currently maintained by attention, which is
+why it has drifted.
 
-Four independent implementations already run the agnostic seam suite in CI — vk
-on lavapipe, dx12 on WARP, Metal on macOS, WebGPU on SwiftShader. That is the
-oracle.
+**The mechanism that fixes it — make omission a compile error, then a test
+failure.**
 
-**The structural weakness, which is the real finding.** The seam's contract is
-prose in doc comments, and a backend that cannot honour it just refuses at
-runtime. Nothing connects "what the docs promise" to "what a backend can do", so
-an over-promise is invisible until something runs. Two rules would close it:
+1. **An exhaustive capability enum in `crcbl-hal`.** Every seam behaviour that a
+   backend could plausibly not have becomes a variant — not just the big
+   divisions `Features` already covers (descriptor indexing, mesh shaders,
+   timestamps) but the small ones that have bitten us: non-zero `fill_buffer`,
+   byte-versus-word fill, a backwards timeline signal, a second acquire without
+   a present, stencil reference, indirect count.
+2. **Each backend answers for every variant, through an exhaustive `match`.**
+   Adding a variant then **fails to compile on every backend that has not
+   declared its answer** — supported, or unsupported with a reason. That is the
+   anti-rot property, and Rust gives it for free; nothing has to remember.
+3. **The agnostic e2e suite drives the enum, both directions.** For each
+   capability: declared supported must actually work, and declared unsupported
+   must refuse with the documented error. A backend that claims a capability it
+   cannot serve fails; one that quietly refuses something it claims fails too.
+   This is what turns "vk-only feature" into a failing test on the other three
+   rather than a silence.
+4. **A parity report test.** Any capability supported by some backends and not
+   others must appear on an explicit, reviewed exception list with its reason.
+   Divergence stays possible — Metal genuinely has no GPU-side draw count — but
+   it becomes deliberate and visible instead of accidental.
 
-1. **Anything a backend may refuse is either a declared capability or is not in
-   the seam.** Today `Features` covers the big ones (descriptor indexing, mesh
-   shaders, timestamps) but not the small divergences — non-zero `fill_buffer`,
-   a byte-vs-word fill, a backwards timeline signal, a second acquire. Each
-   should become a `Features` bit callers can check, or the seam should narrow
-   to the intersection. **`fill_buffer` should narrow**: document it as a zero
-   fill, which is what its own text says it is for ("the idiomatic way to zero
-   an indirect count buffer"), and let a caller wanting a pattern do a staging
-   copy — which is what the migrated tests now do.
-2. **Every refusal site must name the capability it is refusing for.** The
-   `HalError::Unsupported` / `InvalidDescriptor` constructors are greppable, so
-   this is auditable mechanically: a refusal that names no capability is either
-   a missing `Features` bit or a seam over-promise.
+**Order of work:**
 
-**Sequencing — do not remove wgpu first.** The remaining white-box tests
-(`lights`, `shadow`, `depth_probe`, `mesh`, the sprite cluster) are still
-Vulkan-only, so today Vulkan is the only implementation that runs them at all.
-Removing a backend before those are agnostic would shrink divergence-detection
-at the exact moment it is most needed. Order:
+1. Finish migrating the white-box tests to the agnostic suites, so all four
+   backends actually run them (`lights`, `shadow`, `depth_probe` are mechanical;
+   `mesh` and the sprite cluster need the golden-blessing decision first).
+2. Build the capability enum and the exhaustive per-backend answer.
+3. Drive the suites from it, both directions, plus the parity report.
+4. Close the divergences it surfaces — starting with the ones already known:
+   `fill_buffer` (narrow it to a zero fill, which is what its own doc says it is
+   for), the timeline-signal and double-acquire disagreements, and the WebGPU
+   commands still refused.
+5. **Then delete `crcbl-wgpu` entirely** — crate, `wgpu-e2e` suite, CI job,
+   registry entry, `CRCBL_GPU=wgpu`, and `wgpu`/`naga` from the dependency
+   graph.
 
-1. Finish migrating the white-box tests to the agnostic suite (in progress).
-2. Narrow `fill_buffer`, and sweep the refusal sites for other over-promises.
-3. Add the both-directions rule to the seam suite: a capability present must
-   work, and absent must refuse with the documented error.
-4. Then **delete `crcbl-wgpu` entirely** — the crate, its `wgpu-e2e` suite, its
-   CI job, its registry entry and `CRCBL_GPU=wgpu` — and drop `wgpu`/`naga` from
-   the dependency graph, which is a real build-time and advisory-surface win.
-
-**The coverage model afterwards**, which is what makes the deletion safe: the
-agnostic e2e suites (`hal_seam_e2e`, `draw_gen_e2e`, `render_e2e`, `tiling_e2e`,
-`gltf_e2e`) run on **every** backend — vk, dx12, Metal, WebGPU — and are where a
-behaviour every backend owes is asserted exactly once. Bespoke per-backend tests
-stay only for what cannot be expressed there: validation and debug-layer wiring
-(one per API), API-quirk refusals, adapter and limit enumeration, and
-capability-specific paths like Vulkan's mesh-shader tier. Anything that ends up
-in a bespoke test _and_ is a behaviour other backends also owe is a bug in the
-split, not a per-backend test.
+**The coverage model afterwards:** the agnostic e2e suites own every behaviour
+all backends owe, and bespoke per-backend tests keep only what cannot be
+expressed there — validation and debug-layer wiring, API-quirk refusals, adapter
+and limit enumeration. A behaviour sitting in a bespoke test that other backends
+also owe is a bug in the split.
 
 ### After the WebGPU migration: features, then the sample that proves them
 

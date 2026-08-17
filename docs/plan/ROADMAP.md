@@ -2377,3 +2377,20 @@ something trusted, and in a browser the only trusted renderer today is
     `run-cross-backend-e2e.sh`, drop the `wgpu` dependency, and correct the
     `crcbl-mtl` and `crcbl-dx12` manifest comments. `CRCBL_GPU=wgpu`, the
     `wgpu-e2e` suite and the agnostic seam suite all still run against it today.
+
+    **Gated on backend feature parity, which is now the top priority.**
+    `crcbl-wgpu` stays until every render feature works on vk, dx12, Metal and
+    WebGPU alike — not because it is a useful second opinion (on Linux it runs
+    Vulkan underneath, so it is a second abstraction over the same driver), but
+    because deleting a backend while the others still diverge would remove a
+    runnable configuration before the divergences are closed.
+
+    The parity work itself is the point, and it must be **enforced rather than
+    remembered**: an exhaustive capability enum in `crcbl-hal` that every
+    backend answers for through a `match`, so a new feature fails to compile on
+    any backend that has not declared its answer; the agnostic e2e suites driven
+    from that enum in both directions, so a declared capability must work and a
+    declined one must refuse with the documented error; and a parity report that
+    forces any genuine divergence onto a reviewed exception list. See
+    `docs/backlog.md`'s "TOP PRIORITY — backend feature parity, enforced so it
+    cannot rot".
