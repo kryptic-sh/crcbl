@@ -46,44 +46,6 @@ To investigate:
 - Reproduces only on that hardware so far; not seen on the home GPU. Needs the
   office machine (or a memory-constrained adapter) to verify a fix.
 
-### TOP OF QUEUE (parallel project) — greybox asset pack for fast prototyping
-
-A `crcbl-greybox` crate of ready-to-use 2D and 3D prototyping primitives, sized
-in REALITY so scale reads at a glance. World unit is 1.0 = 1 metre (physics SI;
-the engine unit cube spans ±0.5m). Meshes are procedural Rust
-(`crcbl_shaders::mesh::MeshVertex` + meshlet clusters — glTF is not wired to the
-renderer, so no `.glb`); 2D is committed `.crpix` baked through
-`crcbl_sprite::bake::bake_dir`. Extends the existing greybox bits:
-`GpuMaterial::UNTINTED` (grey), `CHECKER_TEXELS`, `PageDesc::opaque_white`.
-
-- **3D primitives (slice G1, in progress).** 1m-based: cube, quad/floor, wall
-  (1×2×0.1m), doorway (1×2.1m opening), ramp (15/30/45°), stairs (0.2m rise /
-  0.28m run), column (0.3m²×3m), cylinder, sphere, capsule (0.5m×1.8m — the
-  human scale figure), platform. `MeshVertex` bytes + clusters; a `scene3d()`
-  SceneDesc
-  - index constants for instant `with_scene`/`add_instance`. Dimensions asserted
-    in metres.
-- **Physical-size texture tiling (slice G-tex, renderer feature — touches
-  `crcbl-shaders` `mesh.slang` + `GpuMaterial` + `crcbl-render`).** A material
-  mode where a texture tiles by WORLD SIZE, not authored UV: one texture cell =
-  1m of surface, so a 1×1×1m cube shows one cell per side and a 2×2×2m cube
-  shows 2×2 cells per side — making an asset's size directly legible.
-  `GpuMaterial` gains a tiling mode + tile-metres (default 1.0); the mesh shader
-  derives UV from world-space extent. Validate through `render_e2e` goldens
-  (cell count matches size).
-- **Greybox textures (slice G-tex).** 1024×1024, tiling at 1m, in SEVEN colours:
-  grey, red, green, blue, orange, brown, black. Each a gridded 1m tile (border +
-  subdivisions) so the physical-tiling above reads as a measured grid. Delivered
-  as `PageDesc` layers + `GpuMaterial` rows using the physical-tiling mode.
-- **2D primitives (slice G2).** `.crpix` at a 32×32-texel base (industry
-  default; each game picks its own `TEXELS_PER_UNIT`, e.g. 32 → 1 tile = 1
-  unit): grid tile, solid square, circle, checker, thin + one-way platform,
-  45°/2:1 slopes, ladder, spike, player placeholder (32×64 = 1×2 tiles), enemy,
-  pickup (16×16), arrow. Baked via `bake_dir`; neutral greys + a high-contrast
-  placeholder tint.
-
-Runs in parallel with the WebGPU testing work below — disjoint crates.
-
 ### TOP OF QUEUE — testing parity across all backends (the diagnostic), then WebGPU feature parity, then the flip
 
 The primary focus is TEST PARITY: the same tests running on every GPU backend
