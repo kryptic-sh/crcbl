@@ -209,9 +209,6 @@ const EXPECTATIONS = {
   // stays in the HUD line for a bug report, and `run: 1` in `waiting` is what
   // says the demo booted a fresh run rather than a restarted one.
   horde: {
-    // Draws mesh instances, so the cull pass has something to count and
-    // its stats readback must come back — see group D.
-    culls: true,
     key: 'Space',
     waiting: (line) =>
       line.includes('WaitingToStart') && line.includes('run: 1'),
@@ -277,8 +274,11 @@ const EXPECTATIONS = {
   // and still quick enough that consecutive heartbeats differ far above the two
   // decimal places the line prints them to.
   lumen: {
-    // Draws mesh instances, so the cull pass has something to count and
-    // its stats readback must come back — see group D.
+    // **The only demo that draws mesh instances**, so the only one whose cull
+    // pass has anything to count. Every demo builds a `ForwardRenderer`, and
+    // the others fill their frames with sprites and text, which that pass does
+    // not see — so the stats readback correctly never arrives for them. See
+    // group D.
     culls: true,
     key: null,
     waiting: (line) =>
