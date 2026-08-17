@@ -3,6 +3,64 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### TOP OF QUEUE — WebGPU full-parity as a wgpu replacement, then the flip
+
+crcbl-webgpu renders every 2D browser demo (breakout/flappy/asteroids/horde/hud)
+but is NOT yet a full replacement for what wgpu did in the browser. Close these
+before flipping the default and deleting crcbl-wgpu (that flip is the LAST step,
+and it removes wasm-bindgen's second and final root — `wgpu`). Audited against
+the WebGPU spec and the engine's actual usage.
+
+**Validation harness (prep — do early, it proves every gap below).** The
+backend-agnostic golden suite already exists: `crates/crcbl/tests/render_e2e.rs`
+runs every `Scene` through whichever backend `crcbl::backend::open` selects
+(vk/mtl/dx12), reads back, and compares against `crcbl/tests/golden`. WebGpu is
+browser-only, so it cannot run this native test. Build a **browser harness that
+runs the same `Scene` set through WebGpu**, reads each back, and compares
+against the same goldens — the vehicle that proves parity scene-by-scene. Then
+consolidate any non-backend-specific golden coverage from
+`crcbl-vk/tests/vk_e2e` and `crcbl-wgpu/tests/wgpu_e2e.rs` into `render_e2e`'s
+`Scene` set; genuinely backend-specific tests (a driver quirk, a vk-only
+capability) stay put — there should not be many.
+
+**Parity gaps (WebGPU CAN express these; crcbl-webgpu currently refuses).** Each
+is refused via `hal/encoder.rs::record_unsupported` (fails `finish`) or an
+inline `HalError::Unsupported` in `hal/device.rs`.
+
+- **A — `draw_indexed_indirect`** → `GPURenderPassEncoder.drawIndexedIndirect`.
+  On the LIVE 3D-forward path (`crcbl-render/src/forward.rs:1413`,
+  `EmitTail::PerBatch`). Highest priority. Needs a stream command.
+  `draw_indirect` too (unused by scenes but cheap alongside). A single-draw
+  indirect maps cleanly (WebGPU takes offset only, no count/stride).
+- **B — `take_error` + `ReadbackFailed` reply.** `take_error` is a `None` stub
+  (`hal/device.rs:241`); the JS half already exists (`gpu-replay.js` error
+  queue + `uncapturederror` listener). Needs a `TakeError` command drained at
+  frame top and a new `Reply` variant carrying the message; and a
+  `ReadbackFailed` reply so a rejected `mapAsync` stops spinning `poll_readback`
+  forever. Correctness for the whole browser path.
+- **C — `dispatch_indirect`** → `dispatchWorkgroupsIndirect`. The backlog's old
+  "blocked on a buffer-write" note is STALE — `write_buffer` shipped
+  (`d2d32ef`), so it is now just unwired. Unused by current scenes.
+- **D — query sets** (`create_query_set`/`query_results`/`resolve_query_set`/
+  `reset_query_set`/`write_timestamp`) for the profiler HUD. Core WebGPU, but
+  timestamps are pass-scoped `timestampWrites`, not an encoder `writeTimestamp`,
+  so the replayer must adapt. Degrades gracefully today (profiler returns None),
+  so lower urgency.
+- **E — debug markers + `set_stencil_reference`** (`end_debug_label`,
+  `insert_debug_marker`). Small, core; no current scene issues them; debug
+  markers should likely replay as accept-and-drop, not block `finish`.
+- **F — `update_bind_group`.** WebGPU bind groups are IMMUTABLE, so this is
+  create-a-new-one; the seam's mutate-in-place-while-pending semantics do not
+  hold. Design-first; not on any current scene path.
+
+**Correctly refused — NOT parity gaps** (WebGPU cannot express them, so
+browser-wgpu could not either): mesh shaders (`create_mesh_pipeline`,
+`draw_mesh_tasks*` — the engine must pick a non-mesh `EmitTail` on WebGPU), push
+constants (substitute: dynamic-offset uniforms), semaphores + `wait_idle`
+(WebGPU auto-synchronises), and **multi-draw-indirect-COUNT**
+(`draw_indexed_indirect_count`/`draw_indirect_count` are not core WebGPU; the
+engine's non-count `EmitTail::PerBatch` is the WebGPU path).
+
 ### WebGPU HAL impls exist but are not driven in a browser yet
 
 `crate::hal` in `crcbl-webgpu` now holds the `Instance`, `PendingDevice`,
