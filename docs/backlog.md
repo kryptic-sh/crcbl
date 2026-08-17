@@ -723,6 +723,75 @@ machine, so the choice was to make the degrade visible rather than to harden a
 condition nobody has observed. If CI's lavapipe arm never prints that line, the
 degrade path is dead and the test should simply require the feature.
 
+### The browser gates run on Linux only — the plan to fix that
+
+Every browser gate is a step inside `pages.yml`'s one `ubuntu-latest` job: the
+five demos and the probe. `ci.yml` has no browser step at all. Scoped 2026-08-18
+against the runner-image manifests and Chromium's own sources.
+
+**The decisive fact, and it is not the obvious one:** headless Chrome can only
+read a WebGPU canvas back on **macOS**. On Windows and Linux the canvas renders
+but never reaches the headless compositor — an upstream limitation with no flag
+that fixes it, and exactly the phenomenon `run-browser-e2e.sh`'s own measured
+table already records for Linux (headless + SwiftShader reads back transparent
+black). So each platform needs a different answer: Linux keeps Xvfb, **macOS
+runs headless against real Metal**, and **Windows runs headed on the runner's
+own desktop session**, which it has.
+
+**Recommendation: ship the probe gate to macOS and Windows as two new jobs, and
+leave the five demos on Linux.** The probe is where the backend coverage is — it
+drives `crcbl-webgpu`'s command stream verb by verb — and it costs **2 seconds**
+of browser time against **2m38s** for the demos, both measured from a real run.
+The jobs take `needs: build` and download the existing `site` artifact rather
+than re-running `web/build.sh`, which needs `python3` and a wasm toolchain; that
+removes the build script's portability from the problem entirely and means every
+OS tests the identical bytes that ship. Separate jobs rather than a matrix,
+because a matrix would build the site three times and collide on the artifact
+name. Runner minutes are free — this is a public repo.
+
+**macOS first**: it is the only platform in the whole workspace where WebGPU on
+real hardware is reachable in CI. Use `macos-15` or `macos-latest` and **never
+`macos-14`**, which returns nil from `MTLCreateSystemDefaultDevice()`.
+
+**Three source changes are required first, all in `web/tools/`:**
+
+1. **`probe-e2e.mjs` has no adapter mode switch** — it hardcodes
+   `--use-webgpu-adapter=swiftshader --use-vulkan=swiftshader --enable-features=Vulkan`,
+   and `CRCBL_CHROMIUM_FLAGS` only appends. On macOS that asks for an adapter
+   that cannot exist, since Chrome's Dawn has no Vulkan backend there. It needs
+   the `auto|hardware|swiftshader` switch `browser-e2e.mjs` already has.
+2. **`browser-e2e.mjs`'s hardware mode is Vulkan-shaped** — `--use-angle=vulkan`
+   is wrong on macOS (`metal`) and Windows (`d3d11`). As it stands macOS has no
+   working mode at all: hardware fails on the flags, and the fallback fails too.
+3. **Windows cleanup throws.** Both drivers kill the browser with
+   `process.kill(-pid)`, a POSIX process-group kill; on Windows a negative pid
+   is not a group, the call throws into a bare `catch {}`, Chrome keeps handles
+   on the profile directory, and the following `rmSync` fails **inside the exit
+   handler** — turning a passing run red after its checks succeeded. Needs
+   `taskkill /pid <pid> /T /F`.
+
+**The predicted failure worth reading twice**, because it is a trap the repo has
+already been caught by once: forcing `--use-webgpu-adapter=swiftshader` on
+Windows re-creates the Chrome-151 two-device mismatch recorded elsewhere in this
+file. It moves **Dawn** to SwiftShader while Chromium's shared-image device
+stays D3D11, and the canvas is handed between them. **Run Windows in the default
+D3D mode**, which is the real argument for change 1 being a mode switch rather
+than a hardcoded flip.
+
+**What only a real run can answer:** whether Chrome exposes any WebGPU adapter
+on a GPU-less Windows runner, and whether headed closes the readback gap. Both
+are answered by one line the harness already prints —
+`control page under "<mode>": adapter <name>` — and by which group letters
+appear in the probe's `groups` line. That granularity is why the probe reports
+per-group rather than pass/fail.
+
+**Two smaller things found on the way:** `run-probe-e2e.sh` and
+`run-browser-e2e.sh` strip ANSI with `sed -E 's/\x1b…'`, and BSD sed has no `\x`
+escape, so on macOS that line matches nothing — harmless today because nothing
+colours that output, and maximally confusing the day something does. And
+`web/run-render-harness-e2e.sh` is referenced from the roadmap and this file but
+wired into **no workflow at all**.
+
 ### Smaller things the WebGPU work surfaced and did not fix
 
 - **A device error names no command.** `Reply::DeviceErrors` carries the
