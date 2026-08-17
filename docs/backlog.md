@@ -61,6 +61,32 @@ work has to touch browser discovery and the Xvfb branch in every driver anyway,
 and doing both at once means changing the plumbing in one place instead of
 three, and then again three more times per platform.
 
+### The browser lost its WebGL2 fallback with wgpu
+
+Un-linking `crcbl-wgpu` from the wasm dropped a capability nobody has decided
+about: **a browser without WebGPU now has no fallback at all.** The WebGL2 path
+came from `wgpu`, which is no longer linkable there, so on such a browser the
+engine has no backend to open rather than a slower one.
+
+Considered and deliberately out of scope for that slice, because re-linking
+`wgpu` to keep it would give back the whole 49% size win and `wasm-bindgen` with
+it. The options, none free:
+
+- **Accept it.** WebGPU shipped in Chrome, Edge and Firefox; Safari has it
+  from 26. The floor rises on its own, and the engine already refuses
+  gracefully.
+- **Detect and message.** Cheapest real improvement: notice `navigator.gpu` is
+  absent and say so in the page rather than failing to boot. Costs almost
+  nothing and turns a blank canvas into an explanation.
+- **A second artifact.** Build a wgpu/WebGL2 wasm alongside and pick at load
+  time — keeps the fallback and the small default, at the cost of two builds,
+  two toolchains (that build needs `wasm-bindgen` back) and a loader that
+  chooses.
+
+**Recommendation: detect and message now, revisit a second artifact only if
+someone reports a browser that needs it.** Nothing in the samples requires
+WebGL2, and no telemetry says anyone is on such a browser.
+
 ### Run the WebGPU browser gates on Windows and macOS, not just Linux
 
 **Every WebGPU browser test in the repository runs in one job**, `pages/build`
