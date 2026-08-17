@@ -6785,6 +6785,54 @@ async function main() {
     );
   }
   {
+    // **THE ARRAY LAYER IS `origin.z`, AND IT ARRIVES IN THE SUBRESOURCE.** The
+    // seam names a copy's layer in `image_subresource.base_layer` — Vulkan's
+    // spelling — and leaves `image_offset.z` for a 3D image's depth, while
+    // WebGPU has one `z` carrying both. Dropping the layer is silent: every
+    // layer of an array page lands on layer 0, the last copy wins, and the page
+    // reads back as its final layer everywhere with no validation message. So
+    // the base layer here is 3 and the offset's `z` is 1, and the assertion is
+    // on their SUM — a mapping that used either one alone passes half of it.
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(80, 1);
+    const imgH = handle(90, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    replayer.replay(frameOf(sampledImageAt(imgH), 701n));
+    const image = replayer.images.get(imgH);
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CopyBufferToImage',
+          buffer: bufH,
+          bufferOffset: 0n,
+          bufferRowLength: 0,
+          bufferImageHeight: 0,
+          image: imgH,
+          imageSubresource: {
+            aspect: ['COLOR'],
+            mip: 0,
+            baseLayer: 3,
+            layerCount: 1,
+          },
+          imageOffset: { x: 0, y: 0, z: 1 },
+          imageExtent: { width: 4, height: 4, depthOrLayers: 1 },
+        },
+        703n
+      )
+    );
+    const copies = device.createdEncoders.at(-1).bufferToImageCopies;
+    check(
+      copies.length === 1 &&
+        copies[0].destination.texture === image &&
+        copies[0].destination.origin.z === 4 &&
+        replayer.pendingErrors === 0,
+      `CopyBufferToImage puts image_subresource.base_layer + image_offset.z in origin.z (${JSON.stringify(
+        copies.at(-1)?.destination?.origin ?? null
+      )})`
+    );
+  }
+  {
     // **An unresolvable source buffer or destination image is named on the error
     // queue — two DISTINCT messages.** The image is built for the buffer case and
     // the buffer for the image case, so each isolates the handle that did not
@@ -6913,6 +6961,59 @@ async function main() {
         copies[0].size.height === 2 &&
         replayer.pendingErrors === 0,
       'CopyImageToImage records copyTextureToTexture(src, dst, extent) with resolved images'
+    );
+  }
+  {
+    // The same layer statement `CopyBufferToImage` makes above, on the copy with
+    // a subresource on BOTH sides: each origin's `z` is that side's own
+    // `base_layer` plus its own offset, so a mapping that read one side's layer
+    // for both — or added the layers to the wrong offsets — is visible. The four
+    // numbers are distinct and no two sum alike.
+    const { replayer, device } = await readyWithDevice();
+    const srcH = handle(90, 1);
+    const dstH = handle(91, 1);
+    replayer.replay(frameOf(sampledImageAt(srcH), 700n));
+    replayer.replay(frameOf(sampledImageAt(dstH), 701n));
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CopyImageToImage',
+          copy: {
+            src: srcH,
+            srcSubresource: {
+              aspect: ['COLOR'],
+              mip: 0,
+              baseLayer: 1,
+              layerCount: 1,
+            },
+            srcOffset: { x: 0, y: 0, z: 2 },
+            dst: dstH,
+            dstSubresource: {
+              aspect: ['COLOR'],
+              mip: 0,
+              baseLayer: 4,
+              layerCount: 1,
+            },
+            dstOffset: { x: 0, y: 0, z: 8 },
+            extent: { width: 2, height: 2, depthOrLayers: 1 },
+          },
+        },
+        703n
+      )
+    );
+    const copies = device.createdEncoders.at(-1).imageCopies;
+    check(
+      copies.length === 1 &&
+        copies[0].source.origin.z === 3 &&
+        copies[0].destination.origin.z === 12 &&
+        replayer.pendingErrors === 0,
+      `CopyImageToImage puts each side's own base_layer + offset.z in its origin.z (${JSON.stringify(
+        [
+          copies.at(-1)?.source?.origin?.z ?? null,
+          copies.at(-1)?.destination?.origin?.z ?? null,
+        ]
+      )})`
     );
   }
   {

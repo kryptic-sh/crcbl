@@ -1047,6 +1047,29 @@ function subresourceCount(count) {
   return count === SUBRESOURCE_ALL ? undefined : count;
 }
 
+/**
+ * A copy's `GPUOrigin3D`, from a `crcbl_hal::ImageSubresourceLayers` and the
+ * `crcbl_hal::Offset3d` beside it.
+ *
+ * **THE ARRAY LAYER IS `origin.z`, AND IT ARRIVES IN THE SUBRESOURCE.** The
+ * seam spells a copy the way Vulkan does — `VkBufferImageCopy` names the layer
+ * in `imageSubresource.baseArrayLayer` and leaves `imageOffset.z` for a 3D
+ * image's depth — while WebGPU has one `z` carrying both. So the two are added
+ * here, exactly as `crcbl-wgpu`'s `texture_info` adds them, and the two
+ * backends stay one mapping rather than two.
+ *
+ * Dropping the layer does not fail: every copy lands on layer 0, the last one
+ * wins, and an array page reads back as its final layer everywhere. That is a
+ * picture, not an error, and no validation message names it.
+ *
+ * @param {{ baseLayer: number }} subresource
+ * @param {{ x: number, y: number, z: number }} offset
+ * @returns {{ x: number, y: number, z: number }}
+ */
+function copyOrigin(subresource, offset) {
+  return { x: offset.x, y: offset.y, z: offset.z + subresource.baseLayer };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // A sampler's vocabulary, in WebGPU's
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5630,6 +5653,9 @@ export class Replayer {
    * a 64×64 `rgba8unorm` texture precisely so its natural row is 64 × 4 = 256
    * bytes, already aligned, and the happy path needs no padding at all.
    *
+   * The texture side's origin comes from {@link copyOrigin}: a page's layer
+   * arrives in `imageSubresource.baseLayer`, and WebGPU wants it in `origin.z`.
+   *
    * Returns the `GPUImageCopyTexture`, the `GPUImageDataLayout` WITHOUT its
    * buffer — the caller adds the resolved buffer, whose role (source or
    * destination) and error wording differ by direction — and the copy size; or
@@ -5679,11 +5705,7 @@ export class Replayer {
       textureView: {
         texture,
         mipLevel: command.imageSubresource.mip,
-        origin: {
-          x: command.imageOffset.x,
-          y: command.imageOffset.y,
-          z: command.imageOffset.z,
-        },
+        origin: copyOrigin(command.imageSubresource, command.imageOffset),
       },
       bufferLayout: {
         offset: Number(command.bufferOffset),
@@ -5773,16 +5795,20 @@ export class Replayer {
   /**
    * Records an image→image copy on the implicit-current encoder.
    *
-   * Both sides are textures — each with its own mip level and texel origin — so
-   * this resolves the two images and maps straight to `copyTextureToTexture`;
-   * there is no buffer layout and no 256-byte trap. A missing encoder or an
-   * unresolvable source or destination image goes to the error queue naming the
-   * handle, distinctly by direction.
+   * Both sides are textures — each with its own mip level, array layer and texel
+   * origin — so this resolves the two images and maps straight to
+   * `copyTextureToTexture`; there is no buffer layout and no 256-byte trap. Each
+   * side's origin comes from {@link copyOrigin}, which is where the subresource's
+   * array layer joins the offset's `z`. A missing encoder or an unresolvable
+   * source or destination image goes to the error queue naming the handle,
+   * distinctly by direction.
    *
    * @param {bigint} sequence
    * @param {{ copy: { src: { index: number, generation: number },
-   *   srcSubresource: { mip: number }, srcOffset: { x: number, y: number, z: number },
-   *   dst: { index: number, generation: number }, dstSubresource: { mip: number },
+   *   srcSubresource: { mip: number, baseLayer: number },
+   *   srcOffset: { x: number, y: number, z: number },
+   *   dst: { index: number, generation: number },
+   *   dstSubresource: { mip: number, baseLayer: number },
    *   dstOffset: { x: number, y: number, z: number },
    *   extent: { width: number, height: number, depthOrLayers: number } } }} command
    */
@@ -5813,20 +5839,12 @@ export class Replayer {
       {
         texture: src,
         mipLevel: copy.srcSubresource.mip,
-        origin: {
-          x: copy.srcOffset.x,
-          y: copy.srcOffset.y,
-          z: copy.srcOffset.z,
-        },
+        origin: copyOrigin(copy.srcSubresource, copy.srcOffset),
       },
       {
         texture: dst,
         mipLevel: copy.dstSubresource.mip,
-        origin: {
-          x: copy.dstOffset.x,
-          y: copy.dstOffset.y,
-          z: copy.dstOffset.z,
-        },
+        origin: copyOrigin(copy.dstSubresource, copy.dstOffset),
       },
       {
         width: copy.extent.width,
