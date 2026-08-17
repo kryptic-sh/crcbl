@@ -3145,15 +3145,25 @@ try {
     );
 
     // **What the page can see for itself.** A device opened here, in this browser,
-    // with the descriptor the probe uses — no optional features and no requested
-    // limits — is the same device WebGPU gives the replayer, so its own
-    // `features` and `limits` are what wasm's numbers are held to. Asked of the
-    // browser rather than of anything of ours, which is what makes it evidence.
+    // with the descriptor the probe uses — no optional features, and every limit
+    // the adapter reports, which is what `requiredLimitsFor` asks for — is the
+    // same device WebGPU gives the replayer, so its own `features` and `limits`
+    // are what wasm's numbers are held to. Asked of the browser rather than of
+    // anything of ours, which is what makes it evidence. The descriptor is
+    // written out here rather than imported from the engine: a reference device
+    // opened by the code under test would agree with it whatever it asked for.
     const liveDevice = await evaluate(
       page,
       `(async () => {
        const adapter = await navigator.gpu.requestAdapter();
-       const device = await adapter.requestDevice();
+       const requiredLimits = {};
+       for (const key in adapter.limits) {
+         const value = adapter.limits[key];
+         if (typeof value === 'number' && Number.isFinite(value)) {
+           requiredLimits[key] = value;
+         }
+       }
+       const device = await adapter.requestDevice({ requiredLimits });
        return {
          features: [...device.features].sort(),
          maxTextureDimension2D: device.limits.maxTextureDimension2D,
@@ -3183,27 +3193,28 @@ try {
     // **The device's capabilities are not the adapter's**, which is the claim a
     // backend gets wrong for free: the adapter is right there when the reply is
     // built. WebGPU grants a device what was asked for, and the probe asks for
-    // nothing optional and no limits — so on any machine whose adapter reports
-    // more than the specification's floor, the two records differ, and wasm's two
-    // sets of numbers have to differ with them.
+    // nothing optional — so on any adapter reporting an optional feature the two
+    // records differ, and wasm's two sets of numbers have to differ with them.
     //
-    // Where an adapter *is* at the floor the two legitimately coincide, and this
-    // says so rather than claiming a distinction it could not observe. The checks
-    // above still hold the device's numbers to a device either way.
-    const adapterIsAboveTheFloor =
-      expectedFeatures !== expectedDeviceFeatures ||
-      live?.limits?.maxTextureDimension2D !== liveDevice?.maxTextureDimension2D;
-    const wasmSaysTheyDiffer =
-      wasmCaps?.featuresLo !== deviceCaps?.featuresLo ||
-      wasmCaps?.maxImage2d !== deviceCaps?.maxImage2d;
+    // **The limits can no longer carry this**, and saying so is the point of
+    // this paragraph. The replayer asks for every limit the adapter reports, so
+    // the device's are the adapter's by construction and a copy would be
+    // indistinguishable there; the features are the axis that still separates
+    // them. Where an adapter reports nothing optional either, the two records
+    // legitimately coincide and this says so rather than claiming a distinction
+    // it could not observe. The checks above still hold the device's numbers to
+    // a device either way.
+    const theAdapterHasOptionalFeatures =
+      expectedFeatures !== expectedDeviceFeatures;
+    const wasmSaysTheyDiffer = wasmCaps?.featuresLo !== deviceCaps?.featuresLo;
     check(
       'G',
       'the device wasm was told about is a device, not a copy of its adapter',
-      adapterIsAboveTheFloor ? wasmSaysTheyDiffer : !wasmSaysTheyDiffer,
-      adapterIsAboveTheFloor
-        ? `adapter ${wasmCaps?.featuresLo?.toString(16)}/${wasmCaps?.maxImage2d}` +
-            ` against device ${deviceCaps?.featuresLo?.toString(16)}/${deviceCaps?.maxImage2d}`
-        : 'this adapter grants nothing beyond the floor, so the two records ' +
+      theAdapterHasOptionalFeatures ? wasmSaysTheyDiffer : !wasmSaysTheyDiffer,
+      theAdapterHasOptionalFeatures
+        ? `adapter ${wasmCaps?.featuresLo?.toString(16)} against device ${deviceCaps?.featuresLo?.toString(16)}` +
+            ` (both report maxImage2d ${deviceCaps?.maxImage2d}, which is the adapter's ceiling and asked for)`
+        : 'this adapter reports nothing optional, so the two feature words ' +
             'genuinely coincide here and a copy could not be told apart'
     );
 

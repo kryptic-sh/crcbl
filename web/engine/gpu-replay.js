@@ -1593,9 +1593,15 @@ export function webgpuBindingLayoutFor(kind) {
  *
  * BOTH KINDS, for `halFeaturesFor`'s reason and with a sharper consequence: an
  * adapter's limits are the ceilings it *could* grant, and a device's are the
- * ones it was created with — the specification's defaults unless the request
- * asked for more. The two differ on most real hardware, and reporting the
- * adapter's for a device would promise a texture size the device will refuse.
+ * ones it was created with — the specification's defaults for every member the
+ * request did not name. Reporting the adapter's for a device would promise a
+ * texture size a default device refuses, which is what this separation prevents.
+ *
+ * For the device *this backend* opens the two now coincide by construction,
+ * because {@link requiredLimitsFor} asks for every member the adapter reports.
+ * That is not a licence to read one off the other: the features still differ —
+ * an optional feature the caller did not ask for is not granted — and any device
+ * opened with a different descriptor differs on both.
  *
  * Four of the nineteen have no `GPUSupportedLimits` member behind them, and each
  * is a value the specification fixes rather than a number invented to fill a
@@ -1678,6 +1684,55 @@ export function halLimitsFor(source) {
     // timestamp queries to have a period for.
     timestampPeriodNs: timestamps ? 1 : 0,
   };
+}
+
+/**
+ * An adapter's own ceilings, as the `requiredLimits` a device is asked for.
+ *
+ * WHY THE CEILINGS AND NOT THE DEFAULTS. WebGPU is the only backend under this
+ * seam that caps *per-stage binding counts*, and it caps them low: eight storage
+ * buffers per stage, where `crcbl-render`'s draw-argument pass binds fourteen in
+ * one compute layout. Nothing in `crcbl_hal::Limits` can express that number —
+ * the seam has no per-stage binding field at all, because Vulkan, Metal and DX12
+ * do not need one — so a device opened with the specification's defaults refuses
+ * that bind group layout, then its pipeline, then every draw behind it. That is
+ * a device this backend cannot render with, whatever the caller asked for.
+ *
+ * WHY IT IS NOT THIS FILE DECIDING SOMETHING THE CALLER DID NOT. `crcbl-wgpu`
+ * opens its device with `adapter.limits()` for the same reason (see
+ * `WgpuDevice::request`), so "everything this adapter offers" is the engine's
+ * established policy for opening a device rather than a number chosen here.
+ * Asking for exactly the adapter's own ceilings is also the one request that
+ * cannot be refused over limits: every member of `GPUSupportedLimits` is by
+ * definition supported by the adapter reporting it, and `requestDevice` rejects
+ * the *whole* request over one that is not — the same hazard `requiredFeatures`
+ * has above.
+ *
+ * NOTHING IS CLAMPED AND NOTHING IS HIDDEN. The device is asked for the ceilings
+ * and then reports its own limits back through {@link halLimitsFor}, which is
+ * what `Reply::Device` carries and what `crcbl_hal::Device::caps` answers — so a
+ * browser that granted less than was asked for says so where the caller already
+ * looks, rather than leaving the engine believing it got what it asked for.
+ *
+ * The keys are the adapter's own, walked rather than listed: `requiredLimits`
+ * rejects a key WebGPU does not define, and a hand-written list is a second
+ * place for a spec addition to go missing. Non-numeric members are skipped so a
+ * future `GPUSupportedLimits` member that is not a number cannot turn a device
+ * request into a `TypeError`.
+ *
+ * @param {{ limits?: object }} adapter The `GPUAdapter` being opened.
+ * @returns {Record<string, number>} A `GPUDeviceDescriptor.requiredLimits`.
+ */
+export function requiredLimitsFor(adapter) {
+  /** @type {Record<string, number>} */
+  const asked = {};
+  const limits = adapter.limits;
+  if (!limits) return asked;
+  for (const key in limits) {
+    const value = limits[key];
+    if (typeof value === 'number' && Number.isFinite(value)) asked[key] = value;
+  }
+  return asked;
 }
 
 /**
@@ -2984,10 +3039,14 @@ export class Replayer {
    * are asked for, because `requestDevice` fails the *whole* request over a
    * feature the adapter lacks — which would turn "nice to have" into fatal.
    *
-   * THE LIMITS ARE NOT REQUESTED AT ALL, so the device gets the specification's
-   * defaults. `DeviceDesc` carries no limits to ask with, and inventing a
-   * request from the adapter's ceilings would be this file deciding something
-   * the caller did not.
+   * THE LIMITS ASKED FOR ARE THE ADAPTER'S OWN CEILINGS, not the
+   * specification's defaults: those defaults allow eight storage buffers per
+   * shader stage and `crcbl-render` binds fourteen in one compute layout, so a
+   * default device refuses that layout and every pipeline and draw behind it.
+   * `DeviceDesc` carries no limits to ask with — `crcbl_hal::Limits` has no
+   * per-stage binding field for the caller to have named one in — so the policy
+   * is `crcbl-wgpu`'s, which opens its device with `adapter.limits()`. See
+   * {@link requiredLimitsFor}.
    *
    * A DEVICE LOST LATER IS NOT THIS. `GPUDevice.lost` and `uncapturederror`
    * report a device that opened and then failed, and a `DeviceFailed` answers
@@ -3061,6 +3120,7 @@ export class Replayer {
             ...required.names,
             ...optional.filter((name) => adapter.features?.has(name)),
           ],
+          requiredLimits: requiredLimitsFor(adapter),
         });
       })
       .then((device) => {
@@ -5286,7 +5346,10 @@ export class Replayer {
     }
     const offset = Number(command.offset);
     for (let i = 0; i < command.drawCount; i += 1) {
-      this.#currentPass.drawIndexedIndirect(buffer, offset + i * command.stride);
+      this.#currentPass.drawIndexedIndirect(
+        buffer,
+        offset + i * command.stride
+      );
     }
   }
 

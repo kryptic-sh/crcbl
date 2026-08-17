@@ -256,10 +256,17 @@
 //!
 //! The device's three numbers are the same three for the same reasons, and one
 //! more: **they are what says the device's capabilities are not a copy of the
-//! adapter's.** A page can open its own default device and read `device.features`
-//! and `device.limits.maxTextureDimension2D` off it, and both differ from the
-//! adapter's whenever the adapter reports anything above the specification's
-//! floor.
+//! adapter's.** A page can open a device with the descriptor the replayer uses
+//! and read `device.features` and `device.limits.maxTextureDimension2D` off it,
+//! which is what the gate holds wasm's numbers to.
+//!
+//! It is the *features* that carry that distinction now, not the limits. The
+//! replayer asks `requestDevice` for every limit the adapter reports — WebGPU's
+//! default of eight storage buffers per shader stage is below what
+//! `crcbl-render` binds — so a device's limits equal its adapter's by
+//! construction, while an optional feature the request did not name is still not
+//! granted. A backend that copied the adapter's record would therefore still be
+//! visible, and in the one place it can be.
 //!
 //! `i32` pairs rather than one `i64` because the whole of this ABI is
 //! `(i32, …) -> i32`, which `docs/plan/41-webgpu-stream.md` sets as the

@@ -482,11 +482,19 @@ pub enum Reply {
     /// point of a separate reply rather than an "ok" flag on
     /// [`Reply::Adapter`]. WebGPU grants a device the features that were asked
     /// for and no others, and its limits are the ones that were requested —
-    /// which are the specification's defaults when a request names none — so an
-    /// adapter reporting `timestamp-query` and a 16384-pixel texture yields a
-    /// device with neither unless the request said so. A backend that reported
-    /// the adapter's [`DeviceCaps`] for its device would select render paths
-    /// against capabilities the device does not have.
+    /// the specification's defaults for every member the request did not name —
+    /// so an adapter reporting `timestamp-query` yields a device without it
+    /// unless the request said so. A backend that reported the adapter's
+    /// [`DeviceCaps`] for its device would select render paths against
+    /// capabilities the device does not have.
+    ///
+    /// The limits half of that gap is closed rather than merely described:
+    /// `web/engine/gpu-replay.js` asks for every member the adapter reports,
+    /// because WebGPU's default of eight storage buffers per shader stage is
+    /// below what `crcbl-render`'s draw-argument pass binds and
+    /// [`Limits`] has no per-stage field for a caller to have
+    /// asked with. So this reply's limits equal that adapter's, and its features
+    /// still do not — which is why it is still the *device* that is read.
     ///
     /// There is no handle: the [`Device`](crcbl_hal::Device) lives on the far
     /// side for its whole life, and this crate's command set already names one

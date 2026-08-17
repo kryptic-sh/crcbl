@@ -406,6 +406,11 @@ function stubLimits() {
     maxBufferSize: 115,
     maxVertexBuffers: 116,
     maxBindingsPerBindGroup: 117,
+    // Read by nothing in the reply either, and the whole reason a device is
+    // asked for the adapter's ceilings: WebGPU's default is 8 and
+    // `crcbl-render`'s draw-argument pass binds 14 storage buffers in one
+    // compute layout.
+    maxStorageBuffersPerShaderStage: 118,
   };
 }
 
@@ -486,11 +491,12 @@ function frameOf(command, sequence) {
  * A `GPUSupportedLimits` for a **device**, distinct in every member from
  * `stubLimits`.
  *
- * The point of the whole device section: WebGPU gives a device the limits it
- * was created with — the specification's defaults, since a `DeviceDesc` asks
- * for none — and those are not the adapter's ceilings. A replayer that read a
- * device's capabilities off its adapter would produce `stubLimits`'s numbers
- * here, and every one of them differs.
+ * The point of the whole device section: what the reply carries has to be read
+ * off the *device*, and a replayer that read it off the adapter instead would
+ * produce `stubLimits`'s numbers here. Every member differs so that mistake
+ * cannot hide. A real device now comes back with its adapter's ceilings —
+ * `requiredLimitsFor` asks for them — which is exactly why a stub that agreed
+ * with its adapter would prove nothing.
  */
 function deviceLimits() {
   return {
@@ -2119,9 +2125,23 @@ async function main() {
       ['texture-compression-bc', 'timestamp-query'],
       'only the optional features this adapter has are asked for'
     );
+    // **The limits asked for are the adapter's own ceilings, every member of
+    // them.** The specification's defaults allow eight storage buffers per
+    // shader stage and `crcbl-render`'s draw-argument pass binds fourteen in one
+    // compute layout, so a device opened without a `requiredLimits` is one whose
+    // every bind group layout, pipeline and draw behind that pass is refused —
+    // which is a device that renders nothing at all rather than a slower one.
+    // Compared against `stubLimits` written out rather than against
+    // `requiredLimitsFor`, which would agree with the replayer whatever it did.
+    checkEqual(
+      asked.requiredLimits,
+      stubLimits(),
+      "the device is asked for the adapter's own ceilings, member for member"
+    );
     check(
-      !('requiredLimits' in asked),
-      'no limits are requested, so the device gets the specification defaults'
+      asked.requiredLimits?.maxStorageBuffersPerShaderStage === 118,
+      'including the per-stage storage-buffer count, which is the one the ' +
+        'forward path needs raised and the one the seam cannot express'
     );
     check(
       !('label' in asked),
