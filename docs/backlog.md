@@ -66,6 +66,61 @@ others.
 Reproduce with lumen specifically — the golden harness does one readback per
 scene and never wraps, so it will not show this.
 
+### DECISION — retire `crcbl-wgpu`, and fix the seam weakness it was masking
+
+**Target backend matrix:** vk on Linux, vk and dx12 on Windows, Metal on macOS,
+`crcbl-webgpu` in a browser on all three. `crcbl-wgpu` is not in it. It existed
+to reach the browser before `crcbl-webgpu` did, and to cover hardware the Tier-A
+backends refuse; the browser half is done, and `crcbl-vk`'s `ArrayPages` binding
+model already covers descriptor-indexing-less GPUs.
+
+**The objection to removing it, and why it does not hold.** Running the migrated
+draw-generation tests on wgpu immediately found that `crcbl_hal::fill_buffer`
+promises "a repeating 32-bit value" while `crcbl-wgpu` refuses any non-zero
+value. That looks like wgpu earning its place as a conformance oracle. It is not
+— **the same tests would have caught it on Metal**, because
+`crcbl-mtl/src/command.rs` refuses a `u32` whose four bytes differ (Metal's
+`fillBuffer:range:value:` takes a byte, not a word). Two of four backends cannot
+honour that contract. wgpu found it first only because those tests were
+Vulkan-only until now; the defect was **test placement, not backend count**.
+
+Four independent implementations already run the agnostic seam suite in CI — vk
+on lavapipe, dx12 on WARP, Metal on macOS, WebGPU on SwiftShader. That is the
+oracle.
+
+**The structural weakness, which is the real finding.** The seam's contract is
+prose in doc comments, and a backend that cannot honour it just refuses at
+runtime. Nothing connects "what the docs promise" to "what a backend can do", so
+an over-promise is invisible until something runs. Two rules would close it:
+
+1. **Anything a backend may refuse is either a declared capability or is not in
+   the seam.** Today `Features` covers the big ones (descriptor indexing, mesh
+   shaders, timestamps) but not the small divergences — non-zero `fill_buffer`,
+   a byte-vs-word fill, a backwards timeline signal, a second acquire. Each
+   should become a `Features` bit callers can check, or the seam should narrow
+   to the intersection. **`fill_buffer` should narrow**: document it as a zero
+   fill, which is what its own text says it is for ("the idiomatic way to zero
+   an indirect count buffer"), and let a caller wanting a pattern do a staging
+   copy — which is what the migrated tests now do.
+2. **Every refusal site must name the capability it is refusing for.** The
+   `HalError::Unsupported` / `InvalidDescriptor` constructors are greppable, so
+   this is auditable mechanically: a refusal that names no capability is either
+   a missing `Features` bit or a seam over-promise.
+
+**Sequencing — do not remove wgpu first.** The remaining white-box tests
+(`lights`, `shadow`, `depth_probe`, `mesh`, the sprite cluster) are still
+Vulkan-only, so today Vulkan is the only implementation that runs them at all.
+Removing a backend before those are agnostic would shrink divergence-detection
+at the exact moment it is most needed. Order:
+
+1. Finish migrating the white-box tests to the agnostic suite (in progress).
+2. Narrow `fill_buffer`, and sweep the refusal sites for other over-promises.
+3. Add the both-directions rule to the seam suite: a capability present must
+   work, and absent must refuse with the documented error.
+4. Then delete `crcbl-wgpu`, its `wgpu-e2e` suite and its CI job — and remove
+   `wgpu`/`naga` from the dependency graph, which is a real build-time and
+   advisory-surface win.
+
 ### After the WebGPU migration: features, then the sample that proves them
 
 The standing pattern from the roadmap — build the feature, then ship the sample
