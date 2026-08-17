@@ -328,6 +328,24 @@ pub enum CompositeAlpha {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceCaps {
     /// Formats the surface can be configured with, best first.
+    ///
+    /// **At least one must be sRGB.** That is an obligation on every backend,
+    /// not a hope: every pass above the seam writes display-referred values and
+    /// leaves the encode to the hardware, so a swapchain configured with a
+    /// linear format presents a transfer function too dark — and nothing in the
+    /// frame's path notices, because a linear target is a perfectly valid one to
+    /// render into. The failure is a picture a human calls wrong and no return
+    /// value calls anything.
+    ///
+    /// A backend whose window system will only *configure* a linear format
+    /// still offers the sRGB counterpart here and reaches it through whatever
+    /// reinterpretation its API has — a D3D12 flip-model back buffer is linear
+    /// with an sRGB render-target view over it, and a WebGPU canvas is linear
+    /// with the counterpart in `GPUCanvasConfiguration.viewFormats`. This list
+    /// is what the engine picks from, so this list is where the sRGB one has to
+    /// be. `crates/crcbl/tests/hal_seam_e2e.rs`'s
+    /// `a_surface_offers_an_srgb_format_and_preferred_format_picks_it` holds
+    /// every backend to it.
     pub formats: Vec<Format>,
     /// Present modes available. Always contains [`PresentMode::Fifo`].
     pub present_modes: Vec<PresentMode>,

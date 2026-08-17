@@ -708,7 +708,132 @@ fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
     headless.device.destroy();
 }
 
+/// **The surface offers an sRGB format, and that is what
+/// [`crcbl::hal::SurfaceCaps::preferred_format`] hands back.**
+///
+/// The whole colour pipeline rests on this and nothing used to check it. Every
+/// pass above the seam writes display-referred values and leaves the encode to
+/// the hardware, so a swapchain configured with a linear format presents a
+/// transfer function too dark — and no call fails, no error is reported, and no
+/// existing gate looks: the frame is a perfectly valid render into a perfectly
+/// valid target, it is just the wrong picture. That is exactly how it shipped to
+/// a user in the browser build, where `surface_caps` answered the canvas's
+/// linear formats and `preferred_format` fell through to the first of them.
+///
+/// [`crcbl::hal::SurfaceCaps::formats`] now states the obligation rather than
+/// leaving it to each backend's own unit tests, and this is where every backend
+/// is held to it. The fallback in `preferred_format` — the first format at all,
+/// when no sRGB one is offered — is a total function's last arm and not a
+/// configuration the engine can run in, which is why reaching it is a failure
+/// here rather than a shrug.
+///
+/// # What this does and does not reach
+///
+/// A **[`SurfaceTarget::Offscreen`] surface**, because that is the only surface
+/// any GPU suite in this workspace creates — there is no compositor in the test
+/// environment and no windowed GPU e2e to put this in. So on `vk`, `dx12` and
+/// `mtl` it pins each backend's own offscreen table (`crcbl-vk`'s
+/// `offscreen_surface_caps`, `crcbl-dx12`'s `OFFSCREEN_FORMATS`, `crcbl-mtl`'s
+/// offscreen arm) and not what a real window system answered. That is a weaker
+/// claim than it looks and it is stated rather than glossed: the windowed path
+/// is covered only by each backend's own unit tests over a fabricated
+/// `SurfaceCaps`, and `crcbl-webgpu`'s canvas — the one that actually
+/// regressed — by `crcbl-webgpu`'s `hal/tests.rs` and by group I of the
+/// standalone probe, neither of which this binary can run.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_surface_offers_an_srgb_format_and_preferred_format_picks_it() {
+    let instance = instance();
+    let adapter = select_adapter(instance.as_ref());
+    // SAFETY: `Offscreen` names no platform object at all.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+        .expect("offscreen always works");
+
+    let caps = instance
+        .surface_caps(surface, adapter.id)
+        .expect("a surface reports its caps");
+
+    assert!(
+        !caps.formats.is_empty(),
+        "a surface that offers no format at all is a backend that should have failed \
+         earlier, per `SurfaceCaps::preferred_format`"
+    );
+    assert!(
+        caps.formats.iter().any(|format| format.is_srgb()),
+        "no sRGB format among {:?}. Every pass above the seam writes display-referred \
+         values and leaves the encode to the hardware, so a linear swapchain presents a \
+         transfer function too dark and nothing else in the frame's path says so.",
+        caps.formats
+    );
+
+    let preferred = caps
+        .preferred_format()
+        .expect("a non-empty format list has a preference");
+    assert!(
+        preferred.is_srgb(),
+        "preferred_format() answered {preferred:?}, which is linear, out of {:?}. It takes \
+         the first sRGB entry and falls through to the first entry of all, so this is the \
+         fallback firing — and the fallback is a total function's last arm, not a mode the \
+         engine renders correctly in.",
+        caps.formats
+    );
+    eprintln!(
+        "crcbl hal seam e2e: the surface prefers {preferred:?} out of {:?}",
+        caps.formats
+    );
+
+    instance.destroy_surface(surface);
+}
+
 // --- a frame's worth of the seam -------------------------------------------
+
+/// The sRGB transfer function, encoding linear light into a display format's
+/// levels.
+///
+/// The standard piecewise curve — IEC 61966-2-1, which is what Vulkan's
+/// `*_SRGB` formats, Metal's `*_sRGB` ones and D3D12's `*_SRGB` ones are each
+/// defined to apply on a write. Transcribed rather than reached for because
+/// this workspace has no shared home for it: `tests/render_e2e.rs`,
+/// `crcbl-vk`'s `vk_e2e/sprite` and `vk_e2e/depth_probe`, and
+/// `crcbl-scene`'s `gltf_render` each carry their own, and a test binary
+/// cannot borrow another test binary's. The constants are the specification's,
+/// and [`a_render_pass_clear_reaches_memory_with_the_colour_it_was_given`] is
+/// what checks the transcription: it asserts against a value the hardware
+/// produced independently.
+fn srgb_encode(linear: f32) -> f32 {
+    if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// The byte a channel of `CLEAR` must arrive as, given the target's format.
+///
+/// Both arms are wanted, and they are the two halves of the failure this test
+/// exists for: an sRGB target encodes on write and a linear one does not, so
+/// the *same* clear lands as two very different byte triples and each is the
+/// other's evidence of a bug.
+fn expected_level(linear: f32, format: Format) -> u8 {
+    let value = if format.is_srgb() {
+        srgb_encode(linear)
+    } else {
+        linear
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        (value * 255.0).round().clamp(0.0, 255.0) as u8
+    }
+}
+
+/// How far a channel may sit from [`expected_level`].
+///
+/// One level, for 8-bit rounding and for the encode's own precision — the
+/// specification fixes the curve but not the implementation's arithmetic. It is
+/// nowhere near wide enough to swallow the failure this guards: [`CLEAR`]'s
+/// channels encode to `137, 188, 225` and land at `64, 128, 191` unencoded,
+/// which is 34 to 73 levels away.
+const LEVEL_TOLERANCE: u8 = 1;
 
 /// A render-pass clear that really reached host memory, in the colour it was
 /// given and in the channel order the format names.
@@ -815,12 +940,7 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
     let mut bytes = poisoned(pixels as usize);
     headless.readback(staging, pixels, &mut bytes);
 
-    // The swapchain format may be sRGB, so the clear's linear values are encoded
-    // on write. Rather than reimplement the transfer function, assert the two
-    // properties that catch the bugs this test is for: every pixel is identical
-    // (so the whole attachment really was cleared, not just part of it), and the
-    // channels are ordered and distinct (so no channel swap or all-zero "nothing
-    // happened" result slipped through).
+    // The whole attachment really was cleared, not just part of it.
     let first: [u8; 4] = bytes[0..4].try_into().expect("four bytes");
     assert!(
         bytes.chunks_exact(4).all(|pixel| pixel == first),
@@ -829,10 +949,11 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
     );
     assert_ne!(first, [0, 0, 0, 0], "an all-zero result means nothing ran");
     assert_eq!(first[3], 255, "alpha 1.0 must survive");
+
+    // The channel order in memory follows the format, which is the point of
+    // checking it: a backend that ignored it would pass a "not all zero"
+    // assertion and produce a blue window.
     let (r, g, b) = match headless.format {
-        // The channel order in memory follows the format, which is the point of
-        // checking it: a backend that ignored it would pass a "not all zero"
-        // assertion and produce a blue window.
         Format::Bgra8Unorm | Format::Bgra8UnormSrgb => (first[2], first[1], first[0]),
         _ => (first[0], first[1], first[2]),
     };
@@ -842,8 +963,50 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
          g={g} b={b} in {:?}",
         headless.format
     );
+
+    // **THE ENCODE HAPPENED, AND THESE ARE THE LEVELS IT PRODUCED.** The
+    // ordering above is what this test used to stop at, and it is not enough:
+    // `CLEAR` satisfies red < green < blue both encoded and unencoded, so a
+    // target that skipped the sRGB encode passed it unchanged. That is the exact
+    // shape of the bug the browser build shipped — a swapchain image viewed in
+    // the linear counterpart of its own format, so every pass wrote
+    // display-referred values that nothing ever encoded — and the only assertion
+    // that can tell the two apart is one on the *values*.
+    //
+    // `CLEAR` is why this is checkable at all: 0 and 1 are fixed points of the
+    // transfer function, so the red the seam suites used to clear to reads back
+    // identically either way and proves nothing about the encode.
+    let want = [
+        expected_level(CLEAR[0], headless.format),
+        expected_level(CLEAR[1], headless.format),
+        expected_level(CLEAR[2], headless.format),
+        expected_level(CLEAR[3], headless.format),
+    ];
+    let (want_r, want_g, want_b) = match headless.format {
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => (want[2], want[1], want[0]),
+        _ => (want[0], want[1], want[2]),
+    };
+    let off_by = |actual: u8, expected: u8| actual.abs_diff(expected) > LEVEL_TOLERANCE;
+    assert!(
+        !(off_by(r, want_r) || off_by(g, want_g) || off_by(b, want_b)),
+        "the clear {CLEAR:?} reached memory as r={r} g={g} b={b}, and a {:?} target must put \
+         r={want_r} g={want_g} b={want_b} there (±{LEVEL_TOLERANCE}).\n  \
+         encoded, which is what an sRGB target owes: r={enc_r} g={enc_g} b={enc_b}\n  \
+         unencoded, which is what the linear values are: r={lin_r} g={lin_g} b={lin_b}\n  \
+         Landing on the unencoded row means the write skipped the sRGB encode — the target \
+         was reinterpreted in the linear counterpart of its format somewhere between \
+         `create_swapchain` and the attachment — and every frame this backend presents is a \
+         transfer function too dark.",
+        headless.format,
+        enc_r = expected_level(CLEAR[0], Format::Rgba8UnormSrgb),
+        enc_g = expected_level(CLEAR[1], Format::Rgba8UnormSrgb),
+        enc_b = expected_level(CLEAR[2], Format::Rgba8UnormSrgb),
+        lin_r = expected_level(CLEAR[0], Format::Rgba8Unorm),
+        lin_g = expected_level(CLEAR[1], Format::Rgba8Unorm),
+        lin_b = expected_level(CLEAR[2], Format::Rgba8Unorm),
+    );
     eprintln!(
-        "crcbl hal seam e2e: the clear reached memory as {first:?} in {:?}",
+        "crcbl hal seam e2e: the clear reached memory as {first:?} in {:?}, against {want:?}",
         headless.format
     );
 
