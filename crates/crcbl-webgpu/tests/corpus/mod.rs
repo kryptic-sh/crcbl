@@ -895,9 +895,18 @@ pub fn every_command() -> Vec<Command> {
         Command::DestroyGraphicsPipeline {
             pipeline: handle(133, 134),
         },
+        // The three debug ops, in the order a caller records them. The two
+        // labelled ones carry DIFFERENT strings so a decoder that read the marker
+        // out of the region's field — or replayed one as the other — answers a
+        // different command, and `EndDebugLabel` between them is body-less, so a
+        // reader that consumed a byte too many for the marker loses it entirely.
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
         },
+        Command::InsertDebugMarker {
+            label: "cull done ✱".into(),
+        },
+        Command::EndDebugLabel,
         Command::BeginRenderPass {
             label: Some("shading".into()),
             color_attachments: vec![
@@ -1043,6 +1052,14 @@ pub fn every_command() -> Vec<Command> {
             x: 1000,
             y: 2000,
             z: 3000,
+        },
+        // The indirect dispatch: one buffer and one offset, no count and no
+        // stride — WebGPU's `dispatchWorkgroupsIndirect` is a single dispatch.
+        // Its handle and offset differ from every indirect draw's above so a fold
+        // between the indirect commands shows.
+        Command::DispatchIndirect {
+            buffer: handle(208, 209),
+            offset: 96,
         },
         Command::EndComputePass,
         // The unlabelled twin of the pass above: `None` and `Some(_)` are
@@ -1579,6 +1596,8 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         Command::DestroyImageView { view } => stream.destroy_image_view(*view),
         Command::DestroySampler { sampler } => stream.destroy_sampler(*sampler),
         Command::BeginDebugLabel { label } => stream.begin_debug_label(label),
+        Command::EndDebugLabel => stream.end_debug_label(),
+        Command::InsertDebugMarker { label } => stream.insert_debug_marker(label),
         Command::BeginRenderPass {
             label,
             color_attachments,
@@ -1636,6 +1655,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         }),
         Command::BindComputePipeline { pipeline } => stream.bind_compute_pipeline(*pipeline),
         Command::Dispatch { x, y, z } => stream.dispatch(*x, *y, *z),
+        Command::DispatchIndirect { buffer, offset } => stream.dispatch_indirect(*buffer, *offset),
         Command::EndComputePass => stream.end_compute_pass(),
         Command::CopyBufferToBuffer { copy } => stream.copy_buffer_to_buffer(copy),
         Command::CopyBufferToImage { copy } => stream.copy_buffer_to_image(copy),

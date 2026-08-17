@@ -190,8 +190,12 @@ import {
  *     is core; only *timestamp* queries need a feature.
  *   * `DEPTH_BIAS_CLAMP` (1 << 14) — `GPUDepthStencilState.depthBiasClamp` is
  *     core and honoured.
- *   * `DEBUG_MARKERS` (1 << 18) — `pushDebugGroup` and `insertDebugMarker` are
- *     core on every encoder and reach the browser's own capture tooling.
+ *   * `DEBUG_MARKERS` (1 << 18) — `pushDebugGroup`, `popDebugGroup` and
+ *     `insertDebugMarker` are core on every encoder and reach the browser's own
+ *     capture tooling. All three are replayed — see
+ *     {@link Replayer#beginDebugLabel} — which is what makes granting the bit
+ *     honest: a capability the device reports and the stream then refuses would
+ *     take down a whole command buffer at `finish()`.
  */
 const CORE_FEATURES = (1n << 8n) | (1n << 7n) | (1n << 14n) | (1n << 18n); // COMPUTE | OCCLUSION_QUERY | DEPTH_BIAS_CLAMP | DEBUG_MARKERS
 
@@ -2698,6 +2702,23 @@ export class Replayer {
    */
   #currentComputePass = null;
   /**
+   * The scope each open debug region was pushed onto, innermost last.
+   *
+   * **The objects, not the labels**, and that is the whole reason this exists.
+   * `pushDebugGroup` lives on the command encoder AND on both pass encoders, and
+   * the three keep independent group stacks — so a region opened on the encoder
+   * and closed after a render pass has begun must still pop the *encoder*.
+   * Resolving the scope again at pop time would pop the pass instead, leaving
+   * one stack unbalanced and the other short, and WebGPU refuses the whole
+   * `finish()` over an unbalanced group.
+   *
+   * Emptied whenever the implicit-current encoder goes away — a region left open
+   * on a finished encoder has nothing left to pop.
+   *
+   * @type {Array<GPUCommandEncoder | GPURenderPassEncoder | GPUComputePassEncoder>}
+   */
+  #debugGroups = [];
+  /**
    * Errors the device reported out of band, oldest first, with a cursor for
    * each of the two things that read them — see {@link DeviceErrorLog}.
    *
@@ -3121,6 +3142,15 @@ export class Replayer {
         case 'CreateCommandEncoder':
           this.#createCommandEncoder(sequence, command);
           break;
+        case 'BeginDebugLabel':
+          this.#beginDebugLabel(sequence, command);
+          break;
+        case 'EndDebugLabel':
+          this.#endDebugLabel(sequence);
+          break;
+        case 'InsertDebugMarker':
+          this.#insertDebugMarker(sequence, command);
+          break;
         case 'BeginRenderPass':
           this.#beginRenderPass(sequence, command);
           break;
@@ -3168,6 +3198,9 @@ export class Replayer {
           break;
         case 'Dispatch':
           this.#dispatch(sequence, command);
+          break;
+        case 'DispatchIndirect':
+          this.#dispatchIndirect(sequence, command);
           break;
         case 'CopyImageToBuffer':
           this.#copyImageToBuffer(sequence, command);
@@ -5207,6 +5240,100 @@ export class Replayer {
     );
     this.#currentPass = null;
     this.#currentComputePass = null;
+    this.#debugGroups.length = 0;
+  }
+
+  /**
+   * The scope a debug op records onto: the innermost open one.
+   *
+   * `pushDebugGroup`, `popDebugGroup` and `insertDebugMarker` exist on
+   * `GPUCommandEncoder`, `GPURenderPassEncoder` and `GPUComputePassEncoder`
+   * alike, so a marker belongs to whichever of the three the stream is inside —
+   * {@link #currentPass} if a render pass is open, else
+   * {@link #currentComputePass}, else the encoder itself. `null` means there is
+   * no encoder either, which every caller turns into an error-queue line.
+   *
+   * The pass encoders are checked FIRST because a pass is open *on* the encoder:
+   * recording a group on the encoder while a pass is open is what WebGPU
+   * forbids, and it costs the whole `finish()`.
+   *
+   * @returns {GPUCommandEncoder | GPURenderPassEncoder | GPUComputePassEncoder | null}
+   */
+  #debugScope() {
+    return (
+      this.#currentPass ?? this.#currentComputePass ?? this.#currentEncoder
+    );
+  }
+
+  /**
+   * Opens a labelled region on the innermost open scope — `BeginDebugLabel` →
+   * `pushDebugGroup(label)`.
+   *
+   * THE SCOPE IS REMEMBERED, not re-derived at pop time: see
+   * {@link #debugGroups} for why that is the difference between a balanced
+   * frame and a refused `finish()`.
+   *
+   * A REGION WITH NO ENCODER OPEN GOES TO THE ERROR QUEUE and does not throw —
+   * the mid-frame ordering fault every recording arm refuses.
+   *
+   * @param {bigint} sequence
+   * @param {{ label: string }} command
+   */
+  #beginDebugLabel(sequence, command) {
+    const scope = this.#debugScope();
+    if (!scope) {
+      this.#deviceError(
+        `a debug label was begun (command ${sequence}) with no command encoder open`
+      );
+      return;
+    }
+    scope.pushDebugGroup(command.label);
+    this.#debugGroups.push(scope);
+  }
+
+  /**
+   * Closes the innermost open region — `EndDebugLabel` → `popDebugGroup()` on
+   * the scope that pushed it.
+   *
+   * POPPING WITH NO REGION OPEN IS A MALFORMED STREAM, routed to the error queue
+   * rather than thrown — {@link Replayer#endRenderPass}'s judgement, and the
+   * same reasoning: an unbalanced label is the far side's bug, and throwing
+   * would abandon every command after it in the frame.
+   *
+   * @param {bigint} sequence
+   */
+  #endDebugLabel(sequence) {
+    const scope = this.#debugGroups.pop();
+    if (scope === undefined) {
+      this.#deviceError(
+        `a debug label was ended (command ${sequence}) with none open`
+      );
+      return;
+    }
+    scope.popDebugGroup();
+  }
+
+  /**
+   * Marks a point in time on the innermost open scope — `InsertDebugMarker` →
+   * `insertDebugMarker(label)`.
+   *
+   * IT OPENS NO REGION, which is why it is a command of its own rather than a
+   * flag on {@link Replayer#beginDebugLabel}: nothing is pushed, so
+   * {@link #debugGroups} is untouched and a later `EndDebugLabel` does not see
+   * it. A marker with no encoder open goes to the error queue.
+   *
+   * @param {bigint} sequence
+   * @param {{ label: string }} command
+   */
+  #insertDebugMarker(sequence, command) {
+    const scope = this.#debugScope();
+    if (!scope) {
+      this.#deviceError(
+        `a debug marker was inserted (command ${sequence}) with no command encoder open`
+      );
+      return;
+    }
+    scope.insertDebugMarker(command.label);
   }
 
   /**
@@ -5766,6 +5893,46 @@ export class Replayer {
   }
 
   /**
+   * Records an indirect dispatch on the open compute pass — `DispatchIndirect` →
+   * `dispatchWorkgroupsIndirect(indirectBuffer, indirectOffset)`.
+   *
+   * NOT UNROLLED, unlike {@link Replayer#drawIndirect}: WebGPU's indirect
+   * dispatch is a single dispatch and so is the HAL call, so exactly one call is
+   * made and the command carries no count and no stride. The argument structure
+   * WebGPU reads is `[workgroupCountX, workgroupCountY, workgroupCountZ]`, and
+   * the `u64` offset is narrowed with `Number` as every other buffer offset here
+   * is.
+   *
+   * A DISPATCH WITH NO COMPUTE PASS OPEN, OR AN UNRESOLVABLE ARGUMENT BUFFER,
+   * GOES TO THE ERROR QUEUE and does not throw — {@link Replayer#dispatch}'s and
+   * {@link Replayer#drawIndirect}'s judgement.
+   *
+   * @param {bigint} sequence
+   * @param {{ buffer: { index: number, generation: number }, offset: bigint }}
+   *   command
+   */
+  #dispatchIndirect(sequence, command) {
+    const named = `an indirect dispatch (command ${sequence})`;
+    if (!this.#currentComputePass) {
+      this.#deviceError(`${named} was recorded with no compute pass open`);
+      return;
+    }
+    const buffer = this.#buffers.get(command.buffer);
+    if (buffer === undefined) {
+      this.#deviceError(
+        `${named} reads its workgroup counts from buffer ` +
+          `${command.buffer.index}.${command.buffer.generation}, which this ` +
+          'replayer holds no live buffer under'
+      );
+      return;
+    }
+    this.#currentComputePass.dispatchWorkgroupsIndirect(
+      buffer,
+      Number(command.offset)
+    );
+  }
+
+  /**
    * The shared buffer↔texture copy layout — the mapping both
    * {@link Replayer#copyImageToBuffer} and {@link Replayer#copyBufferToImage}
    * need, resolved once from a `crcbl_hal::BufferImageCopy`.
@@ -6166,12 +6333,14 @@ export class Replayer {
       this.#currentEncoder = null;
       this.#currentPass = null;
       this.#currentComputePass = null;
+      this.#debugGroups.length = 0;
       return;
     }
     this.#commandBuffers.insert(command.commandBuffer, buffer);
     this.#currentEncoder = null;
     this.#currentPass = null;
     this.#currentComputePass = null;
+    this.#debugGroups.length = 0;
   }
 
   /**

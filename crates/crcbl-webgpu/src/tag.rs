@@ -430,7 +430,9 @@ pub const DESTROY_COMMAND_BUFFER_TAG: u8 = 0x2B;
 /// Written out rather than as `FAMILY_DESTROY + 12`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const DESTROY_READBACK_TAG: u8 = 0x2C;
-/// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
+/// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel) — opens a
+/// labelled region, which becomes `pushDebugGroup(label)` on whichever scope is
+/// open.
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
 pub const BEGIN_RENDER_PASS_TAG: u8 = 0x41;
@@ -477,6 +479,16 @@ pub const SET_SCISSOR_TAG: u8 = 0x4D;
 /// index buffer for subsequent indexed draws, which becomes
 /// `setIndexBuffer(buffer, format, offset)`.
 pub const BIND_INDEX_BUFFER_TAG: u8 = 0x4E;
+/// [`Command::EndDebugLabel`](crate::Command::EndDebugLabel) — closes the region
+/// [`BEGIN_DEBUG_LABEL_TAG`] opened, which becomes `popDebugGroup()` on the
+/// scope that pushed it.
+pub const END_DEBUG_LABEL_TAG: u8 = 0x4F;
+/// [`Command::InsertDebugMarker`](crate::Command::InsertDebugMarker) — a
+/// point-in-time marker, which becomes `insertDebugMarker(label)` on whichever
+/// scope is open. Its own tag rather than a flag on [`BEGIN_DEBUG_LABEL_TAG`]:
+/// a marker opens no region, so folding the two would make an unbalanced
+/// `pushDebugGroup` out of every marker.
+pub const INSERT_DEBUG_MARKER_TAG: u8 = 0x50;
 /// [`Command::Draw`](crate::Command::Draw).
 pub const DRAW_TAG: u8 = 0x60;
 /// [`Command::DrawIndexed`](crate::Command::DrawIndexed) — an indexed draw,
@@ -499,6 +511,12 @@ pub const DRAW_INDEXED_INDIRECT_TAG: u8 = 0x63;
 /// [`Command::Dispatch`](crate::Command::Dispatch) — the first tag of the
 /// dispatch family, [`FAMILY_DISPATCH`].
 pub const DISPATCH_TAG: u8 = 0x70;
+/// [`Command::DispatchIndirect`](crate::Command::DispatchIndirect) — a dispatch
+/// whose three workgroup counts are read out of a buffer, which becomes
+/// `dispatchWorkgroupsIndirect(indirectBuffer, indirectOffset)`. One to one,
+/// with no unroll: WebGPU's indirect dispatch is a single dispatch and the HAL's
+/// is too.
+pub const DISPATCH_INDIRECT_TAG: u8 = 0x71;
 /// [`Command::CopyImageToBuffer`](crate::Command::CopyImageToBuffer) — the
 /// readback path's image→buffer copy.
 pub const COPY_IMAGE_TO_BUFFER_TAG: u8 = 0x78;
@@ -1948,7 +1966,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 62] = [
+    const TAGS: [(&str, u8, u8); 65] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         (
@@ -2024,6 +2042,8 @@ mod tests {
         ),
         ("DestroyReadback", DESTROY_READBACK_TAG, FAMILY_DESTROY),
         ("BeginDebugLabel", BEGIN_DEBUG_LABEL_TAG, FAMILY_ENCODER),
+        ("EndDebugLabel", END_DEBUG_LABEL_TAG, FAMILY_ENCODER),
+        ("InsertDebugMarker", INSERT_DEBUG_MARKER_TAG, FAMILY_ENCODER),
         ("BeginRenderPass", BEGIN_RENDER_PASS_TAG, FAMILY_ENCODER),
         (
             "BindGraphicsPipeline",
@@ -2059,6 +2079,7 @@ mod tests {
             FAMILY_DRAW,
         ),
         ("Dispatch", DISPATCH_TAG, FAMILY_DISPATCH),
+        ("DispatchIndirect", DISPATCH_INDIRECT_TAG, FAMILY_DISPATCH),
         ("CopyImageToBuffer", COPY_IMAGE_TO_BUFFER_TAG, FAMILY_COPY),
         ("CopyBufferToBuffer", COPY_BUFFER_TO_BUFFER_TAG, FAMILY_COPY),
         ("CopyBufferToImage", COPY_BUFFER_TO_IMAGE_TAG, FAMILY_COPY),

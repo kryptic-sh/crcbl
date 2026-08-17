@@ -96,13 +96,13 @@ impl CommandEncoder for WebGpuCommandEncoder {
     }
 
     fn end_debug_label(&mut self) {
-        // The stream carries `BeginDebugLabel` but has no command to close a
-        // label yet, so ending one is unwired.
-        self.record_unsupported("end_debug_label is not yet wired into the WebGPU stream");
+        self.channel
+            .with(|c| c.encode(crate::StreamWriter::end_debug_label));
     }
 
-    fn insert_debug_marker(&mut self, _label: &str) {
-        self.record_unsupported("insert_debug_marker is not yet wired into the WebGPU stream");
+    fn insert_debug_marker(&mut self, label: &str) {
+        self.channel
+            .with(|c| c.encode(|stream| stream.insert_debug_marker(label)));
     }
 
     // --- sync ---
@@ -278,8 +278,9 @@ impl CommandEncoder for WebGpuCommandEncoder {
             .with(|c| c.encode(|stream| stream.dispatch(x, y, z)));
     }
 
-    fn dispatch_indirect(&mut self, _args: BufferHandle, _offset: u64) {
-        self.record_unsupported("dispatch_indirect is not yet wired into the WebGPU stream");
+    fn dispatch_indirect(&mut self, args: BufferHandle, offset: u64) {
+        self.channel
+            .with(|c| c.encode(|stream| stream.dispatch_indirect(args, offset)));
     }
 
     // --- queries ---

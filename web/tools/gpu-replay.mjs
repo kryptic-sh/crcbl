@@ -925,6 +925,23 @@ function stubRenderPass() {
     drawIndexedIndirect(buffer, offset) {
       pass.indexedIndirectDraws.push({ buffer, offset });
     },
+    /** @param {string} label */
+    pushDebugGroup(label) {
+      pass.debugGroups.push(label);
+    },
+    popDebugGroup() {
+      pass.poppedGroups += 1;
+    },
+    /** @param {string} label */
+    insertDebugMarker(label) {
+      pass.debugMarkers.push(label);
+    },
+    /** @type {string[]} Every `pushDebugGroup` label, in order. */
+    debugGroups: [],
+    /** @type {number} How many `popDebugGroup` calls it took. */
+    poppedGroups: 0,
+    /** @type {string[]} Every `insertDebugMarker` label, in order. */
+    debugMarkers: [],
     end() {
       pass.ended += 1;
     },
@@ -979,6 +996,35 @@ function stubComputePass() {
     dispatchWorkgroups(x, y, z) {
       pass.dispatches.push({ x, y, z });
     },
+    /**
+     * @param {object} buffer
+     * @param {number} offset
+     */
+    dispatchWorkgroupsIndirect(buffer, offset) {
+      pass.indirectDispatches.push({ buffer, offset });
+    },
+    /**
+     * @type {Array<{ buffer: object, offset: number }>} Every
+     *   `dispatchWorkgroupsIndirect`, in order.
+     */
+    indirectDispatches: [],
+    /** @param {string} label */
+    pushDebugGroup(label) {
+      pass.debugGroups.push(label);
+    },
+    popDebugGroup() {
+      pass.poppedGroups += 1;
+    },
+    /** @param {string} label */
+    insertDebugMarker(label) {
+      pass.debugMarkers.push(label);
+    },
+    /** @type {string[]} Every `pushDebugGroup` label, in order. */
+    debugGroups: [],
+    /** @type {number} How many `popDebugGroup` calls it took. */
+    poppedGroups: 0,
+    /** @type {string[]} Every `insertDebugMarker` label, in order. */
+    debugMarkers: [],
     end() {
       pass.ended += 1;
     },
@@ -1252,6 +1298,23 @@ function stubDevice(
          */
         clearBuffer(buffer, offset, size) {
           encoder.bufferFills.push({ buffer, offset, size });
+        },
+        /** @type {string[]} Every `pushDebugGroup` label, in order. */
+        debugGroups: [],
+        /** @type {number} How many `popDebugGroup` calls it took. */
+        poppedGroups: 0,
+        /** @type {string[]} Every `insertDebugMarker` label, in order. */
+        debugMarkers: [],
+        /** @param {string} label */
+        pushDebugGroup(label) {
+          encoder.debugGroups.push(label);
+        },
+        popDebugGroup() {
+          encoder.poppedGroups += 1;
+        },
+        /** @param {string} label */
+        insertDebugMarker(label) {
+          encoder.debugMarkers.push(label);
         },
       };
       device.createdEncoders.push(encoder);
@@ -2046,6 +2109,27 @@ async function main() {
   // almost right. Every command in the corpus that is not the one this slice
   // implements has to throw, and the error has to name the sequence — the
   // number wasm's own error attribution is keyed on.
+  //
+  // THE CORPUS NOW HAS NO UNIMPLEMENTED COMMAND, so the sweep below iterates
+  // nothing and would pass against a replayer that had lost the `default` arm
+  // altogether. The synthetic name driven first is what keeps that path under
+  // test; the sweep stays because it re-arms itself the moment a later slice
+  // puts a command on the wire ahead of its replay arm.
+  {
+    const replayer = new Replayer({ gpu: stubGpu(async () => null) });
+    let thrown = null;
+    try {
+      replayer.replay(frameOf({ name: 'NoSuchCommand' }, 4242n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown instanceof ReplayError &&
+        thrown.command === 'NoSuchCommand' &&
+        thrown.sequence === 4242n,
+      `a command no arm handles throws a ReplayError naming it and its sequence (${String(thrown)})`
+    );
+  }
   {
     const replayer = new Replayer({ gpu: stubGpu(async () => null) });
     /** @type {string[]} */
@@ -2086,6 +2170,13 @@ async function main() {
       // throws nor touches the encoder, error queue, or device — its own gate
       // below observes that.
       'CreateCommandEncoder',
+      // The three debug ops `Features::DEBUG_MARKERS` promises. Each records
+      // onto whichever scope is open — encoder, render pass or compute pass —
+      // and a stray one (no encoder open, a pop with no region) routes to the
+      // error queue rather than throwing.
+      'BeginDebugLabel',
+      'EndDebugLabel',
+      'InsertDebugMarker',
       'BeginRenderPass',
       'EndRenderPass',
       'BindGraphicsPipeline',
@@ -2102,6 +2193,7 @@ async function main() {
       'EndComputePass',
       'BindComputePipeline',
       'Dispatch',
+      'DispatchIndirect',
       'CopyImageToBuffer',
       'CopyBufferToBuffer',
       'CopyBufferToImage',
@@ -2153,7 +2245,7 @@ async function main() {
     check(
       wrong.length === 0,
       wrong[0] ??
-        `every command this slice cannot replay throws a ReplayError naming it and its sequence (${unimplemented} of them)`
+        `every command this slice cannot replay throws a ReplayError naming it and its sequence (${unimplemented} of them in the corpus)`
     );
   }
 
@@ -6975,6 +7067,64 @@ async function main() {
     );
   }
   {
+    // **An indirect dispatch reaches dispatchWorkgroupsIndirect with the buffer
+    // it names and its offset narrowed to Number.** NOT unrolled, unlike the
+    // indirect draws: WebGPU's indirect dispatch is a single dispatch and so is
+    // the HAL call, so exactly one call is made whatever the offset.
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(92, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    const buffer = replayer.buffers.get(bufH);
+    const pass = openedComputePass(replayer, device);
+    replayer.replay(
+      frameOf({ name: 'DispatchIndirect', buffer: bufH, offset: 96n }, 702n)
+    );
+    checkEqual(
+      pass.indirectDispatches,
+      [{ buffer, offset: 96 }],
+      'a DispatchIndirect records dispatchWorkgroupsIndirect(buffer, 96) exactly once'
+    );
+    check(
+      pass.dispatches.length === 0 && replayer.pendingErrors === 0,
+      `a valid DispatchIndirect records no direct dispatch and leaves the error queue empty (${pass.dispatches.length} direct)`
+    );
+  }
+  {
+    // **An indirect dispatch of an unresolvable buffer is named on the error
+    // queue** and dispatches nothing — the indirect draws' judgement.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedComputePass(replayer, device);
+    replayer.replay(
+      frameOf(
+        { name: 'DispatchIndirect', buffer: handle(92, 1), offset: 0n },
+        702n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('92.1') &&
+        pass.indirectDispatches.length === 0,
+      `a DispatchIndirect of an unresolvable buffer names it and dispatches nothing (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **An indirect dispatch with no compute pass open is a mid-frame ordering
+    // fault**, exactly as the direct one is.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf(
+        { name: 'DispatchIndirect', buffer: handle(92, 1), offset: 0n },
+        702n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no compute pass open'),
+      `a DispatchIndirect with no compute pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
     // **A bind group binds onto the OPEN COMPUTE pass** — the whole point of the
     // generalized arm, which used to guard on a render pass alone. The fixture's
     // material group is built against resources at the handles it names so its
@@ -7028,6 +7178,199 @@ async function main() {
     check(
       error !== null && error.includes('with none open'),
       `ending a compute pass with none open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+
+  // ---- the debug ops: a promise the device already makes ------------------
+  //
+  // `CORE_FEATURES` grants `Features::DEBUG_MARKERS` unconditionally, so every
+  // device this replayer opens reports it — which is only honest if the three
+  // ops actually reach the browser. `pushDebugGroup`, `popDebugGroup` and
+  // `insertDebugMarker` exist on the command encoder AND on both pass encoders,
+  // and those are different objects with independent group stacks. So what these
+  // checks pin is WHICH object each call landed on: a push that went to the
+  // encoder while a pass was open is an unbalanced group, and WebGPU refuses the
+  // whole `finish()` over one.
+  {
+    // **With no pass open the region goes on the ENCODER**, which is the scope a
+    // frame-level label belongs to.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(encoderCommand, 700n));
+    replayer.replay(frameOf({ name: 'BeginDebugLabel', label: 'frame' }, 701n));
+    const encoder = device.createdEncoders.at(-1);
+    checkEqual(
+      encoder.debugGroups,
+      ['frame'],
+      'a BeginDebugLabel with no pass open pushes the group on the encoder'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'and a valid BeginDebugLabel leaves the error queue empty'
+    );
+  }
+  {
+    // **With a render pass open the region goes on the PASS**, not the encoder —
+    // `GPURenderPassEncoder` has its own `pushDebugGroup` and its own stack.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf({ name: 'BeginDebugLabel', label: 'gbuffer' }, 602n)
+    );
+    const encoder = device.createdEncoders.at(-1);
+    check(
+      pass.debugGroups.length === 1 &&
+        pass.debugGroups[0] === 'gbuffer' &&
+        encoder.debugGroups.length === 0,
+      `a BeginDebugLabel inside a render pass pushes on the pass and not the encoder (${JSON.stringify([pass.debugGroups, encoder.debugGroups])})`
+    );
+  }
+  {
+    // **With a compute pass open the region goes on the COMPUTE pass**, the
+    // third of the three scopes.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedComputePass(replayer, device);
+    replayer.replay(frameOf({ name: 'BeginDebugLabel', label: 'cull' }, 702n));
+    const encoder = device.createdEncoders.at(-1);
+    check(
+      pass.debugGroups.length === 1 &&
+        pass.debugGroups[0] === 'cull' &&
+        encoder.debugGroups.length === 0,
+      `a BeginDebugLabel inside a compute pass pushes on the compute pass (${JSON.stringify([pass.debugGroups, encoder.debugGroups])})`
+    );
+  }
+  {
+    // **THE POP GOES TO THE OBJECT THAT PUSHED**, not to whatever is open when it
+    // arrives. A frame-level region opened on the encoder and closed after a pass
+    // has opened must still pop the ENCODER — popping the pass would leave the
+    // encoder's group open and unbalance the pass's stack at once.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(encoderCommand, 700n));
+    replayer.replay(frameOf({ name: 'BeginDebugLabel', label: 'frame' }, 701n));
+    replayer.replay(frameOf(openPass, 702n));
+    replayer.replay(frameOf({ name: 'EndDebugLabel' }, 703n));
+    const encoder = device.createdEncoders.at(-1);
+    check(
+      encoder.poppedGroups === 1 &&
+        encoder.pass.poppedGroups === 0 &&
+        replayer.pendingErrors === 0,
+      `an EndDebugLabel pops the scope that pushed (encoder ${encoder.poppedGroups}, pass ${encoder.pass.poppedGroups})`
+    );
+  }
+  {
+    // **Nesting closes innermost first.** A frame region on the encoder, a pass
+    // region on the pass: the first pop takes the pass's and the second the
+    // encoder's, which is the ordering a real capture tool shows.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(encoderCommand, 700n));
+    replayer.replay(frameOf({ name: 'BeginDebugLabel', label: 'frame' }, 701n));
+    replayer.replay(frameOf(openPass, 702n));
+    replayer.replay(
+      frameOf({ name: 'BeginDebugLabel', label: 'gbuffer' }, 703n)
+    );
+    const encoder = device.createdEncoders.at(-1);
+    replayer.replay(frameOf({ name: 'EndDebugLabel' }, 704n));
+    const afterInner = [encoder.pass.poppedGroups, encoder.poppedGroups];
+    replayer.replay(frameOf({ name: 'EndDebugLabel' }, 705n));
+    checkEqual(
+      [afterInner, [encoder.pass.poppedGroups, encoder.poppedGroups]],
+      [
+        [1, 0],
+        [1, 1],
+      ],
+      'nested regions pop innermost first: the pass, then the encoder'
+    );
+  }
+  {
+    // **A pop with no region open is a malformed stream**, into the error queue
+    // rather than thrown — {@link Replayer#endRenderPass}'s judgement.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(encoderCommand, 700n));
+    replayer.replay(frameOf({ name: 'EndDebugLabel' }, 701n));
+    const encoder = device.createdEncoders.at(-1);
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('with none open') &&
+        encoder.poppedGroups === 0,
+      `an EndDebugLabel with no region open goes to the error queue and pops nothing (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A NEW ENCODER STARTS WITH AN EMPTY STACK.** A region left open when the
+    // previous encoder went away has nothing to pop — carrying the entry forward
+    // would pop a finished encoder, which is a browser error a frame later.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(encoderCommand, 700n));
+    replayer.replay(frameOf({ name: 'BeginDebugLabel', label: 'frame' }, 701n));
+    const first = device.createdEncoders.at(-1);
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(frameOf({ name: 'EndDebugLabel' }, 703n));
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('with none open') &&
+        first.poppedGroups === 0,
+      `a region left open on a previous encoder is not popped on the next (${JSON.stringify(error)}, popped ${first.poppedGroups})`
+    );
+  }
+  {
+    // **A region with no encoder open at all is a mid-frame ordering fault**, the
+    // judgement every recording arm makes.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf({ name: 'BeginDebugLabel', label: 'frame' }, 701n));
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no command encoder open'),
+      `a BeginDebugLabel with no encoder open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A marker lands on the open scope and opens NO region** — the whole reason
+    // it is its own command rather than a flag on the region's.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf({ name: 'InsertDebugMarker', label: 'cull done' }, 602n)
+    );
+    replayer.replay(frameOf({ name: 'EndDebugLabel' }, 603n));
+    const error = replayer.takeError();
+    checkEqual(
+      pass.debugMarkers,
+      ['cull done'],
+      'an InsertDebugMarker inside a render pass marks the pass'
+    );
+    check(
+      pass.debugGroups.length === 0 &&
+        error !== null &&
+        error.includes('with none open'),
+      `and it opens no region, so the pop after it has nothing to close (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **With no pass open the marker goes on the encoder**, the same scope
+    // resolution the region takes.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(encoderCommand, 700n));
+    replayer.replay(
+      frameOf({ name: 'InsertDebugMarker', label: 'frame start' }, 701n)
+    );
+    const encoder = device.createdEncoders.at(-1);
+    checkEqual(
+      encoder.debugMarkers,
+      ['frame start'],
+      'an InsertDebugMarker with no pass open marks the encoder'
+    );
+  }
+  {
+    // **A marker with no encoder open is a mid-frame ordering fault.**
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf({ name: 'InsertDebugMarker', label: 'stray' }, 701n)
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no command encoder open'),
+      `an InsertDebugMarker with no encoder open goes to the error queue (${JSON.stringify(error)})`
     );
   }
   {

@@ -883,7 +883,14 @@ const EXPECTED = [
   // destroy — the one whose empty slot is the ordinary case: the replayer refuses
   // a pipeline it cannot build and the caller destroys the handle anyway.
   { name: 'DestroyGraphicsPipeline', pipeline: handle(133, 134) },
+  // The three debug ops, in the order a caller records them. The two labelled
+  // ones carry different strings so a decoder that read the marker out of the
+  // region's field answers a different command, and the body-less
+  // `EndDebugLabel` between them is lost entirely by a reader that consumed a
+  // byte too many for the marker.
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
+  { name: 'InsertDebugMarker', label: 'cull done ✱' },
+  { name: 'EndDebugLabel' },
   {
     name: 'BeginRenderPass',
     label: 'shading',
@@ -1009,6 +1016,14 @@ const EXPECTED = [
   { name: 'BeginComputePass', label: 'cull' },
   { name: 'BindComputePipeline', pipeline: handle(174, 175) },
   { name: 'Dispatch', x: 1000, y: 2000, z: 3000 },
+  // The indirect dispatch: one buffer and one `BigInt` offset, with no count and
+  // no stride — `dispatchWorkgroupsIndirect` is a single dispatch. Its handle and
+  // offset differ from every indirect draw's so a fold between them shows.
+  {
+    name: 'DispatchIndirect',
+    buffer: handle(208, 209),
+    offset: 96n,
+  },
   { name: 'EndComputePass' },
   { name: 'BeginComputePass', label: null },
   // The copy that carries a dispatch's storage-buffer output to a host buffer.

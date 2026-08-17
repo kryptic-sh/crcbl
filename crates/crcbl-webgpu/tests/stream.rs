@@ -1646,7 +1646,8 @@ fn every_command_has_its_own_name() {
     // RequestReadback and Present, and one each of the rest of the readback path
     // (CreateCommandEncoder, EndRenderPass, CopyImageToBuffer, Finish,
     // PollReadback, DestroyReadback, DestroyCommandBuffer) and of the compute pass
-    // (BindComputePipeline, Dispatch, EndComputePass, CopyBufferToBuffer), the
+    // (BindComputePipeline, Dispatch, DispatchIndirect, EndComputePass,
+    // CopyBufferToBuffer), the
     // remaining copies and fill (CopyBufferToImage, CopyImageToImage, FillBuffer),
     // the host→buffer upload (WriteBuffer), the dynamic viewport and scissor the
     // graph sets on every pass (SetViewport, SetScissor), the UI pass's indexed
@@ -1655,10 +1656,12 @@ fn every_command_has_its_own_name() {
     // (PipelineBarrier, twice but one name), and the presentation
     // family (CreateSwapchain, AcquireNextFrame, DestroySwapchain and
     // ReconfigureSwapchain) — so the distinct-name count is what the writer has
-    // methods for. The offscreen surface (CreateOffscreenSurface) is the twin of
-    // CreateSurface and adds one name of its own, and the out-of-band error ask
-    // (TakeError) adds the last.
-    assert_eq!(names.len(), 63);
+    // methods for. The debug ops the device advertises through
+    // `Features::DEBUG_MARKERS` add two more names beside BeginDebugLabel
+    // (EndDebugLabel, InsertDebugMarker). The offscreen surface
+    // (CreateOffscreenSurface) is the twin of CreateSurface and adds one name of
+    // its own, and the out-of-band error ask (TakeError) adds the last.
+    assert_eq!(names.len(), 66);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

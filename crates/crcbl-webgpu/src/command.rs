@@ -637,9 +637,40 @@ pub enum Command {
         /// Id to release.
         pipeline: GraphicsPipelineHandle,
     },
-    /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
+    /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label) —
+    /// opens a named region, which becomes `pushDebugGroup(label)`.
+    ///
+    /// **On whichever scope is open**, and that is the whole subtlety of the
+    /// three debug commands: `pushDebugGroup` exists on the command encoder, on
+    /// a render pass encoder and on a compute pass encoder, and they are
+    /// different objects with independent group stacks. The replayer pushes onto
+    /// the innermost open one and remembers which, so
+    /// [`EndDebugLabel`](Self::EndDebugLabel) pops the object that pushed rather
+    /// than whatever happens to be open when it arrives.
     BeginDebugLabel {
         /// Region name.
+        label: String,
+    },
+    /// [`end_debug_label`](crcbl_hal::CommandEncoder::end_debug_label) — closes
+    /// the region [`BeginDebugLabel`](Self::BeginDebugLabel) opened, which
+    /// becomes `popDebugGroup()`.
+    ///
+    /// Body-less: the region it closes is the innermost open one, exactly as
+    /// [`EndRenderPass`](Self::EndRenderPass) closes the open pass without
+    /// naming it. Popping with no region open is a malformed stream the replayer
+    /// routes to the error queue rather than throwing on.
+    EndDebugLabel,
+    /// [`insert_debug_marker`](crcbl_hal::CommandEncoder::insert_debug_marker) —
+    /// a point-in-time marker, which becomes `insertDebugMarker(label)` on
+    /// whichever scope is open.
+    ///
+    /// Its own command rather than a flag on
+    /// [`BeginDebugLabel`](Self::BeginDebugLabel): a marker opens no region, so
+    /// folding the two would leave an unbalanced `pushDebugGroup` behind every
+    /// marker — and WebGPU refuses the whole `finish()` over an unbalanced
+    /// group.
+    InsertDebugMarker {
+        /// Marker name.
         label: String,
     },
     /// [`begin_render_pass`](crcbl_hal::CommandEncoder::begin_render_pass).
@@ -807,11 +838,6 @@ pub enum Command {
     },
     /// [`dispatch`](crcbl_hal::CommandEncoder::dispatch) — the workgroup counts
     /// for a compute dispatch on the open compute pass.
-    ///
-    /// [`dispatch_indirect`](crcbl_hal::CommandEncoder::dispatch_indirect) has no
-    /// command yet: its dimensions come from buffer contents, which needs a fill
-    /// or host→buffer upload command this slice does not have. See
-    /// `docs/backlog.md`.
     Dispatch {
         /// Workgroups in x.
         x: u32,
@@ -819,6 +845,26 @@ pub enum Command {
         y: u32,
         /// Workgroups in z.
         z: u32,
+    },
+    /// [`dispatch_indirect`](crcbl_hal::CommandEncoder::dispatch_indirect) — a
+    /// compute dispatch whose three workgroup counts are read out of a buffer,
+    /// on the open compute pass.
+    ///
+    /// **Not unrolled**, unlike the indirect draws: WebGPU's
+    /// `dispatchWorkgroupsIndirect(indirectBuffer, indirectOffset)` is a single
+    /// dispatch and so is the HAL call, so the two map one to one and the
+    /// command carries no count or stride. The argument structure WebGPU reads
+    /// is `[workgroupCountX, workgroupCountY, workgroupCountZ]` (three `u32`).
+    ///
+    /// **The counts come from buffer contents at replay time**, so observing one
+    /// end to end needs those bytes written first — this seam's
+    /// [`WriteBuffer`](Self::WriteBuffer) is the upload that can do it, since
+    /// [`FillBuffer`](Self::FillBuffer) only clears to zero on WebGPU.
+    DispatchIndirect {
+        /// Buffer holding the three workgroup counts.
+        buffer: BufferHandle,
+        /// Byte offset of the argument structure.
+        offset: u64,
     },
     /// [`end_compute_pass`](crcbl_hal::CommandEncoder::end_compute_pass).
     ///
@@ -1352,6 +1398,8 @@ impl Command {
             Self::DestroyComputePipeline { .. } => "DestroyComputePipeline",
             Self::DestroyGraphicsPipeline { .. } => "DestroyGraphicsPipeline",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
+            Self::EndDebugLabel => "EndDebugLabel",
+            Self::InsertDebugMarker { .. } => "InsertDebugMarker",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",
             Self::BindGroup { .. } => "BindGroup",
@@ -1366,6 +1414,7 @@ impl Command {
             Self::BeginComputePass { .. } => "BeginComputePass",
             Self::BindComputePipeline { .. } => "BindComputePipeline",
             Self::Dispatch { .. } => "Dispatch",
+            Self::DispatchIndirect { .. } => "DispatchIndirect",
             Self::EndComputePass => "EndComputePass",
             Self::CreateCommandEncoder { .. } => "CreateCommandEncoder",
             Self::EndRenderPass => "EndRenderPass",

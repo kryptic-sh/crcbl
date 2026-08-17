@@ -1057,9 +1057,30 @@ impl StreamWriter {
 
     // ── Encoder state ────────────────────────────────────────────────────────
 
-    /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
+    /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label) — the
+    /// region name, which the replayer pushes onto whichever scope is open. See
+    /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
     pub fn begin_debug_label(&mut self, label: &str) -> u64 {
         let sequence = self.push_tag(tag::BEGIN_DEBUG_LABEL_TAG);
+        self.bytes.put_bytes(label.as_bytes());
+        sequence
+    }
+
+    /// [`end_debug_label`](crcbl_hal::CommandEncoder::end_debug_label).
+    ///
+    /// Body-less: it closes the region
+    /// [`begin_debug_label`](Self::begin_debug_label) opened, without naming it.
+    pub fn end_debug_label(&mut self) -> u64 {
+        self.push_tag(tag::END_DEBUG_LABEL_TAG)
+    }
+
+    /// [`insert_debug_marker`](crcbl_hal::CommandEncoder::insert_debug_marker) —
+    /// the marker name, carried exactly as
+    /// [`begin_debug_label`](Self::begin_debug_label)'s is; only the tag says
+    /// which of the two the replayer calls. See
+    /// [`Command::InsertDebugMarker`](crate::Command::InsertDebugMarker).
+    pub fn insert_debug_marker(&mut self, label: &str) -> u64 {
+        let sequence = self.push_tag(tag::INSERT_DEBUG_MARKER_TAG);
         self.bytes.put_bytes(label.as_bytes());
         sequence
     }
@@ -1219,6 +1240,20 @@ impl StreamWriter {
         self.bytes.put_u32(x);
         self.bytes.put_u32(y);
         self.bytes.put_u32(z);
+        sequence
+    }
+
+    /// [`dispatch_indirect`](crcbl_hal::CommandEncoder::dispatch_indirect), on
+    /// the open compute pass — the argument buffer, then its byte offset.
+    ///
+    /// No count and no stride, unlike the indirect draws: WebGPU's
+    /// `dispatchWorkgroupsIndirect` is a single dispatch and so is the HAL call,
+    /// so there is nothing for the replayer to unroll. See
+    /// [`Command::DispatchIndirect`](crate::Command::DispatchIndirect).
+    pub fn dispatch_indirect(&mut self, buffer: BufferHandle, offset: u64) -> u64 {
+        let sequence = self.push_tag(tag::DISPATCH_INDIRECT_TAG);
+        self.bytes.put_handle(buffer);
+        self.bytes.put_u64(offset);
         sequence
     }
 

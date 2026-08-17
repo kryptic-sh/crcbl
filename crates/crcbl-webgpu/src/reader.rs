@@ -1065,6 +1065,10 @@ impl<'a> StreamReader<'a> {
             tag::BEGIN_DEBUG_LABEL_TAG => Ok(Command::BeginDebugLabel {
                 label: r.read_string("BeginDebugLabel::label")?,
             }),
+            tag::END_DEBUG_LABEL_TAG => Ok(Command::EndDebugLabel),
+            tag::INSERT_DEBUG_MARKER_TAG => Ok(Command::InsertDebugMarker {
+                label: r.read_string("InsertDebugMarker::label")?,
+            }),
             tag::BEGIN_RENDER_PASS_TAG => {
                 let label = r.read_opt_string("RenderPassDesc::label")?;
                 let count = r.read_count("RenderPassDesc::color_attachments")?;
@@ -1221,6 +1225,13 @@ impl<'a> StreamReader<'a> {
                 let y = r.read_u32()?;
                 let z = r.read_u32()?;
                 Ok(Command::Dispatch { x, y, z })
+            }
+            tag::DISPATCH_INDIRECT_TAG => {
+                // The argument buffer, then its byte offset. No count and no
+                // stride — see `Command::DispatchIndirect`.
+                let buffer = r.read_handle("DispatchIndirect::buffer")?;
+                let offset = r.read_u64()?;
+                Ok(Command::DispatchIndirect { buffer, offset })
             }
             tag::END_COMPUTE_PASS_TAG => Ok(Command::EndComputePass),
             tag::ENUMERATE_ADAPTERS_TAG => Ok(Command::EnumerateAdapters),

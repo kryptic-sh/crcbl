@@ -734,6 +734,99 @@ fn finish_fails_loudly_after_recording_an_unwired_op() {
     );
 }
 
+// ── (g) the debug-marker ops the device advertises ─────────────────────────
+
+/// **`Features::DEBUG_MARKERS` is a promise, and this is what keeps it.**
+///
+/// `web/engine/gpu-replay.js` grants the bit unconditionally in `CORE_FEATURES`,
+/// so every device this backend opens reports it. A caller that branches on it
+/// records a label region and a marker; if either were unwired, `finish` would
+/// refuse and take the whole command buffer down a frame away from the call that
+/// caused it. So all three ops must encode, and the frame must finish.
+#[test]
+fn the_debug_marker_ops_encode_rather_than_refusing_at_finish() {
+    let (channel, device) = device_on_fresh_channel();
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("the graphics queue");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+
+    encoder.begin_debug_label("gbuffer");
+    encoder.insert_debug_marker("cull done");
+    encoder.end_debug_label();
+    encoder
+        .finish()
+        .expect("the debug ops are wired, so finish succeeds");
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    let names: Vec<_> = commands.iter().map(crate::Command::name).collect();
+    assert_eq!(
+        names,
+        vec![
+            "CreateCommandEncoder",
+            "BeginDebugLabel",
+            "InsertDebugMarker",
+            "EndDebugLabel",
+            "Finish",
+        ],
+        "the three debug ops each encode a command of their own, in order"
+    );
+    let Some(crate::Command::InsertDebugMarker { label }) = commands.get(2) else {
+        panic!("the third command is the marker: {commands:?}");
+    };
+    assert_eq!(label, "cull done", "the marker carries the caller's label");
+}
+
+// ── (h) the indirect dispatch ──────────────────────────────────────────────
+
+/// **`dispatch_indirect` reaches the stream with its buffer and offset intact.**
+///
+/// WebGPU's `dispatchWorkgroupsIndirect(buffer, offset)` maps one to one, so the
+/// op has no reason to fail `finish`. The offset is deliberately not zero: a
+/// writer that dropped the field would still encode a command, and only a
+/// non-zero value tells the two apart.
+#[test]
+fn dispatch_indirect_encodes_rather_than_refusing_at_finish() {
+    let (channel, device) = device_on_fresh_channel();
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("the graphics queue");
+    let args: BufferHandle = Handle::from_bits((7 << 32) | 5).expect("a real handle");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+
+    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+    encoder.dispatch_indirect(args, 256);
+    encoder.end_compute_pass();
+    encoder
+        .finish()
+        .expect("dispatch_indirect is wired, so finish succeeds");
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    let names: Vec<_> = commands.iter().map(crate::Command::name).collect();
+    assert_eq!(
+        names,
+        vec![
+            "CreateCommandEncoder",
+            "BeginComputePass",
+            "DispatchIndirect",
+            "EndComputePass",
+            "Finish",
+        ],
+        "the indirect dispatch encodes its own command inside the pass"
+    );
+    let Some(crate::Command::DispatchIndirect { buffer, offset }) = commands.get(2) else {
+        panic!("the third command is the indirect dispatch: {commands:?}");
+    };
+    assert_eq!(*buffer, args, "the argument buffer crosses");
+    assert_eq!(*offset, 256, "the byte offset crosses");
+}
+
 // ── refusals of needed-but-unwired Device methods ──────────────────────────
 
 #[test]
