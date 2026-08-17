@@ -737,6 +737,18 @@ jobs:
           CRCBL_DX12_VALIDATION: '1'
         run: crates/crcbl/tests/run-render-e2e.sh
 
+      # The same HAL-seam behaviours on this backend, from the one agnostic
+      # binary. It replaces per-backend copies that had drifted apart; without
+      # this step the tests deleted from `vk_e2e`/`wgpu_e2e` would be a net loss
+      # of coverage rather than a consolidation.
+      - name: Run the HAL seam suite on WARP
+        shell: bash
+        env:
+          CRCBL_GPU: dx12
+          CRCBL_ADAPTER: cpu
+          CRCBL_DX12_VALIDATION: '1'
+        run: crates/crcbl/tests/run-hal-seam-e2e.sh
+
       # The two backends nobody on this team can run locally are the two whose
       # golden diffs were being discarded: this job and the Metal one wrote
       # `target/golden-diff/` on a failure and uploaded nothing, so the one
@@ -898,6 +910,16 @@ jobs:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-render-e2e.sh
+
+      # The same HAL-seam behaviours on this backend, from the one agnostic
+      # binary. It replaces per-backend copies that had drifted apart; without
+      # this step the tests deleted from `vk_e2e`/`wgpu_e2e` would be a net loss
+      # of coverage rather than a consolidation.
+      - name: Run the HAL seam suite on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-hal-seam-e2e.sh
       # The only frame in the tree drawn from an **application's** `SceneDesc`
       # rather than from `crcbl_render::scene::demo`, which is what makes it
       # worth its own step: the step above proves the engine's own residents
@@ -1416,6 +1438,16 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-render-e2e.sh
 
+      # The same HAL-seam behaviours on this backend, from the one agnostic
+      # binary. It replaces per-backend copies that had drifted apart; without
+      # this step the tests deleted from `vk_e2e`/`wgpu_e2e` would be a net loss
+      # of coverage rather than a consolidation.
+      - name: Run the HAL seam suite on wgpu
+        env:
+          CRCBL_GPU: wgpu
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-hal-seam-e2e.sh
+
   # `docs/plan/12-testing.md`'s P5 row: "Cross-backend image compare (vk↔wgpu)",
   # which its per-subsystem anchors call "the tier system's regression net" and
   # the roadmap makes a condition of the HAL freeze at P5 exit — the seam is not
@@ -1732,6 +1764,18 @@ jobs:
           MTL_DEBUG_LAYER_ERROR_MODE: nslog
           MTL_DEBUG_LAYER_WARNING_MODE: nslog
         run: crates/crcbl/tests/run-render-e2e.sh
+
+      # The same HAL-seam behaviours on this backend, from the one agnostic
+      # binary. It replaces per-backend copies that had drifted apart; without
+      # this step the tests deleted from `vk_e2e`/`wgpu_e2e` would be a net loss
+      # of coverage rather than a consolidation.
+      - name: Run the HAL seam suite on Metal
+        env:
+          CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+        run: crates/crcbl/tests/run-hal-seam-e2e.sh
 
       - name: Upload golden-image diffs
         if: failure()

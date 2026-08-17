@@ -142,6 +142,17 @@ workspace = true
 # `ForwardRenderer`.
 render-e2e = []
 
+# `tests/hal_seam_e2e.rs` — `crcbl-hal`'s seam itself, on whichever backend
+# `CRCBL_GPU` names. Gated and `#[ignore]`d for exactly the reason `render-e2e`
+# above is, and driven by `tests/run-hal-seam-e2e.sh`.
+#
+# A feature of its own rather than a second suite under `render-e2e`, because
+# the two answer different questions and are run separately: `render-e2e` draws
+# the engine's own frames against checked-in goldens, this one holds every
+# backend to the same HAL behaviour and commits no image. A single gate would
+# mean a machine that can run one has to run both.
+hal-seam-e2e = []
+
 # `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
 # and `build_cluster_dag`. **Off by default**, and the reason is the same one
 # `crcbl-sprite` is linked as `load` and not `bake`: the crate depends on `gltf`,

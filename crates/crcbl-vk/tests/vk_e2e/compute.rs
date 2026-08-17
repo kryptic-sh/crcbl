@@ -1,13 +1,21 @@
-//! The compute path: `begin_compute_pass`, `bind_compute_pipeline`, `dispatch`,
-//! `dispatch_indirect` and `Device::create_compute_pipeline`, reaching a driver.
+//! The compute path's **Vulkan-specific** rules: the compute scope's record-time
+//! refusals, and what `update_bind_group` may do at each descriptor-indexing
+//! tier.
 //!
-//! Milestone-independent, which is why it is a module of its own rather than a
-//! section of one of the graphics ones: it is the half of `crcbl-hal` that had
-//! no test reaching a driver at all. Those calls were covered only by
-//! `crcbl-hal`'s null recorder, which records them and executes none — so a
-//! dispatch that did nothing and a dispatch that did the right thing were the
-//! same green test. `crcbl_shaders::COMPUTE_PROBE` exists so the difference can
-//! be read back and asserted.
+//! **The dispatches themselves are no longer here.** "A dispatch really ran and
+//! wrote the values it was asked for", and "`dispatch_indirect` read its
+//! workgroup count from the buffer at the offset it was named", were the same
+//! `ComputeProbe` written four times — here, in `crcbl-wgpu`'s `wgpu_e2e.rs`,
+//! and inside `crcbl-mtl`'s and `crcbl-dx12`'s own `src/` — down to the same
+//! `PROBE_GROUPS`, the same `PROBE_SENTINEL` and the same decoy arguments at
+//! offset zero. They live once now, in `crates/crcbl/tests/hal_seam_e2e.rs`;
+//! `CRCBL_GPU=vk crates/crcbl/tests/run-hal-seam-e2e.sh` is where Vulkan runs
+//! them. The probe below stays because the two tests that are left need it.
+//!
+//! What is left is Vulkan's own. `crcbl-hal`'s null recorder records the compute
+//! calls and executes none, so a dispatch that did nothing and a dispatch that
+//! did the right thing were the same green test there; these two are about the
+//! *refusals* around it rather than the dispatch.
 //!
 //! `update_bind_group_moves_a_dispatch_onto_a_different_buffer` branches on
 //! whether the device reports `DESCRIPTOR_INDEXING` and asserts both arms — a
@@ -493,155 +501,6 @@ fn assert_probe(actual: &[u32], expected: &[u32], what: &str) {
             expected.len()
         );
     }
-}
-
-/// A dispatch that really ran, and really wrote the values it was asked for.
-///
-/// The distinction this whole slice exists for: `dispatch` returns nothing, so
-/// a backend that recorded no `vkCmdDispatch` at all would submit cleanly,
-/// present cleanly and leave a buffer full of [`PROBE_SENTINEL`]. Only reading
-/// the destination back tells the two apart.
-#[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_vulkan_compute_dispatch_writes_the_values_it_was_asked_for() {
-    let headless = Headless::open();
-    let device = headless.device.as_ref();
-    // Not a skip. Every Vulkan device with a graphics queue has compute — the
-    // flag exists for a wgpu fallback that does not — so an absence here is a
-    // capability-reporting bug, not a machine this suite should tiptoe around.
-    assert!(
-        device.caps().features.contains(Features::COMPUTE),
-        "a Vulkan device with a graphics queue always has compute; \
-         adapter caps report {:?}",
-        device.caps().features
-    );
-
-    let probe = ComputeProbe::new(&headless, crcbl_hal::BindingFlags::empty());
-    let values = probe.run(&headless, |encoder| {
-        encoder.dispatch(PROBE_GROUPS, 1, 1);
-    });
-
-    assert_probe(&values, &probe_expected(PROBE_ELEMENTS), "a full dispatch");
-    assert!(
-        !values.contains(&PROBE_SENTINEL),
-        "a full dispatch must leave no element unwritten"
-    );
-
-    probe.destroy(device);
-    headless.finish();
-}
-
-/// `dispatch_indirect` reads its workgroup count out of GPU memory, at the
-/// offset it was given.
-///
-/// The argument buffer carries a **decoy** at offset zero that would dispatch
-/// every workgroup. So three different failures are distinguishable here rather
-/// than confusable: a backend that ignored the offset dispatches eight groups
-/// and overwrites the tail; a backend that ignored the argument buffer entirely
-/// writes nothing; a correct one writes exactly the front of the buffer and
-/// leaves the sentinel behind it.
-#[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_vulkan_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
-    let headless = Headless::open();
-    let device = headless.device.as_ref();
-    let probe = ComputeProbe::new(&headless, crcbl_hal::BindingFlags::empty());
-
-    /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`], so
-    /// the difference is visible in the readback.
-    const DISPATCHED_GROUPS: u32 = 2;
-    /// Where the real arguments live. Non-zero, and the decoy sits at zero.
-    const ARGS_OFFSET: u64 = 16;
-
-    // `VkDispatchIndirectCommand`: three `uint32_t`s, `x`, `y`, `z`. Fixed by
-    // the Vulkan specification rather than by this engine — `crcbl-hal` does not
-    // spell the argument layout, because it is the backend's native one, and
-    // this is a `crcbl-vk` test.
-    let mut args_bytes = vec![0u8; ARGS_OFFSET as usize + 12];
-    for (slot, value) in [PROBE_GROUPS, 1, 1].iter().enumerate() {
-        args_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
-    }
-    for (slot, value) in [DISPATCHED_GROUPS, 1, 1].iter().enumerate() {
-        let at = ARGS_OFFSET as usize + slot * 4;
-        args_bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    let upload = device
-        .create_buffer(&BufferDesc {
-            label: Some("dispatch args upload"),
-            size: args_bytes.len() as u64,
-            usage: BufferUsage::TRANSFER_SRC,
-            memory: MemoryLocation::HostUpload,
-        })
-        .expect("a staging buffer");
-    device.write_buffer(upload, 0, &args_bytes).expect("write");
-    let args = device
-        .create_buffer(&BufferDesc {
-            label: Some("dispatch args"),
-            size: args_bytes.len() as u64,
-            usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::DeviceLocal,
-        })
-        .expect("an indirect buffer");
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("dispatch args upload"),
-        queue: headless.queue,
-    });
-    encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
-        src: upload,
-        src_offset: 0,
-        dst: args,
-        dst_offset: 0,
-        size: args_bytes.len() as u64,
-    });
-    encoder.pipeline_barrier(&Barriers {
-        buffers: &[crcbl_hal::BufferBarrier {
-            buffer: args,
-            from: ResourceState::TransferDst,
-            to: ResourceState::IndirectArgument,
-            queue_transfer: None,
-        }],
-        ..Barriers::default()
-    });
-    let commands = encoder.finish().expect("recording succeeded");
-    device
-        .submit(headless.queue, &SubmitInfo::new(&[commands]))
-        .expect("submit");
-    device.wait_idle().expect("idle");
-    device.destroy_command_buffer(commands);
-    device.destroy_buffer(upload);
-
-    let values = probe.run(&headless, |encoder| {
-        encoder.dispatch_indirect(args, ARGS_OFFSET);
-    });
-
-    let dispatched = DISPATCHED_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
-    assert!(
-        dispatched > 0 && dispatched < PROBE_ELEMENTS,
-        "the indirect dispatch must cover part of the buffer, not none and not all"
-    );
-    assert_probe(&values, &probe_expected(dispatched), "an indirect dispatch");
-    // Said again in its own words, because the two halves fail for different
-    // reasons: the front proves work happened, the tail proves the *count* came
-    // from the buffer at the offset that was named.
-    assert!(
-        values[..dispatched as usize]
-            .iter()
-            .all(|value| *value != PROBE_SENTINEL),
-        "the dispatched workgroups wrote nothing"
-    );
-    assert!(
-        values[dispatched as usize..]
-            .iter()
-            .all(|value| *value == PROBE_SENTINEL),
-        "the workgroups past the indirect count ran anyway — the argument buffer \
-         or its offset was not honoured"
-    );
-
-    device.destroy_buffer(args);
-    probe.destroy(device);
-    headless.finish();
 }
 
 /// The compute scope's own rules, at record time.

@@ -1,13 +1,19 @@
-//! Milestone 1, and everything else the offscreen ring itself has to get right.
+//! The offscreen ring's own obligations, against a real driver.
 //!
-//! The first test is the milestone — acquire an image, clear it through a real
-//! render pass rather than a `vkCmdClearColorImage`, copy it out and check the
-//! bytes — and the rest are the ring's own obligations: that coming back round
-//! to an image is ordered against the frame that had it last, that a resize
-//! storm keeps the swapchain handle while invalidating the old images, that the
-//! swapchain's own image and view survive a caller trying to destroy them, and
-//! that present-wait and display-timing answer honestly when there is no
+//! Coming back round to an image is ordered against the frame that had it last;
+//! a resize storm keeps the swapchain handle while invalidating the old images;
+//! the swapchain's own image and view survive a caller trying to destroy them;
+//! and present-wait and display-timing answer honestly when there is no
 //! `VkSwapchainKHR` behind them at all.
+//!
+//! **Milestone 1 itself is no longer here.** "Acquire an image, clear it through
+//! a real render pass rather than a `vkCmdClearColorImage`, copy it out and
+//! check the bytes" was written once per backend — here, in `crcbl-wgpu`'s
+//! `wgpu_e2e.rs`, and inside `crcbl-mtl`'s and `crcbl-dx12`'s own `src/` — and
+//! its evidence is bytes in a host buffer, which every backend produces
+//! identically. It lives once now, in
+//! `crates/crcbl/tests/hal_seam_e2e.rs`; `CRCBL_GPU=vk
+//! crates/crcbl/tests/run-hal-seam-e2e.sh` is where Vulkan draws it.
 //!
 //! Those last two are why `Headless` asks for `PRESENT_FEEDBACK` and
 //! `PRESENT_TIMING` as optional features it never needs: where a device grants
@@ -23,179 +29,14 @@
 
 use std::time::{Duration, Instant};
 
-use crate::harness::{CLEAR, EXTENT, Headless, poisoned};
+use crate::harness::{CLEAR, EXTENT, Headless};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-    CommandEncoderDesc, CompositeAlpha, Extent3d, Format, ImageAspect, ImageSubresourceLayers,
+    CommandEncoderDesc, CompositeAlpha, Extent3d, ImageAspect, ImageSubresourceLayers,
     ImageSubresourceRange, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, PresentInfo,
-    PresentMode, ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc, ResourceState, SemaphoreDesc,
-    SemaphoreKind, SemaphoreSignal, SemaphoreWait, StoreOp, SubmitInfo, SwapchainDesc,
+    PresentMode, Rect2d, RenderPassDesc, ResourceState, SemaphoreDesc, SemaphoreKind,
+    SemaphoreSignal, SemaphoreWait, StoreOp, SubmitInfo, SwapchainDesc,
 };
-
-/// Milestone 1, end to end and *verified*: acquire an image, clear it through a
-/// real render pass, copy it out, read the pixels back and check them.
-///
-/// A `vkCmdClearColorImage` would put the same bytes there while exercising
-/// none of the attachment, load-op or layout machinery every later milestone is
-/// built on — so this goes through `begin_render_pass` with
-/// [`LoadOp::Clear`], which is what "clear colour through the graph" means.
-#[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_vulkan_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
-    let headless = Headless::open();
-    let device = &headless.device;
-
-    let acquired = device
-        .acquire_next_frame(headless.swapchain)
-        .expect("the ring always has an image");
-    assert!(
-        acquired.acquire_semaphore.is_none() && acquired.present_semaphore.is_none(),
-        "an offscreen ring has an implicit acquire, like WebGPU's"
-    );
-
-    // The swapchain hands over its own view and the extent it was configured
-    // at. Neither is derived here — that is the whole point of the two fields.
-    assert_eq!(
-        acquired.extent, EXTENT,
-        "an offscreen ring has no window system to clamp against, so the \
-         configured extent is the requested one"
-    );
-
-    let pixels = (EXTENT.0 * EXTENT.1 * 4) as u64;
-    let staging = device
-        .create_buffer(&BufferDesc {
-            label: Some("vk e2e readback"),
-            size: pixels,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::HostReadback,
-        })
-        .expect("a readback buffer");
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("vk e2e frame"),
-        queue: headless.queue,
-    });
-    encoder.pipeline_barrier(&Barriers {
-        images: &[crcbl_hal::ImageBarrier::new(
-            acquired.image,
-            ImageSubresourceRange::all(headless.format),
-            ResourceState::Undefined,
-            ResourceState::ColorAttachment,
-        )],
-        ..Barriers::default()
-    });
-    encoder.begin_render_pass(&RenderPassDesc {
-        label: Some("clear"),
-        color_attachments: &[ColorAttachment {
-            view: acquired.view,
-            resolve: None,
-            load: LoadOp::Clear,
-            store: StoreOp::Store,
-            clear: ClearValue::color(CLEAR),
-        }],
-        depth_stencil_attachment: None,
-        render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
-    });
-    encoder.end_render_pass();
-    encoder.pipeline_barrier(&Barriers {
-        images: &[crcbl_hal::ImageBarrier::new(
-            acquired.image,
-            ImageSubresourceRange::all(headless.format),
-            ResourceState::ColorAttachment,
-            ResourceState::TransferSrc,
-        )],
-        ..Barriers::default()
-    });
-    encoder.copy_image_to_buffer(&BufferImageCopy {
-        buffer: staging,
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        image: acquired.image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: crcbl_hal::Offset3d::default(),
-        image_extent: Extent3d::d2(EXTENT.0, EXTENT.1),
-    });
-    let commands = encoder.finish().expect("recording succeeded");
-
-    device
-        .submit(headless.queue, &SubmitInfo::new(&[commands]))
-        .expect("submit");
-    device
-        .present(
-            headless.queue,
-            &PresentInfo {
-                swapchain: headless.swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-                present_id: None,
-            },
-        )
-        .expect("present");
-
-    let readback = device
-        .request_readback(&ReadbackDesc {
-            label: Some("vk e2e pixels"),
-            buffer: staging,
-            offset: 0,
-            size: pixels,
-            after: None,
-        })
-        .expect("a readback request");
-
-    // Poll with a deadline, never a fixed sleep — `docs/plan/12-testing.md`.
-    let mut bytes = poisoned(pixels as usize);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        match device
-            .poll_readback(readback, &mut bytes)
-            .expect("the readback did not fail")
-        {
-            ReadbackState::Ready => break,
-            ReadbackState::Pending => assert!(
-                std::time::Instant::now() < deadline,
-                "the readback never completed"
-            ),
-        }
-        std::thread::yield_now();
-    }
-
-    // The swapchain format is sRGB, so the clear's linear values are encoded on
-    // write. Rather than reimplement the transfer function, assert the two
-    // properties that catch the bugs this test is for: every pixel is identical
-    // (so the whole attachment really was cleared, not just part of it), and
-    // the channels are ordered and distinct (so no channel swap or all-zero
-    // "nothing happened" result slipped through).
-    let first: [u8; 4] = bytes[0..4].try_into().expect("four bytes");
-    assert!(
-        bytes.chunks_exact(4).all(|pixel| pixel == first),
-        "the whole render area must be cleared uniformly; got {first:?} then {:?}",
-        &bytes[4..8]
-    );
-    assert_ne!(first, [0, 0, 0, 0], "an all-zero result means nothing ran");
-    assert_eq!(first[3], 255, "alpha 1.0 must survive");
-    let (r, g, b) = match headless.format {
-        // The channel order in memory follows the format, which is the point of
-        // checking it: a backend that ignored it would pass a "not all zero"
-        // assertion and produce a blue window.
-        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => (first[2], first[1], first[0]),
-        _ => (first[0], first[1], first[2]),
-    };
-    assert!(
-        r < g && g < b,
-        "the clear was {CLEAR:?}, so red < green < blue must survive into memory; \
-         got r={r} g={g} b={b} in {:?}",
-        headless.format
-    );
-
-    device.destroy_readback(readback);
-    device.destroy_buffer(staging);
-    headless.finish();
-}
 
 /// Coming back round the offscreen ring is ordered against the frame that had
 /// the image last — the dependency `vkAcquireNextImageKHR` and its semaphore

@@ -2,136 +2,39 @@
 //!
 //! The obligations are stated in `crcbl-hal` and covered there against the null
 //! backend, which can model any device it likes. This module is the other half:
-//! obligations 1, 2b, 3 and 4 against a real driver, where breaking one is a
-//! use-after-free inside the driver rather than a failed assertion — so several
-//! of these tests assert the validation report and nothing else.
+//! obligations 1 and 2b against a real driver, where breaking one is a
+//! use-after-free inside the driver rather than a failed assertion — so both of
+//! these tests assert the validation report and nothing else can.
 //!
-//! It is the module that opens **two instances at once**, for obligation 3
-//! across instances: handle bits are only unique within the backend that issued
-//! them, so two `VkInstance`s genuinely hand out identical ones, and a surface
-//! crossing between them must be reported as `ForeignObject` rather than as a
-//! stale handle — the two send a reader to different bugs. No vk test opened two
-//! instances at all before this one.
+//! # Why only two obligations are left here
 //!
-//! It is also explicit about the half it cannot reach. An offscreen surface is
-//! `VK_NULL_HANDLE`, so there is no `vkDestroySurfaceKHR` to defer and 2b's
-//! zombie list never engages here; that bookkeeping is asserted in `instance.rs`
-//! instead, because the only surfaces this suite can create are the ones it
-//! cannot exercise.
+//! Obligations 3 and 4 — a handle crossing devices, a surface crossing
+//! instances, a zero extent — are **return-value** claims, identical on every
+//! backend, and they had a hand-maintained copy in `crcbl-vk`, in `crcbl-wgpu`
+//! and inside `crcbl-mtl`'s and `crcbl-dx12`'s own `src/`. They now live once,
+//! in `crates/crcbl/tests/hal_seam_e2e.rs`, which runs on whichever backend
+//! `CRCBL_GPU` names — so `CRCBL_GPU=vk crates/crcbl/tests/run-hal-seam-e2e.sh`
+//! is where Vulkan is held to them.
+//!
+//! What could not go with them is what only Vulkan can say. Both tests below
+//! rest on `ValidationReport::assert_clean`: obligation 1's failure mode is a
+//! `VkInstance` destroyed under a live `VkDevice`, and 2b's is a
+//! `VkSurfaceKHR` destroyed under a live `VkSwapchainKHR`. Neither produces a
+//! failed return value on any driver — the layer is the only witness, and there
+//! is no cross-backend equivalent of it.
+//!
+//! This module is also explicit about the half it cannot reach. An offscreen
+//! surface is `VK_NULL_HANDLE`, so there is no `vkDestroySurfaceKHR` to defer
+//! and 2b's zombie list never engages here; that bookkeeping is asserted in
+//! `instance.rs` instead, because the only surfaces this suite can create are
+//! the ones it cannot exercise.
 
 use crate::harness::{CLEAR, Headless, instance};
-use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    Barriers, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoderDesc,
-    CompositeAlpha, DeviceDesc, Features, Format, ImageSubresourceRange, Instance, LoadOp,
-    MemoryLocation, PresentInfo, PresentMode, Rect2d, RenderPassDesc, ResourceState, StoreOp,
-    SubmitInfo, SurfaceError, SwapchainDesc,
+    Barriers, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoderDesc, DeviceDesc,
+    Features, ImageSubresourceRange, Instance, LoadOp, MemoryLocation, PresentInfo, Rect2d,
+    RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
 };
-
-/// Obligation 4: a zero extent is the caller's problem, and the error says so
-/// rather than the backend guessing a size.
-#[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_zero_extent_vulkan_swapchain_is_refused_with_a_reason() {
-    let instance = instance();
-    let adapter = instance.adapters().remove(0);
-    // SAFETY: `Offscreen` names no platform object.
-    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen");
-    let device = instance
-        .create_device(&DeviceDesc {
-            label: Some("vk e2e"),
-            adapter: adapter.id,
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            compatible_surface: Some(surface),
-        })
-        .expect("a device opens");
-
-    let error = device
-        .create_swapchain(&SwapchainDesc {
-            label: None,
-            surface,
-            format: Format::Rgba8UnormSrgb,
-            extent: (0, 0),
-            image_count: 2,
-            present_mode: PresentMode::Fifo,
-            composite_alpha: CompositeAlpha::Opaque,
-        })
-        .expect_err("a minimized window means 'not yet', not 'guess'");
-    let SurfaceError::Hal(crcbl_hal::HalError::InvalidDescriptor(message)) = error else {
-        panic!("wrong variant");
-    };
-    assert!(message.contains("do not create one yet"), "{message}");
-
-    instance.destroy_surface(surface);
-    drop(device);
-    instance.validation_report().assert_clean();
-}
-
-/// Obligation 3: handles do not cross devices, and the failure is detected
-/// rather than undefined.
-#[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_buffer_from_one_device_is_foreign_to_another() {
-    let instance = instance();
-    let adapter = instance.adapters().remove(0);
-    let open = || match instance.create_device(&DeviceDesc::for_adapter(adapter.id)) {
-        Ok(device) => device,
-        Err(error) => {
-            // `for_adapter` requires compute and a timeline semaphore, which a
-            // driver may not have — but that is the *only* reason it may fail
-            // here, and swallowing any error would let a genuine one hide
-            // behind the fallback.
-            assert!(
-                matches!(error, crcbl_hal::HalError::UnsupportedFeatures { .. }),
-                "the only permitted refusal of the headless default is a named \
-                 feature gap: {error}"
-            );
-            instance
-                .create_device(&DeviceDesc {
-                    label: None,
-                    adapter: adapter.id,
-                    required_features: Features::empty(),
-                    optional_features: Features::empty(),
-                    compatible_surface: None,
-                })
-                .expect("a featureless headless device opens on any adapter")
-        }
-    };
-    let first = open();
-    let second = open();
-
-    let buffer = first
-        .create_buffer(&BufferDesc {
-            label: Some("foreign"),
-            size: 256,
-            usage: BufferUsage::TRANSFER_SRC,
-            memory: MemoryLocation::HostUpload,
-        })
-        .expect("a buffer");
-
-    let error = second
-        .write_buffer(buffer, 0, &[1, 2, 3, 4])
-        .expect_err("a buffer from another device must be refused");
-    // `ForeignObject` specifically, not "either error will do". Every object
-    // table is per-device, so this used to be answered by the handle happening
-    // to miss the second device's pool — which stops being true the moment two
-    // devices allocate in step, and at that point device A accepted device B's
-    // handle outright. A handle now carries the tag of the device that issued
-    // it, so the answer is decided rather than lucky.
-    assert!(
-        matches!(
-            error,
-            crcbl_hal::HalError::ForeignObject { kind: "buffer", .. }
-        ),
-        "a live handle from another device is foreign, not merely unresolvable: {error}"
-    );
-
-    first.destroy_buffer(buffer);
-    drop(second);
-    drop(first);
-    instance.validation_report().assert_clean();
-}
 
 /// Obligation 1: a `Device` may outlive its `Instance`. Getting this wrong is a
 /// use-after-free inside the driver, which is exactly the class of bug the
@@ -257,70 +160,4 @@ fn a_vulkan_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
     device.destroy_swapchain(headless.swapchain);
     headless.device.destroy();
     headless.instance.validation_report().assert_clean();
-}
-
-/// **Obligation 3, across two instances.** Handle bits are only unique within
-/// the backend that issued them, so two `VkInstance`s genuinely hand out
-/// identical ones — a surface crossing them must be detected, and detected as
-/// `ForeignObject` rather than as a stale handle, because the two send a reader
-/// to different bugs.
-///
-/// `crcbl-hal`'s null backend covers this; the reference backend did not, and
-/// no vk test opened two instances at all.
-#[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_vulkan_surface_from_one_instance_is_foreign_to_another() {
-    let owner = instance();
-    let other = instance();
-
-    // SAFETY: `Offscreen` names no platform object at all.
-    let surface =
-        unsafe { owner.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen always works");
-    let adapter = other.adapters().remove(0);
-
-    let error = other
-        .surface_caps(surface, adapter.id)
-        .expect_err("this surface belongs to the other instance");
-    assert!(
-        matches!(
-            error,
-            crcbl_hal::HalError::ForeignObject {
-                kind: "surface",
-                ..
-            }
-        ),
-        "a live handle from another instance is foreign, not unresolvable: {error}"
-    );
-
-    let error = other
-        .create_device(&DeviceDesc {
-            label: Some("foreign surface"),
-            adapter: adapter.id,
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            compatible_surface: Some(surface),
-        })
-        .expect_err("and the same on the device-creation path");
-    assert!(
-        matches!(
-            error,
-            crcbl_hal::HalError::ForeignObject {
-                kind: "surface",
-                ..
-            }
-        ),
-        "{error}"
-    );
-
-    // The other instance must not be able to free it either, which is what
-    // stops a stray `destroy_surface` from turning a bit collision into a
-    // double free.
-    other.destroy_surface(surface);
-    owner
-        .surface_caps(surface, owner.adapters().remove(0).id)
-        .expect("the owning instance still has its surface");
-
-    owner.destroy_surface(surface);
-    owner.validation_report().assert_clean();
-    other.validation_report().assert_clean();
 }

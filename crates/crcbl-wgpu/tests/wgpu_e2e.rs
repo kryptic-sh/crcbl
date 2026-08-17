@@ -10,6 +10,24 @@
 //! — and it fails when the suite reports zero tests run, because
 //! `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap.
 //!
+//! # What is no longer here
+//!
+//! The behaviours that are the **seam's** rather than wgpu's — a render-pass
+//! clear reaching host memory, a compute dispatch and an indirect dispatch, a
+//! handle foreign to another device, a surface foreign to another instance, a
+//! destroyed handle that must not alias its replacement, a zero-extent ring, a
+//! present with nothing acquired — were maintained here *and* in `crcbl-vk`'s
+//! `vk_e2e` *and* inside `crcbl-mtl`'s and `crcbl-dx12`'s own `src/`, four
+//! copies of one claim drifting apart from each other. They live once now, in
+//! `crates/crcbl/tests/hal_seam_e2e.rs`, which runs on whichever backend
+//! `CRCBL_GPU` names — so `CRCBL_GPU=wgpu crates/crcbl/tests/run-hal-seam-e2e.sh`
+//! is where wgpu is held to them.
+//!
+//! What stayed is what only wgpu answers this way: the ring-reuse hazard, the
+//! descriptor-array and push-constant refusals, the padded indirect stride, the
+//! misaligned and double-mapped readbacks, MSAA resolve, and the two timeline
+//! halves the backends genuinely disagree on — each said in its own test's docs.
+//!
 //! # What this covers, and what the script covers
 //!
 //! Everything here is **offscreen**, through
@@ -33,9 +51,9 @@ use std::time::{Duration, Instant};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     Barriers, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, ClearValue,
-    ColorAttachment, ColorTargetState, CommandEncoder, CommandEncoderDesc, CompositeAlpha,
-    ComputePassDesc, ComputePipelineDesc, Device, DeviceDesc, DrawIndirect, Extent3d, Features,
-    Format, GraphicsPipelineDesc, HalError, ImageAspect, ImageDesc, ImageSubresourceLayers,
+    ColorAttachment, ColorTargetState, CommandEncoderDesc, CompositeAlpha, ComputePassDesc,
+    ComputePipelineDesc, Device, DeviceDesc, DrawIndirect, Extent3d, Features, Format,
+    GraphicsPipelineDesc, HalError, ImageAspect, ImageDesc, ImageSubresourceLayers,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, IndexFormat,
     Instance, LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc, PresentInfo,
     PresentMode, PrimitiveState, PushConstantRange, QueueKind, ReadbackDesc, ReadbackState, Rect2d,
@@ -294,146 +312,6 @@ fn read_bytes(device: &dyn Device, buffer: BufferHandle, size: u64) -> Vec<u8> {
     bytes
 }
 
-/// The slice's deliverable, end to end: a frame rendered offscreen through wgpu
-/// reaches a host buffer with the colour it was given.
-///
-/// A `clear_buffer` would put bytes somewhere while exercising none of the
-/// attachment, load-op or ring machinery, so this goes through
-/// `begin_render_pass` with [`LoadOp::Clear`] — and then through
-/// `copy_image_to_buffer` and `map_async`, which is the pair the cross-backend
-/// image comparison needs and which this backend refused outright until now.
-#[test]
-#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_wgpu_render_pass_clear_reaches_host_memory_with_the_colour_it_was_given() {
-    let headless = Headless::open();
-    let device = headless.device.as_ref();
-
-    let acquired = device
-        .acquire_next_frame(headless.swapchain)
-        .expect("the ring always has an image");
-    assert!(
-        acquired.acquire_semaphore.is_none() && acquired.present_semaphore.is_none(),
-        "an offscreen ring has an implicit acquire, like WebGPU's"
-    );
-    assert_eq!(
-        acquired.extent, EXTENT,
-        "an offscreen ring has no window system to clamp against"
-    );
-    assert_eq!(acquired.index, 0, "the first acquire hands out image zero");
-
-    let pixels = u64::from(EXTENT.0 * EXTENT.1 * 4);
-    let staging = device
-        .create_buffer(&BufferDesc {
-            label: Some("wgpu e2e readback"),
-            size: pixels,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::HostReadback,
-        })
-        .expect("a readback buffer");
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("wgpu e2e frame"),
-        queue: headless.queue,
-    });
-    encoder.begin_render_pass(&RenderPassDesc {
-        label: Some("clear"),
-        color_attachments: &[ColorAttachment {
-            view: acquired.view,
-            resolve: None,
-            load: LoadOp::Clear,
-            store: StoreOp::Store,
-            clear: ClearValue::color(CLEAR),
-        }],
-        depth_stencil_attachment: None,
-        render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
-    });
-    encoder.end_render_pass();
-    encoder.copy_image_to_buffer(&BufferImageCopy {
-        buffer: staging,
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        image: acquired.image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: Offset3d::default(),
-        image_extent: Extent3d::d2(EXTENT.0, EXTENT.1),
-    });
-    let commands = encoder.finish().expect("recording succeeded");
-    device
-        .submit(headless.queue, &SubmitInfo::new(&[commands]))
-        .expect("submit");
-    device
-        .present(
-            headless.queue,
-            &PresentInfo {
-                swapchain: headless.swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-                present_id: None,
-            },
-        )
-        .expect("present");
-
-    let readback = device
-        .request_readback(&ReadbackDesc {
-            label: Some("wgpu e2e pixels"),
-            buffer: staging,
-            offset: 0,
-            size: pixels,
-            after: None,
-        })
-        .expect("a readback request");
-
-    let mut bytes = vec![0u8; pixels as usize];
-    drain(device, readback, &mut bytes);
-
-    // The ring's format is sRGB, so the clear's linear values are encoded on
-    // write. Rather than reimplement the transfer function, assert the two
-    // properties that catch the bugs this test is for: every pixel is identical
-    // (so the whole attachment really was cleared), and the channels are ordered
-    // and distinct (so no channel swap or all-zero "nothing happened" slipped
-    // through).
-    let first: [u8; 4] = bytes[0..4].try_into().expect("four bytes");
-    assert!(
-        bytes.chunks_exact(4).all(|pixel| pixel == first),
-        "the whole render area must be cleared uniformly; got {first:?} then {:?}",
-        &bytes[4..8]
-    );
-    assert_ne!(first, [0, 0, 0, 0], "an all-zero result means nothing ran");
-    assert_eq!(first[3], 255, "alpha 1.0 must survive");
-    let (r, g, b) = match headless.format {
-        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => (first[2], first[1], first[0]),
-        _ => (first[0], first[1], first[2]),
-    };
-    assert!(
-        r < g && g < b,
-        "the clear was {CLEAR:?}, so red < green < blue must survive into memory; got r={r} g={g} \
-         b={b} in {:?}",
-        headless.format
-    );
-
-    // Polling again after `Ready` is legal and yields the same bytes — the
-    // seam says so, and this backend has to keep the mapping alive to honour
-    // it.
-    let mut again = vec![0u8; pixels as usize];
-    assert_eq!(
-        device
-            .poll_readback(readback, &mut again)
-            .expect("a second poll is legal"),
-        ReadbackState::Ready
-    );
-    assert_eq!(again, bytes, "a second poll must yield the same bytes");
-
-    device.destroy_readback(readback);
-    device.destroy_buffer(staging);
-    device.destroy_command_buffer(commands);
-    headless.finish();
-}
-
 /// The hazard `crcbl-vk` had, asked of this backend: a ring image written again
 /// while the previous trip's copy is still reading it.
 ///
@@ -672,74 +550,29 @@ fn acquiring_twice_without_a_present_is_refused_rather_than_dropping_a_frame() {
     headless.finish();
 }
 
-/// Present without an acquire is a caller bug the backend names, not a no-op.
-#[test]
-#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn presenting_a_wgpu_swapchain_without_an_acquire_is_refused() {
-    let headless = Headless::open();
-    let error = headless
-        .device
-        .present(
-            headless.queue,
-            &PresentInfo {
-                swapchain: headless.swapchain,
-                waits: &[],
-                present_id: None,
-            },
-        )
-        .expect_err("nothing was acquired");
-    assert!(
-        matches!(error, SurfaceError::Hal(HalError::InvalidDescriptor(ref m)) if m.contains("without a matching acquire")),
-        "{error}"
-    );
-    headless.finish();
-}
-
-/// A zero extent is the caller's problem — obligation 4 — and the message says
-/// so rather than producing a ring of images nothing can render into.
-#[test]
-#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_zero_extent_offscreen_ring_is_refused_with_the_rule_named() {
-    let (instance, device, surface, _queue, format) = Headless::open_device();
-    for extent in [(0, 48), (64, 0), (0, 0)] {
-        let error = device
-            .create_swapchain(&SwapchainDesc {
-                label: Some("zero"),
-                surface,
-                format,
-                extent,
-                image_count: 2,
-                present_mode: PresentMode::Fifo,
-                composite_alpha: CompositeAlpha::Opaque,
-            })
-            .expect_err("a zero-extent ring has no images");
-        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
-            panic!("{extent:?} gave the wrong variant");
-        };
-        assert!(message.contains("do not create one yet"), "{message}");
-    }
-    instance.destroy_surface(surface);
-    drop(device);
-    drop(instance);
-}
-
-/// The readback's descriptor checks, which exist because wgpu **panics** on a
-/// misaligned or unmappable range rather than returning — and a panic through a
-/// trait object is not a diagnosis.
+/// The readback descriptor checks that are **wgpu's own**, which exist because
+/// wgpu panics on a misaligned or double-mapped range rather than returning —
+/// and a panic through a trait object is not a diagnosis.
+///
+/// The three cases every backend shares — a device-local source, a range past
+/// the end, a range whose end overflows — moved to
+/// `crates/crcbl/tests/hal_seam_e2e.rs`, where one copy holds all four backends
+/// to them. What is left here is what only wgpu answers this way:
+///
+/// * **A misaligned offset.** `map_async` requires an 8-byte-aligned offset;
+///   Vulkan and D3D12 do not.
+/// * **A zero size.** wgpu refuses it and `crcbl-vk` serves it, and the seam is
+///   on Vulkan's side — [`Device::request_readback`] promises
+///   `InvalidDescriptor` for a range that is *out of bounds*, and an empty range
+///   is in bounds. So this is a wgpu house rule, not a seam rule.
+/// * **Two live readbacks of one buffer**, which wgpu panics on rather than
+///   refusing, because a wgpu buffer maps once.
 #[test]
 #[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
 fn a_readback_of_the_wrong_buffer_or_range_is_refused_instead_of_panicking() {
     let headless = Headless::open();
     let device = headless.device.as_ref();
 
-    let device_local = device
-        .create_buffer(&BufferDesc {
-            label: Some("device local"),
-            size: 256,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::DeviceLocal,
-        })
-        .expect("a buffer");
     let host = device
         .create_buffer(&BufferDesc {
             label: Some("host readback"),
@@ -760,11 +593,6 @@ fn a_readback_of_the_wrong_buffer_or_range_is_refused_instead_of_panicking() {
     };
 
     for (what, result) in [
-        (
-            "a device-local buffer has no MAP_READ",
-            request(device_local, 0, 256),
-        ),
-        ("past the end of the buffer", request(host, 0, 512)),
         ("a misaligned offset", request(host, 4, 128)),
         ("a zero size", request(host, 0, 0)),
     ] {
@@ -794,7 +622,6 @@ fn a_readback_of_the_wrong_buffer_or_range_is_refused_instead_of_panicking() {
     drain(device, third, &mut bytes);
     device.destroy_readback(third);
 
-    device.destroy_buffer(device_local);
     device.destroy_buffer(host);
     headless.finish();
 }
@@ -1348,607 +1175,6 @@ fn write_buffer_refuses_a_host_readback_buffer() {
 }
 
 // ---------------------------------------------------------------------------
-// The compute path
-// ---------------------------------------------------------------------------
-//
-// `begin_compute_pass`, `bind_compute_pipeline`, `dispatch`,
-// `dispatch_indirect` and `Device::create_compute_pipeline`, reaching a driver.
-// `crates/crcbl-vk/tests/vk_e2e/compute.rs` is the original and `crcbl-mtl` and
-// `crcbl-dx12` carry twins; this backend implemented all five and executed none
-// of them, so a `dispatch` that recorded nothing at all submitted cleanly and
-// left a buffer full of `PROBE_SENTINEL`. Only reading the destination back
-// tells that apart from a dispatch that did the right thing.
-
-/// Workgroups the probe's buffers are sized for.
-///
-/// Eight, so `dispatch_indirect` can ask for two and leave six workgroups'
-/// worth of untouched sentinel behind it — which is what tells "the argument
-/// buffer was read" apart from "everything was dispatched anyway".
-const PROBE_GROUPS: u32 = 8;
-
-/// Elements the probe transforms.
-const PROBE_ELEMENTS: u32 = PROBE_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
-
-/// What the destination buffer holds before every dispatch.
-///
-/// Deliberately not zero, and deliberately not a square: a destination that was
-/// never written must not be confusable with one the shader wrote, and zero is
-/// both its own square and what fresh device memory tends to be. The same value
-/// `crcbl-vk`'s twin uses.
-const PROBE_SENTINEL: u32 = 0xDEAD_BEEF;
-
-/// Bytes one probe buffer occupies.
-const fn probe_bytes() -> u64 {
-    PROBE_ELEMENTS as u64 * 4
-}
-
-/// The probe's input, one distinct value per index.
-///
-/// Distinct matters: with a constant input, a shader that indexed `source`
-/// wrongly would still produce the right number in every slot. `index + 1`
-/// avoids zero, whose square is itself.
-fn probe_source() -> Vec<u32> {
-    (0..PROBE_ELEMENTS).map(|index| index + 1).collect()
-}
-
-/// What the destination must hold for `elements` dispatched elements, and the
-/// sentinel beyond them.
-///
-/// Written out here rather than derived from the shader: squaring is a closed
-/// form the test states for itself, which is the whole reason the probe squares.
-fn probe_expected(elements: u32) -> Vec<u32> {
-    probe_source()
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            if (index as u32) < elements {
-                value * value
-            } else {
-                PROBE_SENTINEL
-            }
-        })
-        .collect()
-}
-
-/// Everything one compute dispatch needs, built through the seam.
-struct ComputeProbe {
-    params: BufferHandle,
-    source: BufferHandle,
-    destination: BufferHandle,
-    /// A host-visible buffer holding [`PROBE_SENTINEL`] in every slot, copied
-    /// over the destination before each dispatch.
-    ///
-    /// The twins reset the destination with `fill_buffer`, which this backend
-    /// **refuses** for a non-zero value: wgpu's only fill is `clear_buffer`, a
-    /// zero fill. Resetting to zero instead would have made "the shader wrote
-    /// nothing" and "the shader wrote zero" the same reading, so the sentinel
-    /// arrives by copy rather than by fill.
-    sentinel: BufferHandle,
-    /// Host-readable copy target, so the result can be asserted rather than
-    /// assumed.
-    staging: BufferHandle,
-    bind_group_layout: crcbl_hal::BindGroupLayoutHandle,
-    bind_group: crcbl_hal::BindGroupHandle,
-    pipeline_layout: crcbl_hal::PipelineLayoutHandle,
-    pipeline: crcbl_hal::ComputePipelineHandle,
-}
-
-impl ComputeProbe {
-    /// Builds the pipeline and stages the input in.
-    fn new(headless: &Headless) -> Self {
-        let device = headless.device.as_ref();
-        let params = crcbl_shaders::compute_probe::Params {
-            count: PROBE_ELEMENTS,
-        }
-        .to_bytes();
-        let source_bytes: Vec<u8> = probe_source()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect();
-
-        let upload = device
-            .create_buffer(&BufferDesc {
-                label: Some("compute probe upload"),
-                size: (params.len() + source_bytes.len()) as u64,
-                usage: BufferUsage::TRANSFER_SRC,
-                memory: MemoryLocation::HostUpload,
-            })
-            .expect("a staging buffer");
-        device.write_buffer(upload, 0, &params).expect("write");
-        device
-            .write_buffer(upload, params.len() as u64, &source_bytes)
-            .expect("write");
-
-        let sentinel = device
-            .create_buffer(&BufferDesc {
-                label: Some("compute probe sentinel"),
-                size: probe_bytes(),
-                usage: BufferUsage::TRANSFER_SRC,
-                memory: MemoryLocation::HostUpload,
-            })
-            .expect("a sentinel buffer");
-        let sentinel_bytes: Vec<u8> = std::iter::repeat_n(PROBE_SENTINEL, PROBE_ELEMENTS as usize)
-            .flat_map(u32::to_le_bytes)
-            .collect();
-        device
-            .write_buffer(sentinel, 0, &sentinel_bytes)
-            .expect("write");
-
-        let params_buffer = device
-            .create_buffer(&BufferDesc {
-                label: Some("compute probe params"),
-                size: crcbl_shaders::compute_probe::PARAMS_SIZE as u64,
-                usage: BufferUsage::UNIFORM | BufferUsage::TRANSFER_DST,
-                memory: MemoryLocation::DeviceLocal,
-            })
-            .expect("a uniform buffer");
-        let source = device
-            .create_buffer(&BufferDesc {
-                label: Some("compute probe source"),
-                size: probe_bytes(),
-                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
-                memory: MemoryLocation::DeviceLocal,
-            })
-            .expect("a source buffer");
-        let destination = device
-            .create_buffer(&BufferDesc {
-                label: Some("compute probe destination"),
-                size: probe_bytes(),
-                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-                memory: MemoryLocation::DeviceLocal,
-            })
-            .expect("a destination buffer");
-        let staging = device
-            .create_buffer(&BufferDesc {
-                label: Some("compute probe readback"),
-                size: probe_bytes(),
-                usage: BufferUsage::TRANSFER_DST,
-                memory: MemoryLocation::HostReadback,
-            })
-            .expect("a readback buffer");
-
-        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("compute probe upload"),
-            queue: headless.queue,
-        });
-        encoder.copy_buffer_to_buffer(&BufferCopy {
-            src: upload,
-            src_offset: 0,
-            dst: params_buffer,
-            dst_offset: 0,
-            size: params.len() as u64,
-        });
-        encoder.copy_buffer_to_buffer(&BufferCopy {
-            src: upload,
-            src_offset: params.len() as u64,
-            dst: source,
-            dst_offset: 0,
-            size: probe_bytes(),
-        });
-        encoder.pipeline_barrier(&Barriers {
-            buffers: &[
-                crcbl_hal::BufferBarrier {
-                    buffer: params_buffer,
-                    from: ResourceState::TransferDst,
-                    to: ResourceState::ShaderRead,
-                    queue_transfer: None,
-                },
-                crcbl_hal::BufferBarrier {
-                    buffer: source,
-                    from: ResourceState::TransferDst,
-                    to: ResourceState::ShaderRead,
-                    queue_transfer: None,
-                },
-            ],
-            ..Barriers::default()
-        });
-        let commands = encoder.finish().expect("recording succeeded");
-        device
-            .submit(headless.queue, &SubmitInfo::new(&[commands]))
-            .expect("submit");
-        device.wait_idle().expect("idle");
-        device.destroy_command_buffer(commands);
-        device.destroy_buffer(upload);
-
-        let layout_entries = [
-            crcbl_hal::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
-                count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
-            },
-            crcbl_hal::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: ShaderStages::COMPUTE,
-                kind: crcbl_hal::BindingKind::StorageBuffer {
-                    read_only: true,
-                    dynamic: false,
-                },
-                count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
-            },
-            crcbl_hal::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: ShaderStages::COMPUTE,
-                kind: crcbl_hal::BindingKind::StorageBuffer {
-                    read_only: false,
-                    dynamic: false,
-                },
-                count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
-            },
-        ];
-        let bind_group_layout = device
-            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
-                label: Some("compute probe"),
-                entries: &layout_entries,
-            })
-            .expect("the probe's layout");
-
-        let group_entries = [
-            crcbl_hal::BindGroupEntry {
-                binding: 0,
-                array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(params_buffer),
-            },
-            crcbl_hal::BindGroupEntry {
-                binding: 1,
-                array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(source),
-            },
-            crcbl_hal::BindGroupEntry {
-                binding: 2,
-                array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(destination),
-            },
-        ];
-        let bind_group = device
-            .create_bind_group(&crcbl_hal::BindGroupDesc {
-                label: Some("compute probe"),
-                layout: bind_group_layout,
-                entries: &group_entries,
-                variable_count: None,
-            })
-            .expect("a bind group");
-
-        let set_layouts = [bind_group_layout];
-        let pipeline_layout = device
-            .create_pipeline_layout(&PipelineLayoutDesc {
-                label: Some("compute probe"),
-                bind_group_layouts: &set_layouts,
-                push_constants: None,
-            })
-            .expect("a pipeline layout");
-
-        let module = device
-            .create_shader_module(&ShaderModuleDesc {
-                label: Some("compute_probe.slang"),
-                wgsl: crcbl_shaders::COMPUTE_PROBE.wgsl(),
-                ..ShaderModuleDesc::default()
-            })
-            .expect("the committed WGSL is accepted");
-        // The manifest's name rather than a literal: it is read out of the
-        // artifact by the compile script, so a Slang release that renamed it
-        // would fail here rather than in a driver.
-        let entry_point = crcbl_shaders::COMPUTE_PROBE
-            .entry_point(crcbl_shaders::Stage::Compute)
-            .expect("the probe has exactly one compute entry point");
-        let pipeline = device
-            .create_compute_pipeline(&ComputePipelineDesc {
-                label: Some("compute probe"),
-                layout: pipeline_layout,
-                compute: ShaderEntry {
-                    module,
-                    entry_point,
-                },
-                // The shader's own number, not a literal: `crcbl-shaders`
-                // checks this constant against the `[numthreads(…)]` in
-                // `compute_probe.slang`.
-                workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
-            })
-            .expect("a compute pipeline");
-        device.destroy_shader_module(module);
-
-        Self {
-            params: params_buffer,
-            source,
-            destination,
-            sentinel,
-            staging,
-            bind_group_layout,
-            bind_group,
-            pipeline_layout,
-            pipeline,
-        }
-    }
-
-    /// Resets the destination to the sentinel, runs `record` inside a compute
-    /// pass, and reads the destination back.
-    ///
-    /// `record` is the *only* thing that varies between the dispatch and the
-    /// indirect-dispatch tests, so both go through the same barriers and the
-    /// same readback and a difference in the result is a difference in the
-    /// dispatch.
-    fn run(&self, headless: &Headless, record: impl FnOnce(&mut dyn CommandEncoder)) -> Vec<u32> {
-        let device = headless.device.as_ref();
-        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("compute probe dispatch"),
-            queue: headless.queue,
-        });
-        let buffer_barrier = |buffer, from, to| crcbl_hal::BufferBarrier {
-            buffer,
-            from,
-            to,
-            queue_transfer: None,
-        };
-        // `TransferSrc` as the source state is vacuous on the first run and is
-        // the real prior use on every later one.
-        encoder.pipeline_barrier(&Barriers {
-            buffers: &[buffer_barrier(
-                self.destination,
-                ResourceState::TransferSrc,
-                ResourceState::TransferDst,
-            )],
-            ..Barriers::default()
-        });
-        encoder.copy_buffer_to_buffer(&BufferCopy {
-            src: self.sentinel,
-            src_offset: 0,
-            dst: self.destination,
-            dst_offset: 0,
-            size: probe_bytes(),
-        });
-        // `ShaderReadWrite`, not `ShaderWrite`: a barrier names the access the
-        // *descriptor* permits rather than the one the source performs, and the
-        // destination is bound as a read-write storage buffer.
-        encoder.pipeline_barrier(&Barriers {
-            buffers: &[buffer_barrier(
-                self.destination,
-                ResourceState::TransferDst,
-                ResourceState::ShaderReadWrite,
-            )],
-            ..Barriers::default()
-        });
-
-        encoder.begin_compute_pass(&ComputePassDesc {
-            label: Some("compute probe"),
-        });
-        encoder.bind_compute_pipeline(self.pipeline);
-        // Inside the pass, because the open scope is the only signal the seam
-        // gives the backend about which bind point a group is for.
-        encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);
-        record(encoder.as_mut());
-        encoder.end_compute_pass();
-
-        encoder.pipeline_barrier(&Barriers {
-            buffers: &[buffer_barrier(
-                self.destination,
-                ResourceState::ShaderReadWrite,
-                ResourceState::TransferSrc,
-            )],
-            ..Barriers::default()
-        });
-        encoder.copy_buffer_to_buffer(&BufferCopy {
-            src: self.destination,
-            src_offset: 0,
-            dst: self.staging,
-            dst_offset: 0,
-            size: probe_bytes(),
-        });
-        let commands = encoder.finish().expect("recording succeeded");
-        device
-            .submit(headless.queue, &SubmitInfo::new(&[commands]))
-            .expect("submit");
-        device.wait_idle().expect("idle");
-        device.destroy_command_buffer(commands);
-
-        read_bytes(device, self.staging, probe_bytes())
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
-            .collect()
-    }
-
-    fn destroy(self, device: &dyn Device) {
-        device.destroy_compute_pipeline(self.pipeline);
-        device.destroy_pipeline_layout(self.pipeline_layout);
-        device.destroy_bind_group(self.bind_group);
-        device.destroy_bind_group_layout(self.bind_group_layout);
-        device.destroy_buffer(self.staging);
-        device.destroy_buffer(self.sentinel);
-        device.destroy_buffer(self.destination);
-        device.destroy_buffer(self.source);
-        device.destroy_buffer(self.params);
-    }
-}
-
-/// Compares a probe result against what the CPU says it should be, and says
-/// which element disagreed first.
-///
-/// The element count is asserted before the values: a readback that came back
-/// short would otherwise satisfy a `zip` over nothing at all.
-fn assert_probe(actual: &[u32], expected: &[u32], what: &str) {
-    assert_eq!(
-        actual.len(),
-        PROBE_ELEMENTS as usize,
-        "{what}: the readback is not the whole destination buffer"
-    );
-    assert_eq!(expected.len(), actual.len(), "{what}: expectation length");
-    if let Some((index, (got, want))) = actual
-        .iter()
-        .zip(expected)
-        .enumerate()
-        .find(|(_, (got, want))| got != want)
-    {
-        panic!(
-            "{what}: element {index} is {got} ({got:#x}), expected {want} ({want:#x}). \
-             {} of {} elements were expected to be written.",
-            expected.iter().filter(|v| **v != PROBE_SENTINEL).count(),
-            expected.len()
-        );
-    }
-}
-
-/// A dispatch that really ran, and really wrote the values it was asked for.
-///
-/// The distinction this test exists for: `dispatch` returns nothing, so a
-/// backend that recorded no `dispatch_workgroups` at all would submit cleanly
-/// and leave a buffer full of [`PROBE_SENTINEL`]. Only reading the destination
-/// back tells the two apart.
-///
-/// The empty pass at the end is what makes the assertion above about the
-/// *dispatch* rather than about the sentinel copy that precedes it — the same
-/// second arm `crcbl-dx12`'s twin carries.
-#[test]
-#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_wgpu_compute_dispatch_writes_the_values_it_was_asked_for() {
-    let headless = Headless::open();
-    let device = headless.device.as_ref();
-    // Not a skip. `Features::COMPUTE` exists for a fallback that has no compute
-    // at all; every adapter wgpu opens a device on has it, so an absence here
-    // is a capability-reporting bug rather than a machine to tiptoe around.
-    assert!(
-        device.caps().features.contains(Features::COMPUTE),
-        "a wgpu device always has compute; adapter caps report {:?}",
-        device.caps().features
-    );
-
-    let probe = ComputeProbe::new(&headless);
-    let values = probe.run(&headless, |encoder| {
-        encoder.dispatch(PROBE_GROUPS, 1, 1);
-    });
-
-    assert_probe(&values, &probe_expected(PROBE_ELEMENTS), "a full dispatch");
-    assert!(
-        !values.contains(&PROBE_SENTINEL),
-        "a full dispatch must leave no element unwritten"
-    );
-
-    let empty = probe.run(&headless, |_| {});
-    assert!(
-        empty.iter().all(|value| *value == PROBE_SENTINEL),
-        "a compute pass with no dispatch in it must write nothing, or the assertion \
-         above was about the sentinel copy rather than about the dispatch; got {:?}…",
-        &empty[..4]
-    );
-
-    probe.destroy(device);
-    headless.finish();
-}
-
-/// `dispatch_indirect` reads its workgroup count out of GPU memory, at the
-/// offset it was given.
-///
-/// The argument buffer carries a **decoy** at offset zero that would dispatch
-/// every workgroup. So three different failures are distinguishable here rather
-/// than confusable: a backend that ignored the offset dispatches eight groups
-/// and overwrites the tail; a backend that ignored the argument buffer entirely
-/// writes nothing; a correct one writes exactly the front of the buffer and
-/// leaves the sentinel behind it.
-#[test]
-#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_wgpu_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
-    let headless = Headless::open();
-    let device = headless.device.as_ref();
-    let probe = ComputeProbe::new(&headless);
-
-    /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`], so
-    /// the difference is visible in the readback.
-    const DISPATCHED_GROUPS: u32 = 2;
-    /// Where the real arguments live. Non-zero, and the decoy sits at zero.
-    const ARGS_OFFSET: u64 = 16;
-
-    // Three `u32`s, `x`, `y`, `z` — WebGPU's dispatch-indirect parameters, the
-    // same triple Vulkan and D3D12 spell. `crcbl-hal` does not describe the
-    // argument layout because it is the backend's native one.
-    let mut args_bytes = vec![0u8; ARGS_OFFSET as usize + 12];
-    for (slot, value) in [PROBE_GROUPS, 1, 1].iter().enumerate() {
-        args_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
-    }
-    for (slot, value) in [DISPATCHED_GROUPS, 1, 1].iter().enumerate() {
-        let at = ARGS_OFFSET as usize + slot * 4;
-        args_bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    let upload = device
-        .create_buffer(&BufferDesc {
-            label: Some("dispatch args upload"),
-            size: args_bytes.len() as u64,
-            usage: BufferUsage::TRANSFER_SRC,
-            memory: MemoryLocation::HostUpload,
-        })
-        .expect("a staging buffer");
-    device.write_buffer(upload, 0, &args_bytes).expect("write");
-    let args = device
-        .create_buffer(&BufferDesc {
-            label: Some("dispatch args"),
-            size: args_bytes.len() as u64,
-            usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::DeviceLocal,
-        })
-        .expect("an indirect buffer");
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("dispatch args upload"),
-        queue: headless.queue,
-    });
-    encoder.copy_buffer_to_buffer(&BufferCopy {
-        src: upload,
-        src_offset: 0,
-        dst: args,
-        dst_offset: 0,
-        size: args_bytes.len() as u64,
-    });
-    encoder.pipeline_barrier(&Barriers {
-        buffers: &[crcbl_hal::BufferBarrier {
-            buffer: args,
-            from: ResourceState::TransferDst,
-            to: ResourceState::IndirectArgument,
-            queue_transfer: None,
-        }],
-        ..Barriers::default()
-    });
-    let commands = encoder.finish().expect("recording succeeded");
-    device
-        .submit(headless.queue, &SubmitInfo::new(&[commands]))
-        .expect("submit");
-    device.wait_idle().expect("idle");
-    device.destroy_command_buffer(commands);
-    device.destroy_buffer(upload);
-
-    let values = probe.run(&headless, |encoder| {
-        encoder.dispatch_indirect(args, ARGS_OFFSET);
-    });
-
-    let dispatched = DISPATCHED_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
-    assert!(
-        dispatched > 0 && dispatched < PROBE_ELEMENTS,
-        "the indirect dispatch must cover part of the buffer, not none and not all"
-    );
-    assert_probe(&values, &probe_expected(dispatched), "an indirect dispatch");
-    // Said again in its own words, because the two halves fail for different
-    // reasons: the front proves work happened, the tail proves the *count* came
-    // from the buffer at the offset that was named.
-    assert!(
-        values[..dispatched as usize]
-            .iter()
-            .all(|value| *value != PROBE_SENTINEL),
-        "the dispatched workgroups wrote nothing"
-    );
-    assert!(
-        values[dispatched as usize..]
-            .iter()
-            .all(|value| *value == PROBE_SENTINEL),
-        "the workgroups past the indirect count ran anyway — the argument buffer \
-         or its offset was not honoured"
-    );
-
-    device.destroy_buffer(args);
-    probe.destroy(device);
-    headless.finish();
-}
-
-// ---------------------------------------------------------------------------
 // The indexed draw
 // ---------------------------------------------------------------------------
 
@@ -2378,6 +1604,26 @@ fn a_wgpu_indexed_draw_reads_the_index_buffer_it_was_bound() {
 /// by anything holding it, so waiting is meaningful; wgpu can only wait on a
 /// `SubmissionIndex` that already exists, so the same call would block forever
 /// with nothing to point at. The refusal is asserted below rather than glossed.
+///
+/// # Why this stayed when the other seam tests moved
+///
+/// The **shared** half — create at 5, submit a signal of 9, wait, read 9 back —
+/// now also lives in `crates/crcbl/tests/hal_seam_e2e.rs`, which holds every
+/// backend to it. Two halves could not go with it, and they are the two this
+/// test exists for:
+///
+/// * The unsatisfiable wait above, which wgpu and Metal answer differently. The
+///   seam takes Metal's side — `Device::wait_semaphores` calls a timeout "a
+///   normal outcome for a frame-pacing poll, not an error" — so this assertion
+///   pins wgpu's *departure* from the contract, and the shared suite cannot.
+/// * The backwards signal below, which wgpu and Metal both refuse and
+///   `crcbl-vk` does not: Vulkan passes the submission to the driver, where the
+///   layer reports `VUID-VkSubmitInfo2-semaphore-03882`. Until `crcbl-vk`
+///   checks it, asserting it in the shared suite would go red on Vulkan.
+///
+/// Both halves need a live semaphore at a known value and the second needs 9
+/// already signalled, so the sequence stays whole rather than being cut down to
+/// two orphaned assertions.
 #[test]
 #[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
 fn a_wgpu_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
@@ -2510,205 +1756,6 @@ fn a_wgpu_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
     device.destroy_command_buffer(commands);
     device.destroy_semaphore(semaphore);
     headless.finish();
-}
-
-/// **Obligation 3.** A handle from device A used on device B is a caller bug
-/// that must be *detected*, and detected as `ForeignObject` rather than as a
-/// stale handle — the two send a reader to different bugs.
-///
-/// Device B is given a buffer of its own first, and that is the whole design of
-/// this test: without the device tag in the handle, A's first handle and B's
-/// first handle are bit-identical, so B would resolve A's handle to B's own
-/// buffer, find the owner matching, and write into the wrong object with no
-/// error anywhere. Two devices from *one* instance, because that is the
-/// arrangement in which their pools genuinely allocate in step.
-#[test]
-#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_handle_from_another_wgpu_device_is_foreign_not_merely_unresolvable() {
-    let instance = instance();
-    let adapter = instance.adapters().remove(0);
-    let open = |label| {
-        instance
-            .create_device(&DeviceDesc {
-                label: Some(label),
-                adapter: adapter.id,
-                required_features: Features::empty(),
-                optional_features: Features::empty(),
-                compatible_surface: None,
-            })
-            .expect("a featureless headless device opens on any adapter")
-    };
-    let a = open("wgpu e2e obligation 3 A");
-    let b = open("wgpu e2e obligation 3 B");
-
-    let describe = |label| BufferDesc {
-        label: Some(label),
-        size: 64,
-        usage: BufferUsage::TRANSFER_SRC,
-        memory: MemoryLocation::HostUpload,
-    };
-    let on_a = a.create_buffer(&describe("on A")).expect("a buffer on A");
-    let on_b = b
-        .create_buffer(&describe("on B"))
-        .expect("a buffer on B, occupying the slot A's handle would land in");
-    assert_eq!(
-        on_a.generation(),
-        on_b.generation(),
-        "both pools are fresh, so only the tag can tell these apart"
-    );
-
-    let error = b
-        .write_buffer(on_a, 0, &[0xFF; 4])
-        .expect_err("A's buffer is not B's to write");
-    assert!(
-        matches!(error, HalError::ForeignObject { kind: "buffer", .. }),
-        "a live handle from another device is foreign, not merely unresolvable: {error}"
-    );
-
-    // B's own still resolves, so the check is not simply refusing everything.
-    b.write_buffer(on_b, 0, &[0xFF; 4])
-        .expect("B's own buffer resolves");
-
-    // A destroy with a foreign handle must not take the local object that
-    // shares its bits.
-    b.destroy_buffer(on_a);
-    b.write_buffer(on_b, 0, &[0xEE; 4])
-        .expect("B's buffer survived a foreign destroy");
-
-    // The queue is synthesised rather than pooled, and obligation 3 covers it
-    // too: without the tag, every device accepted every other device's.
-    let queue_of_a = a.queue(QueueKind::Graphics).expect("a graphics queue");
-    let error = b
-        .submit(queue_of_a, &SubmitInfo::new(&[]))
-        .expect_err("A's queue is not B's to submit to");
-    assert!(
-        matches!(error, HalError::ForeignObject { kind: "queue", .. }),
-        "{error}"
-    );
-
-    a.destroy_buffer(on_a);
-    b.destroy_buffer(on_b);
-}
-
-/// **Obligation 3, across two instances.** Handle bits are only unique within
-/// the backend that issued them, so two instances genuinely hand out identical
-/// ones — a surface crossing them must be detected, and detected as
-/// `ForeignObject`.
-///
-/// Surfaces are scoped to the *instance* rather than the device, which is why
-/// this is a separate test from the buffer above and not a second assertion in
-/// it.
-#[test]
-#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_wgpu_surface_from_one_instance_is_foreign_to_another() {
-    let owner = instance();
-    let other = instance();
-
-    // SAFETY: `Offscreen` names no platform object at all, so there is nothing
-    // that has to outlive the surface.
-    let surface = unsafe { owner.create_surface(&SurfaceTarget::Offscreen) }
-        .expect("an offscreen surface needs no window system");
-    // The other instance makes one of its own first, so its pool is occupied at
-    // the slot the foreign handle names — without the tag it would resolve.
-    let native = unsafe { other.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen");
-    assert_eq!(
-        surface.generation(),
-        native.generation(),
-        "both pools are fresh, so only the tag can tell these apart"
-    );
-    let adapter = other.adapters().remove(0);
-
-    let error = other
-        .surface_caps(surface, adapter.id)
-        .expect_err("this surface belongs to the other instance");
-    assert!(
-        matches!(
-            error,
-            HalError::ForeignObject {
-                kind: "surface",
-                ..
-            }
-        ),
-        "a live handle from another instance is foreign, not unresolvable: {error}"
-    );
-
-    let error = other
-        .create_device(&DeviceDesc {
-            label: Some("foreign surface"),
-            adapter: adapter.id,
-            required_features: Features::empty(),
-            optional_features: Features::empty(),
-            compatible_surface: Some(surface),
-        })
-        .expect_err("and the same on the device-creation path");
-    assert!(
-        matches!(
-            error,
-            HalError::ForeignObject {
-                kind: "surface",
-                ..
-            }
-        ),
-        "{error}"
-    );
-
-    // The other instance must not be able to free it either, which is what
-    // stops a stray `destroy_surface` from turning a bit collision into a
-    // double free.
-    other.destroy_surface(surface);
-    owner
-        .surface_caps(surface, owner.adapters().remove(0).id)
-        .expect("the owning instance still has its surface");
-
-    other.destroy_surface(native);
-    owner.destroy_surface(surface);
-}
-
-/// A recycled slot must not resurrect the handle that used to name it.
-///
-/// The tagging is what could break this: the generation half is the only thing
-/// separating the two handles, so a stamp that disturbed it would make the dead
-/// handle name the live buffer.
-#[test]
-#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_destroyed_wgpu_handle_does_not_alias_the_buffer_that_replaces_it() {
-    let (instance, device, surface, _queue, _format) = Headless::open_device();
-    let describe = BufferDesc {
-        label: Some("wgpu e2e recycled slot"),
-        size: 256,
-        usage: BufferUsage::TRANSFER_SRC,
-        memory: MemoryLocation::HostUpload,
-    };
-    let first = device.create_buffer(&describe).expect("first buffer");
-    device.destroy_buffer(first);
-    let second = device.create_buffer(&describe).expect("second buffer");
-
-    assert_eq!(
-        first.index(),
-        second.index(),
-        "the free list should have handed back the same slot; if not, this test is not exercising \
-         recycling at all"
-    );
-    assert_ne!(
-        first, second,
-        "the pool reissued the identical handle, so the generation never moved"
-    );
-    device
-        .write_buffer(second, 0, &[1u8; 4])
-        .expect("the live handle resolves");
-    let error = device
-        .write_buffer(first, 0, &[1u8; 4])
-        .expect_err("the dead handle must not name its replacement");
-    assert!(
-        matches!(error, HalError::InvalidHandle { kind: "buffer", .. }),
-        "a stale handle of this device's own is stale, not foreign: {error}"
-    );
-
-    device.destroy_buffer(second);
-    device.wait_idle().expect("idle");
-    instance.destroy_surface(surface);
-    drop(device);
-    drop(instance);
 }
 
 // ---------------------------------------------------------------------------
