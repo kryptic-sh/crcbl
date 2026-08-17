@@ -74,8 +74,12 @@ class CrcblAudioProcessor extends AudioWorkletProcessor {
       for (let channel = 0; channel < out.length; channel += 1) {
         // Mono output from a stereo block, or the other way round, both read
         // channel 0 rather than going silent.
-        const source = block.channels[Math.min(channel, block.channels.length - 1)];
-        out[channel].set(source.subarray(block.offset, block.offset + take), filled);
+        const source =
+          block.channels[Math.min(channel, block.channels.length - 1)];
+        out[channel].set(
+          source.subarray(block.offset, block.offset + take),
+          filled
+        );
       }
       block.offset += take;
       filled += take;
@@ -90,7 +94,10 @@ class CrcblAudioProcessor extends AudioWorkletProcessor {
 
     if (!this.awaitingRefill && this.buffered < LOW_WATER_FRAMES) {
       this.awaitingRefill = true;
-      this.port.postMessage({ want: TARGET_FRAMES - this.buffered, underruns: this.underruns });
+      this.port.postMessage({
+        want: TARGET_FRAMES - this.buffered,
+        underruns: this.underruns,
+      });
     }
     return true;
   }

@@ -4,13 +4,12 @@
 at build time, with `crcbl-wl-scanner`. They are vendored rather than read from
 `/usr/share/wayland{,-protocols}/` for two reasons:
 
-- **Reproducibility.** A build whose output depends on which
-  `wayland-protocols` package the developer happens to have installed is not a
-  build we can reason about. The generated `wl_interface` tables are read by the
-  graphics driver's WSI code, so a version skew between machines is a wire-format
-  skew.
-- **CI.** The runners do not have `wayland-protocols` installed, and requiring it
-  would make the shell crate unbuildable on a machine that will never open a
+- **Reproducibility.** A build whose output depends on which `wayland-protocols`
+  package the developer happens to have installed is not a build we can reason
+  about. The generated `wl_interface` tables are read by the graphics driver's
+  WSI code, so a version skew between machines is a wire-format skew.
+- **CI.** The runners do not have `wayland-protocols` installed, and requiring
+  it would make the shell crate unbuildable on a machine that will never open a
   window.
 
 ## Contents
@@ -20,17 +19,17 @@ Every file below is generated from unconditionally, except the two marked
 feature — a virtual-input protocol compiled into a shipping build is a
 synthetic-input capability nobody asked for.
 
-| File                                  | Upstream                                                                 | Version | SHA-256 (first 16) |
-| ------------------------------------- | ------------------------------------------------------------------------ | ------- | ------------------ |
-| `wayland.xml`                         | `wayland`, `protocol/wayland.xml`                                        | 1.25.0  | `08fb558d96742b41` |
-| `xdg-shell.xml`                       | `wayland-protocols`, `stable/xdg-shell/xdg-shell.xml` (`xdg_wm_base` v7) | 1.49    | `7ba7f9c8473deee6` |
-| `viewporter.xml`                      | `wayland-protocols`, `stable/viewporter/viewporter.xml`                  | 1.49    | `dcb12279a0374630` |
-| `fractional-scale-v1.xml`             | `wayland-protocols`, `staging/fractional-scale/fractional-scale-v1.xml`  | 1.49    | `5941de5d28f427ec` |
-| `xdg-output-unstable-v1.xml`          | `wayland-protocols`, `unstable/xdg-output/`                              | 1.49    | `363d547c3eefe895` |
-| `xdg-decoration-unstable-v1.xml`      | `wayland-protocols`, `unstable/xdg-decoration/`                          | 1.49    | `68753c4a85a28659` |
-| `relative-pointer-unstable-v1.xml`    | `wayland-protocols`, `unstable/relative-pointer/`                        | 1.49    | `ab4930dd3084f732` |
-| `pointer-constraints-unstable-v1.xml` | `wayland-protocols`, `unstable/pointer-constraints/`                     | 1.49    | `f980fac900ba1dcf` |
-| `virtual-keyboard-unstable-v1.xml`    | `wayland-protocols-misc`, `virtual-keyboard-unstable-v1.xml` — **e2e**   | 1.0     | `7ad7870003ecd592` |
+| File                                  | Upstream                                                                  | Version | SHA-256 (first 16) |
+| ------------------------------------- | ------------------------------------------------------------------------- | ------- | ------------------ |
+| `wayland.xml`                         | `wayland`, `protocol/wayland.xml`                                         | 1.25.0  | `08fb558d96742b41` |
+| `xdg-shell.xml`                       | `wayland-protocols`, `stable/xdg-shell/xdg-shell.xml` (`xdg_wm_base` v7)  | 1.49    | `7ba7f9c8473deee6` |
+| `viewporter.xml`                      | `wayland-protocols`, `stable/viewporter/viewporter.xml`                   | 1.49    | `dcb12279a0374630` |
+| `fractional-scale-v1.xml`             | `wayland-protocols`, `staging/fractional-scale/fractional-scale-v1.xml`   | 1.49    | `5941de5d28f427ec` |
+| `xdg-output-unstable-v1.xml`          | `wayland-protocols`, `unstable/xdg-output/`                               | 1.49    | `363d547c3eefe895` |
+| `xdg-decoration-unstable-v1.xml`      | `wayland-protocols`, `unstable/xdg-decoration/`                           | 1.49    | `68753c4a85a28659` |
+| `relative-pointer-unstable-v1.xml`    | `wayland-protocols`, `unstable/relative-pointer/`                         | 1.49    | `ab4930dd3084f732` |
+| `pointer-constraints-unstable-v1.xml` | `wayland-protocols`, `unstable/pointer-constraints/`                      | 1.49    | `f980fac900ba1dcf` |
+| `virtual-keyboard-unstable-v1.xml`    | `wayland-protocols-misc`, `virtual-keyboard-unstable-v1.xml` — **e2e**    | 1.0     | `7ad7870003ecd592` |
 | `wlr-virtual-pointer-unstable-v1.xml` | `wlr-protocols`, `unstable/wlr-virtual-pointer-unstable-v1.xml` — **e2e** | v2      | `3ff6d540be0bc522` |
 
 All are MIT-licensed; the copyright blocks are preserved verbatim inside each
@@ -39,7 +38,7 @@ produce nothing.
 
 ## Why the two e2e protocols exist
 
-`wl_seat` on a wlroots **headless** backend advertises *no* capabilities: there
+`wl_seat` on a wlroots **headless** backend advertises _no_ capabilities: there
 is no pointer and no keyboard, so a client bound to that seat receives no input
 ever. Driving sway's IPC does not help — `swaymsg seat seat0 cursor move`
 reports success and moves nothing, because there is no cursor to move.

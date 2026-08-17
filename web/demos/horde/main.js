@@ -23,7 +23,8 @@ bootDemo({
     frame: (/** @type {number} */ now) => ex.__crcbl_horde_frame(now),
     status: () => ex.__crcbl_horde_status(),
     shutdown: () => ex.__crcbl_horde_shutdown(),
-    logLevel: (/** @type {number} */ level) => ex.__crcbl_horde_log_level(level),
+    logLevel: (/** @type {number} */ level) =>
+      ex.__crcbl_horde_log_level(level),
     logTake: ex.__crcbl_horde_log_take,
     logPtr: ex.__crcbl_horde_log_ptr,
     errorPtr: () => ex.__crcbl_horde_error_ptr(),

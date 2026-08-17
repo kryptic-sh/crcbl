@@ -43,7 +43,10 @@ export async function startAudio({ exports, memory, workletUrl }) {
       outputChannelCount: [2],
     });
   } catch (error) {
-    console.warn('crcbl: could not start the audio worklet; the demo will be silent', error);
+    console.warn(
+      'crcbl: could not start the audio worklet; the demo will be silent',
+      error
+    );
     try {
       await context?.close();
     } catch {
@@ -67,7 +70,12 @@ export async function startAudio({ exports, memory, workletUrl }) {
     // at start-up is what lets the source be installed *after* the worklet is,
     // which is the order boot actually happens in: the game (and therefore its
     // `AudioSource`) does not exist until the device promise resolves.
-    if (exports.__crcbl_web_audio_configure(context.sampleRate, MAX_BLOCK_FRAMES) === 0) {
+    if (
+      exports.__crcbl_web_audio_configure(
+        context.sampleRate,
+        MAX_BLOCK_FRAMES
+      ) === 0
+    ) {
       node.port.postMessage({});
       return;
     }
@@ -97,7 +105,7 @@ export async function startAudio({ exports, memory, workletUrl }) {
     }
     node.port.postMessage(
       { channels, frames: rendered },
-      channels.map((c) => c.buffer),
+      channels.map((c) => c.buffer)
     );
   };
 

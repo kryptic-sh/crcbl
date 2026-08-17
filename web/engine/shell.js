@@ -155,7 +155,13 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     const rect = canvas.getBoundingClientRect();
     const width = Math.max(1, Math.round(rect.width * scale));
     const height = Math.max(1, Math.round(rect.height * scale));
-    if (!force && width === lastWidth && height === lastHeight && scale === lastScale) return;
+    if (
+      !force &&
+      width === lastWidth &&
+      height === lastHeight &&
+      scale === lastScale
+    )
+      return;
     lastWidth = width;
     lastHeight = height;
     lastScale = scale;
@@ -168,7 +174,10 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
   function position(event) {
     const rect = canvas.getBoundingClientRect();
     const scale = window.devicePixelRatio || 1;
-    return [(event.clientX - rect.left) * scale, (event.clientY - rect.top) * scale];
+    return [
+      (event.clientX - rect.left) * scale,
+      (event.clientY - rect.top) * scale,
+    ];
   }
 
   /** @param {KeyboardEvent} event */
@@ -178,7 +187,12 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     // it produced and is only used for the keysym.
     const codeLen = writeUtf8(memory, scratchPtr, scratchCapacity, event.code);
     if (codeLen === null) return;
-    const keyLen = writeUtf8(memory, scratchPtr + codeLen, scratchCapacity - codeLen, event.key);
+    const keyLen = writeUtf8(
+      memory,
+      scratchPtr + codeLen,
+      scratchCapacity - codeLen,
+      event.key
+    );
     if (keyLen === null) return;
     exports.__crcbl_web_key(
       canvasId,
@@ -189,13 +203,14 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       event.timeStamp,
       modifiers(event) |
         (down ? STATE_EDGE : 0) |
-        (event.repeat ? STATE_REPEAT : 0),
+        (event.repeat ? STATE_REPEAT : 0)
     );
     if (SWALLOWED.has(event.code)) event.preventDefault();
     // After the forward, so the engine sees the press either way, and only on
     // a real press: `keyup` would toggle straight back, and a held key's
     // repeats would toggle once per repeat.
-    if (down && !event.repeat && event.code === FULLSCREEN_KEY) toggleFullscreen();
+    if (down && !event.repeat && event.code === FULLSCREEN_KEY)
+      toggleFullscreen();
   }
 
   /**
@@ -281,7 +296,7 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       x,
       y,
       event.pointerId >>> 0,
-      phase,
+      phase
     );
   }
 
@@ -323,7 +338,7 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       x,
       y,
       event.button,
-      modifiers(event) | (down ? STATE_EDGE : 0),
+      modifiers(event) | (down ? STATE_EDGE : 0)
     );
   }
 
@@ -359,7 +374,7 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       x,
       y,
       heldButton,
-      modifiers(event),
+      modifiers(event)
     );
   }
 
@@ -368,7 +383,12 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     const [x, y] = position(event);
     // `deltaMode` is lines or pages on some platforms; the ABI is pixels, and
     // the conventional conversions are 16 px per line and a viewport per page.
-    const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1;
+    const factor =
+      event.deltaMode === 1
+        ? 16
+        : event.deltaMode === 2
+          ? canvas.clientHeight
+          : 1;
     exports.__crcbl_web_pointer_wheel(
       canvasId,
       event.timeStamp,
@@ -376,7 +396,7 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       y,
       event.deltaX * factor,
       event.deltaY * factor,
-      modifiers(event),
+      modifiers(event)
     );
     event.preventDefault();
   }
@@ -403,13 +423,16 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       event.timeStamp,
       x,
       y,
-      event.type === 'pointerenter' ? STATE_EDGE : 0,
+      event.type === 'pointerenter' ? STATE_EDGE : 0
     );
   }
 
   /** @param {FocusEvent} event */
   function onFocus(event) {
-    exports.__crcbl_web_focus(canvasId, event.type === 'focus' ? STATE_EDGE : 0);
+    exports.__crcbl_web_focus(
+      canvasId,
+      event.type === 'focus' ? STATE_EDGE : 0
+    );
   }
 
   /**
@@ -421,7 +444,8 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
    * every key it thought was held is live again.
    */
   function onVisibility() {
-    if (document.visibilityState === 'hidden') exports.__crcbl_web_focus(canvasId, 0);
+    if (document.visibilityState === 'hidden')
+      exports.__crcbl_web_focus(canvasId, 0);
   }
 
   /** The listeners, so `dispose` removes exactly what was added. */
@@ -449,7 +473,12 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     // held; the synthesized focus loss is what clears it.
     [document, 'visibilitychange', onVisibility, undefined],
     // The browser's own context menu on a right-click would eat the button.
-    [canvas, 'contextmenu', (/** @type {Event} */ e) => e.preventDefault(), undefined],
+    [
+      canvas,
+      'contextmenu',
+      (/** @type {Event} */ e) => e.preventDefault(),
+      undefined,
+    ],
   ];
   for (const [target, type, handler, options] of listeners) {
     target.addEventListener(type, handler, options);
@@ -463,7 +492,9 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
   // `ResizeObserver` does not fire when only `devicePixelRatio` changes — which
   // is what happens when the window is dragged to a monitor with a different
   // scale, or the page is zoomed. This media query does.
-  const dprQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+  const dprQuery = window.matchMedia(
+    `(resolution: ${window.devicePixelRatio}dppx)`
+  );
   const onDprChange = () => syncSize();
   dprQuery.addEventListener('change', onDprChange);
 

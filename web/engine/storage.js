@@ -113,7 +113,7 @@ export function drainFetch({ exports, memory }) {
     const url = readUtf8(
       memory,
       exports.__crcbl_web_fetch_url_ptr(id),
-      exports.__crcbl_web_fetch_url_len(id),
+      exports.__crcbl_web_fetch_url_len(id)
     );
     void deliver(exports, memory, id, url);
   }
@@ -138,7 +138,10 @@ async function openRoot() {
     if (!navigator.storage?.getDirectory) return null;
     return await navigator.storage.getDirectory();
   } catch (error) {
-    console.warn('crcbl: no OPFS in this context; saves will not persist', error);
+    console.warn(
+      'crcbl: no OPFS in this context; saves will not persist',
+      error
+    );
     return null;
   }
 }
@@ -162,7 +165,8 @@ export async function restoreOpfs({ exports, memory }) {
   const root = await openRoot();
 
   let flags = 0;
-  if (typeof Window === 'undefined' || !(globalThis instanceof Window)) flags |= ENV_WORKER;
+  if (typeof Window === 'undefined' || !(globalThis instanceof Window))
+    flags |= ENV_WORKER;
   if (
     typeof FileSystemFileHandle !== 'undefined' &&
     'createSyncAccessHandle' in FileSystemFileHandle.prototype
@@ -187,7 +191,9 @@ export async function restoreOpfs({ exports, memory }) {
       // Not a name this store wrote — someone else's file in the same origin.
       if (id === 0) continue;
       try {
-        const file = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+        const file = new Uint8Array(
+          await (await handle.getFile()).arrayBuffer()
+        );
         // May grow wasm memory; the view is built after it.
         const buffer = exports.__crcbl_web_opfs_restore_buffer(id, file.length);
         if (buffer === 0) {
@@ -234,7 +240,7 @@ export async function flushOpfs({ exports, memory, root }) {
       const name = readUtf8(
         memory,
         exports.__crcbl_web_opfs_record_name_ptr(seq),
-        exports.__crcbl_web_opfs_record_name_len(seq),
+        exports.__crcbl_web_opfs_record_name_len(seq)
       );
       let ok = 0;
       try {
@@ -245,7 +251,7 @@ export async function flushOpfs({ exports, memory, root }) {
           const body = readBytes(
             memory,
             exports.__crcbl_web_opfs_record_data_ptr(seq),
-            exports.__crcbl_web_opfs_record_data_len(seq),
+            exports.__crcbl_web_opfs_record_data_len(seq)
           );
           const handle = await root.getFileHandle(name, { create: true });
           const writable = await handle.createWritable();
@@ -273,5 +279,8 @@ export async function flushOpfs({ exports, memory, root }) {
  * @returns {boolean}
  */
 export function opfsSettled(exports) {
-  return exports.__crcbl_web_opfs_pending() === 0 && exports.__crcbl_web_opfs_inflight() === 0;
+  return (
+    exports.__crcbl_web_opfs_pending() === 0 &&
+    exports.__crcbl_web_opfs_inflight() === 0
+  );
 }

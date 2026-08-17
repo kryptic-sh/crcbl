@@ -2,7 +2,7 @@ name: Cron
 
 on:
   schedule:
-    - cron: "0 6 * * 1" # Monday 06:00 UTC
+    - cron: '0 6 * * 1' # Monday 06:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 # The PR-triggered `deny` job in ci.yml checks against whatever advisory DB was
 # current when the PR ran; the one here re-checks a quiet repo against a freshly
@@ -119,7 +119,7 @@ jobs:
       # rustup; miri only exists on nightly, so the channel is overridden here.
       RUSTUP_TOOLCHAIN: nightly
       MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-deterministic-floats
-      PROPTEST_CASES: "4"
+      PROPTEST_CASES: '4'
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -148,6 +148,5 @@ jobs:
       - run: cargo miri setup
       - name: Interpret the seam and container crates
         run: >-
-          cargo miri test
-          -p crcbl-core -p crcbl-hal -p crcbl-ecs -p crcbl-store -p crcbl-ui
-          -p crcbl-jobs
+          cargo miri test -p crcbl-core -p crcbl-hal -p crcbl-ecs -p crcbl-store
+          -p crcbl-ui -p crcbl-jobs

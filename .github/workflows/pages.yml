@@ -30,7 +30,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 # A superseded deploy is worth cancelling; two of them racing to publish is not.
 concurrency:
@@ -59,7 +59,7 @@ jobs:
       # and no `node_modules` — this repository hand-writes its bindings.
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: '24'
 
       # THERE IS NO wasm-bindgen STEP HERE ANY MORE. This job used to resolve the
       # crate's version out of `Cargo.lock` and install the matching CLI, because

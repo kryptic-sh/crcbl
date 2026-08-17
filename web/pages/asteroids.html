@@ -60,17 +60,17 @@ meta-->
   <h3>To find out what happens when entities never stop dying.</h3>
   <p>
     Breakout spawns its world once. Flappy runs a treadmill at a couple of
-    entities a second. This one fires a bullet every sixth of a second, turns one
-    rock into two, and deals a whole wave at a time — so generational ids,
+    entities a second. This one fires a bullet every sixth of a second, turns
+    one rock into two, and deals a whole wave at a time — so generational ids,
     deferred destruction and pool slot recycling all get hammered, and a leak
     shows up as a number that climbs. A test asserts the entity and collider
     accounting on <em>every</em> tick of an eighteen-thousand-tick soak.
   </p>
   <p>
-    It is also the first consumer of the second physics slice: thrust and damping
-    through the force pipeline, bullets through segment CCD, and ship-versus-rock
-    through a broadphase sphere overlap — with the screen wrap as the thing that
-    had to decide what a teleport means to a BVH.
+    It is also the first consumer of the second physics slice: thrust and
+    damping through the force pipeline, bullets through segment CCD, and
+    ship-versus-rock through a broadphase sphere overlap — with the screen wrap
+    as the thing that had to decide what a teleport means to a BVH.
   </p>
 </section>
 

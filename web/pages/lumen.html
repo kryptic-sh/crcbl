@@ -24,9 +24,10 @@ meta-->
   <h1><span class="grad">Lumen</span></h1>
   <p class="tagline">
     One room, chosen for its lighting rather than for its geometry: daylight
-    coming in through a window, a mirror-grade panel and a rough metal block that
-    have no light of their own, a coloured wall the sun bounces off, and a warm
-    lamp orbiting the middle of it. Not a game — the lighting is the content.
+    coming in through a window, a mirror-grade panel and a rough metal block
+    that have no light of their own, a coloured wall the sun bounces off, and a
+    warm lamp orbiting the middle of it. Not a game — the lighting is the
+    content.
   </p>
 </header>
 
@@ -36,40 +37,41 @@ meta-->
   <h2>what you are looking at</h2>
   <h3>Five things, and each one is an effect being asked a question.</h3>
   <p>
-    <strong>The sun through the window.</strong> The opening is above eye height,
-    so the light comes in over the camera and lands on the floor rather than in
-    the lens. The room is built out of slabs rather than single quads, and that
-    is what makes the shaft exist at all: back faces are culled in the shadow
-    pass too, so a wall one quad thick writes nothing into the shadow map and
-    casts nothing onto the floor.
+    <strong>The sun through the window.</strong> The opening is above eye
+    height, so the light comes in over the camera and lands on the floor rather
+    than in the lens. The room is built out of slabs rather than single quads,
+    and that is what makes the shaft exist at all: back faces are culled in the
+    shadow pass too, so a wall one quad thick writes nothing into the shadow map
+    and casts nothing onto the floor.
   </p>
   <p>
     <strong>The shadowed floor.</strong> Two lights reach it. The sun draws the
     window's own shape onto it, and the orbiting lamp is the room's only point
-    light — so it is the candidate the shadow atlas hands its light tiles to, and
-    the contact shadows that swing round the floor are its. Its reach is under
-    half the room's depth on purpose: a light that touched every wall would light
-    the room evenly and there would be nothing to watch it move against.
+    light — so it is the candidate the shadow atlas hands its light tiles to,
+    and the contact shadows that swing round the floor are its. Its reach is
+    under half the room's depth on purpose: a light that touched every wall
+    would light the room evenly and there would be nothing to watch it move
+    against.
   </p>
   <p>
     <strong>The coloured wall's bounce.</strong> The red wall throws colour back
     into the room, and it is one analytic gather of the sun's first bounce off
-    this room's interior, baked into the irradiance volume the scene carries. One
-    bounce off one box — nothing inside the room occludes it, and nothing bounces
-    twice. It is not a global-illumination solve and the sample does not claim to
-    be one.
+    this room's interior, baked into the irradiance volume the scene carries.
+    One bounce off one box — nothing inside the room occludes it, and nothing
+    bounces twice. It is not a global-illumination solve and the sample does not
+    claim to be one.
   </p>
   <p>
     <strong>The two metals, lit by reflection alone.</strong> A fully metallic
-    surface has no diffuse lobe for an ambient term to multiply, so nothing but a
-    reflection lights either of them. The screen-space march reaches the
-    <em>foot</em> of the mirror panel and only the foot — the panel faces you, so
-    a ray leaving it travels back past the eye, and only the lowest band sends
-    one that still hits the floor on screen. Everywhere above that band the march
-    finds nothing and falls back to the same baked volume, which is why the face
-    is dim rather than black. The rough block never fakes a sharp hit: its
-    roughness is above the cutoff one ray is honest at, so it takes that
-    environment directly, with the sun's own specular on top.
+    surface has no diffuse lobe for an ambient term to multiply, so nothing but
+    a reflection lights either of them. The screen-space march reaches the
+    <em>foot</em> of the mirror panel and only the foot — the panel faces you,
+    so a ray leaving it travels back past the eye, and only the lowest band
+    sends one that still hits the floor on screen. Everywhere above that band
+    the march finds nothing and falls back to the same baked volume, which is
+    why the face is dim rather than black. The rough block never fakes a sharp
+    hit: its roughness is above the cutoff one ray is honest at, so it takes
+    that environment directly, with the sun's own specular on top.
   </p>
   <p>
     Press <kbd>F3</kbd> and the panel's <code>unbuilt</code> section says the
@@ -95,8 +97,9 @@ meta-->
     <li class="key-row">
       <span>Fly the free camera</span>
       <span
-        ><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>, <kbd>Space</kbd>
-        and <kbd>Shift</kbd> for up and down, the arrows to look</span
+        ><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>,
+        <kbd>Space</kbd> and <kbd>Shift</kbd> for up and down, the arrows to
+        look</span
       >
     </li>
     <li class="key-row">
@@ -119,15 +122,15 @@ meta-->
     <code>LightingPath::Rasterised</code> by construction — shadow maps,
     screen-space ambient occlusion, screen-space reflections and a probe volume,
     with no branch anywhere for it to take instead. The same sample on a Vulkan
-    machine with ray tracing is where the other path lives, and comparing the two
-    is what the fixture is for. This is the half you can look at without building
-    anything.
+    machine with ray tracing is where the other path lives, and comparing the
+    two is what the fixture is for. This is the half you can look at without
+    building anything.
   </p>
   <p>
     Press <kbd>F3</kbd> for the receipts. The panel names which geometry path,
-    which binding model and which lighting path this frame was drawn through, and
-    which effects survived the four layers that resolve them — so a picture you
-    think looks wrong comes with the arm that drew it, rather than a guess.
+    which binding model and which lighting path this frame was drawn through,
+    and which effects survived the four layers that resolve them — so a picture
+    you think looks wrong comes with the arm that drew it, rather than a guess.
   </p>
 </section>
 
