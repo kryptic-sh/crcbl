@@ -1,5 +1,7 @@
 //! `impl Instance for WebGpuInstance` — adapters, surfaces, the device request.
 
+use std::sync::Mutex;
+
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceDesc, Format, HalError, Instance,
@@ -23,6 +25,20 @@ pub struct WebGpuInstance {
     channel: SharedChannel,
     adapters: Vec<AdapterInfo>,
     pool: HandlePool,
+    /// The surfaces created from [`SurfaceTarget::Offscreen`], so
+    /// [`surface_caps`](Instance::surface_caps) can tell a ring of textures from
+    /// a canvas.
+    ///
+    /// A [`SurfaceHandle`] carries no kind and the stream answers no query about
+    /// one, so the only place the distinction exists is the `create_surface`
+    /// call that made it — which is why it is recorded there and nowhere else.
+    /// The same slot table `crcbl-wgpu`'s instance keeps, minus the platform
+    /// object a browser has none of.
+    ///
+    /// A `Vec` rather than a set because a run holds one surface or two, and
+    /// [`HandlePool`] never mints the same handle twice, so a removed entry can
+    /// never be re-matched by a later one.
+    offscreen: Mutex<Vec<SurfaceHandle>>,
 }
 
 impl WebGpuInstance {
@@ -38,6 +54,7 @@ impl WebGpuInstance {
             channel,
             adapters,
             pool,
+            offscreen: Mutex::new(Vec::new()),
         }
     }
 
@@ -85,6 +102,72 @@ impl WebGpuInstance {
             self.pool.clone(),
         ))
     }
+
+    /// The offscreen-surface list, locked.
+    fn offscreen_surfaces(&self) -> std::sync::MutexGuard<'_, Vec<SurfaceHandle>> {
+        self.offscreen
+            .lock()
+            .expect("the WebGPU offscreen-surface list mutex was poisoned")
+    }
+
+    /// Whether `surface` came from [`SurfaceTarget::Offscreen`].
+    ///
+    /// `false` for a handle this instance never made, which is the same answer a
+    /// canvas gets: the seam has no "no such surface" error on this call, and a
+    /// stray handle is a caller bug that the swapchain command will surface
+    /// against the replayer's own surface table.
+    fn is_offscreen(&self, surface: SurfaceHandle) -> bool {
+        self.offscreen_surfaces().contains(&surface)
+    }
+}
+
+/// What an offscreen ring accepts, which is not what a canvas accepts.
+///
+/// **THE RING ANSWERS TO NO CANVAS.** `GPUCanvasContext.configure` takes only
+/// `rgba8unorm` and `bgra8unorm` and rejects an `-srgb` one, which is why
+/// [`WebGpuInstance::surface_caps`] reports those for a canvas surface — but an
+/// offscreen swapchain is a ring of `GPUTexture`s the replayer creates with
+/// `createTexture`, where every one of these is a core, renderable, copyable
+/// format. Nothing about the canvas restriction applies to it.
+///
+/// **sRGB FIRST, BECAUSE THAT IS THE FRAME THE GOLDENS HOLD.**
+/// [`SurfaceCaps::preferred_format`] takes the first sRGB entry, and the engine
+/// asks for exactly that. Every pass above the seam writes display-referred
+/// values and leaves the encode to the hardware, so a linear ring skips the
+/// encode entirely and the readback is a whole transfer function away from the
+/// image it is compared against.
+///
+/// **Deliberately the same list `crcbl-vk` and `crcbl-wgpu` state for their own
+/// offscreen surfaces**, minus `Rgba16Float`, so the parity gate compares a
+/// frame drawn into the same format the native suites drew into — which is the
+/// only reason the gate exists. `Rgba16Float` is absent because
+/// [`crate::tag`] can name it but nothing has ever asked this backend for a
+/// half-float ring, and a `formats` entry is a promise that a swapchain can be
+/// created with it.
+fn offscreen_surface_caps() -> SurfaceCaps {
+    SurfaceCaps {
+        formats: vec![
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8UnormSrgb,
+            Format::Rgba8Unorm,
+            Format::Bgra8Unorm,
+        ],
+        // `fifo` is what the ring rotates at — there is no display to pace
+        // against, and the seam promises `Fifo` is always offered.
+        present_modes: vec![PresentMode::Fifo],
+        // The replayer's offscreen branch has no `alphaMode` to set at all; the
+        // textures are opaque render targets read straight back.
+        composite_alpha: vec![CompositeAlpha::Opaque],
+        // The replayer builds `imageCount` textures from the descriptor and
+        // refuses only a count of zero, so this is a statement about the caller's
+        // clamp rather than a measurement: two is the ring the canvas branch
+        // reports and the one the engine has always asked this backend for.
+        min_image_count: 2,
+        max_image_count: 2,
+        // Nothing here has an opinion about the size; the replayer sizes the
+        // ring from the swapchain descriptor.
+        current_extent: None,
+    }
 }
 
 impl Instance for WebGpuInstance {
@@ -113,6 +196,10 @@ impl Instance for WebGpuInstance {
                 });
             }
             SurfaceTarget::Offscreen => {
+                // Recorded before the encode, so `surface_caps` on the very next
+                // line — which is where `crcbl::engine`'s open calls it — can
+                // already tell this handle from a canvas one.
+                self.offscreen_surfaces().push(surface);
                 self.channel.with(|channel| {
                     channel.encode(|stream| stream.create_offscreen_surface(surface))
                 });
@@ -130,13 +217,14 @@ impl Instance for WebGpuInstance {
     }
 
     fn destroy_surface(&self, surface: SurfaceHandle) {
+        self.offscreen_surfaces().retain(|held| *held != surface);
         self.channel
             .with(|channel| channel.encode(|stream| stream.destroy_surface(surface)));
     }
 
     fn surface_caps(
         &self,
-        _surface: SurfaceHandle,
+        surface: SurfaceHandle,
         _adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError> {
         // Synthesised locally and synchronously, with no round trip — the one
@@ -144,20 +232,26 @@ impl Instance for WebGpuInstance {
         // open calls `create_surface` and then this on the next line with no
         // frame between them, so a query over the reply channel could not answer
         // in time, and an `Err` meaning "not yet" would send a caller doing
-        // adapter selection to an adapter a browser does not have. The constant
-        // is not a placeholder: both formats are valid
+        // adapter selection to an adapter a browser does not have.
+        //
+        // WHICH OF THE TWO ANSWERS DEPENDS ON WHAT THE SURFACE IS, and that is
+        // the whole reason `offscreen` exists. A canvas is bound by
+        // `GPUCanvasContext.configure`, which takes only the linear 8-bit
+        // formats; an offscreen ring is a set of `GPUTexture`s the replayer
+        // creates and no canvas constrains. Answering the canvas's list for both
+        // handed `SurfaceCaps::preferred_format` nothing sRGB to find, so it
+        // fell through to the first entry and the ring was allocated linear —
+        // every pass above the seam writes display-referred values and leaves
+        // the encode to the hardware, so the frame was never encoded and came
+        // back a whole transfer function away from the golden it is compared to.
+        if self.is_offscreen(surface) {
+            return Ok(offscreen_surface_caps());
+        }
+        // The canvas constant is not a placeholder: both formats are valid
         // `GPUCanvasConfiguration.format` values, `fifo` is the only present
         // mode a canvas offers, and a browser double-buffers on its own — so
         // this is what the canvas actually accepts. Preferring one format over
         // the other is a later optimisation; returning both is correct now.
-        //
-        // **The same caps serve an offscreen surface**, which the handle alone
-        // cannot be told apart from a canvas one here — the instance keeps no
-        // per-surface kind, and these caps are synthesised rather than queried.
-        // That is correct rather than a shortcut: an offscreen ring is not bound
-        // by a real canvas, so the formats a canvas accepts are a valid subset
-        // for it, `fifo` is what the ring rotates at, and the replayer sizes the
-        // ring from the swapchain descriptor, not from a current extent.
         Ok(SurfaceCaps {
             formats: vec![Format::Bgra8Unorm, Format::Rgba8Unorm],
             present_modes: vec![PresentMode::Fifo],

@@ -136,6 +136,81 @@ fn surface_caps_answers_the_constant_canvas_caps_synchronously() {
     assert_eq!(caps.current_extent, None);
 }
 
+/// **An offscreen ring is offered an sRGB format and a canvas is not.**
+///
+/// The ring is `GPUTexture`s the replayer creates, so the canvas's linear-only
+/// `configure` restriction does not reach it — and it must not, because
+/// `preferred_format` takes the first sRGB entry and falls through to the first
+/// entry of all when there is none. Red the moment the offscreen branch goes
+/// back to reporting the canvas list: the frame is then drawn into a linear
+/// target, never encoded, and every golden comparison fails on the transfer
+/// function alone.
+#[test]
+fn an_offscreen_surface_is_offered_an_srgb_format_and_a_canvas_is_not() {
+    let instance = opened_instance();
+    let offscreen = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+        .expect("an offscreen surface is reachable");
+    let canvas = unsafe { instance.create_surface(&SurfaceTarget::Web { canvas_id: 7 }) }
+        .expect("a Web canvas surface is reachable");
+
+    let offscreen_caps = instance
+        .surface_caps(offscreen, AdapterId(0))
+        .expect("the offscreen caps");
+    assert_eq!(
+        offscreen_caps.formats,
+        vec![
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8UnormSrgb,
+            Format::Rgba8Unorm,
+            Format::Bgra8Unorm,
+        ],
+        "the offscreen ring lists its sRGB formats first",
+    );
+    assert_eq!(
+        offscreen_caps.preferred_format(),
+        Some(Format::Rgba8UnormSrgb),
+        "the engine asks for what preferred_format picks, and a golden image \
+         wants a display-referred frame",
+    );
+
+    let canvas_caps = instance
+        .surface_caps(canvas, AdapterId(0))
+        .expect("the canvas caps");
+    assert_eq!(
+        canvas_caps.formats,
+        vec![Format::Bgra8Unorm, Format::Rgba8Unorm],
+        "a canvas still reports only what GPUCanvasContext.configure takes",
+    );
+}
+
+/// The kind is per surface, so destroying the offscreen one must not leave a
+/// later canvas surface answering the ring's caps — the handle pool never
+/// repeats a value, but the list would still match on a stale entry if nothing
+/// removed it.
+#[test]
+fn destroying_an_offscreen_surface_forgets_that_it_was_offscreen() {
+    let instance = opened_instance();
+    let offscreen = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+        .expect("an offscreen surface is reachable");
+    assert_eq!(
+        instance
+            .surface_caps(offscreen, AdapterId(0))
+            .expect("the offscreen caps")
+            .preferred_format(),
+        Some(Format::Rgba8UnormSrgb),
+    );
+
+    instance.destroy_surface(offscreen);
+    assert_eq!(
+        instance
+            .surface_caps(offscreen, AdapterId(0))
+            .expect("caps for a destroyed handle")
+            .formats,
+        vec![Format::Bgra8Unorm, Format::Rgba8Unorm],
+        "a handle this instance no longer holds falls back to the canvas answer",
+    );
+}
+
 #[test]
 fn create_surface_refuses_a_pointer_target() {
     let instance = opened_instance();

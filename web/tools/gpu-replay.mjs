@@ -1544,6 +1544,17 @@ async function main() {
   );
   FROM_FIXTURE.createSurface = createSurface;
 
+  // The offscreen twin, from the fixture for the same reason: the surface handle
+  // the ring is built under is the one the Rust encoder wrote, and it is a
+  // different handle from the canvas surface's on purpose.
+  const createOffscreenSurface = commands.find(
+    (command) => command.name === 'CreateOffscreenSurface'
+  );
+  check(
+    createOffscreenSurface !== undefined,
+    'the committed stream carries a CreateOffscreenSurface'
+  );
+
   // The capability query, from the fixture for the same reason again — and here
   // the point is what it does *not* carry: a decoder that still read a surface
   // and an adapter off the wire would hand this file an object with fields, and
@@ -2623,6 +2634,65 @@ async function main() {
     check(
       replayer.swapchains.size === 0 && String(reason).includes('swapchain'),
       `ReconfigureSwapchain with no configured swapchain is refused and named (${JSON.stringify(reason)})`
+    );
+  }
+
+  // ---- the offscreen ring -------------------------------------------------
+  //
+  // The other half of the presentation family, and the half no canvas
+  // constrains: an offscreen surface has no `GPUCanvasContext` to configure, so
+  // a swapchain on one is `imageCount` `GPUTexture`s this replayer creates. Its
+  // format is the DESCRIPTOR'S, and the checks below exist because substituting
+  // `getPreferredCanvasFormat()` for it is a plausible thing to do and a silent
+  // one: the two 8-bit canvas formats are both linear, so a ring built from one
+  // renders a whole transfer function away from what the engine asked for, with
+  // no error anywhere. The stub browser prefers `rgba8unorm` and the fixture's
+  // swapchain asks for `bgra8unorm-srgb`, so the two cannot be confused.
+  const swapchainOffscreen = {
+    ...createSwapchain,
+    surface: createOffscreenSurface.surface,
+  };
+  {
+    // **The ring is the descriptor's format, extent and count.** `imageCount`
+    // and `extent` are dropped on the canvas branch — a canvas owns its own
+    // buffering and size — and load-bearing here, so all three are read off the
+    // textures the replayer actually created.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(createOffscreenSurface, 2n));
+    replayer.replay(frameOf(swapchainOffscreen, 3n));
+    const ring = device.createdTextures;
+    check(
+      ring.length === createSwapchain.imageCount &&
+        ring.every(
+          (texture) =>
+            texture.format === 'bgra8unorm-srgb' &&
+            texture.usage === (0x10 | 0x01) &&
+            texture.size[0] === createSwapchain.extent.width &&
+            texture.size[1] === createSwapchain.extent.height
+        ) &&
+        replayer.swapchains.get(createSwapchain.swapchain)?.format ===
+          'bgra8unorm-srgb' &&
+        replayer.takeError() === null,
+      `CreateSwapchain on an offscreen surface builds the descriptor's ring (${JSON.stringify({ textures: ring.length, want: createSwapchain.imageCount, formats: ring.map((texture) => texture.format), sizes: ring.map((texture) => texture.size) })})`
+    );
+  }
+  {
+    // **And it never asks the browser what a canvas prefers.** The check above
+    // would already fail on a substituted format, but only while the fixture's
+    // format and the stub's preference differ; this one holds whatever they are.
+    const device = stubDevice();
+    const gpu = stubGpu(async () => openingAdapter({ device }));
+    const replayer = new Replayer({ gpu });
+    replayer.replay(frameOf(FROM_FIXTURE.enumerate, 0n));
+    await settle();
+    replayer.replay(frameOf(FROM_FIXTURE.requestDevice, 1n));
+    await settle();
+    const asked = gpu.formatCalls;
+    replayer.replay(frameOf(createOffscreenSurface, 2n));
+    replayer.replay(frameOf(swapchainOffscreen, 3n));
+    check(
+      gpu.formatCalls === asked && device.createdTextures.length > 0,
+      `an offscreen ring is built without consulting getPreferredCanvasFormat (${gpu.formatCalls - asked} calls, ${device.createdTextures.length} textures)`
     );
   }
 
