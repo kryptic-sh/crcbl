@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>crcbl render harness</title>
+    <style>
+      body {
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+        margin: 2rem;
+        color: #ddd;
+        background: #111;
+      }
+      pre {
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>crcbl render harness</h1>
+    <p>
+      Drives every golden <code>Scene</code> through the browser GPU backend and
+      reports, per scene, how far the offscreen open got. There is nothing to
+      look at here — the result is read out of the page by
+      <code>web/tools/render-harness-e2e.mjs</code> over the DevTools protocol.
+    </p>
+    <pre id="log">starting…</pre>
+    <!-- Built next to this page by the gate; see web/run-render-harness-e2e.sh. -->
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

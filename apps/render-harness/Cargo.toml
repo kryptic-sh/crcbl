@@ -1,0 +1,23 @@
+[package]
+name = "render-harness"
+description = "Drives crcbl's backend-agnostic golden scenes through a browser GPU backend and reads each frame back, for the WebGPU parity gate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# A `cdylib` so a browser can load it, and an `rlib` so a native `cargo check`
+# and clippy compile the same code the wasm build does — the exports are
+# `#[unsafe(no_mangle)]` only on `wasm32`, so the module type-checks everywhere
+# and links its symbols only where a browser reaches them. There is no `[[bin]]`:
+# this crate is driven entirely from JS, and its only artifact is the wasm.
+[lib]
+name = "crcbl_render_harness"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crcbl = { workspace = true }
+
+[lints]
+workspace = true
