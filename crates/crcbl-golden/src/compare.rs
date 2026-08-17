@@ -105,7 +105,7 @@ impl Tolerance {
     ///
     /// `max_channel_delta` gates how far a *matching* frame's pixels drift.
     /// radv and lavapipe differ on P1.2's triangle by at most one level per
-    /// channel, on 3.83% of the frame; `crcbl-vk`'s `sprite_rotation` golden
+    /// channel, on 3.83% of the frame; the `sprite_rotation` golden
     /// reaches two. So two is the observed maximum rather than twice it, and it
     /// is the floor as much as the ceiling: dropping it to one turns
     /// `sprite_rotation`'s 125 drifting pixels into 125 failing ones, which is
@@ -115,7 +115,7 @@ impl Tolerance {
     ///
     /// `max_failing_ratio` gates pixels that *exceed* that delta, so it is sized
     /// against how many of those a passing frame has. On vk and wgpu that is
-    /// zero, for every one of `crcbl-vk`'s goldens and every scene of `crcbl`'s
+    /// zero, for every golden in the tree and every scene of `crcbl`'s
     /// render e2e. The widest spread measured anywhere is **WARP's sprite
     /// scene: 76 pixels of 49 152 over the delta, 0.1546%, at up to delta 13**,
     /// every one of them on a sprite quad's edge with the sprites themselves

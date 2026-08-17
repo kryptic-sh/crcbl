@@ -4660,8 +4660,8 @@ impl ForwardRenderer {
         // outside a texture's extent yields **zero** rather than the nearest
         // texel, so the fetch has to be clamped against the image's own extent
         // or a one-texel image occludes everything but the origin. That clamp is
-        // in `mesh.slang` and `crcbl-vk`'s `depth_probe` is what asks whether it
-        // is; a frame drawn without it is black wherever ambient is the whole of
+        // in `mesh.slang` and `crcbl`'s `forward_e2e::depth_probe` is what asks
+        // whether it is; a frame drawn without it is black wherever ambient is the whole of
         // the light, on real hardware, with nothing reporting an error.
         //
         // So an AO-off frame records **no occlusion pass at all** and takes no

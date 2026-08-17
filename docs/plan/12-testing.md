@@ -176,10 +176,11 @@ rule the workspace actually holds to: _a test lives in `src/` if it can pass on
 a machine with no GPU and no loader; a test that needs a live device is
 `#[ignore]`d._ Measured rather than asserted — every one of `crcbl-vk`'s `src/`
 tests passes with `VK_DRIVER_FILES` pointed at a manifest that does not exist,
-and none of them carries `#[ignore]`. The converse is just as deliberate: across
-the whole of `crates/crcbl-vk/tests/vk_e2e/`, exactly one test,
+and none of them carries `#[ignore]`. The converse is just as deliberate: every
+test in `crates/crcbl-vk/tests/vk_e2e/` is `#[ignore]`d, and across the agnostic
+suites exactly one is not —
 `the_rotation_frame_of_reference_agrees_with_the_shaders` in
-`vk_e2e/sprite/rotation.rs`, is not `#[ignore]`d. It is pure and could live in
+`crates/crcbl/tests/sprite_e2e/sprite/rotation.rs`. It is pure and could live in
 `src/`, and it stays in the e2e binary on purpose: it pins the frame of
 reference its neighbours' pixel assertions are written in, so a sign error there
 would relabel every expected colour consistently and the whole sweep would pass

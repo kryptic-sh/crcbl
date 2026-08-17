@@ -470,10 +470,10 @@ first.
   records **no occlusion pass at all** and takes no frame-sized image out of the
   transient pool; every property the placeholder was chosen for survives, and
   the clamp costs nothing on a frame-sized channel, where every fragment is
-  inside the image already. `crcbl-vk`'s `depth_probe` is what asks whether the
-  clamp is there: it binds the same one-texel image to a frame of `MESH_EXTENT`,
-  darkens the light list until ambient is the whole of the colour, and asserts
-  the ambient term arrived.
+  inside the image already. `crcbl`'s `forward_e2e::depth_probe` is what asks
+  whether the clamp is there, on every backend: it binds the same one-texel
+  image to a frame of `MESH_EXTENT`, darkens the light list until ambient is the
+  whole of the colour, and asserts the ambient term arrived.
 
   A frame-sized transient cleared to 1.0 by an `ssao-none` pass was what shipped
   first, on 2026-08-14, before the shader could be edited. It was correct and

@@ -80,7 +80,7 @@ pub const CLUSTER_STRIDE: u32 = CLUSTER_LIGHT_CAPACITY + 1;
 /// second only that some froxel refused something. Deterministic — a froxel
 /// walks the light list in index order and keeps a prefix of it — so a test can
 /// assert the exact number, which is what
-/// `crcbl-vk`'s `vk_e2e::lights` does.
+/// `crcbl`'s `forward_e2e::lights` does, on every backend.
 ///
 /// It is a word of `cull.slang`'s statistics buffer rather than a counter of its
 /// own for the reason [`crate::cull::CLUSTER_SURVIVOR_WORD`] is: topic 03 §3.6

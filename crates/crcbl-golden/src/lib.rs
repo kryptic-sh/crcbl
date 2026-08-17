@@ -90,7 +90,7 @@
 //!
 //! [`Tolerance::RASTERISER`] is set from those numbers:
 //!
-//! * `max_channel_delta: 2` — the observed maximum, reached by `crcbl-vk`'s
+//! * `max_channel_delta: 2` — the observed maximum, reached by the
 //!   `sprite_rotation` golden on lavapipe while the triangle and the HDR frame
 //!   stop at one.
 //! * `max_failing_ratio` — the backstop for pixels that exceed that delta.
@@ -163,7 +163,7 @@
 //!
 //! | backend (driver) | scenes | pixels over tolerance |
 //! | --- | --- | --- |
-//! | vk (lavapipe) | `crcbl-vk`'s goldens, cube, sprite, ui | 0 — 0.0000% |
+//! | vk (lavapipe) | every golden then in `crcbl-vk`, cube, sprite, ui | 0 — 0.0000% |
 //! | wgpu (lavapipe) | cube, sprite, ui | 0 — 0.0000% |
 //! | dx12 (WARP) | cube, ui | 0 — 0.0000%, max delta 1 |
 //! | dx12 (WARP) | sprite | **76 — 0.1546%**, max delta 13 |
