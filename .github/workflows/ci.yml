@@ -161,6 +161,32 @@ jobs:
           tool: cargo-machete@0.9.2
       - run: cargo machete
 
+  prettier:
+    name: prettier (markdown, web, workflows)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # Pinned exactly, for the reason `cargo-machete` above is: prettier's
+      # defaults are what this repo formats against, and they move between
+      # releases. An unpinned "latest" would rewrite files nobody edited and
+      # turn the board red without a commit, which is indistinguishable from a
+      # regression.
+      #
+      # `git ls-files` rather than a glob: only tracked files are the repo's to
+      # format, and a glob would walk `target/` and any `node_modules` a local
+      # run left behind. `-z`/`--null` and `xargs -0` because a tracked path is
+      # allowed to contain a space.
+      #
+      # This gate exists because thirteen files had drifted before it did —
+      # both other workflows, four engine scripts, four demo pages and two
+      # docs. Nothing catches that without a check, since the formatter is only
+      # ever run by whoever remembers to.
+      - name: check formatting
+        run: >-
+          git ls-files -z '*.md' '*.js' '*.mjs' '*.json' '*.yml' '*.yaml'
+          '*.css' '*.html' | xargs -0 npx --yes prettier@3.8.3 --check
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
@@ -293,7 +319,8 @@ jobs:
       # what the `shaders` job installs; the tests above have already built
       # everything it links.
       - name: Check the committed cluster DAG against its builder
-        run: cargo run --locked -p crcbl-shaders --example cook-clusters -- --check
+        run:
+          cargo run --locked -p crcbl-shaders --example cook-clusters -- --check
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7
