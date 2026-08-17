@@ -128,8 +128,16 @@ jobs:
       #   smoke.mjs — instantiates the artifact under node with every import
       #     stubbed to throw and drives the documented boot sequence up to the
       #     frame that would need a GPU.
+      #
+      # `CRCBL_WEB_BACKEND=webgpu` is what the deployed site is made of. It
+      # turns on the umbrella's `webgpu` feature, which flips the wasm32
+      # auto-selected backend from `crcbl-wgpu` to `crcbl-webgpu` (see
+      # `crates/crcbl/src/backend.rs`), so `target/site` — the directory the
+      # upload step takes and the `deploy` job publishes — renders through our
+      # own WebGPU path rather than through `wgpu`. Every demo step below reuses
+      # this one build and therefore gates the artifact that actually ships.
       - name: Build the site
-        run: ./web/build.sh
+        run: CRCBL_WEB_BACKEND=webgpu ./web/build.sh
 
       # The custom domain lives in `web/CNAME`, which `web/build.sh` copies into
       # the artifact along with the rest of `web/`. GitHub reads that file on
@@ -187,59 +195,69 @@ jobs:
       # Once per demo, and named per demo, so "the browser gate failed" says
       # which game. The site is built once; each run launches its own browser
       # because the driver reads one canvas.
+      #
+      # `CRCBL_WEB_BACKEND=webgpu` on every one of these, matching the build
+      # step: the site under test is the WebGpu build, so the driver expects
+      # `crcbl-webgpu`'s adapter line at boot and skips the probe groups the
+      # engine's own device makes uninstallable. Skipping that variable here
+      # would not silently render through `wgpu` — it would fail waiting for a
+      # `hal: wgpu adapter` line this site never prints.
       - name: Render breakout in a real browser
-        run: CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh
-
-      # THE WEBGPU GATE. The same breakout, rendered through `crcbl-webgpu`
-      # instead of `crcbl-wgpu`: `CRCBL_WEB_BACKEND=webgpu` builds the site with
-      # the umbrella's `webgpu` feature and drives the demo through the backend,
-      # running groups A–F — boots, opens a webgpu device, draws distinct frames.
-      # The crcbl-webgpu probe groups are skipped here: the engine's own device
-      # owns the one command-stream channel, and the wgpu run above still
-      # exercises them.
-      #
-      # Built into its OWN `SITE_DIR`, not `target/site`. The wasm links a
-      # different backend, so `--build` produces a different artifact — and
-      # `target/site` is what the remaining wgpu demo steps reuse and what the
-      # deploy ships, so it must stay the default (wgpu) build. A separate
-      # directory keeps this gate from poisoning either.
-      #
-      # breakout builds the WebGpu site with `--build`; every WebGpu demo below
-      # reuses that one `target/site-webgpu` and drops `--build`, so CI links the
-      # backend and assembles the site once rather than once per demo. Each still
-      # launches its own browser, because the driver reads one canvas.
-      - name: Render breakout through WebGpu in a real browser
-        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh --build
-
-      - name: Render flappy through WebGpu in a real browser
-        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh
-
-      - name: Render asteroids through WebGpu in a real browser
-        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=asteroids ./web/run-browser-e2e.sh
-
-      - name: Render horde through WebGpu in a real browser
-        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=horde ./web/run-browser-e2e.sh
-
-      # hud takes no input through WebGpu either; the same ticker-cursor read the
-      # wgpu step relies on carries the "simulation is advancing" proof here.
-      - name: Render hud through WebGpu in a real browser
-        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh
+        run: CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh
 
       - name: Render flappy in a real browser
-        run: CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh
+        run: CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh
 
       - name: Render asteroids in a real browser
-        run: CRCBL_WEB_E2E_DEMO=asteroids ./web/run-browser-e2e.sh
+        run: CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=asteroids ./web/run-browser-e2e.sh
 
       - name: Render horde in a real browser
-        run: CRCBL_WEB_E2E_DEMO=horde ./web/run-browser-e2e.sh
+        run: CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=horde ./web/run-browser-e2e.sh
 
       # hud is the one demo that takes no input, so the driver dispatches no key
       # for it and reads "the simulation is advancing" off the ticker's own rng
       # cursor instead. Its `EXPECTATIONS` row in `web/tools/browser-e2e.mjs` is
       # what says so; the step is otherwise identical.
       - name: Render hud in a real browser
-        run: CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh
+        run: CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh
+
+      # THE crcbl-webgpu SEAM GATE, AND THE ONE STEP HERE THAT STILL LINKS
+      # `wgpu`. **It is not a legacy fallback and it must not be deleted**, nor
+      # folded into the WebGpu runs above.
+      #
+      # `web/tools/browser-e2e.mjs` carries the PROBE groups — **G through Z** —
+      # which drive `crcbl-webgpu`'s command stream directly rather than through
+      # the engine: the wasm→JS→wasm round trip and the device it opens, a
+      # surface, the capability query held against what `navigator.gpu` tells the
+      # same page, then a buffer, an image and its view, a sampler, a bind-group
+      # layout, a bind group, a shader module, a pipeline layout and both
+      # pipelines — and from S onward the ones that read bytes back and compare
+      # their *values*: a cleared texture, a drawn triangle, a compute shader's
+      # storage writes, a copy chain, a sub-range fill, a presented canvas
+      # frame, a reconfigured swapchain and an indirect draw.
+      # `web/run-browser-e2e.sh` additionally names the G-through-S checks one by
+      # one, so a group that stops emitting its line fails there too.
+      #
+      # Those groups run **only** when the site is a `wgpu` build. In webgpu mode
+      # the engine's own device owns the single command-stream channel, so a
+      # probe cannot install a second one; the driver skips the groups and the
+      # script skips their named-check guards to match. So the five steps above
+      # prove the shipped artifact renders, and this step is the only thing that
+      # proves the seam underneath it command by command. Delete it and every
+      # probe group stops running with nothing going red. The check count this
+      # step prints is what shows it is still doing its job: it runs the A–F
+      # demo groups *and* the whole probe list, so it is more than twice a
+      # WebGpu demo run's count. A step here reporting a demo-sized count is the
+      # failure to look for.
+      #
+      # Its own `SITE_DIR`, because `target/site` is now the WebGpu build that
+      # the steps above reuse and the `deploy` job ships. No `CRCBL_WEB_BACKEND`
+      # here: `wgpu` is the default in all three of `web/build.sh`,
+      # `web/run-browser-e2e.sh` and `web/tools/browser-e2e.mjs`, and those three
+      # defaults are coupled — they are set together at a call site or not at
+      # all. `--build` links that backend into a directory nothing else touches.
+      - name: Gate crcbl-webgpu's seam through a wgpu site
+        run: SITE_DIR=target/site-wgpu CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh --build
 
       # THERE IS NO `lumen` STEP HERE, AND ITS ABSENCE IS DELIBERATE.
       #
@@ -248,7 +266,8 @@ jobs:
       # pass binds fourteen storage buffers in one compute stage, and Chrome's
       # SwiftShader adapter — the only WebGPU adapter a runner with no GPU has —
       # reports a ceiling of ten, so the pipeline is never created and the canvas
-      # stays black. On real hardware the same artifact passes all 33 checks.
+      # stays black. On real hardware the same artifact passes all 33 checks —
+      # measured on the wgpu site, before the deployed build moved to WebGpu.
       #
       # A step here would therefore be a red CI on every commit, and one that
       # blamed the wrong thing. `docs/backlog.md`'s "lumen's browser gate needs a
@@ -258,7 +277,7 @@ jobs:
       # and smoke-runs it under node.
       #
       #     - name: Render lumen in a real browser
-      #       run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
+      #       run: CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed

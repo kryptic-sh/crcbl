@@ -77,18 +77,60 @@ cross-origin isolated and therefore allows `SharedArrayBuffer`. The browser gate
 imports the same server and asserts the isolation, which is why there is one
 server rather than one per caller.
 
+## Which GPU backend the browser renders through
+
+`CRCBL_WEB_BACKEND` picks it, and three files read that one variable: `build.sh`
+(which turns it into `--features crcbl/webgpu`), `run-browser-e2e.sh` and
+`tools/browser-e2e.mjs`.
+
+| value            | the wasm renders through                            |
+| ---------------- | --------------------------------------------------- |
+| `wgpu` (default) | `crcbl-wgpu`, the `wgpu` crate's WebGPU path        |
+| `webgpu`         | `crcbl-webgpu`, our own wasm→JS→wasm command stream |
+
+**The deployed site is `webgpu`.** `.github/workflows/pages.yml` builds
+`target/site` with `CRCBL_WEB_BACKEND=webgpu` and runs all five browser-gated
+demos against that build, so what `crcbl.kryptic.sh` serves renders through
+`crcbl-webgpu`.
+
+The default is still `wgpu` because the three readers are **coupled**: the
+feature the build passes, the adapter line the driver waits for at boot, and the
+guard strings the script demands afterwards all move together. Flipping one of
+them alone fails confusingly — the driver waits for a `hal: wgpu adapter` line a
+WebGpu site never prints. Set the variable at the call site instead.
+
+```sh
+CRCBL_WEB_BACKEND=webgpu ./web/build.sh --serve
+CRCBL_WEB_BACKEND=webgpu ./web/run-browser-e2e.sh --build
+```
+
+The one `wgpu` run left in the Pages workflow is **not** a legacy fallback. The
+gate's probe groups — G through Z in `tools/browser-e2e.mjs` — drive
+`crcbl-webgpu`'s seam command by command, and they can only install their own
+command-stream channel when the engine's own device has not already taken it,
+which is to say only on a `wgpu` site. That step is therefore the only browser
+gate on the new backend's seam, and it is the only run here whose check count
+covers the probes as well as the demo; its comment in `pages.yml` says so at
+length.
+
 ## Why `wasm-bindgen` is here at all
 
 The engine's own ABI is **hand-written** `extern "C"` — no `#[wasm_bindgen]`
 anywhere in the workspace, and no `wasm-bindgen` in any crate's dependency list.
 The tool is still required, and not by choice:
 
-`crcbl-wgpu` is the browser's graphics backend, `wgpu` reaches WebGPU through
-`web-sys`, and `web-sys` is `wasm-bindgen`. A raw `cargo build` artifact
-therefore imports ~320 functions from `__wbindgen_placeholder__`, which nothing
-but the `wasm-bindgen` CLI can resolve. `WebAssembly.instantiateStreaming` on
-that file is a `LinkError`, every time. Dropping the tool means dropping `wgpu`,
-which means there is no browser backend at all.
+`wgpu` reaches WebGPU through `web-sys`, and `web-sys` is `wasm-bindgen`. A raw
+`cargo build` artifact therefore imports ~320 functions from
+`__wbindgen_placeholder__`, which nothing but the `wasm-bindgen` CLI can
+resolve. `WebAssembly.instantiateStreaming` on that file is a `LinkError`, every
+time.
+
+That is still true of the **deployed** site, which no longer _renders_ through
+`wgpu`: `crcbl-wgpu` is an unconditional dependency of the umbrella (see
+`crates/crcbl/Cargo.toml`), so a `CRCBL_WEB_BACKEND=webgpu` build links it all
+the same and inherits its glue imports. The tool goes when the dependency does —
+that is the ROADMAP's "replacing `wgpu`" slice 11, not something this build has
+already done.
 
 So the split is: **`wasm-bindgen` links `wgpu` to the browser; it does not
 define our ABI.** The generated `init()` returns the instance's raw exports

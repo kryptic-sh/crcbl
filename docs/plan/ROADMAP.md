@@ -1274,11 +1274,12 @@ tables):
 - **Pixel art** ([specs/crcbl/pix.md](../specs/crcbl/pix.md)) — `.crpix` text
   baked at build time and drawn through `SpriteRenderer`. Every sample that
   should have pixel art uses it; see the standing requirements above.
-- **Our own WebGPU** (see the 2026-08-15 section at the end of this file) — a
-  planned track, not started. `crcbl-wgpu` is the browser's only renderer and
-  the last place the engine draws through someone else's abstraction; the
-  section carries the survey, the architectural decision it needs first, and
-  what a replacement does _not_ buy.
+- **Our own WebGPU** (see the 2026-08-15 section at the end of this file) — in
+  progress. The deployed demo site already renders through `crcbl-webgpu`;
+  `crcbl-wgpu` is still linked, is still the default backend without the
+  umbrella's `webgpu` feature, and is the last place the engine draws through
+  someone else's abstraction. The section carries the survey, the architectural
+  decision it needed first, and what a replacement does _not_ buy.
 - **Sample→engine seams** (see the 2026-08-15 section at the end of this file) —
   a standing sweep rather than a phase. When two samples carry the same
   machinery, it belongs behind an engine seam; when they carry the same
@@ -1864,9 +1865,12 @@ what would catch it not having it.
 
 ## Replacing `wgpu` with our own WebGPU path (planned 2026-08-15)
 
-**New track, not yet started.** `crcbl-wgpu` is the browser's only renderer and
-the last place the engine draws through somebody else's abstraction. This is the
-plan to replace it with a backend that talks to WebGPU directly.
+**In progress; the slice list below says where.** `crcbl-wgpu` is the last place
+the engine draws through somebody else's abstraction, and it is no longer what
+the demo site renders through: `.github/workflows/pages.yml` builds
+`target/site` with `CRCBL_WEB_BACKEND=webgpu`, so the artifact it deploys is
+`crcbl-webgpu`. This is the plan to replace `crcbl-wgpu` outright with a backend
+that talks to WebGPU directly.
 
 The architectural decision this plan opened with has been taken, along with two
 others that widen it. They are recorded first because everything below follows
@@ -1894,8 +1898,11 @@ from them.
 `crcbl-wgpu` is about 5 900 lines over ten modules against `wgpu` 30, and
 `device.rs` is most of it. It serves **two** roles:
 
-- **The browser's only path.** `wasm32` has no other backend; `crcbl-vk` sits
-  under a target gate in the umbrella's manifest and `crcbl-wgpu` does not.
+- **The browser's default path.** `crcbl-vk` sits under a target gate in the
+  umbrella's manifest and `crcbl-wgpu` does not, so `wasm32` links it either way
+  and auto-selects it unless `crcbl`'s `webgpu` feature is on. It no longer has
+  `wasm32` to itself: `crcbl-webgpu` is a `cfg(target_arch = "wasm32")`
+  dependency of the umbrella, and it is what the deployed site renders through.
 - **A second native backend**, selectable as `CRCBL_GPU=wgpu`, whose real job is
   the cross-backend image gate in `crates/crcbl/tests/run-cross-backend-e2e.sh`.
 
@@ -2345,3 +2352,15 @@ something trusted, and in a browser the only trusted renderer today is
     empty `ALLOWED_IMPORT_MODULES` (deferred from slice 9 — the last
     wasm-bindgen glue import goes with `wgpu`), and correct the `crcbl-mtl` and
     `crcbl-dx12` manifest comments.
+
+    **The deployed site has already moved**, ahead of the rest of this slice:
+    `pages.yml` builds `target/site` with `CRCBL_WEB_BACKEND=webgpu` and gates
+    all five browser-gated demos against it. What is left here is the library
+    default — `crcbl`'s `webgpu` feature is still off — and the deletions. Those
+    have a cost this slice has to answer for: the browser gate's probe groups (G
+    through Z in `web/tools/browser-e2e.mjs`) can only install their own
+    command-stream channel on a `wgpu` site, because in webgpu mode the engine's
+    device owns the one channel. A single wgpu run in `pages.yml` is what keeps
+    them running, so deleting `crcbl-wgpu` retires the whole probe list —
+    including every readback that compares real pixel values — and a replacement
+    for them has to land in the same change.

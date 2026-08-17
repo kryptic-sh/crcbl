@@ -11,11 +11,13 @@ On a dual-GPU laptop the web samples flood the console with
 textures, bind groups and command buffers until nothing renders.
 
 **It is the `wgpu` backend, not `crcbl-webgpu`.** The log says
-`opened the wgpu GPU backend` / `crcbl_wgpu::errors`, and the deployed site is
-built by `web/build.sh` with its default `CRCBL_WEB_BACKEND=wgpu` — the `webgpu`
-build exists only inside CI's e2e gates. Since `crcbl-wgpu` is being deleted at
-the end of the migration, **this is not being fixed.** It is recorded only
-because of what it says about the machine and about our own robustness.
+`opened the wgpu GPU backend` / `crcbl_wgpu::errors`, and at the time it was
+captured the deployed site was still the default `wgpu` build. **The site now
+deploys `crcbl-webgpu`**, so the live question is whether that machine fares any
+better on it — worth asking the reporter to retry. Since `crcbl-wgpu` is being
+deleted at the end of the migration, the wgpu failure itself **is not being
+fixed.** It is recorded only because of what it says about the machine and about
+our own robustness.
 
 **It is not an allocation-size problem, and the earlier guess that it was
 `ArrayPages` allocating a large fixed texture array was wrong.** The failing
@@ -202,10 +204,11 @@ What remains for the browser slices:
   `std::env::var`, empty in a browser, so a JS-settable override is still needed
   before WebGpu can be selected at runtime without a rebuild. **(b) the other
   samples** — breakout, flappy, asteroids, horde and hud all render through
-  WebGpu and are CI-gated, each reusing the one `target/site-webgpu` build; they
-  needed no new stream commands beyond breakout's five. lumen stays out for the
-  same reason it is out of the wgpu gate: its draw-argument compute stage binds
-  more storage buffers than a GPU-less runner's SwiftShader adapter allows.
+  WebGpu and are CI-gated, each reusing the one deployed `target/site` build;
+  they needed no new stream commands beyond breakout's five. lumen stays out for
+  the same reason it is out of the wgpu gate: its draw-argument compute stage
+  binds more storage buffers than a GPU-less runner's SwiftShader adapter
+  allows.
 - **Loud-unsupported, needing a stream command (a later slice wires each).**
   **`draw_indirect` and `draw_indexed_indirect` are WIRED and no longer belong
   on this list** — every demo logs `geometry IndirectPerBatch` and exercises
@@ -10007,15 +10010,11 @@ since they share the renderer, but not directly checked.
    channel and a probe cannot install a second. Deleting the wgpu run would
    delete the only browser gate on the new backend's seam — it is a
    `crcbl-webgpu` gate wearing a wgpu costume.
-4. **Move the three defaults together, or none.** `web/build.sh`,
-   `web/run-browser-e2e.sh` and `web/tools/browser-e2e.mjs` each default
-   `CRCBL_WEB_BACKEND` to `wgpu`, and they are coupled: flip the build alone and
-   the driver waits for a `hal: wgpu adapter` line that never comes, then
-   demands guard strings the site never printed. **Preferred: change none of
-   them, and set `CRCBL_WEB_BACKEND=webgpu` at the `pages.yml` call sites
-   instead** — the env var is already the single knob, the deployed artifact is
-   whatever `web/build.sh` writes to `target/site`, and a developer running the
-   script bare keeps a consistent default.
+4. ~~Move the three defaults together, or none.~~ **Done, as the preferred
+   option:** the defaults stay `wgpu` and `pages.yml` sets
+   `CRCBL_WEB_BACKEND=webgpu` at its call sites. The retained wgpu seam step
+   depends on that default, and a developer running the scripts bare keeps
+   exercising the probe groups.
 
 **What the switch does NOT buy.** `crcbl-wgpu` is an unconditional dependency of
 the umbrella, so it stays linked into every wasm: the webgpu artifacts measure
