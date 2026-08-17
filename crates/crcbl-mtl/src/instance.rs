@@ -641,32 +641,4 @@ pub(crate) mod tests {
             assert!(text.contains("surfaces"), "{target:?}: {text}");
         }
     }
-
-    /// Obligation 1, made observable: the device must survive its instance
-    /// being dropped, and must still work afterwards.
-    #[test]
-    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_metal_device_outlives_the_instance_that_made_it() {
-        let device = {
-            let instance = open();
-            let adapters = instance.adapters();
-            assert!(!adapters.is_empty(), "nothing to check");
-            instance
-                .create_device(&desc(adapters[0].id))
-                .expect("a Metal device opens with no required features")
-        };
-        // The instance is gone; the `Arc` inside the device is what keeps its
-        // `MTLDevice` alive. A buffer round trip is the cheapest proof that the
-        // device object is still usable rather than merely still addressable.
-        assert_eq!(device.backend(), BackendKind::Metal);
-        let buffer = device
-            .create_buffer(&crcbl_hal::BufferDesc {
-                label: Some("outlives its instance"),
-                size: 256,
-                usage: crcbl_hal::BufferUsage::STORAGE,
-                memory: crcbl_hal::MemoryLocation::HostUpload,
-            })
-            .expect("the MTLDevice is still live");
-        device.destroy_buffer(buffer);
-    }
 }

@@ -749,6 +749,26 @@ jobs:
           CRCBL_DX12_VALIDATION: '1'
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
 
+      # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
+      # never run anywhere but by hand: its own header claimed
+      # `run-render-e2e.sh` supplied the backend, and that script passes
+      # `--test render_e2e`. It draws two greybox floor quads through
+      # `ForwardRenderer` and asserts a 2 m surface shows about twice the grid
+      # cells of a 1 m one — the whole of what `GpuMaterial::TILING_PHYSICAL`
+      # buys over stretching one authored tile.
+      #
+      # It needs nothing this backend has not already proven in the step above
+      # it: the `Repeat` sampler physical tiling reads through is one
+      # `ForwardRenderer::with_scene` creates for every scene, so a runner that
+      # drew the cube can draw this.
+      - name: Count the physical tiling on WARP
+        shell: bash
+        env:
+          CRCBL_GPU: dx12
+          CRCBL_ADAPTER: cpu
+          CRCBL_DX12_VALIDATION: '1'
+        run: crates/crcbl/tests/run-tiling-e2e.sh
+
       # The two backends nobody on this team can run locally are the two whose
       # golden diffs were being discarded: this job and the Metal one wrote
       # `target/golden-diff/` on a failure and uploaded nothing, so the one
@@ -920,6 +940,24 @@ jobs:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
+
+      # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
+      # never run in CI at all: its own header claimed `run-render-e2e.sh`
+      # supplied the backend, and that script passes `--test render_e2e`, so the
+      # binary was compiled by every `--all-features` build and selected by
+      # nothing. The assertion — a 2 m surface shows about twice the grid cells
+      # of a 1 m one, which is the whole of what `GpuMaterial::TILING_PHYSICAL`
+      # buys over stretching one authored tile — had only ever been run by hand.
+      #
+      # A counted property rather than a golden, so it is not a second copy of
+      # the step above: it reads a *ratio* off two frames and commits no image,
+      # which is why it survives the rasteriser differences a reference would
+      # have to be blessed against.
+      - name: Count the physical tiling on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-tiling-e2e.sh
       # The only frame in the tree drawn from an **application's** `SceneDesc`
       # rather than from `crcbl_render::scene::demo`, which is what makes it
       # worth its own step: the step above proves the engine's own residents
@@ -1448,6 +1486,17 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
 
+      # The physical-tiling count on this backend, the same step the other three
+      # backends have. `CRCBL_VK_ICD` rather than `CRCBL_WGPU_ICD` for the
+      # reason the step above it gives: the harness resolves the name with
+      # `crcbl_pin_vk_icd`, which exports `VK_DRIVER_FILES` — what wgpu's own
+      # Vulkan backend reads.
+      - name: Count the physical tiling on wgpu
+        env:
+          CRCBL_GPU: wgpu
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-tiling-e2e.sh
+
   # `docs/plan/12-testing.md`'s P5 row: "Cross-backend image compare (vk↔wgpu)",
   # which its per-subsystem anchors call "the tier system's regression net" and
   # the roadmap makes a condition of the HAL freeze at P5 exit — the seam is not
@@ -1629,10 +1678,10 @@ jobs:
       # Six draw tests were quarantined here across three rounds. Every draw
       # this backend recorded faulted on this runner with
       # `kIOGPUCommandBufferCallbackErrorHang`, every encoder reporting
-      # `completed` and none faulted — while
-      # `a_metal_render_pass_clear_reads_back_the_exact_texels`, which is behind
-      # neither the feature nor `#[ignore]` and was never filtered, passed in
-      # the same runs. The device was never the limitation: run 31037470086 ran
+      # `completed` and none faulted — while the crate's own render-pass clear
+      # test, which was never filtered, passed in the same runs. (That test has
+      # since been deleted; `crates/crcbl/tests/hal_seam_e2e.rs` owns the clear
+      # for every backend.) The device was never the limitation: run 31037470086 ran
       # a compute dispatch and two triangle draws on this same image from a
       # standalone Swift script.
       #
@@ -1776,6 +1825,23 @@ jobs:
           MTL_DEBUG_LAYER_ERROR_MODE: nslog
           MTL_DEBUG_LAYER_WARNING_MODE: nslog
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
+
+      # The physical-tiling count on Metal. It draws through `ForwardRenderer`,
+      # so the same validation switches the step above sets apply here and for
+      # the same reason — `MTL_SHADER_VALIDATION` deliberately absent, as
+      # argued at the ForwardRenderer step.
+      #
+      # This suite draws no UI pass, so the finding that held that switch off
+      # does not arise here; leaving it off anyway keeps the two renderer steps
+      # comparable rather than making this one the odd configuration nobody
+      # else runs.
+      - name: Count the physical tiling on Metal
+        env:
+          CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+        run: crates/crcbl/tests/run-tiling-e2e.sh
 
       - name: Upload golden-image diffs
         if: failure()

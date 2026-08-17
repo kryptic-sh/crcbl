@@ -127,9 +127,10 @@
 //! (`crcbl_hal::device`): a `Device` may outlive its `Instance`, and the
 //! backend must keep the instance's state alive internally. The instance's
 //! state is an `Arc` and every device holds a clone of it, so dropping the
-//! public `MetalInstance` while a device is open releases nothing — which the
-//! `a_metal_device_outlives_the_instance_that_made_it` test exercises rather than
-//! asserts on paper.
+//! public `MetalInstance` while a device is open releases nothing — which
+//! `crates/crcbl/tests/hal_seam_e2e.rs`'s
+//! `a_device_outlives_the_instance_that_made_it` exercises on this backend and
+//! every other, rather than asserting on paper.
 //!
 //! # The `Send + Sync` question — and the marker impl MTL1 said would not be
 //! needed

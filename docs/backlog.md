@@ -4950,9 +4950,13 @@ rename's paths:
   `a_compute_dispatch_writes_the_values_it_was_asked_for` as names existing "in
   three each", and gives a count of twenty-six. Both citations and the count are
   now historical. The paragraph wants rewriting to describe the convention as
-  held rather than as owed — the three-way examples are now
-  `a_vulkan_/a_metal_/a_d3d12_device_outlives_the_instance_that_made_it` and the
-  matching compute-dispatch trio.
+  held rather than as owed. **Do not reach for the old three-way examples**: the
+  per-backend copies of `device_outlives_the_instance_that_made_it`, the compute
+  and indirect dispatch pair, the render-pass clear, the foreign handle, the
+  destroyed handle and mtl's swapchain refusals were deleted once
+  `crates/crcbl/tests/hal_seam_e2e.rs` covered them on all four backends in CI.
+  A behaviour every backend owes now has exactly one name, in that file — which
+  is the convention arriving rather than being described.
 - `docs/backlog.md` itself names old identifiers in entries that predate the
   rename: `a_render_pass_clear_reads_back_the_exact_texels` (now
   `a_metal_`/`a_d3d12_`-prefixed, and the entry means the Metal one),

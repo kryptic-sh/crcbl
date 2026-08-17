@@ -1828,46 +1828,6 @@ mod tests {
         instance.destroy_surface(surface);
     }
 
-    /// A present with no acquire behind it is a caller bug and is named as one.
-    ///
-    /// Red when `present` returns `Ok` for a swapchain with nothing
-    /// outstanding, which is the shape that silently drops a frame.
-    #[test]
-    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn presenting_a_metal_swapchain_without_acquiring_is_refused() {
-        use crcbl_hal::Device as _;
-        let (instance, device) = open_device();
-        let surface = offscreen_surface(&instance);
-        let swapchain = device
-            .create_swapchain(&swapchain_desc(surface, Format::Rgba8Unorm, 2))
-            .expect("a ring");
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .expect("the graphics queue exists");
-
-        let error = device
-            .present(
-                queue,
-                &crcbl_hal::PresentInfo {
-                    swapchain,
-                    waits: &[],
-                    present_id: None,
-                },
-            )
-            .expect_err("nothing was acquired");
-        assert!(
-            matches!(
-                error,
-                SurfaceError::Hal(HalError::InvalidDescriptor(ref message))
-                    if message.contains("acquire_next_frame")
-            ),
-            "{error:?}"
-        );
-
-        device.destroy_swapchain(swapchain);
-        instance.destroy_surface(surface);
-    }
-
     /// A reconfigure resizes in place: the swapchain handle survives, the frame
     /// comes back at the new size, and the old rows stop resolving.
     ///
@@ -1978,57 +1938,12 @@ mod tests {
         instance.destroy_surface(surface);
     }
 
-    /// A zero extent is refused all the way through the seam, not only in the
-    /// helper.
-    ///
-    /// Red when `build_swapchain` stops calling `resolve_extent`, or clamps a
-    /// zero up to one.
-    #[test]
-    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_zero_extent_metal_swapchain_is_refused_end_to_end() {
-        use crcbl_hal::Device as _;
-        let (instance, device) = open_device();
-        let surface = offscreen_surface(&instance);
-        let mut desc = swapchain_desc(surface, Format::Rgba8Unorm, 2);
-        desc.extent = (0, 0);
-
-        let error = device
-            .create_swapchain(&desc)
-            .expect_err("a minimized window means 'not yet'");
-        assert!(
-            matches!(error, SurfaceError::Hal(HalError::InvalidDescriptor(_))),
-            "{error:?}"
-        );
-
-        instance.destroy_surface(surface);
-    }
-
-    // --- obligation 3, both halves -----------------------------------------
-
-    /// A surface from another *instance* is foreign, and the check survives two
-    /// instances whose pools issue identical bits.
-    ///
-    /// The second instance is given its own surface first, so the slot the
-    /// first instance's handle names is **occupied** in the second's pool.
-    /// Without the instance tag in the handle it would resolve there and the
-    /// call would succeed against the wrong surface — which is exactly the bug
-    /// `crcbl_mtl::device`'s handle-tagging section describes.
-    #[test]
-    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_metal_surface_from_another_instance_is_foreign() {
-        let first = open_instance();
-        let second = open_instance();
-        let theirs = offscreen_surface(&first);
-        let _ours = offscreen_surface(&second);
-
-        let error = second
-            .surface_caps(theirs, second.adapters()[0].id)
-            .expect_err("that surface belongs to the other instance");
-        assert!(
-            matches!(error, HalError::ForeignObject { kind, .. } if kind == "surface"),
-            "{error:?}"
-        );
-    }
+    // --- obligation 3, across devices --------------------------------------
+    //
+    // The instance half — a surface crossing two `MTLInstance`s — is
+    // `tests/hal_seam_e2e.rs`'s
+    // `a_surface_from_one_instance_is_foreign_to_another`, which runs on every
+    // backend rather than only on this one.
 
     /// A swapchain from another *device* is foreign on every entry point that
     /// takes one.

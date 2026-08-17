@@ -10,13 +10,23 @@
 //! rather than passing whether the mode works or not.
 //!
 //! `#[ignore]` like `render_e2e.rs`: it needs a real GPU, which `CRCBL_GPU`
-//! names and `tests/run-render-e2e.sh` supplies. It commits no golden image —
+//! names and `tests/run-tiling-e2e.sh` supplies. It commits no golden image —
 //! the claim is a cell *count* read off the frame, not a pixel-exact reference,
 //! so it survives the driver-to-driver colour noise a golden would have to
 //! tolerate.
+//!
+//! Its own runner rather than a second `--test` inside `run-render-e2e.sh`,
+//! for the reason `run-hal-seam-e2e.sh` is its own script: each runner owns one
+//! test binary, and its zero-tests check and its adapter-line grep are written
+//! against that binary's single summary. Until that runner existed this file
+//! had **never run in CI** — `run-render-e2e.sh` passes `--test render_e2e`, so
+//! the sentence above claiming it did was false and the assertion below had
+//! only ever been run by hand.
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use crcbl::adapter::{ADAPTER_ENV_VAR, device_type_from_name};
+use crcbl::backend::{BACKEND_ENV_VAR, GpuBackend};
 use crcbl::hal::Format;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::scene::ProbeGrid;
@@ -91,6 +101,49 @@ fn cells_across(image: &Image) -> usize {
     cells
 }
 
+/// **The run is the run it says it is**: the backend and the adapter the frame
+/// was drawn on are the ones the environment asked for, and both are announced.
+///
+/// The same pair `render_e2e.rs` makes, and for the same reason: every backend
+/// tiles this quad identically by construction, so a run that silently fell
+/// back to another one counts the same cells and proves nothing about the one
+/// that was wanted. The printed line is load-bearing outside this file —
+/// `run-tiling-e2e.sh` greps it, fails when it is missing, and compares the pin
+/// it exported against the one that arrived, which is the one failure this
+/// process cannot see for itself: an unset pin and a pin that never reached the
+/// process are the same thing from in here.
+fn assert_pins_arrived(setup: &OffscreenSetup) {
+    let backend = setup.backend();
+    let adapter = setup.adapter();
+    let requested_adapter = crcbl::adapter::pin();
+    eprintln!(
+        "crcbl tiling e2e: device on adapter {id} {name:?} type={kind:?} ({ADAPTER_ENV_VAR}={pin})",
+        id = adapter.id.0,
+        name = adapter.name,
+        kind = adapter.device_type,
+        pin = requested_adapter.as_deref().unwrap_or("<unset>"),
+    );
+
+    if let Ok(requested) = std::env::var(BACKEND_ENV_VAR) {
+        let opened = GpuBackend::from_name(&backend.to_string())
+            .expect("every backend the registry can open has a GpuBackend spelling");
+        assert_eq!(
+            Some(opened),
+            GpuBackend::from_name(&requested),
+            "{BACKEND_ENV_VAR}={requested} was asked for and {backend} drew the frame"
+        );
+    }
+    if let Some(requested) = requested_adapter.as_deref() {
+        let want = device_type_from_name(requested)
+            .unwrap_or_else(|| panic!("{ADAPTER_ENV_VAR}={requested} is not a device class"));
+        assert_eq!(
+            adapter.device_type, want,
+            "{ADAPTER_ENV_VAR}={requested} was asked for and adapter {} ({:?}) drew the frame",
+            adapter.name, adapter.device_type
+        );
+    }
+}
+
 /// Draws one greybox-grey floor quad of `size_m` under the physical tiling
 /// material, framed head-on, and returns the grid cells it shows across the
 /// width.
@@ -100,6 +153,11 @@ fn cells_across(image: &Image) -> usize {
 /// world metre maps to a fixed span of pixels and the cell count read off the
 /// frame is the cell count on the surface.
 fn tiled_surface_cells(size_m: f32) -> usize {
+    // A logger before anything opens, for `render_e2e.rs`'s reason: without one
+    // every `log::info!` a backend emits on the way to a device goes nowhere,
+    // and on a runner nobody can log into that output is the whole diagnosis.
+    crcbl::core::log::init_logging();
+
     let mut setup = OffscreenSetup::open_forward(EDGE, EDGE, move |device, queue, format| {
         let scene = SceneDesc {
             meshes: vec![MeshDesc {
@@ -145,6 +203,8 @@ fn tiled_surface_cells(size_m: f32) -> usize {
     })
     .unwrap_or_else(|why| panic!("a GPU backend opens for the tiling test: {why}"));
 
+    assert_pins_arrived(&setup);
+
     let format = setup.format();
     let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
     setup.finish().expect("the device reaches idle");
@@ -161,10 +221,14 @@ fn tiled_surface_cells(size_m: f32) -> usize {
 /// A 2 m surface shows about twice the grid cells of a 1 m one — the whole of
 /// what physical tiling buys over stretching one authored tile.
 #[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-tiling-e2e.sh"]
 fn a_two_metre_surface_shows_twice_the_tiles_of_a_one_metre_surface() {
     let one_metre = tiled_surface_cells(1.0);
     let two_metre = tiled_surface_cells(2.0);
+    eprintln!(
+        "crcbl tiling e2e: a 1 m surface shows {one_metre} cells across and a 2 m surface \
+         {two_metre}"
+    );
 
     // Anti-vacuity: the 1 m tile's quarter-metre sub-grid must resolve at all,
     // or there is nothing for the 2 m surface to have doubled.

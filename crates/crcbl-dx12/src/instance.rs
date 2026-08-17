@@ -1380,33 +1380,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Obligation 1, made observable: the device must survive its instance being
-    /// dropped, and must still work afterwards.
-    #[test]
-    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
-    fn a_d3d12_device_outlives_the_instance_that_made_it() {
-        let device = {
-            let instance = open();
-            let adapter = pinned_adapter(&instance);
-            instance
-                .create_device(&desc(adapter))
-                .expect("a D3D12 device opens with no required features")
-        };
-        // The instance is gone; the `Arc` inside the device is what keeps its
-        // factory and adapter alive. A buffer round trip is the cheapest proof
-        // that the device is still usable rather than merely still addressable.
-        assert_eq!(device.backend(), BackendKind::Dx12);
-        let buffer = device
-            .create_buffer(&crcbl_hal::BufferDesc {
-                label: Some("outlives its instance"),
-                size: 256,
-                usage: crcbl_hal::BufferUsage::STORAGE,
-                memory: crcbl_hal::MemoryLocation::HostUpload,
-            })
-            .expect("the D3D12 device is still live");
-        device.destroy_buffer(buffer);
-    }
-
     /// An out-of-range adapter is a distinct contract from a feature gap, and it
     /// must not be swallowed by one.
     #[test]

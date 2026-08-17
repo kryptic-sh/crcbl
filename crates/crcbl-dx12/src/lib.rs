@@ -97,7 +97,7 @@
 //!
 //! **Reporting tier 3 is a claim about the API surface, not about execution.**
 //! That half is now measured too:
-//! `crcbl_dx12::device`'s `a_d3d12_render_pass_clear_reads_back_the_exact_texels`
+//! `crcbl_dx12::device`'s `a_d3d12_load_op_preserves_what_clear_replaces`
 //! clears an attachment through a real render pass, copies it into a readback
 //! buffer, submits, and asserts the texels. If a runner enumerates a
 //! capable-looking adapter that cannot execute anything, that test is where it
