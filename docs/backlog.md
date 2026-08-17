@@ -695,6 +695,34 @@ these exercises move to `draw_gen_e2e`/`forward_e2e`, which already have one.
 That choice is worth making explicitly, because it decides where roughly a third
 of the remaining exercises live.
 
+### Four mesh tests stayed on Vulkan, and one degrades quietly
+
+The mesh cluster split; what stayed did so for a reason worth keeping written
+down, because "why is this still vk-only?" is the question a future reader asks.
+
+**`per_cluster_culling_rejects_the_clusters_a_camera_hides`,
+`a_scaled_instance_keeps_the_clusters_a_camera_can_see`,
+`the_gpu_descends_the_dag_to_the_cut_the_camera_asks_for` and
+`the_shadow_cascades_select_coarser_levels_than_the_camera_does` are not
+splittable.** Each reads a buffer only the amplification stage writes —
+`CLUSTER_SURVIVOR_WORD`, `cluster_selection`, `shadow_selection`. On a backend
+with no mesh-shader path those words are never written, so the agnostic half
+would be a counter nobody incremented: a test that passes because nothing ran.
+
+**`the_mesh_dispatch_extent_is_the_culled_instance_count`** stayed for the
+opposite reason — its agnostic half already exists as `draw_gen_e2e`'s
+`a_bucket_fills_and_empties_as_its_instance_comes_and_goes`, and splitting would
+have duplicated a test that already runs on all four backends.
+
+**One live gap:**
+`the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is` still degrades
+when a device reports no `TASK_SHADER` — it now says so loudly on stderr and
+refuses a _partial_ comparison rather than silently comparing less, but it does
+not fail. Whether lavapipe reports the feature could not be checked from this
+machine, so the choice was to make the degrade visible rather than to harden a
+condition nobody has observed. If CI's lavapipe arm never prints that line, the
+degrade path is dead and the test should simply require the feature.
+
 ### Smaller things the WebGPU work surfaced and did not fix
 
 - **A device error names no command.** `Reply::DeviceErrors` carries the

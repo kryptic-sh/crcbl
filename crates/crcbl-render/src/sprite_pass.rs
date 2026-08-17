@@ -339,8 +339,8 @@ impl Sprite {
     /// **normalised sheet coordinates**, top-left corner first. Swapping them at
     /// a call site compiles and draws a wrong picture — the hazard
     /// [`SheetDesc`] became a struct to avoid. Nothing here can catch it. What
-    /// does is the golden images under `crates/crcbl-vk/tests/golden/` and
-    /// `crates/crcbl/tests/golden/`, and the sample suites that assert on a
+    /// does is the golden images under `crates/crcbl/tests/golden/`, and the
+    /// sample suites that assert on a
     /// resolved sprite's `rect` and `uv` — so a sprite call site is not a place
     /// to take the argument order on trust.
     #[must_use]
@@ -1651,7 +1651,7 @@ mod tests {
     /// The angle rides in the fourth component of the sheet lane, which was
     /// padding and was already `0.0`, so a sprite that does not turn produces
     /// exactly the sixty-four bytes it always did. That is what makes the eight
-    /// golden images in `crates/crcbl-vk/tests/golden/` a regression check for
+    /// golden images in `crates/crcbl/tests/golden/` a regression check for
     /// this slice rather than eight pictures that had to be re-blessed: none of
     /// them draws a rotated sprite, and none of their instances changed.
     #[test]
