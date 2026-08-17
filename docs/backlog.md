@@ -32,13 +32,54 @@ should run on ALL backends and move into the shared suite — versus genuinely
 backend-specific tests (a vk mesh-shader capability, a driver quirk) which stay
 per-backend. Split them by the coverage audit and consolidate.
 
-**3. Equal coverage across backends.** `crcbl-mtl` and `crcbl-dx12` currently
-get golden coverage only through `render_e2e` and lack the backend-specific e2e
-and unit tests `crcbl-vk`/`crcbl-wgpu` have — a real gap. Bring every backend to
-the same unit-test AND backend-specific-e2e coverage: the shared suite for what
-is agnostic, and a matching per-backend set for what is genuinely
-backend-specific. (The exact agnostic-vs-specific split and the precise mtl/dx12
-gap come from the coverage audit in flight; fill this in when it lands.)
+**3. Equal coverage across backends.** The audit corrected the premise: mtl/dx12
+are NOT missing seam tests — each has ~75 in-src `#[ignore]`d device tests
+(`crcbl-mtl/src/{device,binding,swapchain,instance,fault}.rs`,
+`crcbl-dx12/src/{device,debug,instance}.rs`, run by `run-{mtl,dx12}-e2e.sh`).
+The two real gaps are:
+
+- **Three divergent seam suites.** `crcbl-vk/tests/vk_e2e/`,
+  `crcbl-wgpu/tests/wgpu_e2e.rs`, and the mtl/dx12 in-src tests each cover the
+  SAME HAL-seam behaviour as separate hand-maintained copies that drift (~17
+  pairs literally overlap — clear→host, ring reuse, foreign-handle,
+  foreign-surface, compute + indirect dispatch, indexed draw, timeline
+  semaphore, destroyed-handle no-alias, write_buffer map/refuse,
+  readback-wrong-range refused, shader-won't- compile refused, zero-extent
+  refused, present-without-acquire refused). Collapse to ONE agnostic seam suite
+  run under `CRCBL_GPU` + WebGpu.
+- **White-box render-graph tests are vk-only.** `vk_e2e/`'s `cull.rs`,
+  `cull_stats.rs`, `draw_gen.rs`, `lights.rs`, `mesh.rs`, `shadow.rs`,
+  `depth_probe.rs`, `sprite/`, `menu.rs`, `nine_slice.rs`, `button_skin.rs`
+  drive `crcbl-render::ForwardRenderer` and read back internal GPU
+  buffers/golden pixels — they name only `crcbl-render` types, so they CAN be
+  agnostic, but today only vk runs them white-box; mtl/dx12/wgpu get only
+  `render_e2e`'s black-box goldens. Make them agnostic so all four backends get
+  white-box render coverage.
+
+**Genuinely per-backend (stays, and there are not many):** mesh/amplification-
+shader capability (vk `mesh_shader.rs`; mtl has a native analog worth its own
+test); the validation/debug-layer wiring (vk `validation_gate.rs`, mtl
+`fault.rs`, dx12 `debug.rs` — one per API); API-quirk refusals (wgpu
+descriptor-array expressiveness cluster + push-constant/indirect-stride limits,
+dx12 root-signature budget / descriptor-heap / WARP enumeration, mtl
+memory-location + anisotropy caps, vk memory-type / descriptor-indexing tier);
+and per-backend adapter/limit enumeration.
+
+**The async enabler.** `crcbl::screenshot::OffscreenSetup`
+(`crcbl/src/screenshot.rs`, gated `#[cfg(not(target_arch="wasm32"))]` at
+`lib.rs:247`) blocks in three spots: `backend::open()` → `.block()`
+(`screenshot.rs:2045`), `instance.create_device` (`:2184`), and a
+`thread::sleep` `poll_readback` loop (`:2503`). The HAL already has the polled
+forms (`request_open`, `request_device`, `poll_readback` — proven non-blocking
+by `crcbl-hal/tests/seam_from_outside.rs:559`). Make these async so all four
+backends run the same suite; WebGpu drives the poll from the browser event loop.
+
+**Slice order (testing-parity track):** (1) async `OffscreenSetup`/`render_e2e`,
+native still green on vk; (2) WebGpu `render_e2e` browser harness — runs the
+agnostic scenes through WebGpu and SHOWS the cracks; (3) unify the three seam
+suites into one agnostic set; (4) make the render-graph white-box tests
+agnostic; (5) per-backend gap-fill for what genuinely stays specific. The WebGPU
+feature gaps below are what steps 2-4 expose, fixed as they surface.
 
 **Parity gaps (WebGPU CAN express these; crcbl-webgpu currently refuses).** Each
 is refused via `hal/encoder.rs::record_unsupported` (fails `finish`) or an
