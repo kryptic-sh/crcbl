@@ -9862,11 +9862,41 @@ others are far off, and _which_ quadrant is correct differs per scene:
 | ao     | 15.81 | 8.27     | 44.11 | 28.11    |
 | probes | 24.73 | 7.11     | 72.60 | 46.22    |
 
-The same scenes pass on vk, mtl and dx12, so this is WebGPU-only. A boundary on
-_exact_ half-frame coordinates points at a dispatch-extent or indexing mistake
-rather than an arithmetic difference — and the WGSL is a separate translation
-from the SPIR-V/MSL/DXIL, so a workgroup-size divergence there is exactly the
-kind of defect no native backend would ever surface. Under investigation.
+The same scenes pass on vk, mtl and dx12, so this is WebGPU-only.
+
+**Measured, and it rules out the obvious causes.** x=128 and y=96 are exactly
+**NDC x=0 and NDC y=0** — the frustum-centre planes, not tile boundaries. There
+are exactly two seams in the whole frame and nothing anywhere else: in a flat
+interior region of `lights` there is one column jump and one row jump, nothing
+at 64/192 or y=64/128, against a noise floor where a 1-LSB seam would still
+show. Within each quadrant the error is a near-pure **per-channel multiplier on
+radiance**, one quadrant fitting 1.0000 exactly. It scales the **direct** term
+too: in `spot`'s worst quadrant the ratio climbs only 0.164 -> 0.296 from
+ambient background to the centre of the spot pool, where a missing light would
+collapse the pool to ambient and an ambient-only bug would leave it at 1.0.
+
+Falsified with cited evidence, so do not re-derive them:
+
+- **Workgroup-size divergence.** Every compute entry declares `64,1,1` on every
+  target and `CLUSTER_WORKGROUP_SIZE` agrees; no dispatch derives its extent
+  from the render extent, and the stream passes x/y/z through untransformed.
+- **Cluster-grid indexing.** The grid is 4x3x24 at `CLUSTER_TILE_PIXELS = 64`
+  for this frame, and no scalar tile size puts boundaries at x=128 and y=96 and
+  nowhere else. Builder and reader share one `Grid` value.
+- **Half-resolution buffers.** SSAO/SSR take their size from
+  `textureDimensions`, and `dunes`/`probes` show the seam without using AO.
+
+**The live lead**, and a caution against assuming it: nothing in `mesh.wgsl`'s
+fragment stage consumes NDC — its only screen-space input is
+`@builtin(position)`, which is correctly declared. But `cube` spans the frame
+centre and shows a flat multiplier with **no quadrant structure at all**, which
+is what you would expect if the boundary lives in **view space** rather than
+screen space: for a centred camera the view planes x=0 and y=0 project to
+exactly screen x=128 and y=96. So a selection keyed on the sign of a view- or
+world-space coordinate — a cube-map face, a cascade region, a probe octant —
+fits the picture as well as a bad pixel coordinate does. The experiment that
+splits them is to write a screen-space ramp to `lit` and read it back on both
+backends.
 
 ### Coverage the gate still does not have
 
