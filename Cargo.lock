@@ -366,6 +366,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-greybox"
+version = "0.1.0"
+dependencies = [
+ "crcbl-render",
+ "crcbl-shaders",
+ "glam",
+]
+
+[[package]]
 name = "crcbl-hal"
 version = "0.1.0"
 dependencies = [

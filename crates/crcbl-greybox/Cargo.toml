@@ -1,0 +1,20 @@
+[package]
+name = "crcbl-greybox"
+description = "Crucible greybox pack: prototyping primitives sized in real-world metres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Procedural geometry only: `crcbl-shaders` for the runtime vertex, material and
+# meshlet records, `crcbl-render` for the scene description a game hands the
+# renderer, and `glam` for the transforms a caller places instances with. No
+# backend and no device — a greybox mesh is host data, so this crate builds for
+# every target the engine has, wasm included.
+[dependencies]
+crcbl-shaders = { workspace = true }
+crcbl-render = { workspace = true }
+glam = { workspace = true }
+
+[lints]
+workspace = true
