@@ -87,6 +87,21 @@ it. The options, none free:
 someone reports a browser that needs it.** Nothing in the samples requires
 WebGL2, and no telemetry says anyone is on such a browser.
 
+### The browser probes cannot say why a readback failed
+
+`Reply::ReadbackFailed` now carries a reason and `poll_readback` reports it, but
+the eight readback state machines in `crates/crcbl-webgpu/src/probe.rs`
+(`ReadbackProbe`, `DrawProbe` and their siblings) each end their `match` with
+`_ => Self::Pending`. So a `ReadbackFailed` naming a probe's sequence still
+reads as "not yet", and the probe re-polls until the gate's deadline instead of
+reporting the browser's words.
+
+Unchanged behaviour and the probe gate is green — nothing is failing today. But
+it means the one harness whose job is diagnosing the seam is the one place a
+failure diagnoses as a timeout. Extending the eight to absorb the new reply is
+mechanical; doing it while adding a ninth probe would be cheaper than doing it
+twice.
+
 ### Run the WebGPU browser gates on Windows and macOS, not just Linux
 
 **Every WebGPU browser test in the repository runs in one job**, `pages/build`
@@ -262,12 +277,6 @@ inline `HalError::Unsupported` in `hal/device.rs`.
   `EmitTail::PerBatch`). Highest priority. Needs a stream command.
   `draw_indirect` too (unused by scenes but cheap alongside). A single-draw
   indirect maps cleanly (WebGPU takes offset only, no count/stride).
-- **B — `take_error` + `ReadbackFailed` reply.** `take_error` is a `None` stub
-  (`hal/device.rs:241`); the JS half already exists (`gpu-replay.js` error
-  queue + `uncapturederror` listener). Needs a `TakeError` command drained at
-  frame top and a new `Reply` variant carrying the message; and a
-  `ReadbackFailed` reply so a rejected `mapAsync` stops spinning `poll_readback`
-  forever. Correctness for the whole browser path.
 - **C — `dispatch_indirect`** → `dispatchWorkgroupsIndirect`. The backlog's old
   "blocked on a buffer-write" note is STALE — `write_buffer` shipped
   (`d2d32ef`), so it is now just unwired. Unused by current scenes.
@@ -467,22 +476,6 @@ the engine keeps its shadow constants integral. `pipeline.rs`'s `DepthBias` doc
 discusses sign and magnitude as floats and does not mention that a quarter of
 the backends cannot carry a fractional one — that is where the outcome belongs
 once it is decided.
-
-### A readback that fails on the browser has no reply, only `take_error`
-
-`poll_readback` answers with a `ReadbackReady` reply (the bytes) or a
-`ReadbackPending` reply (poll again), and there is **no third reply for a
-readback that failed**. In the replayer a `mapAsync` rejection — a device lost
-mid-map, a buffer that was destroyed — surfaces through the `take_error` queue
-and the poll stays `Pending` forever.
-
-That is honest for slice 7a, whose only reader is the gate polling a known-good
-readback, but `Device::poll_readback` returns `Result<ReadbackState, HalError>`
-and a real caller must be able to see `Err(DeviceLost)` rather than spin. Slice
-10's parity gate reads back every scene, so it is the first place a failed
-readback matters. The fix is a `ReadbackFailed` reply carrying the reason, the
-shape `DeviceFailed` and `SurfaceCapsFailed` already use — the reply codec has
-room; nothing consumes it yet.
 
 ### The stream decoder caps a SPIR-V module at 65 536 words
 
