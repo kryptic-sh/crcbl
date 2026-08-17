@@ -134,6 +134,37 @@ const ENGINE_HZ: f32 = 110.0;
 
 impl Audio {
     pub fn new(headless: bool) -> Self {
+        let audio = Self::without_output();
+        let stream = if headless {
+            Some(AudioStream::open_null(Arc::clone(&audio.mixer)))
+        } else {
+            AudioStream::open(Arc::clone(&audio.mixer))
+        };
+        if stream.is_none() && !headless {
+            crcbl::log::info!("audio: no output device available; the game will be silent");
+        }
+
+        Self {
+            _stream: stream,
+            ..audio
+        }
+    }
+
+    /// The bank, the mixer and the listener, with **nothing pulling the mixer**.
+    ///
+    /// [`new`](Self::new) wires an output onto this and is what the game builds.
+    /// A test wants it bare, because both outputs pull: `AudioStream::open` hands
+    /// the mixer to the device callback, and `open_null` — the headless one —
+    /// spawns a thread that calls `fill` every 256 frames forever. A test that
+    /// drives `fill` itself would then be the *second* consumer of one stream of
+    /// audio, and the two race for whatever is only produced once.
+    ///
+    /// That is not hypothetical: a voice's release is a single fade-to-silence
+    /// block, reaped by the first fill after the stop. Sharing the mixer with a
+    /// puller let it take that block, and the test asserting the release is
+    /// audible failed — rarely, and only where the scheduler cooperated, which
+    /// meant once in CI and never on the machine looking for it.
+    fn without_output() -> Self {
         // A low tone for the engine, a short high blip for the gun, and a
         // filtered noise burst for a rock coming apart. The engine's is built by
         // `looped_sine` rather than `sine`: it is the one cue that plays as a
@@ -150,22 +181,12 @@ impl Audio {
         );
         debug_assert_eq!(bank.len(), SOUND_COUNT, "a cue id is missing from the bank");
 
-        // The stream takes a handle, not the mixer: this copy is what stays
-        // behind to play voices through.
         let mixer = Arc::new(Mixer::new());
         // This camera does not move, so the listener is placed once here rather
         // than pushed every frame. Set before any cue can be raised, so no cue
         // is ever computed against the mixer's default, which sits *in* the play
         // plane rather than back from it.
         mixer.set_listener(LISTENER);
-        let stream = if headless {
-            Some(AudioStream::open_null(Arc::clone(&mixer)))
-        } else {
-            AudioStream::open(Arc::clone(&mixer))
-        };
-        if stream.is_none() && !headless {
-            crcbl::log::info!("audio: no output device available; the game will be silent");
-        }
 
         Self {
             bank,
@@ -174,7 +195,7 @@ impl Audio {
             played: Vec::new(),
             thrust: None,
             mixer,
-            _stream: stream,
+            _stream: None,
         }
     }
 
@@ -379,7 +400,7 @@ mod tests {
     /// the bank instead of a `looped_sine` fails it at the sixtieth sample.
     #[test]
     fn the_engine_loops_a_whole_number_of_cycles_with_no_envelope() {
-        let audio = Audio::new(true);
+        let audio = Audio::without_output();
         let data = audio
             .bank
             .sound(SOUND_THRUST)
@@ -422,7 +443,7 @@ mod tests {
     /// answers a cue on top of it with no direction.
     #[test]
     fn the_camera_is_the_listener_from_the_first_cue() {
-        let audio = Audio::new(true);
+        let audio = Audio::without_output();
         assert_eq!(audio.mixer.listener(), LISTENER);
         assert_eq!(
             audio.mixer.listener().position,
@@ -433,7 +454,7 @@ mod tests {
     /// An id nothing answers to is ignored rather than underflowing or panicking.
     #[test]
     fn an_unknown_cue_is_ignored_rather_than_underflowing() {
-        let mut audio = Audio::new(true);
+        let mut audio = Audio::without_output();
         audio.play_at(0, DVec3::ZERO);
         audio.play_at(9999, DVec3::ZERO);
         assert_eq!(audio.voices(), 0);
@@ -455,7 +476,7 @@ mod tests {
     /// this test right up until the audio thread reaped the voice.
     #[test]
     fn a_cue_stays_counted_after_its_voice_is_gone() {
-        let mut audio = Audio::new(true);
+        let mut audio = Audio::without_output();
         audio.play_at(SOUND_SHOT, DVec3::ZERO);
         assert_eq!(audio.plays(SOUND_SHOT), 1);
 
@@ -487,7 +508,7 @@ mod tests {
     /// anywhere in that loop is the pulse hack coming back.
     #[test]
     fn the_engine_is_one_looping_voice_that_outlives_its_buffer() {
-        let mut audio = Audio::new(true);
+        let mut audio = Audio::without_output();
         assert!(!audio.thrust_playing(), "the engine started on its own");
 
         audio.set_thrust(true, DVec3::ZERO);
@@ -549,7 +570,7 @@ mod tests {
     /// stay whatever it was at ignition — and no other test would notice.
     #[test]
     fn the_engine_pans_with_the_ship_without_restarting() {
-        let mut audio = Audio::new(true);
+        let mut audio = Audio::without_output();
         audio.set_thrust(true, DVec3::new(-14.0, 0.0, 0.0));
         let left = audio.mixer.voice_mixes();
         assert_eq!(left.len(), 1);
@@ -581,7 +602,7 @@ mod tests {
     /// normal case rather than an edge one.
     #[test]
     fn where_a_cue_happens_changes_how_it_sounds() {
-        let mut audio = Audio::new(true);
+        let mut audio = Audio::without_output();
         audio.play_at(SOUND_EXPLOSION, DVec3::ZERO);
         audio.play_at(SOUND_EXPLOSION, DVec3::new(-14.0, 6.0, 0.0));
         audio.play_at(SOUND_EXPLOSION, DVec3::new(14.0, 6.0, 0.0));
@@ -619,7 +640,7 @@ mod tests {
     fn the_audio_section_counts_each_cue_and_reports_the_held_engine() {
         use crcbl::ui::DebugModule as _;
 
-        let mut audio = Audio::new(true);
+        let mut audio = Audio::without_output();
         let mut section = crcbl::ui::DebugSection::new("audio");
         audio.debug_section(&mut section);
         assert_eq!(section.title(), "audio");
