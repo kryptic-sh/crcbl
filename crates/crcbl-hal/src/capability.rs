@@ -88,13 +88,29 @@
 //! until the pair is added with a reason, and a backend that starts supporting
 //! something on the list fails until the pair is removed.
 //!
-//! ```
-//! use crcbl_hal::{BackendKind, Capability, DIVERGENCES, divergence};
+//! A reason alone cannot say **what is left**, though — "Metal's blit fill takes
+//! a byte, not a word" and "this backend has not written the code yet" are the
+//! same shape as prose. [`DivergenceKind`] is the field that separates them and
+//! [`parity_blockers`] is the query over it: every row that somebody could still
+//! close, on a backend crcbl is keeping. That set is what shrinks to nothing
+//! when `crcbl-wgpu` can be deleted, and this module's tests snapshot it so it
+//! shrinks deliberately.
 //!
-//! // Metal has no GPU-side draw count — a real API absence, written down.
-//! let known = divergence(Capability::DrawIndirectCount, BackendKind::Metal)
-//!     .expect("Metal's missing draw count is on the list");
-//! assert!(known.why.contains("MTLIndirectCommandBuffer"));
+//! ```
+//! use crcbl_hal::{BackendKind, Capability, DIVERGENCES, DivergenceKind, divergence, parity_blockers};
+//!
+//! // WebGPU has no mesh stage. No work in this repository closes that, so it
+//! // is written down and then left alone.
+//! let permanent = divergence(Capability::MeshShading, BackendKind::WebGpu)
+//!     .expect("WebGPU's missing mesh stage is on the list");
+//! assert_eq!(permanent.kind, DivergenceKind::ApiAbsence);
+//! assert!(!permanent.kind.blocks_parity());
+//!
+//! // Metal's GPU-side draw count is owed rather than absent, so it is one of
+//! // the rows standing between crcbl and its end state.
+//! assert!(parity_blockers().any(|entry| {
+//!     entry.capability == Capability::DrawIndirectCount && entry.backend == BackendKind::Metal
+//! }));
 //!
 //! // Every entry names a backend that actually drives a GPU.
 //! assert!(DIVERGENCES.iter().all(|entry| entry.backend.is_gpu()));
@@ -531,6 +547,70 @@ impl fmt::Display for Support {
     }
 }
 
+/// Which kind of divergence an entry records — and so whether any amount of
+/// work in this repository could ever close it.
+///
+/// **This is what makes the parity goal checkable.** Without it, "Metal's blit
+/// fill takes a byte, not a word, and no work changes that" and "this backend
+/// has not written the code yet" are the same shape in the data, and nobody can
+/// answer "what is left?" without re-reading every reason in
+/// [`DIVERGENCES`]. With it, [`parity_blockers`] answers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DivergenceKind {
+    /// The backend's API cannot express it. **No work here closes it**, so it
+    /// is not on anybody's list.
+    ///
+    /// The reason must carry the evidence: the selector and the type of the
+    /// argument, the WebIDL member that is absent, the enumeration that has no
+    /// such value. A backend's own comment is a claim rather than evidence — a
+    /// row here is a permanent promise, and the two entries this field was
+    /// introduced to settle were both backend comments contradicting the list.
+    ApiAbsence,
+
+    /// The API allows it and this crate has not written it.
+    ///
+    /// The reason says roughly what the work is, and by convention names the
+    /// slice that owes it — `crcbl-dx12` is almost entirely this.
+    Unwritten,
+
+    /// Expressible, and deliberately not done. The reason says what was chosen
+    /// instead, and why that was enough.
+    ///
+    /// Blocks parity all the same: the decline was **ours**, so a caller that
+    /// needs it can overturn it — which is exactly what an
+    /// [`ApiAbsence`](Self::ApiAbsence) row can never be.
+    Declined,
+
+    /// Which of the three above this is **cannot be settled from here**, and
+    /// the reason says what measurement would settle it.
+    ///
+    /// Less a fourth kind of divergence than an admission about the evidence.
+    /// Metal's counter-sampling boundaries are a property of a device this
+    /// workspace cannot open, and a guess written into the data would read
+    /// exactly like the classifications that were checked. It blocks parity,
+    /// because "nobody has looked" is not "done".
+    Unclassified,
+}
+
+impl DivergenceKind {
+    /// Whether a row of this kind stands between a backend and parity.
+    ///
+    /// Everything except [`ApiAbsence`](Self::ApiAbsence): an API with no
+    /// expression for something is not a backlog item, while the other three
+    /// are work owed, a decision that could be reversed, and a question nobody
+    /// has answered.
+    ///
+    /// A `match` rather than a comparison against one variant, so a kind added
+    /// later has to say which side of the goal it falls on.
+    #[must_use]
+    pub const fn blocks_parity(self) -> bool {
+        match self {
+            Self::ApiAbsence => false,
+            Self::Unwritten | Self::Declined | Self::Unclassified => true,
+        }
+    }
+}
+
 /// One (capability, backend) pair that is knowingly absent.
 ///
 /// See [`DIVERGENCES`] for what the list as a whole is for.
@@ -540,10 +620,45 @@ pub struct Divergence {
     pub capability: Capability,
     /// The backend that does not have it.
     pub backend: BackendKind,
+    /// Whether anything in this repository could close it. See
+    /// [`DivergenceKind`], and [`parity_blockers`] for what the field is for.
+    pub kind: DivergenceKind,
     /// Why, in enough detail to decide whether it should stay that way. This is
     /// the sentence a reviewer reads when the pair is added.
     pub why: &'static str,
 }
+
+/// Metal's answer for [`Capability::DrawIndirectCount`], in the parity record
+/// and in the backend's own declaration alike.
+///
+/// **One sentence in two places on purpose**, the shape `crcbl-dx12` uses for
+/// `NO_DEPTH_COPY`. The two used to disagree — this list called the count
+/// "absent from the API rather than unwritten" while `MetalDevice::supports`
+/// ended its refusal with "(the Metal ICB slice)", which is this workspace's
+/// idiom for work that is owed. The API settles it: `MTLRenderCommandEncoder`
+/// has no `countBuffer:` draw, but
+/// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` reads its
+/// execution range from GPU memory, so the count *is* expressible and what is
+/// missing is the encoding. Sharing the constant is what stops them drifting
+/// apart again.
+pub const METAL_NO_DRAW_INDIRECT_COUNT: &str = "Metal has no countBuffer: draw. Its GPU-side \
+     count is executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:, which reads an \
+     MTLIndirectCommandBufferExecutionRange the GPU wrote — so the work is a compute kernel that \
+     encodes the seam's DrawIndirect structs into an MTLIndirectCommandBuffer (the Metal ICB \
+     slice)";
+
+/// The browser's answer for [`Capability::UpdateBindGroup`], in the parity
+/// record and in `crcbl-webgpu`'s own declaration alike.
+///
+/// The second sentence that had drifted, and the same treatment as
+/// [`METAL_NO_DRAW_INDIRECT_COUNT`]. This list used to say the stream "has no
+/// update_bind_group command **yet**", which reads as schedulable work, while
+/// the backend said a bind group is immutable and the stream "could not carry
+/// one that worked". WebGPU settles it: `GPUBindGroup` exposes a label and
+/// nothing else, so there is no mutation to encode and never will be.
+pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immutable once created \
+     — GPUBindGroup exposes a label and nothing else — so the stream has no update_bind_group \
+     command and could not carry one that worked";
 
 /// Every capability a backend is knowingly without, **on every device it can
 /// open**.
@@ -558,6 +673,10 @@ pub struct Divergence {
 /// * a backend that starts *supporting* something listed fails until the pair is
 ///   removed, so the list cannot rot into a record of history.
 ///
+/// Every row also carries a [`DivergenceKind`], which is what separates the
+/// rows that are somebody's work from the rows no work can touch;
+/// [`parity_blockers`] is the query that reads it.
+///
 /// A refusal that is merely *this device's* — the gating
 /// [`Features`] flag is clear — is not listed and is not a gap; see
 /// [`is_parity_gap`].
@@ -570,6 +689,7 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::BufferFillZero,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Declined,
         why: "D3D12's fill is ClearUnorderedAccessViewUint, which takes a descriptor from a \
               shader-visible heap that crcbl_dx12::descriptor does not create. A deliberate \
               non-fix: crcbl-render zeroes its draw-generation counters with a clear dispatch, \
@@ -578,51 +698,64 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::BufferFillRepeatedByte,
         backend: BackendKind::Wgpu,
-        why: "wgpu's only fill is clear_buffer, which writes zero and takes no value",
+        kind: DivergenceKind::ApiAbsence,
+        why: "wgpu's only fill is CommandEncoder::clear_buffer(&Buffer, offset, size), which \
+              writes zero and has no parameter a value could be passed through",
     },
     Divergence {
         capability: Capability::BufferFillRepeatedByte,
         backend: BackendKind::WebGpu,
-        why: "WebGPU's only fill is GPUCommandEncoder.clearBuffer, which writes zero; the stream \
-              carries the value so the replayer can refuse a non-zero one at the target rather \
-              than write the wrong bytes",
+        kind: DivergenceKind::ApiAbsence,
+        why: "WebGPU's only fill is GPUCommandEncoder.clearBuffer(buffer, offset, size), which \
+              writes zero and takes no value; the stream carries the value so the replayer can \
+              refuse a non-zero one at the target rather than write the wrong bytes",
     },
     Divergence {
         capability: Capability::BufferFillRepeatedByte,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Declined,
         why: "no buffer fill at all on this backend; see the BufferFillZero entry",
     },
     Divergence {
         capability: Capability::BufferFillWord,
         backend: BackendKind::Wgpu,
-        why: "wgpu's only fill is clear_buffer, which writes zero and takes no value",
+        kind: DivergenceKind::ApiAbsence,
+        why: "wgpu's only fill is CommandEncoder::clear_buffer(&Buffer, offset, size), which \
+              writes zero and has no parameter a value could be passed through",
     },
     Divergence {
         capability: Capability::BufferFillWord,
         backend: BackendKind::WebGpu,
-        why: "WebGPU's only fill is GPUCommandEncoder.clearBuffer, which writes zero",
+        kind: DivergenceKind::ApiAbsence,
+        why: "WebGPU's only fill is GPUCommandEncoder.clearBuffer(buffer, offset, size), which \
+              writes zero and takes no value at all",
     },
     Divergence {
         capability: Capability::BufferFillWord,
         backend: BackendKind::Metal,
-        why: "MTLBlitCommandEncoder fillBuffer:range:value: repeats a single byte, so only a u32 \
-              whose four bytes are equal has an encoding",
+        kind: DivergenceKind::ApiAbsence,
+        why: "MTLBlitCommandEncoder fillBuffer:range:value: declares value as a uint8_t, so it \
+              repeats one byte and only a u32 whose four bytes are equal has an encoding",
     },
     Divergence {
         capability: Capability::BufferFillWord,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Declined,
         why: "no buffer fill at all on this backend; see the BufferFillZero entry",
     },
     // --- copies ---
     Divergence {
         capability: Capability::ImageToImageCopy,
         backend: BackendKind::Dx12,
-        why: "both sides are texture locations with their own subresource and box, and neither is \
-              the placed footprint plan_copy builds (the DX12 pipeline slice)",
+        kind: DivergenceKind::Unwritten,
+        why: "CopyTextureRegion takes two D3D12_TEXTURE_COPY_LOCATIONs, each with its own \
+              subresource and box, and neither is the placed footprint plan_copy builds; the work \
+              is a second location kind for it to emit (the DX12 pipeline slice)",
     },
     Divergence {
         capability: Capability::DepthImageCopy,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "a D3D12 depth format has two planes and a sampled one is created typeless, so the \
               copy needs a PlaneSlice and a fully typed D3D12_PLACED_SUBRESOURCE_FOOTPRINT — \
               neither of which BufferImageCopy carries and neither of which plan_copy can derive \
@@ -632,6 +765,7 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::MsaaResolveAttachment,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "the render-pass path binds render-target views directly and emits no \
               ResolveSubresource, so there is nothing for a resolve view to attach to (the DX12 \
               pipeline slice)",
@@ -639,146 +773,184 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::StencilReference,
         backend: BackendKind::WebGpu,
-        why: "the WebGPU command stream has no SetStencilReference tag yet, so the value would be \
+        kind: DivergenceKind::Unwritten,
+        why: "GPURenderPassEncoder.setStencilReference(reference) is in the API; what is absent is \
+              a SetStencilReference tag in this crate's command stream, so the value would be \
               dropped rather than applied (the WebGPU stream slice)",
     },
     // --- draws ---
     Divergence {
         capability: Capability::DrawIndirectCount,
         backend: BackendKind::Metal,
-        why: "Metal's only GPU-side count is an MTLIndirectCommandBuffer whose commands a compute \
-              pass must encode before the render pass begins — absent from the API rather than \
-              unwritten, and wgpu reached the same conclusion independently",
+        kind: DivergenceKind::Unwritten,
+        why: METAL_NO_DRAW_INDIRECT_COUNT,
     },
     Divergence {
         capability: Capability::DrawIndirectCount,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has no count-buffer draw and the stream has no tag for one",
+        kind: DivergenceKind::ApiAbsence,
+        why: "GPURenderPassEncoder carries drawIndirect and drawIndexedIndirect and no \
+              count-buffer form of either, so the draw count can only come from the CPU; the \
+              stream has no tag for one because there is nothing to encode",
     },
     Divergence {
         capability: Capability::IndirectArgumentPaddedStride,
         backend: BackendKind::Wgpu,
+        kind: DivergenceKind::ApiAbsence,
         why: "wgpu's multi_draw_indirect family reads its own tightly packed argument structs and \
               takes no stride, so a padded one would read the wrong words silently",
     },
     Divergence {
         capability: Capability::IndirectArgumentPaddedStride,
         backend: BackendKind::WebGpu,
-        why: "WebGPU's drawIndirect reads one tightly packed argument structure and has no stride \
-              parameter to honour",
+        kind: DivergenceKind::ApiAbsence,
+        why: "GPURenderPassEncoder.drawIndirect(indirectBuffer, indirectOffset) reads one tightly \
+              packed argument structure and has no stride parameter to honour",
     },
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::Metal,
-        why: "Metal has the object/mesh stages and Slang emits them, but this backend builds no \
-              MTLMeshRenderPipelineDescriptor (the Metal mesh slice)",
+        kind: DivergenceKind::Unwritten,
+        why: "Metal has the object and mesh stages — MTLMeshRenderPipelineDescriptor and \
+              drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup: — and \
+              Slang emits them, but this backend builds no such pipeline (the Metal mesh slice)",
     },
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "D3D12 has the stages and the DXIL is committed, but this backend builds no pipeline \
               state stream for them (the DX12 mesh slice)",
     },
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::Wgpu,
-        why: "WebGPU has no mesh stage and wgpu exposes none",
+        kind: DivergenceKind::Unwritten,
+        why: "the resolved wgpu has mesh shaders natively — Features::EXPERIMENTAL_MESH_SHADER, \
+              Device::create_mesh_pipeline and RenderPass::draw_mesh_tasks — and this backend \
+              enables none of them, so there is no mesh pipeline to build. Absent in a browser, \
+              which is where this backend is being replaced rather than extended",
     },
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has no mesh stage, and no proposal for one — this is the API rather than the \
-              slice, so it is permanent",
+        kind: DivergenceKind::ApiAbsence,
+        why: "WebGPU has no mesh stage: GPUDevice creates render and compute pipelines only and \
+              GPURenderPassEncoder has no draw for one. No proposal for it has reached the \
+              specification, so this is the API rather than the slice",
     },
     Divergence {
         capability: Capability::TaskShaderStage,
         backend: BackendKind::Metal,
+        kind: DivergenceKind::Unwritten,
         why: "no mesh pipeline to put an object stage in front of; see the MeshShading entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,
         backend: BackendKind::Dx12,
-        why: "no mesh pipeline to put an amplification stage in front of; see the MeshShading entry",
+        kind: DivergenceKind::Unwritten,
+        why: "no mesh pipeline to put an amplification stage in front of; see the MeshShading \
+              entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,
         backend: BackendKind::Wgpu,
-        why: "WebGPU has no mesh stage; see the MeshShading entry",
+        kind: DivergenceKind::Unwritten,
+        why: "wgpu's mesh pipelines carry the task stage with the rest, and this backend enables \
+              none of it; see the MeshShading entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has no mesh stage; see the MeshShading entry",
+        kind: DivergenceKind::ApiAbsence,
+        why: "WebGPU has no mesh stage to put an amplification stage in front of; see the \
+              MeshShading entry",
     },
     // --- bindings ---
     Divergence {
         capability: Capability::UpdateBindGroup,
         backend: BackendKind::Wgpu,
+        kind: DivergenceKind::ApiAbsence,
         why: "WebGPU bind groups are immutable once created and wgpu exposes no update-after-bind \
               path; a caller rebuilds the group instead",
     },
     Divergence {
         capability: Capability::UpdateBindGroup,
         backend: BackendKind::WebGpu,
-        why: "the WebGPU command stream has no update_bind_group command yet (the WebGPU bindless \
-              slice)",
+        kind: DivergenceKind::ApiAbsence,
+        why: WEBGPU_BIND_GROUPS_ARE_IMMUTABLE,
     },
     Divergence {
         capability: Capability::PushConstants,
         backend: BackendKind::Metal,
-        why: "setVertexBytes:length:atIndex: is Metal's closest fit, and the committed MSL puts \
-              its push-constant block at buffer(0) — ahead of every bound buffer, which no \
-              flattening of this descriptor can reproduce (the Metal root-constant slice)",
+        kind: DivergenceKind::Unwritten,
+        why: "setVertexBytes:length:atIndex: is Metal's closest fit and is right there, but the \
+              committed MSL puts its push-constant block at buffer(0) — ahead of every bound \
+              buffer, which no flattening of this descriptor reproduces; the work is a \
+              buffer-index assignment the shaders and the binder agree on (the Metal root-constant \
+              slice)",
     },
     Divergence {
         capability: Capability::PushConstants,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "D3D12's root constants are the equivalent, and nothing here knows which root \
               parameter slot the committed DXIL puts one at (the DX12 root-constant slice)",
     },
     Divergence {
         capability: Capability::PushConstants,
         backend: BackendKind::Wgpu,
+        kind: DivergenceKind::Unwritten,
         why: "wgpu calls them immediates and gates them behind its own IMMEDIATES feature, which \
               this backend does not enable, so a pipeline layout has no immediate block to write",
     },
     Divergence {
         capability: Capability::PushConstants,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has no push constants; the substitute is a dynamic-offset uniform buffer, \
+        kind: DivergenceKind::ApiAbsence,
+        why: "WebGPU has no push constants — GPUPipelineLayoutDescriptor carries bind group \
+              layouts and nothing beside them. The substitute is a dynamic-offset uniform buffer, \
               which the seam already carries as bind-group dynamic offsets",
     },
     Divergence {
         capability: Capability::BindlessDescriptorArray,
         backend: BackendKind::Metal,
-        why: "this backend binds Metal's flat argument tables, which have a fixed length and no \
-              runtime-sized array (the Metal argument-buffer slice)",
+        kind: DivergenceKind::Unwritten,
+        why: "Metal's argument buffers do carry arrays of resources, and this backend binds flat \
+              argument tables instead, which have a fixed length and no runtime-sized array (the \
+              Metal argument-buffer slice)",
     },
     Divergence {
         capability: Capability::BindlessDescriptorArray,
         backend: BackendKind::Wgpu,
-        why: "wgpu's binding arrays need a fixed count in the layout and offer no partial \
-              binding, so the runtime-sized form the seam describes has no expression",
+        kind: DivergenceKind::ApiAbsence,
+        why: "wgpu's binding arrays need a fixed count in the layout and offer no partial binding, \
+              so the runtime-sized form the seam describes has no expression",
     },
     Divergence {
         capability: Capability::BindlessDescriptorArray,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has no binding arrays at all, fixed-size or runtime-sized, so a material \
-              table is indexed through a storage buffer here rather than through descriptors",
+        kind: DivergenceKind::ApiAbsence,
+        why: "GPUBindGroupLayoutEntry carries a binding, a visibility and one resource layout and \
+              no count, so WebGPU has no binding arrays at all, fixed-size or runtime-sized; a \
+              material table is indexed through a storage buffer here rather than through \
+              descriptors",
     },
     Divergence {
         capability: Capability::StorageImageBinding,
         backend: BackendKind::Wgpu,
+        kind: DivergenceKind::Unwritten,
         why: "wgpu needs the texel format and view dimension at bind-group-layout creation and \
               BindingKind::StorageImage carries neither — a gap in the seam's descriptor rather \
-              than in wgpu",
+              than in wgpu, and the work is a field on that descriptor",
     },
     Divergence {
         capability: Capability::StorageImageBinding,
         backend: BackendKind::WebGpu,
+        kind: DivergenceKind::Unwritten,
         why: "GPUStorageTextureBindingLayout requires a texel format and view dimension at layout \
               creation, and BindingKind::StorageImage carries neither — the same seam-descriptor \
-              gap crcbl-wgpu names, reached through a different API",
+              gap crcbl-wgpu names, reached through a different API and closed by the same field",
     },
     // --- rasteriser state ---
     //
@@ -789,78 +961,111 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::PolygonModeLine,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has no core expression for a wireframe fill mode; unlike the other two \
-              rasteriser capabilities this is absent from the API rather than from a given device",
+        kind: DivergenceKind::ApiAbsence,
+        why: "GPUPrimitiveState carries topology, stripIndexFormat, frontFace, cullMode and \
+              unclippedDepth and no fill mode, so WebGPU has no core expression for a wireframe; \
+              unlike the other two rasteriser capabilities this is absent from the API rather than \
+              from a given device",
     },
     // --- queries ---
     Divergence {
         capability: Capability::TimestampQuery,
         backend: BackendKind::Metal,
-        why: "no query sets are built on this backend; supportsCounterSampling: answers per \
-              sampling point, which the seam's query set does not describe (the Metal query slice)",
+        kind: DivergenceKind::Unclassified,
+        why: "no query sets are built on this backend, and which kind of divergence that is cannot \
+              be settled from here: MTLCounterSampleBuffer and \
+              sampleCountersInBuffer:atSampleIndex:withBarrier: exist, but whether a timestamp can \
+              be taken at an arbitrary point depends on which MTLCounterSamplingPoint values a \
+              device reports from supportsCounterSampling:, and no Mac runs in this workspace (the \
+              Metal query slice)",
     },
     Divergence {
         capability: Capability::TimestampQuery,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "no query sets are built on this backend; the timestamp period only a queue can \
               answer is the missing piece (the DX12 query slice)",
     },
     Divergence {
         capability: Capability::TimestampQuery,
         backend: BackendKind::Wgpu,
+        kind: DivergenceKind::Unwritten,
         why: "this backend enables neither wgpu's TIMESTAMP_QUERY nor its statistics features, so \
               no query set can be created even on an adapter that has them",
     },
     Divergence {
         capability: Capability::TimestampQuery,
         backend: BackendKind::WebGpu,
-        why: "query sets are not wired into the WebGPU stream (the WebGPU query slice)",
+        kind: DivergenceKind::Unwritten,
+        why: "a timestamp query set is creatable — GPUQueryType has 'timestamp' — and none is \
+              built here. The limit the slice will meet is that no encoder carries a \
+              writeTimestamp: WebGPU takes timestamps only through a render or compute pass's \
+              timestampWrites, so the seam's arbitrary-point write_timestamp has to narrow to pass \
+              boundaries (the WebGPU query slice)",
     },
     Divergence {
         capability: Capability::OcclusionQuery,
         backend: BackendKind::Metal,
-        why: "no query sets are built on this backend; see the TimestampQuery entry",
+        kind: DivergenceKind::Unwritten,
+        why: "no query sets are built on this backend; \
+              MTLRenderPassDescriptor.visibilityResultBuffer and setVisibilityResultMode:offset: \
+              are core Metal and unconditional, so this one is owed rather than absent (the Metal \
+              query slice)",
     },
     Divergence {
         capability: Capability::OcclusionQuery,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "no query sets are built on this backend; see the TimestampQuery entry",
     },
     Divergence {
         capability: Capability::OcclusionQuery,
         backend: BackendKind::Wgpu,
+        kind: DivergenceKind::Unwritten,
         why: "no query sets are built on this backend; see the TimestampQuery entry",
     },
     Divergence {
         capability: Capability::OcclusionQuery,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has occlusion queries only as a render-pass attachment, which the seam's \
-              standalone query set does not describe",
+        kind: DivergenceKind::Unwritten,
+        why: "an occlusion query set is creatable — GPUQueryType has 'occlusion', and \
+              beginOcclusionQuery/endOcclusionQuery record against a pass's occlusionQuerySet — \
+              and none is built here. The seam has no begin/end call of its own, so what each side \
+              owes is still open (the WebGPU query slice)",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
         backend: BackendKind::Metal,
-        why: "no query sets are built on this backend; see the TimestampQuery entry",
+        kind: DivergenceKind::Unclassified,
+        why: "no query sets are built on this backend, and which kind of divergence that is cannot \
+              be settled from here: MTLCommonCounterSetStatistic names the invocation counters, \
+              but a device advertises the set through MTLDevice.counterSets and no Mac runs in \
+              this workspace (the Metal query slice)",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "no query sets are built on this backend; see the TimestampQuery entry",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
         backend: BackendKind::Wgpu,
+        kind: DivergenceKind::Unwritten,
         why: "no query sets are built on this backend; see the TimestampQuery entry",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has no pipeline-statistics queries",
+        kind: DivergenceKind::ApiAbsence,
+        why: "GPUQueryType is exactly 'occlusion' and 'timestamp', so there is no \
+              pipeline-statistics query set for WebGPU to create",
     },
     // --- synchronisation ---
     Divergence {
         capability: Capability::TimelineSemaphore,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "ID3D12Fence is the seam's timeline almost verbatim, but the other half — \
               ID3D12CommandQueue::Wait and a submission to attach it to — is not built, so a \
               semaphore handed out now would be a counter nothing can signal from the GPU (the \
@@ -869,59 +1074,87 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::TimelineSemaphore,
         backend: BackendKind::WebGpu,
+        kind: DivergenceKind::ApiAbsence,
         why: "WebGPU has no semaphores. It orders submissions implicitly — one queue, executed in \
               order, hazards tracked by the browser — and its only completion signal, \
-              GPUQueue.onSubmittedWorkDone(), resolves for everything submitted so far and \
-              carries no value, so nothing there could drive a counter. create_semaphore refuses \
-              SemaphoreKind::Timeline; it used to hand out a handle whose semaphore_value \
-              answered 0 for ever, which is the succeed-while-doing-nothing shape this enum \
-              exists to make visible",
+              GPUQueue.onSubmittedWorkDone(), resolves for everything submitted so far and carries \
+              no value, so nothing there could drive a counter. create_semaphore refuses \
+              SemaphoreKind::Timeline; it used to hand out a handle whose semaphore_value answered \
+              0 for ever, which is the succeed-while-doing-nothing shape this enum exists to make \
+              visible",
     },
     Divergence {
         capability: Capability::BinarySemaphore,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "create_semaphore refuses both kinds; see the TimelineSemaphore entry (the DX12 \
               command slice)",
     },
     Divergence {
         capability: Capability::CpuTimelineWait,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "there is no semaphore to wait on; see the TimelineSemaphore entry (the DX12 command \
               slice)",
     },
     Divergence {
         capability: Capability::CpuTimelineWait,
         backend: BackendKind::WebGpu,
+        kind: DivergenceKind::ApiAbsence,
         why: "create_semaphore refuses the timeline kind, so there is no counter for a CPU wait to \
               read; the binary semaphore this backend does hand out is GPU-waitable only. \
-              wait_semaphores refuses rather than answering Ok(true) for a wait it never \
-              evaluated — see the TimelineSemaphore entry",
+              wait_semaphores refuses rather than answering Ok(true) for a wait it never evaluated \
+              — see the TimelineSemaphore entry",
     },
     Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
         backend: BackendKind::Wgpu,
+        kind: DivergenceKind::ApiAbsence,
         why: "wgpu has no standalone semaphore object; a timeline here is per-submission \
               completion, so a wait on a value nothing submitted will signal can only hang",
     },
     Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
         backend: BackendKind::Metal,
-        why: "this backend runs one queue and the seam gives no way to signal an MTLSharedEvent \
-              from the CPU, so only an earlier submission can satisfy such a wait — waiting would \
-              stop the queue rather than wait",
+        kind: DivergenceKind::Unwritten,
+        why: "MTLSharedEvent has both halves — setSignaledValue: from the CPU and \
+              encodeWaitForEvent:value: on a command buffer — but the seam offers no CPU signal, \
+              so on this one-queue backend only an earlier submission could satisfy such a wait \
+              and waiting would stop the queue rather than wait. The work is a signal call on the \
+              seam",
     },
     Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
         backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
         why: "there is no semaphore to wait on at all; see the TimelineSemaphore entry",
     },
     Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
         backend: BackendKind::WebGpu,
+        kind: DivergenceKind::ApiAbsence,
         why: "a wait of any kind is refused here, so a wait on a value nothing has signalled is \
               refused with the rest; see the CpuTimelineWait entry",
     },
 ];
+
+/// Every divergence that stands between a backend crcbl is **keeping** and
+/// parity.
+///
+/// The answer to "what is left?", derived rather than maintained. A row is here
+/// when its backend is a [parity target](BackendKind::is_parity_target) and its
+/// [`kind`](Divergence::kind) [blocks parity](DivergenceKind::blocks_parity) —
+/// so `crcbl-wgpu`, which is deleted once `crcbl-webgpu` replaces it, is
+/// excluded by the first half rather than by a reader remembering to skip it,
+/// and [`DivergenceKind::ApiAbsence`] by the second.
+///
+/// The set is snapshotted by this module's own tests, so it shrinks only when
+/// somebody updates the snapshot deliberately. Yields in [`DIVERGENCES`] order.
+pub fn parity_blockers() -> impl Iterator<Item = &'static Divergence> {
+    DIVERGENCES
+        .iter()
+        .filter(|entry| entry.backend.is_parity_target() && entry.kind.blocks_parity())
+}
 
 /// The [`DIVERGENCES`] entry for this pair, if the pair is a known divergence.
 ///
@@ -949,6 +1182,11 @@ pub fn divergence(capability: Capability, backend: BackendKind) -> Option<&'stat
 ///   and wrote down why.
 /// * Any other refusal **is** a gap: this backend cannot do something its peers
 ///   can, on a device that reports it should, and nobody has said so.
+///
+/// Deliberately blind to [`DivergenceKind`]: a written reason is what makes a
+/// refusal reviewed, whatever kind of divergence it turned out to be. "Which of
+/// them is still somebody's work" is the other question, and
+/// [`parity_blockers`] is where it is asked.
 ///
 /// The stated limit: a backend can still put itself outside this rule by
 /// reporting the gating flag clear. That is not a hole so much as a different
@@ -1222,5 +1460,273 @@ mod tests {
             BackendKind::Dx12,
             Features::empty()
         ));
+    }
+
+    /// Every divergence standing between crcbl and its stated end state, as
+    /// reviewed — the whole of what "reach parity, then delete `crcbl-wgpu`"
+    /// still asks for. **Update this deliberately.**
+    ///
+    /// A snapshot rather than a rule, and that is the point: a row leaves only
+    /// when somebody writes the code, overturns the decline, or shows the API
+    /// cannot express it after all. Each of those is a review, and a test that
+    /// merely counted the rows — or checked that each had *some* kind — would
+    /// pass whether the classification were right or wrong.
+    const REVIEWED_BLOCKERS: &[(Capability, BackendKind, DivergenceKind)] = &[
+        // `crcbl-dx12` is the whole of its own list: D3D12 expresses every
+        // capability here, and the three fills are the only rows anybody chose.
+        (
+            Capability::BufferFillZero,
+            BackendKind::Dx12,
+            DivergenceKind::Declined,
+        ),
+        (
+            Capability::BufferFillRepeatedByte,
+            BackendKind::Dx12,
+            DivergenceKind::Declined,
+        ),
+        (
+            Capability::BufferFillWord,
+            BackendKind::Dx12,
+            DivergenceKind::Declined,
+        ),
+        (
+            Capability::ImageToImageCopy,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::DepthImageCopy,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::MsaaResolveAttachment,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::MeshShading,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::TaskShaderStage,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::PushConstants,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::TimestampQuery,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::OcclusionQuery,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::PipelineStatisticsQuery,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::TimelineSemaphore,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::BinarySemaphore,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::CpuTimelineWait,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::TimelineWaitBeforeSignal,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        // Metal: the byte-wide fill is the API and is not here. The two
+        // counter-sampled query rows are unclassified because settling them
+        // needs a Mac.
+        (
+            Capability::DrawIndirectCount,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::MeshShading,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::TaskShaderStage,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::PushConstants,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::BindlessDescriptorArray,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::TimestampQuery,
+            BackendKind::Metal,
+            DivergenceKind::Unclassified,
+        ),
+        (
+            Capability::OcclusionQuery,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::PipelineStatisticsQuery,
+            BackendKind::Metal,
+            DivergenceKind::Unclassified,
+        ),
+        (
+            Capability::TimelineWaitBeforeSignal,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
+        ),
+        // The browser's four. Everything else `crcbl-webgpu` refuses is WebGPU
+        // itself refusing, which is why this is the short list and not the long
+        // one.
+        (
+            Capability::StencilReference,
+            BackendKind::WebGpu,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::StorageImageBinding,
+            BackendKind::WebGpu,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::TimestampQuery,
+            BackendKind::WebGpu,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::OcclusionQuery,
+            BackendKind::WebGpu,
+            DivergenceKind::Unwritten,
+        ),
+    ];
+
+    /// The one that makes the goal checkable: what
+    /// [`parity_blockers`] answers must be what somebody reviewed, row for row.
+    ///
+    /// Fails when a row joins or leaves the blocker set, when a blocking row is
+    /// reclassified, and when a row is moved to another backend — each of which
+    /// is a change to "what is left" and none of which should reach `main`
+    /// without a human editing [`REVIEWED_BLOCKERS`] to match.
+    #[test]
+    fn the_parity_blockers_are_exactly_the_reviewed_list() {
+        let mut actual: Vec<(Capability, String, DivergenceKind)> = parity_blockers()
+            .map(|entry| (entry.capability, entry.backend.to_string(), entry.kind))
+            .collect();
+        actual.sort_unstable();
+        let mut reviewed: Vec<(Capability, String, DivergenceKind)> = REVIEWED_BLOCKERS
+            .iter()
+            .map(|(capability, backend, kind)| (*capability, backend.to_string(), *kind))
+            .collect();
+        reviewed.sort_unstable();
+        assert_eq!(
+            actual, reviewed,
+            "the set of divergences between crcbl and parity has changed. That is the goal moving, \
+             so say so: update REVIEWED_BLOCKERS to match, and if a row left the set, make sure it \
+             left because the work landed or the API was shown to lack it — not because a kind was \
+             widened to ApiAbsence to make it disappear"
+        );
+    }
+
+    /// The exclusion `crcbl-wgpu` gets is [`BackendKind::is_parity_target`]
+    /// answering `false`, not a reader remembering — and it is doing work, so
+    /// the filter is not a sieve over an empty set.
+    #[test]
+    fn crcbl_wgpu_is_outside_the_goal_by_construction() {
+        assert!(!BackendKind::Wgpu.is_parity_target());
+        assert!(
+            parity_blockers().all(|entry| entry.backend != BackendKind::Wgpu),
+            "a wgpu row reached the blocker set"
+        );
+        let hidden = DIVERGENCES
+            .iter()
+            .filter(|entry| entry.backend == BackendKind::Wgpu && entry.kind.blocks_parity())
+            .count();
+        assert!(
+            hidden > 0,
+            "wgpu has no row of a blocking kind, so this exclusion is a filter that removes \
+             nothing and the test above proves nothing"
+        );
+        for backend in GPU_BACKENDS {
+            assert_eq!(
+                backend.is_parity_target(),
+                backend != BackendKind::Wgpu,
+                "{backend} is on the wrong side of the goal"
+            );
+        }
+        assert!(!BackendKind::Null.is_parity_target());
+    }
+
+    /// The rule the query is built on, as a table: the failure mode is a
+    /// negation dropped or added, which reads identically and would either
+    /// empty the blocker set or fill it with rows nobody can act on.
+    #[test]
+    fn only_an_api_absence_is_off_the_hook() {
+        assert!(!DivergenceKind::ApiAbsence.blocks_parity());
+        assert!(DivergenceKind::Unwritten.blocks_parity());
+        assert!(DivergenceKind::Declined.blocks_parity());
+        assert!(DivergenceKind::Unclassified.blocks_parity());
+    }
+
+    /// A kind nothing uses is a distinction nobody made. Each of the four has to
+    /// describe a real row, or it is vocabulary rather than classification.
+    #[test]
+    fn every_kind_describes_at_least_one_real_row() {
+        for kind in [
+            DivergenceKind::ApiAbsence,
+            DivergenceKind::Unwritten,
+            DivergenceKind::Declined,
+            DivergenceKind::Unclassified,
+        ] {
+            assert!(
+                DIVERGENCES.iter().any(|entry| entry.kind == kind),
+                "no divergence is classified {kind:?}, so the variant is a name with nothing \
+                 behind it"
+            );
+        }
+    }
+
+    /// A shared reason is shared with the row it describes.
+    ///
+    /// The other half of each pairing is a `Support::No(…)` in the backend
+    /// crate, which the compiler checks by being a use of the same constant.
+    /// This end is what stops somebody pasting the text back into the row as a
+    /// literal and letting the two drift again.
+    #[test]
+    fn a_shared_reason_is_the_reason_its_row_carries() {
+        assert_eq!(
+            divergence(Capability::DrawIndirectCount, BackendKind::Metal).map(|entry| entry.why),
+            Some(METAL_NO_DRAW_INDIRECT_COUNT)
+        );
+        assert_eq!(
+            divergence(Capability::UpdateBindGroup, BackendKind::WebGpu).map(|entry| entry.why),
+            Some(WEBGPU_BIND_GROUPS_ARE_IMMUTABLE)
+        );
     }
 }

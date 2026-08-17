@@ -52,6 +52,20 @@ pub struct WebGpuCommandEncoder {
     refused: Option<String>,
 }
 
+/// WebGPU's answer for [`Capability::DrawIndirectCount`], shared by the
+/// encoder's refusal and the device's declaration so the two cannot drift.
+///
+/// `GPURenderPassEncoder.drawIndirect` takes a buffer and an offset and reads
+/// one tightly packed argument structure. There is no count-buffer form in the
+/// core specification — the count-buffer draws are Dawn extensions — so this is
+/// the API rather than the slice.
+pub(super) const NO_COUNT_BUFFER_DRAW: &str =
+    "WebGPU has no count-buffer draw, and the stream has no tag for one";
+
+/// WebGPU's answer for [`Capability::MeshShading`] and
+/// [`Capability::TaskShaderStage`], shared for the same reason.
+pub(super) const NO_MESH_STAGE: &str = "WebGPU has no mesh stage";
+
 impl WebGpuCommandEncoder {
     /// A fresh encoder. Encodes `create_command_encoder`, whose replayer builds
     /// the implicit-current encoder every recording method then targets.
@@ -238,22 +252,25 @@ impl CommandEncoder for WebGpuCommandEncoder {
         });
     }
 
+    // These four said "not yet wired into the WebGPU stream", which promises a
+    // slice that cannot exist: `crcbl_hal::DIVERGENCES` classifies all four as
+    // API absences, and a caller reading "not yet" would wait for work nobody
+    // can do. Each now carries the sentence the device's `supports` declares,
+    // through one constant, so the refusal and the declaration cannot drift.
     fn draw_indirect_count(&mut self, _draw: &DrawIndirectCount) {
-        self.record_unsupported("draw_indirect_count is not yet wired into the WebGPU stream");
+        self.record_unsupported(NO_COUNT_BUFFER_DRAW);
     }
 
     fn draw_indexed_indirect_count(&mut self, _draw: &DrawIndirectCount) {
-        self.record_unsupported(
-            "draw_indexed_indirect_count is not yet wired into the WebGPU stream",
-        );
+        self.record_unsupported(NO_COUNT_BUFFER_DRAW);
     }
 
     fn draw_mesh_tasks(&mut self, _x: u32, _y: u32, _z: u32) {
-        self.record_unsupported("draw_mesh_tasks is not yet wired into the WebGPU stream");
+        self.record_unsupported(NO_MESH_STAGE);
     }
 
     fn draw_mesh_tasks_indirect(&mut self, _draw: &DrawIndirect) {
-        self.record_unsupported("draw_mesh_tasks_indirect is not yet wired into the WebGPU stream");
+        self.record_unsupported(NO_MESH_STAGE);
     }
 
     // --- compute scope ---

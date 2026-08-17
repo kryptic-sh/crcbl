@@ -346,7 +346,14 @@ impl Device for WgpuDevice {
         };
         const NO_VALUE_FILL: &str =
             "wgpu's only fill is clear_buffer, which writes zero and takes no value";
-        const NO_MESH: &str = "WebGPU has no mesh stage and wgpu exposes none";
+        // Not "wgpu has no mesh stage": the resolved wgpu does, natively and
+        // experimentally, and this backend enables none of it. The browser is
+        // where the stage is genuinely absent, and the browser is where
+        // `crcbl-webgpu` replaces this backend rather than extending it.
+        const NO_MESH: &str = "the resolved wgpu has mesh shaders natively — \
+             Features::EXPERIMENTAL_MESH_SHADER, Device::create_mesh_pipeline and \
+             RenderPass::draw_mesh_tasks — and this backend enables none of them, so there is no \
+             mesh pipeline to build; a browser has no mesh stage at all";
         const NO_QUERIES: &str = "this backend enables neither wgpu's TIMESTAMP_QUERY nor its statistics features, so \
              no query set can be created even on an adapter that has them";
 

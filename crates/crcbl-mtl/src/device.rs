@@ -1011,13 +1011,18 @@ impl Device for MetalDevice {
 
     /// What this backend does with each seam behaviour.
     ///
-    /// Two kinds of refusal live here and the reasons keep them apart, because
-    /// the answer to "should this be fixed?" is opposite:
+    /// Kinds of refusal live here and the reasons keep them apart, because the
+    /// answer to "should this be fixed?" differs —
+    /// [`crcbl_hal::DivergenceKind`] is the same split as data:
     ///
-    /// * **Metal has not got it.** The GPU-side draw count and the byte-wide
-    ///   buffer fill are the API, not this crate, and no slice will change them.
-    /// * **This crate has not built it.** Mesh pipelines and query sets exist in
+    /// * **Metal has not got it.** The byte-wide buffer fill is the API, not
+    ///   this crate, and no slice will change it.
+    /// * **This crate has not built it.** Mesh pipelines, occlusion queries and
+    ///   the indirect command buffer behind a GPU-side draw count all exist in
     ///   Metal and are owed here; the reason names the slice that owes them.
+    /// * **Nobody here can tell.** The counter-sampled queries depend on what a
+    ///   device answers to `supportsCounterSampling:` and `counterSets`, and no
+    ///   Mac runs in this workspace, so the reason says so instead of guessing.
     ///
     /// Exhaustive with no wildcard arm, and `deny`-ed as such: a capability
     /// added to the enum must be answered here.
@@ -1048,10 +1053,10 @@ impl Device for MetalDevice {
             // and a `MTLStoreAction` that resolves.
             Capability::MsaaResolveAttachment => Support::Yes,
             Capability::StencilReference => Support::Yes,
-            Capability::DrawIndirectCount => Support::No(
-                "Metal's only GPU-side count is an MTLIndirectCommandBuffer whose commands a \
-                 compute pass must encode before the render pass begins (the Metal ICB slice)",
-            ),
+            // The sentence `crcbl_hal::DIVERGENCES` carries for this pair, so
+            // the declaration and the parity record cannot drift apart — they
+            // had, and the constant is what settles it.
+            Capability::DrawIndirectCount => Support::No(crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT),
             // A multi-draw is a loop over the argument structures, so a stride
             // larger than one of them is exactly what the loop steps by.
             Capability::IndirectArgumentPaddedStride => Support::Yes,
@@ -1084,15 +1089,25 @@ impl Device for MetalDevice {
                 Features::SAMPLER_ANISOTROPY,
                 "this device reports no SAMPLER_ANISOTROPY",
             ),
-            // One refusal, three capabilities: `create_query_set` is not built
-            // at all, because `supportsCounterSampling:` answers per sampling
-            // point and the seam's query set does not describe one.
-            Capability::TimestampQuery
-            | Capability::OcclusionQuery
-            | Capability::PipelineStatisticsQuery => Support::No(
-                "no query sets are built on this backend; supportsCounterSampling: answers per \
-                 sampling point, which the seam's query set does not describe (the Metal query \
-                 slice)",
+            // `create_query_set` is not built at all, so all three refuse —
+            // but for two different reasons, and the split is the honest part.
+            // Occlusion is plain unfinished work: `visibilityResultBuffer` and
+            // `setVisibilityResultMode:offset:` are core Metal and answer on
+            // every device.
+            Capability::OcclusionQuery => Support::No(
+                "no query sets are built on this backend; MTLRenderPassDescriptor's \
+                 visibilityResultBuffer and setVisibilityResultMode:offset: are core Metal, so \
+                 this one is owed rather than absent (the Metal query slice)",
+            ),
+            // The counter-sampled two cannot even be classified from here:
+            // whether a device can sample at the boundary the seam needs, and
+            // whether it advertises the statistic counter set at all, are
+            // answers only a Mac gives.
+            Capability::TimestampQuery | Capability::PipelineStatisticsQuery => Support::No(
+                "no query sets are built on this backend, and whether Metal could serve the seam's \
+                 shape is unsettled: supportsCounterSampling: answers per sampling point and \
+                 counterSets is per device, and no Mac runs in the workspace that wrote this (the \
+                 Metal query slice)",
             ),
             // `MTLSharedEvent` is the seam's timeline almost verbatim.
             Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(

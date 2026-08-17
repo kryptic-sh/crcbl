@@ -68,6 +68,29 @@ impl BackendKind {
             Self::Null => false,
         }
     }
+
+    /// Whether parity is measured against this backend.
+    ///
+    /// Every GPU backend except [`Wgpu`](Self::Wgpu), which is the bridge
+    /// `crcbl-webgpu` is being written to replace and which is deleted when it
+    /// does. A divergence of its own is therefore not work anybody will do, and
+    /// counting one would make the remaining distance to the goal look longer
+    /// than it is — so
+    /// [`parity_blockers`](crate::parity_blockers) filters on this rather than
+    /// on a reader remembering which backend is temporary.
+    ///
+    /// [`Null`](Self::Null) is outside the parity model altogether; see
+    /// [`is_gpu`](Self::is_gpu).
+    ///
+    /// A `match` rather than a comparison against one variant, so a backend
+    /// added later has to say which side it is on.
+    #[must_use]
+    pub const fn is_parity_target(self) -> bool {
+        match self {
+            Self::Vulkan | Self::WebGpu | Self::Metal | Self::Dx12 => true,
+            Self::Wgpu | Self::Null => false,
+        }
+    }
 }
 
 impl fmt::Display for BackendKind {

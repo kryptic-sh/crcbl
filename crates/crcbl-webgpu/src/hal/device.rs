@@ -9,14 +9,19 @@
 //!   and `destroy_*` the stream carries, `submit`, the swapchain calls,
 //!   `present`, `acquire_next_frame` and readback are here.
 //! * **Legitimately refused** — WebGPU cannot do it and never will, so refusing
-//!   is correct rather than a gap. `create_mesh_pipeline` (no mesh stage), and
-//!   the timeline half of the semaphore calls: WebGPU orders submissions
-//!   implicitly and has no counter anything could observe.
+//!   is correct rather than a gap. `create_mesh_pipeline` (no mesh stage),
+//!   `update_bind_group` (a `GPUBindGroup` exposes a label and nothing else, so
+//!   there is no mutation to encode), and the timeline half of the semaphore
+//!   calls: WebGPU orders submissions implicitly and has no counter anything
+//!   could observe.
 //! * **Loudly unsupported** — the stream has no command for it *yet*, so a
 //!   `Result`-returning method returns [`HalError::Unsupported`] naming the gap
 //!   rather than a silent success a caller would mistake for a working device.
-//!   `update_bind_group` and the query methods are here; a later slice wires
-//!   them.
+//!   The query methods are here; a later slice wires them.
+//!
+//! Which of the first two a refusal is, is `crcbl_hal::DivergenceKind` —
+//! `ApiAbsence` against `Unwritten` — and the parity record carries the same
+//! answer for every capability this backend declines.
 //!
 //! The first two kinds return the **same variant**, and deliberately: a caller
 //! does the same thing with either, and the sentence in `what` is what says
@@ -48,7 +53,7 @@ use crate::device::DeviceProbe;
 use crate::reply::Reply;
 
 use super::channel::{HandlePool, SharedChannel};
-use super::encoder::WebGpuCommandEncoder;
+use super::encoder::{NO_COUNT_BUFFER_DRAW, NO_MESH_STAGE, WebGpuCommandEncoder};
 
 // ── WebGpuPendingDevice ────────────────────────────────────────────────────
 
@@ -344,7 +349,7 @@ impl Device for WebGpuDevice {
         const NO_VALUE_FILL: &str = "WebGPU's only fill is GPUCommandEncoder.clearBuffer, which writes zero; the stream \
              carries the value so the replayer can refuse a non-zero one rather than write the \
              wrong bytes";
-        const NO_MESH: &str = "WebGPU has no mesh stage";
+        const NO_MESH: &str = NO_MESH_STAGE;
         const NOT_STREAMED: &str = "not yet wired into the WebGPU command stream";
         // One sentence for the three, because they are one obstacle: there is no
         // semaphore object, so there is nothing to signal, read or wait on.
@@ -376,18 +381,16 @@ impl Device for WebGpuDevice {
             Capability::DepthImageCopy => Support::Yes,
             Capability::MsaaResolveAttachment => Support::Yes,
             Capability::StencilReference => Support::No(NOT_STREAMED),
-            Capability::DrawIndirectCount => {
-                Support::No("WebGPU has no count-buffer draw, and the stream has no tag for one")
-            }
+            Capability::DrawIndirectCount => Support::No(NO_COUNT_BUFFER_DRAW),
             Capability::IndirectArgumentPaddedStride => Support::No(
                 "WebGPU's drawIndirect reads one tightly packed argument structure and has no \
                  stride parameter to honour",
             ),
             Capability::MeshShading | Capability::TaskShaderStage => Support::No(NO_MESH),
-            Capability::UpdateBindGroup => Support::No(
-                "WebGPU bind groups are immutable once created; the stream has no \
-                 update_bind_group command and could not carry one that worked",
-            ),
+            // The sentence `crcbl_hal::DIVERGENCES` carries for this pair, so
+            // the declaration and the parity record cannot drift apart — they
+            // had, and the constant is what settles it.
+            Capability::UpdateBindGroup => Support::No(crcbl_hal::WEBGPU_BIND_GROUPS_ARE_IMMUTABLE),
             Capability::PushConstants => Support::No(
                 "WebGPU has no push constants; the substitute is a dynamic-offset uniform buffer, \
                  which the seam already carries as bind-group dynamic offsets",
@@ -412,9 +415,14 @@ impl Device for WebGpuDevice {
                 Features::SAMPLER_ANISOTROPY,
                 "this device reports no SAMPLER_ANISOTROPY",
             ),
-            Capability::TimestampQuery
-            | Capability::OcclusionQuery
-            | Capability::PipelineStatisticsQuery => Support::No(NOT_STREAMED),
+            // Two of the three are creatable in WebGPU and simply not streamed
+            // yet; the third has no query type to create, so it is the API
+            // rather than the slice and its sentence says which.
+            Capability::TimestampQuery | Capability::OcclusionQuery => Support::No(NOT_STREAMED),
+            Capability::PipelineStatisticsQuery => Support::No(
+                "GPUQueryType is exactly 'occlusion' and 'timestamp', so there is no \
+                 pipeline-statistics query set for WebGPU to create",
+            ),
             // WebGPU has no semaphore of any kind. It orders submissions
             // implicitly — one queue, executed in order, hazards tracked by the
             // browser — and its only completion signal is
@@ -678,12 +686,14 @@ impl Device for WebGpuDevice {
         _group: BindGroupHandle,
         _entries: &[BindGroupEntry],
     ) -> Result<(), HalError> {
-        // Needed for the bindless streaming path, but the stream has no
-        // `update_bind_group` command yet — a later slice adds one. Refuse
-        // loudly rather than drop the update.
+        // Needed for the bindless streaming path, and not coming: a
+        // `GPUBindGroup` exposes a label and nothing else, so there is no
+        // mutation for a stream command to carry. A caller rebuilds the group.
+        // Refuse loudly rather than drop the update.
         Err(HalError::Unsupported {
             backend: BackendKind::WebGpu,
-            what: "update_bind_group is not yet wired into the WebGPU stream",
+            what: "WebGPU bind groups are immutable once created, so update_bind_group has \
+                   nothing to encode; rebuild the group instead",
         })
     }
 
