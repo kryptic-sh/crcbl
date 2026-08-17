@@ -102,6 +102,30 @@ failure diagnoses as a timeout. Extending the eight to absorb the new reply is
 mechanical; doing it while adding a ninth probe would be cheaper than doing it
 twice.
 
+### glTF reaches the renderer — what it still cannot open
+
+`crcbl_scene::gltf_render::build_render_scene` turns an imported document into a
+`SceneDesc` and instances, proved by `crates/crcbl/tests/gltf_e2e.rs` drawing
+one and asserting a colour per quadrant. What a real file can still hit:
+
+- **`run-gltf-e2e.sh` is not in CI.** `ci.yml` runs `run-tiling-e2e.sh` on WARP,
+  lavapipe and wgpu; the glTF runner needs the same four steps. Do it with the
+  cross-platform work below, since both edit the same jobs.
+- **`data:` URI buffers and images** — Blender's "glTF Embedded" export is
+  exactly this, so the most common way an artist hands over a single file is one
+  we skip. Probably the highest-value gap for the viewer.
+- **Sparse accessors**, **`KHR_texture_transform`**, and **JPEG images** — no
+  JPEG decoder exists in the workspace, so that one is a dependency decision
+  rather than work (`crcbl-sprite` decodes PNG only).
+- **The single-page limit.** Every base-colour image is resampled onto one
+  square page, so a model with many large textures costs `layers x extent^2 x 4`
+  on the device — a 20-texture 2048² document is roughly 335 MB. A real
+  Sketchfab download will find this before anything else does.
+- **Every fixture is still hand-assembled.** Nothing in the suite opens a file a
+  DCC tool actually wrote, which is the sample's own acceptance test (">=90% of
+  the Khronos glTF-Sample-Models suite"). Until that runs, "we import glTF"
+  means "we import the glTF we generate".
+
 ### Run the WebGPU browser gates on Windows and macOS, not just Linux
 
 **Every WebGPU browser test in the repository runs in one job**, `pages/build`
@@ -6138,11 +6162,20 @@ all. Not reported upstream yet; that is the open action.
 `GpuInstance::transform` requires rigid.** The shader transforms normals with
 the matrix's 3×3 part and no inverse-transpose, so a node with non-uniform scale
 would light wrongly once uploaded. The importer preserves the scale deliberately
-— dropping it here would take the choice away — and the upload step has to pick
-one of: bake the scale into the vertices at import (loses instancing of a shared
-mesh at different scales), carry a separate normal matrix per instance (a wider
-`GpuInstance`), or refuse scaled nodes. Nothing has picked yet, and nothing
-renders a glTF, so nothing is wrong today.
+— dropping it here would take the choice away.
+
+**Picked, and it was a fourth option: pass the matrix through and report
+non-uniform scale loudly.** `build_render_scene` emits a `Skip` naming the node
+and logs it; the object still draws, and only its lighting is wrong. Uniform
+scale is exact, because the mesh shader normalises the interpolated normal, so
+the defect is confined to genuinely non-uniform nodes. Baking at import was
+rejected for the reason above — it loses instancing of one mesh at several
+scales — and refusing the node outright would fail files that are otherwise
+fine, which is the opposite of what the viewer needs.
+
+**Still owed if a real file needs it:** a per-instance normal matrix (a wider
+`GpuInstance`) is the only way to make non-uniform scale actually correct.
+Nothing has asked yet; the skip makes it visible when something does.
 
 **Malformed files are `StorageError::Other(String)`.** That is deliberate reuse
 — a second error enum beside `StorageError` would make every caller of the
