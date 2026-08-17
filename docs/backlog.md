@@ -3,6 +3,69 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### BUG — the browser renders too dark: the canvas never encodes sRGB
+
+**Reported from the deployed demos.** Everything on `crcbl-webgpu` renders
+darker than it should. This is a regression against `crcbl-wgpu`, which handled
+it internally, and it is the same defect the offscreen path already hit and
+fixed.
+
+**Cause.** Every pass above the seam writes display-referred values and leaves
+the encode to the hardware, so the target must be an sRGB format. A WebGPU
+**canvas cannot be configured as sRGB**: `GPUCanvasConfiguration.format` takes
+only `bgra8unorm`, `rgba8unorm` or `rgba16float`. The sRGB output path is to
+configure the base format with `viewFormats: ['<base>-srgb']` and then create
+the frame's view _in the sRGB format_. `web/engine/gpu-replay.js` does neither —
+its own comment says why: `ImageViewDesc::format` is documented as free to
+differ "for sRGB reinterpretation", but `ImageDesc` has no field carrying the
+permission, so every texture is created with WebGPU's default empty
+`viewFormats` and a reinterpreting view is refused.
+
+**Note this interacts with a change made deliberately.** `surface_caps` was
+recently made to answer a canvas with the browser's own
+`getPreferredCanvasFormat()` first, to stop a full-canvas copy every frame. That
+format is linear, so the canvas is now firmly linear. The fix must keep both
+properties: configure the browser's preferred **base** format (no copy) and
+attach its `-srgb` view format (correct encode). Those are not in tension —
+`viewFormats` is exactly the mechanism for having both.
+
+**The offscreen path is already correct** and must not regress: it answers sRGB
+formats directly, because an offscreen ring is textures the replayer creates and
+no canvas constrains. The eleven-scene golden parity proves that half; the demos
+are what proves this half, and nothing currently does — see the coverage note
+below.
+
+**No gate catches this.** The demo gates assert the canvas is not blank and
+changes; they do not compare against a reference. The golden harness compares
+pixels but renders offscreen, which is the path that already works. **A demo
+whose colours are all wrong passes every check we have** — that is the more
+important finding than the bug itself, and it is why this reached a user.
+
+### BUG — a readback buffer is unmapped while its map is still resolving
+
+**Reported running lumen in the browser:**
+
+```
+gpu error: readback 386.1 (command 989) could not be mapped:
+AbortError: Failed to execute 'mapAsync' on 'GPUBuffer':
+Buffer was unmapped before mapping was resolved.
+```
+
+The new `ReadbackFailed` reply is doing its job — this is the error surfacing
+rather than the poll spinning for ever, which is exactly what that slice was
+for. But the underlying defect is real and is ours: something unmaps or destroys
+the staging buffer between `mapAsync` being issued and its promise settling.
+
+Look at the readback ring's lifecycle in `web/engine/gpu-replay.js` and the
+tracker in `crates/crcbl-webgpu/src/hal/device.rs`: a buffer reused for the next
+frame's readback, a `DestroyBuffer` arriving while a map is outstanding, or the
+ring wrapping under a frame rate the parity harness never reaches. lumen is the
+heaviest demo, which is consistent with a ring that is big enough for the
+others.
+
+Reproduce with lumen specifically — the golden harness does one readback per
+scene and never wraps, so it will not show this.
+
 ### After the WebGPU migration: features, then the sample that proves them
 
 The standing pattern from the roadmap — build the feature, then ship the sample
