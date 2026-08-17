@@ -277,6 +277,22 @@ report from a user cannot say which GPU produced it.
 lines come from `contentscript.js` / `inpage.js` — a MetaMask content script
 injected into the page. Unrelated to crcbl.
 
+### No browser probe exercises debug markers or indirect dispatch
+
+`insert_debug_marker`, `end_debug_label` and `dispatch_indirect` are wired and
+covered by the node replayer's stubs, but **nothing drives them against a real
+browser** — `web/probe/` has no group for either.
+
+`DispatchIndirect` is the one worth a group and it is testable end to end: write
+the three workgroup counts with `WriteBuffer`, dispatch off them, and read back
+a storage buffer sized by those counts, so a wrong count is visible rather than
+inferred. The debug ops produce no readable state and can only be seen in a
+capture tool, so they may never be probe-able — say that rather than pretending
+a group would prove something.
+
+Note adding a group changes the check count `run-probe-e2e.sh` asserts (55
+today), which is why the wiring slice deliberately left the probe alone.
+
 ### Smaller things the WebGPU work surfaced and did not fix
 
 - **A device error names no command.** `Reply::DeviceErrors` carries the
@@ -332,30 +348,6 @@ Same shape as the seam merge that already worked — move them to
 `crates/crcbl/tests/`, drive through `crcbl::backend::open` under `CRCBL_GPU`,
 and add the four CI steps beside the existing suites. Expect it to find
 divergences, as the seam merge did on dx12.
-
-### `dispatch_indirect` has no command or replay yet
-
-`CommandEncoder::dispatch_indirect` (`crates/crcbl-hal/src/command.rs`, the HAL
-trait method) is deliberately not wired into the WebGPU command stream: there is
-no `Command` variant, no writer/reader arm, no tag, and no `gpu-replay.js` arm
-for it. Left out of the compute-passes slice (7c) on purpose.
-
-**Why it is blocked, not merely deferred.** An indirect dispatch reads its three
-workgroup counts out of a buffer's contents at replay time. Nothing on this seam
-can yet write _arbitrary_ bytes there: `FillBuffer` shipped in 7d-a but WebGPU's
-`clearBuffer` is zero-only, so a non-zero count cannot be written with it, and
-there is still no host→buffer upload command. The indirect-args buffer would
-hold either a fresh buffer's zeros or a zero fill — a no-op the gate could not
-tell from a stub. The direct `Dispatch` shipped in 7c takes its counts inline,
-which is exactly why it _could_ be observed (its probe reads back `0xDEADBEEF`).
-
-**Its natural gate.** Add a host→buffer upload command (or a valued fill on a
-backend that has one) first, write the three counts into the args buffer with
-it, then `dispatch_indirect` off that buffer and read back a storage buffer
-sized/written by those counts — so a wrong count is visible. Until non-zero
-bytes can be written, an indirect-dispatch probe would assert nothing. Verified
-by grep: `dispatch_indirect` appears only in `crcbl-hal` and the null/vk
-backends, with no `crcbl-webgpu` command, tag, or replay arm.
 
 ### Non-zero `fill_buffer` is refused on the WebGPU backend
 
