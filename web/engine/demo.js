@@ -84,7 +84,7 @@ const CANVAS_ID = 1;
 
 /**
  * @typedef {object} DemoSpec
- * @property {() => Promise<Record<string, any>>} init the wasm-bindgen glue's
+ * @property {() => Promise<Record<string, any>>} init the loader module's
  *   default export, which resolves to the instance's raw exports
  * @property {(exports: Record<string, any>) => SampleApi} bind
  * @property {string} hint what to press, shown beside "Playing."

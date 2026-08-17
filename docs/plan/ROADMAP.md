@@ -1228,11 +1228,11 @@ gets recorded in the relevant crate's docs rather than worked around silently.
 - The demos are a **subdomain, not a subpath under the org site**, and that is
   deliberate. `www.kryptic.sh` is prose built from one template by a stdlib
   Python script; this site is build output — `cargo build --target wasm32`,
-  `wasm-bindgen`, committed shader artifacts, and a headless-Chromium gate.
-  Folding it into the org site would put that whole toolchain into the website's
-  CI and make every demo change wait on a second repo's deploy. The subdomain
-  keeps the pipeline where the code is. `www.kryptic.sh/crcbl/` remains the
-  project's landing page and links here.
+  committed shader artifacts, and a headless-Chromium gate. Folding it into the
+  org site would put that whole toolchain into the website's CI and make every
+  demo change wait on a second repo's deploy. The subdomain keeps the pipeline
+  where the code is. `www.kryptic.sh/crcbl/` remains the project's landing page
+  and links here.
 - `web/CNAME` carries the domain into the published artifact and the deploy
   workflow fails without it: a missing `CNAME` file silently reverts the custom
   domain on the next deploy, so it is checked rather than assumed.
@@ -1275,11 +1275,12 @@ tables):
   baked at build time and drawn through `SpriteRenderer`. Every sample that
   should have pixel art uses it; see the standing requirements above.
 - **Our own WebGPU** (see the 2026-08-15 section at the end of this file) — in
-  progress. The deployed demo site already renders through `crcbl-webgpu`;
-  `crcbl-wgpu` is still linked, is still the default backend without the
-  umbrella's `webgpu` feature, and is the last place the engine draws through
-  someone else's abstraction. The section carries the survey, the architectural
-  decision it needed first, and what a replacement does _not_ buy.
+  progress, and out of the browser: a wasm build links `crcbl-webgpu` and
+  nothing else, which took `wasm-bindgen` out of the toolchain with it.
+  `crcbl-wgpu` remains a native backend (`CRCBL_GPU=wgpu`) and the last place
+  the engine draws through someone else's abstraction. The section carries the
+  survey, the architectural decision it needed first, and what a replacement
+  does _not_ buy.
 - **Sample→engine seams** (see the 2026-08-15 section at the end of this file) —
   a standing sweep rather than a phase. When two samples carry the same
   machinery, it belongs behind an engine seam; when they carry the same
@@ -1866,11 +1867,11 @@ what would catch it not having it.
 ## Replacing `wgpu` with our own WebGPU path (planned 2026-08-15)
 
 **In progress; the slice list below says where.** `crcbl-wgpu` is the last place
-the engine draws through somebody else's abstraction, and it is no longer what
-the demo site renders through: `.github/workflows/pages.yml` builds
-`target/site` with `CRCBL_WEB_BACKEND=webgpu`, so the artifact it deploys is
-`crcbl-webgpu`. This is the plan to replace `crcbl-wgpu` outright with a backend
-that talks to WebGPU directly.
+the engine draws through somebody else's abstraction, and it is out of the
+browser entirely: it is a `cfg(not(target_arch = "wasm32"))` dependency of the
+umbrella, so a wasm build links `crcbl-webgpu` and nothing else, and
+`.github/workflows/pages.yml` needs no flag to say so. This is the plan to
+replace `crcbl-wgpu` outright with a backend that talks to WebGPU directly.
 
 The architectural decision this plan opened with has been taken, along with two
 others that widen it. They are recorded first because everything below follows
@@ -1898,11 +1899,10 @@ from them.
 `crcbl-wgpu` is about 5 900 lines over ten modules against `wgpu` 30, and
 `device.rs` is most of it. It serves **two** roles:
 
-- **The browser's default path.** `crcbl-vk` sits under a target gate in the
-  umbrella's manifest and `crcbl-wgpu` does not, so `wasm32` links it either way
-  and auto-selects it unless `crcbl`'s `webgpu` feature is on. It no longer has
-  `wasm32` to itself: `crcbl-webgpu` is a `cfg(target_arch = "wasm32")`
-  dependency of the umbrella, and it is what the deployed site renders through.
+- ~~**The browser's default path.**~~ Not any more. It sits under the same
+  target gate `crcbl-vk` does — `cfg(not(target_arch = "wasm32"))` — so `wasm32`
+  links `crcbl-webgpu` alone and auto-selects it because the target says so.
+  There is no `webgpu` feature left; it existed only to choose between the two.
 - **A second native backend**, selectable as `CRCBL_GPU=wgpu`, whose real job is
   the cross-backend image gate in `crates/crcbl/tests/run-cross-backend-e2e.sh`.
 
@@ -1916,18 +1916,22 @@ and `CommandEncoder`, plus `PendingDevice`.
 
 **Every other browser ABI in this engine is ours and imports nothing.** Storage,
 fetch, input, the log queue — each is exports-plus-polling, JS calls in and
-reads a buffer wasm owns. WebGPU is the single exception, and it is the reason
-`wasm-bindgen` is in the build at all: `wgpu`→`web-sys` leaves unresolvable
-`__wbindgen_placeholder__` imports only its CLI can link, which is why
-`web/build.sh` has to read the CLI's version out of `Cargo.lock` to match the
+reads a buffer wasm owns. WebGPU was the single exception, and it was the reason
+`wasm-bindgen` was in the build at all: `wgpu`→`web-sys` left unresolvable
+`__wbindgen_placeholder__` imports only its CLI could link, which is why
+`web/build.sh` had to read the CLI's version out of `Cargo.lock` to match the
 crate.
 
-The measurable end state is in `web/tools/check-exports.mjs`, whose
-`ALLOWED_IMPORT_MODULES` set today holds the two `__wbindgen_*` placeholders and
-the emitted glue file. With decisions 1 and 2 both landed that set becomes
-**empty**, and the assertion strengthens from "imports only wasm-bindgen's glue"
-to "imports nothing at all". That file is where this track's success is
-measured.
+**That end state is reached, and it is measured in
+`web/tools/check-exports.mjs`:** its `ALLOWED_IMPORT_MODULES` set is now
+**empty**, so the assertion is "this module imports nothing at all" rather than
+"imports only wasm-bindgen's glue". Measured on the site this repository builds,
+per demo: 338 imports before, 0 after, and 1.57 MB off every `.wasm`.
+`wasm-bindgen` is not merely unused but unusable — with none of its runtime
+intrinsics linked the CLI exits with
+`failed to find intrinsics to enable 'clone_ref' function` — so `web/build.sh`
+copies the artifact and `web/tools/wasm-loader.js` beside it instead of running
+the tool.
 
 It is also the one place the **capability seam** reports someone else's opinion.
 `crcbl-wgpu` maps `wgpu::Features` onto `crcbl_hal::Features` by hand; a direct
@@ -2336,9 +2340,9 @@ something trusted, and in a browser the only trusted renderer today is
    ChaCha20 CSPRNG on wasm32 (the 32-byte export shim, fail-closed until
    seeded). `crcbl-server` draws resume tokens through it, so `getrandom` leaves
    the wasm32 graph entirely — **one of the two wasm-bindgen roots gone**, the
-   other being `wgpu`. `ALLOWED_IMPORT_MODULES` is NOT emptied yet: `wgpu`'s
-   glue is still imported until slice 11, so that step moves there. The `Rng`
-   ships tested but unwired — procgen/noise consume it later.
+   other being `wgpu`. `ALLOWED_IMPORT_MODULES` was NOT emptied here: `wgpu`'s
+   glue was still imported, so that step moved into slice 11, where it landed.
+   The `Rng` ships tested but unwired — procgen/noise consume it later.
 10. **Parity gate**: every `render_e2e` scene drawn through the new backend in a
     browser, checked against the shared references. This is the exit criterion,
     and it is what makes the switch a measurement rather than a hope. **It needs
@@ -2347,20 +2351,29 @@ something trusted, and in a browser the only trusted renderer today is
     frames and present-feedback the stream itself does not carry. That
     integration is the bulk of this slice; the golden-image comparison is what
     it unlocks.
-11. Flip the browser default, delete `crcbl-wgpu` and
-    `run-cross-backend-e2e.sh`, drop the `wgpu` and `wasm-bindgen` dependencies,
-    empty `ALLOWED_IMPORT_MODULES` (deferred from slice 9 — the last
-    wasm-bindgen glue import goes with `wgpu`), and correct the `crcbl-mtl` and
-    `crcbl-dx12` manifest comments.
+11. **The browser half is done.** `crcbl-wgpu` is a
+    `cfg(not(target_arch = "wasm32"))` dependency of the umbrella, so no wasm
+    build links it; `crcbl`'s `webgpu` feature is deleted, because with one
+    browser backend there is nothing for it to select; `CRCBL_WEB_BACKEND` is
+    deleted with it; and `ALLOWED_IMPORT_MODULES` is **empty** (deferred here
+    from slice 9 — the last wasm-bindgen glue import went with `wgpu`). Measured
+    per demo on the site this repository builds: 338 imports → 0, and 1.57 MB
+    off every `.wasm` (breakout 3,182,323 → 1,609,109 bytes; lumen 3,565,467 →
+    1,995,548).
 
-    **The deployed site has already moved**, ahead of the rest of this slice:
-    `pages.yml` builds `target/site` with `CRCBL_WEB_BACKEND=webgpu` and gates
-    all five browser-gated demos against it. What is left here is the library
-    default — `crcbl`'s `webgpu` feature is still off — and the deletions. Those
-    have a cost this slice has to answer for: the browser gate's probe groups (G
-    through Z in `web/tools/browser-e2e.mjs`) can only install their own
-    command-stream channel on a `wgpu` site, because in webgpu mode the engine's
-    device owns the one channel. A single wgpu run in `pages.yml` is what keeps
-    them running, so deleting `crcbl-wgpu` retires the whole probe list —
-    including every readback that compares real pixel values — and a replacement
-    for them has to land in the same change.
+    `wasm-bindgen` went with it, and had to: with none of its runtime intrinsics
+    linked the CLI refuses to process the module at all. `web/build.sh` and
+    `web/run-render-harness-e2e.sh` copy the artifact and
+    `web/tools/wasm-loader.js` beside it — the loader keeps the glue's contract,
+    a default export resolving to the instance's raw exports — and `pages.yml`
+    installs no tool.
+
+    The probe cost this slice had to answer for was answered before it: the
+    groups (G through Z) are `web/tools/probe-groups.mjs`, driven by
+    `web/run-probe-e2e.sh` against `web/probe/`, a page with no engine running,
+    which frees the one command-stream channel without a second backend.
+
+    **What is left in this slice is native**: delete `crcbl-wgpu` and
+    `run-cross-backend-e2e.sh`, drop the `wgpu` dependency, and correct the
+    `crcbl-mtl` and `crcbl-dx12` manifest comments. `CRCBL_GPU=wgpu`, the
+    `wgpu-e2e` suite and the agnostic seam suite all still run against it today.

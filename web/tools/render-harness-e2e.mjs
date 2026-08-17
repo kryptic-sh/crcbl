@@ -21,7 +21,7 @@
 // USAGE
 //   node web/tools/render-harness-e2e.mjs <site-dir> [--readback-dir <dir>]
 //
-//   <site-dir>       A directory with `harness/index.html` and the wasm-bindgen
+//   <site-dir>       A directory with `harness/index.html` and the loader-plus-
 //                    output beside it; `web/run-render-harness-e2e.sh`
 //                    assembles one.
 //   --readback-dir   Where to write the readbacks, as

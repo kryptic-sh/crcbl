@@ -2,8 +2,9 @@
 # Builds the demo site into `target/site/`.
 #
 # The same script the Pages workflow runs, so "it works in CI" and "it works on
-# my machine" are the same claim. Nothing here is npm: the only tool is
-# `wasm-bindgen`, pinned below to the version in `Cargo.lock`.
+# my machine" are the same claim. Nothing here is npm, and since `crcbl-wgpu`
+# stopped being a wasm dependency there is no `wasm-bindgen` either — `cargo`,
+# `python3` and `node` are the whole tool list. See "no wasm-bindgen" below.
 #
 #   ./web/build.sh                 # build everything into target/site
 #   ./web/build.sh --serve         # …and serve it on http://localhost:8000
@@ -35,35 +36,27 @@ DEMOS=(
   "lumen:crcbl_lumen:demos/lumen"
 )
 
-# The `wasm-bindgen` CLI must match the `wasm-bindgen` crate the build resolved,
-# or it refuses with a version-mismatch error. Read it from the lockfile rather
-# than pinning it twice.
-bindgen_version() {
-  awk '/^name = "wasm-bindgen"$/ { found = 1; next }
-       found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' "$REPO/Cargo.lock"
-}
-
-BINDGEN_VERSION="$(bindgen_version)"
-if [ -z "$BINDGEN_VERSION" ]; then
-  echo "web/build.sh: no wasm-bindgen in Cargo.lock — is wgpu still a dependency?" >&2
-  exit 1
-fi
-
-if ! command -v wasm-bindgen >/dev/null 2>&1; then
-  echo "web/build.sh: wasm-bindgen not found." >&2
-  echo "  cargo install wasm-bindgen-cli --version $BINDGEN_VERSION --locked" >&2
-  exit 1
-fi
-
-HAVE_VERSION="$(wasm-bindgen --version | awk '{print $2}')"
-if [ "$HAVE_VERSION" != "$BINDGEN_VERSION" ]; then
-  # Not a warning. A mismatched CLI produces glue whose imports the module does
-  # not have, and the failure surfaces as a `LinkError` in a browser rather than
-  # here.
-  echo "web/build.sh: wasm-bindgen $HAVE_VERSION, but Cargo.lock has $BINDGEN_VERSION." >&2
-  echo "  cargo install wasm-bindgen-cli --version $BINDGEN_VERSION --locked --force" >&2
-  exit 1
-fi
+# NO wasm-bindgen. This script used to run it over every artifact, and the pin
+# it needed — the CLI version has to equal the `wasm-bindgen` crate the build
+# resolved — was the one piece of tooling setup this repository asked of anyone
+# building the site.
+#
+# It is gone because the reason for it is. `wgpu` reached WebGPU through
+# `web-sys`, `web-sys` *is* `wasm-bindgen`, and `crcbl-wgpu` was an
+# unconditional dependency of the umbrella; a raw artifact therefore imported
+# ~340 functions from `__wbindgen_placeholder__` and would not instantiate
+# without the tool resolving them. `crcbl-wgpu` is a
+# `cfg(not(target_arch = "wasm32"))` dependency now, nothing else in a browser
+# build reaches `web-sys`, and the artifacts import **nothing at all** —
+# `web/tools/check-exports.mjs` is what asserts that, per demo, every build.
+#
+# Not merely unnecessary: impossible. With no `wasm-bindgen` crate linked, its
+# runtime intrinsics are absent and the CLI exits with `failed to find
+# intrinsics to enable ‘clone_ref’ function` rather than passing the module
+# through. So the choice was to keep a browser GPU backend nothing renders
+# through, or to replace the tool's one remaining product — the `<lib>.js` that
+# pages `import init from` — with `web/tools/wasm-loader.js`, which is what the
+# copy below does. That file documents the contract it preserves.
 
 echo "==> assembling $SITE"
 rm -rf "$SITE"
@@ -95,37 +88,36 @@ done
 profile_flag=()
 [ "$PROFILE" = "release" ] && profile_flag=(--release)
 
-# Which browser GPU backend the wasm links. `wgpu` is the default and builds
-# exactly as before; `webgpu` turns on the umbrella's `webgpu` feature, which
-# flips the auto-selected backend from `crcbl-wgpu` to `crcbl-webgpu` (see
-# `crates/crcbl/src/backend.rs`). A `--features crcbl/webgpu` on a `-p breakout`
-# build is valid — it names the umbrella the sample already depends on.
-feature_flag=()
-BACKEND="${CRCBL_WEB_BACKEND:-wgpu}"
-case "$BACKEND" in
-  wgpu) ;;
-  webgpu) feature_flag=(--features crcbl/webgpu) ;;
-  *)
-    echo "web/build.sh: CRCBL_WEB_BACKEND='$BACKEND' is not one of wgpu, webgpu" >&2
-    exit 1
-    ;;
-esac
-echo "==> browser GPU backend: $BACKEND"
+# THERE IS NO BACKEND CHOICE HERE ANY MORE, AND THAT IS THE POINT.
+#
+# This used to read `CRCBL_WEB_BACKEND` and pass `--features crcbl/webgpu` for
+# one of its two values, because a browser build linked both `crcbl-wgpu` and
+# `crcbl-webgpu` and something had to say which one `crcbl::backend` picked.
+# `crcbl-wgpu` is a `cfg(not(target_arch = "wasm32"))` dependency of the umbrella
+# now (see `crates/crcbl/Cargo.toml`), so a wasm build has exactly one GPU
+# backend and the feature that chose between them is gone with the choice.
+#
+# Old invocations that still export `CRCBL_WEB_BACKEND=webgpu` get what they
+# asked for: the variable is ignored and `crcbl-webgpu` is what builds.
+echo "==> browser GPU backend: webgpu (crcbl-webgpu, the only one a wasm build links)"
 
 for row in "${DEMOS[@]}"; do
   IFS=: read -r crate lib dest <<<"$row"
-  echo "==> cargo build --lib -p $crate --target $TARGET ($PROFILE, $BACKEND)"
+  echo "==> cargo build --lib -p $crate --target $TARGET ($PROFILE)"
   # `--lib`: the package also has a bin, and building both writes two files with
   # the same name. See `apps/breakout/Cargo.toml`.
-  (cd "$REPO" && cargo build --locked --lib -p "$crate" --target "$TARGET" "${profile_flag[@]}" "${feature_flag[@]}")
+  (cd "$REPO" && cargo build --locked --lib -p "$crate" --target "$TARGET" "${profile_flag[@]}")
 
   wasm="$REPO/target/$TARGET/$PROFILE/$lib.wasm"
-  echo "==> wasm-bindgen $lib.wasm"
-  # `--target web`: a plain ES module the page imports, no bundler, no npm
-  # package layout. The generated glue exists for `wgpu`'s `web-sys` calls; the
-  # engine's own ABI is the hand-written `extern "C"` exports, which the module
-  # keeps and which `init()` returns as `wasm`.
-  wasm-bindgen --target web --no-typescript --out-dir "$SITE/$dest" "$wasm"
+  echo "==> publishing $lib.wasm"
+  # The same two filenames `wasm-bindgen --target web` produced, because every
+  # page imports them by name: `<lib>_bg.wasm` is the artifact, unmodified, and
+  # `<lib>.js` is the ES module whose default export instantiates it. One
+  # loader serves them all — it finds the module beside itself — so this is a
+  # copy rather than a generated file per demo.
+  mkdir -p "$SITE/$dest"
+  cp "$wasm" "$SITE/$dest/${lib}_bg.wasm"
+  cp "$REPO/web/tools/wasm-loader.js" "$SITE/$dest/$lib.js"
 
   echo "==> checking the JS↔wasm export contract"
   node "$REPO/web/tools/check-exports.mjs" "$SITE/$dest/${lib}_bg.wasm" --sample "$crate" --quiet

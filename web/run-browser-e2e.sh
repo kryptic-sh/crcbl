@@ -39,6 +39,12 @@
 #   with `+atomics`. Nothing else in the repository would notice those headers
 #   going missing, so the named-check guard below insists that assertion ran.
 #
+#   It is **not** the gate on `crcbl-webgpu`'s command stream. Those are the
+#   PROBE groups in `web/tools/probe-groups.mjs`, driven by
+#   `web/run-probe-e2e.sh` against a page with no engine running on it. This
+#   script is the demo gate, and the demo renders through `crcbl-webgpu` because
+#   that is the only GPU backend a wasm build of the umbrella links.
+#
 # WHAT IT NEEDS
 #   * **A Chromium or Chrome with WebGPU.** `CRCBL_CHROMIUM` pins one;
 #     otherwise `google-chrome`, `google-chrome-stable`, `chromium` and
@@ -132,24 +138,6 @@ BUILD=0
 HEADLESS=0
 SCREEN="${CRCBL_WEB_E2E_SCREEN:-1280x800x24}"
 DISPLAY_TIMEOUT_S="${CRCBL_WEB_E2E_DISPLAY_TIMEOUT_S:-20}"
-
-# Which browser GPU backend the site renders through. `wgpu` is the default;
-# `webgpu` builds with the umbrella's `webgpu` feature (via `CRCBL_WEB_BACKEND`,
-# which `web/build.sh` reads) so the demo renders through `crcbl-webgpu`. The
-# same groups run either way — all the driver does with this is expect the
-# adapter line of the backend that opened the device.
-#
-# The `crcbl-webgpu` seam groups are not here any more and no longer care which
-# backend the demo uses: they are `web/run-probe-e2e.sh`, driven against a page
-# with no engine on it. This script is the demo gate.
-BACKEND="${CRCBL_WEB_BACKEND:-wgpu}"
-case "$BACKEND" in
-    wgpu | webgpu) ;;
-    *)
-        echo "crcbl web e2e: CRCBL_WEB_BACKEND='$BACKEND' is not one of wgpu, webgpu" >&2
-        exit 1
-        ;;
-esac
 
 while [ "$#" -gt 0 ]; do
     case "$1" in

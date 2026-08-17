@@ -23,11 +23,12 @@
 # rendered is the browser half's crack, and a scene that rendered the wrong
 # picture is the comparator's. Either one is a red gate.
 #
-# It builds `apps/render-harness` to wasm with `--features crcbl/webgpu`, which
-# is what flips the auto-selected browser backend to `crcbl-webgpu`.
+# It builds `apps/render-harness` to wasm plainly. There is no backend flag any
+# more: `crcbl-wgpu` is a `cfg(not(target_arch = "wasm32"))` dependency of the
+# umbrella, so `crcbl-webgpu` is the only GPU backend a wasm build links and
+# `crcbl::backend` auto-selects it because the target says so.
 #
 # WHAT IT NEEDS
-#   * wasm-bindgen, pinned to the Cargo.lock version, exactly as web/build.sh.
 #   * Node 22+ (for the global WebSocket the DevTools client uses).
 #   * A Chromium/Chrome with WebGPU. CRCBL_CHROMIUM pins one; otherwise the usual
 #     four names are tried. No Xvfb is needed: the harness reads an offscreen
@@ -51,35 +52,14 @@ TARGET=wasm32-unknown-unknown
 CRATE=render-harness
 LIB=crcbl_render_harness
 
-bindgen_version() {
-  awk '/^name = "wasm-bindgen"$/ { found = 1; next }
-       found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' "$REPO/Cargo.lock"
-}
-
-BINDGEN_VERSION="$(bindgen_version)"
-if [ -z "$BINDGEN_VERSION" ]; then
-  echo "run-render-harness-e2e.sh: no wasm-bindgen in Cargo.lock" >&2
-  exit 1
-fi
-if ! command -v wasm-bindgen >/dev/null 2>&1; then
-  echo "run-render-harness-e2e.sh: wasm-bindgen not found." >&2
-  echo "  cargo install wasm-bindgen-cli --version $BINDGEN_VERSION --locked" >&2
-  exit 1
-fi
-HAVE_VERSION="$(wasm-bindgen --version | awk '{print $2}')"
-if [ "$HAVE_VERSION" != "$BINDGEN_VERSION" ]; then
-  echo "run-render-harness-e2e.sh: wasm-bindgen $HAVE_VERSION, but Cargo.lock has $BINDGEN_VERSION." >&2
-  echo "  cargo install wasm-bindgen-cli --version $BINDGEN_VERSION --locked --force" >&2
-  exit 1
-fi
-
 profile_flag=()
 [ "$PROFILE" = "release" ] && profile_flag=(--release)
 
 echo "==> cargo build --lib -p $CRATE --target $TARGET ($PROFILE, webgpu)"
-# `--features crcbl/webgpu` flips the auto-selected browser backend from
-# crcbl-wgpu to crcbl-webgpu — the backend this gate exists to exercise.
-(cd "$REPO" && cargo build --locked --lib -p "$CRATE" --target "$TARGET" "${profile_flag[@]}" --features crcbl/webgpu)
+# No feature flag: on wasm32 `crcbl-webgpu` is the umbrella's only GPU backend
+# and therefore the one `crcbl::backend` opens — which is the backend this gate
+# exists to exercise.
+(cd "$REPO" && cargo build --locked --lib -p "$CRATE" --target "$TARGET" "${profile_flag[@]}")
 
 echo "==> assembling $SITE"
 rm -rf "$SITE"
@@ -94,9 +74,15 @@ done
 cp "$REPO/web/harness/index.html" "$SITE/harness/index.html"
 cp "$REPO/web/harness/main.js" "$SITE/harness/main.js"
 
-echo "==> wasm-bindgen $LIB.wasm"
-wasm-bindgen --target web --no-typescript --out-dir "$SITE/harness" \
-  "$REPO/target/$TARGET/$PROFILE/$LIB.wasm"
+# The two filenames `web/harness/main.js` imports, laid out exactly as
+# `web/build.sh` lays a demo out: the artifact unmodified as `<lib>_bg.wasm`,
+# and `web/tools/wasm-loader.js` as the `<lib>.js` whose default export
+# instantiates it. There is no `wasm-bindgen` step here any more — see that
+# file, and `web/build.sh`'s "no wasm-bindgen" note, for why the tool cannot
+# run over an artifact that imports nothing.
+echo "==> publishing $LIB.wasm"
+cp "$REPO/target/$TARGET/$PROFILE/$LIB.wasm" "$SITE/harness/${LIB}_bg.wasm"
+cp "$REPO/web/tools/wasm-loader.js" "$SITE/harness/$LIB.js"
 
 # Inside $SITE, which was just removed and rebuilt, so it starts empty every run
 # — a stale readback from a previous run is a comparison against the wrong frame,

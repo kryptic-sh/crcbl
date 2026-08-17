@@ -26,7 +26,6 @@ crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }
 crcbl-shell = { workspace = true }
 crcbl-ui = { workspace = true }
-crcbl-wgpu = { workspace = true }
 # The simulation half, added so a sample can stop naming them. Every one is a
 # crate the four games already depended on by path; none of them depends on
 # this crate, so the re-export introduces no cycle.
@@ -56,11 +55,12 @@ glam = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 
-# The browser's GPU seam, and only where a browser is. `crcbl-webgpu` is the
-# wasm → JS command stream: pure encoding plus the three `__crcbl_web_gpu_*`
-# entry points `web/engine/gpu-transport.js` drains once a frame. Per-target for
-# the reason `crcbl-vk` below is — the target already says whether a browser is
-# the host — and wasm32 rather than a feature because a native build has no
+# The browser's GPU seam, and only where a browser is — and now the *only* GPU
+# backend a browser build links. `crcbl-webgpu` is the wasm → JS
+# command stream: pure encoding plus the three `__crcbl_web_gpu_*` entry points
+# `web/engine/gpu-transport.js` drains once a frame. Per-target for the reason
+# `crcbl-vk` below is — the target already says whether a browser is the host —
+# and wasm32 rather than a feature because a native build has no
 # `requestAnimationFrame` to drain it from and would link an ABI nothing can
 # call.
 #
@@ -82,8 +82,23 @@ crcbl-webgpu = { workspace = true }
 # and a feature that must be remembered is a feature that will be forgotten.
 # `src/backend.rs` gates the matching registry entry with the same `cfg`, so the
 # browser's table contains only backends that exist.
+#
+# `crcbl-wgpu` is here for a *different* reason, and it is the newer of the two.
+# It compiles for wasm32 perfectly well — that is how the demos reached a
+# browser GPU before `crcbl-webgpu` existed — so this line is not about what can
+# build. It is about what a browser build should *contain*: `crcbl-webgpu` is
+# the browser's backend now, the whole demo site and the golden-scene parity
+# harness render through it, and a second GPU backend linked beside it was
+# nothing but weight. `wgpu` reaches the browser through `web-sys`, so linking
+# it also made `wasm-bindgen` a mandatory post-processing step for an engine
+# whose own ABI is hand-written `extern "C"` exports.
+#
+# It stays a first-class **native** backend: `CRCBL_GPU=wgpu` on every desktop
+# platform, its own `wgpu-e2e` suite, and the agnostic seam suite
+# (`tests/run-hal-seam-e2e.sh`) runs against it. Only the browser lost it.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crcbl-vk = { workspace = true }
+crcbl-wgpu = { workspace = true }
 
 # Metal, and only where Metal exists. `crcbl-mtl` is `#[cfg(target_os =
 # "macos")]` from its crate root down and its `objc2-*` dependencies are pinned
@@ -163,13 +178,15 @@ hal-seam-e2e = []
 # no glTF parser, which `cargo tree -p <sample> -e normal` is what says.
 scene = ["dep:crcbl-scene"]
 
-# Flips the browser's auto-selected backend from `crcbl-wgpu` to `crcbl-webgpu`.
-# **Off by default**, so a plain build is byte-for-byte what it was: `wgpu` is
-# still the browser's automatic backend and `webgpu` still refuses by name on
-# every target. Turning it on makes `crcbl-webgpu` the `wasm32` auto-backend
-# and `wgpu` opt-in there — the permanent form of the temporary registry flip
-# the WebGPU render was proven through. It is a no-op on native: the flip is
-# `#[cfg(target_arch = "wasm32")]`-gated in `src/backend.rs`, so a native build
-# with `--all-features` sees `webgpu` refuse exactly as it does without it.
-# `web/build.sh` passes `--features crcbl/webgpu` when `CRCBL_WEB_BACKEND=webgpu`.
-webgpu = []
+# THERE IS NO `webgpu` FEATURE ANY MORE, AND ITS ABSENCE IS THE POINT.
+#
+# It existed to pick which of two browser backends `src/backend.rs`
+# auto-selected on `wasm32`, while `crcbl-webgpu` was taking over from
+# `crcbl-wgpu`. Now that `crcbl-wgpu` is a `cfg(not(wasm32))` dependency above,
+# a browser build has exactly one GPU backend and there is nothing left to pick:
+# a feature whose every arm makes the same choice is a switch that reads as
+# configuration and configures nothing. `crcbl-webgpu` is the wasm32 backend
+# because the target says so, the same way `crcbl-vk` is the native one.
+#
+# `web/build.sh` and `web/run-render-harness-e2e.sh` used to pass
+# `--features crcbl/webgpu`; both now build plainly.

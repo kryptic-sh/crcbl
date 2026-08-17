@@ -32,25 +32,19 @@
 //! [`GpuError::NoBackend`] names the actual problem. Null is reachable only by
 //! asking for it.
 //!
-//! The same rule is why [`GpuBackend::WebGpu`] is **registered and, by
-//! default, refuses** rather than absent or aliased. `crcbl-webgpu` is the
-//! backend that replaces `crcbl-wgpu` in the browser, and the two have to be
-//! selectable apart while that happens. Aliasing `webgpu` onto
+//! The same rule is why [`GpuBackend::WebGpu`] is **registered on native and
+//! refuses there** rather than being absent or aliased. Aliasing `webgpu` onto
 //! [`GpuBackend::Wgpu`], which is what `from_name` used to do, would make every
 //! `CRCBL_GPU=webgpu` run report success about wgpu; leaving the name
 //! unregistered would report it as unknown, which reads as a typo rather than
-//! as work in progress. So the entry always exists.
+//! as a backend this host cannot have. So the entry always exists, and off
+//! `wasm32` it refuses with `WEBGPU_NOT_IMPLEMENTED`: there is no browser there
+//! to encode the command stream against, so a native `open` of `webgpu` says so
+//! rather than hanging on a future nothing drains.
 //!
-//! What it *does* is behind the crate's off-by-default `webgpu` feature. With
-//! the feature off — the default, and what a plain build gets — `crcbl-webgpu`
-//! opens no device and the entry refuses by name with `WEBGPU_NOT_IMPLEMENTED`
-//! on every target, exactly as it did before the render landed. With the feature
-//! on, `open` is wired to `crcbl_webgpu::WebGpuInstanceOpen` on `wasm32` and
-//! the browser's auto-backend flips from `wgpu` to `webgpu` (see the auto flags
-//! below). The refusal stays on native even with the feature on, because there
-//! is no browser there to encode the command stream against — a native `open`
-//! of `webgpu` returns `WEBGPU_NOT_IMPLEMENTED` rather than hanging on a future
-//! nothing drains.
+//! On `wasm32` it is the browser's one GPU backend, opened through
+//! `crcbl_webgpu::WebGpuInstanceOpen`. There is no feature to turn that on: see
+//! "the table is not the same on every target" below.
 //!
 //! # Opening is polled, because the web says so
 //!
@@ -79,13 +73,21 @@
 //! X11 to Linux, so nothing else in this file mentions a target and the walk in
 //! [`PendingInstance::poll`] needs no conditional compilation of its own.
 //!
-//! One consequence is deliberate: **`wgpu` is auto-selectable on `wasm32` and
-//! not on native** — unless the `webgpu` feature is on, which hands that browser
-//! slot to [`GpuBackend::WebGpu`] instead. Exactly one of the two is automatic
-//! on `wasm32`, decided by the feature: `wgpu` by default, `webgpu` with the
-//! feature. The browser needs one automatic backend or an `open()` there could
-//! never succeed; on native Vulkan is the performance path and both wgpu and
-//! webgpu stay the ones a developer asks for by name.
+//! **[`GpuBackend::Wgpu`] is gated the same way, and that one is a choice
+//! rather than a constraint.** `crcbl-wgpu` compiles for `wasm32` — it is how
+//! the demos reached a browser GPU before `crcbl-webgpu` existed — but a
+//! browser build has no use for a second GPU backend beside the one it renders
+//! through, and linking it dragged `web-sys` (and therefore a mandatory
+//! `wasm-bindgen` pass) into every `.wasm`. So the manifest makes it
+//! `cfg(not(target_arch = "wasm32"))` and this entry follows. It is unchanged
+//! on native: registered, never automatic, and reached by `CRCBL_GPU=wgpu`.
+//!
+//! What that leaves is one automatic backend per target with no feature
+//! deciding it: **[`GpuBackend::WebGpu`] on `wasm32`**, Metal on macOS, Vulkan
+//! on the rest of native. The browser needs an automatic backend or an `open()`
+//! there could never succeed, and it now has exactly one candidate. There used
+//! to be a `webgpu` feature here choosing between `wgpu` and `webgpu` in the
+//! browser; it went when the choice did.
 //!
 //! The other is **Metal, and only Metal, on macOS**. `docs/plan/09-backends-
 //! metal-dx12.md`'s 2026-08-05 correction settles the platform question: Apple
@@ -135,17 +137,21 @@ pub enum GpuBackend {
     /// `crcbl-hal`'s recording no-op backend. Renders nothing; never selected
     /// automatically.
     Null,
-    /// `crcbl-wgpu` — wgpu, native or WebGPU (P5).
-    Wgpu,
-    /// `crcbl-webgpu` — WebGPU reached straight from wasm, the backend meant to
-    /// replace [`Wgpu`](Self::Wgpu) in the browser.
+    /// `crcbl-wgpu` — wgpu (P5), and a **native** backend only.
     ///
-    /// Selectable by name so the two can be told apart during the transition.
-    /// Whether it *opens* is behind the umbrella's off-by-default `webgpu`
-    /// feature: without it, and on native even with it, the entry refuses with
-    /// [`GpuError::Backend`] rather than quietly landing on wgpu; with the
-    /// feature on `wasm32` it opens a real device through the command stream and
-    /// is the browser's automatic backend.
+    /// `CRCBL_GPU=wgpu` reaches it on every desktop platform. It is not
+    /// registered on `wasm32`: the browser renders through
+    /// [`WebGpu`](Self::WebGpu), and `crcbl-wgpu` is not a dependency there at
+    /// all — see this crate's manifest.
+    Wgpu,
+    /// `crcbl-webgpu` — WebGPU reached straight from wasm, and the browser's
+    /// only GPU backend.
+    ///
+    /// Automatic on `wasm32`, where it opens a real device through the command
+    /// stream. Off `wasm32` there is no browser to encode that stream against,
+    /// so the entry is registered — `CRCBL_GPU=webgpu` must not read as a typo —
+    /// and refuses with [`GpuError::Backend`] rather than quietly landing on
+    /// [`Wgpu`](Self::Wgpu).
     WebGpu,
 }
 
@@ -260,15 +266,15 @@ struct Registration {
 /// so a log reader can tell "not turned on here" from a broken driver.
 ///
 /// It is what the entry returns off `wasm32`: there is no browser there to
-/// encode the command stream against, so `webgpu` refuses by name whether or not
-/// the feature is on. On `wasm32` the backend is always openable by name and
-/// this string is never produced, which is why it is `#[cfg]`-ed to the targets
-/// that use it — an ungated `const` would be dead code in every browser build.
-/// Named rather than written into the table, so the registry entry and the test
-/// that proves the refusal point at one string instead of two that can drift.
+/// encode the command stream against, so `webgpu` refuses by name. On `wasm32`
+/// the backend is openable and this string is never produced, which is why it is
+/// `#[cfg]`-ed to the targets that use it — an ungated `const` would be dead
+/// code in every browser build. Named rather than written into the table, so the
+/// registry entry and the test that proves the refusal point at one string
+/// instead of two that can drift.
 #[cfg(not(target_arch = "wasm32"))]
 const WEBGPU_NOT_IMPLEMENTED: &str = "the crcbl-webgpu backend is not active in this build — it \
-    reaches a device only on wasm32, where the umbrella's `webgpu` feature also makes it automatic";
+    reaches a device only on wasm32, where it is the automatic backend";
 
 /// Every backend compiled into this build, in the order [`request_open`] tries
 /// them.
@@ -346,15 +352,17 @@ static REGISTRY: &[Registration] = &[
             )
         },
     },
+    // Native only, gated on the element like every other per-target entry.
+    // `crcbl-wgpu` builds for wasm32 and this is still `#[cfg]`-ed out there:
+    // the manifest stops naming it on that target, so there is nothing to call.
+    // See the module docs for why a browser build carries one GPU backend.
+    #[cfg(not(target_arch = "wasm32"))]
     Registration {
         backend: GpuBackend::Wgpu,
-        // The browser's default backend, so it is auto-selectable there or
-        // `request_open` could never succeed — *unless* the `webgpu` feature
-        // has handed that slot to `crcbl-webgpu`, which is the one condition
-        // that takes it away. On native Vulkan is the performance tier and wgpu
-        // stays opt-in, which is what keeps native selection order exactly what
-        // it was.
-        auto: cfg!(all(target_arch = "wasm32", not(feature = "webgpu"))),
+        // Registered and never automatic. Vulkan is native's performance tier
+        // and `CRCBL_GPU=wgpu` is what asks for this one, which is what keeps
+        // native selection order exactly what it was.
+        auto: false,
         // `new_async`, not `create_native`: adapter enumeration is a future on
         // the WebGPU backend and `create_native` is the `pollster::block_on`
         // wrapper that cannot exist there. Awaiting it costs one extra poll on
@@ -371,26 +379,24 @@ static REGISTRY: &[Registration] = &[
             })
         },
     },
-    // Registered so the name resolves, and *conditionally* openable. `webgpu`
-    // has to be selectable apart from `wgpu` while `crcbl-webgpu` takes over the
-    // browser, and the two failure modes that would make the transition
-    // unreadable are a silent fall-through onto wgpu and a panic — this entry is
-    // neither.
+    // The browser's backend, and registered everywhere so the *name* always
+    // resolves. Off `wasm32` it refuses: `CRCBL_GPU=webgpu` on a desktop has to
+    // say "not here" rather than read as a typo, and the two failure modes that
+    // would make it unreadable are a silent fall-through onto wgpu and a panic —
+    // this entry is neither.
     //
-    // Its `open` is the permanent form of the temporary registry flip the WebGPU
-    // render was proven through. On `wasm32` with the `webgpu` feature it starts
-    // a real [`crcbl_webgpu::WebGpuInstanceOpen`], the future the browser's frame
-    // loop drives to a device; everywhere else — native, or the feature off — it
-    // returns [`WEBGPU_NOT_IMPLEMENTED`]. The `cfg` on the arms is what keeps the
-    // native build from naming `crcbl_webgpu` at all (it is a `wasm32`-only
+    // On `wasm32` its `open` starts a real `crcbl_webgpu::WebGpuInstanceOpen`,
+    // the future the browser's frame loop drives to a device; on native it
+    // returns [`WEBGPU_NOT_IMPLEMENTED`]. The `cfg` on the arms is what keeps
+    // the native build from naming `crcbl_webgpu` at all (it is a `wasm32`-only
     // dependency) and from parking on a future no executor here would poll.
     //
-    // Auto only where it is the active browser backend: `wasm32` with the
-    // feature. Off it, an automatic entry that always refuses would just add a
-    // failed attempt in front of the wgpu one.
+    // Auto exactly where it can open: `wasm32`, where it is the only GPU backend
+    // in the table. An automatic entry that always refuses would add a failed
+    // attempt in front of every native start-up.
     Registration {
         backend: GpuBackend::WebGpu,
-        auto: cfg!(all(target_arch = "wasm32", feature = "webgpu")),
+        auto: cfg!(target_arch = "wasm32"),
         open: || {
             #[cfg(target_arch = "wasm32")]
             {
@@ -664,6 +670,7 @@ mod tests {
         GpuBackend::Vulkan,
         #[cfg(target_os = "windows")]
         GpuBackend::Dx12,
+        #[cfg(not(target_arch = "wasm32"))]
         GpuBackend::Wgpu,
         GpuBackend::WebGpu,
         GpuBackend::Null,
@@ -823,8 +830,8 @@ mod tests {
 
     /// Auto-selection differs by target *on purpose*, and there is exactly one
     /// automatic entry everywhere: Metal on macOS, because Apple platforms are
-    /// Metal only; Vulkan on the rest of native; and in a browser one of `wgpu`
-    /// or `webgpu`, whichever the `webgpu` feature selects (`wgpu` by default).
+    /// Metal only; Vulkan on the rest of native; and `webgpu` in a browser,
+    /// which is the only GPU backend a browser build links at all.
     /// Asserting it here is what stops a later edit from quietly making wgpu
     /// automatic on native — which would change which GPU path every existing
     /// game takes — or from leaving Vulkan
@@ -846,12 +853,10 @@ mod tests {
         assert_eq!(auto, [GpuBackend::Metal]);
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
         assert_eq!(auto, [GpuBackend::Vulkan]);
-        // In a browser the automatic backend is decided by the `webgpu`
-        // feature: `wgpu` by default, `webgpu` with the feature — and exactly
-        // one of them, which is the invariant the whole flip rests on.
-        #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
-        assert_eq!(auto, [GpuBackend::Wgpu]);
-        #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+        // A browser has one GPU backend and it is `crcbl-webgpu`. No feature
+        // decides this any more: `crcbl-wgpu` is not a dependency on wasm32, so
+        // there is no second candidate a build flag could reach.
+        #[cfg(target_arch = "wasm32")]
         assert_eq!(auto, [GpuBackend::WebGpu]);
     }
 
@@ -899,11 +904,10 @@ mod tests {
     /// *string* reaching this variant — and it used to reach
     /// [`GpuBackend::Wgpu`].
     ///
-    /// Native only now. On `wasm32` the backend is openable by name whether or
-    /// not the `webgpu` feature is on — the browser is the one host where the
-    /// command stream has something to encode against — so there is no refusal
-    /// to observe there; the browser gate is what exercises the wasm path. On
-    /// every native target `open_backend(WebGpu)` returns
+    /// Native only. On `wasm32` the backend opens — the browser is the one host
+    /// where the command stream has something to encode against — so there is no
+    /// refusal to observe there; the browser gate is what exercises the wasm
+    /// path. On every native target `open_backend(WebGpu)` returns
     /// `WEBGPU_NOT_IMPLEMENTED`, which is what this reads.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]

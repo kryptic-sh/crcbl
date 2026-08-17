@@ -3,14 +3,16 @@
 //
 // `check-exports.mjs` proves the two halves agree about *names*. This proves
 // the module actually runs: it instantiates the artifact under Node with every
-// `wasm-bindgen` import stubbed to throw, and drives the exact call order
+// import stubbed to throw, and drives the exact call order
 // `apps/<sample>/src/web.rs` specifies, up to the point where a real GPU would
 // be needed.
 //
 // WHERE IT STOPS, and why that is the honest line. The first
 // `__crcbl_<sample>_frame` after a size has been reported starts the device
-// request, which is `navigator.gpu` reached through `web-sys` — a stubbed
-// import here, and a browser everywhere else. Everything before that line is
+// request. `crcbl-webgpu` encodes that request into the command stream and
+// waits for a reply — which arrives from `navigator.gpu` by way of
+// `web/engine/gpu-transport.js`, so under Node nothing ever answers it and the
+// device is never opened. Everything before that line is
 // plain Rust with a browser-shaped ABI in front of it, and all of it runs here:
 // the storage backends, the log queue, the key scratch, the shell, the window.
 // Everything after it needs a GPU and a browser, and this file does not pretend
@@ -52,7 +54,9 @@ function check(condition, what) {
 }
 
 /**
- * Every import stubbed. They are all `wasm-bindgen`'s, and nothing this file
+ * Every import stubbed. There are none left to stub — `crcbl-wgpu` was the last
+ * thing reaching `web-sys` and it is not a wasm dependency of the umbrella any
+ * more — so this loop runs zero times today. It stays because nothing this file
  * calls should reach one — a stub that throws turns "it quietly used the DOM"
  * into a stack trace instead of a pass.
  *

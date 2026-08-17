@@ -29,11 +29,10 @@
 # seam coverage to a second backend being present.
 #
 # WHAT IT NEEDS
-#   * A built site with `probe/index.html` in it — `web/build.sh` puts it there.
-#     `--build` builds one with `CRCBL_WEB_BACKEND=webgpu` unless that variable
-#     is already set, so the module the page loads is the one the site ships. Any
-#     build links `crcbl-webgpu` and carries the probe exports; only that one is
-#     the artifact under test.
+#   * A built site with `probe/index.html` in it — `web/build.sh` puts it there,
+#     and `--build` runs it. Every wasm build links `crcbl-webgpu` — it is the
+#     only GPU backend the umbrella names on `wasm32` — so every artifact
+#     carries the probe exports; the shipped one is what is under test.
 #   * Node 22+, for the global `WebSocket` the DevTools client uses.
 #   * A Chromium/Chrome with WebGPU. `CRCBL_CHROMIUM` pins one.
 #   * Xvfb, unless `--headless`. **It is not optional on a machine with no GPU**:
@@ -91,7 +90,7 @@ fi
 
 if [ "$BUILD" = "1" ] || [ ! -d "$SITE" ]; then
     echo "crcbl probe e2e: building the site into $SITE"
-    SITE_DIR="$SITE" CRCBL_WEB_BACKEND="${CRCBL_WEB_BACKEND:-webgpu}" "$REPO/web/build.sh"
+    SITE_DIR="$SITE" "$REPO/web/build.sh"
 else
     # **A REUSED SITE IS THE ONE WAY THIS HARNESS LIES**, for the reason
     # `web/run-browser-e2e.sh` spells out: without `--build` the run drives

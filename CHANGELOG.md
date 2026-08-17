@@ -16,6 +16,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **A `wasm32` build links `crcbl-webgpu` and nothing else, and the browser no
+  longer needs `wasm-bindgen`.** `crcbl-wgpu` is now a native-only dependency of
+  the umbrella, so `crcbl`'s `webgpu` feature and `web/build.sh`'s
+  `CRCBL_WEB_BACKEND` are **removed** — with one browser backend there is
+  nothing left to select. `crcbl-wgpu` is unchanged natively: it is still
+  `CRCBL_GPU=wgpu` on every desktop platform and still has its own suites.
+
+  Because the browser backend speaks to JavaScript through a command stream
+  rather than through generated bindings, the wasm now imports **nothing**, and
+  `web/build.sh` copies a small loader beside the artifact instead of running
+  `wasm-bindgen`. Deploying the site needs `cargo`, `python3` and `node`, with
+  nothing to `cargo install` first. The demo artifacts roughly **halved** —
+  breakout 3,182,323 → 1,609,109 bytes, lumen 3,565,467 → 1,995,548 — and their
+  generated glue went from 72 KB to 3 KB.
+
+  **What this costs:** a browser without WebGPU has no fallback any more. The
+  WebGL2 path came from `wgpu`, which is no longer linkable there.
+
 - **`GpuMaterial` gained two fields and its GPU row grew from 32 to 48 bytes.**
   `tiling` (`TILING_AUTHORED`, the `0` default, or `TILING_PHYSICAL`) and
   `tile_metres` select and size physical tiling. Code that spreads

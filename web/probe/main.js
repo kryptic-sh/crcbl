@@ -6,18 +6,20 @@
 // page has exactly one channel — so the probe works wherever *nothing else has
 // installed one*. That used to be arranged by driving a demo built on `wgpu`,
 // where `crcbl-webgpu` is linked and idle; a page with no engine running at all
-// satisfies the same condition, needs no second backend, and is what this is.
+// satisfies the same condition, needs no second backend — and needs no wgpu,
+// which a browser build cannot link any more — and is what this is.
 //
 // WHY IT LOADS A DEMO'S MODULE AND NEVER BOOTS IT. The probe exports live in
-// `crcbl-webgpu`, so any artifact that links that crate carries all of them —
-// `web/build.sh` with `CRCBL_WEB_BACKEND=webgpu` produces exactly that, and
-// `check-exports.mjs` proves the symbols are there on every build. Loading the
-// module is inert: `web/demos/<name>/main.js` is what calls `bootDemo`, and
-// nothing in the glue's `init()` reaches the engine, so importing the glue
-// directly instantiates the module and stops. Nothing calls `prepare`, `boot` or
-// `frame`; no shell is attached, no `WebGpuDevice` is opened, and the channel
-// stays free for the probe to claim. Gating the *shipped* artifact is the point
-// of taking it from `demos/` rather than building a wasm target for this page.
+// `crcbl-webgpu`, so any artifact that links that crate carries all of them, and
+// on `wasm32` the umbrella names no other GPU backend — so every artifact
+// `web/build.sh` produces does. `check-exports.mjs` proves the symbols are there
+// on every build. Loading the module is inert: `web/demos/<name>/main.js` is
+// what calls `bootDemo`, and nothing in the loader's `init()` reaches the
+// engine, so importing it instantiates the module and stops. Nothing calls
+// `prepare`, `boot` or `frame`; no shell is attached, no `WebGpuDevice` is
+// opened, and the channel stays free for the probe to claim. Gating the
+// *shipped* artifact is the point of taking it from `demos/` rather than
+// building a wasm target for this page.
 //
 // THE PAGE OWNS THE PUMP, and that is the one thing here that is not a demo's
 // job done somewhere else. `web/engine/demo.js`'s `pumpGpu` runs inside the

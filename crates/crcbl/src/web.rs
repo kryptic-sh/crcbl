@@ -54,12 +54,14 @@
 //! `console.log` is right there — and it is the queue [`log_take`] drains
 //! instead.
 //!
-//! That is worth the small awkwardness because of what it buys: a sample's only
-//! wasm imports are the ones `wasm-bindgen` generates for `wgpu`'s `web-sys`
-//! calls, which means the import list is a thing CI can assert about.
-//! `web/tools/check-exports.mjs` does exactly that — every import must be in the
-//! `wbg` module, so an accidental `extern "C" { fn … }` somewhere in the engine
-//! turns into a failed check rather than a `LinkError` in someone's browser.
+//! That is worth the small awkwardness because of what it buys: **a sample's
+//! wasm imports nothing**, which means the import list is a thing CI can assert
+//! about. `web/tools/check-exports.mjs` does exactly that, so an accidental
+//! `extern "C" { fn … }` somewhere in the engine turns into a failed check
+//! rather than a `LinkError` in someone's browser. It used to have to tolerate
+//! the ~340 imports `wasm-bindgen` generated for `wgpu`'s `web-sys` calls;
+//! `crcbl-wgpu` is not a wasm dependency of the umbrella any more, so the
+//! honest count is zero.
 
 use core::cell::{Cell, RefCell};
 

@@ -306,25 +306,6 @@ const TIMEOUT_MS = Number(
  */
 const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
 
-/**
- * Whether the site under test renders through `crcbl-webgpu` rather than
- * `crcbl-wgpu`.
- *
- * Set by `CRCBL_WEB_BACKEND=webgpu`, the same variable `web/build.sh` reads to
- * turn on the umbrella's `webgpu` feature. All it decides here is which adapter
- * line the engine boot check waits for, because that line names the backend that
- * opened the device — everything else this file asserts is true of a demo
- * rendering through either one.
- *
- * **It no longer skips anything.** The `crcbl-webgpu` seam groups used to live
- * in this file and had to be skipped in webgpu mode, because there the engine's
- * own `WebGpuDevice` owns the single command-stream channel and the probe cannot
- * install a second. They are `web/tools/probe-groups.mjs` now, driven by
- * `web/run-probe-e2e.sh` against a page with no engine on it, which satisfies
- * that condition without needing a second backend linked at all.
- */
-const WEBGPU_MODE = (process.env.CRCBL_WEB_BACKEND ?? 'wgpu') === 'webgpu';
-
 /** How many times the canvas is read back once the ball is in flight. */
 const SAMPLE_COUNT = 16;
 
@@ -1407,16 +1388,17 @@ try {
     said('shell: first configure')?.trim() ?? 'no configure line'
   );
   // The engine logs `hal: <backend> adapter …` at open, where `<backend>` is
-  // `Instance::backend()` — `wgpu` normally, `webgpu` when the site was built
-  // with the `webgpu` feature. Reading the backend's own line is what makes this
-  // a check that the *right* backend opened the device rather than that some
-  // backend did.
-  const backendAdapterLine = WEBGPU_MODE
-    ? 'hal: webgpu adapter'
-    : 'hal: wgpu adapter';
+  // `Instance::backend()`. Reading the backend's own line — rather than any
+  // adapter line — is what makes this a check that the *right* backend opened
+  // the device rather than that some backend did. There is one right answer
+  // here: `crcbl-wgpu` is a `cfg(not(target_arch = "wasm32"))` dependency of the
+  // umbrella, so `crcbl-webgpu` is the only GPU backend a demo's wasm links, and
+  // a `hal: wgpu adapter` line from a browser would mean the manifest had
+  // regressed. This used to be a `CRCBL_WEB_BACKEND`-selected pair of strings.
+  const backendAdapterLine = 'hal: webgpu adapter';
   check(
     'B',
-    `the ${WEBGPU_MODE ? 'webgpu' : 'wgpu'} backend opened a device`,
+    'the webgpu backend opened a device',
     said(backendAdapterLine),
     said(backendAdapterLine)?.trim() ?? 'no adapter line'
   );

@@ -63,9 +63,11 @@ specified symbol by symbol. Those specifications are the source of truth:
 ## Build and run
 
 ```sh
-cargo install wasm-bindgen-cli --version "$(awk '/^name = "wasm-bindgen"$/{f=1;next} f&&/^version/{gsub(/[",]/,"",$3);print $3;exit}' Cargo.lock)" --locked
 ./web/build.sh --serve      # http://localhost:8000/
 ```
+
+No tool to install first. `cargo`, `python3` and `node` are the whole list — see
+"Why there is no `wasm-bindgen` here" below for what used to be here.
 
 `file://` will not work: ES modules need an origin, and the Origin Private File
 System needs a secure context. `localhost` is one.
@@ -79,65 +81,64 @@ server rather than one per caller.
 
 ## Which GPU backend the browser renders through
 
-`CRCBL_WEB_BACKEND` picks it, and every reader takes it from that one variable:
-`build.sh` (which turns it into `--features crcbl/webgpu`),
-`run-browser-e2e.sh`, `tools/browser-e2e.mjs`, and `run-probe-e2e.sh` for the
-site its `--build` produces.
-
-| value            | the wasm renders through                            |
-| ---------------- | --------------------------------------------------- |
-| `wgpu` (default) | `crcbl-wgpu`, the `wgpu` crate's WebGPU path        |
-| `webgpu`         | `crcbl-webgpu`, our own wasm→JS→wasm command stream |
-
-**The deployed site is `webgpu`.** `.github/workflows/pages.yml` builds
-`target/site` with `CRCBL_WEB_BACKEND=webgpu` and runs all five browser-gated
-demos against that build, so what `crcbl.kryptic.sh` serves renders through
-`crcbl-webgpu`.
-
-The default is still `wgpu` because the readers are **coupled**: the feature the
-build passes and the adapter line the driver waits for at boot move together.
-Flipping one alone fails confusingly — the driver waits for a
-`hal: wgpu adapter` line a WebGpu site never prints. Set the variable at the
-call site instead.
+`crcbl-webgpu`, our own wasm→JS→wasm command stream, and **there is nothing to
+configure**. `crcbl-wgpu` is a `cfg(not(target_arch = "wasm32"))` dependency of
+the umbrella (see `crates/crcbl/Cargo.toml`), so a browser build links exactly
+one GPU backend and `crcbl::backend` auto-selects it because the target says so.
 
 ```sh
-CRCBL_WEB_BACKEND=webgpu ./web/build.sh --serve
-CRCBL_WEB_BACKEND=webgpu ./web/run-browser-e2e.sh --build
+./web/build.sh --serve
+./web/run-browser-e2e.sh --build
 ```
 
-**Nothing in the Pages workflow builds a `wgpu` site any more.** It used to, for
-one step and one reason: the seam gate's probe groups — G through Z — install
-their own command-stream channel, a page has exactly one, and on a WebGpu site
-the engine's own `WebGpuDevice` has already taken it. Those groups are
-`tools/probe-groups.mjs` now and run on `probe/`, a page with **no engine
-running** that loads a demo's wasm module without booting it and pumps the
-channel itself — the same condition, met without a second backend. See
+This used to be a `CRCBL_WEB_BACKEND` variable choosing between the two, read by
+`build.sh` (which turned it into `--features crcbl/webgpu`),
+`run-browser-e2e.sh`, `tools/browser-e2e.mjs` and `run-probe-e2e.sh`. Both the
+variable and the umbrella's `webgpu` feature are gone with the choice. An
+invocation that still exports `CRCBL_WEB_BACKEND=webgpu` gets what it asked for;
+the variable is simply ignored.
+
+The driver still waits for `crcbl-webgpu`'s own `hal: webgpu adapter` line at
+boot rather than any adapter line, because that is what makes it a check that
+the _right_ backend opened the device. There is one right answer now: a
+`hal: wgpu adapter` line from a browser would mean the manifest had regressed.
+
+**Nothing in the Pages workflow builds a `wgpu` site any more, and nothing
+could.** It used to, for one step and one reason: the seam gate's probe groups —
+G through Z — install their own command-stream channel, a page has exactly one,
+and on a WebGpu site the engine's own `WebGpuDevice` has already taken it. Those
+groups are `tools/probe-groups.mjs` now and run on `probe/`, a page with **no
+engine running** that loads a demo's wasm module without booting it and pumps
+the channel itself — the same condition, met without a second backend. See
 `run-probe-e2e.sh` below.
 
-## Why `wasm-bindgen` is here at all
+## Why there is no `wasm-bindgen` here
 
 The engine's own ABI is **hand-written** `extern "C"` — no `#[wasm_bindgen]`
 anywhere in the workspace, and no `wasm-bindgen` in any crate's dependency list.
-The tool is still required, and not by choice:
+The tool used to be required anyway, and not by choice: `wgpu` reaches WebGPU
+through `web-sys`, `web-sys` _is_ `wasm-bindgen`, and `crcbl-wgpu` was an
+unconditional dependency of the umbrella. Every artifact therefore imported 338
+functions from `__wbindgen_placeholder__`, which nothing but the `wasm-bindgen`
+CLI can resolve; `WebAssembly.instantiateStreaming` on that file was a
+`LinkError`, every time.
 
-`wgpu` reaches WebGPU through `web-sys`, and `web-sys` is `wasm-bindgen`. A raw
-`cargo build` artifact therefore imports ~320 functions from
-`__wbindgen_placeholder__`, which nothing but the `wasm-bindgen` CLI can
-resolve. `WebAssembly.instantiateStreaming` on that file is a `LinkError`, every
-time.
+Target-gating `crcbl-wgpu` off `wasm32` removed the last thing in a browser
+build reaching `web-sys`. **The artifacts now import nothing at all** —
+`tools/check-exports.mjs` prints the count per demo and fails on any import from
+a module outside the loader's own, so a build that grew one back would be a red
+step rather than a fact nobody measured. Measured on the site this repository
+builds: 338 imports before, 0 after, and 1.57 MB off each `.wasm`.
 
-That is still true of the **deployed** site, which no longer _renders_ through
-`wgpu`: `crcbl-wgpu` is an unconditional dependency of the umbrella (see
-`crates/crcbl/Cargo.toml`), so a `CRCBL_WEB_BACKEND=webgpu` build links it all
-the same and inherits its glue imports. The tool goes when the dependency does —
-that is the ROADMAP's "replacing `wgpu`" slice 11, not something this build has
-already done.
-
-So the split is: **`wasm-bindgen` links `wgpu` to the browser; it does not
-define our ABI.** The generated `init()` returns the instance's raw exports
-object, and everything in `engine/` calls the hand-written `__crcbl_*` symbols
-off it directly. `tools/check-exports.mjs` asserts that all 60 of them survive
-the tool, and that no import outside its glue ever appears.
+That also made the tool unusable rather than merely unnecessary: with no
+`wasm-bindgen` crate linked its runtime intrinsics are absent, and the CLI exits
+with `failed to find intrinsics to enable 'clone_ref' function` instead of
+passing the module through. So the one thing it still produced — the `<lib>.js`
+whose default export instantiates the module — is `tools/wasm-loader.js` now,
+copied beside each artifact under the filename the pages already import. It
+preserves the contract exactly: `init()` resolves to the instance's raw exports
+object, `memory` included, and everything in `engine/` calls the hand-written
+`__crcbl_*` symbols off it directly.
 
 The CLI version is not pinned in a second place — `build.sh` reads it out of
 `Cargo.lock` and refuses to run on a mismatch, because a mismatched CLI produces
@@ -213,16 +214,17 @@ node --check web/engine/*.js web/demos/*/*.js    # every file parses
 `#[unsafe(no_mangle)]`, what the shim calls off the exports object, and what the
 built artifact actually exports. A symbol in either of the first two that is
 missing from the third is a failure. It also asserts `memory` is exported and
-that the module imports nothing outside the bindgen glue.
+that the module imports nothing outside the loader's own module — which today
+means nothing at all, since no artifact imports anything.
 
 `smoke.mjs` goes further and _runs_ the module: it instantiates the deployed
-artifact under node with every `wasm-bindgen` import stubbed to throw, and
-drives the documented call order — `prepare`, the fetch pre-load round trip, the
-OPFS restore, `boot`, a key event through the scratch, `shutdown`. It stops at
-the first `frame` that would request a device, because a device is
-`navigator.gpu`. Everything before that line is plain Rust behind a
-browser-shaped ABI, and it all runs here. What it cannot see, a black canvas
-included, is what `run-browser-e2e.sh` is for.
+artifact under node with every import stubbed to throw, and drives the
+documented call order — `prepare`, the fetch pre-load round trip, the OPFS
+restore, `boot`, a key event through the scratch, `shutdown`. It stops at the
+first `frame` that would request a device, because a device is `navigator.gpu`.
+Everything before that line is plain Rust behind a browser-shaped ABI, and it
+all runs here. What it cannot see, a black canvas included, is what
+`run-browser-e2e.sh` is for.
 
 ## What is not here
 

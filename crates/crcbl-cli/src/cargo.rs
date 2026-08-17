@@ -17,9 +17,11 @@
 //!
 //! P5 has shipped and six samples deploy to Pages, so the refusal is no longer
 //! "not yet" — it is that **a browser bundle is not a `cargo build`**. Getting
-//! one means `cargo build --target wasm32-unknown-unknown`, then a
-//! `wasm-bindgen` whose version has to match the crate the build resolved, then
-//! the shim, the shader artifacts and the site layout. `web/build.sh` is that
+//! one means `cargo build --target wasm32-unknown-unknown`, then the loader
+//! beside the artifact, the shim, the shader artifacts and the site layout.
+//! (It used to mean a `wasm-bindgen` whose version had to match the crate the
+//! build resolved; the browser backend imports nothing, so the tool is gone.)
+//! `web/build.sh` is that
 //! pipeline and is what CI runs; a `crcbl build --target wasm` that shelled out
 //! to Cargo alone would exit 0 having produced something no page can load,
 //! which is the one outcome worse than refusing.
@@ -87,7 +89,7 @@ pub fn build(args: &BuildArgs) -> Result<Outcome, Failure> {
     if args.target == Target::Wasm {
         return Err(Failure::new(
             "a browser bundle is not a cargo build: run `web/build.sh`, which pairs the \
-             wasm32 build with the matching wasm-bindgen, the shim and the site layout",
+             wasm32 build with its loader, the shim and the site layout",
         )
         .with("target", Json::string("wasm"))
         .with("use", Json::string("web/build.sh")));

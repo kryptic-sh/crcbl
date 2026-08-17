@@ -13,9 +13,12 @@
 //      key.
 //   3. `memory` is exported, because every buffer in every one of these ABIs is
 //      an offset into it.
-//   4. The module imports nothing outside `wasm-bindgen`'s own glue. The
-//      engine's ABI is exports-plus-polling by design; an `extern "C" { fn … }`
-//      that crept in somewhere would otherwise be a `LinkError` in a browser.
+//   4. **The module imports nothing.** Not "nothing outside the glue" — nothing
+//      at all. The engine's ABI is exports-plus-polling by design, and since
+//      `crcbl-wgpu` stopped being a wasm dependency of the umbrella there is
+//      nothing left in a browser build reaching `web-sys`. An `extern "C" { fn
+//      … }` that crept in somewhere would otherwise be a `LinkError` in a
+//      browser; here it is a failed build.
 //
 // It reports the reverse direction too — exports the shim never calls — as
 // information rather than failure: `__crcbl_web_pointer_wheel` is unused by
@@ -210,22 +213,23 @@ async function main() {
     );
   }
 
-  // wasm-bindgen rewrites the placeholder module to the name of the glue file it
-  // emits, so the accepted set is "whatever single module the glue owns" plus
-  // the pre-bindgen placeholders (a raw `cargo build` artifact).
-  const ALLOWED_IMPORT_MODULES = new Set([
-    '__wbindgen_placeholder__',
-    '__wbindgen_externref_xform__',
-    './' + basename(wasmPath).replace(/_bg\.wasm$/, '_bg.js'),
-  ]);
+  // **Empty, and that is the assertion.** This used to hold the two
+  // `__wbindgen_*` placeholders and the glue module wasm-bindgen rewrote them
+  // to, because `wgpu` reached WebGPU through `web-sys` and every artifact
+  // imported ~340 functions from it. `crcbl-wgpu` is a
+  // `cfg(not(target_arch = "wasm32"))` dependency of the umbrella now, nothing
+  // in a browser build reaches `web-sys`, and the check therefore says what the
+  // engine always meant: **this module imports nothing at all.** An import of
+  // any kind, from any module, fails here.
+  const ALLOWED_IMPORT_MODULES = new Set();
   const strayModules = [...new Set(imports.map((i) => i.module))].filter(
     (m) => !ALLOWED_IMPORT_MODULES.has(m)
   );
   if (strayModules.length > 0) {
     failures.push(
-      `the artifact imports from ${strayModules.length} unexpected module(s): ${strayModules.join(', ')}.\n` +
-        "    The engine ABI is exports-plus-polling; the only imports allowed are wasm-bindgen's\n" +
-        `    own glue for \`wgpu\`. See \`apps/${sample}/src/web.rs\`.`
+      `the artifact imports from ${strayModules.length} module(s): ${strayModules.join(', ')}.\n` +
+        '    The engine ABI is exports-plus-polling, so a browser artifact imports nothing.\n' +
+        `    See \`apps/${sample}/src/web.rs\`.`
     );
   }
 
