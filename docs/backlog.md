@@ -61,13 +61,22 @@ something runs, and the agnostic suites only cover behaviours somebody
 remembered to put there. Parity is currently maintained by attention, which is
 why it has drifted.
 
-**The measurement that sizes the problem.** `crcbl_hal::Features` has **28**
-declared capability bits. The backends contain roughly **96** refusal sites —
-`crcbl-vk` 22, `crcbl-mtl` 22, `crcbl-dx12` 26, `crcbl-webgpu` 8,
-`crcbl-wgpu` 18. Most refusals therefore correspond to no declared capability at
-all: a caller cannot ask "can you do this?", only try it and handle the error.
-`fill_buffer` is the proof — three backends refuse it in three different ways
-and none of them is expressible in `Features`.
+**The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
+below is built, so the count is now exact rather than approximate:
+`Capability::ALL` is **25** variants and `DIVERGENCES` holds **57** reviewed
+rows — dx12 16, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
+"28 declared `Features` bits and roughly 96 refusal sites", said the same thing
+less precisely and is superseded.)
+
+**Triaged by kind, which is what the goal turns on.** Roughly 16 of those rows
+are API absences no work removes — Metal's `fillBuffer:range:value:` takes a
+byte, WebGPU has no mesh stage and no pipeline-statistics query type. So
+**parity can never mean "`DIVERGENCES` is empty"**. The only checkable
+definition is: _every row on a keeper backend is either a permanent API absence
+or a device-gated `Features` refusal, and no row remains that means "our code
+has not done it yet"._ A slice is in flight adding that kind to the data and a
+`crcbl-hal` test that fails when the blocker set changes; until it lands, the
+list has to be re-triaged by hand every time somebody asks what is left.
 
 **Why `Features` cannot be the mechanism on its own.** It is `bitflags`, and a
 bitflag has no exhaustiveness: a backend that never sets a new bit compiles
@@ -121,6 +130,18 @@ failure.**
    `crcbl-golden`, `crcbl-core`'s `surface.rs` and three files in
    `crcbl-webgpu`. Its own runner is `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`,
    and all three workflows (`ci.yml`, `pages.yml`, `cron.yml`) name it.
+
+   **The deletion costs four GPU exercises that exist nowhere else**, and this
+   is not a `DIVERGENCES` row, so nothing else would flag it.
+   `crates/crcbl-wgpu/tests/wgpu_e2e.rs` is the only place in the workspace that
+   attaches an MSAA resolve view to a real device (every other site, including
+   `crcbl-render`'s `graph.rs`, passes `None`), the only one that drives a
+   padded indirect stride (the positive sites all use the tight stride), the
+   only one that builds a bind group with a `variable_count`, and the only one
+   that creates a pipeline layout with a real push-constant range. Each has to
+   be re-homed into the agnostic suites or given up **deliberately** — three of
+   the four capabilities behind them are declared `Yes` by backends that no test
+   exercises, so losing these leaves the claims resting on nothing.
 
    **`naga` does NOT leave with it, and notes here said otherwise twice.**
    `crcbl-shaders` takes `naga` as its own **dev-dependency** (`version = "30"`,
@@ -416,29 +437,42 @@ and the backend must not surface that cancellation through `take_error`.
 Worth writing down because the other four backends satisfy it by accident — they
 just drop a tracking entry — while WebGPU had to be told.
 
-### The capability enum is built — 3 of 24 capabilities are actually exercised
+### The capability enum is built — 7 of 25 capabilities are actually exercised
 
 `crcbl_hal::Capability` now forces every backend to answer for every seam
 behaviour through an exhaustive `match` (adding a variant fails to compile on
 any backend that has not answered), the seam suite walks `Capability::ALL` in
-both directions, and `DIVERGENCES` lists 54 reviewed
-`(capability, backend, why)` pairs — vulkan 0, metal 10, wgpu 13, dx12 15,
-webgpu 16.
+both directions, and `DIVERGENCES` lists 57 reviewed
+`(capability, backend, why)` pairs — vulkan 0, metal 10, wgpu 13, dx12 16,
+webgpu 18.
 
-**What is declared is not yet what is driven.** Only the three `fill_buffer`
-capabilities are exercised by real GPU work; the other 21 are checked for
-declaration consistency and printed as unexercised on every run. In priority
-order:
+**What is declared is not yet what is driven.** Seven are exercised by real GPU
+work — the three `fill_buffer` capabilities, `DepthImageCopy`, `TimestampQuery`,
+and `OcclusionQuery`/`PipelineStatisticsQuery` **creation-only**. The other 18
+are checked for declaration consistency and printed as unexercised on every run.
+In priority order:
 
-- **The three query kinds** (`TimestampQuery`, `OcclusionQuery`,
-  `PipelineStatisticsQuery`) are drivable from the existing fixture and simply
-  unwritten. Cheapest real coverage available.
+- **`ImageToImageCopy` is the cheapest remaining win.** It needs two owned
+  images and a readback rather than the fixture's swapchain-owned ones, and the
+  assertion is already written — WebGPU probe group V does exactly this shape in
+  the browser, just not natively.
+- **Three are bookkeeping, not work.** `TimelineSemaphore`, `BinarySemaphore`
+  and `CpuTimelineWait` are already asserted directly by
+  `a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it`; they
+  count as unexercised only because the exercise table does not name that test.
 - **Most of the rest need a raster pipeline the seam suite does not have** —
-  draws, mesh stages, storage images. Either the suite grows one, or those
-  capabilities are exercised from `draw_gen_e2e`, which already has one.
-- **`crcbl-webgpu`'s 16 declarations are unverified by anything.** The seam
-  suite is a native binary, so the browser's answers are assertions no test has
-  confirmed. The standalone probe page is where they could be driven.
+  `StencilReference`, `DrawIndirectCount`, `IndirectArgumentPaddedStride`,
+  `PolygonModeLine`, `DepthClamp`, `SamplerAnisotropy`. Either the suite grows
+  one, or they are exercised from `draw_gen_e2e`/`forward_e2e`, which have one.
+- **Two can never be driven by anything a caller records**, whatever fixture
+  exists: `OcclusionQuery` and `PipelineStatisticsQuery`, because the encoder
+  has no begin/end verb (next entry). Their `Yes` means "a set can be created"
+  and nothing more. That is a ceiling, not a to-do.
+- **`crcbl-webgpu`'s 18 declarations are unverified by anything native.** The
+  seam suite is a native binary, so the browser's answers are assertions no test
+  has confirmed. The probe page drives three of them today — `BufferFillZero`
+  (group W), `ImageToImageCopy` (V) and `DepthImageCopy` (AA) — and is where the
+  rest could be driven.
 
 ### The seam cannot use occlusion or pipeline-statistics queries at all
 
@@ -559,6 +593,41 @@ a change:
 A fourth option worth measuring first: whether `bake` and `load` still need to
 be separate features at all. If `bake`'s extra dependencies are small, merging
 them deletes the question.
+
+### Seven capabilities are declared `Yes` and exercised by nothing
+
+The parity mechanism proves that every backend _answers_ for every capability.
+It does not prove the answers are true. An audit on 2026-08-18 walked each
+backend's `supports` against every call site in the workspace and found seven
+capabilities carrying a `Yes` on a keeper backend with no test anywhere that
+drives them. These are the riskiest rows in the table, because a wrong `Yes`
+fails at a user's frame rather than in CI:
+
+- **`StencilReference`** — vk, dx12 and Metal all claim it, all three have a
+  `set_stencil_reference`, and no suite calls it and no render code sets it.
+- **`StorageImageBinding`** — claimed by vk, dx12 and Metal;
+  `BindingKind:: StorageImage` appears only in the WebGPU stream's encoder-level
+  tests. Nothing in `crcbl-render` declares one.
+- **`MsaaResolveAttachment`** — claimed by vk, Metal and WebGPU, and driven only
+  by `crcbl-wgpu`'s suite, i.e. by the crate being deleted.
+- **`IndirectArgumentPaddedStride`** — claimed by vk, dx12 and Metal; every
+  positive site uses the _tight_ stride, so the property that separates "draws
+  indirectly" from "honours a stride" is proven nowhere.
+- **`ImageToImageCopy`** — driven on WebGPU by probe group V and on nothing
+  else; vk's and Metal's `Yes` are unverified.
+- **`UpdateBindGroup`** — driven on vk only; dx12's and Metal's are unverified.
+- **`BinarySemaphore`** on WebGPU — self-declared unverifiable in the backend
+  itself: `acquire_next_frame` answers `None` for both, so nothing observes it.
+
+Also `PolygonModeLine`, `DepthClamp` and `SamplerAnisotropy`, which are answered
+from a device flag and never set against a device — the one anisotropy test
+asserts a _limit refusal_, not a working anisotropic sampler.
+
+**The obstacle is a fixture, not a decision.** Most of these need a raster
+pipeline, and the seam suite has only a compute probe. Either it grows one, or
+these exercises move to `draw_gen_e2e`/`forward_e2e`, which already have one.
+That choice is worth making explicitly, because it decides where roughly a third
+of the remaining exercises live.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
