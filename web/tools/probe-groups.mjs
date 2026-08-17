@@ -63,17 +63,25 @@
 const DECOY_CANVAS_ID = 6;
 
 /**
- * The `crcbl_hal::Format` code each canvas format the specification defines has,
- * from `crates/crcbl-webgpu/src/tag.rs`.
+ * The `crcbl_hal::Format` codes each canvas format the specification defines
+ * has — its own, and its sRGB counterpart's — from
+ * `crates/crcbl-webgpu/src/tag.rs`.
  *
  * Spelled out here rather than imported from `gpu-replay.js` for the reason the
  * feature bits in group G are: a table taken from the thing under test agrees
  * with it by construction, and what the check below is for is that the table
  * itself is right about what this browser prefers.
+ *
+ * BOTH CODES, BECAUSE THE ANSWER IS THE COUNTERPART AND THE FAILURE IS THE
+ * LINEAR ONE. `SurfaceCaps::preferred_format` takes the first sRGB entry, and
+ * `surfaceCapsFor` leads with the counterpart of the browser's own preference —
+ * so `srgb` is what wasm must receive, and receiving `linear` instead is exactly
+ * the browser build that presented every frame a transfer function too dark.
+ * Naming both is what lets the check say which happened.
  */
 const SEAM_FORMAT_CODE = Object.freeze({
-  rgba8unorm: 0x02,
-  bgra8unorm: 0x04,
+  rgba8unorm: { linear: 0x02, srgb: 0x03 },
+  bgra8unorm: { linear: 0x04, srgb: 0x05 },
 });
 
 /** The bit `SurfaceCaps::present_modes` sets for `PresentMode::Fifo`. */
@@ -825,16 +833,20 @@ export async function runProbeGroups({
     page,
     `navigator.gpu.getPreferredCanvasFormat()`
   );
-  const expectedFormatCode = SEAM_FORMAT_CODE[preferredFormat];
+  const expectedFormat = SEAM_FORMAT_CODE[preferredFormat];
   check(
     'I',
     'the preferred format wasm received is the one this browser prefers',
     capsAnswered?.name === 'ANSWERED' &&
-      expectedFormatCode !== undefined &&
-      capsAnswered.format === expectedFormatCode,
+      expectedFormat !== undefined &&
+      capsAnswered.format === expectedFormat.srgb,
     capsAnswered?.name === 'ANSWERED'
       ? `wasm got format code ${capsAnswered.format}, navigator.gpu prefers ` +
-          `${JSON.stringify(preferredFormat)} which is code ${expectedFormatCode}` +
+          `${JSON.stringify(preferredFormat)} whose sRGB counterpart is code ${expectedFormat?.srgb}` +
+          (capsAnswered.format === expectedFormat?.linear
+            ? ' — the LINEAR code, so nothing sRGB was offered and every frame ' +
+              'this canvas presents is a transfer function too dark'
+            : '') +
           `, after the loop delivered ${capsAnswered.delivered - (capsStart?.delivered ?? 0)} reply buffer(s)`
       : capsAnswered
         ? `${capsAnswered.name}: ${JSON.stringify(capsAnswered.reason)}`
@@ -2430,18 +2442,42 @@ export async function runProbeGroups({
   // renders into the frame a *canvas* handed back. wasm records a surface on the
   // a dedicated OffscreenCanvas the probe owns (see below), a swapchain
   // configured on it (a `configure` with COPY_SRC in the usage), an acquire
-  // (`getCurrentTexture`), a pass that clears the acquired view to red, a copy of
-  // that frame into a host buffer, a submit, a present (a no-op the browser
-  // composites on rAF), and a readback; the page loop replays it; and the 16384
-  // bytes that come back are asserted to be red, every pixel. A stub that skipped
-  // the configure/acquire/render leaves a black/zero canvas and fails here; only
-  // the real path — `context.configure`, `getCurrentTexture`, render,
-  // `copyTextureToBuffer` off the acquired texture — leaves red. `gpu-replay.mjs`
-  // cannot reach this: only a real browser has a canvas context.
+  // (`getCurrentTexture`), a pass that clears the acquired view, a copy of that
+  // frame into a host buffer, a submit, a present (a no-op the browser composites
+  // on rAF), and a readback; the page loop replays it; and the 16384 bytes that
+  // come back are asserted against the clear colour, every pixel. A stub that
+  // skipped the configure/acquire/render leaves a black/zero canvas and fails
+  // here; only the real path — `context.configure`, `getCurrentTexture`, render,
+  // `copyTextureToBuffer` off the acquired texture — leaves the colour.
+  // `gpu-replay.mjs` cannot reach this: only a real browser has a canvas context.
+  //
+  // **AND THE SWAPCHAIN IT ASKS FOR IS sRGB, WHICH IS THE OTHER HALF OF THIS
+  // GATE.** `GPUCanvasConfiguration.format` refuses an `-srgb` format outright, so
+  // the page has to configure the base format, name the counterpart in
+  // `viewFormats`, and create the acquired frame's view in it; skip either half
+  // and the frame is written unencoded. That is not a subtle difference — every
+  // pass above the seam writes display-referred values and leaves the encode to
+  // the hardware, so an unencoded frame is the whole picture a transfer function
+  // too dark, which is what the demo site shipped. The colour below is what
+  // catches it: red is a fixed point of the sRGB encode and reads back identically
+  // either way, so this probe clears to mid-tones instead and the two outcomes
+  // share no component.
   group('X — a presented canvas frame is read back as the render colour');
 
   const PROBE_PRESENT_PIXELS = 64 * 64;
-  const PROBE_PRESENT_COLOR_BYTES = [255, 0, 0, 255];
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_PRESENT_COLOR_BYTES` — the sRGB
+  // encode of its `PROBE_PRESENT_COLOR`, `(0.25, 0.75, 0.125, 1.0)`. Spelled out
+  // here rather than imported, as every expected value in this file is.
+  const PROBE_PRESENT_COLOR_BYTES = [137, 225, 99, 255];
+  // The same colour a LINEAR target would hold — `round(u * 255)` per component.
+  // Not expected: it is the specific wrong answer, so the failure detail can say
+  // "unencoded" rather than only "unequal".
+  const PROBE_PRESENT_UNENCODED_BYTES = [64, 191, 32, 255];
+  // `PROBE_PRESENT_COLOR_TOLERANCE`. The hardware evaluates the transfer function
+  // and the specification fixes neither its precision nor its rounding — 0.75
+  // encodes to 224.61, a tenth of a level from a byte boundary — so the window is
+  // two levels wide. The nearest thing it must still separate is 34 levels away.
+  const PROBE_PRESENT_TOLERANCE = 2;
 
   const presentStart = await evaluate(
     page,
@@ -2487,23 +2523,36 @@ export async function runProbeGroups({
              return null;
            }
            // Ready: check every pixel here rather than shipping 16384 numbers
-           // out. \`want\` is the red the pass cleared the acquired frame to;
-           // a black/zero texel is a canvas path that did not run.
+           // out. \`want\` is the sRGB encode of the colour the pass cleared the
+           // acquired frame to; a black/zero texel is a canvas path that did not
+           // run, and \`unencoded\` is the same clear written into a linear target.
            const want = ${JSON.stringify(PROBE_PRESENT_COLOR_BYTES)};
+           const unencoded = ${JSON.stringify(PROBE_PRESENT_UNENCODED_BYTES)};
+           const tolerance = ${PROBE_PRESENT_TOLERANCE};
            let allMatch = r.bytes.length === ${PROBE_PRESENT_PIXELS} * 4;
            let firstWrong = -1;
            for (let i = 0; i < r.bytes.length && allMatch; i += 1) {
-             if (r.bytes[i] !== want[i % 4]) {
+             if (Math.abs(r.bytes[i] - want[i % 4]) > tolerance) {
                allMatch = false;
                firstWrong = i;
              }
            }
+           // Whether the frame that came back is the LINEAR one, checked on the
+           // first texel only: that is the difference between "the canvas path is
+           // broken" and "the canvas path ran and skipped the sRGB encode", and a
+           // gate that cannot say which sends the next reader to the wrong half.
+           const wasUnencoded =
+             r.bytes.length >= 4 &&
+             [0, 1, 2, 3].every(
+               (c) => Math.abs(r.bytes[c] - unencoded[c]) <= tolerance
+             );
            return {
              done: true,
              state: r.name,
              len: r.bytes.length,
              allMatch,
              firstWrong,
+             wasUnencoded,
              // The first two texels, for a failure message a human can read.
              sample: [...r.bytes.slice(0, 8)],
              error: gpu.replayer.takeError(),
@@ -2522,17 +2571,23 @@ export async function runProbeGroups({
   );
   check(
     'X',
-    'the presented canvas frame came back from memory as the render colour, every pixel',
+    'the presented canvas frame came back from memory sRGB-encoded as the render colour, every pixel',
     present?.done === true &&
       present.allMatch === true &&
       present.len === PROBE_PRESENT_PIXELS * 4,
     present?.done !== true
       ? `no present readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
       : present.allMatch
-        ? `${present.len} bytes, every texel [${PROBE_PRESENT_COLOR_BYTES.join(', ')}] (red) from the acquired canvas frame`
+        ? `${present.len} bytes, every texel [${PROBE_PRESENT_COLOR_BYTES.join(', ')}] (the sRGB encode of the clear) from the acquired canvas frame`
         : `state ${present.state}, ${present.len ?? 0} bytes, ` +
           `first wrong at byte ${present.firstWrong} (sample ${JSON.stringify(present.sample)} ` +
-          `against [${PROBE_PRESENT_COLOR_BYTES.join(', ')}])` +
+          `against [${PROBE_PRESENT_COLOR_BYTES.join(', ')}] ±${PROBE_PRESENT_TOLERANCE})` +
+          (present.wasUnencoded
+            ? ` — THE FRAME CAME BACK UNENCODED, [${PROBE_PRESENT_UNENCODED_BYTES.join(', ')}]: ` +
+              'the canvas was configured without its -srgb viewFormat, or the acquired ' +
+              'frame was viewed in the base format, and every frame it presents is a ' +
+              'transfer function too dark'
+            : '') +
           `${present.error ? ` — ${present.error}` : ''}`
   );
 

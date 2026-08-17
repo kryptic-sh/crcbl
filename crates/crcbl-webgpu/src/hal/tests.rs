@@ -45,11 +45,17 @@ fn granted_adapter() -> AdapterInfo {
 
 /// What the browser's replayer answers `Command::SurfaceCaps` with where
 /// `getPreferredCanvasFormat()` is `"rgba8unorm"` — `web/engine/gpu-replay.js`'s
-/// `surfaceCapsFor`, field for field, with the preference first and the other
-/// canvas format behind it.
+/// `surfaceCapsFor`, field for field: the sRGB counterpart of the preference
+/// first, then the other counterpart, then the two formats a canvas can actually
+/// be configured with, the preference still ahead of the other.
 fn browser_canvas_caps() -> SurfaceCaps {
     SurfaceCaps {
-        formats: vec![Format::Rgba8Unorm, Format::Bgra8Unorm],
+        formats: vec![
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8UnormSrgb,
+            Format::Rgba8Unorm,
+            Format::Bgra8Unorm,
+        ],
         present_modes: vec![PresentMode::Fifo],
         composite_alpha: vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied],
         min_image_count: 2,
@@ -189,7 +195,15 @@ fn surface_caps_answers_the_fetched_canvas_caps_synchronously() {
     let caps = instance
         .surface_caps(surface, AdapterId(0))
         .expect("the caps fetched during the open");
-    assert_eq!(caps.formats, vec![Format::Rgba8Unorm, Format::Bgra8Unorm]);
+    assert_eq!(
+        caps.formats,
+        vec![
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8UnormSrgb,
+            Format::Rgba8Unorm,
+            Format::Bgra8Unorm,
+        ]
+    );
     assert_eq!(caps.present_modes, vec![PresentMode::Fifo]);
     assert_eq!(
         caps.composite_alpha,
@@ -199,19 +213,26 @@ fn surface_caps_answers_the_fetched_canvas_caps_synchronously() {
     assert_eq!(caps.current_extent, None);
 }
 
-/// **The canvas caps lead with the format the browser said it prefers.**
+/// **The canvas caps lead with the sRGB counterpart of the format the browser
+/// said it prefers**, and the browser's own answer still leads the pair a canvas
+/// can be configured with.
 ///
-/// A `GPUCanvasContext` configured with anything but
-/// `navigator.gpu.getPreferredCanvasFormat()` makes the browser insert a
-/// full-canvas copy on every present — which it warns about, and which every
-/// visitor pays for the life of the page. Neither canvas format is sRGB, so
+/// Two separate claims, and both are load-bearing.
 /// [`SurfaceCaps::preferred_format`](crcbl_hal::SurfaceCaps::preferred_format)
-/// falls through to the first entry, and leading with the browser's own answer
-/// is the whole of the fix.
+/// takes the first sRGB entry, so what the engine asks for is that counterpart —
+/// every pass above the seam writes display-referred values and leaves the encode
+/// to the hardware, so a linear target presents a transfer function too dark. And
+/// a `GPUCanvasContext` configured with anything but
+/// `navigator.gpu.getPreferredCanvasFormat()` makes the browser insert a
+/// full-canvas copy on every present, which it warns about and every visitor pays
+/// for the life of the page — so the base format the page configures has to stay
+/// the browser's. The two are not in tension: `viewFormats` is what lets one
+/// canvas be configured `rgba8unorm` and viewed `rgba8unorm-srgb`.
 ///
 /// Red while the canvas branch answered a constant: the constant led with
 /// `Bgra8Unorm`, and `getPreferredCanvasFormat()` is `"rgba8unorm"` on Chromium
-/// under Linux and on every Apple device.
+/// under Linux and on every Apple device. Red again while it offered nothing
+/// sRGB at all, which is the frame the demo site shipped.
 #[test]
 fn canvas_caps_lead_with_the_format_the_browser_prefers() {
     let mut open = WebGpuInstanceOpen::start();
@@ -233,28 +254,48 @@ fn canvas_caps_lead_with_the_format_the_browser_prefers() {
         .expect("the browser answered the capability query");
     assert_eq!(
         caps.formats,
-        vec![Format::Rgba8Unorm, Format::Bgra8Unorm],
-        "the canvas reports the browser's preference first and the other canvas \
-         format behind it",
+        vec![
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8UnormSrgb,
+            Format::Rgba8Unorm,
+            Format::Bgra8Unorm,
+        ],
+        "the canvas reports the sRGB counterparts first and the two configurable \
+         formats behind them, the browser's preference leading each pair",
     );
     assert_eq!(
         caps.preferred_format(),
+        Some(Format::Rgba8UnormSrgb),
+        "what the engine asks for is the sRGB view of what the browser prefers",
+    );
+    assert_eq!(
+        caps.formats
+            .iter()
+            .find(|format| !format.is_srgb())
+            .copied(),
         Some(Format::Rgba8Unorm),
-        "what the engine configures the canvas with is what the browser prefers",
+        "and the first format a canvas can actually be CONFIGURED with is still \
+         the browser's own, which is what costs no copy per present",
     );
 }
 
-/// **An offscreen ring is offered an sRGB format and a canvas is not.**
+/// **Both surfaces offer an sRGB format, and they are still two different
+/// answers.**
 ///
-/// The ring is `GPUTexture`s the replayer creates, so the canvas's linear-only
-/// `configure` restriction does not reach it — and it must not, because
-/// `preferred_format` takes the first sRGB entry and falls through to the first
-/// entry of all when there is none. Red the moment the offscreen branch goes
-/// back to reporting the canvas list: the frame is then drawn into a linear
-/// target, never encoded, and every golden comparison fails on the transfer
-/// function alone.
+/// Every pass above the seam writes display-referred values and leaves the encode
+/// to the hardware, so both branches have to hand
+/// [`SurfaceCaps::preferred_format`](crcbl_hal::SurfaceCaps::preferred_format)
+/// something sRGB or the frame is never encoded — the ring by *being* allocated
+/// in it, the canvas by being configured in the base format and viewed through
+/// the counterpart. That leaves the two format lists agreeing whenever the
+/// browser prefers `rgba8unorm`, which is Chromium under Linux and every Apple
+/// device, so **the format list is no longer what tells the branches apart** and
+/// this test keys on `composite_alpha` instead: only a canvas has a
+/// `GPUCanvasConfiguration.alphaMode` to offer `PreMultiplied` from.
+///
+/// Red the moment either branch takes the other's caps whole.
 #[test]
-fn an_offscreen_surface_is_offered_an_srgb_format_and_a_canvas_is_not() {
+fn both_surfaces_are_offered_an_srgb_format_and_still_answer_differently() {
     let instance = opened_instance();
     let offscreen = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
         .expect("an offscreen surface is reachable");
@@ -286,9 +327,30 @@ fn an_offscreen_surface_is_offered_an_srgb_format_and_a_canvas_is_not() {
         .expect("the canvas caps");
     assert_eq!(
         canvas_caps.formats,
-        vec![Format::Rgba8Unorm, Format::Bgra8Unorm],
-        "a canvas still reports only what GPUCanvasContext.configure takes, in \
-         the order the browser gave",
+        vec![
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8UnormSrgb,
+            Format::Rgba8Unorm,
+            Format::Bgra8Unorm,
+        ],
+        "a canvas reports the sRGB views it can be given ahead of the two \
+         formats GPUCanvasContext.configure actually takes",
+    );
+    assert_eq!(
+        canvas_caps.composite_alpha,
+        vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied],
+        "a canvas has an alphaMode and offers both spellings of it",
+    );
+    assert_eq!(
+        offscreen_caps.composite_alpha,
+        vec![CompositeAlpha::Opaque],
+        "an offscreen ring has no alphaMode at all — its textures are opaque \
+         render targets read straight back",
+    );
+    assert_ne!(
+        canvas_caps, offscreen_caps,
+        "the two answers must not collapse into one, whatever the format lists \
+         happen to agree on",
     );
 }
 
@@ -296,6 +358,11 @@ fn an_offscreen_surface_is_offered_an_srgb_format_and_a_canvas_is_not() {
 /// later canvas surface answering the ring's caps — the handle pool never
 /// repeats a value, but the list would still match on a stale entry if nothing
 /// removed it.
+///
+/// Keyed on `composite_alpha` for the reason
+/// [`both_surfaces_are_offered_an_srgb_format_and_still_answer_differently`] is:
+/// the two format lists agree under a browser that prefers `rgba8unorm`, so a
+/// check on `formats` here would pass whether the handle was forgotten or not.
 #[test]
 fn destroying_an_offscreen_surface_forgets_that_it_was_offscreen() {
     let instance = opened_instance();
@@ -305,8 +372,8 @@ fn destroying_an_offscreen_surface_forgets_that_it_was_offscreen() {
         instance
             .surface_caps(offscreen, AdapterId(0))
             .expect("the offscreen caps")
-            .preferred_format(),
-        Some(Format::Rgba8UnormSrgb),
+            .composite_alpha,
+        vec![CompositeAlpha::Opaque],
     );
 
     instance.destroy_surface(offscreen);
@@ -314,8 +381,8 @@ fn destroying_an_offscreen_surface_forgets_that_it_was_offscreen() {
         instance
             .surface_caps(offscreen, AdapterId(0))
             .expect("caps for a destroyed handle")
-            .formats,
-        vec![Format::Rgba8Unorm, Format::Bgra8Unorm],
+            .composite_alpha,
+        vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied],
         "a handle this instance no longer holds falls back to the canvas answer",
     );
 }

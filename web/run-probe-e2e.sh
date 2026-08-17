@@ -423,6 +423,23 @@ if [ -z "$READBACK_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the sRGB encode of a presented canvas frame, which is group X
+# and is its own thing for a reason none of the above share: it is the only check
+# anywhere that reads the pixels of a frame a *canvas* handed back and holds them
+# against a transfer function. A canvas cannot be configured `-srgb`, so the page
+# has to configure the base format, name the counterpart in `viewFormats` and
+# create the acquired frame's view in it — three separate things to get wrong, and
+# every one of them fails silently. Group S's clear proves the readback path but
+# renders offscreen, where nothing is reinterpreted; the demo gates watch the
+# canvas change without ever asking what colour it changed to. Both passed while
+# the deployed site presented every frame a transfer function too dark.
+SRGB_TRIP="$(grep -F 'the presented canvas frame came back from memory sRGB-encoded as the render colour, every pixel' "${OUTPUT}.plain" || true)"
+if [ -z "$SRGB_TRIP" ]; then
+    echo "crcbl probe e2e: the driver never held a presented canvas frame against the sRGB encode;" >&2
+    echo "                 crcbl-webgpu could present every frame unencoded and nothing would say so" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl probe e2e: $RAN checks ran and at least one failed" >&2
     exit "$STATUS"

@@ -2690,26 +2690,44 @@ async function main() {
     surface: createSurface.surface,
   };
   {
-    // **CreateSwapchain configures the canvas.** The format is the fixture's
-    // `Bgra8UnormSrgb`, the alpha mode its `PreMultiplied`, and the usage is the
-    // load-bearing `RENDER_ATTACHMENT | COPY_SRC` — the superset that lets an
-    // acquired frame be copied from. `imageCount` and `presentMode` are carried
-    // and dropped, so `configure` is handed neither.
+    // **CreateSwapchain configures the canvas.** The alpha mode is the fixture's
+    // `PreMultiplied` and the usage is the load-bearing
+    // `RENDER_ATTACHMENT | COPY_SRC` — the superset that lets an acquired frame
+    // be copied from. `imageCount` and `presentMode` are carried and dropped, so
+    // `configure` is handed neither.
+    //
+    // **AND THE FORMAT IS THE FIXTURE'S `Bgra8UnormSrgb` SPLIT IN TWO**, which is
+    // what keeps the browser build from being dark. `GPUCanvasConfiguration.format`
+    // refuses an `-srgb` format outright, so the canvas is configured with the
+    // base `bgra8unorm` and the counterpart is named in `viewFormats` — the
+    // permission the acquire needs to view the frame through the format the
+    // engine asked for. Red both ways: passing `bgra8unorm-srgb` through is a
+    // canvas a real browser refuses, and configuring the base with an empty
+    // `viewFormats` is a frame that can only be viewed linear, which skips the
+    // sRGB encode every pass above the seam leaves to the hardware.
     const { replayer, canvas, device } = await readyWithSurface();
     replayer.replay(frameOf(swapchainOnSurface, 3n));
     const configured = canvas.context.configured;
     check(
       canvas.context.configures === 1 &&
         configured?.device === device &&
-        configured?.format === 'bgra8unorm-srgb' &&
+        configured?.format === 'bgra8unorm' &&
         configured?.alphaMode === 'premultiplied' &&
         configured?.usage === (0x10 | 0x01),
-      `CreateSwapchain configures the canvas with the open device, the mapped format, RENDER_ATTACHMENT|COPY_SRC and mapped alphaMode (${JSON.stringify({ configures: canvas.context.configures, format: configured?.format, alphaMode: configured?.alphaMode, usage: configured?.usage })})`
+      `CreateSwapchain configures the canvas with the open device, the base of the mapped format, RENDER_ATTACHMENT|COPY_SRC and mapped alphaMode (${JSON.stringify({ configures: canvas.context.configures, format: configured?.format, alphaMode: configured?.alphaMode, usage: configured?.usage })})`
+    );
+    checkEqual(
+      configured?.viewFormats,
+      ['bgra8unorm-srgb'],
+      'and names the sRGB counterpart in viewFormats, which is the permission the acquired frame is viewed through'
     );
     check(
       replayer.swapchains.get(createSwapchain.swapchain)?.context ===
-        canvas.context && replayer.takeError() === null,
-      `and files the context under the swapchain handle with no error (${replayer.swapchains.size} held)`
+        canvas.context &&
+        replayer.swapchains.get(createSwapchain.swapchain)?.format ===
+          'bgra8unorm-srgb' &&
+        replayer.takeError() === null,
+      `and files the context and the format the caller asked for under the swapchain handle with no error (${replayer.swapchains.size} held, format ${replayer.swapchains.get(createSwapchain.swapchain)?.format})`
     );
   }
   {
@@ -2729,6 +2747,17 @@ async function main() {
           canvas.context.frame &&
         replayer.takeError() === null,
       `AcquireNextFrame calls getCurrentTexture once and binds the acquired image and view (${canvas.context.acquires} acquires, image ${replayer.images.get(acquireNextFrame.image) === canvas.context.frame})`
+    );
+    // **And the view is created in the swapchain's own format, not defaulted.**
+    // A canvas is configured with a linear base format, so a defaulted view is
+    // linear and the sRGB encode never happens — the frame reaches the compositor
+    // a whole transfer function too dark, with no error anywhere to say so. The
+    // `viewFormats` check above is only half of the fix; this is the half that
+    // uses it.
+    check(
+      canvas.context.frame.views.length === 1 &&
+        canvas.context.frame.views[0]?.format === 'bgra8unorm-srgb',
+      `and creates that view in the swapchain's format rather than defaulting it (${JSON.stringify(canvas.context.frame.views)})`
     );
   }
   {
@@ -8253,11 +8282,15 @@ async function main() {
     checkEqual(
       answered?.caps,
       {
-        // The stub prefers `rgba8unorm` (0x02), so that is what comes first —
-        // `formats` is best-first and the browser's preference is what "best"
-        // means here. `bgra8unorm` (0x04) follows, because a canvas can be
-        // configured with either.
-        formats: [0x02, 0x04],
+        // The stub prefers `rgba8unorm`, so its sRGB counterpart `Rgba8UnormSrgb`
+        // (0x03) comes first: `SurfaceCaps::preferred_format` takes the first
+        // sRGB entry, and every pass above the seam writes display-referred
+        // values, so a linear one presents a transfer function too dark. The
+        // other counterpart `Bgra8UnormSrgb` (0x05) follows, then the two linear
+        // formats a canvas can actually be *configured* with — `rgba8unorm`
+        // (0x02) still ahead of `bgra8unorm` (0x04), because the browser's
+        // preference is what costs no copy per present.
+        formats: [0x03, 0x05, 0x02, 0x04],
         // FIFO, and only FIFO: WebGPU has no present-mode concept, and a canvas
         // presents at the `requestAnimationFrame` boundary.
         presentModes: [0x00],
@@ -8289,8 +8322,8 @@ async function main() {
     const answered = decodeOneReply(replayer.replies);
     checkEqual(
       answered?.caps?.formats,
-      [0x04, 0x02],
-      'a browser preferring bgra8unorm is answered with bgra8unorm first'
+      [0x05, 0x03, 0x04, 0x02],
+      'a browser preferring bgra8unorm is answered with its sRGB counterpart first and bgra8unorm ahead of rgba8unorm'
     );
     checkEqual(
       answered?.caps?.presentModes,

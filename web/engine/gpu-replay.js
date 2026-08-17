@@ -649,7 +649,17 @@ export function webgpuBufferUsageFor(usage, memory) {
 // fix that: the texture is already made by the time the view names its format,
 // and inventing a list would be this file granting a permission the caller never
 // asked for. It is a gap in the seam rather than in this translation, and it is
-// written here because that is where a reader meets it.
+// written here because that is where a reader meets it. No caller has ever
+// asked: every `ImageViewDesc` the engine builds copies the format of the image
+// it views.
+//
+// A SWAPCHAIN FRAME IS THE ONE VIEW THIS FILE DOES REINTERPRET, and it is not an
+// exception to the above — it goes nowhere near `CreateImageView`. A canvas
+// frame's texture is made by `GPUCanvasContext.configure`, which this file
+// calls, so it is the one texture whose `viewFormats` this file is entitled to
+// set: see {@link Replayer#configureSwapchain}, which configures the canvas with
+// the browser's linear preferred format and names the sRGB counterpart the
+// caller's `SwapchainDesc` asked for.
 
 /**
  * The `GPUTextureUsage` bits, as the specification fixes them.
@@ -1888,11 +1898,44 @@ export function halDeviceCapsFor(device) {
  * `SurfaceCaps::formats` entry is a promise that a swapchain can be created with
  * it, so an entry that might be refused at `configure()` is worse than a shorter
  * list: the caller has no way to find out which it was.
+ *
+ * EACH ROW ALSO CARRIES ITS `-srgb` COUNTERPART, AND THAT IS WHAT KEEPS THE
+ * BROWSER BUILD FROM BEING DARK. `GPUCanvasContext.configure` refuses an `-srgb`
+ * format outright, so a canvas is *configured* linear and always will be — but
+ * `GPUCanvasConfiguration.viewFormats` exists exactly so the frames it hands
+ * back can be viewed through the sRGB counterpart of the same bytes, and the two
+ * differ in nothing else. Every pass above the seam writes display-referred
+ * values and leaves the encode to the hardware, so a linear *view* skips the
+ * encode and the whole frame presents a transfer function too dark.
+ * {@link surfaceCapsFor} offers the counterparts and
+ * {@link Replayer#configureSwapchain} is what makes the offer good.
  */
 const CANVAS_FORMAT = Object.freeze({
-  bgra8unorm: FORMAT.BGRA8_UNORM,
-  rgba8unorm: FORMAT.RGBA8_UNORM,
+  bgra8unorm: {
+    code: FORMAT.BGRA8_UNORM,
+    srgb: 'bgra8unorm-srgb',
+    srgbCode: FORMAT.BGRA8_UNORM_SRGB,
+  },
+  rgba8unorm: {
+    code: FORMAT.RGBA8_UNORM,
+    srgb: 'rgba8unorm-srgb',
+    srgbCode: FORMAT.RGBA8_UNORM_SRGB,
+  },
 });
+
+/**
+ * The `GPUCanvasConfiguration.format` each canvas sRGB view format is a view of.
+ *
+ * Derived from {@link CANVAS_FORMAT} rather than written out a second time: a
+ * hand-kept reverse table is one edit away from naming the wrong base format,
+ * and a canvas configured `rgba8unorm` and viewed `bgra8unorm-srgb` swaps the
+ * red and blue channels of every frame with no error anywhere.
+ */
+const CANVAS_BASE_FORMAT = Object.freeze(
+  Object.fromEntries(
+    Object.entries(CANVAS_FORMAT).map(([base, row]) => [row.srgb, base])
+  )
+);
 
 /**
  * The `GPUCanvasAlphaMode` a decoded `CompositeAlpha` names, or why it names
@@ -1958,14 +2001,21 @@ const CANVAS_IMAGE_COUNT = 2;
  *
  * FIELD BY FIELD, BECAUSE ONLY ONE OF THEM IS SOMETHING THE BROWSER SAYS:
  *
- *   * `formats` — `getPreferredCanvasFormat()` answers one format, and it is the
- *     one to put first: `SurfaceCaps::formats` is documented best-first and
- *     `preferred_format()` reads it that way, and the browser's preference is
- *     exactly the "no extra copy on present" claim that ordering means. The
- *     other member of {@link CANVAS_FORMAT} follows it, because a canvas can be
- *     configured with either. None of them is sRGB, so `preferred_format()`
- *     falls through to the first entry — which is the browser's own preference,
- *     and the right answer.
+ *   * `formats` — `getPreferredCanvasFormat()` answers one format, and its
+ *     **sRGB counterpart** is the one to put first. `preferred_format()` takes
+ *     the first sRGB entry and falls through to the first entry of all when
+ *     there is none, so leading with the counterpart is what hands the engine a
+ *     display-referred target: every pass above the seam writes display-referred
+ *     values and leaves the encode to the hardware, and a linear one skips the
+ *     encode and presents a transfer function too dark. The counterpart is not a
+ *     format a canvas can be *configured* with — no `-srgb` one is — and it does
+ *     not have to be: {@link Replayer#configureSwapchain} configures the base
+ *     format and reaches it through `viewFormats`, so the browser's own
+ *     preference is still what the canvas is configured with and there is still
+ *     no full-canvas copy per present. The two linear formats follow, because a
+ *     canvas can be configured with either and they stay askable; within each
+ *     pair the browser's preference leads, for the same "no extra copy" reason
+ *     the ordering has always carried.
  *   * `presentModes` — `[FIFO]`, and WebGPU has **no present-mode concept at
  *     all**. This is not a gap filled with a plausible value: a canvas presents
  *     at the `requestAnimationFrame` boundary in lockstep with the display,
@@ -1998,18 +2048,26 @@ const CANVAS_IMAGE_COUNT = 2;
  */
 function surfaceCapsFor(gpu) {
   const preferred = gpu.getPreferredCanvasFormat();
-  const preferredCode = CANVAS_FORMAT[preferred];
-  if (preferredCode === undefined) {
+  const preferredRow = CANVAS_FORMAT[preferred];
+  if (preferredRow === undefined) {
     throw new SurfaceCapsError(
       SURFACE_CAPS_FAILURE.BACKEND,
       `getPreferredCanvasFormat() answered ${JSON.stringify(preferred)}, ` +
         'which is not a canvas format this seam has a Format for'
     );
   }
+  const rest = Object.entries(CANVAS_FORMAT)
+    .filter(([name]) => name !== preferred)
+    .map(([, row]) => row);
   return {
     formats: [
-      preferredCode,
-      ...Object.values(CANVAS_FORMAT).filter((code) => code !== preferredCode),
+      // sRGB first — see the doc above: `preferred_format()` takes the first
+      // sRGB entry, and this is the one the browser's own base format is viewed
+      // through.
+      preferredRow.srgbCode,
+      ...rest.map((row) => row.srgbCode),
+      preferredRow.code,
+      ...rest.map((row) => row.code),
     ],
     presentModes: [PRESENT_MODE.FIFO],
     compositeAlpha: [COMPOSITE_ALPHA.OPAQUE, COMPOSITE_ALPHA.PRE_MULTIPLIED],
@@ -3621,6 +3679,18 @@ export class Replayer {
    * updates the stored format in place — which is the point, since a later acquire
    * or copy must see the format the reconfigure changed to.
    *
+   * AN sRGB FORMAT IS CONFIGURED AS ITS BASE AND REACHED THROUGH `viewFormats`,
+   * and that is the whole of why the browser build is not dark.
+   * `GPUCanvasConfiguration.format` takes only `bgra8unorm` and `rgba8unorm` and
+   * refuses an `-srgb` one outright, so an engine that asked for
+   * `Bgra8UnormSrgb` — which is what {@link surfaceCapsFor} offers it and what
+   * `preferred_format()` picks — could not be answered by passing the name
+   * through. `viewFormats` is exactly the mechanism: the canvas is configured
+   * with the *base* format, which is still the browser's own preferred one and
+   * so still costs no copy per present, and the frames it hands back may be
+   * viewed through the counterpart named here. {@link Replayer#acquireNextFrame}
+   * is what creates that view, off the format this stores.
+   *
    * @param {string} named A phrase naming the swapchain and command, for errors.
    * @param {object} command
    * @param {GPUCanvasContext} context The context to configure.
@@ -3639,10 +3709,15 @@ export class Replayer {
       this.#deviceError(`${named} ${alpha.reason}`);
       return;
     }
+    // A base format is configured as itself and viewed as itself; an sRGB one is
+    // configured as the base it reinterprets and named in `viewFormats`. See the
+    // method docs — the frame's view is created in `format.name` either way.
+    const base = CANVAS_BASE_FORMAT[format.name] ?? format.name;
     try {
       context.configure({
         device: this.#device,
-        format: format.name,
+        format: base,
+        viewFormats: base === format.name ? [] : [format.name],
         // COPY_SRC beside RENDER_ATTACHMENT: the acquired frame must be readable
         // as a copy source. See the method docs — this is the load-bearing line.
         usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
@@ -3780,7 +3855,16 @@ export class Replayer {
       }
     }
     this.#images.insert(command.image, texture);
-    const view = texture.createView();
+    // NAMED RATHER THAN DEFAULTED, AND THAT IS THE sRGB ENCODE. A canvas is
+    // configured with a linear base format — `configure` refuses an `-srgb` one
+    // — so a defaulted view is linear and every pass above the seam, which
+    // writes display-referred values and leaves the encode to the hardware,
+    // lands unencoded and presents a transfer function too dark.
+    // {@link Replayer#configureSwapchain} put the sRGB counterpart in the
+    // canvas's `viewFormats`, so this view is the format the engine asked for.
+    // The offscreen ring stores its textures' own format, so naming it there is
+    // the default spelled out.
+    const view = texture.createView({ format: entry.format });
     this.#imageViews.insert(command.view, view);
     // A swapchain frame is a colour target and has neither plane: WebGPU has no
     // presentable depth format, so `GPUCanvasConfiguration.format` and the

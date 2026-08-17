@@ -568,10 +568,17 @@ mod tests {
 
     // ── SurfaceCapsProbe ──────────────────────────────────────────────────
 
-    /// What a browser preferring `"rgba8unorm"` answers the query with.
+    /// What a browser preferring `"rgba8unorm"` answers the query with — the
+    /// sRGB counterparts first, then the two formats a canvas can be configured
+    /// with, the preference leading each pair.
     fn browser_canvas_caps() -> SurfaceCaps {
         SurfaceCaps {
-            formats: vec![crcbl_hal::Format::Rgba8Unorm, crcbl_hal::Format::Bgra8Unorm],
+            formats: vec![
+                crcbl_hal::Format::Rgba8UnormSrgb,
+                crcbl_hal::Format::Bgra8UnormSrgb,
+                crcbl_hal::Format::Rgba8Unorm,
+                crcbl_hal::Format::Bgra8Unorm,
+            ],
             present_modes: vec![crcbl_hal::PresentMode::Fifo],
             composite_alpha: vec![
                 crcbl_hal::CompositeAlpha::Opaque,
@@ -599,8 +606,10 @@ mod tests {
     }
 
     /// **The order the browser sent survives the probe.** It is the whole value
-    /// of the query: `SurfaceCaps::formats` is best-first and nothing a canvas
-    /// offers is sRGB, so the first entry is what a canvas gets configured with.
+    /// of the query: `SurfaceCaps::formats` is best-first, and
+    /// `preferred_format` takes the first sRGB entry — the counterpart of the
+    /// format this browser said it prefers, which is what the canvas ends up
+    /// configured with the base of.
     #[test]
     fn a_caps_reply_settles_the_probe_with_the_order_it_carried() {
         let channel = channel();
@@ -612,7 +621,7 @@ mod tests {
         assert_eq!(probe.caps(), Some(&caps));
         assert_eq!(
             probe.caps().and_then(SurfaceCaps::preferred_format),
-            Some(crcbl_hal::Format::Rgba8Unorm),
+            Some(crcbl_hal::Format::Rgba8UnormSrgb),
         );
     }
 

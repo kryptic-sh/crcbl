@@ -1579,6 +1579,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Every frame the browser backend presented was a whole transfer function too
+  dark.** `crcbl-webgpu` answered a canvas surface with the two linear formats a
+  `GPUCanvasContext` can be configured with and nothing sRGB, so
+  `SurfaceCaps::preferred_format` fell through to a linear one and the swapchain
+  was never encoded — every pass above the seam writes display-referred values
+  and leaves the encode to the hardware. The old `crcbl-wgpu` browser path did
+  this internally; nothing carried it across.
+
+  `surfaceCapsFor` in `web/engine/gpu-replay.js` now leads its format list with
+  the sRGB counterpart of `getPreferredCanvasFormat()`, and `CreateSwapchain`
+  configures the canvas with the **base** format while naming that counterpart
+  in `GPUCanvasConfiguration.viewFormats`; `AcquireNextFrame` creates the
+  frame's view in the format the caller asked for rather than defaulting it. The
+  base format stays the browser's own preference, so there is still no
+  full-canvas copy per present. The offscreen ring is unchanged — it already
+  answered sRGB directly — and the eleven-scene golden parity is unaffected.
+
+  Nothing above the HAL seam changed: no engine `ImageViewDesc` reinterprets an
+  image's format, so `ImageDesc` needed no `view_formats` field.
+
 - **`apps/hud` opened its device without present feedback or display timing.**
   Its `desc()` spelled out `TIMESTAMP_QUERY | DEBUG_MARKERS` by hand, dropping
   `PRESENT_FEEDBACK` and `PRESENT_TIMING` along with the `GPU_DRIVEN` it meant

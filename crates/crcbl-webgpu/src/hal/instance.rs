@@ -136,11 +136,13 @@ impl WebGpuInstance {
 /// What an offscreen ring accepts, which is not what a canvas accepts.
 ///
 /// **THE RING ANSWERS TO NO CANVAS.** `GPUCanvasContext.configure` takes only
-/// `rgba8unorm` and `bgra8unorm` and rejects an `-srgb` one, which is why
-/// [`WebGpuInstance::surface_caps`] reports those for a canvas surface — but an
-/// offscreen swapchain is a ring of `GPUTexture`s the replayer creates with
+/// `rgba8unorm` and `bgra8unorm` and rejects an `-srgb` one, so a canvas surface
+/// reaches sRGB through a `viewFormats` reinterpretation of a linear base — but
+/// an offscreen swapchain is a ring of `GPUTexture`s the replayer creates with
 /// `createTexture`, where every one of these is a core, renderable, copyable
-/// format. Nothing about the canvas restriction applies to it.
+/// format allocated exactly as listed. Nothing about the canvas restriction
+/// applies to it, and the lists agreeing entry for entry under a browser that
+/// prefers `rgba8unorm` is a coincidence of that browser rather than one answer.
 ///
 /// **sRGB FIRST, BECAUSE THAT IS THE FRAME THE GOLDENS HOLD.**
 /// [`SurfaceCaps::preferred_format`] takes the first sRGB entry, and the engine
@@ -251,21 +253,27 @@ impl Instance for WebGpuInstance {
         // the whole reason `offscreen` exists. A canvas is bound by
         // `GPUCanvasContext.configure`, which takes only the linear 8-bit
         // formats; an offscreen ring is a set of `GPUTexture`s the replayer
-        // creates and no canvas constrains. Answering the canvas's list for both
-        // handed `SurfaceCaps::preferred_format` nothing sRGB to find, so it
-        // fell through to the first entry and the ring was allocated linear —
-        // every pass above the seam writes display-referred values and leaves
-        // the encode to the hardware, so the frame was never encoded and came
-        // back a whole transfer function away from the golden it is compared to.
+        // creates and no canvas constrains: the ring is allocated in the format
+        // it names, while a canvas's sRGB entry is a view over a linear base
+        // that only `create_swapchain` on the page knows how to reach. Both
+        // therefore have to lead with sRGB — every pass above the seam writes
+        // display-referred values and leaves the encode to the hardware, so a
+        // linear target is a frame a whole transfer function away from what was
+        // asked for — and neither may be answered with the other's list.
         if self.is_offscreen(surface) {
             return Ok(offscreen_surface_caps());
         }
-        // THE BROWSER'S OWN ANSWER, LED BY `getPreferredCanvasFormat()`. Both
-        // canvas formats are valid `GPUCanvasConfiguration.format` values, so a
-        // list in the other order is not refused — it makes the browser insert a
-        // full-canvas copy on every present, and say so. Neither is sRGB, so
-        // `SurfaceCaps::preferred_format` falls through to the first entry,
-        // which is what makes the browser's ordering the whole of the answer.
+        // THE BROWSER'S OWN ANSWER, LED BY THE sRGB VIEW OF
+        // `getPreferredCanvasFormat()`. Two orderings matter and they are
+        // different claims. `SurfaceCaps::preferred_format` takes the first sRGB
+        // entry, so the sRGB counterparts lead the list or the engine is handed
+        // a linear target and the frame is never encoded. And within the two
+        // formats a canvas can actually be *configured* with, the browser's own
+        // preference leads: both are valid `GPUCanvasConfiguration.format`
+        // values, so the other order is not refused — it makes the browser
+        // insert a full-canvas copy on every present, and say so. Neither
+        // counterpart can be configured at all; `web/engine/gpu-replay.js`
+        // configures the base and names the counterpart in `viewFormats`.
         //
         // The `Err` half is `Reply::SurfaceCapsFailed`'s reason, and this is the
         // call it belongs to: `surface_caps` is the only one whose docs oblige a

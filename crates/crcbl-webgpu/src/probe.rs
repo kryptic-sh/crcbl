@@ -77,7 +77,7 @@
 //! | [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) | `() -> i32` | Drain, and answer one of the `FILL_*` codes. |
 //! | [`__crcbl_web_gpu_probe_fill_bytes_ptr`](shim::__crcbl_web_gpu_probe_fill_bytes_ptr) | `() -> i32` | Where the filled bytes start, once [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) answers [`FILL_READY`]. |
 //! | [`__crcbl_web_gpu_probe_fill_bytes_len`](shim::__crcbl_web_gpu_probe_fill_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the fill probe has not answered. |
-//! | [`__crcbl_web_gpu_probe_present`](shim::__crcbl_web_gpu_probe_present) | `(i32) -> i32` | Encode one frame — a surface on the canvas `canvas_id` names, a swapchain configured on it, the acquired frame, a pass that clears the acquired view to [`PROBE_PRESENT_COLOR`], the copy, submit, present, and a `request_readback` against [`PROBE_PRESENT_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_present`](shim::__crcbl_web_gpu_probe_present) | `(i32) -> i32` | Encode one frame — a surface on the canvas `canvas_id` names, an **sRGB** swapchain configured on it, the acquired frame, a pass that clears the acquired view to [`PROBE_PRESENT_COLOR`], the copy, submit, present, and a `request_readback` against [`PROBE_PRESENT_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_present_poll`](shim::__crcbl_web_gpu_probe_present_poll) | `() -> i32` | Poll the present probe's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_present_state`](shim::__crcbl_web_gpu_probe_present_state) | `() -> i32` | Drain, and answer one of the `PRESENT_*` codes. |
 //! | [`__crcbl_web_gpu_probe_present_bytes_ptr`](shim::__crcbl_web_gpu_probe_present_bytes_ptr) | `() -> i32` | Where the presented bytes start, once [`__crcbl_web_gpu_probe_present_state`](shim::__crcbl_web_gpu_probe_present_state) answers [`PRESENT_READY`]. |
@@ -285,12 +285,17 @@
 //! no opinion to disagree with about any of them, so an export for each would
 //! buy checks that can only read back what that file wrote.
 //!
-//! [`formats`](SurfaceCaps::formats) is the field the browser fills, and its
-//! first entry — which is what [`preferred_format`](SurfaceCaps::preferred_format)
-//! answers, neither canvas format being sRGB — is `getPreferredCanvasFormat()`.
-//! **That varies by browser and by machine and the page can ask for it
-//! independently**, so it is the one value here a gate check can corroborate
-//! instead of restate, and it is exported as its wire code.
+//! [`formats`](SurfaceCaps::formats) is the field the browser fills, and what
+//! [`preferred_format`](SurfaceCaps::preferred_format) answers off it is the
+//! **sRGB counterpart of `getPreferredCanvasFormat()`** — that call is what
+//! `web/engine/gpu-replay.js` leads the list with, and `preferred_format` takes
+//! the first sRGB entry. **That varies by browser and by machine and the page can
+//! ask for it independently**, so it is the one value here a gate check can
+//! corroborate instead of restate, and it is exported as its wire code. The
+//! counterpart is not a format a canvas can be *configured* with — no `-srgb` one
+//! is — so what the gate corroborates is the pairing, which is exactly the step
+//! that was missing while the deployed site presented every frame a transfer
+//! function too dark.
 //!
 //! Two of the other five are exported anyway, doing a different job. The format
 //! is one code out of a record of three lists, two counts and an optional pair,
@@ -523,7 +528,8 @@ pub const FILL_UNDECODABLE: u32 = 5;
 /// Nothing has been asked, or there is no channel to ask through.
 pub const PRESENT_UNASKED: u32 = 0;
 /// The setup frame — a surface, a configured swapchain, the acquired frame, the
-/// host buffer, an encoder, a render pass that clears the acquired view to red,
+/// host buffer, an encoder, a render pass that clears the acquired view to
+/// [`PROBE_PRESENT_COLOR`],
 /// the copy, the submit, the present, and the request — is on the stream, and no
 /// poll has been issued.
 pub const PRESENT_REQUESTED: u32 = 1;
@@ -535,8 +541,9 @@ pub const PRESENT_WAITING: u32 = 2;
 pub const PRESENT_PENDING: u32 = 3;
 /// The bytes are in. [`shim::__crcbl_web_gpu_probe_present_bytes_ptr`] and
 /// [`shim::__crcbl_web_gpu_probe_present_bytes_len`] carry them — 64×64
-/// `Rgba8Unorm` texels, every one [`PROBE_PRESENT_COLOR_BYTES`] if the real
-/// canvas context path acquired, rendered and copied a frame end to end.
+/// texels, every one [`PROBE_PRESENT_COLOR_BYTES`] to within
+/// [`PROBE_PRESENT_COLOR_TOLERANCE`] if the real canvas context path acquired,
+/// rendered, sRGB-encoded and copied a frame end to end.
 pub const PRESENT_READY: u32 = 4;
 /// The committed reply buffer would not decode, or answered a command nobody
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
@@ -2467,21 +2474,59 @@ pub const fn probe_fill_copy() -> BufferCopy {
 }
 
 // The present probe (group X): the first probe to drive a *real canvas context*.
-// It creates a surface on the page's canvas, configures a swapchain on it,
-// acquires the frame, clears that acquired image to red, copies it out to a host
+// It creates a surface on the page's canvas, configures an **sRGB** swapchain on
+// it, acquires the frame, clears that acquired image, copies it out to a host
 // buffer and reads it back — so the bytes prove the whole canvas-context path
-// (configure, getCurrentTexture, render, copy) ran. Every handle it names is
-// `5 << 32` — a generation past the copy-chain and fill probes' `4 << 32` — so
-// its live resources never land in another probe's slot in the shared page.
+// (configure, getCurrentTexture, render, copy) ran, AND that the frame was sRGB
+// encoded on the way. Every handle it names is `5 << 32` — a generation past the
+// copy-chain and fill probes' `4 << 32` — so its live resources never land in
+// another probe's slot in the shared page.
 
-/// The colour the present probe clears the acquired frame to — opaque red,
-/// `vec4<f32>(1.0, 0.0, 0.0, 1.0)`. Distinctive so a stub that acquired nothing
-/// and cleared nothing leaves a black/zero canvas rather than this.
-pub const PROBE_PRESENT_COLOR: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+/// The colour the present probe clears the acquired frame to —
+/// `vec4<f32>(0.25, 0.75, 0.125, 1.0)`.
+///
+/// **EVERY COMPONENT IS A MID-TONE, AND THAT IS THE WHOLE POINT.** `0.0` and
+/// `1.0` are fixed points of the sRGB transfer function, so a probe that cleared
+/// to red would read the same bytes back out of a linear target and an sRGB one
+/// and could not tell them apart — which is exactly how a browser build that
+/// presented every frame a transfer function too dark passed this gate. These
+/// three land 73, 34 and 67 byte levels away from their unencoded selves.
+pub const PROBE_PRESENT_COLOR: [f32; 4] = [0.25, 0.75, 0.125, 1.0];
 
-/// The clear colour as the bytes a `Rgba8Unorm` texel holds — what the gate
-/// checks every pixel against. Only a real acquire-render-copy produces them.
-pub const PROBE_PRESENT_COLOR_BYTES: [u8; 4] = [255, 0, 0, 255];
+/// [`PROBE_PRESENT_COLOR`] as the bytes an **sRGB-encoded** texel holds — what
+/// the gate checks every pixel against, and the observable that says the canvas
+/// frame was encoded.
+///
+/// The sRGB transfer function `1.055 * u.powf(1.0 / 2.4) - 0.055` applied to
+/// each of the three colour components and scaled to 8 bits: `0.25 → 136.96`,
+/// `0.75 → 224.61`, `0.125 → 99.09`, with alpha never encoded. **A linear target
+/// reads back `[64, 191, 32, 255]` instead** — that is the bug these numbers
+/// exist to catch, and the two sets share no component.
+///
+/// Rounding is the implementation's, so the gate compares within
+/// [`PROBE_PRESENT_COLOR_TOLERANCE`] rather than exactly; the nearest pair of
+/// values it must still separate is 34 levels apart.
+pub const PROBE_PRESENT_COLOR_BYTES: [u8; 4] = [137, 225, 99, 255];
+
+/// How far off [`PROBE_PRESENT_COLOR_BYTES`] a texel may be.
+///
+/// Every other probe in this file compares bytes exactly, and can: their colours
+/// are exact in 8 bits and pass through no transfer function. This one asks the
+/// hardware to *evaluate* one, and the specification fixes neither the precision
+/// of that evaluation nor the rounding of the result — `0.75` encodes to
+/// `224.61`, which is a tenth of a level from the boundary between two bytes. A
+/// window of two levels covers that on any implementation and is still 17 times
+/// narrower than the gap to the unencoded value.
+pub const PROBE_PRESENT_COLOR_TOLERANCE: u8 = 2;
+
+/// [`PROBE_PRESENT_COLOR`] as the bytes a **linear** target would hold, which is
+/// what a canvas presented without the sRGB view reads back.
+///
+/// Not something the probe expects — it is what the probe must **not** see, and
+/// it is written down so the gate's failure detail can name what went wrong
+/// rather than only that the numbers were unequal. Each component is
+/// `round(u * 255)`.
+pub const PROBE_PRESENT_UNENCODED_BYTES: [u8; 4] = [64, 191, 32, 255];
 
 /// The surface the present probe creates on the page's canvas. `5 << 32`.
 pub const PROBE_PRESENT_SURFACE: SurfaceHandle = match SurfaceHandle::from_bits(5 << 32) {
@@ -2496,14 +2541,24 @@ pub const PROBE_PRESENT_SWAPCHAIN: SwapchainHandle = match SwapchainHandle::from
 };
 
 /// The descriptor the present probe configures its swapchain with — a 64×64
-/// [`Format::Rgba8Unorm`] surface, `Fifo` and `Opaque` (the two a browser
+/// [`Format::Rgba8UnormSrgb`] surface, `Fifo` and `Opaque` (the two a browser
 /// canvas offers), on [`PROBE_PRESENT_SURFACE`].
+///
+/// **sRGB, AND A CANVAS CANNOT BE CONFIGURED WITH IT.**
+/// `GPUCanvasConfiguration.format` takes only `rgba8unorm` and `bgra8unorm` and
+/// refuses an `-srgb` one, so this is the format the *engine* asks for and not
+/// the one the canvas is configured with: `web/engine/gpu-replay.js` configures
+/// the base and names this in `viewFormats`, then views the acquired frame
+/// through it. Asking for it here is what makes that path load-bearing —
+/// [`SurfaceCaps::preferred_format`](crcbl_hal::SurfaceCaps::preferred_format)
+/// hands the engine exactly this on a real canvas, because every pass above the
+/// seam writes display-referred values and leaves the encode to the hardware.
 #[must_use]
 pub const fn probe_present_swapchain_desc() -> SwapchainDesc<'static> {
     SwapchainDesc {
         label: Some("crcbl-webgpu present swapchain"),
         surface: PROBE_PRESENT_SURFACE,
-        format: Format::Rgba8Unorm,
+        format: Format::Rgba8UnormSrgb,
         extent: (PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
         image_count: 2,
         present_mode: PresentMode::Fifo,
@@ -2602,14 +2657,20 @@ pub const fn probe_present_copy() -> BufferImageCopy {
 // shared page and can both run.
 
 /// The colour the reconfigure probe clears the acquired frame to — opaque red,
-/// the same [`PROBE_PRESENT_COLOR`] the present probe uses. The format the bytes
-/// come back in is what differs, not the colour.
-pub const PROBE_RECONFIG_COLOR: [f32; 4] = PROBE_PRESENT_COLOR;
+/// `vec4<f32>(1.0, 0.0, 0.0, 1.0)`.
+///
+/// **Its own literal, and not [`PROBE_PRESENT_COLOR`].** This probe's observable
+/// is the *channel order* the bytes come back in, which needs a colour whose
+/// components differ from each other and nothing else; the present probe's needs
+/// mid-tones, which would put both of this one's non-zero-vs-zero channels
+/// through a transfer function for no gain. Red is exact in 8 bits under either,
+/// which is why every other value below can be compared exactly.
+pub const PROBE_RECONFIG_COLOR: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
 /// Red as the bytes a `Bgra8Unorm` texel holds — B, G, R, A, so `[0, 0, 255, 255]`
 /// for opaque red. THE OBSERVABLE: only a reconfigure that actually re-ran
 /// `configure` with `Bgra8Unorm` produces these; a stub that skipped it leaves the
-/// swapchain `Rgba8Unorm` and reads back [`PROBE_PRESENT_COLOR_BYTES`] instead.
+/// swapchain `Rgba8Unorm` and reads back `[255, 0, 0, 255]` instead.
 pub const PROBE_RECONFIG_COLOR_BYTES: [u8; 4] = [0, 0, 255, 255];
 
 /// The surface the reconfigure probe creates on the page's canvas. `6 << 32`.
@@ -3453,8 +3514,10 @@ enum PresentProbe {
     Pending,
     /// The bytes are in.
     Ready {
-        /// The bytes read back — 64×64 `Rgba8Unorm` texels, every one
-        /// [`PROBE_PRESENT_COLOR_BYTES`] if the canvas-context path ran.
+        /// The bytes read back — 64×64 texels, every one
+        /// [`PROBE_PRESENT_COLOR_BYTES`] to within
+        /// [`PROBE_PRESENT_COLOR_TOLERANCE`] if the canvas-context path ran and
+        /// encoded the frame.
         bytes: Vec<u8>,
     },
 }
@@ -4484,7 +4547,8 @@ impl Probe {
     /// page's key for), the swapchain (a `configure`), the acquire (a
     /// `getCurrentTexture` that binds [`PROBE_PRESENT_IMAGE`] and its view), the
     /// host buffer, an encoder, a render pass that clears
-    /// [`PROBE_PRESENT_VIEW`] to red, the copy out of the acquired image, the
+    /// [`PROBE_PRESENT_VIEW`] to [`PROBE_PRESENT_COLOR`], the copy out of the
+    /// acquired image, the
     /// finish, the submit, the present (a no-op) and the `request_readback` under
     /// [`PROBE_PRESENT_READBACK`]. None is answered — every handle is
     /// caller-allocated — so it is [`encode`](StreamChannel::encode); the poll is
@@ -4624,7 +4688,7 @@ impl Probe {
     /// present (a no-op) and the `request_readback` under [`PROBE_RECONFIG_READBACK`].
     ///
     /// **The reconfigure is the load-bearing command**: without it the acquired
-    /// frame is `Rgba8Unorm` and reads red back as [`PROBE_PRESENT_COLOR_BYTES`];
+    /// frame is `Rgba8Unorm` and reads red back as `[255, 0, 0, 255]`;
     /// with it the frame is `Bgra8Unorm` and the same red reads back as
     /// [`PROBE_RECONFIG_COLOR_BYTES`]. That byte-order difference is the whole
     /// observable — see [`shim::__crcbl_web_gpu_probe_reconfigure`].
@@ -6275,8 +6339,8 @@ pub mod shim {
     ///
     /// `1` when the setup frame — the surface, the configured swapchain, the
     /// acquired frame, the host buffer, an encoder, a pass that clears the acquired
-    /// view red, the copy, finish, submit, present and `request_readback` — is on
-    /// the stream; `0` when no device has opened yet, the probe is re-entered, or
+    /// view, the copy, finish, submit, present and `request_readback` — is on the
+    /// stream; `0` when no device has opened yet, the probe is re-entered, or
     /// another channel is installed.
     ///
     /// **This is the decisive observation point of the present arm, and the first
@@ -6284,6 +6348,13 @@ pub mod shim {
     /// configure/acquire/render leaves a black/zero canvas, so reading back
     /// [`PROBE_PRESENT_COLOR_BYTES`](super::PROBE_PRESENT_COLOR_BYTES) can only come
     /// from a `configure` + `getCurrentTexture` + render + copy that actually ran.
+    ///
+    /// **And the swapchain it asks for is sRGB**, so those bytes are also the only
+    /// proof anywhere that a canvas frame is *encoded*. A canvas cannot be
+    /// configured `-srgb`, so the page has to configure the base format and reach
+    /// the encode through `viewFormats`; skip either half and the readback is
+    /// [`PROBE_PRESENT_UNENCODED_BYTES`](super::PROBE_PRESENT_UNENCODED_BYTES) —
+    /// the whole frame a transfer function too dark, which is what shipped.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_probe_present(canvas_id: u32) -> u32 {
         PROBE.with(|probe| match probe.try_borrow_mut() {
@@ -6352,10 +6423,10 @@ pub mod shim {
     ///
     /// **This is the decisive observation point of the reconfigure arm.** A stub
     /// that skipped the reconfigure leaves the swapchain `Rgba8Unorm`, and reading
-    /// back [`PROBE_PRESENT_COLOR_BYTES`](super::PROBE_PRESENT_COLOR_BYTES) rather
-    /// than [`PROBE_RECONFIG_COLOR_BYTES`](super::PROBE_RECONFIG_COLOR_BYTES) is how
-    /// that shows: only a `configure` re-run with `Bgra8Unorm` hands back a frame
-    /// whose red is the BGRA `[0, 0, 255, 255]`.
+    /// red back as `[255, 0, 0, 255]` rather than
+    /// [`PROBE_RECONFIG_COLOR_BYTES`](super::PROBE_RECONFIG_COLOR_BYTES) is how that
+    /// shows: only a `configure` re-run with `Bgra8Unorm` hands back a frame whose
+    /// red is the BGRA `[0, 0, 255, 255]`.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_probe_reconfigure(canvas_id: u32) -> u32 {
         PROBE.with(|probe| match probe.try_borrow_mut() {
@@ -8024,6 +8095,63 @@ mod tests {
         }));
     }
 
+    /// **The present probe asks for an sRGB swapchain and expects the encoded
+    /// bytes**, which is the whole of what lets group X see a canvas presenting
+    /// unencoded frames.
+    ///
+    /// Both halves are load-bearing and both are checked against the transfer
+    /// function rather than against themselves: a linear swapchain reads the clear
+    /// colour straight back, and expected bytes that drifted onto the unencoded
+    /// ones would pass on exactly the build that shipped a whole transfer function
+    /// too dark. The third assertion is the one that keeps the *colour* honest —
+    /// `0.0` and `1.0` are fixed points of the encode, so a probe clearing to red
+    /// cannot tell the two targets apart in any channel.
+    #[test]
+    fn the_present_probe_asks_for_an_srgb_swapchain_and_expects_encoded_bytes() {
+        assert!(
+            probe_present_swapchain_desc().format.is_srgb(),
+            "a linear swapchain reads the clear colour back unchanged and proves nothing",
+        );
+        for channel in 0..3 {
+            let linear = PROBE_PRESENT_COLOR[channel];
+            // The sRGB transfer function, above its linear toe — every component
+            // here is well past `0.0031308`.
+            let encoded = 1.055 * linear.powf(1.0 / 2.4) - 0.055;
+            assert_eq!(
+                PROBE_PRESENT_COLOR_BYTES[channel],
+                byte_of(encoded),
+                "channel {channel} of PROBE_PRESENT_COLOR_BYTES is not the sRGB encode of {linear}",
+            );
+            assert_eq!(
+                PROBE_PRESENT_UNENCODED_BYTES[channel],
+                byte_of(linear),
+                "channel {channel} of PROBE_PRESENT_UNENCODED_BYTES is not {linear} unencoded",
+            );
+            let apart =
+                PROBE_PRESENT_COLOR_BYTES[channel].abs_diff(PROBE_PRESENT_UNENCODED_BYTES[channel]);
+            assert!(
+                apart > PROBE_PRESENT_COLOR_TOLERANCE * 2,
+                "channel {channel} moves only {apart} levels under the encode, which the \
+                 gate's tolerance of {PROBE_PRESENT_COLOR_TOLERANCE} cannot separate",
+            );
+        }
+        // Alpha is never encoded, so it is the one component the two agree on.
+        assert_eq!(
+            PROBE_PRESENT_COLOR_BYTES[3],
+            PROBE_PRESENT_UNENCODED_BYTES[3]
+        );
+    }
+
+    /// A unorm component as the byte it is stored in, for the check above.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the argument is clamped into 0..=255 on the line before the cast"
+    )]
+    fn byte_of(value: f32) -> u8 {
+        (value * 255.0).round().clamp(0.0, 255.0) as u8
+    }
+
     /// **Nothing waits on the setup frame**: every command in it is caller-
     /// allocated and answered by nothing — the present included, being a no-op —
     /// so the wait belongs to the poll, not here.
@@ -8291,7 +8419,9 @@ mod tests {
         assert_eq!(&reconfigure_bytes()[..4], PROBE_RECONFIG_COLOR_BYTES);
         // And it is the BGRA red, not RGBA's — a stub that skipped the reconfigure
         // would have left the swapchain `Rgba8Unorm` and answered this instead.
-        assert_ne!(&reconfigure_bytes()[..4], PROBE_PRESENT_COLOR_BYTES);
+        // Spelled out rather than named: this probe's colour has one RGBA
+        // spelling, and it is not the present probe's, which is a mid-tone.
+        assert_ne!(&reconfigure_bytes()[..4], [255, 0, 0, 255]);
     }
 
     /// A `ReadbackPending` for the poll's sequence drops the reconfigure back to
@@ -8899,10 +9029,30 @@ mod tests {
     }
 
     /// The capabilities a browser answers with, as `gpu-replay.js` builds them:
-    /// the preferred canvas format first, one present mode, no extent.
+    /// the sRGB counterpart of the preferred canvas format first, then the other
+    /// counterpart, then the two formats a canvas can be configured with —
+    /// `preferred` leading that pair. One present mode, no extent.
+    ///
+    /// `preferred` is named as its **counterpart** because that is what
+    /// `preferred_format` picks and therefore what the format export reports; the
+    /// linear pair is what a `GPUCanvasContext.configure` may be handed.
+    /// The `-srgb` counterpart of a canvas format, for [`canvas_caps`].
+    fn srgb_of(format: Format) -> Format {
+        match format {
+            Format::Rgba8Unorm => Format::Rgba8UnormSrgb,
+            Format::Bgra8Unorm => Format::Bgra8UnormSrgb,
+            other => panic!("{other:?} is not a canvas format"),
+        }
+    }
+
     fn canvas_caps(preferred: Format) -> crcbl_hal::SurfaceCaps {
+        let other = if preferred == Format::Rgba8Unorm {
+            Format::Bgra8Unorm
+        } else {
+            Format::Rgba8Unorm
+        };
         crcbl_hal::SurfaceCaps {
-            formats: vec![preferred, Format::Rgba8Unorm],
+            formats: vec![srgb_of(preferred), srgb_of(other), preferred, other],
             present_modes: vec![PresentMode::Fifo],
             composite_alpha: vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied],
             min_image_count: 2,
@@ -8937,12 +9087,12 @@ mod tests {
 
         assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_ANSWERED);
         assert_eq!(caps_reason(), "");
-        // `Bgra8Unorm` rather than the list's first entry by accident: neither
-        // canvas format is sRGB, so `preferred_format` falls through to the
-        // first, which is what the browser preferred.
+        // `Bgra8UnormSrgb` rather than the list's first entry by accident:
+        // `preferred_format` takes the first sRGB entry, and the list leads with
+        // the counterpart of what this browser preferred.
         assert_eq!(
             __crcbl_web_gpu_probe_surface_caps_format(),
-            u32::from(tag::format_code(Format::Bgra8Unorm))
+            u32::from(tag::format_code(Format::Bgra8UnormSrgb))
         );
         assert_eq!(
             __crcbl_web_gpu_probe_surface_caps_present_modes(),
@@ -8964,11 +9114,11 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_ANSWERED);
         assert_eq!(
             __crcbl_web_gpu_probe_surface_caps_format(),
-            u32::from(tag::format_code(Format::Rgba8Unorm))
+            u32::from(tag::format_code(Format::Rgba8UnormSrgb))
         );
         assert_ne!(
-            tag::format_code(Format::Rgba8Unorm),
-            tag::format_code(Format::Bgra8Unorm),
+            tag::format_code(Format::Rgba8UnormSrgb),
+            tag::format_code(Format::Bgra8UnormSrgb),
             "the two canvas formats must differ for this to notice anything"
         );
     }
@@ -9084,7 +9234,7 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_ANSWERED);
         assert_eq!(
             __crcbl_web_gpu_probe_surface_caps_format(),
-            u32::from(tag::format_code(Format::Bgra8Unorm))
+            u32::from(tag::format_code(Format::Bgra8UnormSrgb))
         );
     }
 
