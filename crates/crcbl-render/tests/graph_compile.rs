@@ -1814,6 +1814,11 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
             bytes.len()
         );
     };
+    // Six accessors, four buffers: `visible`/`runs` are one and
+    // `counts`/`mesh_args` are one, since the draw-argument pass came down to the
+    // eight storage bindings WebGPU guarantees. Every one is still asked, because
+    // what this checks is a property of the *accessor*'s buffer — and a later
+    // split back into six would then be covered without an edit here.
     for frame in 0..instances.len() {
         device_local(&format!("visible {frame}"), draws.visible(frame));
         device_local(&format!("cull stats {frame}"), draws.visible_count(frame));

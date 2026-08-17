@@ -373,6 +373,91 @@ impl BindGroupLayoutDesc<'_> {
     }
 }
 
+/// Storage-buffer bindings one shader stage may use on the **least capable**
+/// target this engine ships to.
+///
+/// WebGPU's default limits fix `maxStorageBuffersPerShaderStage` at 8, and a
+/// browser is entitled to offer no more. Real implementations at or near the
+/// floor are ordinary rather than exotic: SwiftShader — which is what every CI
+/// runner without a GPU runs — reports 10, and a desktop RDNA-3 reports 16, so a
+/// pass written against the hardware in front of the author compiles there and
+/// is refused everywhere it matters.
+///
+/// **The limit is per stage and per pipeline layout, not per bind group.** It is
+/// validated at `createPipelineLayout` as a sum over every bind group layout in
+/// the layout, so splitting an over-budget set across two groups does not help —
+/// tried, and refused with the identical message. What has to come down is the
+/// number of bindings, which is why the GPU-driven passes pack several tables
+/// into one buffer.
+///
+/// [`check_portable_storage_buffers`] is the check; this is the number it checks
+/// against.
+pub const PORTABLE_STORAGE_BUFFERS_PER_STAGE: u32 = 8;
+
+/// Refuses a pipeline layout that would use more than
+/// [`PORTABLE_STORAGE_BUFFERS_PER_STAGE`] storage buffers in any one stage.
+///
+/// **Nothing below the seam notices this until a device does.**
+/// [`BindGroupLayoutDesc::check_entries`] counts nothing per stage and
+/// [`Limits`] has no such field, so before this existed the first thing that
+/// objected was a backend refusing a pipeline layout at runtime — on a browser,
+/// or on a software adapter, which is to say on somebody else's machine. This
+/// turns that into a failure where the layout is written.
+///
+/// `layouts` is every bind group layout of one pipeline layout, in set order,
+/// because the limit sums across them.
+///
+/// # What is counted, and what is not
+///
+/// Only [`ShaderStages::ALL`] — vertex, fragment and compute — because those are
+/// the stages WebGPU has. A binding visible only to
+/// [`ShaderStages::MESH`](crate::ShaderStages::MESH) or
+/// [`TASK`](crate::ShaderStages::TASK) is on a pipeline that needs
+/// [`Features::MESH_SHADER`](crate::Features::MESH_SHADER), which no WebGPU
+/// device reports, so it is not measured against a WebGPU limit. That is the
+/// whole of the exemption: a binding those stages share with the fragment stage
+/// still counts in the fragment stage.
+///
+/// [`BindGroupLayoutEntry::count`] is counted, not the number of entries: an
+/// array of `n` storage buffers takes `n` of the budget, and the
+/// [`u32::MAX`](u32::MAX) bindless sentinel therefore fails here — which is
+/// correct, since a bindless storage array is not something the guaranteed limit
+/// can hold.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`], naming the layout, the stage and both
+/// numbers.
+pub fn check_portable_storage_buffers(
+    label: Option<&str>,
+    layouts: &[&BindGroupLayoutDesc<'_>],
+) -> Result<(), HalError> {
+    for (stage, name) in [
+        (ShaderStages::VERTEX, "vertex"),
+        (ShaderStages::FRAGMENT, "fragment"),
+        (ShaderStages::COMPUTE, "compute"),
+    ] {
+        let used = layouts
+            .iter()
+            .flat_map(|layout| layout.entries.iter())
+            .filter(|entry| {
+                matches!(entry.kind, BindingKind::StorageBuffer { .. })
+                    && entry.visibility.contains(stage)
+            })
+            .fold(0u32, |total, entry| total.saturating_add(entry.count));
+        if used > PORTABLE_STORAGE_BUFFERS_PER_STAGE {
+            return Err(HalError::InvalidDescriptor(format!(
+                "pipeline layout {} binds {used} storage buffers in the {name} stage, and a \
+                 WebGPU device guarantees only {PORTABLE_STORAGE_BUFFERS_PER_STAGE}; the limit is \
+                 a sum over every bind group layout in one pipeline layout, so splitting them \
+                 across groups does not help — pack the data into fewer buffers instead",
+                label.unwrap_or("<unlabelled>"),
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A resource being bound into a slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindingResource {
@@ -1181,6 +1266,144 @@ mod tests {
                 "geometry at the near plane must beat the cleared far value"
             );
         }
+    }
+
+    /// **The storage-buffer budget is per stage and summed across bind group
+    /// layouts**, and going one over is refused.
+    ///
+    /// Falsified by the arms below rather than asserted: a layout at exactly the
+    /// floor passes, the same layout with one more binding fails, and a 7+7
+    /// *split* fails too — which is the whole point, because splitting is what
+    /// an author reaches for first and it is what a device also refuses.
+    #[test]
+    fn a_pipeline_layout_over_the_portable_storage_budget_is_refused() {
+        let storage = |binding: u32, visibility: ShaderStages| BindGroupLayoutEntry {
+            binding,
+            visibility,
+            kind: BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        };
+        let compute: Vec<BindGroupLayoutEntry> = (0..PORTABLE_STORAGE_BUFFERS_PER_STAGE)
+            .map(|binding| storage(binding, ShaderStages::COMPUTE))
+            .collect();
+        let at_the_floor = BindGroupLayoutDesc {
+            label: Some("at the floor"),
+            entries: &compute,
+        };
+        check_portable_storage_buffers(at_the_floor.label, &[&at_the_floor])
+            .expect("exactly the guaranteed number is legal");
+
+        let mut over = compute.clone();
+        over.push(storage(
+            PORTABLE_STORAGE_BUFFERS_PER_STAGE,
+            ShaderStages::COMPUTE,
+        ));
+        let over = BindGroupLayoutDesc {
+            label: Some("one over"),
+            entries: &over,
+        };
+        let error = check_portable_storage_buffers(over.label, &[&over]).expect_err("one over");
+        assert!(error.to_string().contains("one over"), "{error}");
+        assert!(error.to_string().contains("compute"), "{error}");
+
+        // Split across two groups, which is what the limit does *not* forgive.
+        let (first, second) = compute.split_at(4);
+        let mut tail = second.to_vec();
+        tail.push(storage(
+            PORTABLE_STORAGE_BUFFERS_PER_STAGE,
+            ShaderStages::COMPUTE,
+        ));
+        let first = BindGroupLayoutDesc {
+            label: Some("split"),
+            entries: first,
+        };
+        let second = BindGroupLayoutDesc {
+            label: Some("split"),
+            entries: &tail,
+        };
+        check_portable_storage_buffers(Some("split"), &[&first, &second])
+            .expect_err("the limit sums over every bind group layout in the pipeline layout");
+
+        // The graphics stages are counted apart from each other: eight in the
+        // vertex stage and eight in the fragment stage is sixteen bindings and
+        // still legal.
+        let graphics: Vec<BindGroupLayoutEntry> = (0..PORTABLE_STORAGE_BUFFERS_PER_STAGE)
+            .map(|binding| storage(binding, ShaderStages::VERTEX))
+            .chain((0..PORTABLE_STORAGE_BUFFERS_PER_STAGE).map(|binding| {
+                storage(
+                    binding + PORTABLE_STORAGE_BUFFERS_PER_STAGE,
+                    ShaderStages::FRAGMENT,
+                )
+            }))
+            .collect();
+        let graphics = BindGroupLayoutDesc {
+            label: Some("both stages"),
+            entries: &graphics,
+        };
+        check_portable_storage_buffers(graphics.label, &[&graphics])
+            .expect("the budget is per stage");
+    }
+
+    /// A mesh-stage binding is not measured against a WebGPU limit, because no
+    /// WebGPU device has a mesh stage — but one it *shares* with the fragment
+    /// stage still counts there.
+    #[test]
+    fn the_mesh_stages_are_outside_the_webgpu_budget_and_the_fragment_stage_is_not() {
+        let storage = |binding: u32, visibility: ShaderStages| BindGroupLayoutEntry {
+            binding,
+            visibility,
+            kind: BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        };
+        let mesh_only: Vec<BindGroupLayoutEntry> = (0..PORTABLE_STORAGE_BUFFERS_PER_STAGE * 2)
+            .map(|binding| storage(binding, ShaderStages::MESH.union(ShaderStages::TASK)))
+            .collect();
+        let mesh_only = BindGroupLayoutDesc {
+            label: Some("mesh path"),
+            entries: &mesh_only,
+        };
+        check_portable_storage_buffers(mesh_only.label, &[&mesh_only])
+            .expect("a mesh pipeline is never a WebGPU pipeline");
+
+        let shared: Vec<BindGroupLayoutEntry> = (0..PORTABLE_STORAGE_BUFFERS_PER_STAGE + 1)
+            .map(|binding| storage(binding, ShaderStages::MESH.union(ShaderStages::FRAGMENT)))
+            .collect();
+        let shared = BindGroupLayoutDesc {
+            label: Some("shared with the fragment stage"),
+            entries: &shared,
+        };
+        let error = check_portable_storage_buffers(shared.label, &[&shared])
+            .expect_err("the fragment half is still a WebGPU stage");
+        assert!(error.to_string().contains("fragment"), "{error}");
+    }
+
+    /// An array binding spends its whole length, so the bindless sentinel is
+    /// refused — which is the truth about it rather than a technicality.
+    #[test]
+    fn an_array_of_storage_buffers_spends_its_whole_count() {
+        let entries = [BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            kind: BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: PORTABLE_STORAGE_BUFFERS_PER_STAGE + 1,
+            flags: BindingFlags::empty(),
+        }];
+        let desc = BindGroupLayoutDesc {
+            label: Some("an array"),
+            entries: &entries,
+        };
+        check_portable_storage_buffers(desc.label, &[&desc]).expect_err("nine descriptors");
     }
 
     #[test]

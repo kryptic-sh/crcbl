@@ -6,9 +6,14 @@
 //! keeping both in the crate that owns the source means there is one place to
 //! change rather than one per consumer.
 //!
-//! What is *not* here is the bucket table. Which meshes are buckets is the
-//! renderer's decision — [`crcbl_render::ForwardRenderer`] builds one bucket per
-//! resident mesh — and this crate has no idea what is resident.
+//! What is *not* here is **which** meshes are buckets. That is the renderer's
+//! decision — [`crcbl_render::ForwardRenderer`] builds one bucket per resident
+//! mesh — and this crate has no idea what is resident. Where the bucket table
+//! *sits* is another matter and is here, in
+//! [`pack_tables`](crate::draw_gen::pack_tables): the shader reads
+//! every host-written table out of one storage buffer, so the byte layout of
+//! that buffer is the shader's and belongs beside the block that carries its
+//! offsets.
 //!
 //! An instance whose mesh names no bucket scatters nowhere and is not drawn.
 //! That cannot happen while every resident mesh has a bucket, which is the
@@ -32,11 +37,11 @@ pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Bytes of the uniform block.
 ///
-/// Four `uint`, which is exactly the 16 bytes `std140` puts in front of the
+/// Eight `uint`, which is exactly the 32 bytes `std140` puts in front of the
 /// `float4` that follows, and two `float4`. Checked against the `Offset`
 /// decorations `slangc` emits by this module's
 /// `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
-pub const PARAMS_SIZE: usize = 48;
+pub const PARAMS_SIZE: usize = 64;
 
 /// The uniform block, matching `struct DrawGenParams` in
 /// `shaders/draw_gen.slang`.
@@ -63,6 +68,27 @@ pub struct Params {
     /// carries: this pass writes the state and the amplification stage reads it,
     /// so the two must index it identically.
     pub group_stride: u32,
+    /// Where the per-bucket cluster counts start, in words, in the single
+    /// host-written table buffer `draw_gen.slang` binds.
+    ///
+    /// **Five tables share one storage binding**, because WebGPU guarantees only
+    /// eight storage buffers per shader stage and this pass bound fourteen — see
+    /// `shaders/draw_gen.slang`'s header, which is where that is argued. The
+    /// bucket table is at word zero and needs no offset; these four say where
+    /// each later region begins, and only the host knows, because each is as
+    /// long as what is resident.
+    ///
+    /// [`pack_tables`] is what computes all four from the table lengths, so a
+    /// caller packing the buffer and a caller filling this block cannot disagree.
+    pub bucket_clusters_at: u32,
+    /// Where the per-mesh [`MeshLevels`](crate::level_select::MeshLevels)
+    /// records start, in words.
+    pub mesh_levels_at: u32,
+    /// Where the [`LevelGroup`](crate::level_select::LevelGroup) records start,
+    /// in words.
+    pub level_groups_at: u32,
+    /// Where the level → mesh id table starts, in words.
+    pub level_meshes_at: u32,
     /// The eye the uniform cut is selected from, in world space.
     ///
     /// The same three floats a frame writes into
@@ -101,21 +127,136 @@ impl Params {
             self.bucket_capacity,
             self.visible_capacity,
             self.group_stride,
+            self.bucket_clusters_at,
+            self.mesh_levels_at,
+            self.level_groups_at,
+            self.level_meshes_at,
         ]
         .into_iter()
         .enumerate()
         {
             put(slot * 4, value.to_le_bytes());
         }
-        // Offset 16 is where `std140` puts the first `float4`.
+        // Offset 32 is where `std140` puts the first `float4`, the eight `uint`
+        // above having filled two whole 16-byte rows.
         for (axis, value) in self.camera_position.into_iter().enumerate() {
-            put(16 + axis * 4, value.to_le_bytes());
+            put(32 + axis * 4, value.to_le_bytes());
         }
         for (slot, value) in self.lod_params.into_iter().enumerate() {
-            put(32 + slot * 4, value.to_le_bytes());
+            put(48 + slot * 4, value.to_le_bytes());
         }
         bytes
     }
+}
+
+/// The single table buffer `draw_gen.slang` binds, and where each region starts.
+///
+/// Produced by [`pack_tables`], which is the only thing that may produce one:
+/// the bytes and the four offsets have to be computed from the same lengths, and
+/// a caller that packed the buffer one way and filled
+/// [`Params::mesh_levels_at`] another would have a shader reading the region in
+/// front of the one it meant.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tables {
+    /// The whole buffer, ready to upload. Never empty.
+    pub bytes: Vec<u8>,
+    /// Where each region in it starts.
+    pub offsets: TableOffsets,
+}
+
+/// Where each region of [`Tables::bytes`] starts, in words.
+///
+/// Separate from the bytes so a caller can keep it after the upload without
+/// keeping a copy of the buffer: the offsets are what every later frame's
+/// [`Params`] carries, and the bytes are wanted exactly once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TableOffsets {
+    /// [`Params::bucket_clusters_at`].
+    pub bucket_clusters_at: u32,
+    /// [`Params::mesh_levels_at`].
+    pub mesh_levels_at: u32,
+    /// [`Params::level_groups_at`].
+    pub level_groups_at: u32,
+    /// [`Params::level_meshes_at`].
+    pub level_meshes_at: u32,
+}
+
+/// Packs every host-written table `draw_gen.slang` reads into one buffer.
+///
+/// The regions are laid out in the order that shader's `tables` binding
+/// documents: the bucket table at word zero, then the per-bucket cluster counts,
+/// then the per-mesh [`MeshLevels`](crate::level_select::MeshLevels) records,
+/// then the [`LevelGroup`](crate::level_select::LevelGroup) records, then the
+/// level → mesh id table. **One buffer because a WebGPU device guarantees only
+/// eight storage buffers per shader stage** and the pass bound fourteen; the
+/// tables were chosen for the merge because they are written together, when a
+/// mesh becomes resident, and never per frame.
+///
+/// **Each of the three selection regions is padded to at least one record**, so
+/// a renderer whose meshes have no hierarchy at all — the ordinary case — still
+/// has a word for every index the shader can form. A zero-length region would
+/// otherwise put `level_meshes_at` at the end of the buffer, and every mesh's
+/// `first_level` names element zero of that region whether it has a DAG or not.
+///
+/// # Errors
+///
+/// `None` if the packed buffer is longer than a `u32` of words can address,
+/// which is a table built far past anything a device would allocate rather than
+/// a runtime condition.
+#[must_use]
+pub fn pack_tables(
+    bucket_meshes: &[u32],
+    bucket_clusters: &[u32],
+    mesh_levels: &[crate::level_select::MeshLevels],
+    level_groups: &[crate::level_select::LevelGroup],
+    level_meshes: &[u32],
+) -> Option<Tables> {
+    let mut bytes: Vec<u8> = Vec::new();
+    let offset = |bytes: &[u8]| u32::try_from(bytes.len() / 4).ok();
+
+    let words = |values: &[u32]| -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    };
+    // At least one record, for the reason the docs give.
+    let padded = |mut region: Vec<u8>, stride: usize| -> Vec<u8> {
+        if region.is_empty() {
+            region = vec![0u8; stride];
+        }
+        region
+    };
+
+    bytes.extend_from_slice(&words(bucket_meshes));
+    let bucket_clusters_at = offset(&bytes)?;
+    bytes.extend_from_slice(&words(bucket_clusters));
+    let mesh_levels_at = offset(&bytes)?;
+    bytes.extend_from_slice(&padded(
+        crate::level_select::mesh_levels_bytes(mesh_levels),
+        crate::level_select::MESH_LEVELS_STRIDE,
+    ));
+    let level_groups_at = offset(&bytes)?;
+    bytes.extend_from_slice(&padded(
+        crate::level_select::level_group_bytes(level_groups),
+        crate::level_select::LEVEL_GROUP_STRIDE,
+    ));
+    let level_meshes_at = offset(&bytes)?;
+    bytes.extend_from_slice(&padded(words(level_meshes), 4));
+    // The whole buffer is bound as a descriptor, and a zero-length one is not a
+    // descriptor any backend takes. The padding above guarantees it, and this is
+    // what says so where a reader meets it.
+    debug_assert!(!bytes.is_empty());
+
+    Some(Tables {
+        bytes,
+        offsets: TableOffsets {
+            bucket_clusters_at,
+            mesh_levels_at,
+            level_groups_at,
+            level_meshes_at,
+        },
+    })
 }
 
 /// Words in one indexed-indirect argument structure.
@@ -294,8 +435,8 @@ mod tests {
     #[test]
     fn the_draw_gen_params_block_matches_the_offsets_slangc_emits() {
         // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8, 12, 16,
-        // 32.
-        assert_eq!(PARAMS_SIZE, 48);
+        // 20, 24, 28, 32, 48.
+        assert_eq!(PARAMS_SIZE, 64);
         assert_eq!(
             PARAMS_SIZE % 16,
             0,
@@ -307,6 +448,10 @@ mod tests {
             bucket_capacity: 5,
             visible_capacity: 9,
             group_stride: 11,
+            bucket_clusters_at: 13,
+            mesh_levels_at: 17,
+            level_groups_at: 19,
+            level_meshes_at: 23,
             camera_position: [1.5, 2.5, 3.5],
             lod_params: [4.5, 5.5, 6.5],
         }
@@ -319,16 +464,135 @@ mod tests {
         assert_eq!(uint_at(4), 5, "bucket_capacity at offset 4");
         assert_eq!(uint_at(8), 9, "visible_capacity at offset 8");
         assert_eq!(uint_at(12), 11, "group_stride at offset 12");
-        assert_eq!(float_at(16), 1.5, "camera_position at offset 16");
-        assert_eq!(float_at(24), 3.5, "and it is three floats wide");
-        assert_eq!(uint_at(28), 0, "the fourth component is padding, and zero");
-        assert_eq!(float_at(32), 4.5, "lod_params at offset 32");
-        assert_eq!(float_at(36), 5.5, "and its expand budget beside it");
-        assert_eq!(float_at(40), 6.5, "and the hold budget after that");
+        assert_eq!(uint_at(16), 13, "bucket_clusters_at at offset 16");
+        assert_eq!(uint_at(20), 17, "mesh_levels_at at offset 20");
+        assert_eq!(uint_at(24), 19, "level_groups_at at offset 24");
+        assert_eq!(uint_at(28), 23, "level_meshes_at at offset 28");
+        assert_eq!(float_at(32), 1.5, "camera_position at offset 32");
+        assert_eq!(float_at(40), 3.5, "and it is three floats wide");
+        assert_eq!(uint_at(44), 0, "the fourth component is padding, and zero");
+        assert_eq!(float_at(48), 4.5, "lod_params at offset 48");
+        assert_eq!(float_at(52), 5.5, "and its expand budget beside it");
+        assert_eq!(float_at(56), 6.5, "and the hold budget after that");
         assert!(
-            bytes[44..].iter().all(|byte| *byte == 0),
+            bytes[60..].iter().all(|byte| *byte == 0),
             "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[44..]
+            &bytes[60..]
+        );
+    }
+
+    /// The regions [`pack_tables`] lays out are the ones the offsets it returns
+    /// name, and every one of them decodes back to what went in.
+    ///
+    /// Both halves matter and neither implies the other: a packer whose offsets
+    /// were all zero would still round-trip the first region, and one that got
+    /// the offsets right while writing a region at the wrong stride would still
+    /// place them.
+    #[test]
+    fn the_packed_tables_decode_at_the_offsets_they_report() {
+        use crate::cluster_dag::GroupBounds;
+        use crate::cluster_select::GroupCost;
+        use crate::level_select::{LEVEL_GROUP_STRIDE, LevelGroup, MESH_LEVELS_STRIDE, MeshLevels};
+
+        let bucket_meshes = [7u32, 8, 9];
+        let bucket_clusters = [70u32, 80, 90];
+        let mesh_levels = [
+            MeshLevels {
+                first_group: 0,
+                group_count: 2,
+                first_level: 0,
+                top_level: 1,
+            },
+            MeshLevels {
+                first_group: 2,
+                group_count: 0,
+                first_level: 2,
+                top_level: 0,
+            },
+        ];
+        let group = |level: u32, error: f32| LevelGroup {
+            level,
+            cost: GroupCost {
+                error,
+                bounds: GroupBounds {
+                    center: [1.0, 2.0, 3.0],
+                    radius: 4.0,
+                },
+            },
+        };
+        let level_groups = [group(0, 0.25), group(1, 0.5)];
+        let level_meshes = [11u32, 12, 13];
+
+        let packed = pack_tables(
+            &bucket_meshes,
+            &bucket_clusters,
+            &mesh_levels,
+            &level_groups,
+            &level_meshes,
+        )
+        .expect("a table this small addresses");
+        let word_at = |word: u32| {
+            let at = word as usize * 4;
+            u32::from_le_bytes(packed.bytes[at..at + 4].try_into().expect("4"))
+        };
+
+        for (bucket, mesh) in bucket_meshes.iter().enumerate() {
+            let bucket = u32::try_from(bucket).expect("small");
+            assert_eq!(word_at(bucket), *mesh, "bucket table at word 0");
+            assert_eq!(
+                word_at(packed.offsets.bucket_clusters_at + bucket),
+                bucket_clusters[bucket as usize],
+                "cluster counts at bucket_clusters_at"
+            );
+        }
+        for (index, record) in mesh_levels.iter().enumerate() {
+            let at = packed.offsets.mesh_levels_at
+                + u32::try_from(index * MESH_LEVELS_STRIDE / 4).expect("small");
+            assert_eq!(word_at(at), record.first_group);
+            assert_eq!(word_at(at + 1), record.group_count);
+            assert_eq!(word_at(at + 2), record.first_level);
+            assert_eq!(word_at(at + 3), record.top_level);
+        }
+        for (index, record) in level_groups.iter().enumerate() {
+            let at = packed.offsets.level_groups_at
+                + u32::try_from(index * LEVEL_GROUP_STRIDE / 4).expect("small");
+            let start = at as usize * 4;
+            assert_eq!(
+                LevelGroup::from_bytes(
+                    packed.bytes[start..start + LEVEL_GROUP_STRIDE]
+                        .try_into()
+                        .expect("one whole record")
+                ),
+                *record
+            );
+        }
+        for (index, mesh) in level_meshes.iter().enumerate() {
+            let at = packed.offsets.level_meshes_at + u32::try_from(index).expect("small");
+            assert_eq!(word_at(at), *mesh, "level table at level_meshes_at");
+        }
+    }
+
+    /// A renderer whose meshes have no hierarchy is the ordinary case, and every
+    /// index the shader can still form has to land inside the buffer.
+    ///
+    /// `first_level` names element zero of the level region for a flat mesh too,
+    /// so a region packed at zero length would put that read past the end.
+    #[test]
+    fn the_empty_selection_regions_are_padded_to_one_record() {
+        let packed = pack_tables(&[3], &[0], &[], &[], &[]).expect("addresses");
+        let words = u32::try_from(packed.bytes.len() / 4).expect("small");
+        assert!(
+            packed.offsets.level_meshes_at < words,
+            "the level region starts at word {} of a {words}-word buffer",
+            packed.offsets.level_meshes_at
+        );
+        assert!(
+            packed.offsets.level_groups_at < packed.offsets.level_meshes_at,
+            "an empty group region still holds a record"
+        );
+        assert!(
+            packed.offsets.mesh_levels_at < packed.offsets.level_groups_at,
+            "an empty per-mesh region still holds a record"
         );
     }
 

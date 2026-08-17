@@ -269,8 +269,8 @@ mod tests {
         );
     }
 
-    /// **The two shaders that add to the culling statistics index the words
-    /// this crate says they do**, and neither can be checked by a compiler.
+    /// **Every shader that touches the culling statistics indexes the word this
+    /// crate says it does**, and none of them can be checked by a compiler.
     ///
     /// Both counters live in one buffer, so a shader writing the other's word
     /// produces a plausible number for the wrong thing and a zero for the right
@@ -290,6 +290,16 @@ mod tests {
                 include_str!("../shaders/mesh_cluster.slang"),
                 "CLUSTER_SURVIVOR_WORD",
                 CLUSTER_SURVIVOR_WORD,
+            ),
+            // Reads rather than adds, but reads the same shared block: the
+            // draw-argument pass clamps its dispatch against the instance
+            // survivor count, and reading the cluster word instead would clamp
+            // against a number that is zero on three of the four geometry paths.
+            (
+                "draw_gen.slang",
+                include_str!("../shaders/draw_gen.slang"),
+                "INSTANCE_SURVIVOR_WORD",
+                INSTANCE_SURVIVOR_WORD,
             ),
         ] {
             let declaration = format!("static const uint {name} = {value};");

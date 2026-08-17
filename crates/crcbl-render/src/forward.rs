@@ -143,7 +143,7 @@ use crcbl_hal::{
     ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
     MeshPipelineDesc, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
     QueueHandle, Rect2d, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, Viewport,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, Viewport, check_portable_storage_buffers,
 };
 use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao, ssr};
 use glam::{Mat4, Quat, Vec3};
@@ -1390,7 +1390,11 @@ impl BucketDraws {
                     // workgroups, so an empty scene needs no branch here and the
                     // recorded stream stays the same whatever the scene holds.
                     encoder.draw_mesh_tasks_indirect(&DrawIndirect {
-                        args: draws.mesh_args,
+                        // The buffer the per-bucket draw counts are also in —
+                        // the extents follow them, which is what
+                        // `DrawGen::mesh_args_offset` accounts for. See
+                        // [`GeneratedDraws::counts`].
+                        args: draws.counts,
                         offset: *mesh_args_offset,
                         draw_count: 1,
                         stride: mesh_stride,
@@ -1452,13 +1456,15 @@ fn read_draw_sources<'g, 'a>(
         // The per-bucket draw *counts* are not read at all, because nothing here
         // is a draw whose count could come from memory.
         //
-        // The dispatch *extents* are a second buffer and a real indirect read —
-        // one structure per bucket, written by the same pass. Two buffers rather
-        // than one because a resource is in exactly one state per pass and these
-        // two are in different ones.
+        // The dispatch *extents* are a real indirect read — one structure per
+        // bucket, written by the same pass. They are in a **different buffer**
+        // from the arguments above and that separation is load-bearing: a
+        // resource is in exactly one state per pass and these two are in
+        // different ones. They share a buffer with the counts instead, which
+        // this path does not read at all — see [`GeneratedDraws::counts`].
         let pass = pass
             .read_buffer(draws.args_id)
-            .use_buffer(draws.mesh_args_id, ResourceState::IndirectArgument);
+            .use_buffer(draws.counts_id, ResourceState::IndirectArgument);
         if culls_clusters {
             // The amplification stage counts its survivors into the culling
             // statistics, which the draw-argument pass read a moment ago — so this
@@ -2534,10 +2540,19 @@ impl ForwardRenderer {
             flags: BindingFlags::empty(),
         });
 
-        let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let mesh_desc = BindGroupLayoutDesc {
             label: Some("mesh frame"),
             entries: &mesh_entries,
-        })?;
+        };
+        // **This layout is at the guaranteed limit with no headroom on the
+        // raster path**: eight storage buffers in the vertex stage, which is
+        // every one a WebGPU device promises. A ninth is a renderer that cannot
+        // be built in a browser or on SwiftShader, so it fails here rather than
+        // at somebody else's `createPipelineLayout` — see
+        // [`crcbl_hal::check_portable_storage_buffers`], which also says why the
+        // mesh path's extra reads are outside the count.
+        check_portable_storage_buffers(mesh_desc.label, &[&mesh_desc])?;
+        let mesh_layout = device.create_bind_group_layout(&mesh_desc)?;
         rollback.bind_group_layouts.push(mesh_layout);
 
         // A dynamic offset must be a multiple of the device's alignment, and one
@@ -6421,12 +6436,27 @@ mod tests {
 
         let cube = base_at(renderer.bucket_constants[DEMO_CUBE]);
         let pyramid = base_at(renderer.bucket_constants[DEMO_PYRAMID]);
-        assert_eq!(cube, 0, "the first bucket's run starts at the beginning");
+        // **Not zero**, and that is the point since the runs came to share a
+        // buffer with `cull.slang`'s survivor list: the first bucket's run starts
+        // where that list ends. A base of zero would have the first bucket walk
+        // the survivors instead of its own run — the same instances in a
+        // different order, which draws a plausible picture.
+        assert_eq!(
+            cube,
+            renderer.draws.visible_capacity(),
+            "the first bucket's run starts past the survivor list"
+        );
         assert_eq!(
             pyramid,
-            renderer.draws.visible_capacity(),
+            renderer.draws.visible_capacity() * 2,
             "and the second's starts a whole run later — the stride is the \
              capacity, so a bucket that filled up still cannot reach the next"
+        );
+        assert_eq!(
+            cube,
+            renderer.draws.bucket_base(DEMO_CUBE as u32),
+            "the block carries what `DrawGen::bucket_base` says, because a reader \
+             copying a run back uses that accessor and the shader uses this block"
         );
         renderer.destroy(device.as_ref());
     }
@@ -7272,10 +7302,16 @@ mod tests {
     /// is a frame that draws one bucket's geometry three times.
     fn mesh_dispatch_calls(renderer: &ForwardRenderer) -> Vec<DrawIndirect> {
         let stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
+        // The extents share a buffer with the one draw count per bucket that
+        // precedes them, so every offset is that far in. Written out from the
+        // bucket count here rather than taken from `DrawGen::mesh_args_offset`,
+        // for the reason above: a base of zero is exactly the mistake this
+        // comparison exists to catch, and it would agree with itself.
+        let counts_bytes = renderer.bucket_constants.len() as u64 * 4;
         (0..renderer.bucket_constants.len())
             .map(|bucket| DrawIndirect {
                 args: renderer.draws.mesh_args(renderer.frame),
-                offset: bucket as u64 * u64::from(stride),
+                offset: counts_bytes + bucket as u64 * u64::from(stride),
                 draw_count: 1,
                 stride,
             })
@@ -7347,11 +7383,16 @@ mod tests {
         let expected = mesh_dispatch_calls(&renderer);
         // The table is written once at build, into a host-visible buffer the
         // null backend keeps the bytes of — so it is readable whether or not a
-        // shader ever ran.
-        let clusters: Vec<u32> = recorder
-            .buffer_bytes(renderer.draws.bucket_clusters())
-            .expect("the bucket cluster table is one of this recorder's buffers")
+        // shader ever ran. It shares that buffer with the four other tables the
+        // draw-argument pass reads, so the region has to be cut out at the
+        // offset the renderer told the shader about rather than at zero.
+        let table_bytes = recorder
+            .buffer_bytes(renderer.draws.tables())
+            .expect("the table buffer is one of this recorder's buffers");
+        let clusters_at = renderer.draws.table_offsets().bucket_clusters_at as usize * 4;
+        let clusters: Vec<u32> = table_bytes[clusters_at..]
             .chunks_exact(4)
+            .take(renderer.bucket_constants.len())
             .map(|word| u32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
             .collect();
 
@@ -7543,9 +7584,10 @@ mod tests {
             let barriers = &clear.barriers().buffers;
             assert_eq!(
                 barriers.len(),
-                4,
-                "round {round}: the survivor count, the draw arguments, the draw counts \
-                 and the mesh-dispatch arguments, and nothing else: {barriers:?}"
+                3,
+                "round {round}: the survivor count, the draw arguments, and the buffer \
+                 holding both the draw counts and the mesh-dispatch arguments, and \
+                 nothing else: {barriers:?}"
             );
             assert!(
                 barriers
@@ -7553,7 +7595,7 @@ mod tests {
                     .all(|barrier| barrier.to == ResourceState::ShaderReadWrite),
                 "round {round}: every one of them is written by this pass: {barriers:?}"
             );
-            // The ones the frame leaves as indirect arguments are the three a
+            // The ones the frame leaves as indirect arguments are the two a
             // driver reads; the survivor count rests in a shader read. That
             // split is what names them without a handle to compare.
             assert_eq!(
@@ -7561,7 +7603,7 @@ mod tests {
                     .iter()
                     .filter(|barrier| barrier.from == ResourceState::IndirectArgument)
                     .count(),
-                3,
+                2,
                 "round {round}: out of the state a draw read them in: {barriers:?}"
             );
 
@@ -7589,12 +7631,14 @@ mod tests {
             assert_eq!(
                 after("draw-args"),
                 4,
-                "round {round}: and so do the draw arguments, the draw counts and the \
-                 mesh-dispatch arguments — plus `docs/plan/25-lod.md`'s hysteresis state, \
-                 which the clearing pass does *not* zero and which is behind the same \
-                 kind of barrier for the opposite reason: it is the one buffer here \
-                 carrying a value out of the previous frame, so what it needs ordering \
-                 against is that frame rather than this one's clear"
+                "round {round}: and so do the draw arguments and the buffer holding the \
+                 draw counts beside the mesh-dispatch arguments — plus the survivor list, \
+                 which the cull pass has just written and this pass reads through the same \
+                 descriptor it scatters the runs into, and `docs/plan/25-lod.md`'s \
+                 hysteresis state, which the clearing pass does *not* zero and which is \
+                 behind the same kind of barrier for the opposite reason: it is the one \
+                 buffer here carrying a value out of the previous frame, so what it needs \
+                 ordering against is that frame rather than this one's clear"
             );
 
             // The compiled graph borrows the renderer's pass bodies, so it has

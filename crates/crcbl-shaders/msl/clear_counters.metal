@@ -13,38 +13,34 @@ struct ClearParams_0
 };
 
 
-#line 108
+#line 111
 struct KernelContext_0
 {
     ClearParams_0 constant* clear_0;
     uint device* cull_stats_0;
     uint device* args_0;
-    uint device* draw_counts_0;
-    uint device* mesh_args_0;
+    uint device* counts_and_mesh_args_0;
 };
 
 
-#line 102
-[[kernel]] void computeMain(uint3 thread_0 [[thread_position_in_grid]], ClearParams_0 constant* clear_1 [[buffer(0)]], uint device* cull_stats_1 [[buffer(1)]], uint device* args_1 [[buffer(2)]], uint device* draw_counts_1 [[buffer(3)]], uint device* mesh_args_1 [[buffer(4)]])
+#line 105
+[[kernel]] void computeMain(uint3 thread_0 [[thread_position_in_grid]], ClearParams_0 constant* clear_1 [[buffer(0)]], uint device* cull_stats_1 [[buffer(1)]], uint device* args_1 [[buffer(2)]], uint device* counts_and_mesh_args_1 [[buffer(3)]])
 {
 
-#line 102
+#line 105
     thread KernelContext_0 kernelContext_0;
 
-#line 102
+#line 105
     (&kernelContext_0)->clear_0 = clear_1;
 
-#line 102
+#line 105
     (&kernelContext_0)->cull_stats_0 = cull_stats_1;
 
-#line 102
+#line 105
     (&kernelContext_0)->args_0 = args_1;
 
-#line 102
-    (&kernelContext_0)->draw_counts_0 = draw_counts_1;
-
-#line 102
-    (&kernelContext_0)->mesh_args_0 = mesh_args_1;
+#line 105
+    (&kernelContext_0)->counts_and_mesh_args_0 = counts_and_mesh_args_1;
 
     uint index_0 = thread_0.x;
 
@@ -52,7 +48,7 @@ struct KernelContext_0
     {
         *((&kernelContext_0)->cull_stats_0+index_0) = 0U;
 
-#line 106
+#line 109
     }
 
 
@@ -61,25 +57,24 @@ struct KernelContext_0
     {
         *((&kernelContext_0)->args_0+index_0) = 0U;
 
-#line 110
+#line 113
     }
 
 
 
     if(index_0 < ((&kernelContext_0)->clear_0->counts_words_0))
     {
-        *((&kernelContext_0)->draw_counts_0+index_0) = 0U;
+        *((&kernelContext_0)->counts_and_mesh_args_0+index_0) = 0U;
 
-#line 114
+#line 117
     }
 
-
-
+#line 123
     if(index_0 < ((&kernelContext_0)->clear_0->mesh_args_words_0))
     {
-        *((&kernelContext_0)->mesh_args_0+index_0) = 0U;
+        *((&kernelContext_0)->counts_and_mesh_args_0+((&kernelContext_0)->clear_0->counts_words_0 + index_0)) = 0U;
 
-#line 118
+#line 123
     }
 
 

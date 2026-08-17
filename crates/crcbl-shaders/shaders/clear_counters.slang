@@ -46,7 +46,9 @@ struct ClearParams
     /// structure per bucket. Computed on the host from that constant, so this
     /// shader does not re-declare the argument layout.
     uint args_words;
-    /// Words in the per-bucket draw-count buffer, which is one per bucket.
+    /// Words in the per-bucket draw-count region, which is one per bucket — and
+    /// therefore also where the mesh-dispatch extents start, since they follow
+    /// the counts in the same buffer.
     uint counts_words;
     /// Words in the culling-statistics buffer, which is
     /// `crcbl_shaders::cull::STATS_WORDS`. A parameter rather than a literal
@@ -78,17 +80,18 @@ RWStructuredBuffer<uint> cull_stats;
 [[vk::binding(2, 0)]]
 RWStructuredBuffer<uint> args;
 
-/// One draw count per bucket. `draw_gen.slang` stores a `1` into a bucket that
-/// took a survivor and leaves the rest at the zero written here, which is how a
-/// bucket with nothing in it draws nothing.
+/// One draw count per bucket, then the per-bucket mesh-dispatch arguments —
+/// **one buffer with two regions**, which is `draw_gen.slang`'s
+/// `counts_and_mesh_args` and where that shader's header argues the merge.
+///
+/// The counts occupy `0..clear.counts_words`: `draw_gen.slang` stores a `1` into
+/// a bucket that took a survivor and leaves the rest at the zero written here,
+/// which is how a bucket with nothing in it draws nothing. The extents follow at
+/// `clear.counts_words` and run for `clear.mesh_args_words`; their y extent is
+/// the surviving-instance count and is accumulated by atomic add, so it starts
+/// here at zero like every other counter this pass owns.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<uint> draw_counts;
-
-/// The per-bucket mesh-dispatch arguments `draw_gen.slang` writes. Its y extent
-/// is the surviving-instance count and is accumulated by atomic add, so it
-/// starts here at zero like every other counter this pass owns.
-[[vk::binding(4, 0)]]
-RWStructuredBuffer<uint> mesh_args;
+RWStructuredBuffer<uint> counts_and_mesh_args;
 
 /// Invocations per workgroup, matching
 /// `crcbl_shaders::clear_counters::WORKGROUP_SIZE`.
@@ -113,10 +116,12 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     }
     if (index < clear.counts_words)
     {
-        draw_counts[index] = 0;
+        counts_and_mesh_args[index] = 0;
     }
+    // Past the counts, in the same buffer — so the dispatch below still has to
+    // be as long as the *longest* region rather than as long as this one.
     if (index < clear.mesh_args_words)
     {
-        mesh_args[index] = 0;
+        counts_and_mesh_args[clear.counts_words + index] = 0;
     }
 }

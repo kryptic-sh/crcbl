@@ -4,17 +4,20 @@
 //! ```text
 //!  begin_frame ──▶ cull params (this frame's frustum)
 //!
-//!  add_passes ──┬─ compute "clear-counters" ──▶ visible_count, draw_args,
-//!               │                                  draw_counts, mesh_args
+//!  add_passes ──┬─ compute "clear-counters" ──▶ cull stats, draw args,
+//!               │                             counts+mesh args
 //!               │                                        │ graph barrier
-//!               ├─ compute "cull"      instances ──▶ visible + visible_count
+//!               ├─ compute "cull"      instances ──▶ survivors | · · ·
+//!               │                                 ──▶ cull stats
 //!               │                                        │ graph barrier
-//!               └─ compute "draw-args" visible ──▶ visible_instances
-//!                                              ──▶ draw_args + draw_counts
-//!                                              ──▶ mesh_args
+//!               └─ compute "draw-args" survivors ──▶ · · · | bucket runs
+//!                                               ──▶ draw args
+//!                                               ──▶ counts+mesh args
 //!                                                        │ graph barrier
 //!                        the caller's render pass ◀──────┘  IndirectArgument
 //! ```
+//!
+//! `a | b` is one buffer with two regions; the passes below say which is which.
 //!
 //! `docs/plan/03-gpu-driven-rendering.md` §3.3, both halves: "compute pass:
 //! frustum cull against instance AABBs → compacted visible instance list →
@@ -94,6 +97,32 @@
 //! and generates draws for the prefix that fit. [`DrawGen::visible_capacity`] is
 //! what a caller sizes against, and the counter is where a scene that outgrew it
 //! says so.
+//!
+//! # Buffers here are shared, and the accessors are views rather than allocations
+//!
+//! **The draw-argument pass binds eight storage buffers**, which is what a
+//! WebGPU device guarantees per shader stage — see `shaders/draw_gen.slang`'s
+//! header, which is where the merges and their costs are argued. It bound
+//! fourteen until 2026-08 and could therefore not be created on a browser at the
+//! default limits, nor on SwiftShader, which is every CI runner without a GPU.
+//!
+//! The consequence for a caller is that several of the accessors below **hand
+//! back the same buffer**:
+//!
+//! * [`DrawGen::visible`] and [`DrawGen::runs`] are one buffer. The survivor
+//!   list is at offset zero and bucket `b`'s run starts at
+//!   [`DrawGen::bucket_base`]`(b) * 4` bytes.
+//! * [`DrawGen::counts`] and [`DrawGen::mesh_args`] are one buffer. The counts
+//!   are at offset zero and bucket `b`'s dispatch extents at
+//!   [`DrawGen::mesh_args_offset`]`(b)`.
+//! * Every host-written table — the bucket table, the per-bucket cluster counts
+//!   and `docs/plan/25-lod.md`'s three selection tables — is one buffer, packed
+//!   by [`crcbl_shaders::draw_gen::pack_tables`].
+//!
+//! So a reader that copies a region back must take its offset from the accessor
+//! that names it. Reading at zero because a region used to be its own allocation
+//! reads the region in front of it, and the words it finds there are plausible
+//! `u32`s.
 
 use crcbl_hal::{
     Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
@@ -101,11 +130,10 @@ use crcbl_hal::{
     BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
     ComputePipelineDesc, ComputePipelineHandle, Device, HalError, MemoryLocation,
     PipelineLayoutDesc, PipelineLayoutHandle, QueueHandle, ResourceState, ShaderEntry,
-    ShaderModuleDesc, ShaderStages, SubmitInfo,
+    ShaderModuleDesc, ShaderStages, SubmitInfo, check_portable_storage_buffers,
 };
 use crcbl_shaders::{
     CLEAR_COUNTERS, CULL, DRAW_GEN, Stage, clear_counters, cull as cull_shader, draw_gen,
-    level_select,
 };
 
 use crate::cull::Frustum;
@@ -126,8 +154,9 @@ pub struct DrawGenDesc<'a> {
     /// order. One entry per indirect call the caller will record.
     pub bucket_meshes: &'a [u32],
     /// How many clusters each bucket's mesh has, in the same order — the x
-    /// extent of that bucket's mesh dispatch, and the only word of
-    /// [`GeneratedDraws::mesh_args`] the GPU does not decide.
+    /// extent of that bucket's mesh dispatch, and the only word of the
+    /// mesh-dispatch arguments — see [`DrawGen::mesh_args`] — the GPU does not
+    /// decide.
     ///
     /// **Zero on every geometry path with no mesh stage**, where nothing reads
     /// those arguments. It is still the same length as
@@ -172,32 +201,45 @@ pub struct DrawGenDesc<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct GeneratedDraws {
     /// The indirect arguments, [`draw_gen::DRAW_ARGS_SIZE`] bytes per bucket.
+    ///
+    /// **A buffer of its own**, unlike the counts and dispatch extents below,
+    /// and for the one reason that survives the storage-buffer squeeze the module
+    /// docs describe: the mesh path reads these as a shader read in the same pass
+    /// that executes those as indirect arguments, and a resource is in one state
+    /// at a time.
     pub args: BufferHandle,
     /// The same buffer as the graph knows it. Declare it in
-    /// [`ResourceState::IndirectArgument`].
+    /// [`ResourceState::IndirectArgument`], or as a shader read on the mesh path.
     pub args_id: BufferId,
-    /// One `u32` draw count per bucket: `1` for a bucket with something in it
-    /// and `0` for one without. What
-    /// [`GeometryPath::IndirectCount`](crcbl_hal::GeometryPath::IndirectCount)'s
-    /// call reads.
-    pub counts: BufferHandle,
-    /// The same buffer as the graph knows it.
-    pub counts_id: BufferId,
-    /// The per-bucket mesh-dispatch arguments,
-    /// [`draw_gen::MESH_ARGS_SIZE`] bytes per bucket: `(clusters, surviving
-    /// instances, 1)`. What
-    /// [`CommandEncoder::draw_mesh_tasks_indirect`](crcbl_hal::CommandEncoder::draw_mesh_tasks_indirect)
-    /// reads on [`GeometryPath::MeshShader`](crcbl_hal::GeometryPath::MeshShader).
-    pub mesh_args: BufferHandle,
-    /// The same buffer as the graph knows it. Declare it in
-    /// [`ResourceState::IndirectArgument`].
+    /// The per-bucket draw counts **and** the per-bucket mesh-dispatch
+    /// arguments, in that order, in one buffer.
     ///
-    /// A buffer of its own rather than more words on
-    /// [`args`](Self::args), because the mesh path reads *those* as a shader
-    /// read in the same pass and a resource is in one state at a time.
-    pub mesh_args_id: BufferId,
-    /// The per-bucket runs of surviving instance indices, which the vertex
-    /// stage reads. Declare it as a shader read.
+    /// At [`DrawGen::count_offset`]`(b)` is bucket `b`'s `u32` draw count: `1`
+    /// for a bucket with something in it and `0` for one without, which is what
+    /// [`GeometryPath::IndirectCount`](crcbl_hal::GeometryPath::IndirectCount)'s
+    /// call reads. At [`DrawGen::mesh_args_offset`]`(b)` are its
+    /// [`draw_gen::MESH_ARGS_SIZE`] bytes of `(clusters, surviving instances,
+    /// 1)`, which is what
+    /// [`CommandEncoder::draw_mesh_tasks_indirect`](crcbl_hal::CommandEncoder::draw_mesh_tasks_indirect)
+    /// reads on
+    /// [`GeometryPath::MeshShader`](crcbl_hal::GeometryPath::MeshShader).
+    ///
+    /// One buffer because no pass reads both: the two indirect tails execute the
+    /// counts and the mesh path executes the extents, so it is in
+    /// [`ResourceState::IndirectArgument`] either way and never in two states at
+    /// once.
+    pub counts: BufferHandle,
+    /// The same buffer as the graph knows it. Declare it in
+    /// [`ResourceState::IndirectArgument`] — **once**, whichever region the
+    /// pass reads.
+    pub counts_id: BufferId,
+    /// `cull.slang`'s survivor list **and** the per-bucket runs of surviving
+    /// instance indices the vertex stage reads, in that order, in one buffer.
+    /// Declare it as a shader read.
+    ///
+    /// A pass that draws reads only the runs, at
+    /// [`DrawGen::bucket_base`]`(b)` words in — which is the number
+    /// [`DrawConstants::base`](crcbl_shaders::mesh::DrawConstants::base) carries.
     pub runs_id: BufferId,
     /// `docs/plan/25-lod.md`'s hysteresis state, as the graph knows it.
     ///
@@ -225,18 +267,19 @@ pub struct GeneratedDraws {
 /// The cull and draw-argument dispatches, and everything they need.
 #[derive(Debug)]
 pub struct DrawGen {
-    /// Which mesh each bucket draws, as `draw_gen.slang` reads it. Written once:
-    /// the bucket table is fixed when it is built.
-    bucket_meshes: BufferHandle,
-    /// How many clusters each bucket's mesh has, written once for the same
-    /// reason: a mesh's clusters are decided when it becomes resident.
-    bucket_clusters: BufferHandle,
-    /// `docs/plan/25-lod.md`'s three selection tables, written once: a mesh's
-    /// hierarchy is decided when it becomes resident, exactly as its clusters
-    /// are.
-    mesh_levels: BufferHandle,
-    level_groups: BufferHandle,
-    level_meshes: BufferHandle,
+    /// Every host-written table `draw_gen.slang` reads, in one buffer: the
+    /// bucket table, the per-bucket cluster counts and `docs/plan/25-lod.md`'s
+    /// three selection tables.
+    ///
+    /// **Written once**, which is what makes the merge sound rather than merely
+    /// convenient: all five are decided when a mesh becomes resident and none is
+    /// rewritten per frame, so they change together or not at all.
+    /// [`crcbl_shaders::draw_gen::pack_tables`] is what lays them out and
+    /// [`table_offsets`](Self::table_offsets) is where each region starts.
+    tables: BufferHandle,
+    /// Where each region of [`tables`](Self::tables) begins, as the four words
+    /// [`draw_gen::Params`] carries into the shader.
+    table_offsets: draw_gen::TableOffsets,
     /// The two buffer lengths the clearing dispatch zeroes. Shared by every
     /// frame's group, because both are fixed when the bucket table is built.
     clear_params: BufferHandle,
@@ -271,12 +314,13 @@ pub struct DrawGen {
     /// still in flight is a frame still reading them.
     gen_params: Vec<BufferHandle>,
     cull_params: Vec<BufferHandle>,
-    visible: Vec<BufferHandle>,
     visible_count: Vec<BufferHandle>,
+    /// `cull.slang`'s survivor list, then the per-bucket runs — see the module
+    /// docs, and [`DrawGen::bucket_base`] for where a bucket's run starts.
     runs: Vec<BufferHandle>,
     args: Vec<BufferHandle>,
+    /// The per-bucket draw counts, then the per-bucket mesh-dispatch extents.
     counts: Vec<BufferHandle>,
-    mesh_args: Vec<BufferHandle>,
     clear_groups: Vec<BindGroupHandle>,
     cull_groups: Vec<BindGroupHandle>,
     gen_groups: Vec<BindGroupHandle>,
@@ -364,68 +408,35 @@ impl DrawGen {
             Ok(handle)
         };
 
-        let bucket_meshes = buffer(
-            "bucket table",
-            u64::from(bucket_count) * 4,
+        // **Five tables, one buffer**, because the draw-argument pass has eight
+        // storage bindings to spend and a WebGPU device guarantees no more — see
+        // the module docs. They are packed together rather than any other five
+        // because they are the five written at build and never per frame: the
+        // bucket table, its cluster counts, and `docs/plan/25-lod.md`'s three
+        // selection tables all follow residency and nothing else.
+        //
+        // `pack_tables` is what pads an empty selection region out to one zeroed
+        // record, which is the ordinary case for a renderer whose meshes have no
+        // hierarchy — a mesh's `first_level` names element zero of the level
+        // region whether it has a DAG or not.
+        let packed = draw_gen::pack_tables(
+            desc.bucket_meshes,
+            desc.bucket_clusters,
+            desc.mesh_levels,
+            desc.level_groups,
+            desc.level_meshes,
+        )
+        .ok_or_else(|| {
+            HalError::InvalidDescriptor("more table words than a u32 addresses".to_string())
+        })?;
+        let tables = buffer(
+            "tables",
+            packed.bytes.len() as u64,
             BufferUsage::STORAGE,
             MemoryLocation::HostUpload,
         )?;
-        let mut table = Vec::with_capacity(desc.bucket_meshes.len() * 4);
-        for mesh in desc.bucket_meshes {
-            table.extend_from_slice(&mesh.to_le_bytes());
-        }
-        device.write_buffer(bucket_meshes, 0, &table)?;
-
-        let bucket_clusters = buffer(
-            "bucket clusters",
-            u64::from(bucket_count) * 4,
-            BufferUsage::STORAGE,
-            MemoryLocation::HostUpload,
-        )?;
-        let mut clusters = Vec::with_capacity(desc.bucket_clusters.len() * 4);
-        for count in desc.bucket_clusters {
-            clusters.extend_from_slice(&count.to_le_bytes());
-        }
-        device.write_buffer(bucket_clusters, 0, &clusters)?;
-
-        // `docs/plan/25-lod.md`'s selection tables. **Never zero-length**: a
-        // buffer of no bytes is not a descriptor any backend will bind, and a
-        // renderer whose meshes have no hierarchy at all is the ordinary case
-        // rather than an error — so an empty table uploads one zeroed record
-        // that no `MeshLevels` ever names.
-        let mut table = |label: &str, bytes: Vec<u8>, stride: usize| -> Result<_, HalError> {
-            let bytes = if bytes.is_empty() {
-                vec![0u8; stride]
-            } else {
-                bytes
-            };
-            let handle = buffer(
-                label,
-                bytes.len() as u64,
-                BufferUsage::STORAGE,
-                MemoryLocation::HostUpload,
-            )?;
-            device.write_buffer(handle, 0, &bytes)?;
-            Ok(handle)
-        };
-        let mesh_levels = table(
-            "mesh levels",
-            level_select::mesh_levels_bytes(desc.mesh_levels),
-            level_select::MESH_LEVELS_STRIDE,
-        )?;
-        let level_groups = table(
-            "level groups",
-            level_select::level_group_bytes(desc.level_groups),
-            level_select::LEVEL_GROUP_STRIDE,
-        )?;
-        let level_meshes = table(
-            "level meshes",
-            desc.level_meshes
-                .iter()
-                .flat_map(|mesh| mesh.to_le_bytes())
-                .collect(),
-            4,
-        )?;
+        device.write_buffer(tables, 0, &packed.bytes)?;
+        let table_offsets = packed.offsets;
 
         // `docs/plan/25-lod.md`'s hysteresis state. **Zeroed here and by
         // nothing else ever again**: `draw_gen.slang` reads an element before it
@@ -488,12 +499,10 @@ impl DrawGen {
         let frames = desc.instances.len();
         let mut gen_params = Vec::with_capacity(frames);
         let mut cull_params = Vec::with_capacity(frames);
-        let mut visible = Vec::with_capacity(frames);
         let mut visible_count = Vec::with_capacity(frames);
         let mut runs = Vec::with_capacity(frames);
         let mut args = Vec::with_capacity(frames);
         let mut counts = Vec::with_capacity(frames);
-        let mut mesh_args = Vec::with_capacity(frames);
         for frame in 0..frames {
             // The static half is written here and the camera half in
             // `begin_frame`, so a frame that never called it still names the
@@ -512,6 +521,10 @@ impl DrawGen {
                     bucket_capacity: capacity,
                     visible_capacity: capacity,
                     group_stride,
+                    bucket_clusters_at: table_offsets.bucket_clusters_at,
+                    mesh_levels_at: table_offsets.mesh_levels_at,
+                    level_groups_at: table_offsets.level_groups_at,
+                    level_meshes_at: table_offsets.level_meshes_at,
                     ..draw_gen::Params::default()
                 }
                 .to_bytes(),
@@ -523,19 +536,14 @@ impl DrawGen {
                 BufferUsage::UNIFORM,
                 MemoryLocation::HostUpload,
             )?);
-            // `TRANSFER_SRC` on all five, and it is not there for tidiness:
+            // `TRANSFER_SRC` on all four, and it is not there for tidiness:
             // everything these passes produce is written by a shader and read by
             // another, so a copy out is the *only* way anything can check that
             // what they produced is what a CPU would have recorded. `crcbl-vk`'s
             // `draw_gen` end-to-end does exactly that, and topic 03 §3.6's
             // culling-stats ring — the one readback the frame loop is allowed —
             // is the counter below.
-            visible.push(buffer(
-                &format!("visible {frame}"),
-                u64::from(capacity) * 4,
-                BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
-                MemoryLocation::DeviceLocal,
-            )?);
+            //
             // `TRANSFER_DST` on the three the clearing dispatch owns, so a test
             // can poison them — see the module docs. They are device-local like
             // everything else here: nothing writes them from the host any more.
@@ -551,9 +559,16 @@ impl DrawGen {
                 BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
                 MemoryLocation::DeviceLocal,
             )?);
+            // The survivor list and the per-bucket runs, in that order, in one
+            // buffer — see the module docs. `cull.slang` writes the first
+            // `capacity` words and `draw_gen.slang` scatters into the rest;
+            // nothing reads a word of one region through the other, and the
+            // shader is bound the whole buffer once because a read-only view of
+            // half of it beside a writable view of the other half is a usage
+            // conflict on WebGPU.
             runs.push(buffer(
-                &format!("bucket runs {frame}"),
-                u64::from(bucket_count) * u64::from(capacity) * 4,
+                &format!("visible and bucket runs {frame}"),
+                u64::from(capacity) * (1 + u64::from(bucket_count)) * 4,
                 BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 MemoryLocation::DeviceLocal,
             )?);
@@ -566,22 +581,18 @@ impl DrawGen {
                     | BufferUsage::TRANSFER_DST,
                 MemoryLocation::DeviceLocal,
             )?);
+            // The per-bucket draw counts, then the mesh path's dispatch extents
+            // — one buffer, on the argument buffer's terms exactly: written by
+            // the same pass, zeroed by the same one, and read by a driver rather
+            // than by a shader, so `INDIRECT`, and `TRANSFER_SRC` so a test can
+            // read back what the GPU decided.
+            //
+            // Merged because no pass reads both, so the buffer is never in two
+            // resource states at once — see [`GeneratedDraws::counts`], and the
+            // module docs on why a binding had to go.
             counts.push(buffer(
-                &format!("draw counts {frame}"),
-                u64::from(bucket_count) * 4,
-                BufferUsage::STORAGE
-                    | BufferUsage::INDIRECT
-                    | BufferUsage::TRANSFER_SRC
-                    | BufferUsage::TRANSFER_DST,
-                MemoryLocation::DeviceLocal,
-            )?);
-            // The mesh path's dispatch extents, on the argument buffer's terms
-            // exactly: written by the same pass, zeroed by the same one, and
-            // read by a driver rather than by a shader — so `INDIRECT`, and
-            // `TRANSFER_SRC` so a test can read back what the GPU decided.
-            mesh_args.push(buffer(
-                &format!("mesh dispatch args {frame}"),
-                u64::from(bucket_count) * draw_gen::MESH_ARGS_SIZE as u64,
+                &format!("draw counts and mesh dispatch args {frame}"),
+                u64::from(bucket_count) * (4 + draw_gen::MESH_ARGS_SIZE as u64),
                 BufferUsage::STORAGE
                     | BufferUsage::INDIRECT
                     | BufferUsage::TRANSFER_SRC
@@ -591,16 +602,19 @@ impl DrawGen {
         }
 
         // --- the clearing pass ---
-        let clear_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let clear_entries = [
+            uniform(0),
+            storage(1, false),
+            storage(2, false),
+            // The draw counts and the mesh-dispatch extents, one buffer.
+            storage(3, false),
+        ];
+        let clear_desc = BindGroupLayoutDesc {
             label: Some("clear counters"),
-            entries: &[
-                uniform(0),
-                storage(1, false),
-                storage(2, false),
-                storage(3, false),
-                storage(4, false),
-            ],
-        })?;
+            entries: &clear_entries,
+        };
+        check_portable_storage_buffers(clear_desc.label, &[&clear_desc])?;
+        let clear_layout = device.create_bind_group_layout(&clear_desc)?;
         rollback.bind_group_layouts.push(clear_layout);
         let clear_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("clear counters"),
@@ -624,19 +638,22 @@ impl DrawGen {
         // next index in its own table, so a layout that renumbered them would
         // bind the frustum where the instance array goes. See
         // `crcbl_shaders`' declaration-order lint.
-        let cull_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let cull_entries = [
+            uniform(0),
+            // `StructuredBuffer` in the shader, so read-only here: the cull
+            // pass decides what is visible and never edits an instance or a
+            // mesh entry.
+            storage(1, true),
+            storage(2, true),
+            storage(3, false),
+            storage(4, false),
+        ];
+        let cull_desc = BindGroupLayoutDesc {
             label: Some("cull"),
-            entries: &[
-                uniform(0),
-                // `StructuredBuffer` in the shader, so read-only here: the cull
-                // pass decides what is visible and never edits an instance or a
-                // mesh entry.
-                storage(1, true),
-                storage(2, true),
-                storage(3, false),
-                storage(4, false),
-            ],
-        })?;
+            entries: &cull_entries,
+        };
+        check_portable_storage_buffers(cull_desc.label, &[&cull_desc])?;
+        let cull_layout = device.create_bind_group_layout(&cull_desc)?;
         rollback.bind_group_layouts.push(cull_layout);
         let cull_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("cull"),
@@ -654,33 +671,45 @@ impl DrawGen {
         rollback.pipelines.push(cull_pipeline);
 
         // --- the draw-argument pass ---
-        let gen_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        //
+        // **Eight storage bindings, which is every one a WebGPU device
+        // guarantees.** There is no headroom here: a ninth is a pass that cannot
+        // be created in a browser at the default limits or on SwiftShader, which
+        // is what a CI runner without a GPU has. `check_portable_storage_buffers`
+        // below is what turns a ninth into a failure here rather than into a
+        // pipeline-layout refusal on somebody else's device.
+        let gen_entries = [
+            uniform(0),
+            // The instance array and the mesh table, read only.
+            storage(1, true),
+            storage(2, true),
+            // The culling statistics, read only: this pass clamps against the
+            // survivor count and adds to nothing.
+            storage(3, true),
+            // Every host-written table in one buffer, read only: the bucket
+            // table, the per-bucket cluster counts and `docs/plan/25-lod.md`'s
+            // three selection tables were all decided when a mesh became
+            // resident.
+            storage(4, true),
+            // The survivor list and the per-bucket runs. Writable, and read
+            // through the same descriptor — binding one buffer read-only *and*
+            // writable in one group is a usage conflict on WebGPU.
+            storage(5, false),
+            // The indirect arguments.
+            storage(6, false),
+            // The draw counts and the mesh-dispatch extents.
+            storage(7, false),
+            // The hysteresis state, read *and* written: this pass is the
+            // only writer, and it reads the previous frame's answer out of
+            // the same element it then overwrites.
+            storage(8, false),
+        ];
+        let gen_desc = BindGroupLayoutDesc {
             label: Some("draw args"),
-            entries: &[
-                uniform(0),
-                storage(1, true),
-                storage(2, true),
-                storage(3, true),
-                storage(4, true),
-                storage(5, true),
-                storage(6, false),
-                storage(7, false),
-                storage(8, false),
-                // The per-bucket cluster counts, read only: the mesh dispatch's
-                // x extent is the host's and this pass copies it through.
-                storage(9, true),
-                storage(10, false),
-                // `docs/plan/25-lod.md`'s selection tables, read only: what a
-                // mesh's hierarchy is was decided when it became resident.
-                storage(11, true),
-                storage(12, true),
-                storage(13, true),
-                // The hysteresis state, read *and* written: this pass is the
-                // only writer, and it reads the previous frame's answer out of
-                // the same element it then overwrites.
-                storage(14, false),
-            ],
-        })?;
+            entries: &gen_entries,
+        };
+        check_portable_storage_buffers(gen_desc.label, &[&gen_desc])?;
+        let gen_layout = device.create_bind_group_layout(&gen_desc)?;
         rollback.bind_group_layouts.push(gen_layout);
         let gen_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("draw args"),
@@ -709,7 +738,6 @@ impl DrawGen {
                     bound(1, visible_count[frame]),
                     bound(2, args[frame]),
                     bound(3, counts[frame]),
-                    bound(4, mesh_args[frame]),
                 ],
                 variable_count: None,
             })?;
@@ -726,7 +754,10 @@ impl DrawGen {
                     bound(0, cull_params[frame]),
                     bound(1, desc.instances[frame]),
                     bound(2, desc.mesh_table),
-                    bound(3, visible[frame]),
+                    // The survivor list is the front of the buffer whose tail
+                    // holds the per-bucket runs; this pass writes only the front
+                    // and `CullParams::capacity` is what bounds it there.
+                    bound(3, runs[frame]),
                     bound(4, visible_count[frame]),
                 ],
                 variable_count: None,
@@ -741,18 +772,12 @@ impl DrawGen {
                     bound(0, gen_params[frame]),
                     bound(1, desc.instances[frame]),
                     bound(2, desc.mesh_table),
-                    bound(3, visible[frame]),
-                    bound(4, visible_count[frame]),
-                    bound(5, bucket_meshes),
-                    bound(6, runs[frame]),
-                    bound(7, args[frame]),
-                    bound(8, counts[frame]),
-                    bound(9, bucket_clusters),
-                    bound(10, mesh_args[frame]),
-                    bound(11, mesh_levels),
-                    bound(12, level_groups),
-                    bound(13, level_meshes),
-                    bound(14, group_state),
+                    bound(3, visible_count[frame]),
+                    bound(4, tables),
+                    bound(5, runs[frame]),
+                    bound(6, args[frame]),
+                    bound(7, counts[frame]),
+                    bound(8, group_state),
                 ],
                 variable_count: None,
             })?;
@@ -762,22 +787,17 @@ impl DrawGen {
 
         rollback.disarm();
         Ok(Self {
-            bucket_meshes,
-            bucket_clusters,
-            mesh_levels,
-            level_groups,
-            level_meshes,
+            tables,
+            table_offsets,
             clear_params,
             group_state,
             group_stride,
             gen_params,
             cull_params,
-            visible,
             visible_count,
             runs,
             args,
             counts,
-            mesh_args,
             clear_groups,
             cull_groups,
             gen_groups,
@@ -808,11 +828,15 @@ impl DrawGen {
         self.capacity
     }
 
-    /// Where bucket `bucket`'s run starts in [`DrawGen::runs`], as the number
-    /// `mesh.slang`'s `DrawConstants::base` carries.
+    /// Where bucket `bucket`'s run starts in [`DrawGen::runs`], in words, as the
+    /// number `mesh.slang`'s `DrawConstants::base` carries.
+    ///
+    /// **Past the survivor list**, which shares that buffer and occupies its
+    /// first [`visible_capacity`](Self::visible_capacity) words — see the module
+    /// docs. A reader copying a run back multiplies this by four.
     #[must_use]
     pub const fn bucket_base(&self, bucket: u32) -> u32 {
-        bucket * self.capacity
+        self.capacity + bucket * self.capacity
     }
 
     /// Byte offset of bucket `bucket`'s argument structure.
@@ -821,7 +845,8 @@ impl DrawGen {
         bucket as u64 * draw_gen::DRAW_ARGS_SIZE as u64
     }
 
-    /// Byte offset of bucket `bucket`'s draw count.
+    /// Byte offset of bucket `bucket`'s draw count, which is at the front of the
+    /// buffer [`DrawGen::counts`] hands back.
     #[must_use]
     pub const fn count_offset(&self, bucket: u32) -> u64 {
         bucket as u64 * 4
@@ -830,13 +855,20 @@ impl DrawGen {
     /// Byte offset of bucket `bucket`'s mesh-dispatch argument structure — what
     /// [`DrawIndirect::offset`](crcbl_hal::DrawIndirect::offset) carries in the
     /// call that reads it.
+    ///
+    /// **Past the one draw count per bucket** that shares the buffer, so this is
+    /// never zero — see the module docs.
     #[must_use]
     pub const fn mesh_args_offset(&self, bucket: u32) -> u64 {
-        bucket as u64 * draw_gen::MESH_ARGS_SIZE as u64
+        self.bucket_count as u64 * 4 + bucket as u64 * draw_gen::MESH_ARGS_SIZE as u64
     }
 
     /// The buffer of per-bucket instance runs for `frame`, which the drawing
     /// pass's bind group names.
+    ///
+    /// The same buffer [`DrawGen::visible`] hands back: bucket `bucket`'s run
+    /// starts [`bucket_base`](Self::bucket_base)`(bucket)` words in, past the
+    /// survivor list.
     ///
     /// # Panics
     ///
@@ -857,14 +889,18 @@ impl DrawGen {
     }
 
     /// `frame`'s compacted visible list — `cull.slang`'s survivors, as indices
-    /// into the instance array, in no particular order.
+    /// into the instance array, in no particular order, in the **first
+    /// [`visible_capacity`](Self::visible_capacity) words** of the buffer.
+    ///
+    /// The same buffer [`DrawGen::runs`] hands back; the per-bucket runs follow
+    /// the survivors in it. See the module docs.
     ///
     /// # Panics
     ///
     /// If `frame` is not a slot this was built with.
     #[must_use]
     pub fn visible(&self, frame: usize) -> BufferHandle {
-        self.visible[frame]
+        self.runs[frame]
     }
 
     /// `frame`'s culling statistics: surviving instances in
@@ -902,7 +938,8 @@ impl DrawGen {
         self.args[frame]
     }
 
-    /// `frame`'s per-bucket draw counts. The same buffer
+    /// `frame`'s per-bucket draw counts, in the **first
+    /// [`bucket_count`](Self::bucket_count) words** of the buffer
     /// [`GeneratedDraws::counts`] names.
     ///
     /// # Panics
@@ -913,30 +950,42 @@ impl DrawGen {
         self.counts[frame]
     }
 
-    /// The per-bucket cluster counts the host wrote at build — the x extent of
-    /// each bucket's mesh dispatch, before the pass copies it into
-    /// [`GeneratedDraws::mesh_args`].
+    /// Every host-written table the draw-argument pass reads, in one buffer —
+    /// the bucket table, the per-bucket cluster counts and
+    /// `docs/plan/25-lod.md`'s three selection tables.
     ///
-    /// Shared by every frame, because a mesh's clusters are decided when it
-    /// becomes resident. Exposed for the reason the per-frame buffers are: what
-    /// this holds is the only CPU-side half of an extent that is otherwise the
-    /// GPU's, so a test with no GPU can still check it is each bucket's own.
+    /// Shared by every frame, because all five are decided when a mesh becomes
+    /// resident. Exposed for the reason the per-frame buffers are: the cluster
+    /// counts are the only CPU-side half of an extent that is otherwise the
+    /// GPU's, so a test with no GPU can still check the pass copied each
+    /// bucket's own — [`table_offsets`](Self::table_offsets) is where each
+    /// region starts.
     #[must_use]
-    pub fn bucket_clusters(&self) -> BufferHandle {
-        self.bucket_clusters
+    pub fn tables(&self) -> BufferHandle {
+        self.tables
     }
 
-    /// `frame`'s per-bucket mesh-dispatch arguments. The same buffer
-    /// [`GeneratedDraws::mesh_args`] names, and the thing a test reads back to
-    /// see that the extent the mesh path dispatched is the count culling
-    /// produced rather than the instance pool's size.
+    /// Where each region of [`tables`](Self::tables) begins, in words.
+    #[must_use]
+    pub const fn table_offsets(&self) -> draw_gen::TableOffsets {
+        self.table_offsets
+    }
+
+    /// `frame`'s per-bucket mesh-dispatch arguments, at
+    /// [`mesh_args_offset`](Self::mesh_args_offset)`(bucket)` in the buffer
+    /// [`GeneratedDraws::counts`] names — the thing a test reads back to see that
+    /// the extent the mesh path dispatched is the count culling produced rather
+    /// than the instance pool's size.
+    ///
+    /// The same buffer [`DrawGen::counts`] hands back. **Not at offset zero**:
+    /// the draw counts are in front of it.
     ///
     /// # Panics
     ///
     /// If `frame` is not a slot this was built with.
     #[must_use]
     pub fn mesh_args(&self, frame: usize) -> BufferHandle {
-        self.mesh_args[frame]
+        self.counts[frame]
     }
 
     /// `docs/plan/25-lod.md`'s hysteresis state, for a caller binding it into a
@@ -1008,6 +1057,10 @@ impl DrawGen {
                 bucket_capacity: self.capacity,
                 visible_capacity: self.capacity,
                 group_stride: self.group_stride,
+                bucket_clusters_at: self.table_offsets.bucket_clusters_at,
+                mesh_levels_at: self.table_offsets.mesh_levels_at,
+                level_groups_at: self.table_offsets.level_groups_at,
+                level_meshes_at: self.table_offsets.level_meshes_at,
                 camera_position,
                 lod_params,
             }
@@ -1065,21 +1118,18 @@ impl DrawGen {
                 },
             )
         };
-        let visible = import(
-            graph,
-            "cull-visible",
-            self.visible[frame],
-            ResourceState::ShaderRead,
-        );
         let visible_count = import(
             graph,
             "cull-count",
             self.visible_count[frame],
             ResourceState::ShaderRead,
         );
+        // The survivor list and the per-bucket runs are one buffer, so they are
+        // one id: importing it twice would give the graph two independent
+        // histories of one resource and a barrier computed from half of it.
         let runs = import(
             graph,
-            "bucket-runs",
+            "visible-and-bucket-runs",
             self.runs[frame],
             ResourceState::ShaderRead,
         );
@@ -1089,16 +1139,11 @@ impl DrawGen {
             self.args[frame],
             ResourceState::IndirectArgument,
         );
+        // The draw counts and the mesh-dispatch extents, likewise.
         let counts = import(
             graph,
-            "draw-counts",
+            "draw-counts-and-mesh-dispatch-args",
             self.counts[frame],
-            ResourceState::IndirectArgument,
-        );
-        let mesh_args = import(
-            graph,
-            "mesh-dispatch-args",
-            self.mesh_args[frame],
             ResourceState::IndirectArgument,
         );
         // **Not indexed by `frame`**, and that is the point: this one buffer is
@@ -1133,8 +1178,9 @@ impl DrawGen {
             .add_compute_pass("clear-counters")
             .use_buffer(visible_count, ResourceState::ShaderReadWrite)
             .use_buffer(args, ResourceState::ShaderReadWrite)
+            // Both regions of it: the counts and the mesh-dispatch extents are
+            // one buffer and therefore one declaration.
             .use_buffer(counts, ResourceState::ShaderReadWrite)
-            .use_buffer(mesh_args, ResourceState::ShaderReadWrite)
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_compute_pipeline(clear_pipeline);
@@ -1151,7 +1197,7 @@ impl DrawGen {
             // `ShaderReadWrite` rather than a write-only state for both: a
             // storage-buffer descriptor permits reads whatever the shader does
             // with it, and the counter is genuinely read-modify-written.
-            .use_buffer(visible, ResourceState::ShaderReadWrite)
+            .use_buffer(runs, ResourceState::ShaderReadWrite)
             .use_buffer(visible_count, ResourceState::ShaderReadWrite)
             .execute(move |ctx| {
                 // An empty instance array is a dispatch of no workgroups, which
@@ -1178,12 +1224,12 @@ impl DrawGen {
             .div_ceil(draw_gen::WORKGROUP_SIZE);
         graph
             .add_compute_pass("draw-args")
-            .read_buffer(visible)
             .read_buffer(visible_count)
+            // Read for the survivor list and written for the runs, which share
+            // it — one declaration, and `ShaderReadWrite` is what it really is.
             .use_buffer(runs, ResourceState::ShaderReadWrite)
             .use_buffer(args, ResourceState::ShaderReadWrite)
             .use_buffer(counts, ResourceState::ShaderReadWrite)
-            .use_buffer(mesh_args, ResourceState::ShaderReadWrite)
             .use_buffer(group_state, ResourceState::ShaderReadWrite)
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
@@ -1197,8 +1243,6 @@ impl DrawGen {
             args_id: args,
             counts: self.counts[frame],
             counts_id: counts,
-            mesh_args: self.mesh_args[frame],
-            mesh_args_id: mesh_args,
             runs_id: runs,
             group_state_id: group_state,
             visible_count_id: visible_count,
@@ -1224,24 +1268,14 @@ impl DrawGen {
         device.destroy_bind_group_layout(self.gen_layout);
         device.destroy_bind_group_layout(self.cull_layout);
         device.destroy_bind_group_layout(self.clear_layout);
-        for buffer in [
-            self.bucket_meshes,
-            self.bucket_clusters,
-            self.mesh_levels,
-            self.level_groups,
-            self.level_meshes,
-            self.clear_params,
-            self.group_state,
-        ]
-        .into_iter()
-        .chain(self.gen_params)
-        .chain(self.cull_params)
-        .chain(self.visible)
-        .chain(self.visible_count)
-        .chain(self.runs)
-        .chain(self.args)
-        .chain(self.counts)
-        .chain(self.mesh_args)
+        for buffer in [self.tables, self.clear_params, self.group_state]
+            .into_iter()
+            .chain(self.gen_params)
+            .chain(self.cull_params)
+            .chain(self.visible_count)
+            .chain(self.runs)
+            .chain(self.args)
+            .chain(self.counts)
         {
             device.destroy_buffer(buffer);
         }

@@ -1410,7 +1410,11 @@ fn generated_dispatch(
         (
             draws.mesh_args(frame),
             ResourceState::IndirectArgument,
-            0u64,
+            // **Not zero.** The extents share a buffer with the one draw count
+            // per bucket that precedes them, so the accessor that names them is
+            // what says where they start — reading at zero copies the counts
+            // back and decodes them as workgroup extents.
+            draws.mesh_args_offset(0),
             mesh_bytes,
             0u64,
         ),

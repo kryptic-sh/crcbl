@@ -11,9 +11,7 @@ struct ClearParams_std140_0
 
 @binding(2) @group(0) var<storage, read_write> args_0 : array<u32>;
 
-@binding(3) @group(0) var<storage, read_write> draw_counts_0 : array<u32>;
-
-@binding(4) @group(0) var<storage, read_write> mesh_args_0 : array<u32>;
+@binding(3) @group(0) var<storage, read_write> counts_and_mesh_args_0 : array<u32>;
 
 @compute
 @workgroup_size(64, 1, 1)
@@ -30,11 +28,11 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     }
     if(index_0 < (clear_0.counts_words_0))
     {
-        draw_counts_0[index_0] = u32(0);
+        counts_and_mesh_args_0[index_0] = u32(0);
     }
     if(index_0 < (clear_0.mesh_args_words_0))
     {
-        mesh_args_0[index_0] = u32(0);
+        counts_and_mesh_args_0[clear_0.counts_words_0 + index_0] = u32(0);
     }
     return;
 }

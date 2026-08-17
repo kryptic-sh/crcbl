@@ -10,15 +10,15 @@ dxil-model = 6_6
 
 [clear_counters]
 source = shaders/clear_counters.slang
-source-sha256 = e2495aaa7df7409a2574c6dd2ba414ee9add60f44310e04d0cf705619317d9f5
+source-sha256 = c49d76e2b98396fad6a4b903d6c26aa141901c2ec6ccef397e37c02cda2106f9
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/clear_counters.spv
-spirv-sha256 = a2173ccf0a9eccbaca5d1290c26c59268960210a3a2151fcf2220e6ef0a36e6f
+spirv-sha256 = d7c88b5c7e5a23cc3c28c083b55b1e47c6ca4e5db9c43c72a53183a9a621d20a
 wgsl = wgsl/clear_counters.wgsl
-wgsl-sha256 = a26db99eeba0bf573c91efe5fb04a592e02f0d70631d6574201c5c4b20922e11
+wgsl-sha256 = 1d0d7386757337029a271484f9b46bd6d99bd85f2145fccdc790167b91d5451e
 msl = msl/clear_counters.metal
-msl-sha256 = 31b8e385788df87da9dd898c521c6a1221d9bc914666cfaef8b7110e82979302
-dxil = computeMain:dxil/clear_counters.computeMain.dxil:cc3f995858351cfe1c71e87cd04ff292d6accbc3839e8499df4e0558543d88c4
+msl-sha256 = cf0ce1d967998e0f500c941dd6099a53c1eac61977c4f8152fded7b3d291df11
+dxil = computeMain:dxil/clear_counters.computeMain.dxil:7dc658823c8356bb04685153f57558539f9b82e3a7a622f70bb2ec9f93f9dad9
 entry-points = computeMain:glcompute
 
 [compute_probe]
@@ -49,15 +49,15 @@ entry-points = computeMain:glcompute
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = 35a49df7c7a3375235ee706a22334665fbd6a66ed00750ea66658f0a7401c4cb
+source-sha256 = ae50da3dc72c0dcab5b575512e3542e3ae3e7aad4b859742335f0e7a59dfe8a4
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
-spirv-sha256 = 2a67faa1d45bc8f25ad56444054bd6b98fe797c873e3d9e0958b0f307a763511
+spirv-sha256 = 50689ed58359d8144cadce197beaeab07fdaa32d4d02a8cd1f61aee1c4a3b5c5
 wgsl = wgsl/draw_gen.wgsl
-wgsl-sha256 = a68e7f13faa2cb48c004aecef452031ce6cb8ce59a27a9b803a5a9b44bc7ed59
+wgsl-sha256 = 5bdbcb1422965065be3d7c6c6b11e3637f0c4876bba874ccc0482f6b51972578
 msl = msl/draw_gen.metal
-msl-sha256 = bfedaa5e3306d6993ee348e533b4e0d027931cf708d9f057168aafae07907ab9
-dxil = computeMain:dxil/draw_gen.computeMain.dxil:17312802ec054e9893091f2b1d2d75de1576c0565c891128e1e27ad35364d265
+msl-sha256 = 41a7201b8a7142f2286a7d79063a0c303ab97a4b77b3a575a1ce22e09c6c2999
+dxil = computeMain:dxil/draw_gen.computeMain.dxil:d80aef98fd3b193c9091cb7d1b1cc07e782786f45923d8bbaa1bcf0010276b6a
 entry-points = computeMain:glcompute
 
 [light_cluster]

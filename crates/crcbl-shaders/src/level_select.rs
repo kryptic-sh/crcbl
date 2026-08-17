@@ -78,14 +78,22 @@
 
 use crate::cluster_select::{GroupCost, LodBudgets, group_is_expanded};
 
-/// Bytes per [`LevelGroup`], and the stride of the group storage buffer.
+/// Bytes per [`LevelGroup`], and the stride of the group region of
+/// [`crate::draw_gen::Tables`].
 ///
 /// One `uint` then five `float`, no padding, for the reason
 /// [`CLUSTER_SELECT_STRIDE`](crate::cluster_select::CLUSTER_SELECT_STRIDE)
 /// records: a `std430` struct of scalars has a stride that is exactly the sum of
-/// its members. Checked against the `ArrayStride` and `Offset` decorations
-/// `slangc` emits by this module's
-/// `the_level_group_layout_matches_the_offsets_slangc_emits`.
+/// its members.
+///
+/// **The shader no longer reads these through a typed `StructuredBuffer`.** Five
+/// tables share one storage binding since the pass came down to the eight
+/// storage buffers WebGPU guarantees — see `shaders/draw_gen.slang`'s header —
+/// so `level_group_at` there loads six words and reinterprets five of them with
+/// `asfloat`. That makes this stride a statement about *this* encoder rather
+/// than about a decoration `slangc` emits, and
+/// `the_shader_reads_the_selection_records_at_the_words_this_module_encodes` is
+/// what holds the two spellings together.
 pub const LEVEL_GROUP_STRIDE: usize = 24;
 
 /// One group of a mesh's cluster DAG, and which level's simplification it is.
@@ -148,11 +156,14 @@ impl LevelGroup {
     }
 }
 
-/// Bytes per [`MeshLevels`], and the stride of the per-mesh storage buffer.
+/// Bytes per [`MeshLevels`], and the stride of the per-mesh region of
+/// [`crate::draw_gen::Tables`].
 ///
 /// Four `uint`, which is both the sum of the members and a multiple of the
-/// 4-byte alignment they impose — so `std430` adds nothing. Pinned by
-/// `the_mesh_levels_layout_matches_the_offsets_slangc_emits`.
+/// 4-byte alignment they impose — so `std430` adds nothing. On
+/// [`LEVEL_GROUP_STRIDE`]'s terms exactly since the tables were merged: pinned
+/// against the shader's own word constants by
+/// `the_shader_reads_the_selection_records_at_the_words_this_module_encodes`.
 pub const MESH_LEVELS_STRIDE: usize = 16;
 
 /// Where one mesh's DAG is, for an instance that names it.
@@ -317,14 +328,16 @@ mod tests {
     use super::*;
     use crate::cluster_dag::{GroupBounds, dunes_dag};
 
-    /// The offsets `slangc` emitted for `LevelGroup`, read out of the
-    /// disassembly of `spirv/draw_gen.spv`. Six scalars in a row permute
-    /// silently — a radius read as an error selects a level rather than
-    /// crashing — so the byte each lands on is pinned rather than assumed.
+    /// The byte each field of a group record lands on. Six scalars in a row
+    /// permute silently — a radius read as an error selects a level rather than
+    /// crashing — so each is pinned rather than assumed.
+    ///
+    /// This is the *encoder's* layout; that the shader reads the same words is
+    /// [`the_shader_reads_the_selection_records_at_the_words_this_module_encodes`].
+    ///
+    /// [`the_shader_reads_the_selection_records_at_the_words_this_module_encodes`]: fn@the_shader_reads_the_selection_records_at_the_words_this_module_encodes
     #[test]
-    fn the_level_group_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_LevelGroup_std430 ArrayStride 24`, and
-        // `OpMemberDecorate %LevelGroup_std430 n Offset …`.
+    fn the_level_group_layout_is_six_scalars_in_declaration_order() {
         assert_eq!(LEVEL_GROUP_STRIDE, 24);
 
         let group = LevelGroup {
@@ -358,10 +371,9 @@ mod tests {
     }
 
     /// The same, for [`MeshLevels`] — four words whose order decides which
-    /// array each is read against.
+    /// region each is read against.
     #[test]
-    fn the_mesh_levels_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_MeshLevels_std430 ArrayStride 16`.
+    fn the_mesh_levels_layout_is_four_words_in_declaration_order() {
         assert_eq!(MESH_LEVELS_STRIDE, 16);
         let bytes = mesh_levels_bytes(&[MeshLevels {
             first_group: 7,
@@ -412,6 +424,125 @@ mod tests {
                 "draw_gen.slang must declare `{field}` in `struct MeshLevels`"
             );
         }
+    }
+
+    /// **The shader loads each field from the word this module wrote it to.**
+    ///
+    /// The records reach `draw_gen.slang` as raw words now that five tables
+    /// share one storage binding, so nothing in the toolchain lays them out for
+    /// both sides any more: the shader names a word index per field and this
+    /// crate writes a byte offset per field, and a permutation between them is
+    /// silent — a radius read as an error selects a level rather than crashing.
+    ///
+    /// The index is **found in the encoder's own output** rather than written
+    /// here as a literal, so an edit to
+    /// [`LevelGroup::to_bytes`]/[`mesh_levels_bytes`] that moved a field turns
+    /// this red instead of being blessed by it.
+    #[test]
+    fn the_shader_reads_the_selection_records_at_the_words_this_module_encodes() {
+        let source = include_str!("../shaders/draw_gen.slang");
+        let declares = |declaration: &str| {
+            assert!(
+                source.contains(declaration),
+                "draw_gen.slang does not declare `{declaration}`"
+            );
+        };
+        declares(&format!(
+            "static const uint MESH_LEVELS_WORDS = {};",
+            MESH_LEVELS_STRIDE / 4
+        ));
+        declares(&format!(
+            "static const uint LEVEL_GROUP_WORDS = {};",
+            LEVEL_GROUP_STRIDE / 4
+        ));
+
+        // Distinct sentinels, so "which word holds this field" has exactly one
+        // answer in each encoding.
+        let mesh = mesh_levels_bytes(&[MeshLevels {
+            first_group: 101,
+            group_count: 102,
+            first_level: 103,
+            top_level: 104,
+        }]);
+        let group = LevelGroup {
+            level: 201,
+            cost: GroupCost {
+                error: 202.0,
+                bounds: GroupBounds {
+                    center: [203.0, 204.0, 205.0],
+                    radius: 206.0,
+                },
+            },
+        }
+        .to_bytes();
+        let word = |bytes: &[u8], index: usize| {
+            u32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().expect("4"))
+        };
+        let mut pinned = 0;
+        for (bytes, stride, name, encoded) in [
+            (
+                &mesh[..],
+                MESH_LEVELS_STRIDE,
+                "MESH_LEVELS_FIRST_GROUP",
+                101,
+            ),
+            (
+                &mesh[..],
+                MESH_LEVELS_STRIDE,
+                "MESH_LEVELS_GROUP_COUNT",
+                102,
+            ),
+            (
+                &mesh[..],
+                MESH_LEVELS_STRIDE,
+                "MESH_LEVELS_FIRST_LEVEL",
+                103,
+            ),
+            (&mesh[..], MESH_LEVELS_STRIDE, "MESH_LEVELS_TOP_LEVEL", 104),
+            (&group[..], LEVEL_GROUP_STRIDE, "LEVEL_GROUP_LEVEL", 201),
+            (
+                &group[..],
+                LEVEL_GROUP_STRIDE,
+                "LEVEL_GROUP_ERROR",
+                202.0f32.to_bits(),
+            ),
+            (
+                &group[..],
+                LEVEL_GROUP_STRIDE,
+                "LEVEL_GROUP_CENTER_X",
+                203.0f32.to_bits(),
+            ),
+            (
+                &group[..],
+                LEVEL_GROUP_STRIDE,
+                "LEVEL_GROUP_CENTER_Y",
+                204.0f32.to_bits(),
+            ),
+            (
+                &group[..],
+                LEVEL_GROUP_STRIDE,
+                "LEVEL_GROUP_CENTER_Z",
+                205.0f32.to_bits(),
+            ),
+            (
+                &group[..],
+                LEVEL_GROUP_STRIDE,
+                "LEVEL_GROUP_RADIUS",
+                206.0f32.to_bits(),
+            ),
+        ] {
+            let index = (0..stride / 4)
+                .find(|slot| word(bytes, *slot) == encoded)
+                .unwrap_or_else(|| panic!("{name}'s sentinel is in no word of the encoding"));
+            declares(&format!("static const uint {name} = {index};"));
+            pinned += 1;
+        }
+        assert_eq!(
+            pinned,
+            MESH_LEVELS_STRIDE / 4 + LEVEL_GROUP_STRIDE / 4,
+            "every word of both records must be pinned, or one of them is read from a word \
+             nothing checks"
+        );
     }
 
     /// **A mesh with no hierarchy is drawn at level 0 from every camera**,

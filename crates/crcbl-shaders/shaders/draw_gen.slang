@@ -125,6 +125,49 @@
 // `crcbl_shaders::cull`'s
 // `the_shared_structs_are_declared_identically_in_every_shader`, which reads
 // every source and compares the declarations character for character.
+//
+// # Nine bindings, because WebGPU guarantees eight storage buffers per stage
+//
+// **This pass bound fourteen storage buffers and could not be created on a
+// WebGPU device at the guaranteed limit.** `maxStorageBuffersPerShaderStage` is
+// 8 in the WebGPU specification's default limits; SwiftShader — every CI runner
+// without a GPU — offers 10, and an RDNA-3 desktop offers 16. So the forward
+// renderer ran in a browser only on generous hardware.
+//
+// Splitting the fourteen across two bind groups does **not** help and was tried:
+// the limit is validated at `createPipelineLayout` as a sum over every bind
+// group layout in the layout, per stage, and a 7+7 split was refused with the
+// same message. The count itself has to come down, which means fewer *bindings*
+// — so buffers that were separate are now regions of one buffer, and the host
+// hands over where each region starts.
+//
+// Three merges bring fourteen to eight, and each one is a place where a reader
+// has to know the layout rather than the name:
+//
+// * `tables` is every host-written table this pass reads — the bucket table, the
+//   per-bucket cluster counts, and `docs/plan/25-lod.md`'s three selection
+//   tables — as one flat array of words. **The cost is the typed
+//   `StructuredBuffer`**: `LevelGroup`'s five floats are read back through
+//   `asfloat`, and the word each field lands on is a named constant below
+//   rather than a struct member Slang lays out. `crcbl_shaders::level_select` is
+//   the host encoder and pins those constants.
+// * `visible_instances` holds `cull.slang`'s survivor list **and** the per-bucket
+//   runs this pass scatters into, in that order. One binding rather than two
+//   because a read-only descriptor and a writable descriptor of one buffer in
+//   one bind group is a usage conflict on WebGPU — so the survivors are read
+//   back through the writable view.
+// * `counts_and_mesh_args` holds the per-bucket draw counts and then the
+//   per-bucket mesh-dispatch extents. Both are indirect arguments on every path
+//   that reads either, so they are never in two resource states at once — which
+//   is exactly why `args` is still a buffer of its own: the mesh path reads
+//   *those* as data in the same pass that executes these.
+//
+// What a caller must not assume: that any of `DrawGen`'s buffer accessors hand
+// back distinct buffers. `visible` and `runs` are one buffer, and so are `counts`
+// and `mesh_args`; the byte offsets are `DrawGen::bucket_base`,
+// `DrawGen::count_offset` and `DrawGen::mesh_args_offset`, and reading a region
+// at offset zero because it used to be its own allocation reads the region in
+// front of it.
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance` and
 /// `mesh.slang`'s copy.
@@ -207,6 +250,15 @@ static const uint MESH_ARG_GROUP_X = 0;
 static const uint MESH_ARG_GROUP_Y = 1;
 static const uint MESH_ARG_GROUP_Z = 2;
 
+/// Which element of the culling statistics holds `cull.slang`'s survivor count.
+///
+/// The same number as `crcbl_shaders::cull::INSTANCE_SURVIVOR_WORD`, held in
+/// step with it by that module's
+/// `the_shaders_index_the_culling_stats_at_the_words_this_crate_says`. Named
+/// here rather than written as a `0` because this shader reads a *shared*
+/// statistics block: the element beside it is the amplification stage's.
+static const uint INSTANCE_SURVIVOR_WORD = 0;
+
 /// One group of a mesh's cluster DAG, matching
 /// `crcbl_shaders::level_select::LevelGroup`.
 ///
@@ -229,6 +281,25 @@ struct LevelGroup
     /// Distance from that centre to the furthest point the sphere contains.
     float radius;
 };
+
+/// Words one `LevelGroup` occupies in `tables`, matching
+/// `crcbl_shaders::level_select::LEVEL_GROUP_STRIDE` divided by four.
+static const uint LEVEL_GROUP_WORDS = 6;
+
+/// Which word of a group's record holds which field.
+///
+/// Named rather than written as literals in `level_group_at` below, for
+/// `ARG_INDEX_COUNT`'s reason: six scalars in a row permute silently — a radius
+/// read as an error selects a level rather than crashing — and
+/// `crcbl_shaders::level_select`'s
+/// `the_shader_reads_the_selection_records_at_the_words_this_module_encodes`
+/// is what holds these against the bytes the host writes.
+static const uint LEVEL_GROUP_LEVEL = 0;
+static const uint LEVEL_GROUP_ERROR = 1;
+static const uint LEVEL_GROUP_CENTER_X = 2;
+static const uint LEVEL_GROUP_CENTER_Y = 3;
+static const uint LEVEL_GROUP_CENTER_Z = 4;
+static const uint LEVEL_GROUP_RADIUS = 5;
 
 /// Where one mesh's DAG is, matching `crcbl_shaders::level_select::MeshLevels`.
 ///
@@ -253,9 +324,20 @@ struct MeshLevels
     ///
     /// The top *level* and not the level count: the search below starts here,
     /// and a count would have to be decremented — which on a zero written by
-    /// mistake wraps to `0xffffffff` and indexes `level_meshes` with it.
+    /// mistake wraps to `0xffffffff` and indexes the level table with it.
     uint top_level;
 };
+
+/// Words one `MeshLevels` occupies in `tables`, matching
+/// `crcbl_shaders::level_select::MESH_LEVELS_STRIDE` divided by four.
+static const uint MESH_LEVELS_WORDS = 4;
+
+/// Which word of a mesh's record holds which field, on `LEVEL_GROUP_LEVEL`'s
+/// terms exactly.
+static const uint MESH_LEVELS_FIRST_GROUP = 0;
+static const uint MESH_LEVELS_GROUP_COUNT = 1;
+static const uint MESH_LEVELS_FIRST_LEVEL = 2;
+static const uint MESH_LEVELS_TOP_LEVEL = 3;
 
 /// Everything an invocation needs that is not buffer contents, matching
 /// `crcbl_shaders::draw_gen::Params`.
@@ -280,6 +362,21 @@ struct DrawGenParams
     /// `ClusterDrawConstants::group_stride` carries, because that stage reads
     /// what this one writes.
     uint group_stride;
+    /// Where the per-bucket cluster counts start in `tables`, in words.
+    ///
+    /// The bucket table itself starts at word zero, so it needs no offset; every
+    /// region after it does. **Host-computed, because only the host knows how
+    /// long the region in front of each one is** — the bucket table is as long
+    /// as there are buckets, the per-mesh records as long as the mesh table, and
+    /// the group and level runs as long as the resident hierarchies came to.
+    /// `crcbl_render::DrawGen` is what packs them and fills these in.
+    uint bucket_clusters_at;
+    /// Where the per-mesh `MeshLevels` records start in `tables`, in words.
+    uint mesh_levels_at;
+    /// Where the `LevelGroup` records start in `tables`, in words.
+    uint level_groups_at;
+    /// Where the level → mesh id table starts in `tables`, in words.
+    uint level_meshes_at;
     /// The eye this frame's selection is projected from, in world space, in
     /// `xyz`. **The camera's**, on every pass this shader runs for, including the
     /// shadow cascades.
@@ -323,27 +420,55 @@ StructuredBuffer<GpuInstance> instances;
 [[vk::binding(2, 0)]]
 StructuredBuffer<GpuMesh> meshes;
 
-/// `cull.slang`'s compacted survivors, as indices into `instances`. In whatever
-/// order that pass's atomic handed slots out, which is not ascending — nothing
-/// here depends on the order.
-[[vk::binding(3, 0)]]
-StructuredBuffer<uint> visible;
-
-/// How many survivors `cull.slang` found, in element 0. The *true* count, so it
-/// can exceed `DrawGenParams::visible_capacity` and is clamped below before it
+/// How many survivors `cull.slang` found, in element
+/// `crcbl_shaders::cull::INSTANCE_SURVIVOR_WORD`. The *true* count, so it can
+/// exceed `DrawGenParams::visible_capacity` and is clamped below before it
 /// indexes anything.
-[[vk::binding(4, 0)]]
+///
+/// The frame's whole culling-statistics block rather than a counter of its own —
+/// see `cull.slang`, which writes it.
+[[vk::binding(3, 0)]]
 StructuredBuffer<uint> visible_count;
 
-/// Which mesh each bucket draws, as an index into `meshes`. The bucket table,
-/// built on the host when a mesh becomes resident and not rewritten per frame.
-[[vk::binding(5, 0)]]
-StructuredBuffer<uint> bucket_meshes;
+/// Every host-written table this pass reads, as one flat array of words.
+///
+/// **One binding for five tables**, because a WebGPU device guarantees only
+/// eight storage buffers per shader stage — see the header. The regions, in
+/// order, and what indexes each:
+///
+/// | region | starts at | stride | indexed by |
+/// |---|---|---|---|
+/// | bucket table: which mesh each bucket draws | word 0 | 1 | bucket |
+/// | per-bucket cluster counts | `gen.bucket_clusters_at` | 1 | bucket |
+/// | `MeshLevels` per mesh | `gen.mesh_levels_at` | `MESH_LEVELS_WORDS` | `GpuInstance::mesh` |
+/// | `LevelGroup` per DAG group | `gen.level_groups_at` | `LEVEL_GROUP_WORDS` | `MeshLevels::first_group + i` |
+/// | level → mesh id | `gen.level_meshes_at` | 1 | `MeshLevels::first_level + d` |
+///
+/// Every one of them is written when a mesh becomes resident and not rewritten
+/// per frame, which is what lets them share one upload: they change together or
+/// not at all.
+///
+/// The accessors below are the only readers. Nothing indexes this array
+/// directly — a bare offset arithmetic at a use site is exactly the drift the
+/// named word constants exist to prevent.
+[[vk::binding(4, 0)]]
+StructuredBuffer<uint> tables;
 
-/// The per-bucket runs of instance indices the vertex stage reads, bucket `b`'s
-/// starting at `b * bucket_capacity`. `mesh.slang`'s `DrawConstants::base`
-/// carries that offset and `SV_InstanceID` walks the run.
-[[vk::binding(6, 0)]]
+/// `cull.slang`'s compacted survivors, then the per-bucket runs of instance
+/// indices the vertex stage reads.
+///
+/// **Two regions in one buffer, and read *and* written through one descriptor.**
+/// The survivors occupy words `0..gen.visible_capacity`, in whatever order that
+/// pass's atomic handed slots out — nothing here depends on the order — and
+/// bucket `b`'s run starts at `gen.visible_capacity + b * gen.bucket_capacity`,
+/// which is what `mesh.slang`'s `DrawConstants::base` carries and what
+/// `SV_InstanceID` walks.
+///
+/// Writable rather than a read-only view of the survivors beside a writable view
+/// of the runs: binding one buffer twice, once each way, in a single bind group
+/// is a usage conflict on WebGPU. A `RWStructuredBuffer` reads perfectly well,
+/// and the survivor half is read-only here by what this shader does with it.
+[[vk::binding(5, 0)]]
 RWStructuredBuffer<uint> visible_instances;
 
 /// The indirect arguments, `DRAW_ARGS_WORDS` per bucket, as a flat array of
@@ -353,66 +478,41 @@ RWStructuredBuffer<uint> visible_instances;
 /// `ARG_INSTANCE_COUNT` **is** the slot allocator — see the header. The other
 /// four words are plain stores through the same view, which is what
 /// `Atomic<uint>::store` is for.
-[[vk::binding(7, 0)]]
+///
+/// **Still a buffer of its own**, unlike the counts and extents below: the mesh
+/// path reads these as *data* in the same pass that executes those as indirect
+/// arguments, and a resource is in one resource state at a time.
+[[vk::binding(6, 0)]]
 RWStructuredBuffer<Atomic<uint> > args;
 
-/// One draw count per bucket: `1` for a bucket with something in it, and the
-/// zero the caller wrote for a bucket with nothing.
+/// One draw count per bucket, then the per-bucket mesh-dispatch arguments.
 ///
-/// What `GeometryPath::IndirectCount`'s call reads, and the reason the CPU never
-/// learns whether a bucket drew. `IndirectPerBatch` passes a count of one and
+/// The counts occupy words `0..gen.bucket_count`: `1` for a bucket with something
+/// in it, and the zero the clearing pass wrote for a bucket with nothing. That is
+/// what `GeometryPath::IndirectCount`'s call reads, and the reason the CPU never
+/// learns whether a bucket drew — `IndirectPerBatch` passes a count of one and
 /// leans on the empty bucket's zero instance count instead, which draws nothing
-/// just as effectively — this buffer is what the two paths differ over.
-[[vk::binding(8, 0)]]
-RWStructuredBuffer<uint> draw_counts;
-
-/// How many clusters each bucket's mesh has — the x extent of that bucket's
-/// mesh dispatch, and the one number in `mesh_args` below that is not the
-/// GPU's.
+/// just as effectively.
 ///
-/// Host-written beside `bucket_meshes` and not rewritten per frame, because a
-/// mesh's clusters are decided when it becomes resident. Zero on every
-/// geometry path with no mesh stage, where nothing reads `mesh_args` at all.
-[[vk::binding(9, 0)]]
-StructuredBuffer<uint> bucket_clusters;
-
-/// The per-bucket mesh-dispatch arguments, `MESH_ARGS_WORDS` per bucket, as a
-/// flat array of words.
-///
-/// **This is what makes the cluster cull skip work rather than only output.**
+/// The extents follow at `gen.bucket_count`, `MESH_ARGS_WORDS` per bucket.
+/// **They are what makes the cluster cull skip work rather than only output**:
 /// `mesh_cluster.slang`'s stages run one workgroup per (cluster, surviving
 /// instance), and how many instances survived is a number only this pass has —
 /// so a CPU-sized dispatch has to use the instance *pool's* slot count and let
 /// the groups past the survivors return early. Read from here instead, the
 /// groups are never launched.
 ///
+/// One buffer for both because **every path that reads either reads it as an
+/// indirect argument**: the two indirect tails execute the counts and never look
+/// at the extents, the mesh path executes the extents and never looks at the
+/// counts, and no pass wants the buffer in two resource states at once.
+///
 /// Flat and atomic for `args`' reason, and the same division of labour: word
 /// `MESH_ARG_GROUP_Y` is incremented by each scattering invocation, exactly as
 /// `ARG_INSTANCE_COUNT` is, and the other two are plain stores by the
 /// invocation that owns the bucket.
-[[vk::binding(10, 0)]]
-RWStructuredBuffer<Atomic<uint> > mesh_args;
-
-/// Where each mesh's DAG is, indexed by `GpuInstance::mesh`. Host-written and
-/// not rewritten per frame: a mesh's hierarchy is decided when it becomes
-/// resident, exactly as its cluster count is.
-[[vk::binding(11, 0)]]
-StructuredBuffer<MeshLevels> mesh_levels;
-
-/// Every resident mesh's DAG groups, laid end to end in the order
-/// `MeshLevels::first_group` points into.
-[[vk::binding(12, 0)]]
-StructuredBuffer<LevelGroup> level_groups;
-
-/// Which mesh draws which level: element `MeshLevels::first_level + d` is the
-/// mesh id of level `d`.
-///
-/// A DAG is several mesh table entries because every level is decimated
-/// separately and its vertices belong to no vertex of the level below — so a
-/// uniform cut selects a *mesh*, and the bucket table then routes it exactly as
-/// it routes a mesh with no hierarchy at all.
-[[vk::binding(13, 0)]]
-StructuredBuffer<uint> level_meshes;
+[[vk::binding(7, 0)]]
+RWStructuredBuffer<Atomic<uint> > counts_and_mesh_args;
 
 /// `docs/plan/25-lod.md`'s hysteresis state: one word per (instance, group),
 /// `1` where that instance had that group expanded last frame.
@@ -442,8 +542,91 @@ StructuredBuffer<uint> level_meshes;
 ///   is always monotone because every frame's update preserves it.
 ///
 /// Zeroed once when the renderer builds it, which is where the induction starts.
-[[vk::binding(14, 0)]]
+[[vk::binding(8, 0)]]
 RWStructuredBuffer<uint> group_state;
+
+/// Which mesh bucket `bucket` draws, as an index into `meshes`.
+uint bucket_mesh(uint bucket)
+{
+    return tables[bucket];
+}
+
+/// How many clusters bucket `bucket`'s mesh has — the x extent of that bucket's
+/// mesh dispatch, and the one number in the extents that is not the GPU's.
+///
+/// Zero on every geometry path with no mesh stage, where nothing reads the
+/// extents at all.
+uint bucket_clusters(uint bucket)
+{
+    return tables[gen.bucket_clusters_at + bucket];
+}
+
+/// Where mesh `mesh`'s DAG is. Indexed by `GpuInstance::mesh`, so the region is
+/// parallel to the mesh table and every entry an instance can name is filled.
+MeshLevels mesh_levels_of(uint mesh)
+{
+    uint at = gen.mesh_levels_at + mesh * MESH_LEVELS_WORDS;
+    MeshLevels levels;
+    levels.first_group = tables[at + MESH_LEVELS_FIRST_GROUP];
+    levels.group_count = tables[at + MESH_LEVELS_GROUP_COUNT];
+    levels.first_level = tables[at + MESH_LEVELS_FIRST_LEVEL];
+    levels.top_level = tables[at + MESH_LEVELS_TOP_LEVEL];
+    return levels;
+}
+
+/// Group `group` of the concatenated DAG groups, its five floats read back
+/// through `asfloat`.
+///
+/// The bit pattern the host wrote is the bit pattern a float load would have
+/// produced from a typed buffer — `crcbl_shaders::level_select::LevelGroup::to_bytes`
+/// writes `f32::to_le_bytes` and this reads the same word — so this is a
+/// reinterpretation and not a conversion.
+LevelGroup level_group_at(uint group)
+{
+    uint at = gen.level_groups_at + group * LEVEL_GROUP_WORDS;
+    LevelGroup record;
+    record.level = tables[at + LEVEL_GROUP_LEVEL];
+    record.error = asfloat(tables[at + LEVEL_GROUP_ERROR]);
+    record.center_x = asfloat(tables[at + LEVEL_GROUP_CENTER_X]);
+    record.center_y = asfloat(tables[at + LEVEL_GROUP_CENTER_Y]);
+    record.center_z = asfloat(tables[at + LEVEL_GROUP_CENTER_Z]);
+    record.radius = asfloat(tables[at + LEVEL_GROUP_RADIUS]);
+    return record;
+}
+
+/// The mesh id drawing entry `level` of the concatenated level table.
+///
+/// A DAG is several mesh table entries because every level is decimated
+/// separately and its vertices belong to no vertex of the level below — so a
+/// uniform cut selects a *mesh*, and the bucket table then routes it exactly as
+/// it routes a mesh with no hierarchy at all.
+uint level_mesh_at(uint level)
+{
+    return tables[gen.level_meshes_at + level];
+}
+
+/// Where bucket `bucket`'s run of surviving instance indices starts in
+/// `visible_instances`, past the survivor list that shares the buffer.
+///
+/// The same arithmetic `crcbl_render::DrawGen::bucket_base` performs, and what
+/// `mesh.slang`'s `DrawConstants::base` carries.
+uint bucket_base(uint bucket)
+{
+    return gen.visible_capacity + bucket * gen.bucket_capacity;
+}
+
+/// Which word of `counts_and_mesh_args` holds bucket `bucket`'s draw count.
+uint count_word(uint bucket)
+{
+    return bucket;
+}
+
+/// Which word of `counts_and_mesh_args` holds word `slot` of bucket `bucket`'s
+/// mesh-dispatch extents, past the one draw count per bucket in front of them.
+uint mesh_arg_word(uint bucket, uint slot)
+{
+    return gen.bucket_count + bucket * MESH_ARGS_WORDS + slot;
+}
 
 /// Whether a group is **expanded** — its children drawn rather than its parents
 /// — from the eye this frame selects at, given whether it was last frame.
@@ -493,14 +676,14 @@ uint group_is_expanded(float error, float3 center, float radius, float3 eye, uin
 /// camera through the inverse transform, and it needs no inverse.
 uint select_level(GpuInstance instance, uint instance_index)
 {
-    MeshLevels levels = mesh_levels[instance.mesh];
+    MeshLevels levels = mesh_levels_of(instance.mesh);
     float3 eye = gen.camera_position.xyz;
     uint base = instance_index * gen.group_stride;
     uint chosen = levels.top_level;
     for (uint i = 0; i < levels.group_count; ++i)
     {
         uint at = levels.first_group + i;
-        LevelGroup group = level_groups[at];
+        LevelGroup group = level_group_at(at);
         float3 center = mul(instance.transform,
             float4(group.center_x, group.center_y, group.center_z, 1.0)).xyz;
         uint expanded = group_is_expanded(
@@ -531,7 +714,7 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     // is what makes the two comparable.
     if (index < gen.bucket_count)
     {
-        GpuMesh mesh = meshes[bucket_meshes[index]];
+        GpuMesh mesh = meshes[bucket_mesh(index)];
         uint at = index * DRAW_ARGS_WORDS;
         args[at + ARG_INDEX_COUNT].store(mesh.index_count);
         args[at + ARG_FIRST_INDEX].store(mesh.base_index);
@@ -547,20 +730,23 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         // the scattering half's, below, for the reason `ARG_INSTANCE_COUNT` is:
         // nothing inside one dispatch can wait for every other invocation to
         // have finished counting.
-        uint mesh_at = index * MESH_ARGS_WORDS;
-        mesh_args[mesh_at + MESH_ARG_GROUP_X].store(bucket_clusters[index]);
-        mesh_args[mesh_at + MESH_ARG_GROUP_Z].store(1);
+        counts_and_mesh_args[mesh_arg_word(index, MESH_ARG_GROUP_X)]
+            .store(bucket_clusters(index));
+        counts_and_mesh_args[mesh_arg_word(index, MESH_ARG_GROUP_Z)].store(1);
     }
 
     // Clamped by both capacities, which is what makes a bucket's run unable to
     // overflow — see the header.
-    uint count = min(visible_count[0], min(gen.visible_capacity, gen.bucket_capacity));
+    uint count = min(visible_count[INSTANCE_SURVIVOR_WORD],
+        min(gen.visible_capacity, gen.bucket_capacity));
     if (index >= count)
     {
         return;
     }
 
-    uint instance_index = visible[index];
+    // The survivor list is the front of the same buffer the runs are scattered
+    // into — see `visible_instances`.
+    uint instance_index = visible_instances[index];
     GpuInstance instance = instances[instance_index];
     // **`docs/plan/25-lod.md`'s uniform cut, and the one decision this pass
     // makes about detail.** The instance names level 0 of its mesh — that is
@@ -568,14 +754,14 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     // here names the mesh that actually draws, which the bucket table then
     // routes exactly as it routes a mesh with no hierarchy. A mesh with none
     // resolves back to itself, so there is no branch for the ordinary case.
-    uint mesh_id = level_meshes[
-        mesh_levels[instance.mesh].first_level + select_level(instance, instance_index)];
+    uint mesh_id = level_mesh_at(
+        mesh_levels_of(instance.mesh).first_level + select_level(instance, instance_index));
     // A linear walk of the bucket table. The table is small and fixed — one
     // entry per resident mesh today — so this is a couple of comparisons; a
     // mesh → bucket map is what a table large enough to notice would want.
     for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
     {
-        if (bucket_meshes[bucket] != mesh_id)
+        if (bucket_mesh(bucket) != mesh_id)
         {
             continue;
         }
@@ -586,15 +772,15 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         // total yet — and the two are held equal by measurement rather than by
         // assertion: `crcbl-vk`'s `the_mesh_dispatch_extent_is_the_culled
         // _instance_count` reads both buffers back and compares them.
-        mesh_args[bucket * MESH_ARGS_WORDS + MESH_ARG_GROUP_Y].add(1);
+        counts_and_mesh_args[mesh_arg_word(bucket, MESH_ARG_GROUP_Y)].add(1);
 
-        visible_instances[bucket * gen.bucket_capacity + slot] = instance_index;
+        visible_instances[bucket_base(bucket) + slot] = instance_index;
         // Exactly one invocation per bucket takes slot zero, so exactly one
         // writes this — a plain store rather than an atomic, and not a value
         // several invocations race to agree on.
         if (slot == 0)
         {
-            draw_counts[bucket] = 1;
+            counts_and_mesh_args[count_word(bucket)].store(1);
         }
         break;
     }

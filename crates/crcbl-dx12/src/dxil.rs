@@ -734,15 +734,15 @@ mod tests {
                 "draw_gen",
                 &crcbl_shaders::DRAW_GEN,
                 &["computeMain"],
-                // The tail is the mesh path's dispatch extents — the per-bucket
-                // cluster counts the host uploaded (binding 9, read only) and
-                // the argument structures this pass writes them into (10) —
-                // then `docs/plan/25-lod.md`'s three selection tables (11 to
-                // 13), all host-written and all read only, and its hysteresis
-                // state (14), which this pass is the only writer of.
-                &[
-                    Cbv, Srv, Srv, Srv, Srv, Srv, Uav, Uav, Uav, Srv, Uav, Srv, Srv, Srv, Uav,
-                ],
+                // **Eight storage bindings and no more**, which is what a
+                // WebGPU device guarantees per stage — see that source's
+                // header. Read only: the instance array (1), the mesh table
+                // (2), the culling statistics (3) and every host-written table
+                // in one buffer (4). Writable: the survivor list and the
+                // per-bucket runs (5), the indirect arguments (6), the draw
+                // counts beside the mesh-dispatch extents (7), and
+                // `docs/plan/25-lod.md`'s hysteresis state (8).
+                &[Cbv, Srv, Srv, Srv, Srv, Uav, Uav, Uav, Uav],
             ),
             (
                 "mesh",
