@@ -182,6 +182,15 @@ jobs:
       # both other workflows, four engine scripts, four demo pages and two
       # docs. Nothing catches that without a check, since the formatter is only
       # ever run by whoever remembers to.
+      #
+      # Its first run found something worse and is the reason `.prettierrc`
+      # exists: the repo had **no** prettier config, and prettier searches
+      # upward from each file, so every local run here had been picking up a
+      # config in the developer's home directory. Thirty-six files were
+      # formatted to settings the repository did not contain, and a clone into
+      # a different home directory would have reformatted all of them. The
+      # config is now committed and says what this tree is actually formatted
+      # to.
       - name: check formatting
         run: >-
           git ls-files -z '*.md' '*.js' '*.mjs' '*.json' '*.yml' '*.yaml'
