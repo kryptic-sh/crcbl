@@ -79,9 +79,10 @@ server rather than one per caller.
 
 ## Which GPU backend the browser renders through
 
-`CRCBL_WEB_BACKEND` picks it, and three files read that one variable: `build.sh`
-(which turns it into `--features crcbl/webgpu`), `run-browser-e2e.sh` and
-`tools/browser-e2e.mjs`.
+`CRCBL_WEB_BACKEND` picks it, and every reader takes it from that one variable:
+`build.sh` (which turns it into `--features crcbl/webgpu`),
+`run-browser-e2e.sh`, `tools/browser-e2e.mjs`, and `run-probe-e2e.sh` for the
+site its `--build` produces.
 
 | value            | the wasm renders through                            |
 | ---------------- | --------------------------------------------------- |
@@ -93,25 +94,25 @@ server rather than one per caller.
 demos against that build, so what `crcbl.kryptic.sh` serves renders through
 `crcbl-webgpu`.
 
-The default is still `wgpu` because the three readers are **coupled**: the
-feature the build passes, the adapter line the driver waits for at boot, and the
-guard strings the script demands afterwards all move together. Flipping one of
-them alone fails confusingly — the driver waits for a `hal: wgpu adapter` line a
-WebGpu site never prints. Set the variable at the call site instead.
+The default is still `wgpu` because the readers are **coupled**: the feature the
+build passes and the adapter line the driver waits for at boot move together.
+Flipping one alone fails confusingly — the driver waits for a
+`hal: wgpu adapter` line a WebGpu site never prints. Set the variable at the
+call site instead.
 
 ```sh
 CRCBL_WEB_BACKEND=webgpu ./web/build.sh --serve
 CRCBL_WEB_BACKEND=webgpu ./web/run-browser-e2e.sh --build
 ```
 
-The one `wgpu` run left in the Pages workflow is **not** a legacy fallback. The
-gate's probe groups — G through Z in `tools/browser-e2e.mjs` — drive
-`crcbl-webgpu`'s seam command by command, and they can only install their own
-command-stream channel when the engine's own device has not already taken it,
-which is to say only on a `wgpu` site. That step is therefore the only browser
-gate on the new backend's seam, and it is the only run here whose check count
-covers the probes as well as the demo; its comment in `pages.yml` says so at
-length.
+**Nothing in the Pages workflow builds a `wgpu` site any more.** It used to, for
+one step and one reason: the seam gate's probe groups — G through Z — install
+their own command-stream channel, a page has exactly one, and on a WebGpu site
+the engine's own `WebGpuDevice` has already taken it. Those groups are
+`tools/probe-groups.mjs` now and run on `probe/`, a page with **no engine
+running** that loads a demo's wasm module without booting it and pumps the
+channel itself — the same condition, met without a second backend. See
+`run-probe-e2e.sh` below.
 
 ## Why `wasm-bindgen` is here at all
 
@@ -178,6 +179,24 @@ known colour in the same browser with the same flags first, tries both adapters,
 and refuses to interpret the render checks unless the control comes back with
 the colour it drew. The flags, and the failure each one prevents, are in the two
 files' headers.
+
+`run-probe-e2e.sh` is the gate beside it, and the only one that drives
+`crcbl-webgpu`'s seam **one command at a time**: the wasm→JS→wasm round trip,
+the device it opens, every resource kind created on a real `GPUDevice`, and from
+group S onward the readbacks whose _bytes_ are compared against the colour or
+pattern the command asked for. It needs a site with `probe/index.html` in it,
+which `build.sh` puts there:
+
+```sh
+./web/run-probe-e2e.sh --build        # Xvfb + Chromium, then groups G-Z
+```
+
+It prints the group letters it recorded a check under beside the count, and
+fails when any of G-Z is missing from that line — a page that silently drove
+only some of the probes is the failure mode it has to be able to see. Xvfb is
+not optional on a machine with no GPU: under `--headless=new` plus SwiftShader
+the three groups that acquire or present a canvas frame never resolve their
+readback map.
 
 ## Checking it without a browser
 

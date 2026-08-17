@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>crcbl-webgpu seam probe</title>
+    <style>
+      body {
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+        margin: 2rem;
+        color: #ddd;
+        background: #111;
+      }
+      pre {
+        white-space: pre-wrap;
+      }
+      canvas {
+        display: block;
+        width: 320px;
+        height: 180px;
+        background: #000;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>crcbl-webgpu seam probe</h1>
+    <p>
+      A page with <strong>no engine running</strong>. It loads a demo's wasm
+      module without booting it, so nothing has claimed the single GPU command
+      channel, and then it pumps that channel itself — drain, replay, deliver,
+      once per <code>requestAnimationFrame</code> frame. That is the whole page:
+      the commands come from <code>crcbl-webgpu</code>'s probe exports, which
+      <code>web/tools/probe-e2e.mjs</code> drives from outside over the DevTools
+      protocol.
+    </p>
+    <p>
+      There is nothing to look at. The canvas below is here because it is a
+      <em>subject</em>: a surface has to resolve to a real element and answer a
+      real <code>GPUCanvasContext</code>, and that is the element it resolves
+      to.
+    </p>
+    <canvas id="canvas" width="640" height="360"></canvas>
+    <pre id="log">starting…</pre>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
