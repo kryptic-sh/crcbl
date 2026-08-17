@@ -59,10 +59,10 @@ use crcbl::core::SurfaceTarget;
 use crcbl::hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
     CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
-    ImageAspect, ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange, Instance, LoadOp,
-    MemoryLocation, Offset3d, PresentInfo, PresentMode, QueryKind, QuerySetDesc, QuerySetHandle,
-    ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
-    SurfaceError, SwapchainDesc,
+    ImageAspect, ImageBarrier, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
+    ImageUsage, Instance, LoadOp, MemoryLocation, Offset3d, PresentInfo, PresentMode, QueryKind,
+    QuerySetDesc, QuerySetHandle, ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc,
+    ResourceState, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
 };
 
 /// The size every offscreen test in this file renders at.
@@ -2178,6 +2178,194 @@ fn exercise_fill(headless: &Headless, value: u32) -> Exercise {
     outcome
 }
 
+/// The format the depth-copy exercise moves a plane of.
+///
+/// **[`Format::D16Unorm`] and not the [`Format::D32Float`] a shadow atlas uses**,
+/// because this exercise drives the copy in BOTH directions and `D32Float` has
+/// only one: WebGPU — and `wgpu` with it, which is a backend this suite runs —
+/// reads a float depth plane back to a buffer and has no defined layout to write
+/// one from. `D16Unorm` is the depth format every API on this seam moves either
+/// way, so a round trip through it asks the whole capability rather than half of
+/// it. [`Capability::DepthImageCopy`]'s own documentation carries the table.
+const DEPTH_COPY_FORMAT: Format = Format::D16Unorm;
+
+/// Texels across the depth image the exercise round-trips.
+///
+/// **256 IS WHAT PICKS THIS NUMBER**, not a preference about test data. WebGPU
+/// requires a buffer↔image copy's row pitch to be a multiple of 256 bytes and
+/// [`BufferImageCopy::buffer_row_length`] is in *texels* with no padding field,
+/// so a width whose natural row is not already a multiple of 256 has no legal
+/// tightly-packed copy at all on two of this suite's backends. A
+/// [`DEPTH_COPY_FORMAT`] row this wide is exactly 256 bytes.
+const DEPTH_COPY_WIDTH: u32 = 128;
+
+/// Rows the exercise round-trips.
+///
+/// More than one, so a copy that transposed its row pitch or moved a single row
+/// fails. Every row holds different values — see [`exercise_depth_image_copy`] —
+/// so a copy that wrote row 0 four times fails too.
+const DEPTH_COPY_HEIGHT: u32 = 4;
+
+/// Drives [`Capability::DepthImageCopy`] in **both** directions and reports
+/// whether the depth plane survived the round trip.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// A pattern is uploaded into the depth plane with
+/// [`copy_buffer_to_image`](crcbl::hal::CommandEncoder::copy_buffer_to_image),
+/// copied straight back out with
+/// [`copy_image_to_buffer`](crcbl::hal::CommandEncoder::copy_image_to_buffer),
+/// and compared texel for texel. Every texel differs from every other, so the
+/// three ways this passes while being broken are each closed: a copy that moved
+/// nothing leaves [`POISON`] in the destination and reads back as
+/// [`Exercise::SilentlyIgnored`]; a copy that moved row 0 into every row, or
+/// that read the image back at the wrong pitch, reads back values that are not
+/// the ones sent. The upload is what makes the readback mean anything — a
+/// readback of an image nobody wrote is a comparison against undefined contents,
+/// which is a test that passes on a backend that returns whatever was in memory.
+///
+/// **The image is never an attachment.** It is created `TRANSFER_SRC |
+/// TRANSFER_DST` and nothing renders into it, so this asks about the copy alone
+/// rather than about a depth pass — which is `tests/forward_e2e/shadow.rs`'s
+/// question and needs a pipeline this suite does not build.
+fn exercise_depth_image_copy(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let texels = (DEPTH_COPY_WIDTH * DEPTH_COPY_HEIGHT) as usize;
+    let bytes = (texels * 2) as u64;
+
+    // Every texel its own value, and the two bytes of each differ from one
+    // another: a swapped byte pair, a repeated row and a shifted pitch are all
+    // visible in the comparison rather than folded into it.
+    let pattern: Vec<u8> = (0..texels)
+        .flat_map(|index| {
+            let value = (index as u16).wrapping_mul(2749) ^ 0x5AA5;
+            value.to_le_bytes()
+        })
+        .collect();
+
+    let upload = device
+        .create_buffer(&BufferDesc {
+            label: Some("depth copy upload"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a host-upload buffer");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("depth copy staging"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+    let image = device
+        .create_image(&ImageDesc {
+            label: Some("depth copy image"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(DEPTH_COPY_WIDTH, DEPTH_COPY_HEIGHT),
+            format: DEPTH_COPY_FORMAT,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+        })
+        .expect("a transfer-only depth image");
+    device
+        .write_buffer(upload, 0, &pattern)
+        .expect("a host-upload buffer is what write_buffer is for");
+
+    let subresource = ImageSubresourceLayers {
+        aspect: ImageAspect::DEPTH,
+        mip: 0,
+        base_layer: 0,
+        layer_count: 1,
+    };
+    // Whole-subresource, tightly packed and at offset zero. None of the three is
+    // decoration: WebGPU permits no partial copy of a depth-stencil image at
+    // all, and the row pitch and buffer offset both have alignments a partial
+    // one would have to satisfy by hand.
+    let copy = |buffer| BufferImageCopy {
+        buffer,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image,
+        image_subresource: subresource,
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(DEPTH_COPY_WIDTH, DEPTH_COPY_HEIGHT),
+    };
+    let range = ImageSubresourceRange {
+        aspect: ImageAspect::DEPTH,
+        base_mip: 0,
+        mip_count: 1,
+        base_layer: 0,
+        layer_count: 1,
+    };
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("depth copy exercise"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        images: &[ImageBarrier::new(
+            image,
+            range,
+            ResourceState::Undefined,
+            ResourceState::TransferDst,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_image(&copy(upload));
+    encoder.pipeline_barrier(&Barriers {
+        images: &[ImageBarrier::new(
+            image,
+            range,
+            ResourceState::TransferDst,
+            ResourceState::TransferSrc,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_image_to_buffer(&copy(staging));
+
+    let outcome = match encoder.finish() {
+        Err(error) => Exercise::Refused(error),
+        Ok(commands) => {
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+
+            let mut read = poisoned(bytes as usize);
+            headless.readback(staging, bytes, &mut read);
+            if read == pattern {
+                Exercise::Worked
+            } else if read.iter().all(|byte| *byte == POISON) {
+                Exercise::SilentlyIgnored
+            } else {
+                let wrong = read
+                    .iter()
+                    .zip(&pattern)
+                    .position(|(got, want)| got != want)
+                    .expect("the two differ, so some byte differs");
+                panic!(
+                    "the depth plane came back changed: byte {wrong} of {bytes} is {:#04x} and \
+                     {:#04x} was written. Neither direction of this copy is allowed to \
+                     reinterpret a depth texel — it is a blit of the plane's own bytes — so this \
+                     is a pitch, an aspect or a format the backend read differently from the one \
+                     it wrote.",
+                    read[wrong], pattern[wrong],
+                );
+            }
+        }
+    };
+
+    device.destroy_image(image);
+    device.destroy_buffer(staging);
+    device.destroy_buffer(upload);
+    outcome
+}
+
 /// The `u64` a query resolve destination holds before the resolve.
 ///
 /// [`FILL_POISON`]'s job, one type wider. A resolve that was accepted and
@@ -2656,10 +2844,7 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
             "needs two images with matching formats and a readback of the destination; the \
              fixture's images are swapchain-owned",
         ),
-        C::DepthImageCopy => Exercise::Unexercised(
-            "needs a depth image, a pass that writes it and a buffer copy of its depth plane; the \
-             fixture owns colour swapchain images and no depth target",
-        ),
+        C::DepthImageCopy => exercise_depth_image_copy(headless),
         C::MsaaResolveAttachment => Exercise::Unexercised(NEEDS_MSAA_TARGET),
         C::StencilReference => Exercise::Unexercised(NEEDS_PIPELINE),
         C::DrawIndirectCount | C::IndirectArgumentPaddedStride => {

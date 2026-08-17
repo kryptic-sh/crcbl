@@ -92,6 +92,11 @@
 //! | [`__crcbl_web_gpu_probe_indirect_state`](shim::__crcbl_web_gpu_probe_indirect_state) | `() -> i32` | Drain, and answer one of the `INDIRECT_*` codes. |
 //! | [`__crcbl_web_gpu_probe_indirect_bytes_ptr`](shim::__crcbl_web_gpu_probe_indirect_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_indirect_state`](shim::__crcbl_web_gpu_probe_indirect_state) answers [`INDIRECT_READY`]. |
 //! | [`__crcbl_web_gpu_probe_indirect_bytes_len`](shim::__crcbl_web_gpu_probe_indirect_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the indirect draw has not answered. |
+//! | [`__crcbl_web_gpu_probe_depth`](shim::__crcbl_web_gpu_probe_depth) | `() -> i32` | Encode one frame — a [`Format::D32Float`] atlas and a view of it, a pass whose only attachment is that view cleared to [`PROBE_DEPTH_CLEAR`] and stored, an image→buffer copy of its [`ImageAspect::DEPTH`] plane, and a `request_readback` against [`PROBE_DEPTH_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_depth_poll`](shim::__crcbl_web_gpu_probe_depth_poll) | `() -> i32` | Poll the depth readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) | `() -> i32` | Drain, and answer one of the `DEPTH_*` codes. |
+//! | [`__crcbl_web_gpu_probe_depth_bytes_ptr`](shim::__crcbl_web_gpu_probe_depth_bytes_ptr) | `() -> i32` | Where the depth plane starts, once [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) answers [`DEPTH_READY`]. |
+//! | [`__crcbl_web_gpu_probe_depth_bytes_len`](shim::__crcbl_web_gpu_probe_depth_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the depth probe has not answered. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -340,15 +345,16 @@ use crcbl_hal::{
     BlendState, BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage,
     ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle,
     CommandEncoderDesc, CompareOp, CompositeAlpha, ComputePassDesc, ComputePipelineDesc,
-    ComputePipelineHandle, CullMode, DepthBias, DepthStencilState, DeviceDesc, Extent3d, Features,
-    FilterMode, Format, FrontFace, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect,
-    ImageCopy, ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
-    MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PresentInfo,
-    PresentMode, PrimitiveState, PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle,
-    Rect2d, RenderPassDesc, ResourceState, SampleType, SamplerAddressMode, SamplerDesc,
-    SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StoreOp,
-    SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+    ComputePipelineHandle, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
+    DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
+    GraphicsPipelineHandle, ImageAspect, ImageCopy, ImageDesc, ImageHandle, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
+    IndexFormat, LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc,
+    PipelineLayoutHandle, PolygonMode, PresentInfo, PresentMode, PrimitiveState, PrimitiveTopology,
+    QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, ResourceState, SampleType,
+    SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle,
+    SwapchainDesc, SwapchainHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -597,6 +603,30 @@ pub const INDIRECT_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`DRAW_UNDECODABLE`]'s twin.
 pub const INDIRECT_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const DEPTH_UNASKED: u32 = 0;
+/// The setup frame — a [`Format::D32Float`] image and a view of it, the host
+/// buffer, an encoder, a render pass whose only attachment is that view cleared
+/// to [`PROBE_DEPTH_CLEAR`] and stored, an image→buffer copy of the **depth
+/// plane**, the submit and the request — is on the stream, and no poll has been
+/// issued.
+pub const DEPTH_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const DEPTH_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const DEPTH_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_depth_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_depth_bytes_len`] carry them — 64×64
+/// `depth32float` texels, every one [`PROBE_DEPTH_CLEAR`] if the browser copied
+/// a depth plane out to a buffer at all.
+pub const DEPTH_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`DRAW_UNDECODABLE`]'s twin.
+pub const DEPTH_UNDECODABLE: u32 = 5;
 
 /// The side of the square texture the readback probe clears and reads back.
 ///
@@ -3052,6 +3082,174 @@ pub const PROBE_INDIRECT_PIPELINE_DESC: GraphicsPipelineDesc<'static> = Graphics
     color_targets: &PROBE_INDIRECT_COLOR_TARGETS,
 };
 
+// The depth probe (group AA): the one gate that reads a DEPTH PLANE back out of
+// the browser. Every handle it names is `8 << 32` — a generation past the
+// indirect probe's `7 << 32` — so its four live resources never land in another
+// probe's slot in the shared page.
+//
+// It is here because `Capability::DepthImageCopy` is declared supported on this
+// backend and no native test can witness that: the seam suite is a native binary
+// and this backend runs in a browser. A `Support::Yes` nothing exercises where it
+// actually runs is a claim, and the claims this file exists to turn into evidence
+// are exactly the ones whose failure looks like success — a shadow atlas that
+// read back as nothing renders a frame in which every surface is lit.
+
+/// The depth value the probe's pass clears its atlas to, and the value every
+/// texel must read back as.
+///
+/// **Not `0.0` and not `1.0`**, which are the two numbers a depth buffer holds
+/// when nothing wrote it: a clear that never happened, a copy that moved zeroes,
+/// and a plane read at the wrong offset all land on one of those, and this value
+/// lands on neither. Exact in `f32` by construction — it is written as an `f32`
+/// literal, cleared into a `depth32float` plane that stores the float itself,
+/// and copied back as those same four bytes.
+pub const PROBE_DEPTH_CLEAR: f32 = 0.4275;
+
+/// Texels across and down the depth atlas the probe clears and reads back.
+///
+/// [`PROBE_READBACK_SIZE`]'s figure and for a sharper reason: a `depth32float`
+/// row this wide is 64 × 4 = 256 bytes, which is exactly WebGPU's `bytesPerRow`
+/// alignment, so the tightly packed copy the seam sends is already the aligned
+/// copy the browser requires and nothing has to pad.
+pub const PROBE_DEPTH_SIZE: u32 = PROBE_READBACK_SIZE;
+
+/// The queue the depth probe names in its command encoder. `8 << 32`.
+pub const PROBE_DEPTH_QUEUE: QueueHandle = match QueueHandle::from_bits(8 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 8 is not zero"),
+};
+
+/// The command buffer the depth probe finishes its encoder into. `8 << 32`.
+pub const PROBE_DEPTH_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(8 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 8 is not zero"),
+    };
+
+/// The in-flight readback the depth probe requests and polls. `8 << 32`.
+pub const PROBE_DEPTH_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(8 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 8 is not zero"),
+};
+
+/// The image handle the depth probe clears and copies out of. `8 << 32`.
+pub const PROBE_DEPTH_IMAGE: ImageHandle = match ImageHandle::from_bits(8 << 32) {
+    Some(image) => image,
+    None => panic!("generation 8 is not zero"),
+};
+
+/// The depth atlas the probe clears — a 64×64 [`Format::D32Float`] target that
+/// is both a depth-stencil attachment and a copy source, which is the shadow
+/// atlas's own descriptor at the size a readback wants.
+#[must_use]
+pub const fn probe_depth_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu depth image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_DEPTH_SIZE, PROBE_DEPTH_SIZE),
+        format: Format::D32Float,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The image-view handle the depth probe's pass writes through. `8 << 32`.
+pub const PROBE_DEPTH_IMAGE_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(8 << 32) {
+    Some(view) => view,
+    None => panic!("generation 8 is not zero"),
+};
+
+/// The view of [`probe_depth_image_desc`]'s image the pass clears.
+///
+/// [`ImageSubresourceRange::all`] of a depth format is
+/// [`ImageAspect::DEPTH`] alone, which is what makes this a depth-only
+/// attachment: the replayer reads the plane record off the view and leaves the
+/// stencil load and store ops off the `GPURenderPassDepthStencilAttachment`
+/// entirely, which WebGPU requires for a format with no stencil plane.
+pub const PROBE_DEPTH_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu depth view"),
+    image: PROBE_DEPTH_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::D32Float,
+    range: ImageSubresourceRange::all(Format::D32Float),
+};
+
+/// The buffer handle the depth plane is copied into and read back from.
+/// `8 << 32`.
+pub const PROBE_DEPTH_BUFFER: BufferHandle = match BufferHandle::from_bits(8 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 8 is not zero"),
+};
+
+/// The buffer the depth plane is copied into and read back from — `64 * 64 * 4`
+/// bytes, one `f32` a texel.
+#[must_use]
+pub const fn probe_depth_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu depth buffer"),
+        size: (PROBE_DEPTH_SIZE as u64) * (PROBE_DEPTH_SIZE as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The clear the depth pass loads with — [`PROBE_DEPTH_CLEAR`] in the depth
+/// slot, and [`ClearValue`]'s own defaults everywhere else.
+#[must_use]
+pub const fn probe_depth_clear_value() -> ClearValue {
+    ClearValue {
+        color: [0.0; 4],
+        depth: PROBE_DEPTH_CLEAR,
+        stencil: 0,
+    }
+}
+
+/// The depth-stencil attachment the probe's pass writes: the whole atlas
+/// cleared and **stored**, with no colour attachment beside it.
+///
+/// `read_only: false` and [`StoreOp::Store`] are what make the copy afterwards
+/// mean something — a discarded depth attachment leaves the plane undefined and
+/// the readback then compares against whatever the driver had.
+#[must_use]
+pub const fn probe_depth_attachment() -> DepthStencilAttachment {
+    DepthStencilAttachment {
+        view: PROBE_DEPTH_IMAGE_VIEW,
+        read_only: false,
+        depth_load: LoadOp::Clear,
+        depth_store: StoreOp::Store,
+        stencil_load: LoadOp::DontCare,
+        stencil_store: StoreOp::Discard,
+        clear: probe_depth_clear_value(),
+    }
+}
+
+/// The image→buffer copy that moves the depth plane into the readback buffer.
+///
+/// **[`ImageAspect::DEPTH`], and the whole subresource.** Both are requirements
+/// rather than choices: WebGPU rejects a buffer↔texture copy of a depth format
+/// that names `'all'`, and it permits no partial copy of one at all — the origin
+/// must be zero and the extent the whole mip. Tightly packed, which at
+/// [`PROBE_DEPTH_SIZE`] texels of four bytes is already a 256-aligned row.
+#[must_use]
+pub const fn probe_depth_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_DEPTH_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_DEPTH_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::DEPTH,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_DEPTH_SIZE, PROBE_DEPTH_SIZE),
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -3678,6 +3876,71 @@ impl IndirectProbe {
     }
 }
 
+/// One depth-plane readback, from the frame that cleared the atlas to the bytes
+/// read back — [`DrawProbe`]'s state machine on the depth path.
+///
+/// The two probes differ only in the frame they encode: a draw rasterises a
+/// triangle into a colour attachment, this one clears a `depth32float`
+/// attachment and copies its depth plane out. Both end in the same
+/// `request_readback` and are answered by the same
+/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
+/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so the transitions
+/// mirror [`DrawProbe`]'s exactly.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum DepthProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — one `depth32float` texel per four, every one
+        /// [`PROBE_DEPTH_CLEAR`] if the depth copy ran.
+        bytes: Vec<u8>,
+    },
+}
+
+impl DepthProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`DrawProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -3739,6 +4002,10 @@ struct Probe {
     /// A decode error the indirect-draw drain hit, for [`INDIRECT_UNDECODABLE`].
     /// Its own string for [`reason`](Self::reason)'s reason.
     indirect_reason: String,
+    depth: DepthProbe,
+    /// A decode error the depth drain hit, for [`DEPTH_UNDECODABLE`]. Its own
+    /// string for [`reason`](Self::reason)'s reason.
+    depth_reason: String,
 }
 
 impl Probe {
@@ -3767,6 +4034,8 @@ impl Probe {
             reconfig_reason: String::new(),
             indirect: IndirectProbe::Unasked,
             indirect_reason: String::new(),
+            depth: DepthProbe::Unasked,
+            depth_reason: String::new(),
         }
     }
 
@@ -4188,6 +4457,7 @@ impl Probe {
                 self.present.absorb(&replies);
                 self.reconfig.absorb(&replies);
                 self.indirect.absorb(&replies);
+                self.depth.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -4953,6 +5223,106 @@ impl Probe {
     fn indirect_bytes(&self) -> &[u8] {
         match &self.indirect {
             IndirectProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the depth setup frame: a `depth32float` atlas and a view of it, a
+    /// host buffer, a pass whose only attachment is that view cleared to
+    /// [`PROBE_DEPTH_CLEAR`] and stored, and the copy of its **depth plane** out
+    /// to the buffer that is read back.
+    ///
+    /// **One frame, many commands, no reply** —
+    /// [`request_draw`](Self::request_draw)'s shape with the colour attachment
+    /// replaced by a depth one and nothing drawn: the clear is the write, which
+    /// is why this needs no pipeline and no shader.
+    ///
+    /// `false` until a device has opened, [`request_readback`](Self::request_readback)'s
+    /// ordering rule — every command here is a device method.
+    fn request_depth(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(PROBE_DEPTH_IMAGE, &probe_depth_image_desc());
+                stream.create_image_view(PROBE_DEPTH_IMAGE_VIEW, &PROBE_DEPTH_VIEW_DESC);
+                stream.create_buffer(PROBE_DEPTH_BUFFER, &probe_depth_buffer_desc());
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu depth encoder"),
+                    queue: PROBE_DEPTH_QUEUE,
+                });
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu depth pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(probe_depth_attachment()),
+                    render_area: Rect2d::from_size(PROBE_DEPTH_SIZE, PROBE_DEPTH_SIZE),
+                });
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_depth_copy());
+                stream.finish(PROBE_DEPTH_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_DEPTH_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_DEPTH_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu depth readback"),
+                        buffer: PROBE_DEPTH_BUFFER,
+                        offset: 0,
+                        size: probe_depth_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.depth = DepthProbe::Requested;
+            self.depth_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// depth readback and register its wait, unless it is already waiting or
+    /// ready — [`poll_draw`](Self::poll_draw)'s protocol on the depth handle.
+    fn poll_depth(&mut self) -> bool {
+        if !matches!(self.depth, DepthProbe::Requested | DepthProbe::Pending) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_DEPTH_READBACK))
+        else {
+            return false;
+        };
+        self.depth = DepthProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the depth readback has got to.
+    fn depth_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.depth_reason = error.to_string();
+            return DEPTH_UNDECODABLE;
+        }
+        match &self.depth {
+            DepthProbe::Unasked => DEPTH_UNASKED,
+            DepthProbe::Requested => DEPTH_REQUESTED,
+            DepthProbe::Waiting { .. } => DEPTH_WAITING,
+            DepthProbe::Pending => DEPTH_PENDING,
+            DepthProbe::Ready { .. } => DEPTH_READY,
+        }
+    }
+
+    /// The bytes the depth readback came back with, or an empty slice if it has
+    /// not.
+    fn depth_bytes(&self) -> &[u8] {
+        match &self.depth {
+            DepthProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -6556,6 +6926,59 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Encode the depth setup frame — a `depth32float` atlas, a pass that clears
+    /// it, the depth-plane copy, and the readback request.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// probe is re-entered, or another channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_depth() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_depth()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the depth readback once. `1` when a poll is on the stream, `0` when
+    /// there is nothing to poll for.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_depth_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_depth()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `DEPTH_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_depth_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.depth_state(),
+            Err(_) => super::DEPTH_UNASKED,
+        })
+    }
+
+    /// Where the depth plane's bytes start, once
+    /// [`__crcbl_web_gpu_probe_depth_state`] answers [`super::DEPTH_READY`]. Null
+    /// while it has not; the pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_depth_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.depth_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_depth_bytes_ptr`] points at — the
+    /// depth readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_depth_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.depth_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -6573,30 +6996,32 @@ mod tests {
         __crcbl_web_gpu_probe_compute_state, __crcbl_web_gpu_probe_copychain,
         __crcbl_web_gpu_probe_copychain_bytes_len, __crcbl_web_gpu_probe_copychain_bytes_ptr,
         __crcbl_web_gpu_probe_copychain_poll, __crcbl_web_gpu_probe_copychain_state,
-        __crcbl_web_gpu_probe_device, __crcbl_web_gpu_probe_device_features_hi,
-        __crcbl_web_gpu_probe_device_features_lo, __crcbl_web_gpu_probe_device_max_image_2d,
-        __crcbl_web_gpu_probe_device_reason_len, __crcbl_web_gpu_probe_device_reason_ptr,
-        __crcbl_web_gpu_probe_device_state, __crcbl_web_gpu_probe_draw,
-        __crcbl_web_gpu_probe_draw_bytes_len, __crcbl_web_gpu_probe_draw_bytes_ptr,
-        __crcbl_web_gpu_probe_draw_poll, __crcbl_web_gpu_probe_draw_state,
-        __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
-        __crcbl_web_gpu_probe_fill, __crcbl_web_gpu_probe_fill_bytes_len,
-        __crcbl_web_gpu_probe_fill_bytes_ptr, __crcbl_web_gpu_probe_fill_poll,
-        __crcbl_web_gpu_probe_fill_state, __crcbl_web_gpu_probe_graphics_pipeline,
-        __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
-        __crcbl_web_gpu_probe_indirect, __crcbl_web_gpu_probe_indirect_bytes_len,
-        __crcbl_web_gpu_probe_indirect_bytes_ptr, __crcbl_web_gpu_probe_indirect_poll,
-        __crcbl_web_gpu_probe_indirect_state, __crcbl_web_gpu_probe_max_image_2d,
-        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_present,
-        __crcbl_web_gpu_probe_present_bytes_len, __crcbl_web_gpu_probe_present_bytes_ptr,
-        __crcbl_web_gpu_probe_present_poll, __crcbl_web_gpu_probe_present_state,
-        __crcbl_web_gpu_probe_reconfigure, __crcbl_web_gpu_probe_reconfigure_bytes_len,
-        __crcbl_web_gpu_probe_reconfigure_bytes_ptr, __crcbl_web_gpu_probe_reconfigure_poll,
-        __crcbl_web_gpu_probe_reconfigure_state, __crcbl_web_gpu_probe_sampler,
-        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_depth, __crcbl_web_gpu_probe_depth_bytes_len,
+        __crcbl_web_gpu_probe_depth_bytes_ptr, __crcbl_web_gpu_probe_depth_poll,
+        __crcbl_web_gpu_probe_depth_state, __crcbl_web_gpu_probe_device,
+        __crcbl_web_gpu_probe_device_features_hi, __crcbl_web_gpu_probe_device_features_lo,
+        __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
+        __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
+        __crcbl_web_gpu_probe_draw, __crcbl_web_gpu_probe_draw_bytes_len,
+        __crcbl_web_gpu_probe_draw_bytes_ptr, __crcbl_web_gpu_probe_draw_poll,
+        __crcbl_web_gpu_probe_draw_state, __crcbl_web_gpu_probe_features_hi,
+        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_fill,
+        __crcbl_web_gpu_probe_fill_bytes_len, __crcbl_web_gpu_probe_fill_bytes_ptr,
+        __crcbl_web_gpu_probe_fill_poll, __crcbl_web_gpu_probe_fill_state,
+        __crcbl_web_gpu_probe_graphics_pipeline, __crcbl_web_gpu_probe_image,
+        __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_indirect,
+        __crcbl_web_gpu_probe_indirect_bytes_len, __crcbl_web_gpu_probe_indirect_bytes_ptr,
+        __crcbl_web_gpu_probe_indirect_poll, __crcbl_web_gpu_probe_indirect_state,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
+        __crcbl_web_gpu_probe_present, __crcbl_web_gpu_probe_present_bytes_len,
+        __crcbl_web_gpu_probe_present_bytes_ptr, __crcbl_web_gpu_probe_present_poll,
+        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_reconfigure,
+        __crcbl_web_gpu_probe_reconfigure_bytes_len, __crcbl_web_gpu_probe_reconfigure_bytes_ptr,
+        __crcbl_web_gpu_probe_reconfigure_poll, __crcbl_web_gpu_probe_reconfigure_state,
+        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -9301,6 +9726,183 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
         assert_eq!(__crcbl_web_gpu_probe_bind_group(), 0);
         assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The depth probe's bytes, read the way JS reads them.
+    fn depth_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_depth_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_depth_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the depth probe answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::depth` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **Every depth handle is generation eight**, a generation past the indirect
+    /// probe's `7 << 32` and every probe before it: the atlas, its view, the host
+    /// buffer, the command buffer, the queue and the readback are all live at once
+    /// and none may land in another probe's slot in the shared page.
+    #[test]
+    fn the_depth_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_DEPTH_IMAGE.to_bits(),
+            PROBE_DEPTH_IMAGE_VIEW.to_bits(),
+            PROBE_DEPTH_BUFFER.to_bits(),
+            PROBE_DEPTH_COMMAND_BUFFER.to_bits(),
+            PROBE_DEPTH_QUEUE.to_bits(),
+            PROBE_DEPTH_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 8, "every depth handle is generation eight");
+        }
+        // A generation clear of the indirect probe (`7 << 32`), the nearest
+        // neighbour.
+        assert_ne!(PROBE_DEPTH_IMAGE.to_bits(), PROBE_INDIRECT_IMAGE.to_bits());
+    }
+
+    /// **The copy names the depth plane and the whole subresource**, which is
+    /// what WebGPU permits and nothing else: an `'all'` aspect or a partial
+    /// region is refused by the replayer or by the browser, and either way the
+    /// atlas comes back as nothing.
+    #[test]
+    fn the_depth_copy_names_the_depth_aspect_of_the_whole_subresource() {
+        let copy = probe_depth_copy();
+        assert_eq!(copy.image_subresource.aspect, ImageAspect::DEPTH);
+        assert_eq!(copy.image_offset, Offset3d { x: 0, y: 0, z: 0 });
+        assert_eq!(
+            copy.image_extent,
+            Extent3d::d2(PROBE_DEPTH_SIZE, PROBE_DEPTH_SIZE)
+        );
+        // Tightly packed, and the row that produces is already aligned to
+        // WebGPU's `bytesPerRow` rule — a fixed number in the specification
+        // rather than a limit anything reports, and one the seam has no padding
+        // field to satisfy any other way.
+        const BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+        assert_eq!(copy.buffer_row_length, 0);
+        assert_eq!(
+            PROBE_DEPTH_SIZE * 4 % BYTES_PER_ROW_ALIGNMENT,
+            0,
+            "a depth32float row {PROBE_DEPTH_SIZE} texels wide must already be aligned"
+        );
+    }
+
+    /// The depth half: **one export, a whole frame** that clears a `depth32float`
+    /// atlas and copies its depth plane out. No pipeline and no draw — the clear
+    /// is the write.
+    #[test]
+    fn the_depth_export_encodes_the_clear_pass_and_the_plane_copy() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_depth(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateCommandEncoder",
+                "BeginRenderPass",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the frame clears a depth attachment and copies its plane out"
+        );
+        let want = probe_depth_copy();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                Command::CopyImageToBuffer {
+                    buffer,
+                    buffer_offset,
+                    buffer_row_length,
+                    buffer_image_height,
+                    image,
+                    image_subresource,
+                    image_offset,
+                    image_extent,
+                } if *buffer == want.buffer
+                    && *buffer_offset == want.buffer_offset
+                    && *buffer_row_length == want.buffer_row_length
+                    && *buffer_image_height == want.buffer_image_height
+                    && *image == want.image
+                    && *image_subresource == want.image_subresource
+                    && *image_offset == want.image_offset
+                    && *image_extent == want.image_extent
+            )),
+            "the frame carries the depth-plane copy field for field"
+        );
+        // The pass has NO colour attachment and a stored depth one. Both halves
+        // matter: a colour attachment beside it would make the readback a colour
+        // readback, and a discarded depth attachment leaves the plane undefined.
+        let pass = commands
+            .iter()
+            .find_map(|command| match command {
+                Command::BeginRenderPass {
+                    color_attachments,
+                    depth_stencil_attachment,
+                    ..
+                } => Some((color_attachments.clone(), *depth_stencil_attachment)),
+                _ => None,
+            })
+            .expect("the frame begins a render pass");
+        assert!(pass.0.is_empty(), "the depth pass has no colour attachment");
+        assert_eq!(pass.1, Some(probe_depth_attachment()));
+    }
+
+    /// A depth request before a device opens is refused and encodes nothing.
+    #[test]
+    fn a_depth_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_depth(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_depth_state(), DEPTH_UNASKED);
+    }
+
+    /// The whole depth exchange through the exports alone: request, poll, and a
+    /// `ReadbackReady` carrying [`PROBE_DEPTH_CLEAR`] for every texel, which
+    /// reaches the bytes exports. A `cargo test` has no `navigator.gpu`, so the
+    /// replayer is stood in for by a `ReplyWriter`.
+    #[test]
+    fn the_depth_readback_reaches_the_bytes_exports_as_the_cleared_depth() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_depth(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_depth_state(), DEPTH_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_depth_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_depth_state(), DEPTH_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_DEPTH_READBACK,
+            }]
+        );
+
+        let texels = (PROBE_DEPTH_SIZE as usize) * (PROBE_DEPTH_SIZE as usize);
+        let mut cleared = Vec::new();
+        for _ in 0..texels {
+            cleared.extend_from_slice(&PROBE_DEPTH_CLEAR.to_le_bytes());
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_DEPTH_READBACK, &cleared);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_depth_state(), DEPTH_READY);
+        assert_eq!(depth_bytes(), cleared);
+        // The clear value is neither of the two numbers an unwritten depth plane
+        // holds, which is what makes the gate's comparison evidence.
+        const { assert!(PROBE_DEPTH_CLEAR > 0.0 && PROBE_DEPTH_CLEAR < 1.0) };
     }
 
     /// The probe must not take a channel from an engine that has one, because

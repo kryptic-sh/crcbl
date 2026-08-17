@@ -67,8 +67,16 @@ mod cull_stats;
 mod draw_gen;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because
-// `tests/forward_e2e/` opens the same device and draws the same scenes and a
-// second copy is a second place a fix has to land. That directory holds no
-// `main.rs`, so Cargo builds no target of its own from it.
+// `tests/forward_e2e/` and `tests/sprite_e2e/` open the same device against the
+// same offscreen ring and a second copy is a second place a fix has to land.
+// That directory holds no `main.rs`, so Cargo builds no target of its own from
+// it.
 #[path = "../gpu_scene/harness.rs"]
 mod harness;
+
+// The scene, in a second file for the reason that one's header gives: the sprite
+// suite opens the fixture and renders no mesh, so a fixture and a scene in one
+// file made every symbol here dead code in that binary. Only the two suites that
+// draw meshes name it.
+#[path = "../gpu_scene/mesh_scene.rs"]
+mod mesh_scene;

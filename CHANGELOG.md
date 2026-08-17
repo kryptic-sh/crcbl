@@ -27,15 +27,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   through an exhaustive `match` with no wildcard arm.
 
   `Capability::DepthImageCopy` is the one to know about if you read a depth
-  image back: `crcbl-vk`, `crcbl-mtl` and `crcbl-wgpu` perform it, and
-  `crcbl-dx12` and `crcbl-webgpu` are in `crcbl_hal::DIVERGENCES` with the
-  reason each gives — a D3D12 depth format is two planes and a sampled one is
-  typeless, so the copy needs a plane slice and a fully typed footprint
-  `BufferImageCopy` has no field for; the browser replayer scales
-  `buffer_row_length` from texels to `bytesPerRow` through a table of colour
-  formats only. `crcbl-dx12` refuses it with `HalError::Unsupported` rather than
-  the `HalError::InvalidDescriptor` it used to answer, so a caller branching on
-  the variant to pick a fallback sees it.
+  image back: every backend but `crcbl-dx12` performs it, and `crcbl-dx12` is
+  the only entry `crcbl_hal::DIVERGENCES` carries for it — a D3D12 depth format
+  is two planes and a sampled one is typeless, so the copy needs a plane slice
+  and a fully typed footprint `BufferImageCopy` has no field for. It refuses
+  with `HalError::Unsupported` rather than the `HalError::InvalidDescriptor` it
+  used to answer, so a caller branching on the variant to pick a fallback sees
+  it.
+
+  On WebGPU — and on `wgpu`, which enforces the same table — the capability is
+  narrowed by the API rather than by the backend, and the refusal is per format
+  and per direction: the depth plane of `D32Float`, `D32FloatS8Uint` and
+  `D16Unorm` copies out to a buffer, only `D16Unorm`'s copies back in, and
+  `D24UnormS8Uint`'s copies neither way because `depth24plus` has no defined
+  memory layout. A shadow atlas readback is inside all of those.
 
   This is deliberately **not** a `Features` bit. `Features` stays what it is:
   optional capabilities a _caller requests_ at device creation, negotiated per

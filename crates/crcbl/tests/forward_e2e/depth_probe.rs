@@ -36,7 +36,8 @@
 //! reflectivity frame is deliberately shaded through a row that makes the colour
 //! target nearly black, and the occlusion frame has no direct light in it at all.
 
-use crate::harness::{Headless, MESH_EXTENT, POISON, poisoned};
+use crate::harness::{Headless, POISON, poisoned};
+use crate::mesh_scene::MESH_EXTENT;
 use crcbl::hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Device, Extent3d,
     Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,

@@ -64,13 +64,13 @@ fn channel_diff(a: [u8; 3], b: [u8; 3]) -> i32 {
 /// ramp width from `fwidth`, which is symmetric, and this is the picture that
 /// says so.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn a_mirrored_frame_is_the_column_reversed_image() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -82,7 +82,7 @@ fn a_mirrored_frame_is_the_column_reversed_image() {
         "mirror sheet",
         4,
         2,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &asymmetric_sheet(),
     );
 
@@ -96,13 +96,13 @@ fn a_mirrored_frame_is_the_column_reversed_image() {
         &headless,
         &mut renderer,
         &mut pool,
-        &[crcbl_render::Sprite::new(sheet, rect, FRAME_A)],
+        &[crcbl::render::Sprite::new(sheet, rect, FRAME_A)],
     );
     let mirror = render_sprites(
         &headless,
         &mut renderer,
         &mut pool,
-        &[crcbl_render::Sprite::new(sheet, rect, mirrored(FRAME_A))],
+        &[crcbl::render::Sprite::new(sheet, rect, mirrored(FRAME_A))],
     );
 
     // --- the golden: the mirrored image is the plain image, column-reversed ---
@@ -129,17 +129,19 @@ fn a_mirrored_frame_is_the_column_reversed_image() {
                 failing += 1;
                 if failing == 1 {
                     eprintln!(
-                        "vk e2e: mirror — first mismatch at ({x}, {y}): the mirrored \
+                        "{}: mirror — first mismatch at ({x}, {y}): the mirrored \
                          sprite reads {actual:?}, the plain one column-reversed reads \
-                         {expected:?} (diff {distance})"
+                         {expected:?} (diff {distance})",
+                        crate::SUITE
                     );
                 }
             }
         }
     }
     eprintln!(
-        "vk e2e: mirror — column-reversed comparison: {failing} mismatching \
+        "{}: mirror — column-reversed comparison: {failing} mismatching \
          pixel(s) out of {} against a slack of 2, worst diff {worst} at {worst_at:?}",
+        crate::SUITE,
         width * height
     );
     assert_eq!(
@@ -181,9 +183,10 @@ fn a_mirrored_frame_is_the_column_reversed_image() {
         }
     }
     eprintln!(
-        "vk e2e: mirror — {non_background} non-background pixel(s) in the plain \
+        "{}: mirror — {non_background} non-background pixel(s) in the plain \
          frame (the 128×64 sprite is 8192); the plain frame is column-asymmetric \
-         by {plain_asymmetry}; the two frames differ by {mirror_difference}"
+         by {plain_asymmetry}; the two frames differ by {mirror_difference}",
+        crate::SUITE
     );
     assert!(
         non_background > 64 * 32,

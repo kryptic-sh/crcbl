@@ -2794,4 +2794,118 @@ export async function runProbeGroups({
           `against [${PROBE_INDIRECT_COLOR_BYTES.join(', ')}]; the clear was [${PROBE_INDIRECT_CLEAR_BYTES.join(', ')}])` +
           `${indirect.error ? ` — ${indirect.error}` : ''}`
   );
+
+  // **THE DEPTH GATE, AND THE ONLY PLACE `Capability::DepthImageCopy` IS
+  // EXERCISED ON THIS BACKEND.** The seam suite that holds every other backend to
+  // its capability declarations is a native binary; this backend runs in a
+  // browser, so a `Support::Yes` there is a claim and this is the evidence. wasm
+  // records a `depth32float` atlas, a pass whose only attachment is that atlas
+  // cleared to a known depth and stored, an image→buffer copy of its DEPTH PLANE
+  // — `ImageAspect::DEPTH`, whole subresource, which is all WebGPU permits — a
+  // submit and a readback; the page loop replays it; and the 16384 floats that
+  // come back are asserted to be the clear value.
+  //
+  // Three ways it fails loudly rather than passing wrongly. A replayer that
+  // refuses the depth format at all queues a device error and the readback never
+  // arrives. One that copied the wrong plane, or read the row pitch as a colour
+  // format's, returns floats that are not the clear. One that left the aspect at
+  // WebGPU's `'all'` default has its whole command buffer rejected. And the clear
+  // is deliberately neither 0.0 nor 1.0, which are the two values an untouched
+  // depth plane holds.
+  group('AA — a cleared depth plane is copied out and read back');
+
+  const PROBE_DEPTH_TEXELS = 64 * 64;
+  // `PROBE_DEPTH_CLEAR` in `crates/crcbl-webgpu/src/probe.rs`, restated by hand:
+  // a value imported from the thing under test agrees with it by construction.
+  const PROBE_DEPTH_CLEAR = 0.4275;
+  // The float comparison's slack. A `depth32float` plane stores the clear value
+  // itself, so an exact match is what a correct path produces; this is wide
+  // enough to survive the f32 round trip and far narrower than the distance to
+  // either 0.0 or 1.0, which is what a plane nothing wrote reads back as.
+  const PROBE_DEPTH_TOLERANCE = 1e-6;
+
+  const depthStart = await evaluate(
+    page,
+    `(async () => {
+     const { startDepthProbe } = await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     return { started: startDepthProbe({ exports }) };
+   })()`
+  );
+  const depth = depthStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readDepthProbe, pollDepthProbe, DEPTH } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readDepthProbe({ exports, memory: exports.memory });
+           if (r.state === DEPTH.UNDECODABLE) {
+             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           }
+           if (r.state !== DEPTH.READY) {
+             pollDepthProbe({ exports });
+             return null;
+           }
+           // Ready: compare the 16384 floats here rather than shipping them out.
+           // The bytes are a copy already, so the view is safe to build over
+           // them.
+           const want = ${PROBE_DEPTH_CLEAR};
+           const tolerance = ${PROBE_DEPTH_TOLERANCE};
+           let allMatch = r.bytes.length === ${PROBE_DEPTH_TEXELS} * 4;
+           let firstWrong = -1;
+           let firstWrongValue = null;
+           if (allMatch) {
+             const depths = new Float32Array(
+               r.bytes.buffer,
+               r.bytes.byteOffset,
+               r.bytes.length / 4
+             );
+             for (let i = 0; i < depths.length; i += 1) {
+               if (Math.abs(depths[i] - want) > tolerance) {
+                 allMatch = false;
+                 firstWrong = i;
+                 firstWrongValue = depths[i];
+                 break;
+               }
+             }
+           }
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.length,
+             allMatch,
+             firstWrong,
+             firstWrongValue,
+             sample: [...r.bytes.slice(0, 4)],
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+  check(
+    'AA',
+    'wasm encoded the depth setup frame — a depth32float atlas, a clear-and-store pass, the depth-plane copy, the request',
+    depthStart?.started === true,
+    depthStart?.started
+      ? 'the depth clear-and-copy frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'AA',
+    'the depth plane came back from the browser as the cleared depth, every texel',
+    depth?.done === true &&
+      depth.allMatch === true &&
+      depth.len === PROBE_DEPTH_TEXELS * 4,
+    depth?.done !== true
+      ? `no depth readback in ${TIMEOUT_MS} ms — the copy was refused, the map never resolved, or the reply never reached wasm`
+      : depth.allMatch
+        ? `${depth.len} bytes, every depth32float texel ${PROBE_DEPTH_CLEAR} — neither the 0.0 nor the 1.0 an unwritten plane reads back as`
+        : `state ${depth.state}, ${depth.len ?? 0} bytes, ` +
+          `first wrong at texel ${depth.firstWrong} (${depth.firstWrongValue} against ${PROBE_DEPTH_CLEAR}; ` +
+          `the first four bytes were ${JSON.stringify(depth.sample)})` +
+          `${depth.error ? ` — ${depth.error}` : ''}`
+  );
 }

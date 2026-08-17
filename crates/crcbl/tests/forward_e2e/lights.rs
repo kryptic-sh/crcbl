@@ -20,9 +20,8 @@ use crcbl::math::Vec3;
 use crcbl::render::{Light, PointLight, SpotLight};
 use crcbl::shaders::light::{CLUSTER_LIGHT_CAPACITY, CLUSTER_OVERFLOW_WORD, CLUSTER_STRIDE};
 
-use crate::harness::{
-    Headless, MESH_EXTENT, mesh_camera, place_cube, poisoned, read_stats_word, render_mesh,
-};
+use crate::harness::{Headless, poisoned};
+use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, read_stats_word, render_mesh};
 
 /// Where the cube is, and where a light has to be to reach it.
 ///

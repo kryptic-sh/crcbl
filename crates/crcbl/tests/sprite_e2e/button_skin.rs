@@ -1,6 +1,6 @@
 //! Slice 7's nine-slice button skins, drawn.
 //!
-//! `crcbl_render::button_skin` asserts the quads to the float and
+//! `crcbl::render::button_skin` asserts the quads to the float and
 //! `crcbl_ui::widget` asserts the layout to the pixel. Neither can show the
 //! thing a reviewer actually wants to see: **the same skin, at two very
 //! different widths, with corners that did not smudge.** That is a picture, and
@@ -28,7 +28,7 @@ const BUTTON_SHEET_H: u32 = 32;
 /// 10-px one, and a mirrored Y the 4-px with the 12-px.
 ///
 /// Every band is left non-empty at 32×32: columns 6 / 16 / 10, rows 4 / 16 / 12.
-const BUTTON_NINE: crcbl_render::NineSlice = crcbl_render::NineSlice::new(6, 10, 4, 12);
+const BUTTON_NINE: crcbl::render::NineSlice = crcbl::render::NineSlice::new(6, 10, 4, 12);
 
 /// Cell `cell` of frame `frame`, as a byte triple.
 ///
@@ -80,12 +80,13 @@ fn button_skin_sheet() -> Vec<u8> {
 }
 
 /// The three frames as nine-slice sources, built directly rather than through a
-/// `Sheet` — `crcbl-vk` does not depend on `crcbl-sprite`, and the point here is
-/// the geometry, not the loader.
-fn button_source(frame: u32) -> crcbl_render::NineSliceSource {
-    crcbl_render::NineSliceSource {
+/// `Sheet` — the point here is the geometry, not the loader, and a `.crpix` read
+/// through `crcbl::sprite` would put an encoder's output between this test and
+/// the quads it is about.
+fn button_source(frame: u32) -> crcbl::render::NineSliceSource {
+    crcbl::render::NineSliceSource {
         nine: BUTTON_NINE,
-        frame: crcbl_render::Rect::new(frame * BUTTON_FRAME, 0, BUTTON_FRAME, BUTTON_FRAME),
+        frame: crcbl::render::Rect::new(frame * BUTTON_FRAME, 0, BUTTON_FRAME, BUTTON_FRAME),
         sheet_width: BUTTON_SHEET_W,
         sheet_height: BUTTON_SHEET_H,
         texels_per_unit: 1.0,
@@ -95,25 +96,25 @@ fn button_source(frame: u32) -> crcbl_render::NineSliceSource {
 /// A button's rectangle on screen, in the Y-**down** pixel space `crcbl-ui` lays
 /// out in. `screen_rect_to_target` turns it into the sprite pass's Y-up world.
 struct ButtonRect {
-    min: glam::Vec2,
-    max: glam::Vec2,
-    state: crcbl_render::ButtonState,
+    min: crcbl::math::Vec2,
+    max: crcbl::math::Vec2,
+    state: crcbl::render::ButtonState,
 }
 
 impl ButtonRect {
-    fn new(x: f32, y: f32, width: f32, height: f32, state: crcbl_render::ButtonState) -> Self {
+    fn new(x: f32, y: f32, width: f32, height: f32, state: crcbl::render::ButtonState) -> Self {
         Self {
-            min: glam::Vec2::new(x, y),
-            max: glam::Vec2::new(x + width, y + height),
+            min: crcbl::math::Vec2::new(x, y),
+            max: crcbl::math::Vec2::new(x + width, y + height),
             state,
         }
     }
 
     fn frame(&self) -> usize {
         match self.state {
-            crcbl_render::ButtonState::Idle => 0,
-            crcbl_render::ButtonState::Hovered => 1,
-            crcbl_render::ButtonState::Pressed => 2,
+            crcbl::render::ButtonState::Idle => 0,
+            crcbl::render::ButtonState::Hovered => 1,
+            crcbl::render::ButtonState::Pressed => 2,
         }
     }
 
@@ -143,9 +144,9 @@ impl ButtonRect {
 /// so a skin that recorded a state change and sampled one frame fails on the
 /// channel rather than only on the reference image.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
-    use crcbl_render::ButtonState;
+    use crcbl::render::ButtonState;
 
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
@@ -160,8 +161,8 @@ fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
     ];
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -173,11 +174,11 @@ fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
         "button skin",
         BUTTON_SHEET_W,
         BUTTON_SHEET_H,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &button_skin_sheet(),
     );
 
-    let skin = crcbl_render::ButtonSkin {
+    let skin = crcbl::render::ButtonSkin {
         sheet,
         idle: button_source(0),
         hovered: button_source(1),
@@ -186,16 +187,16 @@ fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
     assert!(skin.insets_agree(), "the three frames share their insets");
     assert_eq!(
         skin.insets(),
-        crcbl_render::SkinInsets::new(6.0, 10.0, 4.0, 12.0),
+        crcbl::render::SkinInsets::new(6.0, 10.0, 4.0, 12.0),
         "the insets a button would lay out with are the art's own"
     );
 
     // Every button through the same public path a caller would use: a screen
     // rect, flipped once, expanded, turned into sprites.
-    let mut sprites: Vec<crcbl_render::Sprite> = Vec::new();
+    let mut sprites: Vec<crcbl::render::Sprite> = Vec::new();
     for button in [&narrow, &wide].into_iter().chain(states.iter()) {
         let target =
-            crcbl_render::screen_rect_to_target(button.min, button.max, SPRITE_EXTENT, [0.0, 0.0]);
+            crcbl::render::screen_rect_to_target(button.min, button.max, SPRITE_EXTENT, [0.0, 0.0]);
         let quads = skin.quads(button.state, target);
         assert_eq!(
             quads.len(),
@@ -240,7 +241,7 @@ fn assert_button_pixels(
     // all reading the wrong place and would pass on a blank frame.
     for button in [narrow, wide].into_iter().chain(states.iter()) {
         let target =
-            crcbl_render::screen_rect_to_target(button.min, button.max, SPRITE_EXTENT, [0.0, 0.0]);
+            crcbl::render::screen_rect_to_target(button.min, button.max, SPRITE_EXTENT, [0.0, 0.0]);
         let low = world_to_pixel([target[0], target[1]]);
         let high = world_to_pixel([target[0] + target[2], target[1] + target[3]]);
         assert_eq!(

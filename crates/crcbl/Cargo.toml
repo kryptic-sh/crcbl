@@ -208,6 +208,24 @@ draw-gen-e2e = []
 # wrote. They share `tests/gpu_scene/harness.rs` and nothing else.
 forward-e2e = []
 
+# `tests/sprite_e2e/` — the sprite pass and the two generators in front of it
+# (nine-slice and the shared menu) on whichever backend `CRCBL_GPU` names,
+# driven by `tests/run-sprite-e2e.sh`. Gated and `#[ignore]`d for exactly the
+# reason `render-e2e` above is.
+#
+# The gate it closes is that these are the only tests anywhere that **draw the
+# sprite pass and read the frame back** — everything below them is a recorder
+# assertion or float arithmetic over rectangles — and until this existed they
+# lived in `crates/crcbl-vk/tests/vk_e2e/` and ran on Vulkan alone. Metal, D3D12
+# and wgpu had no evidence that a single sprite quad landed anywhere.
+#
+# A fifth feature rather than more of `forward-e2e` for the reason that one is a
+# fourth: they ask different questions and are separate CI steps. This suite
+# builds no `ForwardRenderer` and no scene, pins its ring to `Rgba8UnormSrgb`
+# because it commits images, and shares `tests/gpu_scene/harness.rs` with the
+# other two and nothing else.
+sprite-e2e = []
+
 # `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
 # and `build_cluster_dag`. **Off by default**, and the reason is the same one
 # `crcbl-sprite` is linked as `load` and not `bake`: the crate depends on `gltf`,

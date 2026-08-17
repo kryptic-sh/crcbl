@@ -12,7 +12,7 @@
 //! # Why one test here is not `#[ignore]`d
 //!
 //! `the_rotation_frame_of_reference_agrees_with_the_shaders` is pure — no
-//! device, no loader, no Vulkan — and could live in `crcbl-vk`'s `src/` tests
+//! device, no backend, no GPU at all — and could live in a `src/` unit test
 //! under the rule that puts it there. It stays in the e2e binary on purpose.
 //! [`sprite_local`] is the inverse of the shader's rotation, and an inverted
 //! sign in it would relabel every expected colour *consistently*, so the sweep
@@ -71,12 +71,12 @@ fn rotation_reach() -> f32 {
 }
 
 /// The four sprites of the rotation frame, at the six angles.
-fn rotation_sprites(sheet: crcbl_render::SheetId) -> Vec<crcbl_render::Sprite> {
+fn rotation_sprites(sheet: crcbl::render::SheetId) -> Vec<crcbl::render::Sprite> {
     ROTATION_DEGREES
         .iter()
         .zip(ROTATION_CENTRES)
         .map(|(degrees, centre)| {
-            crcbl_render::Sprite::new(
+            crcbl::render::Sprite::new(
                 sheet,
                 [
                     centre[0] - ROTATION_SIZE[0] / 2.0,
@@ -165,7 +165,7 @@ fn the_rotation_frame_of_reference_agrees_with_the_shaders() {
 ///
 /// Six sprites at 0°, 45°, 90°, 180°, 270° and 30°, all from the same 2×2
 /// four-colour sheet at the same 64×32 rect, differing only in
-/// [`crcbl_render::Sprite::rotation`].
+/// [`crcbl::render::Sprite::rotation`].
 ///
 /// Every assertion is computed from the rotation matrix, not read off the
 /// picture:
@@ -182,13 +182,13 @@ fn the_rotation_frame_of_reference_agrees_with_the_shaders() {
 ///   clear colour — the evidence that the outline turned rather than the sprite
 ///   merely being repainted inside its old box.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn a_rotated_sprite_turns_about_its_own_centre_by_the_angle_it_was_given() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -201,7 +201,7 @@ fn a_rotated_sprite_turns_about_its_own_centre_by_the_angle_it_was_given() {
         "quad pixel",
         2,
         2,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &pixels,
     );
     // The control for the flatness claim below, registered up front so both
@@ -212,7 +212,7 @@ fn a_rotated_sprite_turns_about_its_own_centre_by_the_angle_it_was_given() {
         "quad smooth",
         2,
         2,
-        crcbl_render::SampleMode::Smooth,
+        crcbl::render::SampleMode::Smooth,
         &pixels,
     );
 
@@ -357,8 +357,9 @@ fn a_rotated_sprite_turns_about_its_own_centre_by_the_angle_it_was_given() {
     let sharp_blend = blended(&image);
     let smooth_blend = blended(&smooth_image);
     eprintln!(
-        "vk e2e: at 45°, {sharp_blend} pixel(s) inside the Pixel sprite are not one \
-         of its four texel colours, against {smooth_blend} inside the Smooth one"
+        "{}: at 45°, {sharp_blend} pixel(s) inside the Pixel sprite are not one \
+         of its four texel colours, against {smooth_blend} inside the Smooth one",
+        crate::SUITE
     );
     assert!(
         smooth_blend > 500,

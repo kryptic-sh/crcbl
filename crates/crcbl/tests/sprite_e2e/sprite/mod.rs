@@ -23,12 +23,11 @@
 //! subtree and import this fixture anyway, because they are sprite quads with a
 //! different generator in front of them.
 
-use crate::harness::{DeviceSlot, Headless, instance, poisoned};
-use crcbl_core::SurfaceTarget;
-use crcbl_hal::{
-    BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, CompositeAlpha, Device,
-    DeviceDesc, Extent3d, Features, Format, ImageAspect, ImageSubresourceLayers, Instance,
-    MemoryLocation, PresentInfo, PresentMode, ResourceState, SubmitInfo, SwapchainDesc,
+use crate::harness::{Headless, poisoned};
+use crcbl::hal::{
+    BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Device, Extent3d, Features,
+    Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,
+    SubmitInfo,
 };
 
 mod drawing;
@@ -48,7 +47,7 @@ mod rotation;
 pub(crate) const SPRITE_EXTENT: (u32, u32) = (256, 192);
 
 /// The background every sprite frame composites onto, in **linear** light —
-/// which is what a `vkClearColorValue` on an `Rgba8UnormSrgb` attachment means.
+/// which is what a clear value on an `Rgba8UnormSrgb` attachment means.
 ///
 /// Deliberately not black and not grey: alpha blending onto black is the one
 /// background where `src * a + dst * (1 - a)` and `src * a` agree, so a
@@ -65,12 +64,12 @@ const SPRITE_HALF_HEIGHT: f32 = 96.0;
 
 /// The camera every sprite frame is drawn with: orthographic, looking down −Z at
 /// the plane the sprites live on.
-fn sprite_camera() -> crcbl_render::Camera {
-    crcbl_render::Camera {
-        eye: glam::Vec3::new(0.0, 0.0, 1.0),
-        target: glam::Vec3::ZERO,
-        up: glam::Vec3::Y,
-        projection: crcbl_render::Projection::Orthographic {
+fn sprite_camera() -> crcbl::render::Camera {
+    crcbl::render::Camera {
+        eye: crcbl::math::Vec3::new(0.0, 0.0, 1.0),
+        target: crcbl::math::Vec3::ZERO,
+        up: crcbl::math::Vec3::Y,
+        projection: crcbl::render::Projection::Orthographic {
             half_height: SPRITE_HALF_HEIGHT,
             near: 0.1,
             far: 10.0,
@@ -89,20 +88,25 @@ pub(crate) fn world_to_pixel(world: [f32; 2]) -> [f32; 2] {
 }
 
 /// Confirms [`world_to_pixel`] agrees with the matrix the pass is actually
-/// handed, including the Y flip `crcbl-vk`'s negative-height viewport applies.
+/// handed, including the Y flip every backend's viewport convention applies.
 ///
 /// Called from every placement test, because every one of them reads a pixel at
 /// a coordinate this function produced: if the mapping is wrong the assertions
 /// are checking the wrong pixels and would happily pass on a blank frame.
+///
+/// Pure arithmetic over `crcbl::render::Camera` and no device at all, so it says
+/// the same thing on every backend — which is the point: it pins the frame of
+/// reference the device tests beside it read pixels in.
 pub(crate) fn assert_the_camera_maps_a_world_unit_to_a_pixel() {
     let (width, height) = SPRITE_EXTENT;
     let aspect = width as f32 / height as f32;
     let view_projection = sprite_camera().view_projection(aspect);
     for world in [[0.0, 0.0], [-128.0, 96.0], [64.0, -32.0], [-100.0, 16.0]] {
-        let clip = view_projection * glam::Vec4::new(world[0], world[1], 0.0, 1.0);
+        let clip = view_projection * crcbl::math::Vec4::new(world[0], world[1], 0.0, 1.0);
         let ndc = clip.truncate() / clip.w;
-        // The seam's convention is +Y up in NDC and `crcbl-vk` submits a
-        // negative-height viewport, so the framebuffer row is the flipped half.
+        // The seam's convention is +Y up in NDC and every backend flips it into
+        // the framebuffer's row order, so the framebuffer row is the flipped
+        // half.
         let pixel = [
             0.5f32.mul_add(ndc.x, 0.5) * width as f32,
             0.5f32.mul_add(-ndc.y, 0.5) * height as f32,
@@ -217,7 +221,7 @@ pub(crate) fn quad_sheet() -> Vec<u8> {
 /// One texel, so the whole quad is that colour whatever the filter does, and a
 /// rectangle's colour is a direct read-out of **which sheet was bound** with no
 /// UV arithmetic in between. That separation is the point — see
-/// [`every_batch_draws_its_own_instances_rather_than_the_first_batchs`].
+/// `drawing::every_batch_draws_its_own_instances_rather_than_the_first_batchs`.
 pub(crate) fn solid_sheet(rgb: [u8; 3]) -> Vec<u8> {
     vec![rgb[0], rgb[1], rgb[2], 255]
 }
@@ -253,20 +257,24 @@ pub(crate) fn alpha_sheet() -> Vec<u8> {
 
 /// The alpha the half-transparent texel is sampled with.
 ///
-/// **Not sRGB-decoded.** Vulkan's sRGB formats apply the transfer function to
-/// the colour channels only; alpha is linear, and a test that decoded it would
-/// be asserting against the wrong number by 30%.
+/// **Not sRGB-decoded.** An sRGB format applies the transfer function to the
+/// colour channels only; alpha is linear, and a test that decoded it would be
+/// asserting against the wrong number by 30%.
 pub(crate) const HALF_ALPHA: f32 = 128.0 / 255.0;
 
 impl Headless {
     /// Opens a ring at a pinned `Rgba8UnormSrgb` for the sprite suite.
     ///
-    /// Pinned rather than preferred for the same reason
-    /// [`Headless::open_for_mesh`] pins it: a golden image compared across two
-    /// machines must not depend on which format each one's surface offered
-    /// first. sRGB specifically, because `SpriteRenderer::register_sheet`
-    /// uploads sheets as `Rgba8UnormSrgb` and the alpha blend is only in linear
-    /// light if the target decodes too.
+    /// **Pinned rather than preferred**, which is the one thing this fixture
+    /// asks the shared harness for that the mesh suites do not: a golden image
+    /// compared across four backends must not depend on which format each one's
+    /// surface offered first. sRGB specifically, because
+    /// `SpriteRenderer::register_sheet` uploads sheets as `Rgba8UnormSrgb` and
+    /// the alpha blend is only in linear light if the target decodes too.
+    ///
+    /// The pin is checked against the ring's own caps inside
+    /// [`Headless::open_at_format`], so a backend that stopped offering it says
+    /// so by name.
     pub(crate) fn open_for_sprites() -> Self {
         Self::open_for_sprites_at(SPRITE_EXTENT)
     }
@@ -277,43 +285,119 @@ impl Headless {
     /// differently-shaped framebuffers to show that it stays centred in both —
     /// which needs two extents and cannot be got from one pinned ring.
     pub(crate) fn open_for_sprites_at(extent: (u32, u32)) -> Self {
-        let instance = instance();
-        let adapter = instance.adapters().remove(0);
-        // SAFETY: `Offscreen` names no platform object at all.
-        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
-            .expect("offscreen always works");
-        let device = instance
-            .create_device(&DeviceDesc {
-                label: Some("vk e2e sprites"),
-                adapter: adapter.id,
-                required_features: Features::empty(),
-                optional_features: Features::GPU_DRIVEN | Features::DEBUG_MARKERS,
-                compatible_surface: Some(surface),
+        Self::open_at_format(
+            extent,
+            Some(Format::Rgba8UnormSrgb),
+            Features::GPU_DRIVEN | Features::DEBUG_MARKERS,
+        )
+    }
+}
+
+/// The row pitch every backend's image→buffer copy accepts.
+///
+/// **This is the finding that moving the suite produced, and it is not a Vulkan
+/// number.** wgpu refuses a multi-row copy whose row pitch is not a multiple of
+/// `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`, and D3D12 refuses one that is not a
+/// multiple of `D3D12_TEXTURE_DATA_PITCH_ALIGNMENT`; both are 256, and both say
+/// so by name through [`HalError::InvalidDescriptor`](crcbl::hal::HalError).
+/// Vulkan and Metal take a tightly packed row, which is why the Vulkan original
+/// of this suite could copy `width * 4` bytes per row and never find out.
+///
+/// It only ever bit the menu module, whose framebuffers are 416 wide — 1664
+/// bytes, not a multiple of 256 — because every other frame here is 256 wide and
+/// 1024 bytes is one by accident. So a suite that padded nothing would have gone
+/// green on three of its four backends.
+const COPY_ROW_ALIGNMENT: u32 = 256;
+
+/// A staging buffer one frame is copied into, and the padded layout the copy has
+/// to be recorded with.
+///
+/// The padding is invisible above this type: [`FrameStaging::read`] takes it
+/// back out, so every caller gets a tightly packed image whatever the width was.
+pub(crate) struct FrameStaging {
+    buffer: crcbl::hal::BufferHandle,
+    extent: (u32, u32),
+    /// Texels per row **in the buffer**, which is the frame's width rounded up
+    /// until the row is a whole number of [`COPY_ROW_ALIGNMENT`] bytes.
+    row_texels: u32,
+    /// Bytes per row in the buffer: `row_texels * 4`, and therefore aligned.
+    row_bytes: usize,
+    size: u64,
+}
+
+impl FrameStaging {
+    /// Allocates the buffer for one frame of `extent`.
+    pub(crate) fn new(device: &dyn Device, extent: (u32, u32)) -> Self {
+        let (width, height) = extent;
+        // Four bytes a texel: every format this suite pins or a swapchain
+        // offers here is 8-bit RGBA or BGRA. `Format::block_size` is not asked
+        // because the pin in `open_for_sprites_at` is what decides, and a format
+        // that stopped being four bytes would change the readback's meaning
+        // rather than only its size.
+        let texels = COPY_ROW_ALIGNMENT / 4;
+        let row_texels = width.div_ceil(texels) * texels;
+        let row_bytes = row_texels as usize * 4;
+        let size = row_bytes as u64 * u64::from(height);
+        let buffer = device
+            .create_buffer(&BufferDesc {
+                label: Some("frame readback"),
+                size,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
             })
-            .expect("a device opens");
-        let queue = device
-            .queue(crcbl_hal::QueueKind::Graphics)
-            .expect("a graphics queue always exists");
-        let format = Format::Rgba8UnormSrgb;
-        let swapchain = device
-            .create_swapchain(&SwapchainDesc {
-                label: Some("vk e2e sprite ring"),
-                surface,
-                format,
-                extent,
-                image_count: 2,
-                present_mode: PresentMode::Fifo,
-                composite_alpha: CompositeAlpha::Opaque,
-            })
-            .expect("the ring is created");
+            .expect("a readback buffer");
         Self {
-            instance,
-            device: DeviceSlot::new(device),
-            surface,
-            swapchain,
-            queue,
-            format,
+            buffer,
+            extent,
+            row_texels,
+            row_bytes,
+            size,
         }
+    }
+
+    /// Records the copy that fills it, on the caller's encoder.
+    pub(crate) fn copy_from(
+        &self,
+        encoder: &mut dyn crcbl::hal::CommandEncoder,
+        image: crcbl::hal::ImageHandle,
+    ) {
+        let (width, height) = self.extent;
+        encoder.copy_image_to_buffer(&BufferImageCopy {
+            buffer: self.buffer,
+            buffer_offset: 0,
+            // The padding, said to the seam. Zero would mean "tightly packed",
+            // which is the descriptor wgpu and D3D12 refuse.
+            buffer_row_length: self.row_texels,
+            buffer_image_height: 0,
+            image,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: crcbl::hal::Offset3d::default(),
+            image_extent: Extent3d::d2(width, height),
+        });
+    }
+
+    /// Reads it back, drops the row padding, and destroys the buffer.
+    ///
+    /// Consuming, because the buffer is gone when this returns.
+    pub(crate) fn read(self, headless: &Headless) -> crcbl_golden::Image {
+        let (width, height) = self.extent;
+        let mut padded = poisoned(self.size as usize);
+        headless.readback(self.buffer, self.size, &mut padded);
+        headless.device.destroy_buffer(self.buffer);
+
+        let tight_bytes = width as usize * 4;
+        let mut tight = Vec::with_capacity(tight_bytes * height as usize);
+        for row in 0..height as usize {
+            let start = row * self.row_bytes;
+            tight.extend_from_slice(&padded[start..start + tight_bytes]);
+        }
+        crcbl_golden::Image::from_readback(width, height, &tight, channel_order(headless.format))
+            .expect("the readback is exactly one image")
     }
 }
 
@@ -326,11 +410,11 @@ impl Headless {
 /// inside the sprite pass would not be testing that.
 pub(crate) fn render_sprites(
     headless: &Headless,
-    renderer: &mut crcbl_render::SpriteRenderer,
-    pool: &mut crcbl_render::TransientPool,
-    sprites: &[crcbl_render::Sprite],
+    renderer: &mut crcbl::render::SpriteRenderer,
+    pool: &mut crcbl::render::TransientPool,
+    sprites: &[crcbl::render::Sprite],
 ) -> crcbl_golden::Image {
-    use crcbl_render::RenderGraph;
+    use crcbl::render::RenderGraph;
 
     let device = headless.device.as_ref();
     let (width, height) = SPRITE_EXTENT;
@@ -339,15 +423,7 @@ pub(crate) fn render_sprites(
         .expect("the ring always has an image");
     assert_eq!(acquired.extent, SPRITE_EXTENT);
 
-    let color_bytes = u64::from(width) * u64::from(height) * 4;
-    let staging = device
-        .create_buffer(&BufferDesc {
-            label: Some("sprite readback"),
-            size: color_bytes,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::HostReadback,
-        })
-        .expect("a readback buffer");
+    let staging = FrameStaging::new(device, SPRITE_EXTENT);
 
     let aspect = width as f32 / height as f32;
     renderer
@@ -368,7 +444,7 @@ pub(crate) fn render_sprites(
         let mut graph = RenderGraph::new(headless.queue);
         let target = graph.import_image(
             "swapchain",
-            crcbl_render::ImportedImage {
+            crcbl::render::ImportedImage {
                 image: acquired.image,
                 view: acquired.view,
                 format: headless.format,
@@ -391,21 +467,7 @@ pub(crate) fn render_sprites(
         .execute(device, pool, encoder.as_mut(), None)
         .expect("the graph executed");
 
-    encoder.copy_image_to_buffer(&BufferImageCopy {
-        buffer: staging,
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        image: acquired.image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: crcbl_hal::Offset3d::default(),
-        image_extent: Extent3d::d2(width, height),
-    });
+    staging.copy_from(encoder.as_mut(), acquired.image);
 
     let commands = encoder.finish().expect("recording succeeded");
     device
@@ -422,33 +484,38 @@ pub(crate) fn render_sprites(
         )
         .expect("present");
 
-    let mut color = poisoned(color_bytes as usize);
-    headless.readback(staging, color_bytes, &mut color);
+    let image = staging.read(headless);
     device.destroy_command_buffer(commands);
-    device.destroy_buffer(staging);
+    image
+}
 
-    let order = match headless.format {
+/// Which order the readback's bytes arrive in, from the ring's format.
+///
+/// The pin in [`Headless::open_for_sprites_at`] makes this `Rgba` on every
+/// backend today. It is still a function of the format rather than a constant,
+/// because it is the format that decides — and a suite that hard-coded `Rgba`
+/// would read a swizzled picture as a wrong one the day the pin changes.
+pub(crate) fn channel_order(format: Format) -> crcbl_golden::ChannelOrder {
+    match format {
         Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
         _ => crcbl_golden::ChannelOrder::Rgba,
-    };
-    crcbl_golden::Image::from_readback(width, height, &color, order)
-        .expect("the readback is exactly one image")
+    }
 }
 
 /// Registers one sheet and returns its id.
 pub(crate) fn register_sheet(
-    renderer: &mut crcbl_render::SpriteRenderer,
+    renderer: &mut crcbl::render::SpriteRenderer,
     device: &dyn Device,
     label: &str,
     width: u32,
     height: u32,
-    sample: crcbl_render::SampleMode,
+    sample: crcbl::render::SampleMode,
     pixels: &[u8],
-) -> crcbl_render::SheetId {
+) -> crcbl::render::SheetId {
     renderer
         .register_sheet(
             device,
-            &crcbl_render::SheetDesc {
+            &crcbl::render::SheetDesc {
                 label,
                 width,
                 height,
@@ -493,10 +560,17 @@ pub(crate) fn assert_background(image: &crcbl_golden::Image, x: u32, y: u32) {
 /// Compares an image against a checked-in reference and **returns** the verdict
 /// rather than asserting it.
 ///
+/// [`crcbl_golden::Golden::new`]'s own tolerance, which is
+/// [`Tolerance::RASTERISER`](crcbl_golden::Tolerance::RASTERISER) — the bound
+/// `tests/render_e2e.rs` holds four backends to, sized against measured driver
+/// disagreement rather than against what would make a backend pass. These
+/// references were blessed on Vulkan; a backend that cannot meet them here is a
+/// finding, not a reason to re-bless.
+///
 /// Deferred on purpose: a test that panicked here would leave the renderer, the
-/// pool and the device undestroyed, and the resulting `Drop` warning and dirty
-/// validation report would be printed on top of the message that says what
-/// actually went wrong. Every caller tears down first and unwraps last.
+/// pool and the device undestroyed, and the resulting `Drop` warning and
+/// out-of-band device error would be printed on top of the message that says
+/// what actually went wrong. Every caller tears down first and unwraps last.
 pub(crate) fn sprite_golden(name: &str, image: &crcbl_golden::Image) -> Result<String, String> {
     let reference =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/golden/{name}.png"));
@@ -513,7 +587,7 @@ pub(crate) fn report_goldens(verdicts: Vec<Result<String, String>>) {
     let mut failures = Vec::new();
     for verdict in verdicts {
         match verdict {
-            Ok(summary) => eprintln!("vk e2e: {summary}"),
+            Ok(summary) => eprintln!("{}: {summary}", crate::SUITE),
             Err(message) => failures.push(message),
         }
     }

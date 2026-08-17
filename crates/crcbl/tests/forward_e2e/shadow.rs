@@ -43,7 +43,8 @@
 //! is not the sun needs a caster the *light* can see past and the *camera*
 //! cannot, which the sun's overhead arrangement does not give.
 
-use crate::harness::{Headless, MESH_EXTENT, poisoned};
+use crate::harness::{Headless, poisoned};
+use crate::mesh_scene::MESH_EXTENT;
 use crcbl::hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, Capability, CommandEncoderDesc, Extent3d,
     Features, Format, HalError, ImageAspect, ImageBarrier, ImageSubresourceLayers,
@@ -163,7 +164,7 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
         .expect("the forward renderer builds");
     // The cube first and whatever else the scene wants above it, which is the
     // order the pool has always been filled in.
-    crate::harness::place_cube_at(&mut renderer, scene.model);
+    crate::mesh_scene::place_cube_at(&mut renderer, scene.model);
     (scene.prepare)(&mut renderer);
 
     let acquired = device
@@ -395,7 +396,7 @@ fn refused_atlas_copy(
 fn render_shadowed(to_light: crcbl::math::Vec3) -> ShadowFrame {
     render_scene(&ShadowScene {
         prepare: &|renderer| {
-            crate::harness::place(
+            crate::mesh_scene::place(
                 renderer,
                 crcbl::render::scene::DEMO_OPEN_BOX,
                 crcbl::render::scene::DEMO_UNTINTED,
@@ -678,7 +679,7 @@ fn render_spot(caster: Option<f32>) -> ShadowFrame {
                 // it by that much of the scale stands it on `y = 0`. A caster
                 // floating above the floor would hide a shadow detached from it,
                 // which is what too much bias looks like.
-                crate::harness::place(
+                crate::mesh_scene::place(
                     renderer,
                     crcbl::render::scene::DEMO_PYRAMID,
                     crcbl::render::scene::DEMO_UNTINTED,
@@ -979,7 +980,7 @@ fn render_point(
                 (second, crcbl::render::scene::DEMO_TINTED),
             ] {
                 if let Some(at) = at {
-                    crate::harness::place(
+                    crate::mesh_scene::place(
                         renderer,
                         crcbl::render::scene::DEMO_PYRAMID,
                         material,

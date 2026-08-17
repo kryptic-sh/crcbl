@@ -210,6 +210,20 @@ capabilities! {
     /// declaring rather than discovering: without it there is no way to show
     /// that a shadow pass wrote anything, and a shadow pass that wrote nothing
     /// renders a frame in which every surface is lit and nothing looks wrong.
+    ///
+    /// **WHICH depth format and WHICH direction remains the API's own rule.**
+    /// This asks whether a backend has an expression for the copy at all; a
+    /// backend answering [`Support::Yes`] still refuses the pairs its API's
+    /// format table withholds, by name and at the call. WebGPU is the one that
+    /// withholds any — and `wgpu` enforces the same table, so both backends on
+    /// it agree: the depth plane of [`Format::D32Float`](crate::Format::D32Float),
+    /// [`D32FloatS8Uint`](crate::Format::D32FloatS8Uint) and
+    /// [`D16Unorm`](crate::Format::D16Unorm) copies **out** to a buffer, only
+    /// `D16Unorm`'s copies back **in**, and
+    /// [`D24UnormS8Uint`](crate::Format::D24UnormS8Uint)'s copies neither way,
+    /// because WebGPU's `depth24plus` is whatever the driver chose to store and
+    /// so has no memory layout to lay a buffer out against. The readback a
+    /// shadow atlas needs is inside every one of those.
     DepthImageCopy,
 
     // --- render pass ---
@@ -613,14 +627,6 @@ pub const DIVERGENCES: &[Divergence] = &[
               copy needs a PlaneSlice and a fully typed D3D12_PLACED_SUBRESOURCE_FOOTPRINT — \
               neither of which BufferImageCopy carries and neither of which plan_copy can derive \
               from the image alone (the DX12 depth slice)",
-    },
-    Divergence {
-        capability: Capability::DepthImageCopy,
-        backend: BackendKind::WebGpu,
-        why: "the replayer turns BufferImageCopy::buffer_row_length from texels into WebGPU's \
-              bytesPerRow through a bytes-per-texel table that holds the single-plane colour \
-              formats only, and it refuses a depth format rather than guessing a figure for one \
-              (the TEXEL_BYTES table in web/engine/gpu-replay.js)",
     },
     // --- render pass ---
     Divergence {

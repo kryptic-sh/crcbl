@@ -36,7 +36,7 @@ use crcbl::shaders::mesh::{GpuInstance, GpuMesh, INSTANCE_STRIDE, MESH_ENTRY_STR
 ///
 /// It lives here rather than in the shared fixture because this is the only
 /// module that renders at it: `tests/forward_e2e/` and the rest of this suite
-/// are mesh scenes at [`MESH_EXTENT`](crate::harness::MESH_EXTENT).
+/// are mesh scenes at [`MESH_EXTENT`](crate::mesh_scene::MESH_EXTENT).
 const EXTENT: (u32, u32) = (64, 48);
 
 /// The cull probe's ring: [`EXTENT`], and nothing required.

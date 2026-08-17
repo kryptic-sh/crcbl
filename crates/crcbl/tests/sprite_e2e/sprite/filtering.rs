@@ -37,13 +37,13 @@ use crate::sprite::{
 /// a whole ramp of them under `Smooth`, and the assertion is on *that* rather
 /// than on a count of differing pixels — which noise could reach.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn pixel_and_smooth_differ_where_and_by_how_much_sharp_bilinear_predicts() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -58,7 +58,7 @@ fn pixel_and_smooth_differ_where_and_by_how_much_sharp_bilinear_predicts() {
         "quad pixel",
         2,
         2,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &pixels,
     );
     let smooth = register_sheet(
@@ -67,14 +67,14 @@ fn pixel_and_smooth_differ_where_and_by_how_much_sharp_bilinear_predicts() {
         "quad smooth",
         2,
         2,
-        crcbl_render::SampleMode::Smooth,
+        crcbl::render::SampleMode::Smooth,
         &pixels,
     );
 
     // 45 units for 2 texels: 22.5 pixels per texel, and a fractional origin so
     // the quad's edges do not land on the pixel grid by accident either.
     let rect = [-22.3f32, -22.7, 45.0, 45.0];
-    let sprite = |sheet| crcbl_render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
+    let sprite = |sheet| crcbl::render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
     let pixel_image = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(sharp)]);
     let smooth_image = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(smooth)]);
 
@@ -194,13 +194,13 @@ fn pixel_and_smooth_differ_where_and_by_how_much_sharp_bilinear_predicts() {
 /// Read straight off sampled pixel values, not through a reference: a golden
 /// blessed from a broken build would agree with itself forever.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn pixel_mode_is_exactly_flat_inside_each_texel_at_a_whole_scale() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -213,7 +213,7 @@ fn pixel_mode_is_exactly_flat_inside_each_texel_at_a_whole_scale() {
         "quad pixel",
         2,
         2,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &pixels,
     );
     let smooth = register_sheet(
@@ -222,13 +222,13 @@ fn pixel_mode_is_exactly_flat_inside_each_texel_at_a_whole_scale() {
         "quad smooth",
         2,
         2,
-        crcbl_render::SampleMode::Smooth,
+        crcbl::render::SampleMode::Smooth,
         &pixels,
     );
 
     // 64 pixels for 2 texels: 32 device pixels per texel, on the grid.
     let rect = [-32.0f32, -32.0, 64.0, 64.0];
-    let sprite = |sheet| crcbl_render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
+    let sprite = |sheet| crcbl::render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
     let pixel_image = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(sharp)]);
     let smooth_image = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(smooth)]);
 
@@ -314,13 +314,13 @@ fn pixel_mode_is_exactly_flat_inside_each_texel_at_a_whole_scale() {
 /// — the control, without which this would pass on a renderer that drew nothing
 /// — it must not, because a fifth of a pixel genuinely reached the GPU.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn a_sub_pixel_move_leaves_a_pixel_sprite_alone_and_moves_a_smooth_one() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -333,7 +333,7 @@ fn a_sub_pixel_move_leaves_a_pixel_sprite_alone_and_moves_a_smooth_one() {
         "quad pixel",
         2,
         2,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &pixels,
     );
     let smooth = register_sheet(
@@ -342,7 +342,7 @@ fn a_sub_pixel_move_leaves_a_pixel_sprite_alone_and_moves_a_smooth_one() {
         "quad smooth",
         2,
         2,
-        crcbl_render::SampleMode::Smooth,
+        crcbl::render::SampleMode::Smooth,
         &pixels,
     );
 
@@ -351,7 +351,7 @@ fn a_sub_pixel_move_leaves_a_pixel_sprite_alone_and_moves_a_smooth_one() {
     // test is not accidentally about one axis.
     let here = [-22.4f32, -22.7, 45.0, 45.0];
     let nudged = [-22.2f32, -22.7, 45.0, 45.0];
-    let sprite = |sheet, rect| crcbl_render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
+    let sprite = |sheet, rect| crcbl::render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
 
     let sharp_here = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(sharp, here)]);
     let sharp_there = render_sprites(

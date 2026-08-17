@@ -40,23 +40,29 @@
 // `crates/crcbl/tests/forward_e2e/`, which runs the same assertions on every
 // backend rather than on Vulkan alone. They named no Vulkan type, so the move
 // was a move.
-mod button_skin;
+//
+// Neither are `button_skin`, `menu`, `nine_slice` and the `sprite` subtree: they
+// are `crates/crcbl/tests/sprite_e2e/`, on the same terms. They owned nine
+// golden PNGs, which is what had deferred them past the three tranches before —
+// and the answer turned out to be `tests/render_e2e.rs`'s, already in the tree:
+// compare through `crcbl-golden` at `Tolerance::RASTERISER` with the readback's
+// channel order travelling with the pixels, against one set of committed
+// references. The images moved to `crates/crcbl/tests/golden/`, with
+// `sprite.png` renamed `sprite_frames.png` because that directory already had
+// one of its own.
 mod compute;
 mod device_request;
 mod draw_gen;
 mod frame_loop_sequences;
 mod harness;
 mod indirect;
-mod menu;
 mod mesh;
 mod mesh_shader;
-mod nine_slice;
 mod pipeline;
 mod queries;
 mod recording;
 mod retire;
 mod seam_obligations;
-mod sprite;
 mod swapchain;
 mod triangle;
 mod validation_gate;

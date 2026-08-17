@@ -360,18 +360,20 @@ impl Device for WebGpuDevice {
                 Support::No(NO_VALUE_FILL)
             }
             Capability::ImageToImageCopy => Support::Yes,
-            // The stream carries `buffer_row_length` in *texels* and the
-            // replayer multiplies it into WebGPU's `bytesPerRow`, through a
-            // bytes-per-texel table holding the single-plane colour formats
-            // alone — so a depth image reaches `copyTextureToBuffer` with no
-            // figure to scale by and the replayer files a device error rather
-            // than guessing one. The obstacle is the seam's texel pitch meeting
-            // WebGPU's byte pitch, not `copyTextureToBuffer` itself.
-            Capability::DepthImageCopy => Support::No(
-                "the replayer turns buffer_row_length from texels into bytesPerRow through a \
-                 bytes-per-texel table that holds the single-plane colour formats only, and \
-                 refuses a depth format rather than guessing a figure for one",
-            ),
+            // The replayer's `DEPTH_STENCIL_COPY` table carries the WebGPU
+            // specification's depth-stencil rows, so a copy naming
+            // `ImageAspect::DEPTH` reaches `copyTextureToBuffer` with the
+            // plane's own bytes-per-texel and the `'depth-only'` aspect on the
+            // texture side. What that table also carries is WebGPU's own
+            // narrowing, which this `Yes` does not claim away: the depth plane
+            // of `D32Float`, `D32FloatS8Uint` and `D16Unorm` copies OUT to a
+            // buffer, only `D16Unorm`'s copies back IN, and
+            // `D24UnormS8Uint`'s copies neither way because `depth24plus` has
+            // no defined memory layout at all. Each combination WebGPU forbids
+            // is refused by name on the device error queue rather than
+            // recorded, and `Capability::DepthImageCopy` says which of them
+            // this backend answers for.
+            Capability::DepthImageCopy => Support::Yes,
             Capability::MsaaResolveAttachment => Support::Yes,
             Capability::StencilReference => Support::No(NOT_STREAMED),
             Capability::DrawIndirectCount => {

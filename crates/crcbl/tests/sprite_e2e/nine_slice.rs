@@ -1,6 +1,6 @@
 //! Slice 6's nine-slice geometry, drawn.
 //!
-//! `crcbl_render::nine_slice` is exact arithmetic over rectangles and its unit
+//! `crcbl::render::nine_slice` is exact arithmetic over rectangles and its unit
 //! tests assert the quads to the float. What they cannot show is the thing the
 //! feature exists for: that those quads, handed to the real pass on a real
 //! driver, come back as one picture — corners the size they were drawn at,
@@ -77,20 +77,20 @@ fn nine_slice_sheet() -> Vec<u8> {
 /// colours and nothing else**. A one-texel seam between two bands would show as
 /// the clear colour or as a blend, and either fails that count.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn a_nine_slice_stretched_beyond_its_source_keeps_its_corners_and_shows_no_seam() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     // The geometry first, from the same call the frame is drawn from: nine
     // quads, because every band of this slice is non-empty at this target.
-    let source = crcbl_render::NineSliceSource {
-        nine: crcbl_render::NineSlice::new(
+    let source = crcbl::render::NineSliceSource {
+        nine: crcbl::render::NineSlice::new(
             NINE_SLICE_INSET,
             NINE_SLICE_INSET,
             NINE_SLICE_INSET,
             NINE_SLICE_INSET,
         ),
-        frame: crcbl_render::Rect::new(0, 0, NINE_SLICE_SIZE, NINE_SLICE_SIZE),
+        frame: crcbl::render::Rect::new(0, 0, NINE_SLICE_SIZE, NINE_SLICE_SIZE),
         sheet_width: NINE_SLICE_SIZE,
         sheet_height: NINE_SLICE_SIZE,
         texels_per_unit: 1.0,
@@ -101,8 +101,8 @@ fn a_nine_slice_stretched_beyond_its_source_keeps_its_corners_and_shows_no_seam(
     assert_eq!(quads.len(), 9, "every band of this slice has extent");
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -114,11 +114,11 @@ fn a_nine_slice_stretched_beyond_its_source_keeps_its_corners_and_shows_no_seam(
         "nine slice",
         NINE_SLICE_SIZE,
         NINE_SLICE_SIZE,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &nine_slice_sheet(),
     );
 
-    let sprites: Vec<crcbl_render::Sprite> = quads.sprites(sheet, [1.0; 4]).collect();
+    let sprites: Vec<crcbl::render::Sprite> = quads.sprites(sheet, [1.0; 4]).collect();
     assert_eq!(sprites.len(), 9);
     let image = render_sprites(&headless, &mut renderer, &mut pool, &sprites);
 

@@ -1297,6 +1297,12 @@ function stubDevice(
         bufferToImageCopies: [],
         /**
          * @type {Array<{ source: object, destination: object, size: object }>}
+         *   Every `copyTextureToBuffer` — the readback direction, whose
+         *   `source` is the texture and `destination` the buffer layout.
+         */
+        imageToBufferCopies: [],
+        /**
+         * @type {Array<{ source: object, destination: object, size: object }>}
          *   Every `copyTextureToTexture`.
          */
         imageCopies: [],
@@ -1334,6 +1340,14 @@ function stubDevice(
          */
         copyBufferToTexture(source, destination, size) {
           encoder.bufferToImageCopies.push({ source, destination, size });
+        },
+        /**
+         * @param {object} source A `GPUImageCopyTexture`.
+         * @param {object} destination A `GPUImageCopyBuffer`.
+         * @param {object} size A `GPUExtent3D`.
+         */
+        copyTextureToBuffer(source, destination, size) {
+          encoder.imageToBufferCopies.push({ source, destination, size });
         },
         /**
          * @param {object} source A `GPUImageCopyTexture`.
@@ -7804,6 +7818,232 @@ async function main() {
       `a buffer→image copy with no encoder goes to the error queue (${JSON.stringify(error)})`
     );
   }
+
+  // ---- the depth plane, in both directions ---------------------------------
+  //
+  // A shadow atlas is read back through this, and a depth image is not a colour
+  // image of a different width: the bytes-per-texel is per PLANE, the aspect has
+  // to name one plane rather than `'all'`, and WebGPU permits each plane in each
+  // DIRECTION separately. `depth32float` reads back and cannot be written from a
+  // buffer; `depth16unorm` does both; `depth24plus-stencil8`'s depth plane does
+  // neither. Each of those four rows is driven below, because a table that got
+  // one of them wrong would still make the shadow readback work and would make
+  // some other copy write the wrong bytes or refuse a legal one.
+  /**
+   * @param {{ index: number, generation: number }} h
+   * @param {string} format A `crcbl_hal::Format` name.
+   */
+  const depthImageAt = (h, format) => ({
+    name: 'CreateImage',
+    image: h,
+    label: null,
+    imageType: 'D2',
+    extent: { width: 4, height: 4, depthOrLayers: 1 },
+    format,
+    mipLevels: 1,
+    samples: 1,
+    usage: ['DEPTH_STENCIL_ATTACHMENT', 'TRANSFER_SRC', 'TRANSFER_DST'],
+  });
+  /**
+   * A copy of one plane of the image at `imgH`, in whichever direction `name`
+   * names. Tightly packed, so `bytesPerRow` is the copy width times the plane's
+   * own footprint — 4 texels wide, which is what the checks multiply.
+   *
+   * @param {string} name `'CopyImageToBuffer'` or `'CopyBufferToImage'`.
+   * @param {{ index: number, generation: number }} bufH
+   * @param {{ index: number, generation: number }} imgH
+   * @param {string[]} aspect `crcbl_hal::ImageAspect` flag names.
+   */
+  const planeCopy = (name, bufH, imgH, aspect) => ({
+    name,
+    buffer: bufH,
+    bufferOffset: 0n,
+    bufferRowLength: 0,
+    bufferImageHeight: 0,
+    image: imgH,
+    imageSubresource: { aspect, mip: 0, baseLayer: 0, layerCount: 1 },
+    imageOffset: { x: 0, y: 0, z: 0 },
+    imageExtent: { width: 4, height: 4, depthOrLayers: 1 },
+  });
+  /**
+   * Replays a device, a buffer, a depth image of `format` and an encoder, then
+   * the plane copy, and hands back what the encoder recorded and what landed on
+   * the error queue.
+   *
+   * `depth32float-stencil8` is a `GPUFeatureName` as well as a format, so the
+   * device this opens holds it — a device without it refuses the image itself
+   * and every check past that point would be asserting about a handle nothing
+   * created.
+   *
+   * @param {string} name `'CopyImageToBuffer'` or `'CopyBufferToImage'`.
+   * @param {string} format A `crcbl_hal::Format` name.
+   * @param {string[]} aspect `crcbl_hal::ImageAspect` flag names.
+   */
+  const depthCopyCase = async (name, format, aspect) => {
+    const bufH = handle(80, 1);
+    const imgH = handle(90, 1);
+    const { replayer, device } = await readyWithDevice({
+      device: stubDevice(['depth32float-stencil8']),
+    });
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    replayer.replay(frameOf(depthImageAt(imgH, format), 701n));
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(frameOf(planeCopy(name, bufH, imgH, aspect), 703n));
+    const encoder = device.createdEncoders.at(-1);
+    return {
+      recorded:
+        name === 'CopyImageToBuffer'
+          ? encoder.imageToBufferCopies
+          : encoder.bufferToImageCopies,
+      error: replayer.takeError(),
+      image: replayer.images.get(imgH),
+    };
+  };
+  {
+    // **THE SHADOW READBACK: `depth32float` copies out, with the depth aspect on
+    // the texture side and four bytes a texel.** Passing no aspect at all would
+    // leave WebGPU's `'all'` default, which it rejects for a depth-stencil
+    // format — so the assertion is on the aspect as much as on the pitch.
+    const { recorded, error, image } = await depthCopyCase(
+      'CopyImageToBuffer',
+      'D32_FLOAT',
+      ['DEPTH']
+    );
+    check(
+      error === null &&
+        recorded.length === 1 &&
+        recorded[0].source.texture === image &&
+        recorded[0].source.aspect === 'depth-only' &&
+        recorded[0].destination.bytesPerRow === 4 * 4 &&
+        recorded[0].size.width === 4,
+      `a depth32float image→buffer copy records copyTextureToBuffer with the depth aspect and a 4-byte texel (${JSON.stringify([error, recorded.map((copy) => [copy.source.aspect, copy.destination.bytesPerRow])])})`
+    );
+  }
+  {
+    // **AND `depth16unorm` IS TWO BYTES, NOT FOUR.** One table entry per format
+    // and not one number for "depth": a footprint copied from the neighbouring
+    // row reads every row of the image from the wrong offset, and the copy still
+    // succeeds.
+    const { recorded, error } = await depthCopyCase(
+      'CopyImageToBuffer',
+      'D16_UNORM',
+      ['DEPTH']
+    );
+    check(
+      error === null &&
+        recorded.length === 1 &&
+        recorded[0].destination.bytesPerRow === 4 * 2,
+      `a depth16unorm image→buffer copy uses a 2-byte texel (${JSON.stringify([error, recorded.map((copy) => copy.destination.bytesPerRow)])})`
+    );
+  }
+  {
+    // **`depth16unorm` IS THE ONE DEPTH PLANE WEBGPU ALSO WRITES**, so the
+    // upload direction is not refused wholesale.
+    const { recorded, error, image } = await depthCopyCase(
+      'CopyBufferToImage',
+      'D16_UNORM',
+      ['DEPTH']
+    );
+    check(
+      error === null &&
+        recorded.length === 1 &&
+        recorded[0].destination.texture === image &&
+        recorded[0].destination.aspect === 'depth-only' &&
+        recorded[0].source.bytesPerRow === 4 * 2,
+      `a depth16unorm buffer→image copy records copyBufferToTexture with the depth aspect (${JSON.stringify([error, recorded.map((copy) => [copy.destination.aspect, copy.source.bytesPerRow])])})`
+    );
+  }
+  {
+    // **THE DIRECTION IS PART OF THE RULE.** The same `depth32float` plane that
+    // reads back above cannot be written from a buffer, and the refusal says so
+    // rather than recording a copy the device would reject asynchronously with
+    // no sequence number attached to it.
+    const { recorded, error } = await depthCopyCase(
+      'CopyBufferToImage',
+      'D32_FLOAT',
+      ['DEPTH']
+    );
+    check(
+      recorded.length === 0 &&
+        error !== null &&
+        error.includes('depth32float') &&
+        error.includes('destination'),
+      `a depth32float buffer→image copy is refused naming the direction (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **`depth24plus-stencil8`'s DEPTH PLANE COPIES IN NEITHER DIRECTION**, and
+    // the readback is the direction that would otherwise look safe.
+    const { recorded, error } = await depthCopyCase(
+      'CopyImageToBuffer',
+      'D24_UNORM_S8_UINT',
+      ['DEPTH']
+    );
+    check(
+      recorded.length === 0 &&
+        error !== null &&
+        error.includes('depth24plus-stencil8') &&
+        error.includes('depth-only'),
+      `a depth24plus-stencil8 depth readback is refused naming the format and the plane (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A COPY NAMES ONE PLANE.** `ImageAspect::DEPTH | ImageAspect::STENCIL` is
+    // the whole image and maps to `'all'`, which is legal on a view and illegal
+    // on a buffer↔texture copy of a depth-stencil format.
+    const { recorded, error } = await depthCopyCase(
+      'CopyImageToBuffer',
+      'D32_FLOAT_S8_UINT',
+      ['DEPTH', 'STENCIL']
+    );
+    check(
+      recorded.length === 0 &&
+        error !== null &&
+        error.includes("'all'") &&
+        error.includes('one plane'),
+      `a both-planes depth-stencil copy is refused (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **THE STENCIL PLANE IS ONE BYTE AND COPIES BOTH WAYS**, on the format
+    // whose depth plane copies only one way — which is what keeps the two planes
+    // separate entries rather than one answer per format.
+    const { recorded, error } = await depthCopyCase(
+      'CopyBufferToImage',
+      'D32_FLOAT_S8_UINT',
+      ['STENCIL']
+    );
+    check(
+      error === null &&
+        recorded.length === 1 &&
+        recorded[0].destination.aspect === 'stencil-only' &&
+        recorded[0].source.bytesPerRow === 4 * 1,
+      `a depth32float-stencil8 stencil upload records a 1-byte texel (${JSON.stringify([error, recorded.map((copy) => [copy.destination.aspect, copy.source.bytesPerRow])])})`
+    );
+  }
+  {
+    // **A COLOUR COPY STILL SAYS `'all'`.** The aspect is now always spelled, and
+    // `'all'` is the only one a single-plane colour format accepts — so this is
+    // the check that the depth work did not change what a colour readback sends.
+    const { replayer, device } = await readyWithDevice();
+    const bufH = handle(80, 1);
+    const imgH = handle(90, 1);
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    replayer.replay(frameOf(sampledImageAt(imgH), 701n));
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(
+      frameOf(planeCopy('CopyImageToBuffer', bufH, imgH, ['COLOR']), 703n)
+    );
+    const copies = device.createdEncoders.at(-1).imageToBufferCopies;
+    check(
+      replayer.pendingErrors === 0 &&
+        copies.length === 1 &&
+        copies[0].source.aspect === 'all' &&
+        copies[0].destination.bytesPerRow === 4 * 4,
+      `an rgba8unorm image→buffer copy carries the 'all' aspect and a 4-byte texel (${JSON.stringify(copies.map((copy) => copy.source.aspect))})`
+    );
+  }
+
   {
     // **An image→image copy reaches the encoder with both images resolved and the
     // two sides' mip levels, origins and the shared extent passed through.** The

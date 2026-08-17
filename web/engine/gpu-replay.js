@@ -332,9 +332,9 @@ const GPU_MAP_READ = 0x0001;
  * the conversion from `crcbl_hal::BufferImageCopy::buffer_row_length` (which is
  * in *texels*) to WebGPU's `bytesPerRow` (which is in *bytes*) needs the block
  * size the format string does not carry. Only the uncompressed, single-plane
- * colour formats are here: a block-compressed or depth/stencil format has no
- * single "bytes per texel", and {@link Replayer#copyImageToBuffer} refuses one
- * rather than guessing — a linear readback of those is not this slice's path.
+ * colour formats are here: a block-compressed format has no bytes per *texel* at
+ * all, and a depth or stencil plane's footprint depends on which plane the copy
+ * names — that is {@link DEPTH_STENCIL_COPY}'s table, not this one.
  */
 const TEXEL_BYTES = Object.freeze({
   r8unorm: 1,
@@ -353,6 +353,53 @@ const TEXEL_BYTES = Object.freeze({
   rgba32float: 16,
   r32uint: 4,
   rg32uint: 8,
+});
+
+/**
+ * What WebGPU lets a buffer↔texture copy do with each plane of each
+ * depth-stencil format this backend can create. The specification's own table,
+ * transcribed — not a judgement made here.
+ *
+ * **A DEPTH PLANE IS NOT A COLOUR PLANE OF A DIFFERENT WIDTH.** Three things
+ * differ at once, and each is a wrong picture rather than an error if it is
+ * guessed:
+ *
+ *   * **The footprint is per plane.** `depth32float-stencil8` moves four bytes a
+ *     texel through its depth plane and one through its stencil plane, so
+ *     {@link TEXEL_BYTES}'s one-number-per-format shape cannot hold it.
+ *   * **So is the direction.** `depth32float` is a legal copy *source* and an
+ *     illegal copy *destination*, and `depth24plus-stencil8`'s depth plane is
+ *     neither — `depth24plus` names whatever the driver chose to store, so there
+ *     is no memory layout to lay a buffer out against.
+ *   * **A copy names ONE plane.** `'all'` is rejected for a depth-stencil format
+ *     however the buffer is laid out, which a colour copy never has to think
+ *     about because `'all'` is the only aspect a colour format has.
+ *
+ * Keyed by `GPUTextureFormat`, then by the `GPUTextureAspect`
+ * {@link webgpuTextureAspectFor} answers. A format absent from this table is a
+ * colour one and goes through {@link TEXEL_BYTES}; an aspect absent from a row
+ * is a plane the format does not have or one WebGPU will not copy in either
+ * direction. `source` and `destination` are the two directions separately,
+ * because that is how the specification states them.
+ *
+ * The four rows are the four depth formats {@link TEXTURE_FORMAT} can produce.
+ * `stencil8` and `depth24plus` have no `crcbl_hal::Format` spelling, so no
+ * texture this replayer holds can carry either.
+ *
+ * @see https://www.w3.org/TR/webgpu/#depth-formats
+ */
+const DEPTH_STENCIL_COPY = Object.freeze({
+  depth16unorm: { 'depth-only': { bytes: 2, source: true, destination: true } },
+  depth32float: {
+    'depth-only': { bytes: 4, source: true, destination: false },
+  },
+  'depth32float-stencil8': {
+    'depth-only': { bytes: 4, source: true, destination: false },
+    'stencil-only': { bytes: 1, source: true, destination: true },
+  },
+  'depth24plus-stencil8': {
+    'stencil-only': { bytes: 1, source: true, destination: true },
+  },
 });
 
 /**
@@ -6039,22 +6086,31 @@ export class Replayer {
    * The texture side's origin comes from {@link copyOrigin}: a page's layer
    * arrives in `imageSubresource.baseLayer`, and WebGPU wants it in `origin.z`.
    *
+   * THE ASPECT IS PART OF THE COPY, not decoration. A colour format has one
+   * plane and `'all'` is the only aspect it accepts, so the colour path reads as
+   * though the field were absent; a depth-stencil format accepts exactly one
+   * named plane and rejects `'all'`, and which plane it is decides both the
+   * bytes-per-texel above and whether this direction is legal at all —
+   * {@link DEPTH_STENCIL_COPY} is where those two facts live.
+   *
    * Returns the `GPUImageCopyTexture`, the `GPUImageDataLayout` WITHOUT its
    * buffer — the caller adds the resolved buffer, whose role (source or
    * destination) and error wording differ by direction — and the copy size; or
    * queues a `#deviceError` naming `named` and returns `null` when the image is
-   * unresolvable or its format has no defined bytes-per-texel
-   * ({@link TEXEL_BYTES}).
+   * unresolvable, its aspect is one WebGPU cannot spell, or the format and
+   * aspect together have no copy in this direction.
    *
    * @param {object} command
    * @param {string} named
+   * @param {'source'|'destination'} role Which side of the copy the TEXTURE is
+   *   — the direction a depth or stencil plane is permitted separately for.
    * @returns {{ texture: object,
    *   textureView: { texture: object, mipLevel: number,
-   *     origin: { x: number, y: number, z: number } },
+   *     origin: { x: number, y: number, z: number }, aspect: string },
    *   bufferLayout: { offset: number, bytesPerRow: number, rowsPerImage: number },
    *   size: { width: number, height: number, depthOrArrayLayers: number } } | null}
    */
-  #textureCopyLayout(command, named) {
+  #textureCopyLayout(command, named, role) {
     const texture = this.#images.get(command.image);
     if (texture === undefined) {
       this.#deviceError(
@@ -6063,13 +6119,46 @@ export class Replayer {
       );
       return null;
     }
-    const texelBytes = TEXEL_BYTES[texture.format];
-    if (texelBytes === undefined) {
+    const aspect = webgpuTextureAspectFor(command.imageSubresource.aspect);
+    if (aspect.aspect === null) {
+      this.#deviceError(`${named} ${aspect.reason}`);
+      return null;
+    }
+    const planes = DEPTH_STENCIL_COPY[texture.format];
+    let texelBytes;
+    if (planes === undefined) {
+      texelBytes = TEXEL_BYTES[texture.format];
+      if (texelBytes === undefined) {
+        this.#deviceError(
+          `${named} touches a ${texture.format} texture, which has no single bytes-per-texel ` +
+            'this replayer can turn buffer_row_length into a bytesPerRow with'
+        );
+        return null;
+      }
+    } else if (aspect.aspect === 'all') {
       this.#deviceError(
-        `${named} touches a ${texture.format} texture, which has no single bytes-per-texel ` +
-          'this replayer can turn buffer_row_length into a bytesPerRow with'
+        `${named} resolves to the 'all' aspect of a ${texture.format} texture. A buffer↔texture ` +
+          'copy of a depth-stencil format moves exactly one plane, so it must name the depth or ' +
+          'the stencil one'
       );
       return null;
+    } else if (planes[aspect.aspect] === undefined) {
+      this.#deviceError(
+        `${named} names the ${aspect.aspect} plane of a ${texture.format} texture, which WebGPU ` +
+          'copies in neither direction: depth24plus leaves its depth plane to the driver and so ' +
+          'has no layout to lay a buffer out against, and a format without a stencil plane has ' +
+          'no stencil aspect to copy'
+      );
+      return null;
+    } else if (!planes[aspect.aspect][role]) {
+      this.#deviceError(
+        `${named} makes the ${aspect.aspect} plane of a ${texture.format} texture the copy's ` +
+          `${role}, which WebGPU's depth-stencil formats table does not permit — that plane ` +
+          `copies in the other direction only`
+      );
+      return null;
+    } else {
+      texelBytes = planes[aspect.aspect].bytes;
     }
     // `0` means tightly packed, so the row is the copy width; otherwise the
     // caller's explicit texel pitch. Multiplied to bytes, passed through unpadded
@@ -6089,6 +6178,7 @@ export class Replayer {
         texture,
         mipLevel: command.imageSubresource.mip,
         origin: copyOrigin(command.imageSubresource, command.imageOffset),
+        aspect: aspect.aspect,
       },
       bufferLayout: {
         offset: Number(command.bufferOffset),
@@ -6107,10 +6197,12 @@ export class Replayer {
    * Records an image→buffer copy on the implicit-current encoder — the readback
    * path's copy.
    *
-   * The buffer is the copy's DESTINATION; {@link Replayer#textureCopyLayout}
-   * resolves the image side and the 256-byte-trap layout. A missing encoder, an
-   * unresolvable buffer or image, or a format with no defined bytes-per-texel
-   * all go to the error queue.
+   * The buffer is the copy's DESTINATION, so the TEXTURE is the copy's
+   * `'source'` — which is the direction a depth plane is permitted separately
+   * for, and the reason that word is passed down.
+   * {@link Replayer#textureCopyLayout} resolves the image side and the
+   * 256-byte-trap layout. A missing encoder, an unresolvable buffer or image, or
+   * a format and aspect with no readable footprint all go to the error queue.
    *
    * @param {bigint} sequence
    * @param {object} command
@@ -6129,7 +6221,7 @@ export class Replayer {
       );
       return;
     }
-    const layout = this.#textureCopyLayout(command, named);
+    const layout = this.#textureCopyLayout(command, named, 'source');
     if (!layout) return;
     this.#currentEncoder.copyTextureToBuffer(
       layout.textureView,
@@ -6142,12 +6234,15 @@ export class Replayer {
    * Records a buffer→image copy on the implicit-current encoder — the upload
    * counterpart of {@link Replayer#copyImageToBuffer}.
    *
-   * The buffer is the copy's SOURCE; {@link Replayer#textureCopyLayout} resolves
-   * the image side and the 256-byte-trap layout. `copyBufferToTexture` takes its
-   * arguments (source = buffer layout, destination = texture view, size) in the
-   * OPPOSITE order to `copyTextureToBuffer`. A missing encoder, an unresolvable
-   * buffer or image, or a format with no defined bytes-per-texel all go to the
-   * error queue.
+   * The buffer is the copy's SOURCE, so the TEXTURE is the copy's
+   * `'destination'` — and this is the direction WebGPU withholds from a float
+   * depth plane, so a `depth32float` upload is refused here while the readback
+   * above is not. {@link Replayer#textureCopyLayout} resolves the image side and
+   * the 256-byte-trap layout. `copyBufferToTexture` takes its arguments
+   * (source = buffer layout, destination = texture view, size) in the OPPOSITE
+   * order to `copyTextureToBuffer`. A missing encoder, an unresolvable buffer or
+   * image, or a format and aspect with no writable footprint all go to the error
+   * queue.
    *
    * @param {bigint} sequence
    * @param {object} command
@@ -6166,7 +6261,7 @@ export class Replayer {
       );
       return;
     }
-    const layout = this.#textureCopyLayout(command, named);
+    const layout = this.#textureCopyLayout(command, named, 'destination');
     if (!layout) return;
     this.#currentEncoder.copyBufferToTexture(
       { buffer, ...layout.bufferLayout },

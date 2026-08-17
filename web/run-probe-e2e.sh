@@ -218,17 +218,19 @@ if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     exit 1
 fi
 
-# **EVERY GROUP, BY LETTER.** The count above cannot tell "twenty groups ran" from
-# "one group ran twenty checks", and a page that silently drives only some of the
+# **EVERY GROUP, BY LETTER.** The count above cannot tell "many groups ran" from
+# "one group ran many checks", and a page that silently drives only some of the
 # probes is the failure this gate has to be able to see. The driver prints the
-# letters it actually recorded a check under; this insists all twenty are there.
+# letters it actually recorded a check under; this insists every one is there.
+# `AA` is a two-letter tag because the alphabet ran out at the indirect probe;
+# the match below is space-delimited, so it cannot be confused with `A`.
 LETTERS="$(grep -E '^probe e2e: groups ' "${OUTPUT}.plain" | tail -1 || true)"
 if [ -z "$LETTERS" ]; then
     echo "crcbl probe e2e: the driver never printed which groups it ran" >&2
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;
@@ -437,6 +439,21 @@ SRGB_TRIP="$(grep -F 'the presented canvas frame came back from memory sRGB-enco
 if [ -z "$SRGB_TRIP" ]; then
     echo "crcbl probe e2e: the driver never held a presented canvas frame against the sRGB encode;" >&2
     echo "                 crcbl-webgpu could present every frame unencoded and nothing would say so" >&2
+    exit 1
+fi
+
+# And the depth plane, which is group AA and is the only exercise this backend's
+# `Capability::DepthImageCopy` has anywhere. Every other backend's capability
+# declarations are held to what they do by `crcbl/tests/hal_seam_e2e.rs`, which is
+# a native binary and cannot open this backend at all: the browser is where a
+# depth plane crosses `copyTextureToBuffer`, so without this the declaration is a
+# sentence nothing tests. It is worth its own line because of what a wrong answer
+# looks like — a shadow atlas that read back as nothing renders a frame in which
+# every surface is lit and nothing looks broken.
+DEPTH_TRIP="$(grep -F 'the depth plane came back from the browser as the cleared depth, every texel' "${OUTPUT}.plain" || true)"
+if [ -z "$DEPTH_TRIP" ]; then
+    echo "crcbl probe e2e: the driver never read a depth plane back from a real device;" >&2
+    echo "                 crcbl-webgpu declares Capability::DepthImageCopy and nothing tried it" >&2
     exit 1
 fi
 

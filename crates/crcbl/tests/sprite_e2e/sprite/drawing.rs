@@ -18,7 +18,7 @@
 //! solid one-texel sheets of different colours, so the sheet that was bound and
 //! the instance that was read are separable.
 //!
-//! Goldens: `tests/golden/sprite.png`, `sprite_multi_sheet.png` and
+//! Goldens: `tests/golden/sprite_frames.png`, `sprite_multi_sheet.png` and
 //! `sprite_alpha.png`.
 
 use crate::harness::Headless;
@@ -38,13 +38,13 @@ use crate::sprite::{
 /// sprite in the wrong place, upside down, mirrored, or showing the wrong frame
 /// fails on a named pixel rather than only on a reference image.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn a_sprite_is_drawn_the_right_way_up_in_the_right_place_from_the_right_frame() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -56,7 +56,7 @@ fn a_sprite_is_drawn_the_right_way_up_in_the_right_place_from_the_right_frame() 
         "asymmetric",
         4,
         2,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &asymmetric_sheet(),
     );
 
@@ -69,8 +69,8 @@ fn a_sprite_is_drawn_the_right_way_up_in_the_right_place_from_the_right_frame() 
         &mut renderer,
         &mut pool,
         &[
-            crcbl_render::Sprite::new(sheet, first, FRAME_A),
-            crcbl_render::Sprite::new(sheet, second, FRAME_B),
+            crcbl::render::Sprite::new(sheet, first, FRAME_A),
+            crcbl::render::Sprite::new(sheet, second, FRAME_B),
         ],
     );
 
@@ -135,7 +135,7 @@ fn a_sprite_is_drawn_the_right_way_up_in_the_right_place_from_the_right_frame() 
     assert_background(&image, 2, 2);
     assert_background(&image, SPRITE_EXTENT.0 - 3, SPRITE_EXTENT.1 - 3);
 
-    let verdict = sprite_golden("sprite", &image);
+    let verdict = sprite_golden("sprite_frames", &image);
     renderer.destroy(headless.device.as_ref());
     pool.destroy(headless.device.as_ref());
     headless.finish();
@@ -170,20 +170,20 @@ fn a_sprite_is_drawn_the_right_way_up_in_the_right_place_from_the_right_frame() 
 /// bases. A fix that only worked while each sheet appeared once would pass with
 /// three.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn every_batch_draws_its_own_instances_rather_than_the_first_batchs() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
     )
     .expect("the sprite renderer builds");
 
-    let sheets: Vec<crcbl_render::SheetId> = SOLID_SHEETS
+    let sheets: Vec<crcbl::render::SheetId> = SOLID_SHEETS
         .iter()
         .map(|(name, rgb)| {
             register_sheet(
@@ -192,7 +192,7 @@ fn every_batch_draws_its_own_instances_rather_than_the_first_batchs() {
                 name,
                 1,
                 1,
-                crcbl_render::SampleMode::Pixel,
+                crcbl::render::SampleMode::Pixel,
                 &solid_sheet(*rgb),
             )
         })
@@ -210,10 +210,10 @@ fn every_batch_draws_its_own_instances_rather_than_the_first_batchs() {
     // Sheet 0, 1, 2, 0 — four batches, three sheets.
     let named: [usize; 4] = [0, 1, 2, 0];
 
-    let sprites: Vec<crcbl_render::Sprite> = rects
+    let sprites: Vec<crcbl::render::Sprite> = rects
         .iter()
         .zip(named)
-        .map(|(rect, sheet)| crcbl_render::Sprite::new(sheets[sheet], *rect, [0.0, 0.0, 1.0, 1.0]))
+        .map(|(rect, sheet)| crcbl::render::Sprite::new(sheets[sheet], *rect, [0.0, 0.0, 1.0, 1.0]))
         .collect();
 
     let image = render_sprites(&headless, &mut renderer, &mut pool, &sprites);
@@ -272,13 +272,13 @@ fn every_batch_draws_its_own_instances_rather_than_the_first_batchs() {
 /// premultiplied in the shader as well as in the blender would land visibly
 /// short of it, and a pass that ignored alpha entirely would land on the source.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn alpha_blending_composites_the_sprite_onto_what_is_already_there() {
     assert_the_camera_maps_a_world_unit_to_a_pixel();
 
     let headless = Headless::open_for_sprites();
-    let mut pool = crcbl_render::TransientPool::new();
-    let mut renderer = crcbl_render::SpriteRenderer::new(
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
         headless.format,
@@ -290,7 +290,7 @@ fn alpha_blending_composites_the_sprite_onto_what_is_already_there() {
         "alpha",
         2,
         2,
-        crcbl_render::SampleMode::Pixel,
+        crcbl::render::SampleMode::Pixel,
         &alpha_sheet(),
     );
 
@@ -299,7 +299,11 @@ fn alpha_blending_composites_the_sprite_onto_what_is_already_there() {
         &headless,
         &mut renderer,
         &mut pool,
-        &[crcbl_render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0])],
+        &[crcbl::render::Sprite::new(
+            sheet,
+            rect,
+            [0.0, 0.0, 1.0, 1.0],
+        )],
     );
 
     // Screen: x 96..160, y 64..128, so each texel is a 32-pixel square and the

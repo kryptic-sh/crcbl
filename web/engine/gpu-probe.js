@@ -180,6 +180,26 @@ export const INDIRECT = Object.freeze({
 });
 
 /**
+ * The `DEPTH_*` codes `__crcbl_web_gpu_probe_depth_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The depth probe is a readback at heart — its setup frame ends in the same
+ * `request_readback` — so its codes mirror {@link READBACK} exactly. `READY`
+ * carries the 64×64 `depth32float` texels of a cleared depth atlas, which the
+ * gate checks are the clear value: the one claim no native suite can make about
+ * this backend, because a depth plane only crosses `copyTextureToBuffer` in a
+ * browser.
+ */
+export const DEPTH = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
  * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1252,6 +1272,75 @@ export function readIndirectProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: indirectStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the depth codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function depthStateName(state) {
+  const found = Object.entries(DEPTH).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to clear a `depth32float` atlas and copy its DEPTH PLANE out to a
+ * buffer, and start reading that buffer back on the device it opened.
+ *
+ * {@link startDrawProbe}'s depth sibling, and the only gate that moves a depth
+ * plane across `copyTextureToBuffer` at all. It needs no pipeline: the pass has
+ * one depth attachment, no colour attachment, and the clear is the write.
+ * {@link pollDepthProbe} drives the poll and {@link readDepthProbe} reads the
+ * bytes when they land. Its answer is *data* and it needs a **device**, so
+ * `false` before one has opened is ordering rather than failure — wait for
+ * {@link readDeviceProbe} to say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startDepthProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_depth() === 1;
+}
+
+/**
+ * Poll the depth readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_depth_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollDepthProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_depth_poll() === 1;
+}
+
+/**
+ * Read where the depth readback has got to, and its bytes once it is `READY`.
+ *
+ * {@link readDrawProbe}'s depth sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readDepthProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_depth_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_depth_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_depth_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: depthStateName(state), bytes };
 }
 
 /**

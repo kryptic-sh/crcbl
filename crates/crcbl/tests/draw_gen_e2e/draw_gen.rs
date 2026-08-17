@@ -23,7 +23,8 @@
 //! is an offset a backend can compute differently, and none of them changes a
 //! pixel.
 
-use crate::harness::{Headless, MESH_EXTENT, mesh_camera, place, place_cube_at, poisoned};
+use crate::harness::{Headless, poisoned};
+use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place, place_cube_at};
 use crcbl::hal::{
     Barriers, BufferCopy, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
     MemoryLocation, PresentInfo, ResourceState, SubmitInfo,

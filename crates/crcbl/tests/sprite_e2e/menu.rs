@@ -1,6 +1,6 @@
 //! Slice 14's shared menu, drawn.
 //!
-//! `crcbl_ui::menu` asserts the layout to the pixel and `crcbl_render::menu`
+//! `crcbl_ui::menu` asserts the layout to the pixel and `crcbl::render::menu`
 //! asserts the quads to the float, both with no device in the room. Neither can
 //! show the two things a reviewer actually wants to see: **that the window
 //! frame really is a nine-slice whose corners survive being stretched to a very
@@ -14,17 +14,16 @@
 //!
 //! **It is the real art.** The panel, the button skin and the scrim are frames
 //! of `crates/crcbl-render/assets/menu.crpix`, baked by that crate's own
-//! `build.rs` and uploaded by `crcbl_render::MenuArt::register` — not a
+//! `build.rs` and uploaded by `crcbl::render::MenuArt::register` — not a
 //! lookalike assembled here. That is the whole reason the art lives in
 //! `crcbl-render` rather than under `apps/`: this crate cannot see `apps/`, and
 //! a golden image of a replica would be evidence about the replica.
 
-use crate::harness::{Headless, poisoned};
-use crate::sprite::{SPRITE_CLEAR, background_rgb, close, report_goldens, rgb, sprite_golden};
-use crcbl_hal::{
-    BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, Format, ImageAspect,
-    ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState, SubmitInfo,
+use crate::harness::Headless;
+use crate::sprite::{
+    FrameStaging, SPRITE_CLEAR, background_rgb, close, report_goldens, rgb, sprite_golden,
 };
+use crcbl::hal::{CommandEncoderDesc, PresentInfo, ResourceState, SubmitInfo};
 
 /// The two framebuffers the menu golden is taken in.
 ///
@@ -44,20 +43,20 @@ const MENU_WIDE_EXTENT: (u32, u32) = (416, 224);
 const MENU_SCALE: u32 = 2;
 
 /// The pause menu, as `apps/*/src/menu.rs` builds it.
-fn golden_pause_menu() -> crcbl_render::Menu {
-    crcbl_render::Menu::new(
+fn golden_pause_menu() -> crcbl::render::Menu {
+    crcbl::render::Menu::new(
         "PAUSED",
         vec![
-            crcbl_render::MenuItem::new(1, "RESUME", "ESC"),
-            crcbl_render::MenuItem::new(3, "FULLSCREEN", "F11"),
-            crcbl_render::MenuItem::new(4, "DEBUG PANEL", "F3"),
+            crcbl::render::MenuItem::new(1, "RESUME", "ESC"),
+            crcbl::render::MenuItem::new(3, "FULLSCREEN", "F11"),
+            crcbl::render::MenuItem::new(4, "DEBUG PANEL", "F3"),
         ],
     )
 }
 
 /// The smallest menu the type can express: one short item, no key hint.
-fn golden_small_menu() -> crcbl_render::Menu {
-    crcbl_render::Menu::new("GO", vec![crcbl_render::MenuItem::new(1, "OK", "")])
+fn golden_small_menu() -> crcbl::render::Menu {
+    crcbl::render::Menu::new("GO", vec![crcbl::render::MenuItem::new(1, "OK", "")])
 }
 
 /// Renders one menu frame **through the real `MenuRenderer` and the real
@@ -68,28 +67,23 @@ fn golden_small_menu() -> crcbl_render::Menu {
 /// sample composites a menu over a game.
 fn render_menu(
     headless: &Headless,
-    renderer: &mut crcbl_render::MenuRenderer,
-    pool: &mut crcbl_render::TransientPool,
+    renderer: &mut crcbl::render::MenuRenderer,
+    pool: &mut crcbl::render::TransientPool,
     extent: (u32, u32),
 ) -> crcbl_golden::Image {
-    use crcbl_render::RenderGraph;
+    use crcbl::render::RenderGraph;
 
     let device = headless.device.as_ref();
-    let (width, height) = extent;
     let acquired = device
         .acquire_next_frame(headless.swapchain)
         .expect("the ring always has an image");
     assert_eq!(acquired.extent, extent);
 
-    let color_bytes = u64::from(width) * u64::from(height) * 4;
-    let staging = device
-        .create_buffer(&BufferDesc {
-            label: Some("menu readback"),
-            size: color_bytes,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::HostReadback,
-        })
-        .expect("a readback buffer");
+    // **The rows are padded here and nowhere else in this suite matters.** These
+    // framebuffers are 416 wide, which is 1664 bytes a row — not a multiple of
+    // the 256 wgpu and D3D12 both require — where every other frame in the suite
+    // is 256 wide and aligned by accident. See `sprite::COPY_ROW_ALIGNMENT`.
+    let staging = FrameStaging::new(device, extent);
 
     renderer
         .begin_frame(device, extent)
@@ -104,7 +98,7 @@ fn render_menu(
         let mut graph = RenderGraph::new(headless.queue);
         let target = graph.import_image(
             "swapchain",
-            crcbl_render::ImportedImage {
+            crcbl::render::ImportedImage {
                 image: acquired.image,
                 view: acquired.view,
                 format: headless.format,
@@ -124,21 +118,7 @@ fn render_menu(
         .execute(device, pool, encoder.as_mut(), None)
         .expect("the graph executed");
 
-    encoder.copy_image_to_buffer(&BufferImageCopy {
-        buffer: staging,
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        image: acquired.image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: crcbl_hal::Offset3d::default(),
-        image_extent: Extent3d::d2(width, height),
-    });
+    staging.copy_from(encoder.as_mut(), acquired.image);
 
     let commands = encoder.finish().expect("recording succeeded");
     device
@@ -155,17 +135,9 @@ fn render_menu(
         )
         .expect("present");
 
-    let mut color = poisoned(color_bytes as usize);
-    headless.readback(staging, color_bytes, &mut color);
+    let image = staging.read(headless);
     device.destroy_command_buffer(commands);
-    device.destroy_buffer(staging);
-
-    let order = match headless.format {
-        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
-        _ => crcbl_golden::ChannelOrder::Rgba,
-    };
-    crcbl_golden::Image::from_readback(width, height, &color, order)
-        .expect("the readback is exactly one image")
+    image
 }
 
 /// Two equally wide images, one above the other, as a single reference.
@@ -187,7 +159,7 @@ fn stack(top: &crcbl_golden::Image, bottom: &crcbl_golden::Image) -> crcbl_golde
 /// `crcbl_ui` lays out in screen pixels already, so this is the layout's own
 /// numbers — but taken as `u32`s, and asserted against the drawn image rather
 /// than trusted. `assert_menu_pixels` is what makes that not circular.
-fn panel_pixels(layout: &crcbl_render::MenuLayout) -> [u32; 4] {
+fn panel_pixels(layout: &crcbl::render::MenuLayout) -> [u32; 4] {
     let (min, max) = layout.panel();
     [min.x as u32, min.y as u32, max.x as u32, max.y as u32]
 }
@@ -206,10 +178,10 @@ fn panel_pixels(layout: &crcbl_render::MenuLayout) -> [u32; 4] {
 /// come back **pixel-for-pixel identical**. That is what "the frame does not
 /// smudge when the menu grows" means, said as bytes.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
 fn the_shared_menu_keeps_its_frame_at_two_panel_sizes_and_two_shapes() {
-    let style = crcbl_render::MenuStyle::pixel_art(MENU_SCALE);
-    let atlas = crcbl_render::FontAtlas::built_in();
+    let style = crcbl::render::MenuStyle::pixel_art(MENU_SCALE);
+    let atlas = crcbl::render::FontAtlas::built_in();
 
     let mut tall_menu = golden_pause_menu();
     tall_menu.select_next();
@@ -222,8 +194,8 @@ fn the_shared_menu_keeps_its_frame_at_two_panel_sizes_and_two_shapes() {
     // Both halves are rendered on their own ring, because a swapchain has one
     // extent and the point is that the two extents differ.
     let tall_headless = Headless::open_for_sprites_at(MENU_TALL_EXTENT);
-    let mut tall_pool = crcbl_render::TransientPool::new();
-    let mut tall_renderer = crcbl_render::MenuRenderer::new(
+    let mut tall_pool = crcbl::render::TransientPool::new();
+    let mut tall_renderer = crcbl::render::MenuRenderer::new(
         tall_headless.device.as_ref(),
         tall_headless.queue,
         tall_headless.format,
@@ -241,8 +213,8 @@ fn the_shared_menu_keeps_its_frame_at_two_panel_sizes_and_two_shapes() {
     tall_headless.finish();
 
     let wide_headless = Headless::open_for_sprites_at(MENU_WIDE_EXTENT);
-    let mut wide_pool = crcbl_render::TransientPool::new();
-    let mut wide_renderer = crcbl_render::MenuRenderer::new(
+    let mut wide_pool = crcbl::render::TransientPool::new();
+    let mut wide_renderer = crcbl::render::MenuRenderer::new(
         wide_headless.device.as_ref(),
         wide_headless.queue,
         wide_headless.format,
@@ -272,7 +244,7 @@ fn the_shared_menu_keeps_its_frame_at_two_panel_sizes_and_two_shapes() {
 /// dimmed everything outside it.
 fn assert_menu_pixels(
     image: &crcbl_golden::Image,
-    layout: &crcbl_render::MenuLayout,
+    layout: &crcbl::render::MenuLayout,
     extent: (u32, u32),
 ) {
     let [x0, y0, x1, y1] = panel_pixels(layout);
@@ -392,9 +364,9 @@ fn assert_menu_pixels(
 /// panels of very different sizes, with corner blocks that are byte-identical.
 fn assert_menu_corners_match(
     tall: &crcbl_golden::Image,
-    tall_layout: &crcbl_render::MenuLayout,
+    tall_layout: &crcbl::render::MenuLayout,
     wide: &crcbl_golden::Image,
-    wide_layout: &crcbl_render::MenuLayout,
+    wide_layout: &crcbl::render::MenuLayout,
 ) {
     let a = panel_pixels(tall_layout);
     let b = panel_pixels(wide_layout);
@@ -476,5 +448,5 @@ fn assert_menu_corners_match(
 /// deeper border moves this test with it instead of silently checking the wrong
 /// block.
 fn crcbl_ui_panel_inset() -> u32 {
-    crcbl_render::MenuStyle::pixel_art(1).panel.left as u32
+    crcbl::render::MenuStyle::pixel_art(1).panel.left as u32
 }

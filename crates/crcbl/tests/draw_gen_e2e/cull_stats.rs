@@ -3,7 +3,7 @@
 //!
 //! Every other reader of `DrawGen::visible_count` copies it back by hand,
 //! outside the frame loop, with its own barriers — see
-//! [`crate::harness::read_stats_word`]. This one reads what
+//! [`crate::mesh_scene::read_stats_word`]. This one reads what
 //! [`ForwardRenderer::counters`](crcbl::render::ForwardRenderer::counters)
 //! reports **from inside the loop**, off `crcbl::render::cull_stats`'s ring,
 //! with no fence, no `wait_idle` and no poll loop anywhere in the frame.
@@ -24,7 +24,8 @@
 //! the backend and adapter `CRCBL_GPU` and `CRCBL_ADAPTER` named — which is why
 //! the run prints the path it took rather than assuming one.
 
-use crate::harness::{Headless, mesh_camera, place, place_cube, read_stats_word, render_mesh};
+use crate::harness::Headless;
+use crate::mesh_scene::{mesh_camera, place, place_cube, read_stats_word, render_mesh};
 use crcbl::hal::Features;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{ForwardRenderer, InstanceDesc, InstanceHandle, Projection, TransientPool};

@@ -782,6 +782,27 @@ jobs:
           CRCBL_DX12_VALIDATION: '1'
         run: crates/crcbl/tests/run-forward-e2e.sh
 
+      # The sprite pass and the two generators in front of it, against the nine
+      # goldens that moved out of `crates/crcbl-vk/tests/` with the tests. Same
+      # consolidation and same migration as the three steps above —
+      # `crates/crcbl/tests/sprite_e2e/` is what `vk_e2e`'s `sprite/` subtree,
+      # `menu.rs`, `nine_slice.rs` and `button_skin.rs` became — and until this
+      # step existed D3D12 had no evidence that a single sprite quad was drawn.
+      #
+      # This backend has the most to say about the readback: it and wgpu are the
+      # two that refuse an image-to-buffer copy whose row pitch is not a multiple
+      # of 256, where Vulkan and Metal take a tightly packed row. The menu
+      # module's 416-wide framebuffers are the only frames in the suite that are
+      # not aligned by accident, so the fixture pads every row and says so with
+      # `BufferImageCopy::buffer_row_length`.
+      - name: Draw the sprite pass on WARP
+        shell: bash
+        env:
+          CRCBL_GPU: dx12
+          CRCBL_ADAPTER: cpu
+          CRCBL_DX12_VALIDATION: '1'
+        run: crates/crcbl/tests/run-sprite-e2e.sh
+
       # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
       # never run anywhere but by hand: its own header claimed
       # `run-render-e2e.sh` supplied the backend, and that script passes
@@ -996,6 +1017,20 @@ jobs:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-forward-e2e.sh
+
+      # The sprite pass, the nine-slice, the button skin and the shared menu.
+      # This is the Vulkan arm of the suite `vk_e2e`'s `sprite/` subtree,
+      # `menu.rs`, `nine_slice.rs` and `button_skin.rs` became: the same checks
+      # and the same nine goldens the step above this job's `run-vk-e2e.sh` used
+      # to make, now made from a binary that names no backend so the other three
+      # jobs make them too. The references were blessed on Vulkan, so this is the
+      # arm that would notice a change in the pass itself rather than a driver
+      # disagreement.
+      - name: Draw the sprite pass on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-sprite-e2e.sh
 
       # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
       # never run in CI at all: its own header claimed `run-render-e2e.sh`
@@ -1568,6 +1603,23 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-forward-e2e.sh
 
+      # The sprite pass on this backend, and the step that found the one real
+      # divergence this migration turned up: wgpu refuses an image-to-buffer copy
+      # whose row pitch is not a multiple of 256, and the menu module's 416-wide
+      # framebuffers are 1664 bytes a row. Every other frame in the suite is 256
+      # wide and aligned by accident, so a fixture that padded nothing was green
+      # on Vulkan and Metal and could never have been right here. The readback
+      # now pads and sets `BufferImageCopy::buffer_row_length`, which every
+      # backend takes.
+      #
+      # With that fixed, all nine goldens blessed on Vulkan matched here exactly
+      # — zero differing pixels, not merely inside `Tolerance::RASTERISER`.
+      - name: Draw the sprite pass on wgpu
+        env:
+          CRCBL_GPU: wgpu
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-sprite-e2e.sh
+
       # The physical-tiling count on this backend, the same step the other three
       # backends have. `CRCBL_VK_ICD` rather than `CRCBL_WGPU_ICD` for the
       # reason the step above it gives: the harness resolves the name with
@@ -1940,6 +1992,21 @@ jobs:
           MTL_DEBUG_LAYER_ERROR_MODE: nslog
           MTL_DEBUG_LAYER_WARNING_MODE: nslog
         run: crates/crcbl/tests/run-forward-e2e.sh
+
+      # The sprite pass on Metal. Until this step existed no Metal run had drawn
+      # a sprite quad at all: `render_e2e`'s `sprite` scene is the screenshot
+      # path's black-box golden and makes none of the placement, frame-selection,
+      # filtering or seam claims this suite does.
+      #
+      # Same validation switches as the renderer steps, for the reason argued at
+      # the ForwardRenderer one — `MTL_SHADER_VALIDATION` deliberately absent.
+      - name: Draw the sprite pass on Metal
+        env:
+          CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+        run: crates/crcbl/tests/run-sprite-e2e.sh
 
       # The physical-tiling count on Metal. It draws through `ForwardRenderer`,
       # so the same validation switches the step above sets apply here and for
