@@ -205,6 +205,20 @@ impl MetalInstance {
     /// refuses in the same voice, and so the reader can see at a glance which
     /// ones still do.
     pub(crate) fn not_yet(what: &'static str) -> HalError {
+        Self::unsupported(what)
+    }
+
+    /// The refusal for something **Metal itself** has not got, with `what`
+    /// naming the API that is missing.
+    ///
+    /// The same variant as [`not_yet`](Self::not_yet) and a different sentence,
+    /// which is the split `Device::supports` already draws for this crate: "the
+    /// byte-wide fill is the API, and no slice will change it" is not "the mesh
+    /// slice is owed". Both are [`HalError::Unsupported`] because a caller does
+    /// the same thing with either — take the fallback — and neither is
+    /// [`HalError::InvalidDescriptor`], which is reserved for a descriptor field
+    /// the caller can correct.
+    pub(crate) fn unsupported(what: &'static str) -> HalError {
         HalError::Unsupported {
             backend: BackendKind::Metal,
             what,

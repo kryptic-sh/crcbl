@@ -45,12 +45,31 @@
 //!
 //! # WebGPU has no semaphores at all
 //!
-//! WebGPU serialises queue submission and inserts hazard barriers itself. A
-//! backend on it therefore implements every type in this module as a no-op:
-//! waits are satisfied trivially, signals are recorded, and
-//! [`Device::wait_semaphores`](crate::Device::wait_semaphores) resolves against
-//! `onSubmittedWorkDone`. The renderer's submit code is identical either way
-//! because the *shape* is the same; only the cost differs.
+//! WebGPU expresses cross-submit ordering **implicitly**: one queue, command
+//! buffers executed in submission order, and hazards between them tracked by the
+//! browser. There is no object to signal and nothing to wait on, and the only
+//! completion signal it offers — `GPUQueue.onSubmittedWorkDone()` — resolves for
+//! *everything* submitted so far and carries no value, so it cannot answer "has
+//! the timeline reached N".
+//!
+//! A backend on it therefore **refuses** the timeline half rather than
+//! implementing it as a no-op: [`Device::create_semaphore`](crate::Device::create_semaphore)
+//! answers [`HalError::Unsupported`](crate::HalError::Unsupported) for
+//! [`SemaphoreKind::Timeline`], and so do
+//! [`Device::semaphore_value`](crate::Device::semaphore_value) and
+//! [`Device::wait_semaphores`](crate::Device::wait_semaphores). The
+//! [`SemaphoreKind::Binary`] half is still handed out, because WSI acquire is
+//! where binary semaphores come from and every device must have one to give.
+//!
+//! **A no-op that returns `Ok` is the wrong shape here**, and `crcbl-webgpu`
+//! shipped it: a caller got a handle, polled its value, and read `0` for ever
+//! with nothing in any return code to say why. The engine is unaffected either
+//! way — `crcbl::engine`'s `GpuContext` and `crcbl_render::MeshPool` both check
+//! [`Features::TIMELINE_SEMAPHORE`](crate::Features::TIMELINE_SEMAPHORE) before
+//! creating one and take their documented `wait_idle` fallback when it is
+//! absent, which it always is on a browser — so refusing costs nothing and buys
+//! a caller that does *not* check the flag an immediate answer instead of a
+//! silent one.
 
 use crcbl_core::Handle;
 

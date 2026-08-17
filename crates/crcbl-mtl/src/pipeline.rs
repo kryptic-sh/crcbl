@@ -43,7 +43,11 @@
 //! error: [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) is
 //! absent from this backend's caps, and `crcbl_hal::pipeline` requires a
 //! backend without it to fail **at layout creation** rather than dropping every
-//! `push_constants` call silently.
+//! `push_constants` call silently. The error is
+//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported): no range of any
+//! size would be accepted here, so this is
+//! [`Capability::PushConstants`](crcbl_hal::Capability::PushConstants) answered,
+//! not a field the caller could correct.
 //!
 //! # Metal splits pipeline state in two, so a pipeline entry carries both
 //!
@@ -269,17 +273,24 @@ impl MetalDevice {
         &self,
         desc: &PipelineLayoutDesc<'_>,
     ) -> Result<PipelineLayoutHandle, HalError> {
-        if let Some(range) = desc.push_constants {
+        if desc.push_constants.is_some() {
             // `crcbl_hal::pipeline` requires this to fail here rather than at
             // the `push_constants` call, so a caller learns at start-up instead
             // of watching every draw read stale constants.
-            return Err(HalError::InvalidDescriptor(format!(
-                "a push-constant range of {} bytes needs Features::PUSH_CONSTANTS, which this \
-                 device does not report: `setVertexBytes:length:atIndex:` is Metal's closest fit, \
-                 and the committed MSL puts its push-constant block at buffer(0) — ahead of every \
-                 bound buffer, which no flattening of this descriptor can reproduce",
-                range.size
-            )));
+            //
+            // **`Unsupported`, not `InvalidDescriptor`.** The range is not
+            // malformed — no size would be accepted, because this backend
+            // reports `Features::PUSH_CONSTANTS` on no device — so this answers
+            // `Capability::PushConstants`, and the variant is the one a caller
+            // matches on to reach for the dynamic-offset uniform buffer the seam
+            // names as the substitute. `crcbl-wgpu` already refuses the same
+            // field the same way at the same point.
+            return Err(crate::MetalInstance::unsupported(
+                "a push-constant range, on a backend that reports Features::PUSH_CONSTANTS on no \
+                 device: `setVertexBytes:length:atIndex:` is Metal's closest fit, and the \
+                 committed MSL puts its push-constant block at buffer(0) — ahead of every bound \
+                 buffer, which no flattening of this descriptor can reproduce",
+            ));
         }
         let ceiling = self.inner.caps.limits.max_bind_groups as usize;
         if desc.bind_group_layouts.len() > ceiling {

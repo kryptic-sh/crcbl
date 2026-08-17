@@ -924,6 +924,98 @@ fn needed_but_unwired_device_methods_refuse_loudly() {
     );
 }
 
+// ── semaphores: the timeline half refuses, the binary half does not ────────
+
+/// **A semaphore call that cannot do anything must not report that it did.**
+///
+/// The three timeline entry points used to answer `Ok`: `create_semaphore`
+/// handed out a pool slot, `semaphore_value` answered `0` for ever, and
+/// `wait_semaphores` answered `Ok(true)` for a wait it never evaluated. A caller
+/// polling for progress therefore saw success and no movement, with nothing in
+/// any return value to say why — which is the one failure a caller cannot
+/// detect, and the reason
+/// [`Capability::TimelineSemaphore`](crcbl_hal::Capability::TimelineSemaphore)
+/// declares the *behaviour* rather than the return code.
+///
+/// **What turns it red.** Any of the three going back to `Ok`. Refusing the
+/// binary kind as well — WSI acquire is where binary semaphores come from and
+/// `crcbl_hal::sync` requires every device to hand one out, so a backend that
+/// refused both would satisfy every assertion about the timeline half and still
+/// be wrong. And the declarations drifting from the calls: `supports` is checked
+/// against the same three here, because a declaration nobody compares to
+/// behaviour is what this whole enum exists to stop.
+#[test]
+fn the_timeline_semaphore_calls_refuse_instead_of_succeeding_at_nothing() {
+    use crcbl_hal::{Capability, SemaphoreDesc, SemaphoreKind, SemaphoreWait, Support};
+
+    let (_channel, device) = device_on_fresh_channel();
+
+    let timeline = device.create_semaphore(&SemaphoreDesc {
+        label: Some("frames in flight"),
+        kind: SemaphoreKind::Timeline { initial_value: 0 },
+    });
+    assert!(
+        matches!(
+            timeline,
+            Err(HalError::Unsupported {
+                backend: BackendKind::WebGpu,
+                ..
+            })
+        ),
+        "a timeline this backend cannot advance must be refused, not handed out: {timeline:?}"
+    );
+
+    // The binary kind still works, and is what the seam requires every device to
+    // give. It is also what makes the assertion above about the *kind* rather
+    // than about `create_semaphore` refusing everything.
+    let binary = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("acquire"),
+            kind: SemaphoreKind::Binary,
+        })
+        .expect("WSI acquire needs a binary semaphore on every device");
+
+    let value = device.semaphore_value(binary);
+    assert!(
+        matches!(value, Err(HalError::Unsupported { .. })),
+        "every semaphore here is binary and has no counter; 0 forever is the answer this \
+         refusal replaced: {value:?}"
+    );
+    let waited = device.wait_semaphores(
+        &[SemaphoreWait {
+            semaphore: binary,
+            value: 1,
+        }],
+        0,
+    );
+    assert!(
+        matches!(waited, Err(HalError::Unsupported { .. })),
+        "there is no timeline to block on, so Ok(true) would be claiming a wait was satisfied \
+         that was never evaluated: {waited:?}"
+    );
+    device.destroy_semaphore(binary);
+
+    // And the declarations say the same thing the calls do. The fixture's device
+    // reports no TIMELINE_SEMAPHORE, exactly as a browser's does.
+    assert!(
+        !device
+            .caps()
+            .features
+            .contains(Features::TIMELINE_SEMAPHORE)
+    );
+    for capability in [
+        Capability::TimelineSemaphore,
+        Capability::CpuTimelineWait,
+        Capability::TimelineWaitBeforeSignal,
+    ] {
+        assert!(
+            matches!(device.supports(capability), Support::No(_)),
+            "{capability} is refused at the call site and must be declared refused too"
+        );
+    }
+    assert_eq!(device.supports(Capability::BinarySemaphore), Support::Yes);
+}
+
 /// A mesh-pipeline descriptor shaped only enough to be refused before anything
 /// reads its stages.
 fn mesh_pipeline_desc() -> crcbl_hal::MeshPipelineDesc<'static> {

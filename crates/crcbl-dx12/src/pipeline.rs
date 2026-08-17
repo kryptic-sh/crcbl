@@ -80,6 +80,14 @@
 //! know which root parameter slot the committed artifacts put one at, which is
 //! the same gap `crcbl-mtl` names for `setVertexBytes:`.
 //!
+//! The refusal is [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported),
+//! through [`crate::instance::not_yet`] like every other slice this backend
+//! still owes. It answers
+//! [`Capability::PushConstants`](crcbl_hal::Capability::PushConstants) — no
+//! range of any size is acceptable — so a caller can match on the variant and
+//! reach for the seam's dynamic-offset uniform buffer instead of reading a
+//! descriptor error and looking for a field to fix.
+//!
 //! # D3D12 keeps almost all of the pipeline in the object, and one thing outside
 //!
 //! [`GraphicsPipelineDesc`](crcbl_hal::GraphicsPipelineDesc) is Vulkan-shaped
@@ -238,27 +246,35 @@ struct RootSignaturePlan {
 ///
 /// # Errors
 ///
-/// [`HalError::InvalidDescriptor`] for a push-constant range (see the module
-/// docs), more sets than
+/// [`HalError::Unsupported`] for a push-constant range (see the module docs).
+/// [`HalError::InvalidDescriptor`] for more sets than
 /// [`Limits::max_bind_groups`](crcbl_hal::Limits::max_bind_groups), or a
 /// signature costing more root DWORDs than D3D12 holds — see
 /// [`root::place`] — and [`HalError::Backend`] when D3D12 refuses to serialise
 /// or create the signature, carrying the serialiser's own error blob, which is
 /// the only text that says *which* parameter it objected to.
+///
+/// The push-constant range is the one that is **not** an `InvalidDescriptor`,
+/// and the two above it are why the distinction is worth keeping: a set count or
+/// a DWORD budget is a number the caller can lower and retry, and no
+/// push-constant range of any size is acceptable here.
 pub(crate) fn layout(
     device: &ID3D12Device,
     desc: &PipelineLayoutDesc<'_>,
     sets: &[(crcbl_hal::BindGroupLayoutHandle, SetTables)],
     owner: u64,
 ) -> Result<PipelineLayoutEntry, HalError> {
-    if let Some(range) = desc.push_constants {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a push-constant range of {} bytes needs Features::PUSH_CONSTANTS, which this device \
-             does not report: D3D12's root constants are the equivalent, and nothing here knows \
-             which root parameter slot the committed DXIL puts one at (the DX12 root-constant \
-             slice)",
-            range.size
-        )));
+    if desc.push_constants.is_some() {
+        // `Unsupported`, because this answers `Capability::PushConstants`
+        // rather than describing a malformed field: `crcbl_dx12::adapter`
+        // reports `Features::PUSH_CONSTANTS` on no device, so the variant is
+        // what lets a caller branch to the seam's dynamic-offset substitute.
+        // `crcbl-wgpu` refuses the same field the same way at the same point.
+        return Err(crate::instance::not_yet(
+            "a push-constant range, on a backend that reports Features::PUSH_CONSTANTS on no \
+             device: D3D12's root constants are the equivalent, and nothing here knows which root \
+             parameter slot the committed DXIL puts one at (the DX12 root-constant slice)",
+        ));
     }
     let plan = plan_root(sets)?;
     let signature = D3D12_ROOT_SIGNATURE_DESC {

@@ -827,9 +827,12 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::TimelineSemaphore,
         backend: BackendKind::WebGpu,
-        why: "WebGPU has no semaphores; create_semaphore hands out a handle and semaphore_value \
-              always answers 0, so the counter a caller would observe never advances. The return \
-              codes are Ok and the behaviour is absent, which is exactly the shape this enum \
+        why: "WebGPU has no semaphores. It orders submissions implicitly — one queue, executed in \
+              order, hazards tracked by the browser — and its only completion signal, \
+              GPUQueue.onSubmittedWorkDone(), resolves for everything submitted so far and \
+              carries no value, so nothing there could drive a counter. create_semaphore refuses \
+              SemaphoreKind::Timeline; it used to hand out a handle whose semaphore_value \
+              answered 0 for ever, which is the succeed-while-doing-nothing shape this enum \
               exists to make visible",
     },
     Divergence {
@@ -843,6 +846,14 @@ pub const DIVERGENCES: &[Divergence] = &[
         backend: BackendKind::Dx12,
         why: "there is no semaphore to wait on; see the TimelineSemaphore entry (the DX12 command \
               slice)",
+    },
+    Divergence {
+        capability: Capability::CpuTimelineWait,
+        backend: BackendKind::WebGpu,
+        why: "create_semaphore refuses the timeline kind, so there is no counter for a CPU wait to \
+              read; the binary semaphore this backend does hand out is GPU-waitable only. \
+              wait_semaphores refuses rather than answering Ok(true) for a wait it never \
+              evaluated — see the TimelineSemaphore entry",
     },
     Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
@@ -861,6 +872,12 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::TimelineWaitBeforeSignal,
         backend: BackendKind::Dx12,
         why: "there is no semaphore to wait on at all; see the TimelineSemaphore entry",
+    },
+    Divergence {
+        capability: Capability::TimelineWaitBeforeSignal,
+        backend: BackendKind::WebGpu,
+        why: "a wait of any kind is refused here, so a wait on a value nothing has signalled is \
+              refused with the rest; see the CpuTimelineWait entry",
     },
 ];
 

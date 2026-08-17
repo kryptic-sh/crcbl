@@ -2296,19 +2296,28 @@ fn every_declared_capability_behaves_the_way_it_was_declared() {
             )),
         }
 
-        // A refusal must be nameable by a caller. `InvalidHandle` or a lost
-        // device would mean this exercise broke rather than the backend refused,
-        // which would make every `No` above pass for the wrong reason.
+        // **A capability refusal is `HalError::Unsupported` and nothing else.**
+        // That is the variant a caller matches on to choose a fallback path, so
+        // a backend answering `InvalidDescriptor` — "your descriptor is wrong",
+        // which sends a caller looking for a field to correct — is invisible to
+        // exactly the branch the variant exists for. This accepted either while
+        // `crcbl-mtl` and `crcbl-dx12` still did that; both now refuse by
+        // capability, so the looser arm would only let it come back.
+        //
+        // `InvalidDescriptor` is still right elsewhere, and the exercises are
+        // written so it cannot arrive here: `exercise_fill` fills a range inside
+        // a buffer it just created, so a refusal is about the *value*. An
+        // `InvalidHandle` or a lost device means this exercise broke rather than
+        // the backend refused, which would make every `No` above pass for the
+        // wrong reason.
         if let Exercise::Refused(error) = &outcome {
             assert!(
-                matches!(
-                    error,
-                    HalError::Unsupported { .. } | HalError::InvalidDescriptor(_)
-                ),
-                "{capability}: {backend} refused with {error}, which is neither the \
-                 HalError::Unsupported the seam documents for \"this backend cannot\" nor the \
-                 InvalidDescriptor some backends still use for it. An InvalidHandle or a lost \
-                 device here means this exercise is broken, not the backend."
+                matches!(error, HalError::Unsupported { .. }),
+                "{capability}: {backend} refused with {error}, which is not the \
+                 HalError::Unsupported the seam documents for \"this backend cannot\". A caller \
+                 branching on that variant to pick a fallback would miss this refusal entirely — \
+                 and an InvalidHandle or a lost device here means this exercise is broken, not \
+                 the backend."
             );
         }
     }

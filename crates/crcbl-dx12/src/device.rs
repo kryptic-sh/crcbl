@@ -6124,6 +6124,26 @@ pub(crate) mod tests {
                     )
                     .expect_err("no fence a caller can hold yet"),
             ),
+            // The seam requires this refusal at *layout creation* rather than at
+            // the `push_constants` call, and it is the one refusal in this list
+            // that used to answer `InvalidDescriptor` — which would have sent a
+            // caller looking for a field to correct instead of at the
+            // dynamic-offset substitute `crcbl_hal::pipeline` names. The
+            // assertions below are what hold it to the variant.
+            (
+                "push-constant ranges",
+                device
+                    .create_pipeline_layout(&PipelineLayoutDesc {
+                        label: None,
+                        bind_group_layouts: &[],
+                        push_constants: Some(crcbl_hal::PushConstantRange {
+                            stages: ShaderStages::ALL,
+                            offset: 0,
+                            size: 64,
+                        }),
+                    })
+                    .expect_err("this backend reports Features::PUSH_CONSTANTS on no device"),
+            ),
         ];
         assert!(!refusals.is_empty(), "nothing to check");
         for (what, error) in &refusals {

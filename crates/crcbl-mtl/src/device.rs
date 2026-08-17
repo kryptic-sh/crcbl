@@ -987,6 +987,13 @@ fn not_yet(what: &'static str) -> HalError {
     crate::MetalInstance::not_yet(what)
 }
 
+/// The "Metal itself has not got this" answer — same variant as
+/// [`not_yet`], different sentence. See
+/// [`MetalInstance::unsupported`](crate::MetalInstance::unsupported).
+fn unsupported(what: &'static str) -> HalError {
+    crate::MetalInstance::unsupported(what)
+}
+
 /// Saturating `u64` → `NSUInteger`, for a length already bounds-checked against
 /// a device limit.
 pub(crate) fn to_ns(value: u64) -> NSUInteger {
@@ -2096,9 +2103,14 @@ impl Device for MetalDevice {
     /// signal, so there is nowhere else the value could come from. Metal reports
     /// nothing for that — the queue simply stops, with the process alive and no
     /// log line anywhere — so the check is made here and turns a silent hang
-    /// into an [`HalError::InvalidDescriptor`]. The seam's own use satisfies it
-    /// by construction: a frames-in-flight timeline waits on the value the
-    /// *previous* frame signalled.
+    /// into an [`HalError::Unsupported`]. That variant rather than
+    /// [`HalError::InvalidDescriptor`]: the wait is well-formed and `crcbl-vk`
+    /// performs it, so what is missing is the capability
+    /// ([`Capability::TimelineWaitBeforeSignal`](crcbl_hal::Capability::TimelineWaitBeforeSignal),
+    /// on the reviewed divergence list for this backend) rather than a field the
+    /// caller got wrong. The seam's own use satisfies it by construction: a
+    /// frames-in-flight timeline waits on the value the *previous* frame
+    /// signalled.
     ///
     /// # Timeline values may not go backwards
     ///
@@ -2168,13 +2180,20 @@ impl Device for MetalDevice {
                 // queue simply stops, with the process alive and nothing in any
                 // log. Vulkan behaves the same way for the same reason; the
                 // difference is only that this one can be caught.
+                //
+                // **`Unsupported`, not `InvalidDescriptor`.** The wait is
+                // well-formed and `crcbl-vk` performs it; what is absent is
+                // anywhere for the signal to come from, which is exactly
+                // `Capability::TimelineWaitBeforeSignal` and is on the reviewed
+                // divergence list for this backend. A caller matching on the
+                // variant can split its submission in two; one reading "your
+                // descriptor is wrong" would go looking for a typo.
                 if wait.value > entry.encoded {
-                    return Err(HalError::InvalidDescriptor(format!(
-                        "waiting for timeline value {} when nothing has yet encoded a signal past \
-                         {}: on a single queue only an earlier submission can satisfy it, so this \
+                    return Err(unsupported(
+                        "a wait for a timeline value nothing submitted has encoded a signal past: \
+                         on a single queue only an earlier submission can satisfy it, so this \
                          would stop the queue rather than wait",
-                        wait.value, entry.encoded
-                    )));
+                    ));
                 }
                 wait.value
             } else {
@@ -3621,11 +3640,16 @@ using namespace metal;\n\
     ///
     /// **What turns it red.** Accepting a push-constant range — the seam
     /// requires the failure *here* rather than at the `push_constants` call, and
-    /// this backend reports no [`Features::PUSH_CONSTANTS`]. Accepting a
-    /// non-empty bind-group list — nothing could satisfy it, since
-    /// `create_bind_group_layout` still refuses, so the handle would name
-    /// nothing. Collapsing the two onto one error — the two `matches!` demand
-    /// different variants.
+    /// this backend reports no [`Features::PUSH_CONSTANTS`]. Refusing it as
+    /// anything but [`HalError::Unsupported`]: no range of any size is
+    /// acceptable here, so this is
+    /// [`Capability::PushConstants`](crcbl_hal::Capability::PushConstants)
+    /// answered and a caller must be able to branch on the variant to reach for
+    /// the seam's dynamic-offset substitute. Accepting a non-empty bind-group
+    /// list — nothing could satisfy it, since the handle names nothing.
+    /// Collapsing the two onto one error — the two `matches!` demand different
+    /// variants, and that contrast is the point: "this backend cannot" and "you
+    /// handed me a dead handle" send a caller to different places.
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_pipeline_layout_is_empty_or_refused_by_cause() {
@@ -3649,10 +3673,14 @@ using namespace metal;\n\
                 }),
             })
             .expect_err("this device reports no PUSH_CONSTANTS");
-        let HalError::InvalidDescriptor(text) = error else {
-            panic!("a feature this device lacks is a descriptor error, got {error:?}");
+        let HalError::Unsupported { backend, what } = error else {
+            panic!(
+                "a capability this backend has on no device is HalError::Unsupported, which is \
+                 what a caller matches on to take the dynamic-offset substitute; got {error:?}"
+            );
         };
-        assert!(text.contains("PUSH_CONSTANTS"), "{text}");
+        assert_eq!(backend, BackendKind::Metal);
+        assert!(what.contains("PUSH_CONSTANTS"), "{what}");
 
         // Until the binding slice this was `Unsupported`, because no bind group
         // layout could exist at all. Now that they are real, a hand-made handle
@@ -4003,7 +4031,10 @@ using namespace metal;\n\
     /// the copy's completion point unreachable and `drain` hits its deadline.
     /// Dropping the guard makes the first half return `Ok` — and, run for real
     /// in that shape, would stop the queue, which is what the guard exists to
-    /// prevent.
+    /// prevent. Refusing it as anything but [`HalError::Unsupported`] turns it
+    /// red too: that variant is the one a caller branches on, and
+    /// [`Capability::TimelineWaitBeforeSignal`](crcbl_hal::Capability::TimelineWaitBeforeSignal)
+    /// is what the refusal answers.
     ///
     /// It deliberately does **not** claim to prove the wait *gated* anything.
     /// Proving that needs an observation taken between two submissions, and
@@ -4037,7 +4068,14 @@ using namespace metal;\n\
                 },
             )
             .expect_err("nothing can ever satisfy that wait");
-        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        // `Unsupported`, because the wait is well-formed — `crcbl-vk` performs
+        // exactly this one — and what is absent is the capability. A caller
+        // matching on the variant can split its submission in two; one told its
+        // descriptor was invalid would go looking for a typo.
+        assert!(
+            matches!(&error, HalError::Unsupported { backend, .. } if *backend == BackendKind::Metal),
+            "{error:?}"
+        );
 
         let source = [0xDEu8, 0xAD, 0xBE, 0xEF];
         let upload = device

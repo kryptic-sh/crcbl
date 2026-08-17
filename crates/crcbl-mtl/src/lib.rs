@@ -68,14 +68,37 @@
 //! fails there rather than launching the wrong thread count here.
 //!
 //! What is still refused, with `what` naming what is missing: **query sets**,
-//! **push constants** and **indirect-count draws**. The last is not simply
-//! unwritten: an indirect-count draw needs an `MTLIndirectCommandBuffer` filled
-//! by a compute pass that would have to run before the render encoder the call
-//! happens inside. See `crcbl_mtl::command`'s `indirect_count`.
+//! **push constants**, **indirect-count draws**, a **word-wide buffer fill**, a
+//! **variable-count bind group** and a **wait for a timeline value nothing has
+//! signalled**. The indirect count is not simply unwritten: it needs an
+//! `MTLIndirectCommandBuffer` filled by a compute pass that would have to run
+//! before the render encoder the call happens inside. See
+//! `crcbl_mtl::command`'s `indirect_count`.
 //!
 //! Nothing in this crate is a stub that reports success — a refused command
 //! recorded into an encoder *fails the encoder*, so `finish` hands back the
 //! refusal rather than a command buffer that submits and does nothing.
+//!
+//! # Which refusal a caller gets, and why the split is worth having
+//!
+//! Every one of the refusals above is
+//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported), and the rule is
+//! the one [`Capability`](crcbl_hal::Capability) draws: this variant means **the
+//! operation is real and this backend cannot perform it**, whether because Metal
+//! has not got it (the byte-wide fill) or because a slice here has not built it
+//! (mesh pipelines). Both send a caller to the same place — take the fallback —
+//! which is why they share a variant, and
+//! `crcbl_mtl::instance::MetalInstance::unsupported` and `…::not_yet` are the
+//! two sentences that say which.
+//!
+//! What is deliberately **not** folded in is anything a caller can correct:
+//! a stale handle is [`InvalidHandle`](crcbl_hal::HalError::InvalidHandle), one
+//! from another device is [`ForeignObject`](crcbl_hal::HalError::ForeignObject),
+//! and a descriptor field that is out of range or self-inconsistent is
+//! [`InvalidDescriptor`](crcbl_hal::HalError::InvalidDescriptor) naming the
+//! field. A fill whose range runs past the buffer is the caller's arithmetic; a
+//! fill whose *value* has no Metal encoding is Metal's limit. Same call, two
+//! variants, and that is the distinction rather than an inconsistency.
 //!
 //! # Barriers are encoder boundaries, not calls
 //!

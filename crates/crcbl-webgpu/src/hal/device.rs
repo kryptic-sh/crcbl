@@ -10,12 +10,19 @@
 //!   `present`, `acquire_next_frame` and readback are here.
 //! * **Legitimately refused** — WebGPU cannot do it and never will, so refusing
 //!   is correct rather than a gap. `create_mesh_pipeline` (no mesh stage), and
-//!   the semaphore calls, which are no-ops because WebGPU auto-synchronises.
+//!   the timeline half of the semaphore calls: WebGPU orders submissions
+//!   implicitly and has no counter anything could observe.
 //! * **Loudly unsupported** — the stream has no command for it *yet*, so a
 //!   `Result`-returning method returns [`HalError::Unsupported`] naming the gap
 //!   rather than a silent success a caller would mistake for a working device.
 //!   `update_bind_group` and the query methods are here; a later slice wires
 //!   them.
+//!
+//! The first two kinds return the **same variant**, and deliberately: a caller
+//! does the same thing with either, and the sentence in `what` is what says
+//! which. What none of them is any longer is a silent `Ok` — `create_semaphore`,
+//! `semaphore_value` and `wait_semaphores` used to succeed while doing nothing,
+//! which is the one shape a caller cannot detect at all.
 //!
 //! A wired method may still refuse a descriptor the stream cannot carry — see
 //! the `super::bounds` module for which fields are measured, and why the refusal
@@ -33,8 +40,8 @@ use crcbl_hal::{
     ImageViewHandle, MeshPipelineDesc, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle,
     PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
     ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
-    SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support, SurfaceError,
-    SwapchainDesc, SwapchainHandle,
+    SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support,
+    SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -310,11 +317,17 @@ impl Device for WebGpuDevice {
     /// **The answer is about behaviour, not about return codes**, and on this
     /// backend the two come apart more than anywhere else: a command crosses the
     /// stream and the browser executes it a turn later, so a method can return
-    /// `Ok` here and be refused there. The semaphores are the clearest case —
-    /// [`create_semaphore`](Self::create_semaphore) hands out a handle and
-    /// [`semaphore_value`](Self::semaphore_value) answers `0` forever, so a
-    /// caller watching a counter advance never sees one, whatever the `Result`
-    /// said. This method reports the behaviour.
+    /// `Ok` here and be refused there. [`StencilReference`](Capability::StencilReference)
+    /// is the shape — the call encodes, and no command in the stream carries it.
+    /// This method reports the behaviour.
+    ///
+    /// The semaphores used to be the clearest case and are no longer one:
+    /// [`create_semaphore`](Self::create_semaphore) handed out a handle whose
+    /// [`semaphore_value`](Self::semaphore_value) answered `0` for ever, so a
+    /// caller watching a counter advance never saw one whatever the `Result`
+    /// said. Those three now refuse, so the declarations below and the return
+    /// codes agree — a declaration is what a caller *reads*, and it was never
+    /// going to stop one that did not.
     ///
     /// A consequence worth stating: several refusals below are *declarations*
     /// this crate cannot demonstrate, because the seam suite is a native binary
@@ -333,6 +346,13 @@ impl Device for WebGpuDevice {
              wrong bytes";
         const NO_MESH: &str = "WebGPU has no mesh stage";
         const NOT_STREAMED: &str = "not yet wired into the WebGPU command stream";
+        // One sentence for the three, because they are one obstacle: there is no
+        // semaphore object, so there is nothing to signal, read or wait on.
+        const NO_TIMELINE: &str = "WebGPU has no semaphores. It orders submissions implicitly and its only completion \
+             signal, GPUQueue.onSubmittedWorkDone(), resolves for everything submitted so far and \
+             carries no value — so nothing here could advance a counter, and create_semaphore, \
+             semaphore_value and wait_semaphores all refuse rather than succeed while doing \
+             nothing";
 
         match capability {
             Capability::BufferFillZero => Support::Yes,
@@ -381,19 +401,23 @@ impl Device for WebGpuDevice {
             Capability::TimestampQuery
             | Capability::OcclusionQuery
             | Capability::PipelineStatisticsQuery => Support::No(NOT_STREAMED),
-            Capability::TimelineSemaphore => Support::No(
-                "WebGPU has no semaphores; create_semaphore hands out a handle and \
-                 semaphore_value always answers 0, so the counter never advances however the \
-                 calls succeed",
-            ),
-            // WebGPU serialises queue submission and inserts its own hazard
-            // barriers, so a wait is satisfied by the time anything can ask —
-            // which is the answer `crcbl_hal::sync` prescribes for this
-            // backend, and it holds for a value nothing has signalled yet for
-            // the same reason.
-            Capability::BinarySemaphore
+            // WebGPU has no semaphore of any kind. It orders submissions
+            // implicitly — one queue, executed in order, hazards tracked by the
+            // browser — and its only completion signal is
+            // `GPUQueue.onSubmittedWorkDone()`, which resolves for everything
+            // submitted so far and carries no value. So there is no counter to
+            // advance, none to read, and nothing for a CPU wait to block on;
+            // `create_semaphore` refuses the timeline kind and the other two
+            // follow from that.
+            Capability::TimelineSemaphore
             | Capability::CpuTimelineWait
-            | Capability::TimelineWaitBeforeSignal => Support::Yes,
+            | Capability::TimelineWaitBeforeSignal => Support::No(NO_TIMELINE),
+            // The one that stays. `crcbl_hal::sync` requires every device to
+            // hand out a binary semaphore because WSI acquire is where they come
+            // from — and `acquire_next_frame` here answers `None` for both, so
+            // nothing observes it. A handle is the honest answer: it is created
+            // and destroyed, and no claim about a value is made about it.
+            Capability::BinarySemaphore => Support::Yes,
         }
     }
 
@@ -748,32 +772,85 @@ impl Device for WebGpuDevice {
 
     // --- synchronisation ---
 
-    fn create_semaphore(&self, _desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
-        // WebGPU auto-synchronises submissions, so it has no semaphores. A dummy
-        // handle keeps a caller's book-keeping consistent — it is created,
-        // waited on and destroyed like any other, and every one of those is a
-        // no-op — rather than refusing a primitive the engine's own headless
-        // descriptor asks for. Correct, and documented as such.
-        Ok(self.pool.alloc())
+    /// Hands out a **binary** semaphore and refuses a **timeline** one.
+    ///
+    /// The two kinds get different answers because the seam asks different
+    /// things of them, and only one of the two is a question WebGPU can answer:
+    ///
+    /// * A [`SemaphoreKind::Timeline`] is a counter a caller *observes*. WebGPU
+    ///   expresses cross-submit ordering implicitly — one queue, submissions
+    ///   executed in order, hazards tracked by the browser — and its only
+    ///   completion signal is `GPUQueue.onSubmittedWorkDone()`, which resolves
+    ///   for everything submitted so far and carries no value to compare a wait
+    ///   against. So there is nothing here to advance a counter, which is what
+    ///   [`Capability::TimelineSemaphore`] names. Refusing is also what
+    ///   [`Device::create_semaphore`] already documents for a device without
+    ///   [`Features::TIMELINE_SEMAPHORE`], and this backend never reports that
+    ///   flag: no `GPUFeatureName` satisfies it, so `requestDevice` refuses the
+    ///   engine's default descriptor by name rather than granting it — see
+    ///   [`crate::device`].
+    /// * A [`SemaphoreKind::Binary`] is the *swapchain's*, not a caller's, and
+    ///   [`crcbl_hal::sync`] requires every device to hand one out because WSI
+    ///   acquire is where they come from. [`acquire_next_frame`] here answers
+    ///   `None` for both of its semaphores, so nothing ever observes this one;
+    ///   the handle costs a pool slot and keeps a caller's book-keeping uniform.
+    ///
+    /// **Why this is not `Ok` for both.** It was, and the handle it returned was
+    /// a counter [`semaphore_value`] answered `0` for ever: a caller polling for
+    /// progress saw success and no movement, with nothing in any return code to
+    /// say why. The replayer already refuses a submit-level wait or signal by
+    /// name rather than dropping it — see [`Command::Submit`] — and this is that
+    /// same judgement one layer up, where a caller finds out before it submits
+    /// instead of a frame later on the error queue.
+    ///
+    /// [`acquire_next_frame`]: Self::acquire_next_frame
+    /// [`semaphore_value`]: Self::semaphore_value
+    /// [`Command::Submit`]: crate::Command::Submit
+    fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
+        match desc.kind {
+            SemaphoreKind::Binary => Ok(self.pool.alloc()),
+            SemaphoreKind::Timeline { .. } => Err(HalError::Unsupported {
+                backend: BackendKind::WebGpu,
+                what: "timeline semaphores: WebGPU orders submissions implicitly and its only \
+                       completion signal, onSubmittedWorkDone, carries no value to observe",
+            }),
+        }
     }
 
     fn destroy_semaphore(&self, _semaphore: SemaphoreHandle) {
-        // No-op: WebGPU has no semaphore to destroy.
+        // No-op: the binary semaphore `create_semaphore` hands out is a pool
+        // slot and nothing else, and no timeline was ever created.
     }
 
+    /// Refuses: every semaphore this backend hands out is binary.
+    ///
+    /// [`Device::semaphore_value`] documents [`HalError::Unsupported`] for a
+    /// binary semaphore, which has no value to read — and `create_semaphore`
+    /// here refuses the only kind that would have one.
     fn semaphore_value(&self, _semaphore: SemaphoreHandle) -> Result<u64, HalError> {
-        // No-op: there is no timeline behind a WebGPU semaphore, so nothing has
-        // advanced. Zero is the value a freshly created timeline reports.
-        Ok(0)
+        Err(HalError::Unsupported {
+            backend: BackendKind::WebGpu,
+            what: "semaphore_value: every semaphore on this backend is binary, and WebGPU has no \
+                   counter behind one",
+        })
     }
 
+    /// Refuses: there is no timeline on this backend to block on.
+    ///
+    /// A CPU wait needs a [`SemaphoreKind::Timeline`], `create_semaphore` hands
+    /// out none, and the binary kind the seam does require is GPU-waitable only.
+    /// `Ok(true)` stood here and meant "already satisfied", which was true of
+    /// nothing — there was no counter to compare a value against.
     fn wait_semaphores(
         &self,
         _waits: &[SemaphoreWait],
         _timeout_ns: u64,
     ) -> Result<bool, HalError> {
-        // No-op: WebGPU auto-synchronises, so every wait is already satisfied.
-        Ok(true)
+        Err(HalError::Unsupported {
+            backend: BackendKind::WebGpu,
+            what: "wait_semaphores: WebGPU has no timeline to block on; submissions are ordered \
+                   and hazard-tracked by the browser",
+        })
     }
 
     fn wait_idle(&self) -> Result<(), HalError> {

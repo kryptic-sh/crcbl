@@ -695,14 +695,31 @@ impl CommandEncoder for MetalCommandEncoder {
     /// leaving a caller to find out from a corrupt indirect count. Every value
     /// the seam's own reason for existing needs — "the idiomatic way to zero an
     /// indirect count buffer" — is a repeated byte, and `0` most of all.
+    ///
+    /// # Which refusal, and why they differ
+    ///
+    /// The two failures below are the two halves of the seam's own split, and
+    /// they are deliberately different variants:
+    ///
+    /// * A word whose bytes differ is
+    ///   [`Capability::BufferFillWord`](crcbl_hal::Capability::BufferFillWord) —
+    ///   a thing Metal's API has not got, on every device — so it is
+    ///   [`HalError::Unsupported`], which is the variant a caller matches on to
+    ///   take the clear-dispatch fallback `crcbl-render` already has.
+    /// * A range running past the end of the buffer is the caller's arithmetic,
+    ///   so it stays [`HalError::InvalidDescriptor`] naming the range: no
+    ///   fallback would help, and the same call with a smaller `size` works.
     fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
         let bytes = value.to_ne_bytes();
         if bytes.iter().any(|byte| *byte != bytes[0]) {
-            self.fail(HalError::InvalidDescriptor(format!(
-                "fill_buffer cannot write {value:#010x} on Metal: \
+            // The word itself cannot ride along: `Unsupported::what` is
+            // `&'static str` by design. `fail` logs the error, and the value is
+            // the caller's own, so what is worth carrying is the obstacle.
+            self.fail(crate::MetalInstance::unsupported(
+                "fill_buffer with a u32 whose four bytes differ: \
                  MTLBlitCommandEncoder::fillBuffer:range:value: repeats a single byte, so only a \
-                 value whose four bytes are equal has an encoding"
-            )));
+                 value whose four bytes are equal has an encoding",
+            ));
             return;
         }
         let Some(raw) = self.buffer(buffer) else {

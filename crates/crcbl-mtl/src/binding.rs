@@ -728,6 +728,16 @@ impl MetalDevice {
 
     /// Resolves every entry to a retained Metal object. See the module docs for
     /// why the objects rather than the handles are kept.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] for a layout no device issued,
+    /// [`HalError::Unsupported`] for a
+    /// [`BindGroupDesc::variable_count`](crcbl_hal::BindGroupDesc::variable_count)
+    /// — the same answer [`plan_set`] gives the layout half of
+    /// [`Capability::BindlessDescriptorArray`](crcbl_hal::Capability::BindlessDescriptorArray)
+    /// — and [`HalError::InvalidDescriptor`] from [`resolve`] for an entry that
+    /// does not fit the layout it names.
     pub(crate) fn create_bind_group_impl(
         &self,
         desc: &BindGroupDesc<'_>,
@@ -747,11 +757,16 @@ impl MetalDevice {
             // refuses every layout that declares one — so this is a caller
             // asking for a shape no layout on this backend can have, rather
             // than a value to ignore.
-            return Err(HalError::InvalidDescriptor(
+            //
+            // **The same variant `plan_set` uses**, because it is the same
+            // answer: `Capability::BindlessDescriptorArray` is what both halves
+            // report, and the two ends of one capability refusing with two
+            // different errors is what let a caller branch on `Unsupported` and
+            // still be surprised here.
+            return Err(crate::MetalInstance::unsupported(
                 "BindGroupDesc::variable_count on a Metal bind group: this backend binds flat \
                  argument tables and refuses every VARIABLE_COUNT layout, so no group has a \
-                 variable length to choose"
-                    .to_string(),
+                 variable length to choose",
             ));
         }
         let mut bindings = Vec::with_capacity(desc.entries.len());

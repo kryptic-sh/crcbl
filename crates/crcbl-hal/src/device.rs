@@ -902,7 +902,10 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     ///
     /// # Errors
     ///
-    /// [`HalError::InvalidHandle`] or [`HalError::DeviceLost`].
+    /// [`HalError::InvalidHandle`] or [`HalError::DeviceLost`], and
+    /// [`HalError::Unsupported`] on a backend with no timeline to block on at
+    /// all — see [`crate::sync`], where WebGPU is the case. A *timeout* is not
+    /// an error: that is `Ok(false)`.
     fn wait_semaphores(
         &self,
         waits: &[crate::SemaphoreWait],
