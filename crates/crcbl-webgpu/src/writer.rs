@@ -1581,6 +1581,23 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::take_error`](crcbl_hal::Device::take_error).
+    ///
+    /// Body-less — the call takes nothing — and **answered**, so it goes through
+    /// [`StreamChannel::encode_awaited`](crate::web::StreamChannel::encode_awaited)
+    /// for [`poll_readback`](Self::poll_readback)'s reason: the
+    /// [`Reply::DeviceErrors`](crate::Reply::DeviceErrors) naming the returned
+    /// sequence is refused, whole buffer at a time, unless something is already
+    /// waiting on it.
+    ///
+    /// **One at a time.** The reply carries the whole queue, so a second poll
+    /// while the first is unanswered would ask for errors the first is already
+    /// bringing; [`WebGpuDevice::take_error`](crate::hal::WebGpuDevice) is what
+    /// holds to that.
+    pub fn take_error(&mut self) -> u64 {
+        self.push_tag(tag::TAKE_ERROR_TAG)
+    }
+
     // ── Instance ─────────────────────────────────────────────────────────────
 
     /// [`Instance::adapters`](crcbl_hal::Instance::adapters).

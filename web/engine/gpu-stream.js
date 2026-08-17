@@ -164,10 +164,11 @@ const RECONFIGURE_SWAPCHAIN_TAG = 0x8c;
 const ENUMERATE_ADAPTERS_TAG = 0x90;
 const REQUEST_DEVICE_TAG = 0x91;
 const SURFACE_CAPS_TAG = 0x92;
-// The device family: submission and the readback poll, the two `Device` methods
-// that make no object and release none.
+// The device family: submission, the readback poll and the out-of-band error
+// ask — the `Device` methods that make no object and release none.
 const SUBMIT_TAG = 0xa0;
 const POLL_READBACK_TAG = 0xa1;
+const TAKE_ERROR_TAG = 0xa2;
 
 // ── Optional fields ──────────────────────────────────────────────────────────
 
@@ -2406,6 +2407,13 @@ function decodeCommand(r) {
         name: 'PollReadback',
         readback: r.readHandle('PollReadback::readback'),
       };
+    case TAKE_ERROR_TAG:
+      // No body: the HAL call takes nothing and this seam holds one device, so
+      // there is nothing to name. It is answered even when nothing went wrong —
+      // an empty `deviceErrors` — because a command nobody answers leaves its
+      // sequence waiting for ever on the far side, and this one is asked again
+      // every time the engine's queue runs dry.
+      return { name: 'TakeError' };
     case DESTROY_READBACK_TAG:
       return {
         name: 'DestroyReadback',

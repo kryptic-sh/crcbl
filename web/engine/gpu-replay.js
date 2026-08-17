@@ -90,11 +90,12 @@
 // the seam's own: `Device::take_error`, which `crcbl_hal` documents as existing
 // *for WebGPU* and which `docs/plan/41-webgpu-stream.md` has `Gpu::acquire`
 // draining at the top of every frame. This replayer keeps that queue — see
-// {@link Replayer#takeError} — and everything that can go wrong with a buffer
-// goes into it: the refusals this file makes before asking the browser, a
+// {@link DeviceErrorLog} — and everything that can go wrong with a buffer goes
+// into it: the refusals this file makes before asking the browser, a
 // `createBuffer` that throws, and the errors the device reports asynchronously
-// through `uncapturederror`. Not a throw, and not a reply; that class argues
-// why.
+// through `uncapturederror`. Not a throw, and not a reply of its own; the
+// `TakeError` command is what carries them across, because a reply has to name a
+// sequence something is waiting on and an `uncapturederror` names nothing.
 //
 // AND `SurfaceCaps`, WHICH ANSWERS WITHIN THE CALL. It is the third command
 // with a reply and the only one whose answer is ready immediately: WebGPU has no
@@ -146,6 +147,7 @@ import {
   COMPOSITE_ALPHA,
   DEVICE_TYPE,
   FORMAT,
+  MAX_DEVICE_ERRORS,
   PRESENT_MODE,
   SURFACE_CAPS_FAILURE,
   ReplyWriter,
@@ -2288,14 +2290,130 @@ export class HandleTable {
 /**
  * How many out-of-band errors are held before the queue stops growing.
  *
- * Nothing drains it yet — the `take_error` command is a later slice — and
- * `uncapturederror` can fire once a frame for as long as a page is open, so an
- * unbounded queue is a leak on a page that is doing badly. The first errors are
- * the ones worth keeping: what went wrong first is what caused the rest.
- * Nothing past the cap is *lost* silently, though; see
- * {@link Replayer#takeError}.
+ * `uncapturederror` can fire once a frame for as long as a page is open, and a
+ * reader may be slow or absent, so an unbounded queue is a leak on a page that
+ * is doing badly. The first errors are the ones worth keeping: what went wrong
+ * first is what caused the rest. Nothing past the cap is *lost* silently,
+ * though; see {@link DeviceErrorLog#take}.
+ *
+ * Independent of `MAX_DEVICE_ERRORS`, which bounds one *reply* rather than this
+ * queue — the two are equal today, so a single `TakeError` empties a full log,
+ * but neither number follows the other.
  */
 const MAX_PENDING_ERRORS = 64;
+
+/**
+ * The names of the two things that drain the error log.
+ *
+ * TWO READERS OVER ONE LOG, AND NEITHER TAKES WHAT THE OTHER NEEDS. The errors
+ * are captured in one place — {@link Replayer#deviceError} — and read by two:
+ * the engine, through a `TakeError` command that carries them to
+ * `Device::take_error` in wasm, and this file's own callers, through
+ * {@link Replayer#takeError}, which is how `web/tools/gpu-replay.mjs` and the
+ * browser parity gate assert that a scene produced no device errors at all.
+ *
+ * A single shared queue would break that gate the day wasm started draining it:
+ * the engine would eat the errors mid-frame and the gate would then prove
+ * nothing, silently and while still passing. So each reader has its own cursor
+ * into the same log, every message is delivered to both, and a message is
+ * dropped only once *both* have taken it.
+ */
+const ERROR_READERS = Object.freeze(['gate', 'wasm']);
+
+/**
+ * The device's out-of-band errors, oldest first, with one cursor per reader.
+ *
+ * `Device::take_error`'s queue on this side of the seam: each reader is handed
+ * each message exactly once, in the order the device reported them, which is the
+ * order that says which failure caused the rest.
+ */
+class DeviceErrorLog {
+  /**
+   * Messages at least one reader has not taken yet, oldest first.
+   *
+   * @type {string[]}
+   */
+  #messages = [];
+  /**
+   * How many of {@link DeviceErrorLog#messages} each reader has taken. Indexes
+   * into that array, so trimming it moves these down with it.
+   *
+   * @type {Record<string, number>}
+   */
+  #taken = Object.fromEntries(ERROR_READERS.map((reader) => [reader, 0]));
+  /** How many messages were refused for want of room, ever. */
+  #dropped = 0;
+  /**
+   * How much of {@link DeviceErrorLog##dropped} each reader has been told about.
+   * A running total rather than a flag, so a second flood is reported again and
+   * one reader being told does not hide it from the other.
+   *
+   * @type {Record<string, number>}
+   */
+  #droppedReported = Object.fromEntries(
+    ERROR_READERS.map((reader) => [reader, 0])
+  );
+
+  /**
+   * Records what the device reported.
+   *
+   * @param {string} message
+   */
+  push(message) {
+    if (this.#messages.length >= MAX_PENDING_ERRORS) {
+      this.#dropped += 1;
+      return;
+    }
+    this.#messages.push(message);
+  }
+
+  /**
+   * How many messages `reader` has not taken yet.
+   *
+   * @param {string} reader One of {@link ERROR_READERS}.
+   */
+  pending(reader) {
+    return this.#messages.length - this.#taken[reader];
+  }
+
+  /**
+   * The oldest message `reader` has not taken, or `null`.
+   *
+   * The last thing out, once that reader has emptied the log, is a synthesised
+   * line naming how many were refused for want of room — so a page that
+   * produced more than {@link MAX_PENDING_ERRORS} learns that it did rather
+   * than being told the first few were all there was.
+   *
+   * @param {string} reader One of {@link ERROR_READERS}.
+   * @returns {string | null}
+   */
+  take(reader) {
+    const at = this.#taken[reader];
+    if (at < this.#messages.length) {
+      const message = this.#messages[at];
+      this.#taken[reader] = at + 1;
+      this.#forgetWhatEveryReaderHasTaken();
+      return message;
+    }
+    if (this.#droppedReported[reader] === this.#dropped) return null;
+    const dropped = this.#dropped - this.#droppedReported[reader];
+    this.#droppedReported[reader] = this.#dropped;
+    return `and ${dropped} further device error(s) were dropped: this replayer holds ${MAX_PENDING_ERRORS} and they were not taken in time`;
+  }
+
+  /**
+   * Drops the messages every reader has already had, which is what keeps the
+   * log from growing for the life of a page.
+   */
+  #forgetWhatEveryReaderHasTaken() {
+    const behind = Math.min(
+      ...ERROR_READERS.map((reader) => this.#taken[reader])
+    );
+    if (behind === 0) return;
+    this.#messages.splice(0, behind);
+    for (const reader of ERROR_READERS) this.#taken[reader] -= behind;
+  }
+}
 
 /**
  * Replays decoded command streams against WebGPU and collects the answers.
@@ -2576,16 +2694,12 @@ export class Replayer {
    */
   #currentComputePass = null;
   /**
-   * Errors the device reported out of band, oldest first.
+   * Errors the device reported out of band, oldest first, with a cursor for
+   * each of the two things that read them — see {@link DeviceErrorLog}.
    *
-   * `Device::take_error`'s queue, on this side of the seam — see
-   * {@link Replayer#takeError}.
-   *
-   * @type {string[]}
+   * @type {DeviceErrorLog}
    */
-  #errors = [];
-  /** How many errors were refused for want of room in {@link #errors}. */
-  #errorsDropped = 0;
+  #errors = new DeviceErrorLog();
 
   /**
    * @param {object} [options]
@@ -2806,20 +2920,28 @@ export class Replayer {
     return this.#readbacks;
   }
 
-  /** How many out-of-band errors are waiting to be taken. */
+  /**
+   * How many out-of-band errors this file's own callers have not taken yet.
+   *
+   * The gate's cursor, not the engine's: a `TakeError` carrying errors to wasm
+   * leaves this number where it was, because the two readers drain the same log
+   * independently — see {@link DeviceErrorLog}.
+   */
   get pendingErrors() {
-    return this.#errors.length;
+    return this.#errors.pending('gate');
   }
 
   /**
-   * The oldest error the device reported out of band, or `null`.
+   * The oldest error the device reported out of band that *this file's callers*
+   * have not taken, or `null`.
    *
-   * `crcbl_hal::Device::take_error` seen from this side, and named for it:
-   * each error is reported once — taking it clears it — and
-   * `docs/plan/41-webgpu-stream.md` has `Gpu::acquire` draining this at the top
-   * of every frame once there is a command to carry it. There is no such
-   * command yet, so today's readers are `web/tools/gpu-replay.mjs` and the
-   * browser gate.
+   * `crcbl_hal::Device::take_error` seen from this side, and named for it: each
+   * error is reported once to each reader — taking it clears it for that reader
+   * — and `docs/plan/41-webgpu-stream.md` has `Gpu::acquire` draining it at the
+   * top of every frame. That draining now happens: a `TakeError` command carries
+   * the same messages to wasm through {@link Replayer#takeErrorCommand}, on a
+   * cursor of its own, so `web/tools/gpu-replay.mjs` and the browser gate go on
+   * seeing every error the engine also sees.
    *
    * **WHY A QUEUE AND NOT A THROW OR A REPLY.** A `CreateBuffer` that cannot be
    * honoured has nowhere else to go, and the two alternatives are both wrong
@@ -2834,11 +2956,14 @@ export class Replayer {
    *     asked for something invalid, and which WebGPU itself does not report by
    *     throwing at all: `createBuffer` hands back a `GPUBuffer` and the reason
    *     arrives later on the device's error channel.
-   *   * A reply would name a sequence nothing is waiting on. Identity here is
-   *     positional — wasm allocated the handle and moved on — so no wait is
-   *     registered, and `crcbl-webgpu`'s reader turns a reply for an unawaited
-   *     sequence into a `DecodeError::UnexpectedSequence` that refuses the
-   *     *whole frame's* replies, stranding every other answer in it.
+   *   * A reply *of its own* would name a sequence nothing is waiting on.
+   *     Identity here is positional — wasm allocated the handle and moved on —
+   *     so no wait is registered, and `crcbl-webgpu`'s reader turns a reply for
+   *     an unawaited sequence into a `DecodeError::UnexpectedSequence` that
+   *     refuses the *whole frame's* replies, stranding every other answer in it.
+   *     That is why the errors leave on the back of a command that *asks* for
+   *     them, whose sequence something is waiting on by construction, rather
+   *     than at the moment they happen.
    *
    * The last of these to come out, once the queue has been emptied, is a
    * synthesised line naming how many were refused for want of room — so a page
@@ -2848,12 +2973,7 @@ export class Replayer {
    * @returns {string | null}
    */
   takeError() {
-    const error = this.#errors.shift();
-    if (error !== undefined) return error;
-    if (this.#errorsDropped === 0) return null;
-    const dropped = this.#errorsDropped;
-    this.#errorsDropped = 0;
-    return `and ${dropped} further device error(s) were dropped: this replayer holds ${MAX_PENDING_ERRORS} and nothing has been draining them`;
+    return this.#errors.take('gate');
   }
 
   /**
@@ -3077,6 +3197,9 @@ export class Replayer {
           break;
         case 'PollReadback':
           this.#pollReadback(sequence, command);
+          break;
+        case 'TakeError':
+          this.#takeErrorCommand(sequence);
           break;
         case 'DestroyReadback':
           this.#destroyReadback(command);
@@ -6234,11 +6357,38 @@ export class Replayer {
    * @param {string} message
    */
   #deviceError(message) {
-    if (this.#errors.length >= MAX_PENDING_ERRORS) {
-      this.#errorsDropped += 1;
-      return;
-    }
     this.#errors.push(message);
+  }
+
+  /**
+   * Answers a `TakeError`: the errors the device reported since wasm last asked.
+   *
+   * ANSWERED WITHIN THE CALL, and answered even when there is nothing to say —
+   * an empty list. Silence is not an option: one command is answered exactly
+   * once, and a sequence that is never answered stays registered on the far side
+   * for ever. This command is asked again every time the engine's own queue runs
+   * dry, so a replayer that stayed quiet on a healthy page would fill wasm's
+   * waiting set and stop it asking anything at all.
+   *
+   * AT MOST `MAX_DEVICE_ERRORS`, AND THE REST ARE KEPT, NOT DROPPED. The cursor
+   * only moves for the messages that go into this reply, so anything past the
+   * cap is the next ask's — which is a frame later, and a frame later is what
+   * this whole channel already is.
+   *
+   * The cursor is the `'wasm'` one, so nothing taken here is taken from
+   * {@link Replayer#takeError} — see {@link DeviceErrorLog}.
+   *
+   * @param {bigint} sequence
+   */
+  #takeErrorCommand(sequence) {
+    const messages = [];
+    while (messages.length < MAX_DEVICE_ERRORS) {
+      const message = this.#errors.take('wasm');
+      if (message === null) break;
+      messages.push(message);
+    }
+    this.#replies.deviceErrors(sequence, messages);
+    this.#queued = true;
   }
 
   /**

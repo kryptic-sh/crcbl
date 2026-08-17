@@ -60,13 +60,15 @@
 //! | Event | WebGPU | Where it lands |
 //! | --- | --- | --- |
 //! | the request failed | `requestDevice()` rejects, or this backend refuses to ask | [`Reply::DeviceFailed`] → [`DeviceProbe::Failed`], and an `Err` from `poll` once the trait exists |
-//! | a device was lost, or a call was invalid | `GPUDevice.lost`, `uncapturederror` | `take_error`, on a device that is open — **not built yet**, because nothing here holds a device |
+//! | a device was lost, or a call was invalid | `GPUDevice.lost`, `uncapturederror` | `take_error`, on a device that is open — [`Command::TakeError`](crate::Command::TakeError) → [`Reply::DeviceErrors`] |
 //!
-//! The second needs a reply of its own and a device to attach it to, and it is
-//! what `docs/plan/41-webgpu-stream.md`'s error-attribution section is about.
 //! Reporting a lost device as a failed request would be wrong in both
 //! directions: the request succeeded, and the device that was lost had already
-//! been used.
+//! been used. So the second has a command and a reply of its own — the command
+//! asks, because an `uncapturederror` arrives with no sequence of its own to name
+//! — and `docs/plan/41-webgpu-stream.md`'s error-attribution section is what
+//! remains: which *encoded command* a browser's own validation failure belongs
+//! to is still not carried, so a message says what went wrong and not where.
 //!
 //! # Worked exchange
 //!

@@ -1093,6 +1093,31 @@ pub enum Command {
         /// Which in-flight readback to poll.
         readback: ReadbackHandle,
     },
+    /// [`Device::take_error`](crcbl_hal::Device::take_error) — asks for the
+    /// errors the browser reported out of band since the last time it was asked.
+    ///
+    /// **A body-less command**, as [`Command::SurfaceCaps`] is: the HAL call
+    /// takes nothing and this seam holds one device, so there is nothing to name.
+    ///
+    /// **Answered exactly once, by a
+    /// [`Reply::DeviceErrors`](crate::Reply::DeviceErrors) naming this
+    /// command's sequence — and answered even when there is nothing to report**,
+    /// with an empty list. Silence is not an option here: a command nobody
+    /// answers leaves its sequence registered for ever, and this one is issued
+    /// again every time the caller's queue runs dry, so a replayer that stayed
+    /// quiet on a healthy page would fill
+    /// [`MAX_WAITING_REPLIES`](crate::tag::MAX_WAITING_REPLIES) and then stop the
+    /// engine from asking anything at all.
+    ///
+    /// **Why the errors travel this way and not on their own.** WebGPU reports
+    /// them on `uncapturederror`, out of band and long after the command that
+    /// caused one has returned, so there is no sequence to attribute them to —
+    /// and a reply naming a sequence nobody waits on is
+    /// [`DecodeError::UnexpectedSequence`](crate::DecodeError::UnexpectedSequence),
+    /// which refuses the whole buffer and takes every other answer in the frame
+    /// with it. A command that *asks* is what gives the answer a sequence to
+    /// name.
+    TakeError,
     /// [`Device::destroy_readback`](crcbl_hal::Device::destroy_readback).
     ///
     /// A no-op for an id whose slot holds nothing, exactly as
@@ -1355,6 +1380,7 @@ impl Command {
             Self::Submit { .. } => "Submit",
             Self::RequestReadback { .. } => "RequestReadback",
             Self::PollReadback { .. } => "PollReadback",
+            Self::TakeError => "TakeError",
             Self::DestroyReadback { .. } => "DestroyReadback",
             Self::DestroyCommandBuffer { .. } => "DestroyCommandBuffer",
             Self::EnumerateAdapters => "EnumerateAdapters",

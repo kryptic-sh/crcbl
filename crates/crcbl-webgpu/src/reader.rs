@@ -1525,6 +1525,10 @@ impl<'a> StreamReader<'a> {
             tag::POLL_READBACK_TAG => Ok(Command::PollReadback {
                 readback: r.read_handle("PollReadback::readback")?,
             }),
+            // No body: the HAL call takes nothing, and this seam holds one
+            // device. A decoder that read a field here would consume whatever
+            // follows, which is why the corpus puts a command after it.
+            tag::TAKE_ERROR_TAG => Ok(Command::TakeError),
             tag::DESTROY_READBACK_TAG => Ok(Command::DestroyReadback {
                 readback: r.read_handle("DestroyReadback::readback")?,
             }),

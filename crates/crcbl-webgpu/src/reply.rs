@@ -58,6 +58,7 @@
 //! | a string alone | [`Reply::NoAdapter`] |
 //! | a counted array of fixed-size elements | [`Reply::QueryResults`] |
 //! | counted arrays of enum codes, plus an optional non-handle field | [`Reply::SurfaceCaps`] |
+//! | a counted array of *variable-length* elements | [`Reply::DeviceErrors`] |
 //!
 //! [`Reply::NoAdapter`] was the first addition this set took, and it is not a
 //! new shape but a new *fact*: an enumeration is answered exactly once, so "the
@@ -72,6 +73,16 @@
 //! codes* rather than fixed-width scalars, and the seam's first optional field
 //! that is neither a handle nor a string. Both are settled in this module's own
 //! `put_surface_caps` and in [`tag`]'s three new code tables.
+//!
+//! [`Reply::DeviceErrors`] is the fifth, and brought the second new *shape*: a
+//! counted array whose elements are themselves length-prefixed, which is one
+//! more indirection than the three counted arrays above it, whose elements are
+//! all one byte wide. It is also the only reply here that carries no answer to a
+//! question about a *thing* — no adapter, no device, no surface, no readback —
+//! but the device's out-of-band complaints, which is why its command asks rather
+//! than names. Its caps are [`tag::MAX_DEVICE_ERRORS`] and
+//! [`tag::MAX_DEVICE_ERROR_BYTES`], and both are enforced by writer and reader
+//! alike.
 //!
 //! [`Reply::SurfaceCapsFailed`] is the fourth, and brought no shape at all — a
 //! string and an enum code is [`Reply::DeviceFailed`] again. What it brought is
@@ -425,6 +436,44 @@ pub enum SurfaceCapsFailure {
     Backend,
 }
 
+// ── Device errors ─────────────────────────────────────────────────────────────
+
+/// What replaces the tail of a device-error message that did not fit
+/// [`tag::MAX_DEVICE_ERROR_BYTES`].
+///
+/// **So that a shortened message reads as shortened.** A validation error that
+/// simply stopped mid-sentence would be read as the whole of what the browser
+/// said, and the reader would go looking for a cause in the part that was cut.
+///
+/// It is the same text on both sides of the seam — `web/engine/gpu-reply.js`
+/// writes it too — because either half may be the one that truncates: the
+/// browser's encoder is the one that matters in production, and this one is what
+/// the fixture pins it to.
+pub const TRUNCATION_MARKER: &str = "… [truncated]";
+
+/// One device-error message, cut to [`tag::MAX_DEVICE_ERROR_BYTES`] if it is
+/// past it.
+///
+/// **Cut at a `char` boundary**, not at the byte: the field is decoded with
+/// [`String::from_utf8`] and a slice through the middle of a multi-byte
+/// character is [`DecodeError::NotUtf8`] — which would refuse the whole reply
+/// buffer over the shape of one browser's prose. A WebGPU message names
+/// resources by their labels, and a label is whatever a caller wrote, so
+/// multi-byte characters are ordinary here rather than exotic.
+///
+/// Borrowed unless it was cut, so the common case allocates nothing.
+fn device_error_field(message: &str) -> std::borrow::Cow<'_, str> {
+    if message.len() <= tag::MAX_DEVICE_ERROR_BYTES {
+        return std::borrow::Cow::Borrowed(message);
+    }
+    let budget = tag::MAX_DEVICE_ERROR_BYTES - TRUNCATION_MARKER.len();
+    let end = (0..=budget)
+        .rev()
+        .find(|at| message.is_char_boundary(*at))
+        .expect("zero is a char boundary of every string");
+    std::borrow::Cow::Owned(format!("{}{TRUNCATION_MARKER}", &message[..end]))
+}
+
 // ── Reply ─────────────────────────────────────────────────────────────────────
 
 /// One decoded reply, with every borrowed field owned.
@@ -515,9 +564,9 @@ pub enum Reply {
     /// [`PendingDevice::poll`](crcbl_hal::PendingDevice::poll) would report as
     /// an `Err`. A device *lost* later — WebGPU's `GPUDevice.lost`, or an
     /// `uncapturederror` on a device that is open and working — belongs to
-    /// [`Device::take_error`](crcbl_hal::Device::take_error) and to a reply this
-    /// slice does not have, because nothing here holds a device long enough to
-    /// lose one.
+    /// [`Device::take_error`](crcbl_hal::Device::take_error) and to
+    /// [`Reply::DeviceErrors`], which answers a command that *asks* rather than a
+    /// command that failed.
     DeviceFailed {
         /// What the browser said, or what the replayer refused to ask for. For
         /// a log or a banner; never a code to branch on.
@@ -603,6 +652,40 @@ pub enum Reply {
         /// [`HalError`](crcbl_hal::HalError) an `impl Instance` builds.
         cause: SurfaceCapsFailure,
     },
+    /// [`take_error`](crcbl_hal::Device::take_error): what the browser reported
+    /// out of band since the last time it was asked.
+    ///
+    /// **The answer to [`Command::TakeError`](crate::Command::TakeError), and it
+    /// is an answer even when it is empty.** A page that is working produces
+    /// this reply with no messages every time the engine asks, which is the
+    /// ordinary case; an empty list is "nothing since you last asked", never
+    /// "still looking". There is no pending half here for
+    /// [`Reply::Device`]'s reason turned around: the replayer holds the queue and
+    /// can always say what is in it, so a deferred answer would be a sequence
+    /// nothing ever settles.
+    ///
+    /// **Many messages, because `take_error` is called until it answers
+    /// `None`.** [`Device::take_error`](crcbl_hal::Device::take_error) hands back
+    /// one message per call and the caller loops, so a reply carrying a single
+    /// message would let a frame learn one thing about a device that is failing
+    /// in a hundred ways. The whole queue crosses at once and
+    /// [`WebGpuDevice`](crate::hal::WebGpuDevice) hands it out one call at a
+    /// time. At most [`tag::MAX_DEVICE_ERRORS`] of them: what does not fit stays
+    /// queued on the JS side for the next ask, so the cap delays a message and
+    /// never drops one.
+    ///
+    /// **Each message may have been truncated**, at
+    /// [`tag::MAX_DEVICE_ERROR_BYTES`] and with [`TRUNCATION_MARKER`] in place of
+    /// what was cut — see that constant for why truncating beats splitting and
+    /// beats refusing. Nothing downstream may treat these as anything but text
+    /// for a log or a banner: they come from another vendor's runtime, and the
+    /// [`HalError`](crcbl_hal::HalError) an engine builds from one says only that
+    /// the device complained.
+    DeviceErrors {
+        /// What the device reported, oldest first — the order they happened in,
+        /// which is the order that says which failure caused the others.
+        messages: Vec<String>,
+    },
     /// [`query_results`](crcbl_hal::Device::query_results).
     QueryResults {
         /// Which query set.
@@ -629,6 +712,7 @@ impl Reply {
             Self::DeviceFailed { .. } => "DeviceFailed",
             Self::SurfaceCaps { .. } => "SurfaceCaps",
             Self::SurfaceCapsFailed { .. } => "SurfaceCapsFailed",
+            Self::DeviceErrors { .. } => "DeviceErrors",
             Self::ReadbackPending { .. } => "ReadbackPending",
             Self::ReadbackReady { .. } => "ReadbackReady",
             Self::QueryResults { .. } => "QueryResults",
@@ -742,6 +826,35 @@ impl ReplyWriter {
         self.open(tag::SURFACE_CAPS_FAILED_REPLY_TAG, sequence);
         self.bytes.put_bytes(reason.as_bytes());
         self.bytes.put_u8(tag::surface_caps_failure_code(cause));
+    }
+
+    /// [`Reply::DeviceErrors`], returning how many messages it carried.
+    ///
+    /// **The one method here that cannot panic on an over-large argument**, and
+    /// deliberately so — the type's own `# Panics` note is about a caller that
+    /// hands the writer something the reader would refuse, and neither half of
+    /// this reply's payload is such a thing. A message past
+    /// [`tag::MAX_DEVICE_ERROR_BYTES`] is truncated (see [`TRUNCATION_MARKER`]),
+    /// and past [`tag::MAX_DEVICE_ERRORS`] messages only the first
+    /// `MAX_DEVICE_ERRORS` are written. Both are the point of the reply rather
+    /// than caller mistakes: the argument is a queue a *failing device* filled,
+    /// so its size is not something the caller chose, and an error report is the
+    /// last thing that should take a process down — on wasm a panic is
+    /// `unreachable`, which would turn the one channel that says why a page is
+    /// blank into the reason it stopped.
+    ///
+    /// **The return value is what keeps the cap from being a drop.** A caller
+    /// with more than fits keeps the rest and offers them to the next
+    /// [`Command::TakeError`](crate::Command::TakeError); `web/engine/gpu-replay.js`
+    /// is the caller that matters and does exactly that.
+    pub fn device_errors(&mut self, sequence: u64, messages: &[String]) -> usize {
+        let written = messages.len().min(tag::MAX_DEVICE_ERRORS);
+        self.open(tag::DEVICE_ERRORS_REPLY_TAG, sequence);
+        self.bytes.put_count(written);
+        for message in &messages[..written] {
+            self.bytes.put_bytes(device_error_field(message).as_bytes());
+        }
+        written
     }
 
     /// [`Reply::ReadbackPending`].
@@ -871,6 +984,34 @@ impl<'a> ReplyReader<'a> {
                         code: code.into(),
                     })?;
                 Reply::SurfaceCapsFailed { reason, cause }
+            }
+            tag::DEVICE_ERRORS_REPLY_TAG => {
+                // Both caps are enforced here, not only the format-wide ones the
+                // primitives carry: `read_count` bounds the list at
+                // `MAX_ELEMENT_COUNT` and `read_string` bounds each message at
+                // `MAX_FIELD_BYTES`, and a buffer of that size is three orders
+                // of magnitude past anything either writer produces. Refusing at
+                // the reply's own numbers is what makes them the contract rather
+                // than a convention the writers happen to keep.
+                let count = r.read_count("DeviceErrors::messages")?;
+                if count > tag::MAX_DEVICE_ERRORS {
+                    return Err(DecodeError::InvalidLength {
+                        field: "DeviceErrors::messages",
+                        len: count as u32,
+                    });
+                }
+                let mut messages = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let message = r.read_string("DeviceErrors::messages")?;
+                    if message.len() > tag::MAX_DEVICE_ERROR_BYTES {
+                        return Err(DecodeError::InvalidLength {
+                            field: "DeviceErrors::messages",
+                            len: message.len() as u32,
+                        });
+                    }
+                    messages.push(message);
+                }
+                Reply::DeviceErrors { messages }
             }
             tag::READBACK_PENDING_REPLY_TAG => Reply::ReadbackPending {
                 readback: r.read_handle("ReadbackPending::readback")?,

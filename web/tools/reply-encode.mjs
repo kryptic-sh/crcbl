@@ -48,8 +48,11 @@ import {
   COMPOSITE_ALPHA,
   DEVICE_TYPE,
   FORMAT,
+  MAX_DEVICE_ERRORS,
+  MAX_DEVICE_ERROR_BYTES,
   PRESENT_MODE,
   SURFACE_CAPS_FAILURE,
+  TRUNCATION_MARKER,
   ReplyEncodeError,
   ReplyWriter,
 } from '../engine/gpu-reply.js';
@@ -369,6 +372,38 @@ function encodeCanonicalReplies(replies) {
     SURFACE_CAPS_FAILURE.BACKEND
   );
   replies.surfaceCapsFailed(53n, '', SURFACE_CAPS_FAILURE.BACKEND);
+  // **Two messages in one reply**, which is what the list is for: `take_error`
+  // hands back one per call and a device that is failing produces them faster
+  // than one round trip a frame can carry. A writer that wrote the count and
+  // then one message would leave the second where the next reply's tag belongs.
+  replies.deviceErrors(59n, [
+    'Buffer usage (MapRead|Storage) is invalid.\n - While validating [Buffer "hud ✱ staging"]',
+    'vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY',
+  ]);
+  // The ordinary answer on a page that is working, and the count's zero
+  // boundary. It is sent rather than skipped: an unanswered `TakeError` leaves
+  // its sequence waiting on the far side for ever.
+  replies.deviceErrors(61n, []);
+  // **The untruncated message**, and the one place in this file that is handed
+  // something different from what the Rust corpus spells out: `replies::every_reply`
+  // holds the cut form, so arriving at the same bytes is this writer proving it
+  // cuts where Rust cuts — at the cap, less the marker, walked back to the start
+  // of the character that straddles it. Every character here is three bytes
+  // wide, so a writer that cut at the budget itself would split one and produce
+  // a field that is not UTF-8.
+  replies.deviceErrors(67n, [overLongDeviceError()]);
+}
+
+/**
+ * A device-error message past `MAX_DEVICE_ERROR_BYTES`, made of one repeated
+ * three-byte character.
+ *
+ * The rule is duplicated from `replies::WIDE_CHAR` rather than shared, for
+ * `growthPayload`'s reason: an input derived from the expectation would agree
+ * with it by construction, and what this pins is the *cut*.
+ */
+function overLongDeviceError() {
+  return '✱'.repeat(MAX_DEVICE_ERROR_BYTES);
 }
 
 /**
@@ -751,6 +786,57 @@ async function main() {
       new ReplyWriter().adapter(1n, info);
     }
   );
+
+  // ---- the device errors are the one payload that is never refused --------
+  // Everything above this line refuses what the reader would refuse, because
+  // every one of those payloads is a caller's mistake. A device-error message is
+  // not: it is a browser's own prose about a device that is failing, its length
+  // is nobody's choice, and a throw here would lose the report a page with
+  // nothing on screen has to go on. So the writer cuts, and says how much of a
+  // flood it carried.
+  {
+    const replies = new ReplyWriter();
+    const written = replies.deviceErrors(1n, [
+      'x'.repeat(MAX_DEVICE_ERROR_BYTES * 2),
+    ]);
+    check(
+      written === 1,
+      `a message twice the cap is carried rather than thrown (wrote ${written})`
+    );
+    // The field is the cap exactly: an ASCII message cuts at the budget with no
+    // walk back, and the marker fills the rest.
+    const encoded = new TextDecoder().decode(
+      replies.bytes.subarray(10 + 9 + 8)
+    );
+    check(
+      encoded.endsWith(TRUNCATION_MARKER) &&
+        new TextEncoder().encode(encoded).length === MAX_DEVICE_ERROR_BYTES,
+      `and it is cut to the cap with the marker in place of the tail (${encoded.length} chars)`
+    );
+  }
+  {
+    const flood = Array.from(
+      { length: MAX_DEVICE_ERRORS + 7 },
+      (_, i) => `error ${i}`
+    );
+    const replies = new ReplyWriter();
+    const written = replies.deviceErrors(1n, flood);
+    check(
+      written === MAX_DEVICE_ERRORS,
+      `a flood past the cap carries ${MAX_DEVICE_ERRORS} and says so (wrote ${written})`
+    );
+    // The count on the wire is what the caller was told, so the rest are the
+    // caller's to keep for the next ask rather than something dropped here.
+    const view = new DataView(
+      replies.bytes.buffer,
+      replies.bytes.byteOffset,
+      replies.bytes.byteLength
+    );
+    check(
+      view.getUint32(10 + 9, true) === written,
+      'and the count on the wire is the number it reported'
+    );
+  }
 
   if (failures.length > 0) {
     console.error(`\nreply-encode: FAILED (${failures.length})`);

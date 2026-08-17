@@ -414,6 +414,127 @@ fn a_readback_polls_ready_on_a_readback_reply() {
     assert_eq!(out, [1, 2, 3, 4], "the bytes reach the caller's slice");
 }
 
+// ── take_error: the browser's out-of-band failures ─────────────────────────
+
+/// **The check the stub could not fail.** `take_error` answered `None`
+/// unconditionally, so a browser reporting an out-of-memory cascade — the real
+/// failure this exists for — reached the engine as a healthy device drawing
+/// nothing. Every assertion below is about a message *arriving*: the ask on the
+/// stream, the text out of the reply, one message per call, and the next ask
+/// once the queue is dry.
+#[test]
+fn take_error_hands_back_what_the_browser_reported() {
+    let (channel, device) = device_on_fresh_channel();
+
+    // Nothing has been reported and nothing has been asked, so the first call is
+    // `None` — and it is what puts the ask on the stream. On a fresh channel it
+    // is the first command, so its sequence is 0.
+    assert_eq!(device.take_error(), None, "nothing has been reported yet");
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert_eq!(
+        commands
+            .iter()
+            .map(crate::Command::name)
+            .collect::<Vec<_>>(),
+        vec!["TakeError"],
+        "the first call asks, exactly once",
+    );
+
+    // A second call while that ask is unanswered must not ask again: the reply
+    // carries the replayer's whole queue, so a second ask would bring the same
+    // messages twice.
+    assert_eq!(device.take_error(), None, "still nothing to report");
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert_eq!(commands.len(), 1, "one ask is outstanding, not two");
+
+    // What the browser said, answering that ask.
+    let reported = [
+        "Buffer usage (MapRead|Storage) is invalid.".to_string(),
+        "vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY".to_string(),
+    ];
+    feed(&channel, |w| {
+        assert_eq!(
+            w.device_errors(0, &reported),
+            reported.len(),
+            "both messages fit one reply",
+        );
+    });
+
+    assert_eq!(
+        device.take_error().as_deref(),
+        Some(reported[0].as_str()),
+        "the first message reaches the caller, text and all",
+    );
+    assert_eq!(
+        device.take_error().as_deref(),
+        Some(reported[1].as_str()),
+        "and the second, in the order the browser reported them",
+    );
+    assert_eq!(
+        device.take_error(),
+        None,
+        "each error is reported once, which is what take_error promises",
+    );
+
+    // The queue ran dry, so the drained call asked again — with the sequence the
+    // command after the answered one has.
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert_eq!(
+        commands
+            .iter()
+            .map(crate::Command::name)
+            .collect::<Vec<_>>(),
+        vec!["TakeError", "TakeError"],
+        "an emptied queue asks for the next batch",
+    );
+    feed(&channel, |w| {
+        w.device_errors(1, &["the device was lost".to_string()]);
+    });
+    assert_eq!(
+        device.take_error().as_deref(),
+        Some("the device was lost"),
+        "and the second ask is answered on its own sequence",
+    );
+}
+
+/// A reply of the wrong shape naming the ask is a replayer bug, and the failure
+/// mode to avoid is silence for ever: the ask is answered exactly once, so a
+/// device that kept waiting on it would never ask again and would report nothing
+/// no matter what the browser said afterwards.
+#[test]
+fn take_error_asks_again_after_a_reply_of_the_wrong_shape() {
+    let (channel, device) = device_on_fresh_channel();
+    assert_eq!(device.take_error(), None);
+
+    // `NoAdapter` is not an answer to a `TakeError`, but it names its sequence,
+    // so the channel accepts it and the queue must treat the ask as spent.
+    feed(&channel, |w| w.no_adapter(0, "not an answer to this"));
+    assert_eq!(device.take_error(), None, "nothing arrived to report");
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert_eq!(
+        commands.len(),
+        2,
+        "the device asks again rather than hanging"
+    );
+    feed(&channel, |w| {
+        w.device_errors(1, &["a real message".to_string()]);
+    });
+    assert_eq!(device.take_error().as_deref(), Some("a real message"));
+}
+
 // ── (f) an unwired op fails loudly at finish ───────────────────────────────
 
 #[test]

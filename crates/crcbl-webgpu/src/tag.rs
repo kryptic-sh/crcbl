@@ -135,6 +135,44 @@ pub const MAX_ELEMENT_COUNT: usize = 1 << 16;
 /// payload still has room for the replies around it.
 pub const MAX_REPLY_BYTES: usize = 4 * MAX_FIELD_BYTES;
 
+/// The most bytes one device-error message may occupy on the wire, marker
+/// included.
+///
+/// **A message past this is truncated, never split and never refused.** A
+/// browser's validation error is prose for a person — its head names the call
+/// and the resource that failed, and its tail is the nested "While validating…"
+/// context WebGPU appends — so the actionable half is the one that fits, and a
+/// diagnostic that arrives shortened still says what went wrong. Splitting one
+/// message across replies would put reassembly state on both sides of the seam
+/// for no gain, and refusing it would drop the report the caller has nothing
+/// else to go on. Both writers cut at a UTF-8 boundary and append
+/// [`TRUNCATION_MARKER`](crate::reply::TRUNCATION_MARKER), so a shortened
+/// message is visibly shortened rather than quietly complete.
+///
+/// Well inside [`MAX_FIELD_BYTES`]: the cap that matters here is not what one
+/// field may be but what a whole reply costs, since a device that is failing
+/// produces [`MAX_DEVICE_ERRORS`] of them at once.
+pub const MAX_DEVICE_ERROR_BYTES: usize = 4096;
+
+/// The most messages one [`Reply::DeviceErrors`](crate::Reply::DeviceErrors)
+/// carries.
+///
+/// **The reply carries many, because `take_error` is asked many times.**
+/// [`Device::take_error`](crcbl_hal::Device::take_error) hands back one message
+/// per call and a caller drains it in a loop, so a reply carrying one message
+/// would answer one loop iteration per frame and a page producing a hundred
+/// errors would take a hundred frames to say so — by which time the failure that
+/// caused them is long past. One round trip therefore brings the whole queue,
+/// and wasm hands it out one message at a time.
+///
+/// A cap rather than "whatever is queued", because this length is what a
+/// failing page produces without bound. Times [`MAX_DEVICE_ERROR_BYTES`] it is
+/// the reply's worst case, which stays comfortably inside [`MAX_REPLY_BYTES`] so
+/// a frame carrying a flood still has room for the answers around it. What does
+/// not fit stays queued in JS for the next poll — no message is dropped for
+/// being past this.
+pub const MAX_DEVICE_ERRORS: usize = 64;
+
 /// The most sequences that may be waiting for a reply at once.
 ///
 /// A reply that never arrives — JS dropped it, or the page lost its device —
@@ -515,6 +553,13 @@ pub const SUBMIT_TAG: u8 = 0xA0;
 /// command that is *answered*, by a [`Reply::ReadbackReady`](crate::Reply::ReadbackReady)
 /// or [`Reply::ReadbackPending`](crate::Reply::ReadbackPending) naming its sequence.
 pub const POLL_READBACK_TAG: u8 = 0xA1;
+/// [`Command::TakeError`](crate::Command::TakeError) — the second device-family
+/// command that is answered, by a
+/// [`Reply::DeviceErrors`](crate::Reply::DeviceErrors) naming its sequence.
+///
+/// Written out rather than as `FAMILY_DEVICE + 2`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const TAKE_ERROR_TAG: u8 = 0xA2;
 
 // ── Reply families ────────────────────────────────────────────────────────────
 //
@@ -542,16 +587,28 @@ pub const REPLY_FAMILY_QUERY: u8 = 0x18;
 /// One past the query family.
 pub const REPLY_FAMILY_QUERY_END: u8 = 0x20;
 
+/// First tag of the device-error family: [`Device::take_error`](crcbl_hal::Device::take_error).
+///
+/// Its own family rather than a tag in the readback one, which is also answered
+/// on behalf of a [`Device`](crcbl_hal::Device): the readback family answers a
+/// command that names an object, and this one answers the device's out-of-band
+/// error channel — the replies here belong to no handle and are not about work
+/// anybody asked for.
+pub const REPLY_FAMILY_ERROR: u8 = 0x20;
+/// One past the device-error family.
+pub const REPLY_FAMILY_ERROR_END: u8 = 0x28;
+
 /// Every reply family, as `(first, end)` pairs in ascending order. Walked by the
 /// same test that walks [`FAMILIES`].
-pub const REPLY_FAMILIES: [(u8, u8); 3] = [
+pub const REPLY_FAMILIES: [(u8, u8); 4] = [
     (REPLY_FAMILY_INSTANCE, REPLY_FAMILY_INSTANCE_END),
     (REPLY_FAMILY_READBACK, REPLY_FAMILY_READBACK_END),
     (REPLY_FAMILY_QUERY, REPLY_FAMILY_QUERY_END),
+    (REPLY_FAMILY_ERROR, REPLY_FAMILY_ERROR_END),
 ];
 
 /// One past the last claimed reply tag. Everything above is unassigned.
-pub const REPLY_FAMILIES_END: u8 = REPLY_FAMILY_QUERY_END;
+pub const REPLY_FAMILIES_END: u8 = REPLY_FAMILY_ERROR_END;
 
 // ── Reply tags ────────────────────────────────────────────────────────────────
 //
@@ -587,6 +644,13 @@ pub const READBACK_PENDING_REPLY_TAG: u8 = 0x10;
 pub const READBACK_READY_REPLY_TAG: u8 = 0x11;
 /// [`Reply::QueryResults`](crate::Reply::QueryResults).
 pub const QUERY_RESULTS_REPLY_TAG: u8 = 0x18;
+/// [`Reply::DeviceErrors`](crate::Reply::DeviceErrors).
+///
+/// A *new tag* rather than a new [`REPLY_VERSION`], the distinction that
+/// constant's docs draw: every reply an older decoder knows still decodes, and
+/// this byte comes back as
+/// [`DecodeError::UnknownTag`](crate::DecodeError::UnknownTag) naming itself.
+pub const DEVICE_ERRORS_REPLY_TAG: u8 = 0x20;
 
 // ── Optional fields ───────────────────────────────────────────────────────────
 //

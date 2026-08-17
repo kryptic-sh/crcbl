@@ -126,9 +126,9 @@ fn every_reply_has_its_own_name() {
     names.dedup();
     // The corpus holds two of several shapes — Adapters, NoAdapters, Devices,
     // DeviceFaileds, ReadbackReadys, QueryResults, SurfaceCapsFaileds — and
-    // three SurfaceCaps, so the distinct-name count is what the writer has
-    // methods for.
-    assert_eq!(names.len(), 9);
+    // three SurfaceCaps and three DeviceErrors, so the distinct-name count is
+    // what the writer has methods for.
+    assert_eq!(names.len(), 10);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -1062,4 +1062,114 @@ fn no_byte_sequence_makes_the_decoder_panic() {
         // …and without a valid header, so `new` is fuzzed too.
         let _ = decode_replies(&replies[..replies.len().min(tag::REPLY_HEADER_BYTES + len / 2)]);
     }
+}
+
+// ── Device errors: the two caps, and why neither is a panic ──────────────────
+
+/// **An over-long message is truncated, never refused and never a panic.**
+///
+/// The one payload on this wire that arrives from a failing device rather than
+/// from a caller, so the writer's usual answer to something past a cap — assert,
+/// which on wasm is an `unreachable` that takes the module down — would turn the
+/// channel that says why a page is blank into the reason it stopped. What
+/// crosses instead is the head of the message and
+/// [`TRUNCATION_MARKER`](crcbl_webgpu::reply::TRUNCATION_MARKER).
+///
+/// The input is built here and the expectation lives in the shared corpus,
+/// because `web/tools/reply-encode.mjs` hands its own writer the same
+/// untruncated message and has to arrive at the same bytes — which is what pins
+/// the cut across the two languages rather than only within this one.
+#[test]
+fn a_device_error_past_the_cap_is_truncated_at_a_char_boundary() {
+    let long = replies::WIDE_CHAR
+        .to_string()
+        .repeat(tag::MAX_DEVICE_ERROR_BYTES);
+    assert!(
+        long.len() > tag::MAX_DEVICE_ERROR_BYTES,
+        "the input has to be past the cap for this to check anything"
+    );
+
+    let mut replies = ReplyWriter::new();
+    assert_eq!(
+        replies.device_errors(5, std::slice::from_ref(&long)),
+        1,
+        "one message went over, cut or not"
+    );
+
+    let decoded = decode_replies(replies.bytes()).expect("a truncated message still decodes");
+    assert_eq!(
+        decoded,
+        vec![(
+            5,
+            Reply::DeviceErrors {
+                messages: vec![replies::truncated_message()],
+            }
+        )],
+        "the wire carries the cut prefix and the marker",
+    );
+    let Reply::DeviceErrors { messages } = &decoded[0].1 else {
+        panic!("the reply is a DeviceErrors");
+    };
+    assert!(
+        messages[0].len() <= tag::MAX_DEVICE_ERROR_BYTES,
+        "the field the reader enforces a cap on is inside it: {} bytes",
+        messages[0].len(),
+    );
+    assert!(
+        messages[0].starts_with(replies::WIDE_CHAR),
+        "the head of the message is what survives, so it still says what failed"
+    );
+}
+
+/// **Past the cap on messages, the writer carries what fits and says how many.**
+///
+/// A drop would be silent, and the queue this comes from is the one place a
+/// failing device is heard from at all. The count is what lets the caller keep
+/// the rest for the next ask — `web/engine/gpu-replay.js` does exactly that.
+#[test]
+fn more_device_errors_than_fit_one_reply_are_carried_over_rather_than_dropped() {
+    let flood: Vec<String> = (0..tag::MAX_DEVICE_ERRORS + 7)
+        .map(|i| format!("error {i}"))
+        .collect();
+
+    let mut replies = ReplyWriter::new();
+    assert_eq!(
+        replies.device_errors(11, &flood),
+        tag::MAX_DEVICE_ERRORS,
+        "the reply carries the cap's worth and reports it"
+    );
+
+    let decoded = decode_replies(replies.bytes()).expect("a full reply decodes");
+    assert_eq!(
+        decoded,
+        vec![(
+            11,
+            Reply::DeviceErrors {
+                messages: flood[..tag::MAX_DEVICE_ERRORS].to_vec(),
+            }
+        )],
+        "and they are the oldest, in order: what went wrong first caused the rest",
+    );
+}
+
+/// A reply claiming more messages than the cap is refused at the count, before
+/// anything is allocated for it — the reader enforcing the number the writer
+/// keeps to, which is what makes it the contract rather than a convention.
+#[test]
+fn a_device_error_list_past_the_cap_is_refused_by_the_reader() {
+    let mut buffer = header();
+    buffer.push(tag::DEVICE_ERRORS_REPLY_TAG);
+    buffer.extend_from_slice(&7u64.to_le_bytes());
+    let count = u32::try_from(tag::MAX_DEVICE_ERRORS + 1).expect("the cap fits a u32");
+    buffer.extend_from_slice(&count.to_le_bytes());
+    // Enough bytes behind the count that `read_count`'s own "every element costs
+    // a byte" check passes and this one is what refuses it.
+    buffer.resize(buffer.len() + count as usize, 0);
+    assert_eq!(
+        decode_replies(&buffer),
+        Err(DecodeError::InvalidLength {
+            field: "DeviceErrors::messages",
+            len: count,
+        }),
+    );
 }

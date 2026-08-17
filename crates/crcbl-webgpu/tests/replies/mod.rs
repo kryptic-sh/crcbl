@@ -15,8 +15,8 @@ use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceType, Features, Format,
     Limits, PresentMode, SurfaceCaps,
 };
-use crcbl_webgpu::reply::SurfaceCapsFailure;
-use crcbl_webgpu::{Reply, ReplyWriter};
+use crcbl_webgpu::reply::{SurfaceCapsFailure, TRUNCATION_MARKER};
+use crcbl_webgpu::{Reply, ReplyWriter, tag};
 
 use crate::corpus::handle;
 
@@ -372,7 +372,82 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                 cause: SurfaceCapsFailure::Backend,
             },
         ),
+        // The out-of-band errors, and **two of them in one reply**, which is the
+        // whole reason this reply carries a list: `take_error` hands back one
+        // message per call, and a device that is failing produces them faster
+        // than one round trip a frame can carry. A decoder that read the count
+        // and then one message would leave the second where the next reply's tag
+        // should be, which is what a two-element list catches and a one-element
+        // list cannot.
+        //
+        // The wording is a real browser's, down to the nested "While validating"
+        // context and the newline: this is the shape the cap and the truncation
+        // below exist for, and a message with a `\n` and a `"` in it is the one a
+        // writer that went through JSON would mangle.
+        (
+            59,
+            Reply::DeviceErrors {
+                messages: vec![
+                    "Buffer usage (MapRead|Storage) is invalid.\n - While validating \
+                     [Buffer \"hud ✱ staging\"]"
+                        .into(),
+                    "vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY".into(),
+                ],
+            },
+        ),
+        // **The ordinary answer on a page that is working**, and the count's zero
+        // boundary. It is not the absence of a reply: the command is answered
+        // every time it is asked, because an unanswered sequence waits for ever.
+        (
+            61,
+            Reply::DeviceErrors {
+                messages: Vec::new(),
+            },
+        ),
+        // **A message that did not fit, as the wire carries it** — the cut
+        // prefix and the marker, not the original.
+        //
+        // This is the one entry in either corpus whose JavaScript counterpart is
+        // handed something *different* to what is written here:
+        // `reply-encode.mjs` gives its writer the whole untruncated message and
+        // has to arrive at exactly these bytes. That is what pins the cut across
+        // the two languages — the cap, the marker, and the walk back to a `char`
+        // boundary, which here lands one byte short of the budget because every
+        // character is three bytes wide. The Rust writer's own cut is checked in
+        // `tests/reply.rs`, which is where the untruncated input lives on this
+        // side.
+        (
+            67,
+            Reply::DeviceErrors {
+                messages: vec![truncated_message()],
+            },
+        ),
     ]
+}
+
+/// The character the truncation case is built from, three bytes wide in UTF-8 so
+/// that no cut at a byte budget divisible by two or four lands on a boundary.
+///
+/// The message it fills is written by whoever needs one past the cap —
+/// `tests/reply.rs` on this side, `reply-encode.mjs` on the other — because what
+/// is shared between the two binaries here is the *expectation*, and an input
+/// nothing in `fixture.rs` uses would be dead code in half of them.
+pub const WIDE_CHAR: char = '✱';
+
+/// What a message past [`tag::MAX_DEVICE_ERROR_BYTES`] made of [`WIDE_CHAR`]
+/// becomes on the wire.
+///
+/// Spelled from the rule rather than from the writer: the budget is the cap less
+/// the marker, and the last whole character that fits inside it is the last one
+/// carried. A writer that cut at the budget itself would split the character
+/// straddling it and produce a field that is not UTF-8; one that forgot the
+/// marker would produce a longer prefix. Both are a byte difference here.
+pub fn truncated_message() -> String {
+    let budget = tag::MAX_DEVICE_ERROR_BYTES - TRUNCATION_MARKER.len();
+    format!(
+        "{}{TRUNCATION_MARKER}",
+        WIDE_CHAR.to_string().repeat(budget / WIDE_CHAR.len_utf8())
+    )
 }
 
 /// The features a device opened by `web/engine/gpu-replay.js` comes back with
@@ -404,6 +479,14 @@ pub fn encode_reply(replies: &mut ReplyWriter, sequence: u64, reply: &Reply) {
         Reply::SurfaceCaps { caps } => replies.surface_caps(sequence, caps),
         Reply::SurfaceCapsFailed { reason, cause } => {
             replies.surface_caps_failed(sequence, reason, *cause);
+        }
+        Reply::DeviceErrors { messages } => {
+            // The count it wrote is dropped here and asserted where it means
+            // something: this corpus is under the cap by construction, so a
+            // check of it would be a check on the corpus rather than on the
+            // writer. `tests/reply.rs` is where a list past the cap is handed
+            // over and the return value is what says how much of it crossed.
+            let _ = replies.device_errors(sequence, messages);
         }
         Reply::ReadbackPending { readback } => replies.readback_pending(sequence, *readback),
         Reply::ReadbackReady { readback, data } => {

@@ -157,6 +157,11 @@ const MAX_REASON_CHARS = 512;
 /** `MAX_PENDING_ERRORS` in `web/engine/gpu-replay.js`, restated for that reason. */
 const MAX_PENDING_ERRORS = 64;
 
+/** `tag::MAX_DEVICE_ERRORS` — the most one `DeviceErrors` reply carries.
+ * Restated rather than imported, for `MAX_PENDING_ERRORS`'s reason: the two are
+ * equal today and neither follows the other. */
+const MAX_DEVICE_ERRORS = 64;
+
 /**
  * The `GPUBufferUsage` bits, from the WebGPU specification.
  *
@@ -1442,6 +1447,17 @@ function decodeOneReply(bytes) {
       },
     };
   }
+  if (tag === 0x20) {
+    // `DeviceErrors`: a count, then that many length-prefixed messages. Read
+    // whole rather than sampled, because the messages *are* the behaviour here
+    // — the check this exists for is that the text the browser produced is the
+    // text that reaches wasm, not that something came back.
+    const count = view.getUint32(at, true);
+    at += 4;
+    const messages = [];
+    for (let i = 0; i < count; i += 1) messages.push(string());
+    return { tag: 'DeviceErrors', sequence, messages };
+  }
   if (tag !== 0x05) {
     throw new Error(`decodeOneReply does not read tag 0x${tag.toString(16)}`);
   }
@@ -1999,6 +2015,11 @@ async function main() {
       'Submit',
       'RequestReadback',
       'PollReadback',
+      // Answered whatever state the replayer is in, and with an empty list when
+      // there is nothing to report — including on a replayer with no device,
+      // which is what this sweep hands it. An unanswered `TakeError` is a
+      // sequence wasm waits on for ever.
+      'TakeError',
       'DestroyReadback',
       'DestroyCommandBuffer',
       // The presentation family. CreateSwapchain configures, AcquireNextFrame
@@ -3083,11 +3104,11 @@ async function main() {
     );
   }
   {
-    // **The queue is bounded, and says when it dropped something.** Nothing
-    // drains it yet — the `take_error` command is a later slice — and
-    // `uncapturederror` can fire every frame for as long as a page is open. The
-    // first errors are kept, because what went wrong first caused the rest; what
-    // must not happen is the rest disappearing silently.
+    // **The queue is bounded, and says when it dropped something.**
+    // `uncapturederror` can fire every frame for as long as a page is open, and
+    // a reader can be slow or absent — this one takes nothing until the flood is
+    // over. The first errors are kept, because what went wrong first caused the
+    // rest; what must not happen is the rest disappearing silently.
     const { replayer, device } = await readyWithDevice();
     const over = 3;
     for (let i = 0; i < MAX_PENDING_ERRORS + over; i += 1) {
@@ -3118,6 +3139,93 @@ async function main() {
     check(
       replayer.takeError() === null,
       'after which it is empty rather than repeating the summary'
+    );
+  }
+
+  // ---- and how the queue reaches wasm: the TakeError command --------------
+  //
+  // THE CHECK THE STUB COULD NOT FAIL. Until `Device::take_error` was wired,
+  // everything above proved only that this file's own queue held the message:
+  // nothing carried it across, so a machine whose GPU refused work reached the
+  // engine as a healthy device drawing nothing, for minutes, with nothing for
+  // the user to report. What is asserted here is the crossing — that the text
+  // the browser produced is the text in the reply buffer wasm decodes.
+  {
+    const { replayer, device } = await readyWithDevice();
+    device.report('Buffer usage (MapRead|Storage) is invalid');
+    device.report('vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY');
+    replayer.replay(frameOf({ name: 'TakeError' }, 40n));
+    const answered = decodeOneReply(replayer.replies);
+    checkEqual(
+      answered,
+      {
+        tag: 'DeviceErrors',
+        sequence: 40n,
+        messages: [
+          'the device reported Buffer usage (MapRead|Storage) is invalid',
+          'the device reported vkAllocateMemory failed with ' +
+            'VK_ERROR_OUT_OF_DEVICE_MEMORY',
+        ],
+      },
+      'the errors the device reported cross to wasm, in the order they happened'
+    );
+
+    // ONE LOG, TWO READERS, AND NEITHER EATS THE OTHER'S. The browser parity
+    // gate proves "zero device errors per scene" by draining `takeError()`; the
+    // day wasm started draining the same queue, that check would have stopped
+    // seeing anything and gone on passing. So the same two messages are still
+    // here for this side.
+    check(
+      replayer.pendingErrors === 2 &&
+        replayer.takeError() ===
+          'the device reported Buffer usage (MapRead|Storage) is invalid' &&
+        replayer.takeError() ===
+          'the device reported vkAllocateMemory failed with ' +
+            'VK_ERROR_OUT_OF_DEVICE_MEMORY' &&
+        replayer.takeError() === null,
+      'and the gate still sees every one of them on its own cursor'
+    );
+
+    // …and each reader is done once it has taken them: a second ask answers
+    // with nothing rather than the same errors again.
+    replayer.clear();
+    replayer.replay(frameOf({ name: 'TakeError' }, 41n));
+    checkEqual(
+      decodeOneReply(replayer.replies),
+      { tag: 'DeviceErrors', sequence: 41n, messages: [] },
+      'a second ask is answered with an empty list rather than left unanswered'
+    );
+  }
+  {
+    // **A flood crosses whole, and what would not fit is still named.** The two
+    // caps meet here: the log holds `MAX_PENDING_ERRORS` and one reply carries
+    // `MAX_DEVICE_ERRORS`, which are the same number today — so a full log
+    // crosses in a single ask and it is the *log's* cap that bites first, not
+    // the reply's. What must not happen either way is a message disappearing
+    // without a word: the ones refused for want of room come out as the
+    // synthesised line, on this reader's cursor exactly as on the gate's.
+    const over = 3;
+    const { replayer, device } = await readyWithDevice();
+    for (let i = 0; i < MAX_PENDING_ERRORS + over; i += 1) {
+      device.report(`error ${i}`);
+    }
+    replayer.replay(frameOf({ name: 'TakeError' }, 42n));
+    const first = decodeOneReply(replayer.replies);
+    check(
+      first?.messages?.length === MAX_DEVICE_ERRORS &&
+        first.messages[0] === 'the device reported error 0' &&
+        first.messages[MAX_DEVICE_ERRORS - 1] ===
+          `the device reported error ${MAX_PENDING_ERRORS - 1}`,
+      `the ask carries ${MAX_DEVICE_ERRORS} of them, oldest first (${first?.messages?.length})`
+    );
+    replayer.clear();
+    replayer.replay(frameOf({ name: 'TakeError' }, 43n));
+    const rest = decodeOneReply(replayer.replies);
+    check(
+      rest?.messages?.length === 1 &&
+        rest.messages[0].includes(String(over)) &&
+        rest.messages[0].includes('dropped'),
+      `and the next ask names the ${over} there was no room for (${JSON.stringify(rest?.messages)})`
     );
   }
 

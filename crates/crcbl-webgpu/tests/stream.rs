@@ -1656,8 +1656,9 @@ fn every_command_has_its_own_name() {
     // family (CreateSwapchain, AcquireNextFrame, DestroySwapchain and
     // ReconfigureSwapchain) — so the distinct-name count is what the writer has
     // methods for. The offscreen surface (CreateOffscreenSurface) is the twin of
-    // CreateSurface and adds one name of its own.
-    assert_eq!(names.len(), 62);
+    // CreateSurface and adds one name of its own, and the out-of-band error ask
+    // (TakeError) adds the last.
+    assert_eq!(names.len(), 63);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

@@ -68,6 +68,31 @@ const MAX_FIELD_BYTES = 1 << 20;
 /** `tag::MAX_ELEMENT_COUNT` — largest element count in a length-prefixed array. */
 const MAX_ELEMENT_COUNT = 1 << 16;
 
+/**
+ * `tag::MAX_DEVICE_ERROR_BYTES` — the most one device-error message may occupy,
+ * marker included.
+ *
+ * A MESSAGE PAST THIS IS TRUNCATED, NOT REFUSED, which is the one place this
+ * writer departs from "refuse what the reader would refuse". Everything else it
+ * refuses is a caller mistake; this payload is a browser's own prose about a
+ * device that is failing, so its length is nobody's choice, and throwing would
+ * lose the report that a page with nothing on screen has to go on.
+ */
+export const MAX_DEVICE_ERROR_BYTES = 4096;
+
+/** `tag::MAX_DEVICE_ERRORS` — the most messages one `DeviceErrors` carries. */
+export const MAX_DEVICE_ERRORS = 64;
+
+/**
+ * `crcbl_webgpu::reply::TRUNCATION_MARKER` — what replaces the tail of a message
+ * that did not fit.
+ *
+ * So a shortened message reads as shortened: one that simply stopped
+ * mid-sentence would be taken for the whole of what the browser said, and read
+ * as a cause that is not there.
+ */
+export const TRUNCATION_MARKER = '… [truncated]';
+
 // ── Reply tags ───────────────────────────────────────────────────────────────
 //
 // Their own space, not a continuation of the command table's: the two never
@@ -83,6 +108,7 @@ const SURFACE_CAPS_FAILED_REPLY_TAG = 0x05;
 const READBACK_PENDING_REPLY_TAG = 0x10;
 const READBACK_READY_REPLY_TAG = 0x11;
 const QUERY_RESULTS_REPLY_TAG = 0x18;
+const DEVICE_ERRORS_REPLY_TAG = 0x20;
 
 // ── DeviceType codes ─────────────────────────────────────────────────────────
 
@@ -466,6 +492,40 @@ class ByteWriter {
   }
 
   /**
+   * One device-error message, cut to `MAX_DEVICE_ERROR_BYTES` if it is past it.
+   *
+   * THE CUT IS AT A CHARACTER BOUNDARY, NOT AT THE BYTE. The far side decodes
+   * this field with `String::from_utf8`, so a slice through the middle of a
+   * multi-byte character is a decode error that refuses the *whole reply
+   * buffer* — every answer in the frame lost over the shape of one browser's
+   * prose. WebGPU names resources by their labels and a label is whatever a
+   * caller wrote, so multi-byte characters here are ordinary.
+   *
+   * The walk back is off UTF-8 continuation bytes (`0b10xxxxxx`), which is the
+   * same position Rust's `str::is_char_boundary` finds, and
+   * `crates/crcbl-webgpu/tests/fixtures/canonical-replies.bin` is what holds
+   * the two to it: the canonical corpus carries a message cut this way, and
+   * `reply-encode.mjs` hands this writer the *untruncated* original.
+   *
+   * @param {string} text
+   * @param {string} field
+   */
+  putDeviceError(text, field) {
+    const bytes = this.#utf8.encode(text);
+    if (bytes.length <= MAX_DEVICE_ERROR_BYTES) {
+      this.putBytes(bytes, field);
+      return;
+    }
+    const marker = this.#utf8.encode(TRUNCATION_MARKER);
+    let end = MAX_DEVICE_ERROR_BYTES - marker.length;
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+    const cut = new Uint8Array(end + marker.length);
+    cut.set(bytes.subarray(0, end));
+    cut.set(marker, end);
+    this.putBytes(cut, field);
+  }
+
+  /**
    * An element count, capped by `MAX_ELEMENT_COUNT`.
    *
    * @param {number} count
@@ -811,9 +871,12 @@ export class ReplyWriter {
    * `crcbl-hal`, which is why the word crosses rather than a phrase built here.
    *
    * A REQUEST THAT FAILED IS NOT A DEVICE THAT WAS LOST. This answers a
-   * `RequestDevice` that never produced a device. A `GPUDevice.lost` on a device
-   * that is open and working is a different event with a different home —
-   * `Device::take_error` — and there is no reply for it yet.
+   * `RequestDevice` that never produced a device. An `uncapturederror` on a
+   * device that is open and working is a different event with a different home —
+   * `Device::take_error`, and {@link ReplyWriter#deviceErrors}, which answers a
+   * command that asks rather than a command that failed. (`GPUDevice.lost` is
+   * watched by neither: it means the device is gone rather than that a call
+   * failed, and this seam has no device-lost path.)
    *
    * @param {bigint} sequence
    * @param {string} reason
@@ -872,6 +935,42 @@ export class ReplyWriter {
       this.#writer.putString(reason, 'SurfaceCapsFailed::reason');
       this.#writer.putU8(cause, 'SurfaceCapsFailed::cause');
     });
+  }
+
+  /**
+   * `Device::take_error`: what the device reported out of band, oldest first.
+   *
+   * ANSWERS EVERY ASK, INCLUDING WITH NOTHING TO SAY. An empty list is the
+   * ordinary reply on a page that is working — "nothing since you last asked" —
+   * and it has to be sent, because a `TakeError` nobody answers leaves its
+   * sequence waiting on the far side for ever and the engine asks again every
+   * time its own queue empties.
+   *
+   * MANY MESSAGES, BECAUSE `take_error` HANDS BACK ONE PER CALL. A caller loops
+   * until it answers nothing, so a reply carrying a single message would let a
+   * frame learn one thing about a device failing in a hundred ways. At most
+   * `MAX_DEVICE_ERRORS` of them; **the return value says how many were
+   * written**, and anything past that is the caller's to keep and offer to the
+   * next ask rather than something dropped here.
+   *
+   * Each message is cut to `MAX_DEVICE_ERROR_BYTES` if it is past it — see
+   * {@link ByteWriter#putDeviceError}, and `tag::MAX_DEVICE_ERROR_BYTES` for why
+   * truncating beats splitting and beats refusing.
+   *
+   * @param {bigint} sequence
+   * @param {ArrayLike<string>} messages
+   * @returns {number} How many of them the reply carried.
+   */
+  deviceErrors(sequence, messages) {
+    const written = Math.min(messages.length, MAX_DEVICE_ERRORS);
+    this.#atomic(() => {
+      this.#open(DEVICE_ERRORS_REPLY_TAG, sequence);
+      this.#writer.putCount(written, 'DeviceErrors::messages');
+      for (let i = 0; i < written; i += 1) {
+        this.#writer.putDeviceError(messages[i], 'DeviceErrors::messages');
+      }
+    });
+    return written;
   }
 
   /**

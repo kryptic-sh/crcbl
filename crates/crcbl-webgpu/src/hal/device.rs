@@ -21,7 +21,7 @@
 //! the `super::bounds` module for which fields are measured, and why the refusal
 //! is a [`HalError`] rather than the writer's assert.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crcbl_hal::{
@@ -158,6 +158,51 @@ impl ReadbackTracker {
     }
 }
 
+// ── error tracking ─────────────────────────────────────────────────────────
+
+/// The device's out-of-band errors on this side of the seam: what has arrived
+/// and not been handed out, and the ask that is in flight.
+///
+/// **One ask at a time**, which is what [`waiting`](Self::waiting) is for. A
+/// [`Reply::DeviceErrors`] carries the replayer's whole queue, so a second
+/// [`Command::TakeError`](crate::Command::TakeError) issued while the first is
+/// unanswered would ask for errors already on their way and answer the caller
+/// twice with the same message.
+#[derive(Debug, Default)]
+struct ErrorQueue {
+    /// Arrived and not yet handed to a caller, oldest first — the order the
+    /// browser reported them in, which is the order that says which failure
+    /// caused the rest.
+    ///
+    /// Bounded by [`tag::MAX_DEVICE_ERRORS`](crate::tag::MAX_DEVICE_ERRORS)
+    /// without a check of its own: a reply carries at most that many, and
+    /// another is only asked for once this is empty.
+    arrived: VecDeque<String>,
+    /// Sequence of the ask whose answer has not arrived, or `None` when none is
+    /// out.
+    waiting: Option<u64>,
+}
+
+impl ErrorQueue {
+    /// Take this device's errors out of a drained frame's replies.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) {
+        let Some(sequence) = self.waiting else {
+            return;
+        };
+        let Some((_, reply)) = replies.iter().find(|(candidate, _)| *candidate == sequence) else {
+            return;
+        };
+        // Answered, whatever it says: one command is answered exactly once, so
+        // leaving this set would wait for a second reply that the channel would
+        // refuse. A reply of another shape naming this ask is a replayer bug and
+        // carries no errors; the next `take_error` asks again.
+        self.waiting = None;
+        if let Reply::DeviceErrors { messages } = reply {
+            self.arrived.extend(messages.iter().cloned());
+        }
+    }
+}
+
 // ── WebGpuDevice ───────────────────────────────────────────────────────────
 
 /// An open device: encodes resource, pass and submission commands onto the
@@ -171,6 +216,9 @@ pub struct WebGpuDevice {
     /// Readbacks in flight, keyed by handle bits. Guarded so the device stays
     /// `Send + Sync` on native, where the seam demands it.
     readbacks: Mutex<HashMap<u64, ReadbackTracker>>,
+    /// The out-of-band errors the browser has reported, and the ask in flight
+    /// for more. Guarded for [`readbacks`](Self::readbacks)'s reason.
+    errors: Mutex<ErrorQueue>,
     /// The extent each live swapchain was configured at, keyed by handle bits.
     /// WebGPU's acquire is synchronous and answers no size, so the frame's
     /// extent is the one this device last configured.
@@ -188,6 +236,7 @@ impl WebGpuDevice {
             graphics_queue,
             pool,
             readbacks: Mutex::new(HashMap::new()),
+            errors: Mutex::new(ErrorQueue::default()),
             swapchains: Mutex::new(HashMap::new()),
         }
     }
@@ -206,6 +255,12 @@ impl WebGpuDevice {
     /// method comes through here, and a second call in the same frame drains an
     /// empty buffer and changes nothing. A decode error or a borrowed inbox is
     /// left for the next frame; nothing here is the place to report one.
+    ///
+    /// **Every waiter is offered every reply**, for the same reason: the buffer
+    /// is drained once, so a reply this frame carried for the error queue is
+    /// gone by the time [`take_error`](Device::take_error) next runs unless it is
+    /// dispatched here. Each waiter picks out the sequence it is waiting on and
+    /// ignores the rest.
     fn pump(&self) {
         let Some(Ok(replies)) = self.channel.with(crate::web::StreamChannel::drain_replies) else {
             return;
@@ -220,6 +275,11 @@ impl WebGpuDevice {
         for tracker in readbacks.values_mut() {
             tracker.absorb(&replies);
         }
+        drop(readbacks);
+        self.errors
+            .lock()
+            .expect("the device error queue was poisoned")
+            .absorb(&replies);
     }
 }
 
@@ -243,11 +303,37 @@ impl Device for WebGpuDevice {
     }
 
     fn take_error(&self) -> Option<String> {
-        // Honest stub: live-device error reporting — `uncapturederror` and
-        // `GPUDevice.lost`, delivered out of band on the reply channel — is a
-        // later slice, and needs a reply this crate does not have yet. Today
-        // nothing here holds a live device long enough to lose one, so there is
-        // nothing to report.
+        // The browser's out-of-band errors, one per call, exactly as the seam
+        // asks: `uncapturederror` fires on the JS side long after the command
+        // that caused it returned, the replayer queues what it hears, and a
+        // `TakeError` on the stream is what brings the queue across.
+        //
+        // **A frame late, and that is the seam's shape rather than a shortfall.**
+        // Nothing here can block on a browser, so the answer to this frame's ask
+        // lands in the next one — which is why `Gpu::acquire` calls this at the
+        // top of a frame and refuses to record another when it answers `Some`.
+        // The first frame after a failure therefore still records; the second
+        // stops. That is what the stub could not do at all.
+        self.pump();
+        let mut errors = self
+            .errors
+            .lock()
+            .expect("the device error queue was poisoned");
+        if let Some(message) = errors.arrived.pop_front() {
+            return Some(message);
+        }
+        // Nothing left, so ask for more — but only with nothing already out, and
+        // only *after* the queue is empty: a reply carries the replayer's whole
+        // queue, so asking again while holding messages would re-ask for what is
+        // already here. A channel that cannot take the command (its buffers are
+        // borrowed, or `MAX_WAITING_REPLIES` are already waiting) leaves
+        // `waiting` as it was, so the next call tries again rather than waiting
+        // for an answer to a command that was never encoded.
+        if errors.waiting.is_none() {
+            errors.waiting = self
+                .channel
+                .with(|channel| channel.encode_awaited(crate::StreamWriter::take_error));
+        }
         None
     }
 

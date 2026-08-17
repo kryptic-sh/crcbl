@@ -280,10 +280,10 @@ const FIRST_COMMAND = {
 // The body-less one, and a sharper end-of-frame check than a command with a
 // body would be: its whole encoding is one byte, so a window that stopped a
 // single byte early loses it entirely and the decode still succeeds.
-const LAST_COMMAND = { name: 'EnumerateAdapters' };
+const LAST_COMMAND = { name: 'TakeError' };
 
 /** How many commands `corpus::every_command` holds. */
-const COMMAND_COUNT = 91;
+const COMMAND_COUNT = 92;
 
 async function main() {
   const override = process.argv.slice(2).find((arg) => !arg.startsWith('--'));

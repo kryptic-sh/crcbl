@@ -1271,11 +1271,14 @@ const EXPECTED = [
   // them would consume the twelve bytes after this tag, which are the command
   // below and the end of the buffer — so the pair decodes one command short.
   { name: 'SurfaceCaps' },
-  // Body-less too, and last in the corpus so that the byte offsets the checks
-  // below count from the *first* command stay where they are. A decoder that
-  // read one field too many here would run off the end of the buffer, which is
-  // what the truncation sweep sees.
+  // Body-less too, with another body-less command after it: the pair is what
+  // says a decoder that read a field here consumes its neighbour.
   { name: 'EnumerateAdapters' },
+  // Body-less as well, and last in the corpus so that the byte offsets the
+  // checks below count from the *first* command stay where they are — appending
+  // moves none of them. A decoder that read one field too many here would run
+  // off the end of the buffer, which is what the truncation sweep sees.
+  { name: 'TakeError' },
 ];
 
 /**
@@ -1587,15 +1590,16 @@ async function main() {
   );
 
   // ---- the body-less commands really have no body -------------------------
-  // The fixture ends with `SurfaceCaps` then `EnumerateAdapters`, and each is
-  // one tag byte and nothing else. So cutting one byte drops the last, cutting
-  // two drops both, and only the third cut lands inside a body — the last field
-  // of the `RequestDevice` before them — and is short.
+  // The fixture ends with `SurfaceCaps`, `EnumerateAdapters` and `TakeError`,
+  // and each is one tag byte and nothing else. So cutting one byte drops the
+  // last, cutting three drops all three, and only the fourth cut lands inside a
+  // body — the last field of the command before them — and is short.
   //
   // Byte for byte, which is what makes it a check on the *shape* rather than on
-  // the count: a decoder that read any body at all for either empty command
-  // fails the first two, and one that read a byte too few fails the third.
-  for (const dropped of [1, 2]) {
+  // the count: a decoder that read any body at all for one of the empty
+  // commands fails the first three, and one that read a byte too few fails the
+  // last.
+  for (const dropped of [1, 2, 3]) {
     const short = fixture.subarray(0, fixture.length - dropped);
     checkEqual(
       failureOf(short) ?? decodeStream(short),
@@ -1604,7 +1608,7 @@ async function main() {
     );
   }
   checkRefused(
-    fixture.subarray(0, fixture.length - 3),
+    fixture.subarray(0, fixture.length - 4),
     { kind: 'TooShort' },
     'a fixture cut inside a command body is TooShort'
   );

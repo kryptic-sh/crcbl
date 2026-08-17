@@ -1343,15 +1343,22 @@ pub fn every_command() -> Vec<Command> {
         // consume the `EnumerateAdapters` below it and end the stream one
         // command short — which is what the pair says and neither says alone.
         Command::SurfaceCaps,
+        // Body-less too, and with a body-less command after it: the pair says
+        // that a decoder reading a field that is no longer there consumes its
+        // neighbour, and neither of them says it alone.
+        Command::EnumerateAdapters,
         // Last, and not for tidiness: `web/tools/stream-decode.mjs` reaches into
         // this fixture by byte offset to corrupt one field at a time, and every
         // one of those offsets is counted from the *first* command. A command
-        // inserted above would move all of them.
+        // inserted above would move all of them — appending one moves nothing,
+        // which is why this arrived here rather than beside the device family it
+        // belongs to.
         //
-        // Body-less too, and here it is the *end* of the stream that follows the
-        // tag: a decoder that read one field too many runs off the buffer rather
-        // than into a neighbour, which is the other half of the shape.
-        Command::EnumerateAdapters,
+        // Body-less as well, and here it is the *end* of the stream that follows
+        // the tag: a decoder that read one field too many runs off the buffer
+        // rather than into a neighbour, which is the other half of the shape and
+        // the property whichever command is last has to carry.
+        Command::TakeError,
     ]
 }
 
@@ -1766,6 +1773,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             },
         ),
         Command::PollReadback { readback } => stream.poll_readback(*readback),
+        Command::TakeError => stream.take_error(),
         Command::DestroyReadback { readback } => stream.destroy_readback(*readback),
         Command::DestroyCommandBuffer { command_buffer } => {
             stream.destroy_command_buffer(*command_buffer)
