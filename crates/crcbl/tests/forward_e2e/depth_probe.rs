@@ -874,7 +874,11 @@ impl DepthProbe {
                 spirv: crcbl::shaders::MESH.spirv(),
                 wgsl: crcbl::shaders::MESH.wgsl(),
                 msl: crcbl::shaders::MESH.msl(),
-                dxil: &[],
+                // **DXIL too, or this suite is Vulkan-only again.** A backend
+                // that compiles only DXIL refuses a module handed the other
+                // three, which is what made this test fail on WARP the first
+                // time CI ran it agnostically.
+                dxil: &crcbl::shaders::MESH.dxil_containers(),
             })
             .expect("the committed SPIR-V is accepted");
         // **Two, because `fragmentMain` writes two.** A fragment stage writing
