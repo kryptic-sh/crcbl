@@ -749,6 +749,22 @@ jobs:
           CRCBL_DX12_VALIDATION: '1'
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
 
+      # The draw-generation buffers, read back and compared against the CPU
+      # oracle. Same consolidation as the step above it and from the same
+      # migration: `crates/crcbl/tests/draw_gen_e2e/` is what
+      # `crates/crcbl-vk/tests/vk_e2e/`'s `cull.rs`, `cull_stats.rs` and most of
+      # `draw_gen.rs` became, so until this step existed D3D12 had the goldens of
+      # the step above and no check on a single GPU-written number.
+      #
+      # It needs the same device the ForwardRenderer step needs and nothing more.
+      - name: Check the draw generation on WARP
+        shell: bash
+        env:
+          CRCBL_GPU: dx12
+          CRCBL_ADAPTER: cpu
+          CRCBL_DX12_VALIDATION: '1'
+        run: crates/crcbl/tests/run-draw-gen-e2e.sh
+
       # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
       # never run anywhere but by hand: its own header claimed
       # `run-render-e2e.sh` supplied the backend, and that script passes
@@ -940,6 +956,17 @@ jobs:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
+
+      # The draw-generation buffers, read back and compared against the CPU
+      # oracle. This is the Vulkan arm of the suite `vk_e2e`'s `cull.rs`,
+      # `cull_stats.rs` and most of `draw_gen.rs` became — the same checks the
+      # step above this job's `run-vk-e2e.sh` used to make, now made from a
+      # binary that names no backend so the other three jobs make them too.
+      - name: Check the draw generation on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-draw-gen-e2e.sh
 
       # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
       # never run in CI at all: its own header claimed `run-render-e2e.sh`
@@ -1486,6 +1513,19 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
 
+      # The draw-generation buffers on this backend. It found a real divergence
+      # on its first run: `crcbl-wgpu` refuses `fill_buffer` with a non-zero
+      # value, because wgpu's `clear_buffer` is a zero fill and it has nothing
+      # else — so the seam call the Vulkan original poisoned its counters with
+      # does not exist here. The suite stages the poison and copies it instead,
+      # which every backend can do; see `draw_gen_e2e/cull.rs`'s
+      # `VISIBLE_SENTINEL`.
+      - name: Check the draw generation on wgpu
+        env:
+          CRCBL_GPU: wgpu
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-draw-gen-e2e.sh
+
       # The physical-tiling count on this backend, the same step the other three
       # backends have. `CRCBL_VK_ICD` rather than `CRCBL_WGPU_ICD` for the
       # reason the step above it gives: the harness resolves the name with
@@ -1825,6 +1865,23 @@ jobs:
           MTL_DEBUG_LAYER_ERROR_MODE: nslog
           MTL_DEBUG_LAYER_WARNING_MODE: nslog
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
+
+      # The draw-generation buffers on Metal — the backend with the most to say
+      # here, because it is the one on `GeometryPath::IndirectPerBatch` and the
+      # one whose `fillBuffer:range:value:` repeats a *byte* rather than a word.
+      # Until this step existed no Metal run had read a single GPU-written
+      # draw-generation number; the ForwardRenderer step above compares pictures,
+      # and a wrong `first_index` naming the same range draws the right picture.
+      #
+      # Same validation switches as the two renderer steps, for the reason argued
+      # at the ForwardRenderer one — `MTL_SHADER_VALIDATION` deliberately absent.
+      - name: Check the draw generation on Metal
+        env:
+          CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+        run: crates/crcbl/tests/run-draw-gen-e2e.sh
 
       # The physical-tiling count on Metal. It draws through `ForwardRenderer`,
       # so the same validation switches the step above sets apply here and for

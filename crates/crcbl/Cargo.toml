@@ -179,6 +179,20 @@ render-e2e = []
 # mean a machine that can run one has to run both.
 hal-seam-e2e = []
 
+# `tests/draw_gen_e2e/` — the draw-generation cluster (the cull pass, its
+# statistics ring, and the indirect arguments it feeds) on whichever backend
+# `CRCBL_GPU` names, driven by `tests/run-draw-gen-e2e.sh`. Gated and
+# `#[ignore]`d for exactly the reason `render-e2e` above is.
+#
+# The gate it closes is that these tests read **GPU-written buffers** back and
+# compare them against a CPU oracle — a check no golden image can make — and
+# until this existed they lived in `crates/crcbl-vk/tests/vk_e2e/` and ran on
+# Vulkan alone. A third feature rather than a second suite under `render-e2e`
+# for the reason `hal-seam-e2e` is a second: the three answer different
+# questions and are run as separate steps, and one gate would mean a machine
+# that can run one has to run all of them.
+draw-gen-e2e = []
+
 # `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
 # and `build_cluster_dag`. **Off by default**, and the reason is the same one
 # `crcbl-sprite` is linked as `load` and not `bake`: the crate depends on `gltf`,

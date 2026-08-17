@@ -37,8 +37,6 @@
 // beside the root file, which is `tests/` itself.)
 mod button_skin;
 mod compute;
-mod cull;
-mod cull_stats;
 mod depth_probe;
 mod device_request;
 mod draw_gen;

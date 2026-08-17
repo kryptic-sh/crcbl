@@ -1,5 +1,5 @@
 //! `docs/plan/03-gpu-driven-rendering.md` §3.3's GPU frustum cull pass, against
-//! a real driver and against `crcbl_render::cull::visible_instances`.
+//! a real driver and against `crcbl::render::cull::visible_instances`.
 //!
 //! Separate from `draw_gen`, which consumes this pass's output, because the two
 //! halves fail differently: a consumer that drew the right picture from the
@@ -12,26 +12,36 @@
 //! freed mesh, removed, and never written at all — so a dropped plane, a
 //! missing `abs` in the bounds transform, a missing empty-entry guard or a
 //! missing liveness check each changes a different element of the answer. The
-//! last two tests run the pass over `crcbl_render::InstancePool`'s **own
+//! last two tests run the pass over `crcbl::render::InstancePool`'s **own
 //! buffer** rather than over records typed out here, because a removal that
 //! updated the host mirror and never reached the device passes everything
 //! above them.
 
 use crate::harness::{Headless, poisoned};
-use crcbl_hal::{
+use crcbl::hal::{
     Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, MemoryLocation, ResourceState,
     SubmitInfo,
 };
-use crcbl_render::cull::{Frustum, visible_instances};
-use crcbl_render::{Camera, InstanceHandle, InstancePool, InstancePoolDesc, Projection};
-use crcbl_shaders::mesh::{GpuInstance, GpuMesh, INSTANCE_STRIDE, MESH_ENTRY_STRIDE};
-use glam::{Mat4, Vec3};
+use crcbl::math::{Mat4, Vec3};
+use crcbl::render::cull::{Frustum, visible_instances};
+use crcbl::render::{Camera, InstanceHandle, InstancePool, InstancePoolDesc, Projection};
+use crcbl::shaders::mesh::{GpuInstance, GpuMesh, INSTANCE_STRIDE, MESH_ENTRY_STRIDE};
 
 /// What the visible list holds before every dispatch.
 ///
 /// Not zero and not any instance index the scene uses: a slot the shader never
 /// wrote must not be confusable with one it wrote, and instance 0 is a real
 /// answer.
+///
+/// **It reaches the list through a copy, not through
+/// [`CommandEncoder::fill_buffer`].** `crcbl-wgpu` refuses a fill with a
+/// non-zero value outright — wgpu offers `clear_buffer`, which is a zero fill
+/// and nothing else — so the Vulkan original's one-line fill is a
+/// backend-specific mechanism wearing a seam call's name. The staging copy in
+/// [`CullProbe::over`] and [`CullProbe::run`] puts the same bytes in the same
+/// place on every backend; the assertions that read them are unchanged.
+///
+/// [`CommandEncoder::fill_buffer`]: crcbl::hal::CommandEncoder::fill_buffer
 const VISIBLE_SENTINEL: u32 = 0xDEAD_BEEF;
 
 /// Elements the visible list holds, which is [`Params::capacity`].
@@ -40,7 +50,7 @@ const VISIBLE_SENTINEL: u32 = 0xDEAD_BEEF;
 /// reach the overflow arm — that one asks for it by rebuilding with a small
 /// capacity of its own.
 ///
-/// [`Params::capacity`]: crcbl_shaders::cull::Params::capacity
+/// [`Params::capacity`]: crcbl::shaders::cull::Params::capacity
 const VISIBLE_CAPACITY: u32 = 64;
 
 /// The unit cube every "is it in the frustum" instance below draws: table entry
@@ -57,7 +67,7 @@ fn unit_cube() -> GpuMesh {
 
 /// A tall thin bar: table entry 2, and the mesh whose *rotation* decides
 /// whether it is on screen. An axis-aligned box would not — see
-/// `crcbl_render::cull::Aabb::transformed`.
+/// `crcbl::render::cull::Aabb::transformed`.
 fn bar() -> GpuMesh {
     GpuMesh {
         base_vertex: 64,
@@ -173,23 +183,27 @@ fn aspect() -> f32 {
 
 /// Everything the cull pass needs on the device, plus the readback path.
 struct CullProbe {
-    params: crcbl_hal::BufferHandle,
+    params: crcbl::hal::BufferHandle,
     /// The instance array. Created by [`CullProbe::new`] and destroyed with the
     /// probe, or somebody else's — see [`CullProbe::over`], where it is an
     /// [`InstancePool`]'s and outlives this.
-    instances: crcbl_hal::BufferHandle,
+    instances: crcbl::hal::BufferHandle,
     /// Whether [`CullProbe::destroy`] releases `instances`.
     owns_instances: bool,
-    meshes: crcbl_hal::BufferHandle,
-    visible: crcbl_hal::BufferHandle,
-    counter: crcbl_hal::BufferHandle,
-    staging: crcbl_hal::BufferHandle,
+    meshes: crcbl::hal::BufferHandle,
+    visible: crcbl::hal::BufferHandle,
+    counter: crcbl::hal::BufferHandle,
+    staging: crcbl::hal::BufferHandle,
+    /// [`VISIBLE_SENTINEL`] repeated, on the host, ready to be copied over
+    /// `visible` before each dispatch. See that constant for why this is not a
+    /// `fill_buffer`.
+    sentinel: crcbl::hal::BufferHandle,
     capacity: u32,
     instance_count: u32,
-    bind_group_layout: crcbl_hal::BindGroupLayoutHandle,
-    bind_group: crcbl_hal::BindGroupHandle,
-    pipeline_layout: crcbl_hal::PipelineLayoutHandle,
-    pipeline: crcbl_hal::ComputePipelineHandle,
+    bind_group_layout: crcbl::hal::BindGroupLayoutHandle,
+    bind_group: crcbl::hal::BindGroupHandle,
+    pipeline_layout: crcbl::hal::PipelineLayoutHandle,
+    pipeline: crcbl::hal::ComputePipelineHandle,
 }
 
 /// What one dispatch produced.
@@ -217,7 +231,7 @@ impl CullProbe {
     ) -> Self {
         let device = headless.device.as_ref();
         let instance_count = u32::try_from(instances.len()).expect("a small scene");
-        // Host-visible, exactly as `crcbl_render::InstancePool`'s buffers are —
+        // Host-visible, exactly as `crcbl::render::InstancePool`'s buffers are —
         // which is what the other constructor hands over instead of this.
         let instance_buffer = device
             .create_buffer(&BufferDesc {
@@ -249,21 +263,21 @@ impl CullProbe {
     /// what a host copy could not tell apart from one that worked.
     fn over(
         headless: &Headless,
-        instance_buffer: crcbl_hal::BufferHandle,
+        instance_buffer: crcbl::hal::BufferHandle,
         instance_count: u32,
         meshes: &[GpuMesh],
         capacity: u32,
     ) -> Self {
         let device = headless.device.as_ref();
 
-        // Host-visible for both remaining inputs, exactly as `crcbl_render`'s
+        // Host-visible for both remaining inputs, exactly as `crcbl-render`'s
         // own pools are: the mesh table is a `HostUpload` storage buffer there,
         // and the uniform block is one everywhere in the engine. A staging copy
         // would need barriers this test is not about.
         let params = device
             .create_buffer(&BufferDesc {
                 label: Some("cull params"),
-                size: crcbl_shaders::cull::PARAMS_SIZE as u64,
+                size: crcbl::shaders::cull::PARAMS_SIZE as u64,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
             })
@@ -310,80 +324,98 @@ impl CullProbe {
                 memory: MemoryLocation::HostReadback,
             })
             .expect("a readback buffer");
+        let sentinel = device
+            .create_buffer(&BufferDesc {
+                label: Some("cull sentinel"),
+                size: u64::from(capacity) * 4,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a sentinel source");
+        // Written once and copied every run. A `HostUpload` source copied from
+        // with no barrier of its own is the same shape `crcbl_render::texture`'s
+        // upload path uses.
+        device
+            .write_buffer(
+                sentinel,
+                0,
+                &VISIBLE_SENTINEL.to_le_bytes().repeat(capacity as usize),
+            )
+            .expect("write");
 
-        let storage = |read_only| crcbl_hal::BindGroupLayoutEntry {
+        let storage = |read_only| crcbl::hal::BindGroupLayoutEntry {
             binding: 0,
-            visibility: crcbl_hal::ShaderStages::COMPUTE,
-            kind: crcbl_hal::BindingKind::StorageBuffer {
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::StorageBuffer {
                 read_only,
                 dynamic: false,
             },
             count: 1,
-            flags: crcbl_hal::BindingFlags::empty(),
+            flags: crcbl::hal::BindingFlags::empty(),
         };
         let layout_entries = [
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: crcbl_hal::ShaderStages::COMPUTE,
-                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                visibility: crcbl::hal::ShaderStages::COMPUTE,
+                kind: crcbl::hal::BindingKind::UniformBuffer { dynamic: false },
                 count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
+                flags: crcbl::hal::BindingFlags::empty(),
             },
             // `StructuredBuffer` in the shader, so read-only here — the cull
             // pass never edits an instance or a mesh entry.
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 1,
                 ..storage(true)
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 2,
                 ..storage(true)
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 3,
                 ..storage(false)
             },
-            crcbl_hal::BindGroupLayoutEntry {
+            crcbl::hal::BindGroupLayoutEntry {
                 binding: 4,
                 ..storage(false)
             },
         ];
         let bind_group_layout = device
-            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
                 label: Some("cull"),
                 entries: &layout_entries,
             })
             .expect("the cull layout");
 
         let group_entries = [
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 0,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(params),
+                resource: crcbl::hal::BindingResource::whole_buffer(params),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 1,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(instance_buffer),
+                resource: crcbl::hal::BindingResource::whole_buffer(instance_buffer),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 2,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(mesh_buffer),
+                resource: crcbl::hal::BindingResource::whole_buffer(mesh_buffer),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 3,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(visible),
+                resource: crcbl::hal::BindingResource::whole_buffer(visible),
             },
-            crcbl_hal::BindGroupEntry {
+            crcbl::hal::BindGroupEntry {
                 binding: 4,
                 array_index: 0,
-                resource: crcbl_hal::BindingResource::whole_buffer(counter),
+                resource: crcbl::hal::BindingResource::whole_buffer(counter),
             },
         ];
         let bind_group = device
-            .create_bind_group(&crcbl_hal::BindGroupDesc {
+            .create_bind_group(&crcbl::hal::BindGroupDesc {
                 label: Some("cull"),
                 layout: bind_group_layout,
                 entries: &group_entries,
@@ -393,7 +425,7 @@ impl CullProbe {
 
         let set_layouts = [bind_group_layout];
         let pipeline_layout = device
-            .create_pipeline_layout(&crcbl_hal::PipelineLayoutDesc {
+            .create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
                 label: Some("cull"),
                 bind_group_layouts: &set_layouts,
                 push_constants: None,
@@ -401,30 +433,33 @@ impl CullProbe {
             .expect("a pipeline layout");
 
         let module = device
-            .create_shader_module(&crcbl_hal::ShaderModuleDesc {
+            .create_shader_module(&crcbl::hal::ShaderModuleDesc {
                 label: Some("cull.slang"),
-                spirv: crcbl_shaders::CULL.spirv(),
-                wgsl: crcbl_shaders::CULL.wgsl(),
-                msl: crcbl_shaders::CULL.msl(),
-                dxil: &[],
+                spirv: crcbl::shaders::CULL.spirv(),
+                wgsl: crcbl::shaders::CULL.wgsl(),
+                msl: crcbl::shaders::CULL.msl(),
+                // **Every target, not just SPIR-V.** The Vulkan original passed
+                // `&[]` here because only Vulkan ever ran it; a D3D12 device
+                // handed an empty container list has no code to compile.
+                dxil: &crcbl::shaders::CULL.dxil_containers(),
             })
-            .expect("the committed SPIR-V is accepted");
-        // The manifest's name rather than a literal, for the reason
-        // `compute.rs` gives: it is read out of the artifact's `OpEntryPoint`.
-        let entry_point = crcbl_shaders::CULL
-            .entry_point(crcbl_shaders::Stage::Compute)
+            .expect("the committed artifacts are accepted");
+        // The manifest's name rather than a literal: it is read out of the
+        // artifact's own `OpEntryPoint`.
+        let entry_point = crcbl::shaders::CULL
+            .entry_point(crcbl::shaders::Stage::Compute)
             .expect("the cull pass has exactly one compute entry point");
         let pipeline = device
-            .create_compute_pipeline(&crcbl_hal::ComputePipelineDesc {
+            .create_compute_pipeline(&crcbl::hal::ComputePipelineDesc {
                 label: Some("cull"),
                 layout: pipeline_layout,
-                compute: crcbl_hal::ShaderEntry {
+                compute: crcbl::hal::ShaderEntry {
                     module,
                     entry_point,
                 },
-                // The shader's own number; see `compute.rs` for why it is not
-                // a literal.
-                workgroup_size: [crcbl_shaders::cull::WORKGROUP_SIZE, 1, 1],
+                // The shader's own number rather than a literal, for the same
+                // reason the entry point is.
+                workgroup_size: [crcbl::shaders::cull::WORKGROUP_SIZE, 1, 1],
             })
             .expect("a compute pipeline");
         device.destroy_shader_module(module);
@@ -437,6 +472,7 @@ impl CullProbe {
             visible,
             counter,
             staging,
+            sentinel,
             capacity,
             instance_count,
             bind_group_layout,
@@ -456,7 +492,7 @@ impl CullProbe {
             .write_buffer(
                 self.params,
                 0,
-                &crcbl_shaders::cull::Params {
+                &crcbl::shaders::cull::Params {
                     planes: frustum.planes.map(|plane| plane.to_array()),
                     instance_count: self.instance_count,
                     capacity: self.capacity,
@@ -469,15 +505,14 @@ impl CullProbe {
             label: Some("cull dispatch"),
             queue: headless.queue,
         });
-        let buffer_barrier = |buffer, from, to| crcbl_hal::BufferBarrier {
+        let buffer_barrier = |buffer, from, to| crcbl::hal::BufferBarrier {
             buffer,
             from,
             to,
             queue_transfer: None,
         };
         // `TransferSrc` as the source state is vacuous on the first run and is
-        // the real prior use on every later one — the same reasoning
-        // `compute.rs` records for the probe's destination.
+        // the real prior use on every later one.
         encoder.pipeline_barrier(&Barriers {
             buffers: &[
                 buffer_barrier(
@@ -493,16 +528,23 @@ impl CullProbe {
             ],
             ..Barriers::default()
         });
-        encoder.fill_buffer(self.visible, 0, visible_bytes, VISIBLE_SENTINEL);
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+            src: self.sentinel,
+            src_offset: 0,
+            dst: self.visible,
+            dst_offset: 0,
+            size: visible_bytes,
+        });
+        // A zero fill, which every backend has — see [`VISIBLE_SENTINEL`] for
+        // why the sentinel above it cannot be one.
         // The shader only ever adds to the counter, so the zero has to come
         // from here. A counter left holding the previous run's total is the
         // defect this fill exists to prevent, and it is why every test below
         // that runs twice checks the second answer as hard as the first.
         encoder.fill_buffer(self.counter, 0, 4, 0);
-        // `ShaderReadWrite` rather than a write-only state, for the reason
-        // `compute.rs` measured: a storage-buffer descriptor permits reads
-        // whatever the source does with it, and naming only the write leaves
-        // the fill unsynchronised against one.
+        // `ShaderReadWrite` rather than a write-only state: a storage-buffer
+        // descriptor permits reads whatever the source does with it, and naming
+        // only the write leaves the fill unsynchronised against one.
         encoder.pipeline_barrier(&Barriers {
             buffers: &[
                 buffer_barrier(
@@ -519,14 +561,14 @@ impl CullProbe {
             ..Barriers::default()
         });
 
-        encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+        encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
             label: Some("cull"),
         });
         encoder.bind_compute_pipeline(self.pipeline);
         encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);
         let groups = self
             .instance_count
-            .div_ceil(crcbl_shaders::cull::WORKGROUP_SIZE);
+            .div_ceil(crcbl::shaders::cull::WORKGROUP_SIZE);
         encoder.dispatch(groups, 1, 1);
         encoder.end_compute_pass();
 
@@ -545,14 +587,14 @@ impl CullProbe {
             ],
             ..Barriers::default()
         });
-        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
             src: self.visible,
             src_offset: 0,
             dst: self.staging,
             dst_offset: 0,
             size: visible_bytes,
         });
-        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
             src: self.counter,
             src_offset: 0,
             dst: self.staging,
@@ -594,6 +636,7 @@ impl CullProbe {
         device.destroy_bind_group(self.bind_group);
         device.destroy_bind_group_layout(self.bind_group_layout);
         for buffer in [
+            self.sentinel,
             self.staging,
             self.counter,
             self.visible,
@@ -611,11 +654,11 @@ impl CullProbe {
 /// The pass agrees with the CPU reference, instance for instance, on a scene
 /// with one case per rejection it can make.
 ///
-/// The reference is the oracle: it is ordinary Rust in `crcbl_render::cull`,
+/// The reference is the oracle: it is ordinary Rust in `crcbl::render::cull`,
 /// with its own unit tests against hand-placed boxes, and this asserts the GPU
 /// reproduces it rather than asserting a list somebody typed out.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run via tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn the_gpu_visible_list_matches_the_cpu_reference() {
     let headless = Headless::open();
     let (instances, meshes) = (scene(), meshes());
@@ -665,7 +708,7 @@ fn the_gpu_visible_list_matches_the_cpu_reference() {
 /// camera cannot see and a camera standing in front of it cannot miss — and that
 /// the instance at the origin flips the other way.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run via tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn the_visible_set_changes_with_the_camera() {
     let headless = Headless::open();
     let (instances, meshes) = (scene(), meshes());
@@ -715,7 +758,7 @@ fn the_visible_set_changes_with_the_camera() {
 /// normalized its planes, because the infinite camera's far plane has a zero
 /// normal and normalizing it produces `NaN`s that compare false everywhere.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run via tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn a_finite_far_plane_culls_what_an_infinite_one_keeps() {
     let headless = Headless::open();
     let (instances, meshes) = (scene(), meshes());
@@ -763,7 +806,7 @@ fn a_finite_far_plane_culls_what_an_infinite_one_keeps() {
 /// difference between an overflow a caller can see and a list that quietly
 /// stops growing.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run via tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn an_overflowing_list_still_counts_every_survivor() {
     let headless = Headless::open();
     let (instances, meshes) = (scene(), meshes());
@@ -804,7 +847,7 @@ fn an_overflowing_list_still_counts_every_survivor() {
 
 // --- the pool's own removals -----------------------------------------------
 //
-// The two tests below run the pass over `crcbl_render::InstancePool`'s **own
+// The two tests below run the pass over `crcbl::render::InstancePool`'s **own
 // buffer**, so what is culled is what `insert`, `remove` and `begin_frame`
 // actually put on the device. A removal that updated the host mirror and never
 // reached the GPU passes every test above this line.
@@ -886,7 +929,7 @@ fn host_array(pool: &InstancePool, handles: &[Option<InstanceHandle>]) -> Vec<Gp
 /// half a metre away and stays in the list, which is what says the pass still
 /// ran.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run via tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn a_removed_instance_is_not_in_the_visible_list() {
     let headless = Headless::open();
     let device = headless.device.as_ref();
@@ -966,7 +1009,7 @@ fn a_removed_instance_is_not_in_the_visible_list() {
 /// the contents it replaced were at the origin, which the turned camera cannot
 /// see either.
 #[test]
-#[ignore = "needs a real Vulkan implementation; run via tests/run-vk-e2e.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
 fn a_slot_reused_after_a_removal_draws_its_new_contents() {
     let headless = Headless::open();
     let device = headless.device.as_ref();
