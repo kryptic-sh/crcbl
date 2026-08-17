@@ -494,6 +494,42 @@ but the calls still succeed rather than refusing, so a caller that trusts the
 handle gets silence instead of an error. Either implement them on the stream or
 make them refuse; the declaration alone does not stop a caller using them.
 
+### `vk_e2e/mesh.rs` is a redesign, not a move — and the decision is taken
+
+The white-box migration is otherwise finished: the seam suite (16),
+`draw_gen_e2e` (12), `forward_e2e` (13) and `sprite_e2e` (12) all run on vk,
+dx12, Metal and WebGPU in CI, and `crcbl-vk`'s own suite is down from 92 tests
+to 55. The nine sprite goldens moved without a single re-bless — every one
+matches on wgpu with zero differing pixels.
+
+**`mesh.rs` (3180 lines, 15 tests, 4 goldens) cannot be moved as it stands.** At
+least seven of its tests open the device demanding
+`Features::MESH_SHADER | Features::TASK_SHADER` and then assert that
+`GeometryPath::MeshShader` was the path selected — one failure message even says
+"radv and lavapipe both report VK_EXT_mesh_shader". That path does not exist on
+wgpu, WARP or Metal, so those tests assert a Vulkan fact, not a seam fact.
+
+**Decision, taken rather than deferred: split each affected test in two.** The
+claim about what the cluster DAG selected — which levels, which clusters, how
+many survived — is backend-agnostic and belongs in the shared suite. The claim
+that the _mesh-shader path_ produced it is Vulkan-specific and stays in
+`vk_e2e`, alongside the existing mesh-shader capability test. Two tests where
+there was one, each asserting something true everywhere it runs. The alternative
+— moving them wholesale and gating the assertions on `Capability::MeshShading` —
+would leave three backends running a test whose substance is skipped, which is
+the shape this project keeps removing.
+
+**A blocker to clear first:** `vk_e2e/draw_gen.rs` and `vk_e2e/queries.rs` still
+import
+`crate::mesh::{MESH_EXTENT, mesh_camera, place, place_cube, render_mesh}`, so
+those helpers must be extracted within `vk_e2e` before `mesh.rs` can leave.
+
+**And a measurement worth having before the goldens move:** the mesh goldens are
+the loosest in the tree already — `mesh_clusters` reports 99.84% of pixels
+differing on radv today, with a max channel delta of 6 and 0.66% over tolerance.
+It passes, but with far less headroom than any sprite golden, so a cross-backend
+move needs the numbers measured on each backend rather than assumed.
+
 ### Smaller things the WebGPU work surfaced and did not fix
 
 - **A device error names no command.** `Reply::DeviceErrors` carries the
