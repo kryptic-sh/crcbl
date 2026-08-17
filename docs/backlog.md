@@ -41,6 +41,26 @@ sanctioned exception to the server-authoritative rule (it is a tool and
 simulates nothing), and it is exempt from the `.crpix` art rule, because the
 whole point is that it shows _the user's_ asset unadorned.
 
+### Three copies of the Chromium launch and CDP plumbing
+
+`web/tools/browser-e2e.mjs`, `web/tools/render-harness-e2e.mjs` and now
+`web/tools/probe-e2e.mjs` each carry a near-identical copy of the same code:
+finding a browser, the flag list, launching it, waiting on `DevToolsActivePort`,
+a minimal CDP client, and `Runtime.evaluate` wrapping. The third arrived with
+the standalone probe page, which followed the existing per-driver-copy pattern
+rather than extracting a shared module — consolidating would have meant editing
+the parity gate, which that slice had no mandate to touch.
+
+Three copies is where drift starts, and the flag list is the part that matters:
+it encodes which adapter Chromium picks and whether WebGPU is exposed at all, so
+two drivers disagreeing about it means two gates testing different things while
+both look green. A shared `web/tools/chromium.mjs` is the obvious shape.
+
+**Do this together with the cross-platform work below**, not before it: that
+work has to touch browser discovery and the Xvfb branch in every driver anyway,
+and doing both at once means changing the plumbing in one place instead of
+three, and then again three more times per platform.
+
 ### Run the WebGPU browser gates on Windows and macOS, not just Linux
 
 **Every WebGPU browser test in the repository runs in one job**, `pages/build`
