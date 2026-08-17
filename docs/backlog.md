@@ -814,6 +814,32 @@ colours that output, and maximally confusing the day something does. And
 `web/run-render-harness-e2e.sh` is referenced from the roadmap and this file but
 wired into **no workflow at all**.
 
+### `BinarySemaphore` stays unexercised, deliberately
+
+The seam suite drives 10 of 25 capabilities. `BinarySemaphore` is not one of
+them, and the entry that used to claim it was covered was **false** — the
+timeline test it named never creates a binary semaphore at all. The capability's
+own docs say why the two are separate: a backend that refused both would pass
+every test that checks only the timeline half.
+
+**A creation-only exercise is available and was declined.** It would assert that
+`create_semaphore(Binary)` handed back a handle, which is what the capability's
+own wording claims, and `exercise_query_set_creation` sets the precedent. It was
+declined because the tally means "driven by real GPU work", and a check that a
+handle came back would move the number without moving the coverage — and the
+query-set precedent is recorded in this file as a **ceiling to live with**, not
+a pattern to copy.
+
+**What a real exercise would need:** the observable is ordering between two
+submissions, and on a single-queue backend a dropped binary semaphore is
+indistinguishable from an honoured one, because submission order already
+provides the ordering. So it needs either a second queue or a device that can be
+shown to reorder without it. That is a fixture decision, and it is the same
+missing machinery as the `NEEDS_TWO_SUBMISSIONS` rows.
+
+**Honest 10 is worth more than a padded 11**, which is the whole reason the
+tally exists.
+
 ### Smaller things the WebGPU work surfaced and did not fix
 
 - **A device error names no command.** `Reply::DeviceErrors` carries the
