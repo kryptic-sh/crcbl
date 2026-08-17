@@ -3,65 +3,52 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### INVESTIGATE — Dawn `VK_ERROR_OUT_OF_DEVICE_MEMORY` on the office PC
+### The office PC's `VK_ERROR_OUT_OF_DEVICE_MEMORY` — wgpu only, so not worth fixing
 
-The web samples boot and keep running on the office PC, but Chrome's console
-logs once, right after the first frames:
+On a dual-GPU laptop the web samples flood the console with
+`vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY`, and in `breakout`
+**every** allocation the frame makes fails, cascading into invalid buffers,
+textures, bind groups and command buffers until nothing renders.
 
-```
-vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY
- - While handling unexpected error type Internal when allowed errors are Validation.
-    at CheckVkSuccessImpl (../../third_party/dawn/src/dawn/native/vulkan/VulkanError.cpp:106)
-```
+**It is the `wgpu` backend, not `crcbl-webgpu`.** The log says
+`opened the wgpu GPU backend` / `crcbl_wgpu::errors`, and the deployed site is
+built by `web/build.sh` with its default `CRCBL_WEB_BACKEND=wgpu` — the `webgpu`
+build exists only inside CI's e2e gates. Since `crcbl-wgpu` is being deleted at
+the end of the migration, **this is not being fixed.** It is recorded only
+because of what it says about the machine and about our own robustness.
 
-It is **non-fatal** — the HUD ticks on for minutes — so Dawn either recovers or
-the failed allocation is on a path that degrades silently. That silence is the
-worrying half: nothing in our code hears it.
+**It is not an allocation-size problem, and the earlier guess that it was
+`ArrayPages` allocating a large fixed texture array was wrong.** The failing
+allocations are tiny — `ball staging` is 1536 bytes, `bricks staging` 4096,
+`ui glyph atlas staging` 9984 — and they fail on a card reporting 14 MB used of
+2.0 GB. When a 1.5 KB buffer cannot be allocated, the heap being asked for is
+not the one with the free memory: the plausible causes are the dGPU (an MX550 on
+a PCIe 1.0 x4 link, parked in P8) being unable to serve allocations in that
+state, or Dawn selecting a device or memory type that has nothing available.
+Chromium holds GPU processes on **both** the MX550 and the Intel UHD, so which
+one Dawn opened is still unknown — the engine logs the adapter name as empty
+(`wgpu adapter ""`, type `Other`), which is a real gap in its own right: a bug
+report from a user cannot say which GPU produced it.
 
-**The machine (measured with `gpur`, 2026-08-17).** A dual-GPU laptop:
+**What this is worth acting on:**
 
-| device               | memory                             | notes                                           |
-| -------------------- | ---------------------------------- | ----------------------------------------------- |
-| NVIDIA GeForce MX550 | **2.0 GB dedicated**, 14 MB in use | PCIe **1.0 x4** (max 4.0 x16), P8, 300 MHz, 4 W |
-| Intel UHD Graphics   | 1.3 G / 15 G **shared**            | integrated, 27% busy                            |
-
-Chromium has GPU processes on **both**: 295 MiB on the Intel and 11 MiB on the
-NVIDIA. So which adapter Dawn actually opened for WebGPU is not yet established,
-and the engine still logs the adapter name as empty (`wgpu adapter ""`, type
-`Other`), which is its own small defect — we cannot tell from a report which GPU
-produced it.
-
-**The strongest hypothesis, and it is testable from the log we already have.**
-The same run reports
-`this device does not have DESCRIPTOR_INDEXING -> binding ArrayPages`.
-`ArrayPages` is the fallback binding model, and it backs materials with
-fixed-size texture **arrays** rather than a bindless table. If that array is
-sized by a constant — layers x extent x 4 bytes — it is a single allocation that
-does not scale down for a 2 GB card, and it would be by far the largest thing
-the frame asks for. A 2D sample like flappy needing a fraction of it would still
-pay the whole cost.
-
-Two other candidates worth eliminating:
-
-- **A non-resizable BAR.** Many laptop dGPUs expose only a 256 MB host-visible
-  VRAM window, and a mappable allocation larger than that returns
-  `VK_ERROR_OUT_OF_DEVICE_MEMORY` while device-local memory sits nearly empty —
-  which is exactly the shape here (14 MB used of 2.0 GB, and the allocation
-  still fails).
-- **The dGPU being asleep.** P8 at 300 MHz on a 4x-downgraded PCIe 1.0 link is a
-  card the driver has parked; whether Dawn can allocate on it in that state is
-  worth confirming rather than assuming.
-
-To settle it: log every allocation's size and memory type on the web path, plus
-the adapter's reported heap sizes, and compare against the device's budget. The
-`ArrayPages` array size can be computed from the source without the machine —
-start there, since if it is hundreds of megabytes the answer is already in hand.
-Reproducing needs the office machine or a deliberately memory-constrained
-adapter.
+- **Find out whether `crcbl-webgpu` survives the same machine.** That is the
+  backend we are keeping, and it is the only version of this question that
+  matters. Nothing deployed uses it today, so there is nothing for the user to
+  try — publishing a `webgpu`-backed variant of the site alongside the default
+  one would make the new backend testable on real problem hardware instead of
+  only on CI's SwiftShader and one developer's RDNA-3.
+- **We degrade badly rather than failing loudly.** `crcbl-wgpu` does surface
+  these through `crcbl_wgpu::errors` and `crcbl::web`'s `gpu error`, which is
+  better than silence — but the engine keeps running for minutes with invalid
+  textures and empty bind groups, rendering nothing. An unrecoverable device
+  error at start-up should stop and say so. Worth carrying into `crcbl-webgpu`,
+  where `WebGpuDevice::take_error` is still a documented `None` stub, so the
+  same failure there would be entirely silent.
 
 **Not the bug:** the `MaxListenersExceededWarning`, `ObjectMultiplex`,
 `app-init-liveness` / `background-liveness` and `Extension context invalidated`
-lines all come from `contentscript.js` / `inpage.js` — a MetaMask content script
+lines come from `contentscript.js` / `inpage.js` — a MetaMask content script
 injected into the page. Unrelated to crcbl.
 
 ### TOP OF QUEUE — testing parity across all backends (the diagnostic), then WebGPU feature parity, then the flip
