@@ -1,5 +1,10 @@
-//! Adapter enumeration over the stream: ask on one frame, answer on a later
-//! one.
+//! The instance-level questions over the stream: ask on one frame, answer on a
+//! later one.
+//!
+//! Two of them, and one probe each — [`AdapterProbe`] for the enumeration and
+//! [`SurfaceCapsProbe`] for what a canvas will accept. Both are asked on the
+//! frame the open starts and both must have answered before the instance
+//! exists, for the reason the second section below gives.
 //!
 //! [`Instance::adapters`](crcbl_hal::Instance::adapters) is a synchronous call
 //! returning a `Vec`. Nothing on this seam can be: the command is written during
@@ -28,6 +33,10 @@
 //! between them, so a query at call time could not answer and an `Err` meaning
 //! "not yet" would send that caller to an adapter a browser does not have.
 //! `docs/plan/ROADMAP.md`'s slice 4i carries the whole argument.
+//!
+//! [`SurfaceCapsProbe`] is what that fetching became: the canvas format the
+//! browser prefers is a fact only the browser has, and the instance holds its
+//! answer so `surface_caps` can hand it back without a frame in between.
 //!
 //! # What this reports is what the *browser* said, not what this crate can do
 //!
@@ -86,9 +95,9 @@
 //! # Ok::<(), crcbl_webgpu::DecodeError>(())
 //! ```
 
-use crcbl_hal::AdapterInfo;
+use crcbl_hal::{AdapterInfo, SurfaceCaps};
 
-use crate::reply::Reply;
+use crate::reply::{Reply, SurfaceCapsFailure};
 use crate::web::StreamChannel;
 use crate::writer::StreamWriter;
 
@@ -224,6 +233,152 @@ impl AdapterProbe {
         match self {
             Self::Granted { info } => vec![info.clone()],
             _ => Vec::new(),
+        }
+    }
+}
+
+/// One canvas capability query, from the frame that asked to the frame that was
+/// answered.
+///
+/// [`AdapterProbe`]'s shape for the seam's other instance-level question, and
+/// held beside it for the reason the module docs above give:
+/// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) is synchronous
+/// and `crcbl::engine`'s open calls it on the line after `create_surface`, so
+/// the answer has to be in hand before the instance is. The
+/// [open future](crate::hal::WebGpuInstanceOpen) asks for both on the frame it
+/// starts and assembles the instance when both have answered.
+///
+/// **What it fetches is the browser's `getPreferredCanvasFormat()`**, which is
+/// the one field of [`SurfaceCaps`] a browser has an opinion about and the one
+/// this side cannot guess. `GPUCanvasContext.configure` accepts either canvas
+/// format, so configuring with the other one is not an error — it is a
+/// full-canvas copy on every present, which the browser warns about and every
+/// visitor pays. The other five fields are decisions `web/engine/gpu-replay.js`
+/// documents in `surfaceCapsFor`; they cross all the same, because a decoder
+/// that filled them in locally would be a second copy of that reasoning.
+///
+/// **Not per surface, though the HAL call is.**
+/// [`Command::SurfaceCaps`](crate::Command::SurfaceCaps) carries no arguments:
+/// the canvas formats come from `navigator.gpu` whichever canvas and whichever
+/// adapter is asked about, so one answer serves every canvas surface this
+/// instance makes. The offscreen surfaces are the ones this does not describe,
+/// and [`WebGpuInstance`](crate::hal::WebGpuInstance) answers those from its own
+/// list — nothing about a canvas constrains a ring of `GPUTexture`s.
+///
+/// **Not [`Eq`]**, for [`AdapterProbe`]'s reason once removed: nothing here
+/// holds a float, but the pair is read and matched together and one of them
+/// being comparable and the other not is a distinction with no use.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum SurfaceCapsProbe {
+    /// Nothing has been asked — the state [`request`](Self::request) leaves it
+    /// in if the channel had no room.
+    #[default]
+    Unasked,
+    /// The command is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`SurfaceCaps`](crate::Command::SurfaceCaps) command,
+        /// which is what the reply will name.
+        sequence: u64,
+    },
+    /// The browser said what a canvas will accept.
+    Answered {
+        /// What it said, in the order it said it —
+        /// [`formats`](SurfaceCaps::formats) is best-first and
+        /// [`preferred_format`](SurfaceCaps::preferred_format) reads it that
+        /// way, so the order is the answer rather than a presentation of it.
+        caps: SurfaceCaps,
+    },
+    /// The query answered nothing.
+    ///
+    /// Reachable when the browser names a canvas format this seam has no
+    /// [`Format`](crcbl_hal::Format) for, and it is a refusal rather than a
+    /// catastrophe: `surface_caps`'s own `Err` is an ordinary answer, so this
+    /// becomes the [`HalError`](crcbl_hal::HalError) a canvas query returns
+    /// instead of killing the instance the offscreen surfaces would still work
+    /// on.
+    Refused {
+        /// What the browser said, or what the replayer did instead. For a log or
+        /// a banner; never a code to branch on.
+        reason: String,
+        /// Which failure, as [`SurfaceCapsFailure`] spells it.
+        cause: SurfaceCapsFailure,
+    },
+}
+
+impl SurfaceCapsProbe {
+    /// Ask the browser what a canvas will accept, on this frame's stream.
+    ///
+    /// `None` when the channel would not take the request, and nothing is
+    /// encoded then — [`AdapterProbe::request`]'s contract exactly, and for the
+    /// same reason: a command whose sequence nothing waits on turns the frame's
+    /// entire reply buffer into a
+    /// [`DecodeError::UnexpectedSequence`](crate::DecodeError).
+    #[must_use]
+    pub fn request(channel: &StreamChannel) -> Option<Self> {
+        let sequence = channel.encode_awaited(StreamWriter::surface_caps)?;
+        Some(Self::Waiting { sequence })
+    }
+
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    #[must_use]
+    pub const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Whether an answer has arrived — either way round.
+    #[must_use]
+    pub const fn is_settled(&self) -> bool {
+        matches!(self, Self::Answered { .. } | Self::Refused { .. })
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there.
+    ///
+    /// `true` when this call settled the probe. Everything not naming this
+    /// probe's sequence is left alone, for [`AdapterProbe::absorb`]'s reason:
+    /// the reply buffer is the whole engine's.
+    pub fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::SurfaceCaps { caps } => Self::Answered { caps: caps.clone() },
+            Reply::SurfaceCapsFailed { reason, cause } => Self::Refused {
+                reason: reason.clone(),
+                cause: *cause,
+            },
+            // Settled rather than left waiting, as an enumeration answered with
+            // the wrong shape is: the sequence has been answered and a second
+            // answer to it is refused, so nothing else is coming.
+            other => Self::Refused {
+                reason: format!(
+                    "the replayer answered the canvas capability query with {}",
+                    other.name()
+                ),
+                cause: SurfaceCapsFailure::Backend,
+            },
+        };
+        true
+    }
+
+    /// What the browser said a canvas accepts, or `None` while the query is in
+    /// flight and when it answered nothing.
+    ///
+    /// The three states that are not an answer are one `None` here because a
+    /// caller that has one of them has nothing to configure a canvas with
+    /// either way; [`is_settled`](Self::is_settled) and the
+    /// [`Refused`](Self::Refused) variant are what tell them apart.
+    #[must_use]
+    pub const fn caps(&self) -> Option<&SurfaceCaps> {
+        match self {
+            Self::Answered { caps } => Some(caps),
+            _ => None,
         }
     }
 }
@@ -409,5 +564,111 @@ mod tests {
             Some(full),
             "a refused request must not leave a command on the stream"
         );
+    }
+
+    // ── SurfaceCapsProbe ──────────────────────────────────────────────────
+
+    /// What a browser preferring `"rgba8unorm"` answers the query with.
+    fn browser_canvas_caps() -> SurfaceCaps {
+        SurfaceCaps {
+            formats: vec![crcbl_hal::Format::Rgba8Unorm, crcbl_hal::Format::Bgra8Unorm],
+            present_modes: vec![crcbl_hal::PresentMode::Fifo],
+            composite_alpha: vec![
+                crcbl_hal::CompositeAlpha::Opaque,
+                crcbl_hal::CompositeAlpha::PreMultiplied,
+            ],
+            min_image_count: 2,
+            max_image_count: 2,
+            current_extent: None,
+        }
+    }
+
+    #[test]
+    fn a_canvas_query_encodes_one_command_and_registers_exactly_one_wait() {
+        let channel = channel();
+        let probe = SurfaceCapsProbe::request(&channel).expect("a fresh channel has room");
+        assert_eq!(channel.waiting_replies(), 1);
+        let commands = channel
+            .encode(|stream| decode_stream(stream.bytes()))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode");
+        assert_eq!(commands, vec![Command::SurfaceCaps]);
+        assert_eq!(probe.sequence(), Some(0));
+        assert!(!probe.is_settled());
+        assert!(probe.caps().is_none());
+    }
+
+    /// **The order the browser sent survives the probe.** It is the whole value
+    /// of the query: `SurfaceCaps::formats` is best-first and nothing a canvas
+    /// offers is sRGB, so the first entry is what a canvas gets configured with.
+    #[test]
+    fn a_caps_reply_settles_the_probe_with_the_order_it_carried() {
+        let channel = channel();
+        let mut probe = SurfaceCapsProbe::request(&channel).expect("room");
+        let sequence = probe.sequence().expect("a fresh request waits");
+        let caps = browser_canvas_caps();
+        assert!(probe.absorb(&[(sequence, Reply::SurfaceCaps { caps: caps.clone() })]));
+        assert!(probe.is_settled());
+        assert_eq!(probe.caps(), Some(&caps));
+        assert_eq!(
+            probe.caps().and_then(SurfaceCaps::preferred_format),
+            Some(crcbl_hal::Format::Rgba8Unorm),
+        );
+    }
+
+    #[test]
+    fn a_failed_reply_settles_the_probe_the_other_way_and_keeps_the_reason() {
+        let channel = channel();
+        let mut probe = SurfaceCapsProbe::request(&channel).expect("room");
+        let sequence = probe.sequence().expect("a fresh request waits");
+        assert!(probe.absorb(&[(
+            sequence,
+            Reply::SurfaceCapsFailed {
+                reason: "getPreferredCanvasFormat() answered \"rgba16float\"".into(),
+                cause: SurfaceCapsFailure::Backend,
+            },
+        )]));
+        let SurfaceCapsProbe::Refused { reason, cause } = &probe else {
+            panic!("a failed reply settles the probe as a refusal");
+        };
+        assert!(reason.contains("rgba16float"), "{reason}");
+        assert_eq!(*cause, SurfaceCapsFailure::Backend);
+        // Settled and empty are different facts, and both are true here.
+        assert!(probe.is_settled());
+        assert!(probe.caps().is_none());
+    }
+
+    #[test]
+    fn a_canvas_query_answered_with_the_wrong_shape_settles_as_a_refusal() {
+        let channel = channel();
+        let mut probe = SurfaceCapsProbe::request(&channel).expect("room");
+        let sequence = probe.sequence().expect("a fresh request waits");
+        assert!(probe.absorb(&[(
+            sequence,
+            Reply::NoAdapter {
+                reason: "requestAdapter() resolved null".into(),
+            },
+        )]));
+        let SurfaceCapsProbe::Refused { reason, .. } = &probe else {
+            panic!("a reply that cannot be a capability answer settles as a refusal");
+        };
+        assert!(reason.contains("NoAdapter"), "{reason}");
+    }
+
+    /// The reply buffer belongs to the whole engine, and the two probes share
+    /// it: each takes only the sequence it asked for.
+    #[test]
+    fn a_canvas_query_ignores_replies_that_do_not_name_its_sequence() {
+        let channel = channel();
+        let mut probe = SurfaceCapsProbe::request(&channel).expect("room");
+        let sequence = probe.sequence().expect("a fresh request waits");
+        assert!(!probe.absorb(&[(
+            sequence + 1,
+            Reply::SurfaceCaps {
+                caps: browser_canvas_caps(),
+            },
+        )]));
+        assert_eq!(probe.sequence(), Some(sequence));
+        assert!(!probe.is_settled());
     }
 }

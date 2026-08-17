@@ -232,28 +232,6 @@ What remains for the browser slices:
   no reply, but revisit if a browser ever reports a pinned canvas size that
   differs from the requested extent.
 
-### WebGpu surface_caps should prefer the browser's canvas format
-
-`WebGpuInstance::surface_caps` (in `crcbl-webgpu`'s `hal/instance.rs`) returns a
-fixed `formats: [Bgra8Unorm, Rgba8Unorm]`, so the engine's `preferred_format`
-configures the canvas `Bgra8Unorm`. Under SwiftShader — every GPU-less CI runner
-— the browser prefers `rgba8unorm`, and Chrome emits a WebGPU **warning**
-("configured with a different format than is preferred by this device… requires
-an extra copy"). It is a performance warning, not an error: the frame renders
-and reads back correctly.
-
-The browser gate filters that one warning string (`BENIGN_FORMAT_WARNING` in
-`web/tools/browser-e2e.mjs`, dropped from group D's device-error check) so a
-clean render is not failed by it. That is a **stopgap**. The proper fix is for
-the backend to return the browser's own
-`navigator.gpu.getPreferredCanvasFormat()` first from `surface_caps`, so no
-mismatch and no warning is produced. The format is browser-global and could be
-prefetched during instance-open, alongside adapter enumeration — but that means
-a new reply/field on the command stream, and the stream has committed fixtures
-(`stream-decode.mjs`, `reply-encode.mjs`, `gpu-replay.mjs`) that a format
-prefetch has to be threaded through. It was too large for the CI-gating slice;
-when it lands, delete the filter and the stopgap comment with it.
-
 ### `dispatch_indirect` has no command or replay yet
 
 `CommandEncoder::dispatch_indirect` (`crates/crcbl-hal/src/command.rs`, the HAL
@@ -10015,12 +9993,11 @@ since they share the renderer, but not directly checked.
    "a black canvas over a game that reported itself as playing". Today it
    returns `None`. Deploying on a backend that cannot report a device failure is
    how the office-machine OOM would have looked with no diagnosis at all.
-2. **Fix the canvas format preference.** Every passing run logs
-   `WebGPU canvas configured with a different format than is preferred by this device ("rgba8unorm"). This requires an extra copy`
-   — `surface_caps` offers a fixed `[Bgra8Unorm, Rgba8Unorm]` while the browser
-   prefers `rgba8unorm`. It is a per-frame full-canvas copy that would ship to
-   every visitor. Cheap insurance before the flip rather than after, and the
-   offscreen path already learned this lesson.
+2. ~~Fix the canvas format preference.~~ **Done.** `surface_caps` answers the
+   browser's own `getPreferredCanvasFormat()` for a canvas surface, so the
+   warning and its per-frame copy are gone from every demo log, and
+   `BENIGN_FORMAT_WARNING` was removed from the browser gate — a regression now
+   fails group D instead of being filtered.
 3. **Keep one wgpu demo step in CI, and rename it so nobody deletes it.** Twelve
    guard groups (G through S) assert `crcbl-webgpu`'s own seam in a real browser
    — stream, surface, buffer, image, sampler, bind group layout, bind group,

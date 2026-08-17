@@ -39,22 +39,34 @@ pub struct WebGpuInstance {
     /// [`HandlePool`] never mints the same handle twice, so a removed entry can
     /// never be re-matched by a later one.
     offscreen: Mutex<Vec<SurfaceHandle>>,
+    /// What the browser said a canvas accepts, fetched during the open — or the
+    /// reason it said nothing, which becomes the
+    /// [`HalError::Backend`] a canvas query answers with.
+    ///
+    /// One value for every canvas surface, because
+    /// [`Command::SurfaceCaps`](crate::Command::SurfaceCaps) names no surface
+    /// and no adapter: `navigator.gpu.getPreferredCanvasFormat()` is a fact
+    /// about the browser, not about a canvas. The offscreen surfaces are the
+    /// ones this does not describe — see [`offscreen_surface_caps`].
+    canvas: Result<SurfaceCaps, String>,
 }
 
 impl WebGpuInstance {
-    /// Assemble an instance from a settled enumeration. Called by the open
-    /// future; not a public entry point, since the adapters must already be the
-    /// browser's answer.
+    /// Assemble an instance from a settled enumeration and a settled canvas
+    /// capability query. Called by the open future; not a public entry point,
+    /// since both must already be the browser's answer.
     pub(crate) fn new(
         channel: SharedChannel,
         adapters: Vec<AdapterInfo>,
         pool: HandlePool,
+        canvas: Result<SurfaceCaps, String>,
     ) -> Self {
         Self {
             channel,
             adapters,
             pool,
             offscreen: Mutex::new(Vec::new()),
+            canvas,
         }
     }
 
@@ -227,12 +239,13 @@ impl Instance for WebGpuInstance {
         surface: SurfaceHandle,
         _adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError> {
-        // Synthesised locally and synchronously, with no round trip — the one
-        // reply-less answer among the calls that could defer. `crcbl::engine`'s
-        // open calls `create_surface` and then this on the next line with no
-        // frame between them, so a query over the reply channel could not answer
-        // in time, and an `Err` meaning "not yet" would send a caller doing
-        // adapter selection to an adapter a browser does not have.
+        // Answered synchronously, with no round trip of its own.
+        // `crcbl::engine`'s open calls `create_surface` and then this on the
+        // next line with no frame between them, so a query issued here could not
+        // answer in time, and an `Err` meaning "not yet" would send a caller
+        // doing adapter selection to an adapter a browser does not have. The
+        // canvas answer is the browser's all the same: it was fetched during the
+        // instance open, alongside the enumeration, and is held in `canvas`.
         //
         // WHICH OF THE TWO ANSWERS DEPENDS ON WHAT THE SURFACE IS, and that is
         // the whole reason `offscreen` exists. A canvas is bound by
@@ -247,19 +260,19 @@ impl Instance for WebGpuInstance {
         if self.is_offscreen(surface) {
             return Ok(offscreen_surface_caps());
         }
-        // The canvas constant is not a placeholder: both formats are valid
-        // `GPUCanvasConfiguration.format` values, `fifo` is the only present
-        // mode a canvas offers, and a browser double-buffers on its own — so
-        // this is what the canvas actually accepts. Preferring one format over
-        // the other is a later optimisation; returning both is correct now.
-        Ok(SurfaceCaps {
-            formats: vec![Format::Bgra8Unorm, Format::Rgba8Unorm],
-            present_modes: vec![PresentMode::Fifo],
-            composite_alpha: vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied],
-            min_image_count: 2,
-            max_image_count: 2,
-            current_extent: None,
-        })
+        // THE BROWSER'S OWN ANSWER, LED BY `getPreferredCanvasFormat()`. Both
+        // canvas formats are valid `GPUCanvasConfiguration.format` values, so a
+        // list in the other order is not refused — it makes the browser insert a
+        // full-canvas copy on every present, and say so. Neither is sRGB, so
+        // `SurfaceCaps::preferred_format` falls through to the first entry,
+        // which is what makes the browser's ordering the whole of the answer.
+        //
+        // The `Err` half is `Reply::SurfaceCapsFailed`'s reason, and this is the
+        // call it belongs to: `surface_caps` is the only one whose docs oblige a
+        // caller to treat an `Err` as "try the next adapter", so a query the
+        // browser refused is reported here rather than having failed the open
+        // that the offscreen surfaces do not need it for.
+        self.canvas.clone().map_err(HalError::Backend)
     }
 
     fn request_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn PendingDevice>, HalError> {

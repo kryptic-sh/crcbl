@@ -16,7 +16,7 @@ use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
     CompositeAlpha, Device, DeviceCaps, DeviceDesc, DeviceType, Features, Format, HalError,
     Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc,
-    ReadbackState, SubmitInfo,
+    ReadbackState, SubmitInfo, SurfaceCaps,
 };
 
 use crate::ReplyWriter;
@@ -40,6 +40,21 @@ fn granted_adapter() -> AdapterInfo {
         driver: String::new(),
         backend: BackendKind::WebGpu,
         caps: device_caps(),
+    }
+}
+
+/// What the browser's replayer answers `Command::SurfaceCaps` with where
+/// `getPreferredCanvasFormat()` is `"rgba8unorm"` — `web/engine/gpu-replay.js`'s
+/// `surfaceCapsFor`, field for field, with the preference first and the other
+/// canvas format behind it.
+fn browser_canvas_caps() -> SurfaceCaps {
+    SurfaceCaps {
+        formats: vec![Format::Rgba8Unorm, Format::Bgra8Unorm],
+        present_modes: vec![PresentMode::Fifo],
+        composite_alpha: vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied],
+        min_image_count: 2,
+        max_image_count: 2,
+        current_extent: None,
     }
 }
 
@@ -71,16 +86,20 @@ fn feed(channel: &SharedChannel, build: impl FnOnce(&mut ReplyWriter)) {
     assert!(accepted, "the channel must accept the injected replies");
 }
 
-/// Drive an open future to its instance on a fed adapter reply.
+/// Drive an open future to its instance on the two replies the open waits for.
+///
+/// `enumerate_adapters` is the first awaited command on a fresh channel and the
+/// canvas capability query the second, so their sequences are 0 and 1.
 fn opened_instance() -> WebGpuInstance {
     let mut open = WebGpuInstanceOpen::start();
     let channel = open.channel();
-    // `enumerate_adapters` is the first awaited command on a fresh channel, so
-    // its sequence is 0.
-    feed(&channel, |w| w.adapter(0, &granted_adapter()));
+    feed(&channel, |w| {
+        w.adapter(0, &granted_adapter());
+        w.surface_caps(1, &browser_canvas_caps());
+    });
     match Pin::new(&mut open).poll(&mut noop_context()) {
         Poll::Ready(Ok(instance)) => instance,
-        other => panic!("the instance must open on the adapter reply, got {other:?}"),
+        other => panic!("the instance must open on the browser's two replies, got {other:?}"),
     }
 }
 
@@ -95,38 +114,82 @@ fn device_on_fresh_channel() -> (SharedChannel, WebGpuDevice) {
 // ── (a) instance open ──────────────────────────────────────────────────────
 
 #[test]
-fn instance_open_settles_to_an_instance_on_an_adapter_reply() {
+fn instance_open_settles_to_an_instance_on_the_browsers_two_replies() {
     let mut open = WebGpuInstanceOpen::start();
     let channel = open.channel();
 
-    // Nothing fed yet: the enumeration is still in flight, which is `Pending`.
+    // Nothing fed yet: both questions are in flight, which is `Pending`.
     assert!(
         matches!(Pin::new(&mut open).poll(&mut noop_context()), Poll::Pending),
         "an unanswered enumeration polls Pending"
     );
 
+    // The adapter alone is not enough: `surface_caps` is synchronous once the
+    // instance exists, so an instance built before the canvas answer arrived
+    // would have nothing to answer a canvas query with but a guess.
     let info = granted_adapter();
     feed(&channel, |w| w.adapter(0, &info));
+    assert!(
+        matches!(Pin::new(&mut open).poll(&mut noop_context()), Poll::Pending),
+        "an unanswered canvas capability query polls Pending"
+    );
+
+    feed(&channel, |w| w.surface_caps(1, &browser_canvas_caps()));
     let Poll::Ready(Ok(instance)) = Pin::new(&mut open).poll(&mut noop_context()) else {
-        panic!("the adapter reply must settle the open future");
+        panic!("the second reply must settle the open future");
     };
     assert_eq!(instance.adapters(), vec![info]);
     assert_eq!(instance.backend(), BackendKind::WebGpu);
 }
 
+/// A canvas query the browser refused is an `Err` from `surface_caps`, not a
+/// failed open: the reason belongs to the call whose `Err` half is ordinary, and
+/// an offscreen surface on the same instance does not depend on it.
+#[test]
+fn a_refused_canvas_query_opens_the_instance_and_fails_the_canvas_call() {
+    let mut open = WebGpuInstanceOpen::start();
+    let channel = open.channel();
+    feed(&channel, |w| {
+        w.adapter(0, &granted_adapter());
+        w.surface_caps_failed(
+            1,
+            "getPreferredCanvasFormat() answered \"rgba16float\"",
+            crate::SurfaceCapsFailure::Backend,
+        );
+    });
+    let Poll::Ready(Ok(instance)) = Pin::new(&mut open).poll(&mut noop_context()) else {
+        panic!("a refused canvas query must still open the instance");
+    };
+
+    let canvas = unsafe { instance.create_surface(&SurfaceTarget::Web { canvas_id: 7 }) }
+        .expect("a Web canvas surface is reachable");
+    let Err(HalError::Backend(reason)) = instance.surface_caps(canvas, AdapterId(0)) else {
+        panic!("the canvas query answers the refusal it was given");
+    };
+    assert!(reason.contains("rgba16float"), "{reason}");
+
+    let offscreen = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+        .expect("an offscreen surface is reachable");
+    assert!(
+        instance.surface_caps(offscreen, AdapterId(0)).is_ok(),
+        "a ring of GPUTextures is not described by the canvas answer",
+    );
+}
+
 // ── (b) surface caps ───────────────────────────────────────────────────────
 
 #[test]
-fn surface_caps_answers_the_constant_canvas_caps_synchronously() {
+fn surface_caps_answers_the_fetched_canvas_caps_synchronously() {
     let instance = opened_instance();
     let surface = unsafe { instance.create_surface(&SurfaceTarget::Web { canvas_id: 7 }) }
         .expect("a Web canvas surface is reachable");
 
-    // No reply is fed: the answer must be synchronous.
+    // No reply is fed *here*: the answer crossed during the open, and the call
+    // itself must not need a frame.
     let caps = instance
         .surface_caps(surface, AdapterId(0))
-        .expect("the constant caps");
-    assert_eq!(caps.formats, vec![Format::Bgra8Unorm, Format::Rgba8Unorm]);
+        .expect("the caps fetched during the open");
+    assert_eq!(caps.formats, vec![Format::Rgba8Unorm, Format::Bgra8Unorm]);
     assert_eq!(caps.present_modes, vec![PresentMode::Fifo]);
     assert_eq!(
         caps.composite_alpha,
@@ -134,6 +197,51 @@ fn surface_caps_answers_the_constant_canvas_caps_synchronously() {
     );
     assert_eq!((caps.min_image_count, caps.max_image_count), (2, 2));
     assert_eq!(caps.current_extent, None);
+}
+
+/// **The canvas caps lead with the format the browser said it prefers.**
+///
+/// A `GPUCanvasContext` configured with anything but
+/// `navigator.gpu.getPreferredCanvasFormat()` makes the browser insert a
+/// full-canvas copy on every present — which it warns about, and which every
+/// visitor pays for the life of the page. Neither canvas format is sRGB, so
+/// [`SurfaceCaps::preferred_format`](crcbl_hal::SurfaceCaps::preferred_format)
+/// falls through to the first entry, and leading with the browser's own answer
+/// is the whole of the fix.
+///
+/// Red while the canvas branch answered a constant: the constant led with
+/// `Bgra8Unorm`, and `getPreferredCanvasFormat()` is `"rgba8unorm"` on Chromium
+/// under Linux and on every Apple device.
+#[test]
+fn canvas_caps_lead_with_the_format_the_browser_prefers() {
+    let mut open = WebGpuInstanceOpen::start();
+    let channel = open.channel();
+    // Sequence 0 is the enumeration and 1 the capability query: `start` encodes
+    // them in that order on a fresh channel.
+    feed(&channel, |w| {
+        w.adapter(0, &granted_adapter());
+        w.surface_caps(1, &browser_canvas_caps());
+    });
+    let Poll::Ready(Ok(instance)) = Pin::new(&mut open).poll(&mut noop_context()) else {
+        panic!("both replies are fed, so the open future must settle to an instance");
+    };
+
+    let canvas = unsafe { instance.create_surface(&SurfaceTarget::Web { canvas_id: 7 }) }
+        .expect("a Web canvas surface is reachable");
+    let caps = instance
+        .surface_caps(canvas, AdapterId(0))
+        .expect("the browser answered the capability query");
+    assert_eq!(
+        caps.formats,
+        vec![Format::Rgba8Unorm, Format::Bgra8Unorm],
+        "the canvas reports the browser's preference first and the other canvas \
+         format behind it",
+    );
+    assert_eq!(
+        caps.preferred_format(),
+        Some(Format::Rgba8Unorm),
+        "what the engine configures the canvas with is what the browser prefers",
+    );
 }
 
 /// **An offscreen ring is offered an sRGB format and a canvas is not.**
@@ -178,8 +286,9 @@ fn an_offscreen_surface_is_offered_an_srgb_format_and_a_canvas_is_not() {
         .expect("the canvas caps");
     assert_eq!(
         canvas_caps.formats,
-        vec![Format::Bgra8Unorm, Format::Rgba8Unorm],
-        "a canvas still reports only what GPUCanvasContext.configure takes",
+        vec![Format::Rgba8Unorm, Format::Bgra8Unorm],
+        "a canvas still reports only what GPUCanvasContext.configure takes, in \
+         the order the browser gave",
     );
 }
 
@@ -206,7 +315,7 @@ fn destroying_an_offscreen_surface_forgets_that_it_was_offscreen() {
             .surface_caps(offscreen, AdapterId(0))
             .expect("caps for a destroyed handle")
             .formats,
-        vec![Format::Bgra8Unorm, Format::Rgba8Unorm],
+        vec![Format::Rgba8Unorm, Format::Bgra8Unorm],
         "a handle this instance no longer holds falls back to the canvas answer",
     );
 }

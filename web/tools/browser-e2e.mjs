@@ -320,29 +320,6 @@ const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
  */
 const WEBGPU_MODE = (process.env.CRCBL_WEB_BACKEND ?? 'wgpu') === 'webgpu';
 
-/**
- * The one WebGPU *warning* group D filters out, and why it is safe to.
- *
- * Under SwiftShader — the only adapter a runner with no GPU has — the browser
- * prefers `rgba8unorm` for the canvas, while `crcbl-webgpu`'s `surface_caps`
- * offers `Bgra8Unorm` first and the engine configures the swapchain with it.
- * Chrome emits this through the device's error channel, so it lands in
- * `deviceErrors` beside real validation failures, but it is a *performance*
- * warning ("requires an extra copy"), not a device error: the frame still
- * renders and reads back correctly, which every other group D check confirms.
- *
- * Matched on a distinctive substring so it swallows only this warning and never
- * a real error. **This is a stopgap.** The proper fix is for the WebGpu backend
- * to prefer the browser's own `getPreferredCanvasFormat()` so no mismatch and no
- * warning is produced; it needs the format prefetched during instance-open,
- * which is a command-stream change with committed fixtures behind it — tracked
- * in `docs/backlog.md` under "WebGpu surface_caps should prefer the browser's
- * canvas format". Until then the warning is filtered rather than left to fail a
- * clean render.
- */
-const BENIGN_FORMAT_WARNING =
-  'configured with a different format than is preferred by this device';
-
 /** How many times the canvas is read back once the ball is in flight. */
 const SAMPLE_COUNT = 16;
 
@@ -1821,18 +1798,20 @@ try {
     last ? `${last.width}x${last.height}` : 'no canvas'
   );
 
-  // The benign swapchain-format perf warning is dropped here rather than at
-  // collection, so it still appears in the full device-error dump and the saved
-  // log — it is real output, just not a failure. See `BENIGN_FORMAT_WARNING`.
-  const realDeviceErrors = deviceErrors.filter(
-    (text) => !text.includes(BENIGN_FORMAT_WARNING)
-  );
+  // NOTHING IS FILTERED OUT OF THIS. It used to drop Chrome's "configured with
+  // a different format than is preferred by this device" warning, which
+  // `crcbl-webgpu` earned on every frame by offering `Bgra8Unorm` first while
+  // the browser preferred `rgba8unorm`. That backend now fetches
+  // `getPreferredCanvasFormat()` during its instance-open and reports it first,
+  // so the warning is not produced — and the filter that made it invisible is
+  // gone with it, because the whole cost of that warning is a full-canvas copy
+  // per frame that nothing else here would notice.
   check(
     'D',
     'the browser reported no WebGPU device errors',
-    realDeviceErrors.length === 0,
-    realDeviceErrors.length
-      ? `${realDeviceErrors.length} error(s); first: ${realDeviceErrors[0].split('\n')[0]}`
+    deviceErrors.length === 0,
+    deviceErrors.length
+      ? `${deviceErrors.length} error(s); first: ${deviceErrors[0].split('\n')[0]}`
       : ''
   );
 
