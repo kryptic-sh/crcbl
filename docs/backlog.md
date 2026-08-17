@@ -113,8 +113,22 @@ failure.**
    for), the timeline-signal and double-acquire disagreements, and the WebGPU
    commands still refused.
 5. **Then delete `crcbl-wgpu` entirely** — crate, `wgpu-e2e` suite, CI job,
-   registry entry, `CRCBL_GPU=wgpu`, and `wgpu`/`naga` from the dependency
-   graph.
+   registry entry, `CRCBL_GPU=wgpu`, and `wgpu` from the dependency graph.
+
+   **Inventory, so the deletion is mechanical rather than exploratory:** only
+   `crates/crcbl/Cargo.toml` actually depends on it — the `crcbl-mtl` and
+   `crcbl-shaders` manifests merely _mention_ it in comments, as do
+   `crcbl-golden`, `crcbl-core`'s `surface.rs` and three files in
+   `crcbl-webgpu`. Its own runner is `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`,
+   and all three workflows (`ci.yml`, `pages.yml`, `cron.yml`) name it.
+
+   **`naga` does NOT leave with it, and notes here said otherwise twice.**
+   `crcbl-shaders` takes `naga` as its own **dev-dependency** (`version = "30"`,
+   `wgsl-in`) to validate the generated WGSL — "a module naga rejects is a
+   pipeline that fails to create". That validation matters _more_ once WebGPU is
+   the only browser backend, since the WGSL it checks is what actually ships. It
+   stays, and its manifest comment needs rewording: it justifies the pin as "the
+   version `wgpu` already resolves", which stops being true.
 
 **The coverage model afterwards:** the agnostic e2e suites own every behaviour
 all backends owe, and bespoke per-backend tests keep only what cannot be
