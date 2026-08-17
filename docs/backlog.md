@@ -9953,3 +9953,61 @@ Also worth knowing:
 - **`crates/crcbl/tests/tiling_e2e.rs` never runs in CI.** Its doc says
   `run-render-e2e.sh` runs it, but that script passes `--test render_e2e`, so
   the physical-tiling assertion has only ever been run by hand. Pre-existing.
+
+## The forward path binds more storage buffers than WebGPU guarantees
+
+`crcbl-render`'s "draw args" pass (`crates/crcbl-render/src/draw_gen.rs`, the
+`gen_layout` binding `storage(1..14)`) binds **14 storage buffers in one compute
+stage**. Opening the browser device with the adapter's own ceilings — which
+`requiredLimitsFor` now does — is necessary but does not help where the
+adapter's ceiling is itself below 14:
+
+| adapter                                    | `maxStorageBuffersPerShaderStage` | forward path |
+| ------------------------------------------ | --------------------------------- | ------------ |
+| WebGPU spec default (the guaranteed floor) | 8                                 | refused      |
+| SwiftShader (what the parity gate pins)    | 10                                | refused      |
+| this machine's RDNA-3                      | 16                                | runs         |
+
+So this is **not a SwiftShader quirk, it is a portability defect for the web
+target**: 8 is the number every WebGPU implementation must support, and anything
+above it is a negotiation that some devices will lose. Measured by probing each
+adapter's `limits` directly in headless Chromium.
+
+Two consequences, and the second is a decision:
+
+- **The parity gate cannot exercise nine of eleven scenes under SwiftShader**,
+  which is what CI has. Running the gate on real hardware is possible
+  (`CRCBL_CHROMIUM_FLAGS="--ignore-gpu-blocklist --use-angle=vulkan --use-webgpu-adapter=default --use-vulkan=native"`
+  works here) but a CI runner has no GPU, so a green CI gate would only ever
+  cover `sprite` and `ui`.
+- **Splitting "draw args" across bind groups is the durable fix** and the
+  recommendation: `maxBindGroups` is 4 and the pass uses 1, so the same 14
+  buffers spread over two groups sit inside even the guaranteed floor of 8. That
+  is a `crcbl-render` change affecting every backend's layout, so it wants its
+  own slice and its own golden re-verification — but until it happens, the web
+  backend only runs the forward renderer on generous hardware, which is not what
+  "a full replacement for wgpu" means.
+
+Declined for now: raising nothing and simply pinning the gate to hardware. It
+would make the gate un-runnable in CI, which is where regressions are actually
+caught.
+
+## Nothing enforces prettier, and files have drifted
+
+`AGENTS.md` requires prettier on every markdown and JS file we touch, but
+`.github/workflows/ci.yml` **runs no formatter check at all** — `grep prettier`
+finds nothing. `web/engine/gpu-replay.js` was prettier-dirty from the commit
+that landed the unrolled `drawIndexedIndirect` call until the limits fix
+reflowed it, and nothing noticed for either.
+
+Currently dirty (`npx prettier --list-different`), all pre-existing and left
+alone rather than reformatted as a drive-by:
+
+`web/demos/horde/main.js`, `web/engine/audio-worklet.js`, `web/engine/audio.js`,
+`web/engine/shell.js`, `web/engine/storage.js`, `docs/code-review.md`.
+
+Worth a CI step plus one formatting commit. Note the local `prettier` wrapper
+**prints "All files formatted correctly" even when a file is dirty**, and its
+exit code is swallowed by a pipe — the only trustworthy check is to format a
+copy and `cmp` it, or read `--list-different`'s file list. Several "prettier
+clean" claims in this repository's history were that wrapper, not prettier.
