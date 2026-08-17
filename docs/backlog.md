@@ -10011,3 +10011,28 @@ Worth a CI step plus one formatting commit. Note the local `prettier` wrapper
 exit code is swallowed by a pipe — the only trustworthy check is to format a
 copy and `cmp` it, or read `--list-different`'s file list. Several "prettier
 clean" claims in this repository's history were that wrapper, not prettier.
+
+## Two swapchain holes the seam does not close on any backend
+
+Found while fixing dx12's missing acquire tracking; neither is a dx12 bug, and
+neither should be fixed on one backend alone.
+
+- **Acquiring twice without presenting is accepted** by dx12, vk and mtl — each
+  simply overwrites the outstanding acquire. Only wgpu refuses it
+  (`"acquire_next_frame with a frame already acquired; present it first"`).
+  Making the other three refuse it would turn dx12's own e2e job red today: the
+  windowed loop in `crcbl-dx12/src/swapchain.rs` acquires and then calls
+  `draw_and_present`, which acquires again before presenting. So the question is
+  which behaviour the seam means — if wgpu is right, three backends and a caller
+  need fixing; if it is wrong, wgpu's refusal should go. Decide before adding it
+  to `hal_seam_e2e.rs`.
+- **`reconfigure_swapchain` does not clear the outstanding acquire** on dx12, vk
+  or mtl, so `acquire` → `reconfigure` → `present` is accepted even though the
+  reconfigure already destroyed that image and its view. Exotic — the engine
+  only reconfigures from the `OutOfDate` arms, never between an acquire and its
+  present — but it is a real hole, identical on three backends, and cheap to
+  close once someone decides the first question.
+
+The suite that would hold all four to an answer already exists
+(`crates/crcbl/tests/hal_seam_e2e.rs`, run by CI on WARP, lavapipe, Metal and
+wgpu), so these are decisions rather than infrastructure.
