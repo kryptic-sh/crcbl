@@ -416,6 +416,50 @@ and the backend must not surface that cancellation through `take_error`.
 Worth writing down because the other four backends satisfy it by accident — they
 just drop a tracking entry — while WebGPU had to be told.
 
+### The capability enum is built — 3 of 24 capabilities are actually exercised
+
+`crcbl_hal::Capability` now forces every backend to answer for every seam
+behaviour through an exhaustive `match` (adding a variant fails to compile on
+any backend that has not answered), the seam suite walks `Capability::ALL` in
+both directions, and `DIVERGENCES` lists 54 reviewed
+`(capability, backend, why)` pairs — vulkan 0, metal 10, wgpu 13, dx12 15,
+webgpu 16.
+
+**What is declared is not yet what is driven.** Only the three `fill_buffer`
+capabilities are exercised by real GPU work; the other 21 are checked for
+declaration consistency and printed as unexercised on every run. In priority
+order:
+
+- **The three query kinds** (`TimestampQuery`, `OcclusionQuery`,
+  `PipelineStatisticsQuery`) are drivable from the existing fixture and simply
+  unwritten. Cheapest real coverage available.
+- **Most of the rest need a raster pipeline the seam suite does not have** —
+  draws, mesh stages, storage images. Either the suite grows one, or those
+  capabilities are exercised from `draw_gen_e2e`, which already has one.
+- **`crcbl-webgpu`'s 16 declarations are unverified by anything.** The seam
+  suite is a native binary, so the browser's answers are assertions no test has
+  confirmed. The standalone probe page is where they could be driven.
+
+### Metal and dx12 refuse with the wrong error variant
+
+`crcbl-hal` documents `HalError::Unsupported` for "this backend cannot do this",
+but `crcbl-mtl` and `crcbl-dx12` return `InvalidDescriptor` for several
+capability refusals. The seam suite's refusal assertion currently accepts both
+and names which one the seam documents, so this is visible rather than hidden —
+but a caller matching on `Unsupported` to pick a fallback path would miss them.
+Normalising is mechanical; it was not done because neither backend can be run on
+this machine, and a refusal-path change that CI alone verifies is worth doing
+deliberately rather than as a rider.
+
+### `crcbl-webgpu`'s semaphores return `Ok` and do nothing
+
+`create_semaphore` hands out a handle and `semaphore_value` answers `0` for
+ever. It is declared `TimelineSemaphore: No`, which is the honest answer about
+behaviour and exactly the kind of gap the capability enum exists to surface —
+but the calls still succeed rather than refusing, so a caller that trusts the
+handle gets silence instead of an error. Either implement them on the stream or
+make them refuse; the declaration alone does not stop a caller using them.
+
 ### Smaller things the WebGPU work surfaced and did not fix
 
 - **A device error names no command.** `Reply::DeviceErrors` carries the
