@@ -5,8 +5,8 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ### INVESTIGATE — Dawn `VK_ERROR_OUT_OF_DEVICE_MEMORY` on the office PC
 
-The web samples (e.g. `crcbl-flappy`) boot and keep running on the office PC,
-but Chrome's console logs, once, right after the first frames:
+The web samples boot and keep running on the office PC, but Chrome's console
+logs once, right after the first frames:
 
 ```
 vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY
@@ -14,37 +14,55 @@ vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY
     at CheckVkSuccessImpl (../../third_party/dawn/src/dawn/native/vulkan/VulkanError.cpp:106)
 ```
 
-This is **Dawn** (Chrome's WebGPU → Vulkan), not our Vulkan backend — the page
-runs the `wgpu` web backend (`opened the wgpu GPU backend`,
-`hal: wgpu adapter "" (Other)`). A device-local `vkAllocateMemory` OOMs on that
-machine's GPU/driver while it fits the home machine's. It is currently
-**non-fatal** — the HUD ticks past 30s — so Dawn either recovers or the failed
-allocation is on a path that degrades silently. Worth pinning down before it
-becomes a hard failure on lower-memory GPUs.
+It is **non-fatal** — the HUD ticks on for minutes — so Dawn either recovers or
+the failed allocation is on a path that degrades silently. That silence is the
+worrying half: nothing in our code hears it.
 
-What is NOT the bug: the `MaxListenersExceededWarning`, `ObjectMultiplex`, and
-`app-init-liveness` / `background-liveness` orphaned-stream lines all come from
-`contentscript.js` — a MetaMask (wallet extension) content script injected into
-the page. Unrelated to crcbl; ignore.
+**The machine (measured with `gpur`, 2026-08-17).** A dual-GPU laptop:
 
-To investigate:
+| device               | memory                             | notes                                           |
+| -------------------- | ---------------------------------- | ----------------------------------------------- |
+| NVIDIA GeForce MX550 | **2.0 GB dedicated**, 14 MB in use | PCIe **1.0 x4** (max 4.0 x16), P8, 300 MHz, 4 W |
+| Intel UHD Graphics   | 1.3 G / 15 G **shared**            | integrated, 27% busy                            |
 
-- **Get the office PC's GPU + driver** (`chrome://gpu`, and the adapter Dawn
-  picked) — the adapter name logged empty (`""`), so we don't know if it's an
-  iGPU with a small device-local heap or a dGPU. This decides whether it's a
-  budgeting bug or a genuinely constrained device.
-- **Find the large allocation.** Suspects, in rough size order: the swapchain
-  (990×481 ×3 Rgba8UnormSrgb is small), the `ArrayPages` binding model's texture
-  page arrays, the `IndirectPerBatch` indirect/draw buffers, and any G-buffer /
-  shadow / SSR / probe targets the forward renderer allocates up front. Log each
-  allocation's size + memory type at creation on web and compare against the
-  device's reported heap size.
-- **Check whether wgpu/Dawn surfaces the OOM back to us at all** — if the
-  allocation silently degrades (e.g. a target that never gets created), a visual
-  artifact may follow that we are not detecting. Confirm what the failed
-  allocation was for.
-- Reproduces only on that hardware so far; not seen on the home GPU. Needs the
-  office machine (or a memory-constrained adapter) to verify a fix.
+Chromium has GPU processes on **both**: 295 MiB on the Intel and 11 MiB on the
+NVIDIA. So which adapter Dawn actually opened for WebGPU is not yet established,
+and the engine still logs the adapter name as empty (`wgpu adapter ""`, type
+`Other`), which is its own small defect — we cannot tell from a report which GPU
+produced it.
+
+**The strongest hypothesis, and it is testable from the log we already have.**
+The same run reports
+`this device does not have DESCRIPTOR_INDEXING -> binding ArrayPages`.
+`ArrayPages` is the fallback binding model, and it backs materials with
+fixed-size texture **arrays** rather than a bindless table. If that array is
+sized by a constant — layers x extent x 4 bytes — it is a single allocation that
+does not scale down for a 2 GB card, and it would be by far the largest thing
+the frame asks for. A 2D sample like flappy needing a fraction of it would still
+pay the whole cost.
+
+Two other candidates worth eliminating:
+
+- **A non-resizable BAR.** Many laptop dGPUs expose only a 256 MB host-visible
+  VRAM window, and a mappable allocation larger than that returns
+  `VK_ERROR_OUT_OF_DEVICE_MEMORY` while device-local memory sits nearly empty —
+  which is exactly the shape here (14 MB used of 2.0 GB, and the allocation
+  still fails).
+- **The dGPU being asleep.** P8 at 300 MHz on a 4x-downgraded PCIe 1.0 link is a
+  card the driver has parked; whether Dawn can allocate on it in that state is
+  worth confirming rather than assuming.
+
+To settle it: log every allocation's size and memory type on the web path, plus
+the adapter's reported heap sizes, and compare against the device's budget. The
+`ArrayPages` array size can be computed from the source without the machine —
+start there, since if it is hundreds of megabytes the answer is already in hand.
+Reproducing needs the office machine or a deliberately memory-constrained
+adapter.
+
+**Not the bug:** the `MaxListenersExceededWarning`, `ObjectMultiplex`,
+`app-init-liveness` / `background-liveness` and `Extension context invalidated`
+lines all come from `contentscript.js` / `inpage.js` — a MetaMask content script
+injected into the page. Unrelated to crcbl.
 
 ### TOP OF QUEUE — testing parity across all backends (the diagnostic), then WebGPU feature parity, then the flip
 
