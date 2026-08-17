@@ -9834,125 +9834,53 @@ a `libaddr2line` conflict, but the target's std is present in the toolchain
 sysroot and builds fine — rustup's metadata is out of step with its own files,
 so believe `cargo build --target wasm32-unknown-unknown`, not `rustup`.
 
-## The WebGPU parity gate compares pixels now — two cracks, both verified
+## The WebGPU parity gate: 2/11 scenes match, one shading bug left
 
 `./web/run-render-harness-e2e.sh` drives all eleven golden `Scene`s through
 `crcbl-webgpu` in headless Chromium, reads each frame back, and compares it
-against `crcbl/tests/golden/<name>.png` with `crcbl-golden`'s own comparator at
-`Tolerance::RASTERISER`. All eleven render and read back; **none matches yet**,
-for two unrelated reasons. Both were confirmed by reading the code and the
-frames, not inferred from the failure alone.
+against `crcbl/tests/golden/<name>.png` with `crcbl-golden`'s comparator at
+`Tolerance::RASTERISER`. **All eleven render with zero device errors**, and
+`sprite` and `ui` **match** at max channel delta 1 — so the gate's green branch
+is now observed end to end, not merely its red one.
 
-### 1. `requiredLimits` never reaches `requestDevice` — nine scenes draw blank
+Closed since this was first written: the missing `requiredLimits`, the stencil
+ops on a depth-only attachment, and the linear offscreen swapchain format.
 
-`cube, dunes, lights, spot, spot_shadow, point_shadow, ao, ssr, probes` all read
-back a single flat colour, and each reports the same device error:
+### What is left: a shading discontinuity at exactly half the frame
 
-```
-The number of storage buffers (14) in the Compute stage exceeds the maximum
-per-stage limit (8).
- - While validating [BindGroupLayoutDescriptor "draw args"]
-```
+The other nine scenes draw correct geometry — `dunes` is recognisably the golden
+terrain — but the shading breaks on an exact half-frame boundary, **x = 128** of
+256 for `dunes`/`spot_shadow`/`ao` and additionally **y = 96** of 192 for `ao`.
+In `dunes` the left half is nearly black against a uniformly lit golden.
+Residual error per quadrant leaves one quadrant essentially exact while the
+others are far off, and _which_ quadrant is correct differs per scene:
 
-`#requestDevice` in `web/engine/gpu-replay.js` calls
-`adapter.requestDevice({ label, requiredFeatures })` and passes **no
-`requiredLimits`**, so the device is created with WebGPU's defaults — 8 storage
-buffers per stage — while the forward renderer's "draw args" compute pass
-binds 14. The bind-group layout is invalid, so the pipeline is, so the pass
-draws nothing.
+| scene  | TL    | TR       | BL    | BR       |
+| ------ | ----- | -------- | ----- | -------- |
+| dunes  | 7.84  | 2.96     | 27.83 | **0.37** |
+| spot   | 17.02 | **0.86** | 44.94 | 32.22    |
+| ao     | 15.81 | 8.27     | 44.11 | 28.11    |
+| probes | 24.73 | 7.11     | 72.60 | 46.22    |
 
-This is a missing descriptor field, not a missing command. The fix carries
-`crcbl_hal::Limits` on the device-creation command and turns it into
-`requiredLimits` in the replayer. **Highest-value fix in the backlog**: it is
-the single thing standing between nine scenes and a real comparison.
+The same scenes pass on vk, mtl and dx12, so this is WebGPU-only. A boundary on
+_exact_ half-frame coordinates points at a dispatch-extent or indexing mistake
+rather than an arithmetic difference — and the WGSL is a separate translation
+from the SPIR-V/MSL/DXIL, so a workgroup-size divergence there is exactly the
+kind of defect no native backend would ever surface. Under investigation.
 
-### 2. The browser's offscreen swapchain is linear where native presents sRGB
+### Coverage the gate still does not have
 
-`sprite` and `ui` draw correctly — right geometry, right hues, right text — and
-report **no device error at all**. They are simply un-encoded: the readback is
-linear where the golden is sRGB. Saturated primaries match (the transfer
-function is identity at 0 and 255) while every mid-tone is too dark, which is
-what the eye sees comparing `target/golden-diff/sprite.actual.png` against
-`sprite.expected.png`.
-
-Measured: applying the sRGB transfer function to the raw readback and
-re-comparing puts `sprite` at a **max channel delta of 1 across the whole
-frame** — pixel-exact but for the encoding. A `ui` corner reads `1a3359` in the
-browser; sRGB-encoded that is `5a7c9f`, against the golden's `597ca0`.
-
-The surface reports the non-sRGB `Bgra8Unorm` that
-`navigator.gpu.getPreferredCanvasFormat()` returns on Chrome, where the native
-path presents `Bgra8UnormSrgb`. This is a format-selection decision in the
-offscreen path — the offscreen ring answers to no canvas, so it is free to
-choose the sRGB format.
-
-`ui` additionally keeps ~1% residue (506 px, max delta 165) after encoding,
-scattered rather than clustered — consistent with alpha blending done against a
-linear target, which encoding afterwards cannot undo. Re-measure it once the
-format is fixed; it may vanish with the cause.
-
-### What this does not yet cover
-
-- **The gate's green branch has never been seen end to end.** The comparator's
-  green path was verified by feeding it readbacks decoded from the goldens
-  themselves (11/11, exit 0), not by a browser frame that genuinely matched. The
-  red path is thoroughly checked — a corrupted block, a mislabelled channel
-  order, a missing readback and a wrong extent each turn it red and name the
-  scene — but "this gate can pass for the right reason" is still owed.
-- **No second-wave crack list yet.** No `dispatch_indirect`, query-set,
-  debug-marker, `update_bind_group` or stencil-reference refusal has appeared,
-  because crack 1 stops the forward path before it reaches them. Expect more
-  once limits are carried.
-
-## Drift the seam merge exposed — two backend bugs and a contradictory doc
-
-Collapsing the per-backend HAL-seam copies into
-`crates/crcbl/tests/hal_seam_e2e.rs` turned up places where two copies of the
-same claim disagreed. Each was a question nothing was asking, because every
-backend was marking its own homework. The merged suite asserts only what all
-backends agree on; these are what it had to leave out.
-
-- **`crcbl-vk` does not refuse a backwards timeline signal.** wgpu and mtl both
-  return `InvalidDescriptor` for a signal value at or below the semaphore's
-  current one; vk passes it to the driver, which reports
-  `VUID-VkSubmitInfo2-semaphore-03882`. A monotonicity violation deadlocks every
-  waiter past that value, so **vk is the bug** — it should refuse at the seam
-  like the others. The assertion is in wgpu's suite, not the shared one, until
-  vk is fixed.
-- **An unsatisfiable timeline wait: wgpu returns `Err(Unsupported)`, mtl returns
-  `Ok(false)`.** `Device::wait_semaphores` documents a timeout as "a normal
-  outcome for a frame-pacing poll, not an error", so **mtl matches the contract
-  and wgpu departs from it.** Same treatment: pinned per-backend until wgpu is
-  fixed.
-- **`write_buffer` on a `HostReadback` buffer — needs a decision.** wgpu asserts
-  it must be _refused_; mtl and dx12 depend on it _succeeding_ (both use it for
-  their poison fill). The HAL doc contradicts itself: the prose says "Only valid
-  for `HostUpload`" while the Errors clause says `InvalidDescriptor` "if the
-  buffer is not host-visible" — and `HostReadback` _is_ host-visible. Decide
-  which the seam means, then make the three backends agree and move the test in.
-
-Also worth knowing:
-
-- **Coverage holes the duplication hid.** vk had no test for `write_buffer`
-  refusal, readback-range refusal, or present-without-acquire — all three
-  implemented. mtl had no readback-descriptor test at all, its indexed-draw
-  lacks the decoy half wgpu/dx12 carry, and its compute dispatch lacks the
-  empty-pass arm. dx12 has no foreign-surface test. The shared suite closes
-  these for every backend at once, which is the point of merging.
-- **The mtl/dx12 in-src copies were NOT deleted**, deliberately: they cover six
-  of the merged behaviours, and neither they nor the new suite has been run on
-  that hardware from here, so deleting would trade executed coverage for
-  unexecuted coverage. Now that CI runs `run-hal-seam-e2e.sh` on Metal and WARP,
-  a green run there is the signal to delete them. Note mtl/dx12 assert exact
-  texels on `Rgba8Unorm` where the shared test asserts channel ordering on the
-  ring's preferred format; carry that exactness over first.
-- **Not migrated:** indexed draw (a ~280-line inline pipeline build, its own
-  slice) and shader-won't-compile (wgpu expects `HalError::Backend`, mtl
-  `ShaderCompilation`, vk a byte-swapped-SPIR-V message, and dx12 consumes
-  precompiled DXIL with no source path — settle the variant first).
-- **`crates/crcbl/tests/tiling_e2e.rs` never runs in CI.** Its doc says
-  `run-render-e2e.sh` runs it, but that script passes `--test render_e2e`, so
-  the physical-tiling assertion has only ever been run by hand. Pre-existing.
+- **CI cannot run the nine forward scenes.** They need more storage buffers per
+  stage than SwiftShader offers — see the ceiling entry below. Only `sprite` and
+  `ui` are reachable on a CI runner; the numbers above come from running the
+  gate against this machine's GPU with
+  `CRCBL_CHROMIUM_FLAGS="--ignore-gpu-blocklist --use-angle=vulkan --use-webgpu-adapter=default --use-vulkan=native"`.
+- **The gate is not wired into CI at all yet**, deliberately, because it exits 1
+  while nine scenes fail. Wire it once they pass — or wire it now restricted to
+  the two scenes that do, which would at least catch a regression in them.
+- The read-only depth-stencil path and the stencil-ful attachment branch are
+  covered by the node replay gate only; no golden scene exercises either on real
+  hardware.
 
 ## The forward path binds more storage buffers than WebGPU guarantees
 
