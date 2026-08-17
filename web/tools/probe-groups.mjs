@@ -2604,7 +2604,7 @@ export async function runProbeGroups({
   group('Y — a reconfigured swapchain presents in the new format');
 
   const PROBE_RECONFIG_PIXELS = 64 * 64;
-  const PROBE_RECONFIG_COLOR_BYTES = [0, 0, 255, 255];
+  const PROBE_RECONFIG_COLOR_BYTES = [153, 102, 51, 255];
 
   const reconfigStart = await evaluate(
     page,
@@ -2687,7 +2687,7 @@ export async function runProbeGroups({
     reconfig?.done !== true
       ? `no reconfigure readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
       : reconfig.allMatch
-        ? `${reconfig.len} bytes, every texel [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}] (bgra red) from the reconfigured canvas frame`
+        ? `${reconfig.len} bytes, every texel [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}] (bgra 0.2/0.4/0.6) from the reconfigured canvas frame`
         : `state ${reconfig.state}, ${reconfig.len ?? 0} bytes, ` +
           `first wrong at byte ${reconfig.firstWrong} (sample ${JSON.stringify(reconfig.sample)} ` +
           `against [${PROBE_RECONFIG_COLOR_BYTES.join(', ')}])` +

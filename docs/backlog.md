@@ -392,11 +392,6 @@ Two gaps remain in the same bug class:
   ring is the same shape. **No windowed GPU e2e exists on any backend** and
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
-- **Probe group Y (reconfigure) asserts red**, which is a fixed point of the
-  sRGB transfer function, so it cannot tell an encoded reconfigure from an
-  unencoded one. Low risk only because `#reconfigureSwapchain` shares
-  `#configureSwapchain` with the path group X does cover. Use mid-tones there
-  too.
 
 ### The culling stats never land on the WebGPU backend
 

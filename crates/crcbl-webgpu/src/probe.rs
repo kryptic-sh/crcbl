@@ -2687,21 +2687,36 @@ pub const fn probe_present_copy() -> BufferImageCopy {
 // shared page and can both run.
 
 /// The colour the reconfigure probe clears the acquired frame to — opaque red,
-/// `vec4<f32>(1.0, 0.0, 0.0, 1.0)`.
+/// `vec4<f32>(0.2, 0.4, 0.6, 1.0)`.
 ///
-/// **Its own literal, and not [`PROBE_PRESENT_COLOR`].** This probe's observable
-/// is the *channel order* the bytes come back in, which needs a colour whose
-/// components differ from each other and nothing else; the present probe's needs
-/// mid-tones, which would put both of this one's non-zero-vs-zero channels
-/// through a transfer function for no gain. Red is exact in 8 bits under either,
-/// which is why every other value below can be compared exactly.
-pub const PROBE_RECONFIG_COLOR: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+/// **Its own literal, and not [`PROBE_PRESENT_COLOR`].** Three distinct
+/// mid-tones, chosen to be wrong in three different ways at once:
+///
+/// * **Distinct channels** are what makes the *byte order* observable — the
+///   whole point of this probe — and three distinct values pin it harder than
+///   red's one-versus-zero, which cannot tell `BGRA` from a channel-reversing
+///   bug that also happens to swap the two zeroes.
+/// * **Mid-tones** are what makes an *encode* observable. Red was a fixed point
+///   of the sRGB transfer function, so a reconfigure that wrongly attached an
+///   `-srgb` view format still read back `255` and passed. These do not:
+///   unencoded they are `51, 102, 153`, and through an sRGB view they land near
+///   `124, 170, 203`.
+/// * **Neither format here is sRGB**, so the *correct* answer is the unencoded
+///   one. This probe is not asserting an encode happens; it is asserting that
+///   nothing encodes when nothing should.
+///
+/// Each component is an exact eighth-ish of full scale — `0.2 × 255 = 51`
+/// exactly, and unorm conversion is round-to-nearest by specification on every
+/// backend — so the bytes below can still be compared exactly rather than
+/// within a tolerance.
+pub const PROBE_RECONFIG_COLOR: [f32; 4] = [0.2, 0.4, 0.6, 1.0];
 
-/// Red as the bytes a `Bgra8Unorm` texel holds — B, G, R, A, so `[0, 0, 255, 255]`
-/// for opaque red. THE OBSERVABLE: only a reconfigure that actually re-ran
-/// `configure` with `Bgra8Unorm` produces these; a stub that skipped it leaves the
-/// swapchain `Rgba8Unorm` and reads back `[255, 0, 0, 255]` instead.
-pub const PROBE_RECONFIG_COLOR_BYTES: [u8; 4] = [0, 0, 255, 255];
+/// [`PROBE_RECONFIG_COLOR`] as the bytes a `Bgra8Unorm` texel holds — B, G, R,
+/// A, so `[153, 102, 51, 255]`. THE OBSERVABLE: only a reconfigure that actually
+/// re-ran `configure` with `Bgra8Unorm` produces these; a stub that skipped it
+/// leaves the swapchain `Rgba8Unorm` and reads back `[51, 102, 153, 255]`
+/// instead, and one that attached an sRGB view format reads back neither.
+pub const PROBE_RECONFIG_COLOR_BYTES: [u8; 4] = [153, 102, 51, 255];
 
 /// The surface the reconfigure probe creates on the page's canvas. `6 << 32`.
 pub const PROBE_RECONFIG_SURFACE: SurfaceHandle = match SurfaceHandle::from_bits(6 << 32) {
