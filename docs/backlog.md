@@ -9833,3 +9833,73 @@ hitting the same wall:** `rustup target list --installed` does **not** list
 a `libaddr2line` conflict, but the target's std is present in the toolchain
 sysroot and builds fine — rustup's metadata is out of step with its own files,
 so believe `cargo build --target wasm32-unknown-unknown`, not `rustup`.
+
+## The WebGPU parity gate compares pixels now — two cracks, both verified
+
+`./web/run-render-harness-e2e.sh` drives all eleven golden `Scene`s through
+`crcbl-webgpu` in headless Chromium, reads each frame back, and compares it
+against `crcbl/tests/golden/<name>.png` with `crcbl-golden`'s own comparator at
+`Tolerance::RASTERISER`. All eleven render and read back; **none matches yet**,
+for two unrelated reasons. Both were confirmed by reading the code and the
+frames, not inferred from the failure alone.
+
+### 1. `requiredLimits` never reaches `requestDevice` — nine scenes draw blank
+
+`cube, dunes, lights, spot, spot_shadow, point_shadow, ao, ssr, probes` all read
+back a single flat colour, and each reports the same device error:
+
+```
+The number of storage buffers (14) in the Compute stage exceeds the maximum
+per-stage limit (8).
+ - While validating [BindGroupLayoutDescriptor "draw args"]
+```
+
+`#requestDevice` in `web/engine/gpu-replay.js` calls
+`adapter.requestDevice({ label, requiredFeatures })` and passes **no
+`requiredLimits`**, so the device is created with WebGPU's defaults — 8 storage
+buffers per stage — while the forward renderer's "draw args" compute pass
+binds 14. The bind-group layout is invalid, so the pipeline is, so the pass
+draws nothing.
+
+This is a missing descriptor field, not a missing command. The fix carries
+`crcbl_hal::Limits` on the device-creation command and turns it into
+`requiredLimits` in the replayer. **Highest-value fix in the backlog**: it is
+the single thing standing between nine scenes and a real comparison.
+
+### 2. The browser's offscreen swapchain is linear where native presents sRGB
+
+`sprite` and `ui` draw correctly — right geometry, right hues, right text — and
+report **no device error at all**. They are simply un-encoded: the readback is
+linear where the golden is sRGB. Saturated primaries match (the transfer
+function is identity at 0 and 255) while every mid-tone is too dark, which is
+what the eye sees comparing `target/golden-diff/sprite.actual.png` against
+`sprite.expected.png`.
+
+Measured: applying the sRGB transfer function to the raw readback and
+re-comparing puts `sprite` at a **max channel delta of 1 across the whole
+frame** — pixel-exact but for the encoding. A `ui` corner reads `1a3359` in the
+browser; sRGB-encoded that is `5a7c9f`, against the golden's `597ca0`.
+
+The surface reports the non-sRGB `Bgra8Unorm` that
+`navigator.gpu.getPreferredCanvasFormat()` returns on Chrome, where the native
+path presents `Bgra8UnormSrgb`. This is a format-selection decision in the
+offscreen path — the offscreen ring answers to no canvas, so it is free to
+choose the sRGB format.
+
+`ui` additionally keeps ~1% residue (506 px, max delta 165) after encoding,
+scattered rather than clustered — consistent with alpha blending done against a
+linear target, which encoding afterwards cannot undo. Re-measure it once the
+format is fixed; it may vanish with the cause.
+
+### What this does not yet cover
+
+- **The gate's green branch has never been seen end to end.** The comparator's
+  green path was verified by feeding it readbacks decoded from the goldens
+  themselves (11/11, exit 0), not by a browser frame that genuinely matched. The
+  red path is thoroughly checked — a corrupted block, a mislabelled channel
+  order, a missing readback and a wrong extent each turn it red and name the
+  scene — but "this gate can pass for the right reason" is still owed.
+- **No second-wave crack list yet.** No `dispatch_indirect`, query-set,
+  debug-marker, `update_bind_group` or stencil-reference refusal has appeared,
+  because crack 1 stops the forward path before it reaches them. Expect more
+  once limits are carried.
