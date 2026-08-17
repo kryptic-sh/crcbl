@@ -241,10 +241,11 @@ pub mod session;
 // `web.rs` is gated, which is where the wasm-only parts live.
 pub mod web;
 
-// Native only, and the module's own docs say why: every step of the screenshot
-// path blocks, and the browser's main thread may not. P5.6 gated it rather than
-// letting a wasm build compile a hang.
-#[cfg(not(target_arch = "wasm32"))]
+// Builds everywhere: its open and its readback are poll-based state machines
+// ([`screenshot::PendingOffscreen`], [`screenshot::PendingReadback`]) that block
+// nowhere, so a wasm build compiles the module rather than a hang. The blocking
+// conveniences over them (`OffscreenSetup::open`, `draw_and_readback`) stay
+// native-only inside the module, where their docs say why.
 pub mod screenshot;
 
 /// The names a game touches on every frame.

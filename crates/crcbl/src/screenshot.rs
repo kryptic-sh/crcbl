@@ -34,21 +34,29 @@
 //! This module is the render half of the CLI subcommand; the CLI module
 //! owns the argument parsing and I/O.
 //!
-//! # Native only
+//! # Poll-based core, native convenience
 //!
-//! The whole path blocks: [`crate::backend::open`], a blocking device creation,
-//! and a `std::thread::sleep` poll loop waiting for the readback copy to land.
-//! The browser's main thread may not block, so this module is
-//! `#[cfg(not(target_arch = "wasm32"))]` in `lib.rs` and a wasm build that
-//! reaches for it fails to *compile* rather than hanging on the first
-//! screenshot — the rule [`crate::backend`] states and
-//! [`Instance::create_device`] established.
+//! The path used to block in three places — `crate::backend::open`, a blocking
+//! device creation, and a `std::thread::sleep` poll loop waiting for the readback
+//! copy to land — and a browser's main thread may not block. It is now a pair of
+//! poll-driven state machines instead: [`OffscreenSetup::request`] →
+//! [`PendingOffscreen::poll`] opens the instance, device and swapchain a frame at
+//! a time on [`crate::backend::request_open`] and
+//! [`Instance::request_device`], and [`OffscreenSetup::begin_readback`] →
+//! [`PendingReadback::poll`] drives the copy on [`Device::poll_readback`]. Both
+//! are free of `#[cfg]` and build on `wasm32`, so a future browser harness can
+//! drive them across `requestAnimationFrame` frames.
 //!
-//! Nothing here is wanted in a browser at P5: it is a command-line tool's back
-//! end, not something a game calls per frame. If it ever is, the polled shapes
-//! it would have to be rewritten onto already exist —
-//! [`Instance::request_device`] and
-//! [`Device::poll_readback`].
+//! The blocking entry points — `OffscreenSetup::open`,
+//! `OffscreenSetup::open_with`, `OffscreenSetup::open_forward` and
+//! `OffscreenSetup::draw_and_readback` — remain as a **native-only**
+//! convenience: each drives its poll core to completion with
+//! [`std::thread::yield_now`] (never a sleep) and is
+//! `#[cfg(not(target_arch = "wasm32"))]`, because a busy loop on the browser's
+//! one thread would hang it. `crcbl screenshot` and every headless test use
+//! them; browser code drives the poll core directly. They are spelled without a
+//! doc link on purpose: they are absent from a `wasm32` build, where this module
+//! and its docs still compile.
 //!
 //! # Which adapter drew it
 //!
@@ -70,10 +78,11 @@
 use std::time::Duration;
 
 use crate::hal::{
-    Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Device, DeviceDesc,
-    Extent3d, Features, Format, ImageAspect, ImageBarrier, ImageSubresourceLayers,
-    ImageSubresourceRange, Instance, MemoryLocation, Offset3d, PresentInfo, PresentMode,
-    QueueHandle, QueueKind, ReadbackDesc, ReadbackState, ResourceState, SubmitInfo, SurfaceError,
+    Barriers, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, CommandBufferHandle,
+    CommandEncoderDesc, Device, DeviceDesc, DeviceRequestState, Extent3d, Features, Format,
+    ImageAspect, ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange, Instance,
+    MemoryLocation, Offset3d, PendingDevice, PresentInfo, PresentMode, QueueHandle, QueueKind,
+    ReadbackDesc, ReadbackHandle, ReadbackState, ResourceState, SubmitInfo, SurfaceError,
     SurfaceHandle, SurfaceTarget, SwapchainDesc, SwapchainHandle,
 };
 use crate::render::scene::{
@@ -1492,7 +1501,7 @@ impl From<ForwardScene> for SceneState {
 ///
 /// One variant per [`Scene`], plus the [`ForwardScene`] an application supplies;
 /// the frame's per-scene work is the three arms of
-/// [`OffscreenSetup::draw_and_readback`] and nothing else keys off it.
+/// `OffscreenSetup::draw_and_readback` and nothing else keys off it.
 enum SceneState {
     /// Every scene drawn through [`ForwardRenderer`]: one camera, one sun and
     /// one set of residents, differing in what is put in the scene and where the
@@ -1838,8 +1847,9 @@ impl SceneState {
 /// most this path will ever ask an allocator for.
 ///
 /// The CLI checks `--size` against this at parse time so an absurd request is
-/// a bad *invocation* (exit 2) rather than a failed command; [`OffscreenSetup::open`]
-/// checks it again because a library may not have gone through the CLI.
+/// a bad *invocation* (exit 2) rather than a failed command;
+/// `OffscreenSetup::request` (and `open` over it) checks it again because a
+/// library may not have gone through the CLI.
 pub const MAX_DIMENSION: u32 = 16_384;
 
 /// Row-pitch alignment, in bytes, for the readback staging buffer.
@@ -1864,11 +1874,11 @@ pub const MAX_DIMENSION: u32 = 16_384;
 /// unconditional rather than a backend-specific branch: nothing above
 /// `crcbl-hal` may key off which backend is behind the seam.
 ///
-/// The padding never reaches the caller — [`OffscreenSetup::draw_and_readback`]
-/// compacts the rows before returning.
+/// The padding never reaches the caller — [`PendingReadback::poll`] compacts the
+/// rows before returning.
 pub const READBACK_ROW_ALIGNMENT: u32 = 256;
 
-/// How long [`OffscreenSetup::draw_and_readback`] waits for the copy to land.
+/// How long `OffscreenSetup::draw_and_readback` waits for the copy to land.
 ///
 /// Generous because an offscreen ring on a software rasteriser can take
 /// hundreds of milliseconds for a single frame. Public because the two error
@@ -1886,11 +1896,144 @@ pub const READBACK_DEADLINE: Duration = Duration::from_secs(10);
 /// meaning what it says.
 const RING_IMAGES: u32 = 2;
 
+/// The closure `finish_open` calls to build the scene's renderer once the device
+/// is ready.
+///
+/// Boxed rather than a generic parameter so [`PendingOffscreen`] is one concrete
+/// type a browser harness can hold across frames — and so the private
+/// [`SceneState`] it returns never surfaces in a public generic signature. The
+/// `'b` is the closure's own capture lifetime: [`OffscreenSetup::request`]'s scene
+/// closure is `'static`, while [`OffscreenSetup::open_forward_with`]'s may borrow
+/// a caller's locals, and a native open drives it to completion before returning
+/// so the borrow never outlives them.
+type BuildScene<'b> =
+    Box<dyn FnOnce(&dyn Device, QueueHandle, Format) -> Result<SceneState, OffscreenError> + 'b>;
+
+/// One frame read back: its `(width, height)` and its tightly packed bytes, in
+/// [`OffscreenSetup::format`]'s channel order.
+type ReadbackFrame = ((u32, u32), Vec<u8>);
+
+/// Where a [`PendingOffscreen`] has got to: opening the instance, then opening
+/// the device on it.
+///
+/// The two async steps of an open — [`crate::backend::request_open`] and
+/// [`Instance::request_device`] — with the synchronous surface/adapter/format
+/// work done at the transition between them.
+#[allow(clippy::large_enum_variant)]
+enum OpenPhase {
+    /// Polling [`crate::backend::PendingInstance`] for the backend.
+    Instance {
+        pending: crate::backend::PendingInstance,
+    },
+    /// The instance is open and the surface, adapter and format are decided;
+    /// polling [`PendingDevice`] for the device.
+    Device {
+        instance: Box<dyn Instance>,
+        surface: SurfaceHandle,
+        adapter: crate::hal::AdapterInfo,
+        format: Format,
+        pending: Box<dyn PendingDevice>,
+    },
+    /// The setup has been handed over (or an open failed). A further poll is a
+    /// caller bug.
+    Finished,
+}
+
+/// An [`OffscreenSetup`] open in flight — the non-blocking half of
+/// [`OffscreenSetup::request`].
+///
+/// Poll it once per frame with [`Self::poll`] until it hands over the setup. It
+/// blocks nowhere and builds on `wasm32`, which is the whole reason it exists:
+/// the browser's one thread cannot sit in `OffscreenSetup::open`'s busy loop,
+/// so browser code drives this from `requestAnimationFrame` instead.
+#[allow(missing_debug_implementations)]
+pub struct PendingOffscreen<'b> {
+    width: u32,
+    height: u32,
+    optional_features: Features,
+    /// The scene builder, taken once the device is ready. `None` only after the
+    /// setup has been handed over.
+    build: Option<BuildScene<'b>>,
+    phase: OpenPhase,
+}
+
+impl PendingOffscreen<'_> {
+    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// Drives the instance open, then the device open, then builds the ring and
+    /// the scene — the synchronous middle steps run in the same poll that
+    /// finishes the instance, so a caller sees only the two genuine waits.
+    ///
+    /// # Errors
+    ///
+    /// Anything `OffscreenSetup::open` can report, surfaced from whichever step
+    /// reached it. Polling after the setup was handed over reports
+    /// [`OffscreenError::Unusable`].
+    pub fn poll(&mut self) -> Result<Option<OffscreenSetup>, OffscreenError> {
+        loop {
+            match core::mem::replace(&mut self.phase, OpenPhase::Finished) {
+                OpenPhase::Instance { mut pending } => match pending.poll()? {
+                    None => {
+                        self.phase = OpenPhase::Instance { pending };
+                        return Ok(None);
+                    }
+                    // Fall through to the device phase and poll it in this same
+                    // call: the surface and adapter work between the two is
+                    // synchronous, so parking here would waste a frame.
+                    Some(instance) => {
+                        self.phase =
+                            OffscreenSetup::start_device(instance, self.optional_features)?;
+                    }
+                },
+                OpenPhase::Device {
+                    instance,
+                    surface,
+                    adapter,
+                    format,
+                    mut pending,
+                } => match pending.poll()? {
+                    DeviceRequestState::Pending => {
+                        self.phase = OpenPhase::Device {
+                            instance,
+                            surface,
+                            adapter,
+                            format,
+                            pending,
+                        };
+                        return Ok(None);
+                    }
+                    DeviceRequestState::Ready(device) => {
+                        let build = self
+                            .build
+                            .take()
+                            .expect("the scene builder is present until the setup is handed over");
+                        let setup = OffscreenSetup::finish_open(
+                            build,
+                            instance,
+                            surface,
+                            adapter,
+                            format,
+                            (self.width, self.height),
+                            device,
+                        )?;
+                        return Ok(Some(setup));
+                    }
+                },
+                OpenPhase::Finished => {
+                    return Err(OffscreenError::Unusable(
+                        "the offscreen setup was already opened",
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Holds everything needed to render one frame offscreen: a GPU instance,
 /// device, offscreen swapchain ring, and the chosen scene's renderer.
 ///
-/// The caller drives one frame via [`Self::draw_and_readback`], then tears
-/// down with [`Self::finish`].
+/// The caller drives one frame via [`Self::begin_readback`] (or the blocking
+/// `draw_and_readback` over it on native), then tears down with [`Self::finish`].
 #[allow(missing_debug_implementations)]
 pub struct OffscreenSetup {
     instance: Box<dyn Instance>,
@@ -1964,7 +2107,7 @@ pub enum OffscreenError {
 }
 
 impl OffscreenSetup {
-    /// What [`Self::open`] asks the device for, optionally.
+    /// What [`Self::request`] asks the device for, optionally.
     ///
     /// [`Features::MESH_SHADER`] is in here because
     /// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes the mesh path the
@@ -1973,7 +2116,7 @@ impl OffscreenSetup {
     /// data-layout axis, and folding a second selector into it would make it a
     /// tier again — so it has to be named beside it. Every scene here draws
     /// identically on either path, which `tests/render_e2e.rs` checks by drawing
-    /// each one twice through [`Self::open_with`].
+    /// each one twice through [`Self::request_with`].
     ///
     /// Optional, never required: a device without any of these opens and draws
     /// the same picture through a lesser tail.
@@ -2007,8 +2150,56 @@ impl OffscreenSetup {
     /// [`ADAPTER_ENV_VAR`](crate::adapter::ADAPTER_ENV_VAR) names no adapter
     /// this backend enumerated, if the device is unusable, or if any HAL call
     /// fails.
+    ///
+    /// **Blocks**, so `wasm32` has no `open`: browser code drives
+    /// [`Self::request`] → [`PendingOffscreen::poll`] across its frame loop
+    /// instead. Same rule, same reason as [`Instance::create_device`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(width: u32, height: u32, scene: Scene) -> Result<Self, OffscreenError> {
         Self::open_with(width, height, scene, Self::OPTIONAL_FEATURES)
+    }
+
+    /// Starts opening an [`OffscreenSetup`] for `scene`, without blocking.
+    ///
+    /// The non-blocking half of `Self::open`, and the entry a browser drives:
+    /// poll the returned [`PendingOffscreen`] once per `requestAnimationFrame`
+    /// frame until it hands over the setup. The instance and device are opened on
+    /// [`crate::backend::request_open`] and [`Instance::request_device`], neither
+    /// of which blocks, so this whole path builds and runs on `wasm32`.
+    ///
+    /// The size checks the blocking `open` makes are made here, before a backend
+    /// is touched: an absurd `--size` costs a comparison rather than a device.
+    ///
+    /// # Errors
+    ///
+    /// The same as `Self::open`, except that everything that depends on a
+    /// backend answering is deferred to [`PendingOffscreen::poll`].
+    pub fn request(
+        width: u32,
+        height: u32,
+        scene: Scene,
+    ) -> Result<PendingOffscreen<'static>, OffscreenError> {
+        Self::request_with(width, height, scene, Self::OPTIONAL_FEATURES)
+    }
+
+    /// [`Self::request`] asking the device for `optional_features` instead of
+    /// [`Self::OPTIONAL_FEATURES`] — the non-blocking half of `Self::open_with`.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::request`].
+    pub fn request_with(
+        width: u32,
+        height: u32,
+        scene: Scene,
+        optional_features: Features,
+    ) -> Result<PendingOffscreen<'static>, OffscreenError> {
+        Self::request_built(
+            width,
+            height,
+            optional_features,
+            Box::new(move |device, queue, format| SceneState::open(scene, device, queue, format)),
+        )
     }
 
     /// [`Self::open`] asking the device for `optional_features` instead of
@@ -2026,28 +2217,14 @@ impl OffscreenSetup {
     /// # Errors
     ///
     /// The same as [`Self::open`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with(
         width: u32,
         height: u32,
         scene: Scene,
         optional_features: Features,
     ) -> Result<Self, OffscreenError> {
-        // Checked before the backend is opened, so an absurd `--size` costs a
-        // comparison rather than a device.
-        if width == 0 || height == 0 {
-            return Err(OffscreenError::Unusable("a frame must be at least 1x1"));
-        }
-        if width > MAX_DIMENSION || height > MAX_DIMENSION {
-            return Err(OffscreenError::TooLarge { width, height });
-        }
-
-        Self::open_on(
-            crate::backend::open()?,
-            width,
-            height,
-            scene,
-            optional_features,
-        )
+        Self::block_open(Self::request_with(width, height, scene, optional_features)?)
     }
 
     /// [`Self::open`] drawing a [`ForwardScene`] the **caller** built, rather
@@ -2073,6 +2250,7 @@ impl OffscreenSetup {
     /// # Errors
     ///
     /// The same as [`Self::open`], plus whatever `build` returns.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_forward<F>(width: u32, height: u32, build: F) -> Result<Self, OffscreenError>
     where
         F: FnOnce(&dyn Device, QueueHandle, Format) -> Result<ForwardScene, OffscreenError>,
@@ -2096,6 +2274,7 @@ impl OffscreenSetup {
     /// # Errors
     ///
     /// The same as [`Self::open_forward`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_forward_with<F>(
         width: u32,
         height: u32,
@@ -2105,32 +2284,28 @@ impl OffscreenSetup {
     where
         F: FnOnce(&dyn Device, QueueHandle, Format) -> Result<ForwardScene, OffscreenError>,
     {
-        // The same two refusals `open_with` makes, and for the same reason: an
-        // absurd size costs a comparison rather than a device.
-        if width == 0 || height == 0 {
-            return Err(OffscreenError::Unusable("a frame must be at least 1x1"));
-        }
-        if width > MAX_DIMENSION || height > MAX_DIMENSION {
-            return Err(OffscreenError::TooLarge { width, height });
-        }
-
-        Self::open_built(
-            crate::backend::open()?,
+        let pending = Self::request_built(
             width,
             height,
             optional_features,
-            |device, queue, format| build(device, queue, format).map(SceneState::from),
-        )
+            Box::new(move |device, queue, format| {
+                build(device, queue, format).map(SceneState::from)
+            }),
+        )?;
+        Self::block_open(pending)
     }
 
-    /// [`Self::open`] on an instance that has already been opened.
+    /// [`Self::request`] on an instance that has already been opened.
     ///
     /// The split exists so the barrier test below can drive the whole of
     /// [`Self::draw_and_readback`] against `crcbl_hal::null`, whose recorder is
     /// the only thing in the tree that can be *asked* what command stream this
-    /// module produced. The size checks stay in [`Self::open`]: they are about
+    /// module produced. The size checks stay in [`Self::request`]: they are about
     /// the caller's `--size`, and refusing before a backend is opened is the
-    /// property their test asserts.
+    /// property their test asserts. Its only callers are those tests — it drives
+    /// its poll core to completion with [`Self::block_open`] — so it is
+    /// `#[cfg(test)]`, which is also always native.
+    #[cfg(test)]
     fn open_on(
         instance: Box<dyn Instance>,
         width: u32,
@@ -2138,26 +2313,64 @@ impl OffscreenSetup {
         scene: Scene,
         optional_features: Features,
     ) -> Result<Self, OffscreenError> {
-        Self::open_built(instance, width, height, optional_features, |d, q, f| {
-            SceneState::open(scene, d, q, f)
-        })
+        // The instance is already open, so this pending starts in its device
+        // phase — `start_device` records the surface and adapter and starts the
+        // device request the poll then drives.
+        let pending = PendingOffscreen {
+            width,
+            height,
+            optional_features,
+            build: Some(Box::new(move |device, queue, format| {
+                SceneState::open(scene, device, queue, format)
+            })),
+            phase: Self::start_device(instance, optional_features)?,
+        };
+        Self::block_open(pending)
     }
 
-    /// Everything both entry points do once the scene is somebody's decision:
-    /// surface, adapter, device, ring — then whichever renderer `build` makes.
+    /// The shared non-blocking constructor: size checks, then start the instance
+    /// open and wrap it with `build` for [`PendingOffscreen::poll`] to finish.
     ///
-    /// One body rather than two, because a second copy is where the adapter pin,
-    /// the ring depth or the teardown-on-refusal below would come to differ
-    /// between the engine's own scenes and an application's.
-    fn open_built(
-        instance: Box<dyn Instance>,
+    /// One body for every entry point, because a second copy is where the size
+    /// refusals, the adapter pin, the ring depth or the teardown-on-refusal would
+    /// come to differ between the engine's own scenes and an application's.
+    fn request_built<'b>(
         width: u32,
         height: u32,
         optional_features: Features,
-        build: impl FnOnce(&dyn Device, QueueHandle, Format) -> Result<SceneState, OffscreenError>,
-    ) -> Result<Self, OffscreenError> {
-        let extent = (width, height);
+        build: BuildScene<'b>,
+    ) -> Result<PendingOffscreen<'b>, OffscreenError> {
+        // Checked before the backend is opened, so an absurd `--size` costs a
+        // comparison rather than a device.
+        if width == 0 || height == 0 {
+            return Err(OffscreenError::Unusable("a frame must be at least 1x1"));
+        }
+        if width > MAX_DIMENSION || height > MAX_DIMENSION {
+            return Err(OffscreenError::TooLarge { width, height });
+        }
 
+        Ok(PendingOffscreen {
+            width,
+            height,
+            optional_features,
+            build: Some(build),
+            phase: OpenPhase::Instance {
+                pending: crate::backend::request_open()?,
+            },
+        })
+    }
+
+    /// The surface, adapter and format decided the moment an instance is open,
+    /// then the device request the caller polls until it is ready.
+    ///
+    /// Everything here answers *now* — a foreign surface, a missing adapter, an
+    /// unusable format all fail from this call. Only the device itself waits on a
+    /// driver, and that is what [`PendingOffscreen::poll`] drives from the
+    /// returned [`OpenPhase::Device`].
+    fn start_device(
+        instance: Box<dyn Instance>,
+        optional_features: Features,
+    ) -> Result<OpenPhase, OffscreenError> {
         let target = SurfaceTarget::Offscreen;
         // SAFETY: `Offscreen` names no platform object, so nothing can dangle.
         let surface = unsafe {
@@ -2180,8 +2393,8 @@ impl OffscreenSetup {
             .preferred_format()
             .ok_or(OffscreenError::Unusable("no surface format"))?;
 
-        let device = instance
-            .create_device(&DeviceDesc {
+        let pending = instance
+            .request_device(&DeviceDesc {
                 label: Some("crcbl screenshot"),
                 adapter: adapter.id,
                 required_features: Features::empty(),
@@ -2190,6 +2403,32 @@ impl OffscreenSetup {
             })
             .map_err(OffscreenError::Hal)?;
 
+        Ok(OpenPhase::Device {
+            instance,
+            surface,
+            // Cloned out of `adapters`, which is dropped at the end of this call;
+            // `Self::adapter` answers from it after the enumeration is gone.
+            adapter: adapter.clone(),
+            format,
+            pending,
+        })
+    }
+
+    /// The ring and the scene, once the device is ready — the tail of an open.
+    ///
+    /// A `build` that fails hands its error back and **nothing is left behind**:
+    /// the swapchain and the surface go back before this returns, exactly as
+    /// `Scene::Dunes`' "no amplification stage" refusal must — it once destroyed
+    /// its own renderer and left the swapchain and the surface behind.
+    fn finish_open(
+        build: BuildScene<'_>,
+        instance: Box<dyn Instance>,
+        surface: SurfaceHandle,
+        adapter: crate::hal::AdapterInfo,
+        format: Format,
+        extent: (u32, u32),
+        device: Box<dyn Device>,
+    ) -> Result<Self, OffscreenError> {
         let queue = device
             .queue(QueueKind::Graphics)
             .ok_or(OffscreenError::Unusable("no graphics queue"))?;
@@ -2209,11 +2448,6 @@ impl OffscreenSetup {
         let scene = match build(device.as_ref(), queue, format) {
             Ok(scene) => scene,
             Err(error) => {
-                // Nothing has been submitted, so nothing is in flight — but the
-                // ring and the surface still have to go back, or a refused
-                // build leaks both. `Scene::Dunes`' "no amplification stage"
-                // refusal did exactly that: it destroyed its own renderer and
-                // left the swapchain and the surface behind.
                 device.destroy_swapchain(swapchain);
                 instance.destroy_surface(surface);
                 return Err(error);
@@ -2227,16 +2461,34 @@ impl OffscreenSetup {
             swapchain,
             queue,
             format,
-            adapter: adapter.clone(),
+            adapter,
             scene,
             pool: TransientPool::new(),
         })
     }
 
+    /// Drives a [`PendingOffscreen`] to completion with a tight busy-poll.
+    ///
+    /// The native backends make progress synchronously, so each poll either
+    /// finishes the open or is one that will next time — [`std::thread::yield_now`]
+    /// rather than a sleep, and never a hot spin that would starve a truly
+    /// asynchronous backend on a single-core runner. Absent on `wasm32`, where a
+    /// busy loop on the one thread would hang the page; browser code polls the
+    /// [`PendingOffscreen`] from its frame loop instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn block_open(mut pending: PendingOffscreen<'_>) -> Result<Self, OffscreenError> {
+        loop {
+            if let Some(setup) = pending.poll()? {
+                return Ok(setup);
+            }
+            std::thread::yield_now();
+        }
+    }
+
     /// The surface format the readback bytes are in.
     ///
     /// The swapchain's preferred format is `Bgra8UnormSrgb` on most surfaces,
-    /// and [`Self::draw_and_readback`] copies the swapchain image *raw*. A
+    /// and [`Self::begin_readback`] copies the swapchain image *raw*. A
     /// caller turning those bytes into an image therefore has to know whether
     /// to swizzle red and blue, and this is how it knows. Feeding them to an
     /// RGBA constructor unconditionally produces a channel-swapped PNG on
@@ -2246,7 +2498,7 @@ impl OffscreenSetup {
         self.format
     }
 
-    /// Which backend [`crate::backend::open`] selected for this frame.
+    /// Which backend [`crate::backend`] selected for this frame.
     ///
     /// The frame itself cannot say: every backend renders the same scene
     /// through the same [`ForwardRenderer`], so a caller comparing pixels has
@@ -2287,7 +2539,7 @@ impl OffscreenSetup {
         self.device.caps()
     }
 
-    /// What the last [`draw_and_readback`](Self::draw_and_readback) recorded,
+    /// What the last `draw_and_readback` (or [`begin_readback`](Self::begin_readback)) recorded,
     /// and what the GPU has told it since.
     ///
     /// The same [`FrameCounters`] a game puts on its debug panel, which is what
@@ -2302,7 +2554,7 @@ impl OffscreenSetup {
         self.scene.counters()
     }
 
-    /// Records, submits, and reads back one frame.
+    /// Records, submits, and reads back one frame, blocking until it lands.
     ///
     /// Returns the swapchain image's bytes as `((width, height), Vec<u8>)`,
     /// four bytes per pixel, row-major, top row first, in [`Self::format`]'s
@@ -2314,6 +2566,12 @@ impl OffscreenSetup {
     /// clock; nothing ever called it, so every screenshot rendered `t = 0`
     /// anyway and the state only made the frame look configurable.)
     ///
+    /// **Blocks** on the copy landing, so `wasm32` has none: browser code drives
+    /// [`Self::begin_readback`] → [`PendingReadback::poll`] across its frame loop
+    /// instead. This is the convenience over exactly that, spinning with
+    /// [`std::thread::yield_now`] — never a sleep — until the copy is ready or
+    /// [`READBACK_DEADLINE`] passes.
+    ///
     /// # Errors
     ///
     /// [`OffscreenError::Hal`] if recording, submission, or readback fail,
@@ -2321,7 +2579,45 @@ impl OffscreenSetup {
     /// [`OffscreenError::TooLarge`] if the acquired extent's byte count does
     /// not fit in a `usize`, or [`OffscreenError::ReadbackTimeout`] if the copy
     /// has not landed after [`READBACK_DEADLINE`].
-    pub fn draw_and_readback(&mut self) -> Result<((u32, u32), Vec<u8>), OffscreenError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn draw_and_readback(&mut self) -> Result<ReadbackFrame, OffscreenError> {
+        let mut pending = self.begin_readback()?;
+        let deadline = std::time::Instant::now() + READBACK_DEADLINE;
+        loop {
+            if let Some(frame) = pending.poll()? {
+                return Ok(frame);
+            }
+            if std::time::Instant::now() > deadline {
+                // The in-flight resources are left alone deliberately: the GPU
+                // may still be reading them, and destroying them now would be
+                // worse than leaking them until `finish` waits the device idle
+                // and drops it. Dropping `pending` does not touch them.
+                return Err(OffscreenError::ReadbackTimeout(READBACK_DEADLINE));
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Records and submits one frame, returning the readback still in flight.
+    ///
+    /// The non-blocking half of `Self::draw_and_readback`: it does everything
+    /// up to and including the readback request, then hands back a
+    /// [`PendingReadback`] whose [`poll`](PendingReadback::poll) the caller drives
+    /// until the copy lands. Builds on `wasm32`, so a browser harness reads a
+    /// frame back across `requestAnimationFrame` frames without blocking.
+    ///
+    /// The frame is the blocking path's, unchanged — same passes, same
+    /// barriers, same fixed `t = 0` pose, same bytes in [`Self::format`]'s channel
+    /// order.
+    ///
+    /// # Errors
+    ///
+    /// [`OffscreenError::Hal`] if recording or submission fail,
+    /// [`OffscreenError::OutOfDate`] if the swapchain is stale, or
+    /// [`OffscreenError::TooLarge`] if the acquired extent's byte count does not
+    /// fit in a `usize`. The copy landing (and its own failures) is
+    /// [`PendingReadback::poll`]'s.
+    pub fn begin_readback(&mut self) -> Result<PendingReadback<'_>, OffscreenError> {
         let device = self.device.as_ref();
         let acquired = device
             .acquire_next_frame(self.swapchain)
@@ -2498,35 +2794,19 @@ impl OffscreenSetup {
             after: None,
         })?;
 
-        let mut staged = vec![0u8; staged_capacity];
+        let staged = vec![0u8; staged_capacity];
 
-        let deadline = std::time::Instant::now() + READBACK_DEADLINE;
-        loop {
-            let state = device.poll_readback(readback, &mut staged)?;
-            if let ReadbackState::Ready = state {
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                // The command buffer, staging buffer and readback are left
-                // alone deliberately: the GPU may still be reading them, and
-                // destroying them now would be worse than leaking them until
-                // `finish` waits the device idle and drops it.
-                return Err(OffscreenError::ReadbackTimeout(READBACK_DEADLINE));
-            }
-            std::thread::sleep(Duration::from_micros(100));
-        }
-
-        device.destroy_command_buffer(commands);
-        device.destroy_buffer(staging);
-        device.destroy_readback(readback);
-
-        // Drop the row padding. Done here rather than left to the caller because
-        // the pitch is this module's decision, and a caller that forgot it would
-        // get a sheared image — the one failure a structural comparison sees and
-        // a per-pixel one does not describe usefully.
-        let pixels = compact_rows(&staged, staged_pitch, packed_pitch, host_capacity);
-
-        Ok((extent, pixels))
+        Ok(PendingReadback {
+            setup: self,
+            commands,
+            staging,
+            readback,
+            staged,
+            extent,
+            staged_pitch,
+            packed_pitch,
+            host_capacity,
+        })
     }
 
     /// Tears down in correct order: wait idle, destroy the scene and the
@@ -2552,6 +2832,69 @@ impl OffscreenSetup {
         drop(self.device);
         drop(self.instance);
         idle.map_err(OffscreenError::Hal)
+    }
+}
+
+/// A recorded, submitted frame whose readback copy has not yet landed — the
+/// non-blocking half of `OffscreenSetup::draw_and_readback`.
+///
+/// Returned by [`OffscreenSetup::begin_readback`]; poll it once per frame with
+/// [`Self::poll`] until it hands over the pixels. It blocks nowhere and builds on
+/// `wasm32`, so a browser harness drives it from `requestAnimationFrame`.
+///
+/// Dropping one before the copy lands abandons the in-flight command buffer,
+/// staging buffer and readback rather than destroying them: the GPU may still be
+/// reading them, and [`OffscreenSetup::finish`] waits the device idle and frees
+/// them. That is why the blocking `draw_and_readback` can drop this on a
+/// timeout and leave the leak for `finish`, exactly as it always has.
+#[allow(missing_debug_implementations)]
+pub struct PendingReadback<'a> {
+    setup: &'a OffscreenSetup,
+    commands: CommandBufferHandle,
+    staging: BufferHandle,
+    readback: ReadbackHandle,
+    /// The padded readback bytes, filled by [`Device::poll_readback`] once ready.
+    staged: Vec<u8>,
+    extent: (u32, u32),
+    staged_pitch: u64,
+    packed_pitch: u64,
+    host_capacity: usize,
+}
+
+impl PendingReadback<'_> {
+    /// Advances the readback. `Ok(None)` means "not landed yet, poll again".
+    ///
+    /// On `Ready` it destroys the frame's command buffer, staging buffer and
+    /// readback, drops the row padding, and hands back the pixels as
+    /// [`OffscreenSetup::begin_readback`] documents — four bytes per pixel,
+    /// row-major, top row first, in [`OffscreenSetup::format`]'s channel order.
+    ///
+    /// # Errors
+    ///
+    /// [`OffscreenError::Hal`] if the readback poll fails.
+    pub fn poll(&mut self) -> Result<Option<ReadbackFrame>, OffscreenError> {
+        let device = self.setup.device.as_ref();
+        match device.poll_readback(self.readback, &mut self.staged)? {
+            ReadbackState::Pending => Ok(None),
+            ReadbackState::Ready => {
+                device.destroy_command_buffer(self.commands);
+                device.destroy_buffer(self.staging);
+                device.destroy_readback(self.readback);
+
+                // Drop the row padding. Done here rather than left to the caller
+                // because the pitch is this module's decision, and a caller that
+                // forgot it would get a sheared image — the one failure a
+                // structural comparison sees and a per-pixel one does not
+                // describe usefully.
+                let pixels = compact_rows(
+                    &self.staged,
+                    self.staged_pitch,
+                    self.packed_pitch,
+                    self.host_capacity,
+                );
+                Ok(Some((self.extent, pixels)))
+            }
+        }
     }
 }
 
