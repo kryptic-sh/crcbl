@@ -9871,3 +9871,41 @@ hitting the same wall:** `rustup target list --installed` does **not** list
 a `libaddr2line` conflict, but the target's std is present in the toolchain
 sysroot and builds fine — rustup's metadata is out of step with its own files,
 so believe `cargo build --target wasm32-unknown-unknown`, not `rustup`.
+
+## Flaky: asteroids' engine-release audio test, seen once under coverage
+
+`the_engine_is_one_looping_voice_that_outlives_its_buffer` in
+`apps/asteroids/src/audio.rs` failed once in the `coverage (linux)` CI job, at
+the assertion that the engine's release block is still audible after the thrust
+key comes up:
+
+```
+panicked at apps/asteroids/src/audio.rs:
+the engine's release block was cut
+```
+
+**Re-running the same job on the same commit passed**, with nothing changed — so
+it is intermittent, not a break introduced by that commit.
+
+**Not root-caused.** What was ruled out, by running it:
+
+- Not ordinary nondeterminism: 30 runs locally at default features, all passed.
+- Not `--all-features` (the flag the coverage job adds): 20 runs, all passed.
+- Not coverage instrumentation itself: reproduced the job's tooling with
+  `cargo llvm-cov nextest --no-report -p asteroids --all-features`, passed.
+- Not cross-test interference: nextest runs each test in its own process.
+- Not RNG: the engine cue is a looped sine
+  (`the_engine_loops_a_whole_number_of_ cycles_with_no_envelope` pins it sample
+  by sample), and the only seeded noise in the module is the explosion's, from a
+  fixed `EXPLOSION_SEED`.
+
+That leaves something about the runner itself — a different libm's `sinf`, or a
+state the mixer carries that a slower machine reaches differently. The next
+person to see it should capture the actual block contents rather than only the
+assertion, since "all samples below 1e-3" and "the voice produced no block at
+all" are different bugs and the current message cannot tell them apart. Making
+the assertion print the block's peak would pay for itself the first time it
+fires again.
+
+Worth fixing rather than tolerating: a test that fails once every few dozen CI
+runs trains everyone to re-run a red board instead of reading it.
