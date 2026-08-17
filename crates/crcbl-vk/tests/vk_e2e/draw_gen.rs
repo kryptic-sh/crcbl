@@ -124,7 +124,7 @@ fn every_geometry_path_draws_the_same_frame() {
             &mut pool,
             &mesh_camera(Projection::default()),
         );
-        frames.push((expected, frame.image));
+        frames.push((expected, frame));
         teardown(headless, renderer, pool);
     }
 

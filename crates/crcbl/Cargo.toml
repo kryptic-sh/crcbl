@@ -226,6 +226,28 @@ forward-e2e = []
 # other two and nothing else.
 sprite-e2e = []
 
+# `tests/mesh_e2e/` — the lit mesh through the render graph: its four goldens,
+# the `Rgba16Float` scene target, the transient pool under a resize storm and
+# the uniform level-of-detail cut, on whichever backend `CRCBL_GPU` names,
+# driven by `tests/run-mesh-e2e.sh`. Gated and `#[ignore]`d for exactly the
+# reason `render-e2e` above is.
+#
+# The gate it closes is the last of the five that lived in
+# `crates/crcbl-vk/tests/vk_e2e/`, and the only one whose migration was a
+# redesign: half of `vk_e2e/mesh.rs` opens a device demanding
+# `Features::MESH_SHADER | Features::TASK_SHADER` and then asserts
+# `GeometryPath::MeshShader` was selected, which no other backend can reach at
+# all. Those tests stayed; what came here is everything that never named a path
+# — including the two tests that were split so that each half asserts something
+# true everywhere it runs.
+#
+# A sixth feature rather than more of `forward-e2e` for the reason that one is a
+# fourth: they ask different questions and are separate CI steps. This suite
+# owns the four mesh goldens (`tests/golden/mesh*.png`, moved out of
+# `crates/crcbl-vk/tests/golden/`) and is the only one that asks the shared
+# scene for the HDR target beside the swapchain image.
+mesh-e2e = []
+
 # `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
 # and `build_cluster_dag`. **Off by default**, and the reason is the same one
 # `crcbl-sprite` is linked as `load` and not `bake`: the crate depends on `gltf`,

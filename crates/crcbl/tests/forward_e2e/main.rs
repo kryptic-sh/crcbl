@@ -88,3 +88,9 @@ mod harness;
 // draw meshes name it.
 #[path = "../gpu_scene/mesh_scene.rs"]
 mod mesh_scene;
+
+// The culling-statistics readback, in a third file for the reason that one's
+// header gives: `tests/mesh_e2e/` renders the same scene and reads no counter,
+// so a scene and a statistics copy in one file left this dead code there.
+#[path = "../gpu_scene/cull_readback.rs"]
+mod cull_readback;

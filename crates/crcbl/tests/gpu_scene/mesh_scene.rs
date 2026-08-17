@@ -2,24 +2,28 @@
 //! not a test target: `tests/gpu_scene/` holds no `main.rs`, so Cargo compiles
 //! nothing here on its own.
 //!
-//! **Two suites pull this in with `#[path]`** — `tests/draw_gen_e2e/` and
-//! `tests/forward_e2e/` — because they place the same meshes, render them
-//! through the same graph and read back the same frames. It sits beside
-//! [`harness`](crate::harness) rather than inside it because the third suite on
-//! that fixture, `tests/sprite_e2e/`, draws no mesh at all: a fixture every GPU
-//! suite opens with and a scene two of them render are separate concerns, and
-//! keeping them in one file made every symbol here dead code in the third
-//! binary.
+//! **Three suites pull this in with `#[path]`** — `tests/draw_gen_e2e/`,
+//! `tests/forward_e2e/` and `tests/mesh_e2e/` — because they place the same
+//! meshes, render them through the same graph and read back the same frames. It
+//! sits beside [`harness`](crate::harness) rather than inside it because the
+//! fourth suite on that fixture, `tests/sprite_e2e/`, draws no mesh at all: a
+//! fixture every GPU suite opens with and a scene three of them render are
+//! separate concerns, and keeping them in one file made every symbol here dead
+//! code in that binary.
 //!
-//! Everything below is `vk_e2e/mesh.rs`'s. [`render_mesh`] reads back only the
-//! swapchain image: the `Rgba16Float` probe pass its Vulkan original also runs
-//! exists for lighting assertions that live in `mesh.rs` and have not moved.
+//! The culling-statistics readback two of them do is
+//! `tests/gpu_scene/cull_readback.rs`, on the same terms: `tests/mesh_e2e/`
+//! reads no counter, so a scene and a statistics copy in one file would leave
+//! that symbol dead in its binary.
+//!
+//! Everything below is `vk_e2e/mesh.rs`'s, including the `Rgba16Float` probe
+//! pass — [`render_mesh`]'s `hdr` sink is what turns it into a second readback,
+//! and `tests/mesh_e2e/hdr.rs` is the only caller that asks for one.
 
-use crate::harness::{Headless, POISON, poisoned};
+use crate::harness::{Headless, poisoned};
 use crcbl::hal::{
-    Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, Features,
-    Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,
-    SubmitInfo,
+    BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, Features, Format,
+    ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState, SubmitInfo,
 };
 use crcbl::math::Mat4;
 use crcbl::render::{Camera, ForwardRenderer, InstanceDesc, InstanceHandle, TransientPool};
@@ -133,11 +137,20 @@ pub(crate) fn place_cube(renderer: &mut ForwardRenderer) {
 /// Deliberately [`ForwardRenderer`] and [`crcbl::render::RenderGraph`] rather
 /// than a hand-built copy: a frame is only evidence about the code an
 /// application runs if it *is* the code an application runs.
+///
+/// `hdr` is the raw `Rgba16Float` scene target, copied back beside the
+/// swapchain image when a caller supplies a sink for it. **A sink rather than a
+/// second function**, because the copy has to be recorded into this frame's own
+/// encoder before the transient is recycled — there is no later moment to ask
+/// from. `tests/mesh_e2e/hdr.rs` is the only caller that passes one; the other
+/// two suites read the tonemapped frame and pass `None`, which records no probe
+/// pass and no second copy at all.
 pub(crate) fn render_mesh(
     headless: &Headless,
     renderer: &mut ForwardRenderer,
     pool: &mut TransientPool,
     camera: &Camera,
+    hdr: Option<&mut Vec<u8>>,
 ) -> crcbl_golden::Image {
     let device = headless.device.as_ref();
     let (width, height) = MESH_EXTENT;
@@ -155,6 +168,20 @@ pub(crate) fn render_mesh(
             memory: MemoryLocation::HostReadback,
         })
         .expect("a readback buffer");
+    // `Rgba16Float`: four channels of two bytes. The row is `4 * 2 * 256`
+    // bytes wide, so it satisfies the 256-byte copy pitch wgpu and D3D12
+    // enforce without this having to pad — see `MESH_EXTENT`.
+    let hdr_bytes = u64::from(width) * u64::from(height) * 8;
+    let hdr_staging = hdr.as_ref().map(|_| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some("mesh hdr readback"),
+                size: hdr_bytes,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer")
+    });
 
     renderer
         .begin_frame(
@@ -164,6 +191,11 @@ pub(crate) fn render_mesh(
             MESH_EXTENT,
         )
         .expect("the uniform buffer is writable");
+
+    // Where the graph's realised HDR handle lands, so the copy below can name
+    // it. `Cell` rather than a channel: the pass body runs synchronously inside
+    // `execute`, on this thread.
+    let hdr_handle: std::cell::Cell<Option<crcbl::hal::ImageHandle>> = std::cell::Cell::new(None);
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some("mesh frame"),
@@ -188,7 +220,17 @@ pub(crate) fn render_mesh(
                 final_state: ResourceState::TransferSrc,
             },
         );
-        let _ = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+        let scene = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+        if hdr_staging.is_some() {
+            // One extra declaration, and the graph works out that the HDR
+            // target has to move from `ShaderRead` (the tonemap sampled it) to
+            // `TransferSrc` (this wants to copy it).
+            let sink = &hdr_handle;
+            graph
+                .add_compute_pass("hdr probe")
+                .use_image(scene, ResourceState::TransferSrc)
+                .execute(move |ctx| sink.set(Some(ctx.image(scene))));
+        }
         // `&*pool`: the same pool the frame is about to be realised against, so
         // the barriers open where the last frame left off.
         graph.compile(&*pool).expect("a legal frame")
@@ -198,21 +240,36 @@ pub(crate) fn render_mesh(
         .execute(device, pool, encoder.as_mut(), None)
         .expect("the graph executed");
 
+    let layers = ImageSubresourceLayers {
+        aspect: ImageAspect::COLOR,
+        mip: 0,
+        base_layer: 0,
+        layer_count: 1,
+    };
+    // Both copies are outside every pass and need no barrier: the graph left
+    // both images in `TransferSrc` because both were declared that way.
     encoder.copy_image_to_buffer(&BufferImageCopy {
         buffer: staging,
         buffer_offset: 0,
         buffer_row_length: 0,
         buffer_image_height: 0,
         image: acquired.image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
+        image_subresource: layers,
         image_offset: crcbl::hal::Offset3d::default(),
         image_extent: Extent3d::d2(width, height),
     });
+    if let Some(hdr_staging) = hdr_staging {
+        encoder.copy_image_to_buffer(&BufferImageCopy {
+            buffer: hdr_staging,
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: hdr_handle.get().expect("the probe pass ran"),
+            image_subresource: layers,
+            image_offset: crcbl::hal::Offset3d::default(),
+            image_extent: Extent3d::d2(width, height),
+        });
+    }
 
     let commands = encoder.finish().expect("recording succeeded");
     device
@@ -231,6 +288,11 @@ pub(crate) fn render_mesh(
 
     let mut color = poisoned(color_bytes as usize);
     headless.readback(staging, color_bytes, &mut color);
+    if let (Some(hdr_staging), Some(hdr)) = (hdr_staging, hdr) {
+        *hdr = poisoned(hdr_bytes as usize);
+        headless.readback(hdr_staging, hdr_bytes, hdr);
+        device.destroy_buffer(hdr_staging);
+    }
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
 
@@ -240,70 +302,4 @@ pub(crate) fn render_mesh(
     };
     crcbl_golden::Image::from_readback(width, height, &color, order)
         .expect("the readback is exactly one image")
-}
-
-/// One word of the frame's culling statistics, copied back after the frame that
-/// wrote it.
-///
-/// Topic 03 §3.6's ring is one buffer with a counter per producer in it — the
-/// cull pass's survivors, the amplification stage's, and `light_cluster.slang`'s
-/// refused assignments — so reading any of them is the same copy with a
-/// different offset. One helper rather than one per counter, because the
-/// barriers around it are the part worth getting right once.
-pub(crate) fn read_stats_word(
-    headless: &Headless,
-    renderer: &ForwardRenderer,
-    word_index: u32,
-) -> u32 {
-    let device = headless.device.as_ref();
-    let stats = renderer.draws().visible_count(renderer.frame());
-    let word = u64::from(word_index) * 4;
-    let staging = device
-        .create_buffer(&BufferDesc {
-            label: Some("culling statistics readback"),
-            size: 4,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::HostReadback,
-        })
-        .expect("a readback buffer");
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("culling statistics copy"),
-        queue: headless.queue,
-    });
-    let barrier = |from: ResourceState, to: ResourceState| {
-        [crcbl::hal::BufferBarrier {
-            buffer: stats,
-            from,
-            to,
-            queue_transfer: None,
-        }]
-    };
-    let out = barrier(ResourceState::ShaderRead, ResourceState::TransferSrc);
-    let back = barrier(ResourceState::TransferSrc, ResourceState::ShaderRead);
-    encoder.pipeline_barrier(&Barriers {
-        buffers: &out,
-        ..Barriers::default()
-    });
-    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
-        src: stats,
-        src_offset: word,
-        dst: staging,
-        dst_offset: 0,
-        size: 4,
-    });
-    encoder.pipeline_barrier(&Barriers {
-        buffers: &back,
-        ..Barriers::default()
-    });
-    let commands = encoder.finish().expect("recording succeeded");
-    device
-        .submit(headless.queue, &SubmitInfo::new(&[commands]))
-        .expect("submit");
-
-    let mut bytes = [POISON; 4];
-    headless.readback(staging, 4, &mut bytes);
-    device.destroy_command_buffer(commands);
-    device.destroy_buffer(staging);
-    u32::from_le_bytes(bytes)
 }

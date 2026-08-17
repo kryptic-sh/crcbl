@@ -153,7 +153,10 @@ impl Deref for DeviceSlot {
 /// An offscreen surface, a device, and a swapchain-shaped image ring.
 pub(crate) struct Headless {
     pub(crate) device: DeviceSlot,
-    surface: crcbl::hal::SurfaceHandle,
+    /// The offscreen surface the ring hangs off. `pub(crate)` because a test
+    /// that *reconfigures* the swapchain has to name it again —
+    /// `tests/mesh_e2e/resize.rs` is the one that does.
+    pub(crate) surface: crcbl::hal::SurfaceHandle,
     pub(crate) swapchain: crcbl::hal::SwapchainHandle,
     pub(crate) queue: crcbl::hal::QueueHandle,
     pub(crate) format: Format,

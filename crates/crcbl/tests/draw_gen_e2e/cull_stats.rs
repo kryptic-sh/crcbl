@@ -3,7 +3,7 @@
 //!
 //! Every other reader of `DrawGen::visible_count` copies it back by hand,
 //! outside the frame loop, with its own barriers — see
-//! [`crate::mesh_scene::read_stats_word`]. This one reads what
+//! [`crate::cull_readback::read_stats_word`]. This one reads what
 //! [`ForwardRenderer::counters`](crcbl::render::ForwardRenderer::counters)
 //! reports **from inside the loop**, off `crcbl::render::cull_stats`'s ring,
 //! with no fence, no `wait_idle` and no poll loop anywhere in the frame.
@@ -24,8 +24,9 @@
 //! the backend and adapter `CRCBL_GPU` and `CRCBL_ADAPTER` named — which is why
 //! the run prints the path it took rather than assuming one.
 
+use crate::cull_readback::read_stats_word;
 use crate::harness::Headless;
-use crate::mesh_scene::{mesh_camera, place, place_cube, read_stats_word, render_mesh};
+use crate::mesh_scene::{mesh_camera, place, place_cube, render_mesh};
 use crcbl::hal::Features;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{ForwardRenderer, InstanceDesc, InstanceHandle, Projection, TransientPool};
@@ -111,7 +112,7 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
     // just been made, so nothing can have been polled and the row must say
     // `indirect`.
     for frame in 1..=REPORT_FLOOR {
-        render_mesh(&headless, &mut renderer, &mut pool, &camera);
+        render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
         let counters = renderer.counters();
         assert_eq!(
             counters.drawn, None,
@@ -130,7 +131,7 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
             "no culling report arrived in {REPORT_BOUND} frames; the readback is being polled \
              and thrown away rather than answered",
         );
-        render_mesh(&headless, &mut renderer, &mut pool, &camera);
+        render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
         rendered += 1;
     }
     let counters = renderer.counters();
@@ -245,7 +246,7 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
             rendered < REPORT_FLOOR + REPORT_BOUND,
             "no culling report arrived in {REPORT_BOUND} frames",
         );
-        render_mesh(&headless, &mut renderer, &mut pool, &camera);
+        render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
         rendered += 1;
     }
     let culled = renderer.cull_stats().expect("a readback answered");
@@ -258,7 +259,7 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
     // on the very next frame — the report in hand is an older frame's — and must
     // have changed a few frames later.
     renderer.set_instance(pyramid, &pyramid_at(Vec3::new(0.9, 0.0, 0.0)));
-    render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
     let straight_after = renderer.cull_stats().expect("still reporting");
     assert_eq!(
         straight_after.instances, 1,
@@ -270,7 +271,7 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
     // count on 1 for ever.
     let mut visible = straight_after;
     for frame in 0..REPORT_BOUND {
-        render_mesh(&headless, &mut renderer, &mut pool, &camera);
+        render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
         visible = renderer.cull_stats().expect("still reporting");
         assert!(
             visible.instances == 1 || visible.instances == 2,

@@ -50,6 +50,14 @@
 // references. The images moved to `crates/crcbl/tests/golden/`, with
 // `sprite.png` renamed `sprite_frames.png` because that directory already had
 // one of its own.
+//
+// `mesh` is still here, and it is the one module that was *split* rather than
+// moved. `crates/crcbl/tests/mesh_e2e/` took its four goldens (and the four
+// PNGs), its HDR measurements, its resize storm and the uniform half of its
+// level-of-detail selection; what is left opens devices demanding
+// `Features::MESH_SHADER` and asserts on the path they selected, which no other
+// backend can reach. Two of its tests became two tests each, one per side. That
+// module's header says which, and why the others could not be split at all.
 mod compute;
 mod device_request;
 mod draw_gen;

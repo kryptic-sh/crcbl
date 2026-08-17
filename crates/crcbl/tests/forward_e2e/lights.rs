@@ -20,8 +20,9 @@ use crcbl::math::Vec3;
 use crcbl::render::{Light, PointLight, SpotLight};
 use crcbl::shaders::light::{CLUSTER_LIGHT_CAPACITY, CLUSTER_OVERFLOW_WORD, CLUSTER_STRIDE};
 
+use crate::cull_readback::read_stats_word;
 use crate::harness::{Headless, poisoned};
-use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, read_stats_word, render_mesh};
+use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh};
 
 /// Where the cube is, and where a light has to be to reach it.
 ///
@@ -90,7 +91,7 @@ fn a_froxel_that_runs_out_of_budget_counts_what_it_refused() {
     // A frame no froxel could overflow: the sun and two lights, well inside the
     // budget. If this is not zero, the number below says nothing about overflow.
     renderer.set_lights(&[everywhere(0), everywhere(1)]);
-    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
     let quiet = read_stats_word(&headless, &renderer, CLUSTER_OVERFLOW_WORD);
     assert_eq!(
         quiet, 0,
@@ -99,7 +100,7 @@ fn a_froxel_that_runs_out_of_budget_counts_what_it_refused() {
 
     let crowd: Vec<Light> = (0..CROWD).map(everywhere).collect();
     renderer.set_lights(&crowd);
-    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
     let grid = renderer.grid();
     let overflowed = read_stats_word(&headless, &renderer, CLUSTER_OVERFLOW_WORD);
 
@@ -249,7 +250,7 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
     place_cube(&mut renderer);
     let camera = camera();
 
-    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
     let sun_only = assignments(&headless, &renderer);
 
     renderer.set_lights(&[Light::Point(PointLight {
@@ -257,7 +258,7 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
         radius: LIGHT_REACH,
         color: Vec3::new(4.0, 1.0, 1.0),
     })]);
-    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
     let with_sphere = assignments(&headless, &renderer);
 
     renderer.set_lights(&[Light::Spot(SpotLight {
@@ -269,7 +270,7 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
         inner_angle: SPOT_INNER,
         outer_angle: SPOT_OUTER,
     })]);
-    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
     let with_cone = assignments(&headless, &renderer);
 
     let froxels = renderer.grid().froxels();
@@ -351,7 +352,7 @@ fn a_point_light_brightens_the_face_it_is_beside_and_not_the_frame() {
     place_cube(&mut renderer);
     let camera = camera();
 
-    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
 
     renderer.set_lights(&[Light::Point(PointLight {
         position: LIGHT_AT,
@@ -360,7 +361,7 @@ fn a_point_light_brightens_the_face_it_is_beside_and_not_the_frame() {
         // `DirectionalLight::default` already puts above 1.0.
         color: Vec3::new(4.0, 1.0, 1.0),
     })]);
-    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
 
     // The cube's centre, which faces the camera and is on the light's side.
     let (x, y) = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
