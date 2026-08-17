@@ -86,6 +86,22 @@ something runs, and the agnostic suites only cover behaviours somebody
 remembered to put there. Parity is currently maintained by attention, which is
 why it has drifted.
 
+**The measurement that sizes the problem.** `crcbl_hal::Features` has **28**
+declared capability bits. The backends contain roughly **96** refusal sites —
+`crcbl-vk` 22, `crcbl-mtl` 22, `crcbl-dx12` 26, `crcbl-webgpu` 8,
+`crcbl-wgpu` 18. Most refusals therefore correspond to no declared capability at
+all: a caller cannot ask "can you do this?", only try it and handle the error.
+`fill_buffer` is the proof — three backends refuse it in three different ways
+and none of them is expressible in `Features`.
+
+**Why `Features` cannot be the mechanism on its own.** It is `bitflags`, and a
+bitflag has no exhaustiveness: a backend that never sets a new bit compiles
+silently, which is precisely the rot. The anti-rot property needs an `enum` and
+a `match` — adding a variant then fails to build everywhere it is not answered.
+`Features` stays what it is (optional capabilities a _caller requests_ at device
+creation); the new enum is a different thing (seam behaviours a _backend must
+answer for_), and the two should not be merged.
+
 **The mechanism that fixes it — make omission a compile error, then a test
 failure.**
 
