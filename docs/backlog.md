@@ -3,6 +3,49 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### INVESTIGATE — Dawn `VK_ERROR_OUT_OF_DEVICE_MEMORY` on the office PC
+
+The web samples (e.g. `crcbl-flappy`) boot and keep running on the office PC,
+but Chrome's console logs, once, right after the first frames:
+
+```
+vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY
+ - While handling unexpected error type Internal when allowed errors are Validation.
+    at CheckVkSuccessImpl (../../third_party/dawn/src/dawn/native/vulkan/VulkanError.cpp:106)
+```
+
+This is **Dawn** (Chrome's WebGPU → Vulkan), not our Vulkan backend — the page
+runs the `wgpu` web backend (`opened the wgpu GPU backend`,
+`hal: wgpu adapter "" (Other)`). A device-local `vkAllocateMemory` OOMs on that
+machine's GPU/driver while it fits the home machine's. It is currently
+**non-fatal** — the HUD ticks past 30s — so Dawn either recovers or the failed
+allocation is on a path that degrades silently. Worth pinning down before it
+becomes a hard failure on lower-memory GPUs.
+
+What is NOT the bug: the `MaxListenersExceededWarning`, `ObjectMultiplex`, and
+`app-init-liveness` / `background-liveness` orphaned-stream lines all come from
+`contentscript.js` — a MetaMask (wallet extension) content script injected into
+the page. Unrelated to crcbl; ignore.
+
+To investigate:
+
+- **Get the office PC's GPU + driver** (`chrome://gpu`, and the adapter Dawn
+  picked) — the adapter name logged empty (`""`), so we don't know if it's an
+  iGPU with a small device-local heap or a dGPU. This decides whether it's a
+  budgeting bug or a genuinely constrained device.
+- **Find the large allocation.** Suspects, in rough size order: the swapchain
+  (990×481 ×3 Rgba8UnormSrgb is small), the `ArrayPages` binding model's texture
+  page arrays, the `IndirectPerBatch` indirect/draw buffers, and any G-buffer /
+  shadow / SSR / probe targets the forward renderer allocates up front. Log each
+  allocation's size + memory type at creation on web and compare against the
+  device's reported heap size.
+- **Check whether wgpu/Dawn surfaces the OOM back to us at all** — if the
+  allocation silently degrades (e.g. a target that never gets created), a visual
+  artifact may follow that we are not detecting. Confirm what the failed
+  allocation was for.
+- Reproduces only on that hardware so far; not seen on the home GPU. Needs the
+  office machine (or a memory-constrained adapter) to verify a fix.
+
 ### TOP OF QUEUE (parallel project) — greybox asset pack for fast prototyping
 
 A `crcbl-greybox` crate of ready-to-use 2D and 3D prototyping primitives, sized
