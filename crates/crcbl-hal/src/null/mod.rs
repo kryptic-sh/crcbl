@@ -756,6 +756,7 @@ impl Device for NullDevice {
             | Capability::BufferFillRepeatedByte
             | Capability::BufferFillWord
             | Capability::ImageToImageCopy
+            | Capability::DepthImageCopy
             | Capability::MsaaResolveAttachment
             | Capability::StencilReference
             | Capability::IndirectArgumentPaddedStride

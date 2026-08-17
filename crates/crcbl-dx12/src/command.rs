@@ -560,6 +560,19 @@ fn release_location(location: &mut D3D12_TEXTURE_COPY_LOCATION) {
     unsafe { ManuallyDrop::drop(&mut location.pResource) };
 }
 
+/// What this backend answers
+/// [`Capability::DepthImageCopy`](crcbl_hal::Capability::DepthImageCopy) with,
+/// in the declaration and in the refusal alike.
+///
+/// **One sentence in two places on purpose.** `Dx12Device::supports` hands this
+/// to [`Support::No`](crcbl_hal::Support::No) and [`plan_copy`] hands it to
+/// [`crate::instance::not_yet`], so a caller that reads the declaration before
+/// recording and one that reads the error afterwards are told the same thing —
+/// and a test can hold the two to each other.
+pub(crate) const NO_DEPTH_COPY: &str = "a buffer copy of a depth-format image: a D3D12 depth format has two planes and a sampled one \
+     is created typeless, so the copy needs a PlaneSlice and a fully typed placed footprint that \
+     BufferImageCopy carries no field for (the DX12 depth slice)";
+
 /// Turns a seam buffer↔image copy into the `CopyTextureRegion` calls it is.
 ///
 /// # What D3D12 requires that the seam does not say
@@ -580,11 +593,12 @@ fn plan_copy(
 ) -> Result<Vec<CopyRegion>, HalError> {
     let format = image.format;
     if format.is_depth_stencil() {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy of a {format:?} image is not available on this backend: a depth format has \
-             two planes and a sampled one is stored typeless, so the copy needs a plane slice and \
-             a fully typed footprint the seam has no field for (the DX12 depth slice)"
-        )));
+        // `Unsupported`, not `InvalidDescriptor`: nothing the caller could
+        // write in `BufferImageCopy` makes this copy legal here, so the variant
+        // a caller matches on to pick a fallback is the one that has to arrive.
+        // It answers `Capability::DepthImageCopy`, and `NO_DEPTH_COPY` is the
+        // same sentence `Dx12Device::supports` declares it with.
+        return Err(crate::instance::not_yet(NO_DEPTH_COPY));
     }
     if copy.image_subresource.aspect != ImageAspect::COLOR {
         return Err(HalError::InvalidDescriptor(format!(

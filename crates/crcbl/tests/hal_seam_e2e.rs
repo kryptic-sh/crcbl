@@ -60,8 +60,9 @@ use crcbl::hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
     CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
     ImageAspect, ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange, Instance, LoadOp,
-    MemoryLocation, Offset3d, PresentInfo, PresentMode, ReadbackDesc, ReadbackState, Rect2d,
-    RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
+    MemoryLocation, Offset3d, PresentInfo, PresentMode, QueryKind, QuerySetDesc, QuerySetHandle,
+    ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
+    SurfaceError, SwapchainDesc,
 };
 
 /// The size every offscreen test in this file renders at.
@@ -2177,6 +2178,449 @@ fn exercise_fill(headless: &Headless, value: u32) -> Exercise {
     outcome
 }
 
+/// The `u64` a query resolve destination holds before the resolve.
+///
+/// [`FILL_POISON`]'s job, one type wider. A resolve that was accepted and
+/// dropped leaves this behind, so "the destination was never written" stays
+/// distinguishable from "the queries really did read back these numbers"
+/// instead of being folded into it. No counter a device hands out reaches this
+/// value within a process's lifetime, so it cannot be mistaken for a timestamp
+/// either.
+const QUERY_POISON: u64 = 0x5A5A_5A5A_5A5A_5A5A;
+
+/// Queries the timestamp exercise writes: one before the timed work, one after.
+const TIMESTAMP_QUERIES: u32 = 2;
+
+/// Bytes one resolved query occupies, and so the stride
+/// [`resolve_query_set`](crcbl::hal::CommandEncoder::resolve_query_set) writes
+/// into its destination.
+const QUERY_RESULT_BYTES: u64 = size_of::<u64>() as u64;
+
+/// Bytes the copy between the two timestamps moves.
+///
+/// Large enough that the copy occupies the queue for far longer than one tick
+/// of any device's counter, so a second timestamp greater than the first is a
+/// fact about the hardware rather than a race with the clock's granularity.
+/// Nothing ever reads these bytes: the copy is here for the time it takes, not
+/// for the data it moves.
+const TIMED_COPY_BYTES: u64 = 4 << 20;
+
+/// How many queries the creation-only exercise asks a set to hold.
+///
+/// More than one, so that reading one past the end has an in-range read beside
+/// it to be compared against.
+const CREATED_QUERIES: u32 = 2;
+
+/// Drives a [`QueryKind::Timestamp`] set through both of the seam's read paths
+/// and reports whether what came back could have come from a clock.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// Two timestamps are written around a [`TIMED_COPY_BYTES`] copy, and the
+/// second must be **strictly greater** than the first. That is the one
+/// relationship every API's timestamps obey without knowing the device:
+/// Vulkan's `vkCmdWriteTimestamp2` and D3D12's `EndQuery` both record a raw
+/// tick whose scale is `VkPhysicalDeviceLimits::timestampPeriod` or
+/// `ID3D12CommandQueue::GetTimestampFrequency`, Metal's
+/// `MTLCounterSampleBuffer` records an `MTLTimestamp`, and WebGPU's
+/// `timestampWrites` records nanoseconds outright — four units, one shared
+/// property. A magic number would be a different assertion on every device;
+/// this is the same assertion on all of them.
+///
+/// Three failures it cannot be green through. A `write_timestamp` accepted and
+/// dropped — which the seam explicitly permits on a device *without*
+/// [`Features::TIMESTAMP_QUERY`], and which is therefore exactly what a wrong
+/// `Support::Yes` looks like — reads back two zeros. A counter that is not
+/// running reads back the same value twice. A resolve that writes nothing
+/// leaves [`QUERY_POISON`] in the destination. None of the three satisfies
+/// `end > start` against a written destination.
+///
+/// The period is checked too, because it is half the claim: a backend
+/// reporting `timestamp_period_ns` of zero turns every delta into zero
+/// nanoseconds, and the profiler those queries exist for then reads zero
+/// however long the frame took.
+///
+/// # Why the results are read before they are resolved
+///
+/// [`Device::query_results`] runs first and the resolve into a buffer only
+/// afterwards, because a resolve *waits* for availability — `crcbl-vk` issues
+/// `vkCmdCopyQueryPoolResults` with `VK_QUERY_RESULT_WAIT_BIT` — and a query
+/// that was reset and never written never becomes available. Reading the
+/// non-blocking path first means a backend whose `write_timestamp` is a silent
+/// no-op fails this exercise rather than hanging the suite inside it.
+fn exercise_timestamp_query(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let set = match device.create_query_set(&QuerySetDesc {
+        label: Some("timestamp exercise"),
+        kind: QueryKind::Timestamp,
+        count: TIMESTAMP_QUERIES,
+    }) {
+        Ok(set) => set,
+        Err(error) => return Exercise::Refused(error),
+    };
+
+    let source = device
+        .create_buffer(&BufferDesc {
+            label: Some("timed copy source"),
+            size: TIMED_COPY_BYTES,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a device-local buffer");
+    let sink = device
+        .create_buffer(&BufferDesc {
+            label: Some("timed copy sink"),
+            size: TIMED_COPY_BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a device-local buffer");
+
+    let barrier = |buffer, from, to| crcbl::hal::BufferBarrier {
+        buffer,
+        from,
+        to,
+        queue_transfer: None,
+    };
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("timestamp exercise"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[
+            barrier(source, ResourceState::Undefined, ResourceState::TransferSrc),
+            barrier(sink, ResourceState::Undefined, ResourceState::TransferDst),
+        ],
+        ..Barriers::default()
+    });
+    // Always reset before writing: Vulkan requires it and every other backend
+    // accepts it, which is why the seam has callers do it unconditionally.
+    encoder.reset_query_set(set, 0..TIMESTAMP_QUERIES);
+    encoder.write_timestamp(set, 0);
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: source,
+        src_offset: 0,
+        dst: sink,
+        dst_offset: 0,
+        size: TIMED_COPY_BYTES,
+    });
+    encoder.write_timestamp(set, 1);
+
+    let outcome = match encoder.finish() {
+        Err(error) => Exercise::Refused(error),
+        Ok(commands) => {
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+
+            let mut ticks = [0u64; TIMESTAMP_QUERIES as usize];
+            device
+                .query_results(set, 0, &mut ticks)
+                .expect("reading a set this exercise created, over the range it created it with");
+            let [start, end] = ticks;
+            if start == 0 && end == 0 {
+                // The documented degrade for a device without the feature, and
+                // therefore what a wrong `Support::Yes` produces.
+                Exercise::SilentlyIgnored
+            } else {
+                assert!(
+                    end > start,
+                    "the timestamps around a {TIMED_COPY_BYTES}-byte copy came back as \
+                     {start} then {end}. A clock that ran cannot report the second write at or \
+                     before the first, so either the writes did not land where they were asked \
+                     to or the counter behind them is not moving."
+                );
+                let period = f64::from(device.caps().limits.timestamp_period_ns);
+                assert!(
+                    period > 0.0,
+                    "this device declares timestamp queries and reports a period of {period} \
+                     nanoseconds per tick, so every elapsed time derived from the {} ticks it \
+                     just measured is zero",
+                    end - start
+                );
+                eprintln!(
+                    "crcbl hal seam e2e: the timed copy took {ticks_elapsed} ticks, {micros:.3} \
+                     µs at {period} ns/tick",
+                    ticks_elapsed = end - start,
+                    micros = (end - start) as f64 * period / 1_000.0,
+                );
+                exercise_timestamp_resolve(headless, set, ticks)
+            }
+        }
+    };
+
+    device.destroy_buffer(sink);
+    device.destroy_buffer(source);
+    device.destroy_query_set(set);
+    outcome
+}
+
+/// The second half of [`exercise_timestamp_query`]: the same two queries, read
+/// again through [`resolve_query_set`](crcbl::hal::CommandEncoder::resolve_query_set).
+///
+/// The destination is primed with [`QUERY_POISON`] first, so a resolve that was
+/// accepted and dropped is `SilentlyIgnored` rather than an unexplained
+/// mismatch. What it must produce is not a plausible range but the *same two
+/// numbers* [`Device::query_results`] already returned — same pool, same
+/// indices, already available — so the two read paths hold each other to one
+/// answer and a backend where one of them reads a different pool, a different
+/// range or a different stride cannot be green.
+///
+/// This cannot block: `ticks` is only non-`None` because the queries have
+/// already been observed as available.
+fn exercise_timestamp_resolve(
+    headless: &Headless,
+    set: QuerySetHandle,
+    ticks: [u64; TIMESTAMP_QUERIES as usize],
+) -> Exercise {
+    const BYTES: u64 = TIMESTAMP_QUERIES as u64 * QUERY_RESULT_BYTES;
+    let device = headless.device.as_ref();
+
+    let prime = device
+        .create_buffer(&BufferDesc {
+            label: Some("timestamp resolve prime"),
+            size: BYTES,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a host-upload buffer");
+    let resolved = device
+        .create_buffer(&BufferDesc {
+            label: Some("timestamp resolve"),
+            size: BYTES,
+            usage: BufferUsage::QUERY_RESOLVE
+                | BufferUsage::TRANSFER_DST
+                | BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a device-local buffer");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("timestamp resolve readback"),
+            size: BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+
+    let primer: Vec<u8> = core::iter::repeat_n(QUERY_POISON, TIMESTAMP_QUERIES as usize)
+        .flat_map(u64::to_le_bytes)
+        .collect();
+    device
+        .write_buffer(prime, 0, &primer)
+        .expect("a host-upload buffer is what write_buffer is for");
+
+    let barrier = |buffer, from, to| crcbl::hal::BufferBarrier {
+        buffer,
+        from,
+        to,
+        queue_transfer: None,
+    };
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("timestamp resolve"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            resolved,
+            ResourceState::Undefined,
+            ResourceState::TransferDst,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: prime,
+        src_offset: 0,
+        dst: resolved,
+        dst_offset: 0,
+        size: BYTES,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            resolved,
+            ResourceState::TransferDst,
+            ResourceState::TransferDst,
+        )],
+        ..Barriers::default()
+    });
+    encoder.resolve_query_set(set, 0..TIMESTAMP_QUERIES, resolved, 0);
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            resolved,
+            ResourceState::TransferDst,
+            ResourceState::TransferSrc,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: resolved,
+        src_offset: 0,
+        dst: staging,
+        dst_offset: 0,
+        size: BYTES,
+    });
+
+    let outcome = match encoder.finish() {
+        Err(error) => Exercise::Refused(error),
+        Ok(commands) => {
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+
+            let mut bytes = poisoned(BYTES as usize);
+            headless.readback(staging, BYTES, &mut bytes);
+            let words: Vec<u64> = bytes
+                .chunks_exact(8)
+                .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+                .collect();
+            if words.iter().all(|word| *word == QUERY_POISON) {
+                Exercise::SilentlyIgnored
+            } else {
+                assert_eq!(
+                    words.as_slice(),
+                    ticks.as_slice(),
+                    "resolve_query_set wrote {words:?} for the same two queries \
+                     Device::query_results had just read as {ticks:?}. One of the two read paths \
+                     is reaching a different pool, a different range or a different stride."
+                );
+                Exercise::Worked
+            }
+        }
+    };
+
+    device.destroy_buffer(staging);
+    device.destroy_buffer(resolved);
+    device.destroy_buffer(prime);
+    outcome
+}
+
+/// Drives what the seam actually offers for a [`QueryKind::Occlusion`] or
+/// [`QueryKind::PipelineStatistics`] set: creating one, recording against it,
+/// and reading it.
+///
+/// # This deliberately asserts nothing about a count
+///
+/// Both kinds count something a *draw* produces — occlusion counts samples that
+/// passed the depth test, pipeline statistics count invocations and primitives
+/// — and every API scopes them with a begin/end pair around that draw:
+/// `vkCmdBeginQuery`/`vkCmdEndQuery`, D3D12's `BeginQuery`/`EndQuery`, Metal's
+/// `setVisibilityResultMode:offset:` on a render encoder, WebGPU's
+/// `beginOcclusionQuery` inside a render pass with an `occlusionQuerySet`
+/// attached. **[`crcbl::hal::CommandEncoder`] has no such verb** — its query
+/// vocabulary is `reset_query_set`, `write_timestamp` and `resolve_query_set` —
+/// so no work this suite can record ever reaches these pools, and there is no
+/// number to be plausible about. Asserting on a resolve of them would be
+/// asserting on queries that were never begun: the value is whatever "not
+/// written" resolves to, which is zero on the backend that has them, and zero
+/// is also what a backend doing nothing produces.
+///
+/// Two further things would have to change before a count could be asserted
+/// even with that verb. Occlusion needs the graphics pipeline the fixture does
+/// not have, for the same reason `NEEDS_PIPELINE` gives elsewhere. And
+/// `crcbl-vk` creates its statistics pools with `VERTEX_SHADER_INVOCATIONS |
+/// FRAGMENT_SHADER_INVOCATIONS | CLIPPING_PRIMITIVES` and no compute counter,
+/// so the dispatch this suite *can* size would be counted by none of them.
+///
+/// # What it does assert
+///
+/// The refusal, in full: a backend declaring these unsupported must fail
+/// `create_query_set` with [`HalError::Unsupported`], which is the direction
+/// four of the five backends are in and the direction that was previously
+/// unchecked.
+///
+/// And, for a backend declaring support, that the handle reaches the command
+/// stream: the set is reset through a submitted command buffer, so a backend
+/// handing out a handle its own encoder does not recognise fails at `finish`.
+/// Vulkan needs that reset before any read besides, since a pool that was never
+/// reset may not be read at all.
+///
+/// [`QueryKind::Occlusion`] then gets a read on top, which shows the handle
+/// names a pool of the size that was asked for rather than a stub:
+/// [`Device::query_results`] over `0..count` must succeed *and* a read one query
+/// past the end must be refused with [`HalError::InvalidDescriptor`]. The
+/// **pair** is the check — `Ok` alone is what an implementation doing nothing
+/// answers to everything, and it is the refusal beside it that makes the
+/// success mean something.
+///
+/// [`QueryKind::PipelineStatistics`] gets no read, and the reason is a seam
+/// defect rather than a shortcut. Both of the seam's read paths assume one
+/// `u64` per query — [`Device::query_results`] takes `out.len()` results
+/// starting at `first_query`, and `crcbl-vk` resolves with a `size_of::<u64>()`
+/// stride — while a Vulkan statistics pool holds one `u64` per *enabled
+/// counter*, and `crcbl-vk` enables three. Asking for two queries hands
+/// `vkGetQueryPoolResults` 16 bytes where it needs 32, which the validation
+/// layer catches as `VUID-vkGetQueryPoolResults-dataSize-00817`. There is no
+/// `out` length that both satisfies Vulkan and passes the seam's own
+/// `first_query + out.len() <= count` bound, so a statistics pool cannot be read
+/// through this seam at all: that wants a seam change and is left named here
+/// rather than papered over with a read that only looks like one.
+fn exercise_query_set_creation(headless: &Headless, kind: QueryKind) -> Exercise {
+    let device = headless.device.as_ref();
+    let set = match device.create_query_set(&QuerySetDesc {
+        label: Some("query set exercise"),
+        kind,
+        count: CREATED_QUERIES,
+    }) {
+        Ok(set) => set,
+        Err(error) => return Exercise::Refused(error),
+    };
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("query set exercise"),
+        queue: headless.queue,
+    });
+    encoder.reset_query_set(set, 0..CREATED_QUERIES);
+
+    let outcome = match encoder.finish() {
+        Err(error) => Exercise::Refused(error),
+        Ok(commands) => {
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+
+            if kind == QueryKind::PipelineStatistics {
+                // One `u64` per query is not this pool's layout; see the note
+                // above on `VUID-vkGetQueryPoolResults-dataSize-00817`.
+                Exercise::Worked
+            } else {
+                let mut inside = [0u64; CREATED_QUERIES as usize];
+                device
+                    .query_results(set, 0, &mut inside)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{kind:?}: this backend created a {CREATED_QUERIES}-query set and then \
+                             refused to read queries 0..{CREATED_QUERIES} of it — {error}. Either \
+                             the handle names no pool or this exercise is broken; it is not a \
+                             capability refusal, which create_query_set is where it belongs."
+                        )
+                    });
+
+                let mut past_the_end = [0u64; CREATED_QUERIES as usize + 1];
+                match device.query_results(set, 0, &mut past_the_end) {
+                    Err(HalError::InvalidDescriptor(_)) => Exercise::Worked,
+                    Ok(()) => Exercise::SilentlyIgnored,
+                    Err(error) => panic!(
+                        "{kind:?}: reading {} queries out of a {CREATED_QUERIES}-query set was \
+                         refused with {error}, and the seam documents InvalidDescriptor for a \
+                         range that exceeds the set. A caller cannot tell an over-long read from a \
+                         dead handle if both answer the same way.",
+                        past_the_end.len()
+                    ),
+                }
+            }
+        }
+    };
+
+    device.destroy_query_set(set);
+    outcome
+}
+
 /// Drives `capability` against this device, or says why it cannot be.
 ///
 /// **Exhaustive with no wildcard arm**, so a capability added to
@@ -2212,6 +2656,10 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
             "needs two images with matching formats and a readback of the destination; the \
              fixture's images are swapchain-owned",
         ),
+        C::DepthImageCopy => Exercise::Unexercised(
+            "needs a depth image, a pass that writes it and a buffer copy of its depth plane; the \
+             fixture owns colour swapchain images and no depth target",
+        ),
         C::MsaaResolveAttachment => Exercise::Unexercised(NEEDS_MSAA_TARGET),
         C::StencilReference => Exercise::Unexercised(NEEDS_PIPELINE),
         C::DrawIndirectCount | C::IndirectArgumentPaddedStride => {
@@ -2228,10 +2676,13 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::PolygonModeLine | C::DepthClamp | C::SamplerAnisotropy => {
             Exercise::Unexercised(NEEDS_PIPELINE)
         }
-        C::TimestampQuery | C::OcclusionQuery | C::PipelineStatisticsQuery => {
-            Exercise::Unexercised(
-                "needs a query set and a resolve into a buffer; drivable here and not yet written",
-            )
+        C::TimestampQuery => exercise_timestamp_query(headless),
+        // Creation and refusal only, and `exercise_query_set_creation` says at
+        // length why there is no count to assert: the seam has no begin/end
+        // verb, so nothing this suite records ever reaches either pool.
+        C::OcclusionQuery => exercise_query_set_creation(headless, QueryKind::Occlusion),
+        C::PipelineStatisticsQuery => {
+            exercise_query_set_creation(headless, QueryKind::PipelineStatistics)
         }
         C::TimelineSemaphore | C::BinarySemaphore | C::CpuTimelineWait => Exercise::Unexercised(
             "covered by a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it, which \

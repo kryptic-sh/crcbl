@@ -1039,6 +1039,11 @@ impl Device for MetalDevice {
                  u32 whose four bytes are equal has an encoding",
             ),
             Capability::ImageToImageCopy => Support::Yes,
+            // A Metal depth texture is a single-plane typed texture, so the blit
+            // encoder's texture↔buffer calls take it with the bytes-per-row
+            // `conv::copy_footprint` computes from the depth aspect's own texel
+            // size — the same call and the same footprint a colour copy uses.
+            Capability::DepthImageCopy => Support::Yes,
             // `MTLRenderPassColorAttachmentDescriptor` carries `resolveTexture`
             // and a `MTLStoreAction` that resolves.
             Capability::MsaaResolveAttachment => Support::Yes,

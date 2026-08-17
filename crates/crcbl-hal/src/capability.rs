@@ -193,6 +193,25 @@ capabilities! {
     /// separately where it is refused at all.
     ImageToImageCopy,
 
+    /// A buffer↔image copy —
+    /// [`copy_image_to_buffer`](crate::CommandEncoder::copy_image_to_buffer) or
+    /// [`copy_buffer_to_image`](crate::CommandEncoder::copy_buffer_to_image) —
+    /// whose image carries a **depth or depth-stencil** format and whose
+    /// subresource names [`ImageAspect::DEPTH`](crate::ImageAspect::DEPTH).
+    ///
+    /// Separate from the colour copies every backend performs, because a depth
+    /// image is not one plane of one type. An API that stores a *sampled* depth
+    /// texture typeless needs the plane and a fully typed footprint chosen at
+    /// the copy itself, and [`BufferImageCopy`](crate::BufferImageCopy) carries
+    /// neither — so a backend can copy every colour format and still have no
+    /// expression for this one.
+    ///
+    /// It is what a shadow atlas is read back through, which is why it is worth
+    /// declaring rather than discovering: without it there is no way to show
+    /// that a shadow pass wrote anything, and a shadow pass that wrote nothing
+    /// renders a frame in which every surface is lit and nothing looks wrong.
+    DepthImageCopy,
+
     // --- render pass ---
 
     /// A [`ColorAttachment::resolve`](crate::ColorAttachment::resolve) view: the
@@ -393,6 +412,7 @@ impl Capability {
             | Self::BufferFillRepeatedByte
             | Self::BufferFillWord
             | Self::ImageToImageCopy
+            | Self::DepthImageCopy
             | Self::MsaaResolveAttachment
             | Self::StencilReference
             | Self::IndirectArgumentPaddedStride
@@ -585,6 +605,22 @@ pub const DIVERGENCES: &[Divergence] = &[
         backend: BackendKind::Dx12,
         why: "both sides are texture locations with their own subresource and box, and neither is \
               the placed footprint plan_copy builds (the DX12 pipeline slice)",
+    },
+    Divergence {
+        capability: Capability::DepthImageCopy,
+        backend: BackendKind::Dx12,
+        why: "a D3D12 depth format has two planes and a sampled one is created typeless, so the \
+              copy needs a PlaneSlice and a fully typed D3D12_PLACED_SUBRESOURCE_FOOTPRINT — \
+              neither of which BufferImageCopy carries and neither of which plan_copy can derive \
+              from the image alone (the DX12 depth slice)",
+    },
+    Divergence {
+        capability: Capability::DepthImageCopy,
+        backend: BackendKind::WebGpu,
+        why: "the replayer turns BufferImageCopy::buffer_row_length from texels into WebGPU's \
+              bytesPerRow through a bytes-per-texel table that holds the single-plane colour \
+              formats only, and it refuses a depth format rather than guessing a figure for one \
+              (the TEXEL_BYTES table in web/engine/gpu-replay.js)",
     },
     // --- render pass ---
     Divergence {

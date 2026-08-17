@@ -1595,6 +1595,9 @@ impl Device for Dx12Device {
                 "both sides are texture locations with their own subresource and box, and neither \
                  is the placed footprint plan_copy builds (the DX12 pipeline slice)",
             ),
+            // The sentence `crate::command::plan_copy` refuses with, so the
+            // declaration and the error a caller reads cannot drift apart.
+            Capability::DepthImageCopy => Support::No(crate::command::NO_DEPTH_COPY),
             Capability::MsaaResolveAttachment => Support::No(
                 "the render-pass path binds render-target views directly and emits no \
                  ResolveSubresource, so a resolve view has nothing to attach to (the DX12 pipeline \

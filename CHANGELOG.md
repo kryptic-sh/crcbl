@@ -21,9 +21,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   names one seam behaviour per variant — the three different `fill_buffer`
   promises, the GPU-read draw count, a padded indirect stride, mesh and task
   stages, update-after-bind, push constants, bindless arrays, storage-image
-  bindings, the three query kinds, the two semaphore kinds and the two kinds of
-  timeline wait — and `Device::supports(capability)` answers `Support::Yes` or
-  `Support::No(reason)` through an exhaustive `match` with no wildcard arm.
+  bindings, a buffer copy of a depth-format image, the three query kinds, the
+  two semaphore kinds and the two kinds of timeline wait — and
+  `Device::supports(capability)` answers `Support::Yes` or `Support::No(reason)`
+  through an exhaustive `match` with no wildcard arm.
+
+  `Capability::DepthImageCopy` is the one to know about if you read a depth
+  image back: `crcbl-vk`, `crcbl-mtl` and `crcbl-wgpu` perform it, and
+  `crcbl-dx12` and `crcbl-webgpu` are in `crcbl_hal::DIVERGENCES` with the
+  reason each gives — a D3D12 depth format is two planes and a sampled one is
+  typeless, so the copy needs a plane slice and a fully typed footprint
+  `BufferImageCopy` has no field for; the browser replayer scales
+  `buffer_row_length` from texels to `bytesPerRow` through a table of colour
+  formats only. `crcbl-dx12` refuses it with `HalError::Unsupported` rather than
+  the `HalError::InvalidDescriptor` it used to answer, so a caller branching on
+  the variant to pick a fallback sees it.
 
   This is deliberately **not** a `Features` bit. `Features` stays what it is:
   optional capabilities a _caller requests_ at device creation, negotiated per

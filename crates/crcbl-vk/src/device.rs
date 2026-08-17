@@ -1543,6 +1543,10 @@ impl Device for VkDevice {
             | Capability::BufferFillRepeatedByte
             | Capability::BufferFillWord => Support::Yes,
             Capability::ImageToImageCopy => Support::Yes,
+            // `VkBufferImageCopy::imageSubresource` names the aspect, so a depth
+            // plane is addressed by the same call and the same struct a colour
+            // copy is — there is no second footprint to describe.
+            Capability::DepthImageCopy => Support::Yes,
             // `VkRenderingAttachmentInfo` carries `resolveImageView` and
             // `resolveMode`, filled from `ColorAttachment::resolve`.
             Capability::MsaaResolveAttachment => Support::Yes,

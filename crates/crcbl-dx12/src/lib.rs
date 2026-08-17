@@ -39,8 +39,8 @@
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
 //! the clear that no slice has written — queries, timeline semaphores, buffer
-//! fills, image-to-image copies, mesh dispatch, a push-constant range at
-//! pipeline-layout creation — refuses with
+//! fills, image-to-image copies, a buffer copy of a depth-format image, mesh
+//! dispatch, a push-constant range at pipeline-layout creation — refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
 //! yet" rather than "broken". A refusal that is *permanent* deliberately does

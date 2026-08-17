@@ -45,9 +45,9 @@
 
 use crate::harness::{Headless, MESH_EXTENT, poisoned};
 use crcbl::hal::{
-    Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, Features,
-    Format, ImageAspect, ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange,
-    MemoryLocation, PresentInfo, ResourceState, SubmitInfo,
+    Barriers, BufferDesc, BufferImageCopy, BufferUsage, Capability, CommandEncoderDesc, Extent3d,
+    Features, Format, HalError, ImageAspect, ImageBarrier, ImageSubresourceLayers,
+    ImageSubresourceRange, MemoryLocation, PresentInfo, ResourceState, SubmitInfo, Support,
 };
 
 /// Where the open box sits: at the origin, so the camera below looks straight
@@ -81,23 +81,55 @@ const SUN_TOWARDS_Z: f32 = 1.0;
 /// A frame drawn under one sun, with its shadow atlas read back beside it.
 struct ShadowFrame {
     image: crcbl_golden::Image,
-    /// The atlas as depth, row-major, `atlas_extent()` of them.
-    atlas: Vec<f32>,
+    /// The atlas as depth, row-major, `atlas_extent()` of them — or the reason
+    /// this backend produced none, which is a declared answer rather than a
+    /// failure. See [`ShadowFrame::atlas`].
+    atlas: Result<Vec<f32>, &'static str>,
 }
 
 impl ShadowFrame {
-    /// Cascade `cascade`'s tile, as depths.
-    fn tile(&self, cascade: usize) -> Vec<f32> {
-        let (width, _) = crcbl::render::shadow::atlas_extent();
-        let (origin_x, origin_y) = crcbl::render::shadow::tile_origin(cascade);
-        let side = crcbl::render::shadow::TILE;
-        (0..side)
-            .flat_map(|row| {
-                let start = ((origin_y + row) * width + origin_x) as usize;
-                self.atlas[start..start + side as usize].to_vec()
-            })
-            .collect()
+    /// The whole atlas as depths, or `None` on a backend that declares
+    /// [`Capability::DepthImageCopy`] absent.
+    ///
+    /// **`None` is a claim, not a skip.** Reading a shadow atlas means copying
+    /// a *depth* image into a buffer, which is not a copy every backend has: a
+    /// depth format is two planes, a sampled one may be stored typeless, and
+    /// `crcbl_hal::DIVERGENCES` lists D3D12 and the browser replayer with the
+    /// reason each gives. [`render_scene`] records that copy either way — where
+    /// the capability is declared present the depths come back and every tile
+    /// assertion below runs against them, and where it is declared absent
+    /// `render_scene` has already asserted that the recorded copy was *refused*,
+    /// with [`HalError::Unsupported`] carrying the same reason
+    /// `Device::supports` gave. A backend that declared the gap and then
+    /// performed the copy, or that refused it as a malformed descriptor, fails
+    /// there rather than arriving here.
+    fn atlas(&self) -> Option<&[f32]> {
+        match &self.atlas {
+            Ok(atlas) => Some(atlas),
+            Err(why) => {
+                eprintln!(
+                    "{suite}: shadow — this backend declares no depth-image copy and refused the \
+                     atlas readback as it says it does, so the tile assertions have nothing to \
+                     read: {why}",
+                    suite = crate::SUITE
+                );
+                None
+            }
+        }
     }
+}
+
+/// Tile `tile` of `atlas`, as depths.
+fn tile(atlas: &[f32], tile: usize) -> Vec<f32> {
+    let (width, _) = crcbl::render::shadow::atlas_extent();
+    let (origin_x, origin_y) = crcbl::render::shadow::tile_origin(tile);
+    let side = crcbl::render::shadow::TILE;
+    (0..side)
+        .flat_map(|row| {
+            let start = ((origin_y + row) * width + origin_x) as usize;
+            atlas[start..start + side as usize].to_vec()
+        })
+        .collect()
 }
 
 /// What one frame of this module draws.
@@ -200,22 +232,16 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
         image_extent: Extent3d::d2(width, height),
     });
 
-    // **The one hand-written barrier in this module.** The atlas belongs to the
-    // renderer, not to the graph, and the graph left it in `ShaderRead` because
-    // that is what the colour pass wanted — so a reader outside the frame has to
-    // ask for it. Every barrier *inside* the frame is still the graph's.
-    let range = ImageSubresourceRange::all(Format::D32Float);
-    let to_source = [ImageBarrier::new(
-        renderer.shadow_atlas(),
-        range,
-        ResourceState::ShaderRead,
-        ResourceState::TransferSrc,
-    )];
-    encoder.pipeline_barrier(&Barriers {
-        images: &to_source,
-        ..Barriers::default()
-    });
-    encoder.copy_image_to_buffer(&BufferImageCopy {
+    // **Reading the atlas is a declared capability, not a given.** The atlas is
+    // `D32Float`, and copying a depth image into a buffer is
+    // `Capability::DepthImageCopy` — which D3D12 and the browser replayer both
+    // declare absent, each for a reason `crcbl_hal::DIVERGENCES` carries. So the
+    // copy is recorded where the backend says it works and *probed on an
+    // encoder of its own* where it says it does not: recording it into this one
+    // would fail `finish` and take the colour readback down with it, leaving
+    // every assertion in this module — including the several that never look at
+    // a depth at all — unable to run.
+    let atlas_copy = BufferImageCopy {
         buffer: atlas_staging,
         buffer_offset: 0,
         buffer_row_length: 0,
@@ -229,7 +255,27 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
         },
         image_offset: crcbl::hal::Offset3d::default(),
         image_extent: Extent3d::d2(atlas_width, atlas_height),
-    });
+    };
+    let depth_copy = device.supports(Capability::DepthImageCopy);
+    if depth_copy.is_yes() {
+        // **The one hand-written barrier in this module.** The atlas belongs to
+        // the renderer, not to the graph, and the graph left it in `ShaderRead`
+        // because that is what the colour pass wanted — so a reader outside the
+        // frame has to ask for it. Every barrier *inside* the frame is still
+        // the graph's.
+        let range = ImageSubresourceRange::all(Format::D32Float);
+        let to_source = [ImageBarrier::new(
+            renderer.shadow_atlas(),
+            range,
+            ResourceState::ShaderRead,
+            ResourceState::TransferSrc,
+        )];
+        encoder.pipeline_barrier(&Barriers {
+            images: &to_source,
+            ..Barriers::default()
+        });
+        encoder.copy_image_to_buffer(&atlas_copy);
+    }
 
     let commands = encoder.finish().expect("recording succeeded");
     device
@@ -249,12 +295,17 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
 
     let mut color = poisoned(color_bytes as usize);
     headless.readback(color_staging, color_bytes, &mut color);
-    let mut atlas_raw = poisoned(atlas_bytes as usize);
-    headless.readback(atlas_staging, atlas_bytes, &mut atlas_raw);
-    let atlas = atlas_raw
-        .chunks_exact(4)
-        .map(|word| f32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
-        .collect();
+    let atlas = match depth_copy {
+        Support::Yes => {
+            let mut atlas_raw = poisoned(atlas_bytes as usize);
+            headless.readback(atlas_staging, atlas_bytes, &mut atlas_raw);
+            Ok(atlas_raw
+                .chunks_exact(4)
+                .map(|word| f32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
+                .collect())
+        }
+        Support::No(why) => Err(refused_atlas_copy(&headless, &atlas_copy, why)),
+    };
 
     // Through the ring's own channel order rather than as raw RGBA. The Vulkan
     // original could assume the latter because its fixture only ever opened one
@@ -276,6 +327,68 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
     pool.destroy(device);
     headless.finish();
     ShadowFrame { image, atlas }
+}
+
+/// **Holds a backend to a declared missing depth-image copy**, and hands back
+/// the reason it declared so [`ShadowFrame::atlas`] can carry it.
+///
+/// The assertion that stands in for the tile checks on such a backend, and the
+/// reason this module does not simply stop looking at the atlas when
+/// [`Capability::DepthImageCopy`] is absent: a declaration nothing exercises is
+/// a sentence in a match arm. Three things have to hold, and each is a distinct
+/// way the declaration could be a lie:
+///
+/// * the copy is **refused** — a backend that declared the gap and then recorded
+///   the copy anyway is claiming to be worse than it is, and the atlas readback
+///   should come back;
+/// * it is refused with [`HalError::Unsupported`], which is the variant the seam
+///   documents for "this backend cannot" and the one a caller branches on to
+///   pick a fallback. `InvalidDescriptor` here would send that caller looking
+///   for a field to correct, and this whole slice exists because `crcbl-dx12`
+///   answered exactly that; and
+/// * the message carries the reason `Device::supports` gave, so the declaration
+///   and the error a caller actually reads cannot drift apart.
+///
+/// The probe gets its own encoder because the frame's has already been finished
+/// and submitted; nothing is submitted from this one, and `finish` failing is
+/// the whole result.
+fn refused_atlas_copy(
+    headless: &Headless,
+    copy: &BufferImageCopy,
+    why: &'static str,
+) -> &'static str {
+    let mut probe = headless.device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("shadow atlas depth-copy probe"),
+        queue: headless.queue,
+    });
+    probe.copy_image_to_buffer(copy);
+    let error = probe.finish().err().unwrap_or_else(|| {
+        panic!(
+            "this backend declares Capability::DepthImageCopy absent ({why}) and then recorded \
+             the copy without complaint. Either the declaration is stale — in which case delete \
+             its crcbl_hal::DIVERGENCES entry and let this module read the atlas — or the \
+             encoder dropped the copy silently, which is a shadow atlas nobody can check and a \
+             frame that looks correct."
+        )
+    });
+    assert!(
+        matches!(error, HalError::Unsupported { .. }),
+        "this backend refused the atlas copy with {error}, which is not the \
+         HalError::Unsupported the seam documents for \"this backend cannot\". A caller branching \
+         on that variant to pick a fallback would miss the refusal entirely."
+    );
+    let text = error.to_string();
+    assert!(
+        text.contains(why),
+        "this backend declares Capability::DepthImageCopy absent because {why:?}, and refused the \
+         copy saying {text:?} instead. The declaration a caller reads before recording and the \
+         error it reads afterwards have to be the same sentence, or one of them is stale."
+    );
+    eprintln!(
+        "{suite}: shadow — the atlas is not readable on this backend, as declared: {text}",
+        suite = crate::SUITE
+    );
+    why
 }
 
 /// The open box under a sun at `to_light`, with the cube hanging over it.
@@ -355,9 +468,16 @@ fn sun(sign: f32) -> crcbl::math::Vec3 {
 #[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn the_shadow_atlas_is_written_rather_than_left_at_its_clear_value() {
     let frame = render_shadowed(sun(1.0));
+    // On a backend without `Capability::DepthImageCopy` there is no atlas to
+    // look at, and what `render_scene` asserted in its place is that the copy
+    // was refused for the reason the backend declares — see
+    // [`ShadowFrame::atlas`].
+    let Some(atlas) = frame.atlas() else {
+        return;
+    };
     let side = crcbl::render::shadow::TILE as usize;
     assert_eq!(
-        frame.atlas.len(),
+        atlas.len(),
         side * side * crcbl::render::shadow::TILES,
         "the readback is the whole atlas"
     );
@@ -366,14 +486,14 @@ fn the_shadow_atlas_is_written_rather_than_left_at_its_clear_value() {
     // be a viewport landing where it does not belong, and a cascade's map
     // written over a light's is a picture no golden can see.
     for light_tile in 0..crcbl::render::shadow::LIGHT_TILES {
-        let tile = frame.tile(crcbl::render::shadow::light_tile(light_tile));
+        let free = tile(atlas, crcbl::render::shadow::light_tile(light_tile));
         assert!(
-            tile.iter().all(|depth| *depth == crcbl::hal::depth::CLEAR),
+            free.iter().all(|depth| *depth == crcbl::hal::depth::CLEAR),
             "light tile {light_tile} holds depths in a frame with no shadowed light in it"
         );
     }
     for cascade in 0..crcbl::render::shadow::CASCADES {
-        let tile = frame.tile(cascade);
+        let tile = tile(atlas, cascade);
         let written = tile.iter().filter(|depth| **depth > 0.0).count();
         assert!(
             written > 0,
@@ -643,7 +763,13 @@ const SPOT_SHADOW_RATIO: f32 = 1.5;
 #[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn a_shadowed_spot_fills_the_tile_it_was_given_and_no_other() {
     let frame = render_spot(Some(0.0));
-    let held = frame.tile(crcbl::render::shadow::light_tile(0));
+    // As `the_shadow_atlas_is_written_rather_than_left_at_its_clear_value`: a
+    // backend that declares no depth-image copy was held to that refusal in
+    // `render_scene`, and has no atlas for the tiles below.
+    let Some(atlas) = frame.atlas() else {
+        return;
+    };
+    let held = tile(atlas, crcbl::render::shadow::light_tile(0));
     let written = held.iter().filter(|depth| **depth > 0.0).count();
     let fraction = written as f64 / held.len() as f64;
     eprintln!(
@@ -686,7 +812,7 @@ fn a_shadowed_spot_fills_the_tile_it_was_given_and_no_other() {
     // spot is one tile of a region six wide, that a spot did not render the five
     // faces it does not have.
     for light_tile in 1..crcbl::render::shadow::LIGHT_TILES {
-        let free = frame.tile(crcbl::render::shadow::light_tile(light_tile));
+        let free = tile(atlas, crcbl::render::shadow::light_tile(light_tile));
         assert!(
             free.iter().all(|depth| *depth == crcbl::hal::depth::CLEAR),
             "light tile {light_tile} holds no map and was written anyway"
@@ -945,9 +1071,15 @@ fn a_shadowed_point_lights_faces_are_the_six_the_host_built() {
     // The one light is the only candidate and the region is empty, so `Selection`
     // gives it the whole of it from tile 0 — which is the base `mesh.slang` reads
     // off the row and adds a face to.
+    // As `the_shadow_atlas_is_written_rather_than_left_at_its_clear_value`: a
+    // backend that declares no depth-image copy was held to that refusal in
+    // `render_scene`, and has no atlas for the faces below.
+    let Some(atlas) = frame.atlas() else {
+        return;
+    };
     let mut written = [0usize; crcbl::render::shadow::POINT_FACES];
     for (face, count) in written.iter_mut().enumerate() {
-        let tile = frame.tile(crcbl::render::shadow::light_tile(face));
+        let tile = tile(atlas, crcbl::render::shadow::light_tile(face));
         *count = tile.iter().filter(|depth| **depth > 0.0).count();
         assert!(
             tile.iter().all(|depth| (0.0..=1.0).contains(depth)),

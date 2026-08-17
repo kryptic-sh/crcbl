@@ -360,6 +360,18 @@ impl Device for WebGpuDevice {
                 Support::No(NO_VALUE_FILL)
             }
             Capability::ImageToImageCopy => Support::Yes,
+            // The stream carries `buffer_row_length` in *texels* and the
+            // replayer multiplies it into WebGPU's `bytesPerRow`, through a
+            // bytes-per-texel table holding the single-plane colour formats
+            // alone — so a depth image reaches `copyTextureToBuffer` with no
+            // figure to scale by and the replayer files a device error rather
+            // than guessing one. The obstacle is the seam's texel pitch meeting
+            // WebGPU's byte pitch, not `copyTextureToBuffer` itself.
+            Capability::DepthImageCopy => Support::No(
+                "the replayer turns buffer_row_length from texels into bytesPerRow through a \
+                 bytes-per-texel table that holds the single-plane colour formats only, and \
+                 refuses a depth format rather than guessing a figure for one",
+            ),
             Capability::MsaaResolveAttachment => Support::Yes,
             Capability::StencilReference => Support::No(NOT_STREAMED),
             Capability::DrawIndirectCount => {

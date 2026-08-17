@@ -354,6 +354,12 @@ impl Device for WgpuDevice {
             C::BufferFillZero => hal::Support::Yes,
             C::BufferFillRepeatedByte | C::BufferFillWord => hal::Support::No(NO_VALUE_FILL),
             C::ImageToImageCopy => hal::Support::Yes,
+            // `conv::map_aspect` turns ImageAspect::DEPTH into
+            // `wgpu::TextureAspect::DepthOnly` and the copy carries it, so a
+            // depth plane is addressed by the same call as a colour one. Native
+            // wgpu permits the copy that WebGPU's own bytes-per-texel rules make
+            // awkward in a browser, which is why this and `crcbl-webgpu` differ.
+            C::DepthImageCopy => hal::Support::Yes,
             C::MsaaResolveAttachment => hal::Support::Yes,
             C::StencilReference => hal::Support::Yes,
             // Mapped from wgpu's own MULTI_DRAW_INDIRECT_COUNT at adapter
