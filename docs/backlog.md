@@ -41,31 +41,6 @@ pixels but renders offscreen, which is the path that already works. **A demo
 whose colours are all wrong passes every check we have** — that is the more
 important finding than the bug itself, and it is why this reached a user.
 
-### BUG — a readback buffer is unmapped while its map is still resolving
-
-**Reported running lumen in the browser:**
-
-```
-gpu error: readback 386.1 (command 989) could not be mapped:
-AbortError: Failed to execute 'mapAsync' on 'GPUBuffer':
-Buffer was unmapped before mapping was resolved.
-```
-
-The new `ReadbackFailed` reply is doing its job — this is the error surfacing
-rather than the poll spinning for ever, which is exactly what that slice was
-for. But the underlying defect is real and is ours: something unmaps or destroys
-the staging buffer between `mapAsync` being issued and its promise settling.
-
-Look at the readback ring's lifecycle in `web/engine/gpu-replay.js` and the
-tracker in `crates/crcbl-webgpu/src/hal/device.rs`: a buffer reused for the next
-frame's readback, a `DestroyBuffer` arriving while a map is outstanding, or the
-ring wrapping under a frame rate the parity harness never reaches. lumen is the
-heaviest demo, which is consistent with a ring that is big enough for the
-others.
-
-Reproduce with lumen specifically — the golden harness does one readback per
-scene and never wraps, so it will not show this.
-
 ### TOP PRIORITY — backend feature parity, enforced so it cannot rot
 
 **The goal: every render feature works on every backend — vk, dx12, Metal,
@@ -393,6 +368,39 @@ Two gaps remain in the same bug class:
   unencoded one. Low risk only because `#reconfigureSwapchain` shares
   `#configureSwapchain` with the path group X does cover. Use mid-tones there
   too.
+
+### The culling stats never land on the WebGPU backend
+
+Found while fixing lumen's readback cancellation, and it is a live defect rather
+than a hazard: **`latest()` is `None` forever on the browser**, so the debug
+panel shows `indirect` and no cull statistics at all.
+
+`WebGpuDevice::poll_readback` always answers `Pending` on the first poll for a
+handle — it encodes the `PollReadback` command and returns, and the reply
+arrives a frame later, which is the shape every command on this stream has.
+`CullStatsRing::resolve` (`crates/crcbl-render/src/cull_stats.rs`) polls each
+slot exactly once when the ring comes round and then releases it, so on WebGPU
+the answer is _always_ discarded before it can be read. On the native backends
+the first poll can already be ready, which is why this has never shown.
+
+The fix belongs in `cull_stats.rs`, not the backend: poll the slot on the turn
+before releasing it, or keep the request alive one extra turn of the ring. Note
+this is the same underlying shape as the bug just fixed — a caller assuming a
+readback settles synchronously — so it is worth checking whether any other
+`destroy_readback` caller makes the same assumption.
+
+### `Device::destroy_readback` does not say what happens to a pending map
+
+`crcbl-hal`'s doc says only "Releases a readback request, whether or not it
+completed", which sanctions the call and leaves the consequence unstated — and
+the consequence is exactly where a backend can get it wrong. It should say:
+destroying a readback whose completion has not landed is legal and produces no
+error on any backend; the request is cancelled and its bytes are never
+delivered; on WebGPU this is `unmap()`, which cancels an outstanding `mapAsync`,
+and the backend must not surface that cancellation through `take_error`.
+
+Worth writing down because the other four backends satisfy it by accident — they
+just drop a tracking entry — while WebGPU had to be told.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
