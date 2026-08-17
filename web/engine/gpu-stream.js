@@ -130,6 +130,12 @@ const SET_SCISSOR_TAG = 0x4d;
 // The index buffer for the UI pass's indexed draw, recorded on the open render
 // pass as `setIndexBuffer`.
 const BIND_INDEX_BUFFER_TAG = 0x4e;
+// The other two debug ops beside `BeginDebugLabel`: closing the region it opened
+// (`popDebugGroup`, body-less) and a point-in-time marker (`insertDebugMarker`).
+// The marker has its own tag because it opens no region — folding it onto the
+// region's tag would leave an unbalanced group behind every marker.
+const END_DEBUG_LABEL_TAG = 0x4f;
+const INSERT_DEBUG_MARKER_TAG = 0x50;
 const DRAW_TAG = 0x60;
 // The indexed draw the UI pass records, on the open render pass as `drawIndexed`.
 const DRAW_INDEXED_TAG = 0x61;
@@ -138,8 +144,12 @@ const DRAW_INDEXED_TAG = 0x61;
 // `draw_count` into that many calls at `offset + i * stride`.
 const DRAW_INDIRECT_TAG = 0x62;
 const DRAW_INDEXED_INDIRECT_TAG = 0x63;
-// The dispatch family: the workgroup counts for a compute dispatch.
+// The dispatch family: the workgroup counts for a compute dispatch, inline or
+// read out of a buffer. The indirect form is NOT unrolled — WebGPU's
+// `dispatchWorkgroupsIndirect` is a single dispatch, so it carries no count and
+// no stride.
 const DISPATCH_TAG = 0x70;
+const DISPATCH_INDIRECT_TAG = 0x71;
 const COPY_IMAGE_TO_BUFFER_TAG = 0x78;
 // The buffer→buffer copy that carries a dispatch's storage-buffer output to a
 // host-readable buffer — the only way a dispatch is observed.
@@ -1969,6 +1979,17 @@ function decodeCommand(r) {
         name: 'BeginDebugLabel',
         label: r.readString('BeginDebugLabel::label'),
       };
+    case END_DEBUG_LABEL_TAG:
+      // Body-less: it closes the region `BeginDebugLabel` opened, without naming
+      // it — the replayer pops the scope that pushed. See `gpu-replay.js`.
+      return { name: 'EndDebugLabel' };
+    case INSERT_DEBUG_MARKER_TAG:
+      // The same field `BeginDebugLabel` carries; only the tag says which of the
+      // two the replayer calls.
+      return {
+        name: 'InsertDebugMarker',
+        label: r.readString('InsertDebugMarker::label'),
+      };
     case BEGIN_RENDER_PASS_TAG: {
       const label = r.readOptString('RenderPassDesc::label');
       const count = r.readCount('RenderPassDesc::color_attachments');
@@ -2088,6 +2109,13 @@ function decodeCommand(r) {
         y: r.readU32(),
         z: r.readU32(),
       };
+    case DISPATCH_INDIRECT_TAG: {
+      // The argument buffer, then its byte offset (`u64`, `BigInt`). No count
+      // and no stride: WebGPU's `dispatchWorkgroupsIndirect` is a single
+      // dispatch, so there is nothing to unroll. See `gpu-replay.js`.
+      const buffer = r.readHandle('DispatchIndirect::buffer');
+      return { name: 'DispatchIndirect', buffer, offset: r.readU64() };
+    }
     case COPY_IMAGE_TO_BUFFER_TAG: {
       // `BufferImageCopy` in declaration order; the direction is the tag, never a
       // field. `bufferRowLength` is in TEXELS and `0` is tightly packed — both
