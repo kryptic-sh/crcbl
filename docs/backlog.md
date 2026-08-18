@@ -55,18 +55,18 @@ something runs, and the agnostic suites only cover behaviours somebody
 remembered to put there. Parity is currently maintained by attention, which is
 why it has drifted.
 
-**The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
-below is built, so the count is now exact rather than approximate:
-`Capability::ALL` is **25** variants and `DIVERGENCES` holds **45** reviewed
-rows — dx12 6, WebGPU 16, wgpu 13, Metal 10, Vulkan 0. (The earlier framing, "28
-declared `Features` bits and roughly 96 refusal sites", said the same thing less
-precisely and is superseded.)
+**The numbers live in the code, not here.** This entry used to restate the row
+counts and the per-kind breakdown, and they went stale inside a day — twice.
+`cargo test -p crcbl-hal` computes them: `parity_blockers()` answers what is
+left, and `the_parity_blockers_are_exactly_the_reviewed_list` fails when that
+set changes, so `REVIEWED_BLOCKERS` in `crates/crcbl-hal/src/capability.rs` is
+always the current answer. Read it there. (The blocker total is quoted below
+because the decision turns on it, and it is checked whenever it is touched.)
 
-**Every row now carries a kind, and the goal has a number.** `Divergence` gained
-`DivergenceKind`: `ApiAbsence` (the API cannot express it — its reason must
-carry the evidence), `Unwritten`, `Declined`, and `Unclassified` for rows that
-cannot be settled without hardware nobody here has. Of the 56: **21
-`ApiAbsence`, 30 `Unwritten`, 3 `Declined`, 2 `Unclassified`.**
+**Every row carries a kind.** `Divergence` has a `DivergenceKind`: `ApiAbsence`
+(the API cannot express it — its reason must carry the evidence), `Unwritten`,
+`Declined`, and `Unclassified` for rows that cannot be settled without hardware
+nobody here has.
 
 `parity_blockers()` is the query — a row on vk, dx12, Metal or WebGPU whose kind
 is anything but `ApiAbsence` — and `crcbl-wgpu` is excluded **by construction**
@@ -423,26 +423,6 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
-### The culling stats never land on the WebGPU backend
-
-Found while fixing lumen's readback cancellation, and it is a live defect rather
-than a hazard: **`latest()` is `None` forever on the browser**, so the debug
-panel shows `indirect` and no cull statistics at all.
-
-`WebGpuDevice::poll_readback` always answers `Pending` on the first poll for a
-handle — it encodes the `PollReadback` command and returns, and the reply
-arrives a frame later, which is the shape every command on this stream has.
-`CullStatsRing::resolve` (`crates/crcbl-render/src/cull_stats.rs`) polls each
-slot exactly once when the ring comes round and then releases it, so on WebGPU
-the answer is _always_ discarded before it can be read. On the native backends
-the first poll can already be ready, which is why this has never shown.
-
-The fix belongs in `cull_stats.rs`, not the backend: poll the slot on the turn
-before releasing it, or keep the request alive one extra turn of the ring. Note
-this is the same underlying shape as the bug just fixed — a caller assuming a
-readback settles synchronously — so it is worth checking whether any other
-`destroy_readback` caller makes the same assumption.
-
 ### `Device::destroy_readback` does not say what happens to a pending map
 
 `crcbl-hal`'s doc says only "Releases a readback request, whether or not it
@@ -456,38 +436,34 @@ and the backend must not surface that cancellation through `take_error`.
 Worth writing down because the other four backends satisfy it by accident — they
 just drop a tracking entry — while WebGPU had to be told.
 
-### The capability enum is built — 7 of 25 capabilities are actually exercised
+### What is still declared but not driven
 
-`crcbl_hal::Capability` now forces every backend to answer for every seam
-behaviour through an exhaustive `match` (adding a variant fails to compile on
-any backend that has not answered), the seam suite walks `Capability::ALL` in
-both directions, and `DIVERGENCES` lists 57 reviewed
-`(capability, backend, why)` pairs — vulkan 0, metal 10, wgpu 13, dx12 16,
-webgpu 18.
+The seam suite drives most of `Capability::ALL` with real GPU work; the tally it
+prints on every run is the current answer and this entry does not restate it —
+earlier versions did, and were wrong within a day.
 
-**What is declared is not yet what is driven.** Seven are exercised by real GPU
-work — the three `fill_buffer` capabilities, `DepthImageCopy`, `TimestampQuery`,
-and `OcclusionQuery`/`PipelineStatisticsQuery` **creation-only**. The other 18
-are checked for declaration consistency and printed as unexercised on every run.
-In priority order:
+**Seven remain unexercised, for three different reasons:**
 
-- **Three are bookkeeping, not work.** `TimelineSemaphore`, `BinarySemaphore`
-  and `CpuTimelineWait` are already asserted directly by
-  `a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it`; they
-  count as unexercised only because the exercise table does not name that test.
-- **Most of the rest need a raster pipeline the seam suite does not have** —
-  `StencilReference`, `DrawIndirectCount`, `IndirectArgumentPaddedStride`,
-  `PolygonModeLine`, `DepthClamp`, `SamplerAnisotropy`. Either the suite grows
-  one, or they are exercised from `draw_gen_e2e`/`forward_e2e`, which have one.
-- **Two can never be driven by anything a caller records**, whatever fixture
-  exists: `OcclusionQuery` and `PipelineStatisticsQuery`, because the encoder
-  has no begin/end verb (next entry). Their `Yes` means "a set can be created"
-  and nothing more. That is a ceiling, not a to-do.
-- **`crcbl-webgpu`'s 18 declarations are unverified by anything native.** The
-  seam suite is a native binary, so the browser's answers are assertions no test
-  has confirmed. The probe page drives three of them today — `BufferFillZero`
-  (group W), `ImageToImageCopy` (V) and `DepthImageCopy` (AA) — and is where the
-  rest could be driven.
+- **A fixture that does not exist yet.** `SamplerAnisotropy` needs a shader that
+  samples a minified texture at a grazing angle and a second to compare against;
+  the committed raster artifact samples nothing. `StorageImageBinding` and
+  `BindlessDescriptorArray` need a bind-group layout built for the capability.
+- **An observable the seam cannot reach.** `BinarySemaphore`'s claim is ordering
+  between two submissions, and on a one-queue backend a dropped binary semaphore
+  is indistinguishable from an honoured one. `TimelineWaitBeforeSignal` needs a
+  wait that can outlive the test if a backend hangs rather than refuses.
+- **Artifacts per backend.** `MeshShading` and `TaskShaderStage` need committed
+  mesh and task shaders for each backend that can run one.
+
+**And two capabilities are unexercised on Metal alone**, which the tally shows
+as a lower number there than elsewhere: both indirect exercises turn on which of
+two argument structures a draw read, and CI's Metal device reports no
+`max_draw_indirect_count` above one, so a single call can only reach the first.
+
+**A ceiling worth not mistaking for a to-do:** `OcclusionQuery` and
+`PipelineStatisticsQuery` can never be driven further than set creation by
+anything a caller records, because `CommandEncoder` has no begin/end query verb.
+Their `Yes` means a set can be made and read, which is what Vulkan's means too.
 
 ### The seam cannot use occlusion or pipeline-statistics queries at all
 
@@ -604,26 +580,6 @@ current hard-coded three do not.
 queries are core in Vulkan and only the _precise count_ is optional, so a device
 without it is currently reported as having no occlusion queries at all.
 
-### Metal and dx12 refuse with the wrong error variant
-
-`crcbl-hal` documents `HalError::Unsupported` for "this backend cannot do this",
-but `crcbl-mtl` and `crcbl-dx12` return `InvalidDescriptor` for several
-capability refusals. The seam suite's refusal assertion currently accepts both
-and names which one the seam documents, so this is visible rather than hidden —
-but a caller matching on `Unsupported` to pick a fallback path would miss them.
-Normalising is mechanical; it was not done because neither backend can be run on
-this machine, and a refusal-path change that CI alone verifies is worth doing
-deliberately rather than as a rider.
-
-### `crcbl-webgpu`'s semaphores return `Ok` and do nothing
-
-`create_semaphore` hands out a handle and `semaphore_value` answers `0` for
-ever. It is declared `TimelineSemaphore: No`, which is the honest answer about
-behaviour and exactly the kind of gap the capability enum exists to surface —
-but the calls still succeed rather than refusing, so a caller that trusts the
-handle gets silence instead of an error. Either implement them on the stream or
-make them refuse; the declaration alone does not stop a caller using them.
-
 ### `vk_e2e/mesh.rs` is a redesign, not a move — and the decision is taken
 
 The white-box migration is otherwise finished: the seam suite (16),
@@ -690,36 +646,27 @@ A fourth option worth measuring first: whether `bake` and `load` still need to
 be separate features at all. If `bake`'s extra dependencies are small, merging
 them deletes the question.
 
-### Seven capabilities are declared `Yes` and exercised by nothing
+### Three capabilities are still declared `Yes` and exercised by nothing
 
-The parity mechanism proves that every backend _answers_ for every capability.
-It does not prove the answers are true. An audit on 2026-08-18 walked each
-backend's `supports` against every call site in the workspace and found seven
-capabilities carrying a `Yes` on a keeper backend with no test anywhere that
-drives them. These are the riskiest rows in the table, because a wrong `Yes`
-fails at a user's frame rather than in CI:
+The mechanism proves every backend _answers_ for every capability. It does not
+prove the answers are true, and an audit found seven carrying a `Yes` on a
+keeper backend with no test anywhere driving them. **Four have since been
+closed** — `MsaaResolveAttachment`, `IndirectArgumentPaddedStride`,
+`UpdateBindGroup` and `StencilReference` are all driven now, three of them by
+exercises written specifically because the claim rested on nothing.
 
-- **`StorageImageBinding`** — claimed by vk, dx12 and Metal;
+**Three survive**, and they are the ones a wrong `Yes` would reach a user
+through:
+
+- **`StorageImageBinding`** — claimed by vk, dx12 and Metal.
   `BindingKind:: StorageImage` appears only in the WebGPU stream's encoder-level
-  tests. Nothing in `crcbl-render` declares one.
-- **`MsaaResolveAttachment`** — claimed by vk, Metal and WebGPU, and driven only
-  by `crcbl-wgpu`'s suite, i.e. by the crate being deleted.
-- **`IndirectArgumentPaddedStride`** — claimed by vk, dx12 and Metal; every
-  positive site uses the _tight_ stride, so the property that separates "draws
-  indirectly" from "honours a stride" is proven nowhere.
-- **`UpdateBindGroup`** — driven on vk only; dx12's and Metal's are unverified.
-- **`BinarySemaphore`** on WebGPU — self-declared unverifiable in the backend
-  itself: `acquire_next_frame` answers `None` for both, so nothing observes it.
-
-Also `PolygonModeLine`, `DepthClamp` and `SamplerAnisotropy`, which are answered
-from a device flag and never set against a device — the one anisotropy test
-asserts a _limit refusal_, not a working anisotropic sampler.
-
-**The obstacle is a fixture, not a decision.** Most of these need a raster
-pipeline, and the seam suite has only a compute probe. Either it grows one, or
-these exercises move to `draw_gen_e2e`/`forward_e2e`, which already have one.
-That choice is worth making explicitly, because it decides where roughly a third
-of the remaining exercises live.
+  tests, and nothing in `crcbl-render` declares one.
+- **`SamplerAnisotropy`** — answered from a device flag and never set against a
+  device. The one anisotropy test asserts a _limit refusal_, not a working
+  anisotropic sampler.
+- **`BinarySemaphore` on WebGPU** — self-declared unverifiable in the backend
+  itself: `acquire_next_frame` answers `None` for both kinds, so nothing
+  observes it.
 
 ### Four mesh tests stayed on Vulkan, and one degrades quietly
 
@@ -1121,23 +1068,6 @@ both features — but the raster exercises made it **reachable where it was not
 before**, so it is a live hazard on a poorer device rather than a theoretical
 one.
 
-### SHIPPED — depth clamping is withheld where it was measured not to work
-
-The probe answered that this runner ignores `MTLDepthClipMode::Clamp` entirely,
-with and without a depth attachment, while its four controls passed. Real Metal
-honours it. `crcbl-mtl` now withholds `Features::DEPTH_CLAMP` from a device
-whose name says virtual — `wgpu-hal`'s own precedent, for its mesh gate, since
-Metal has no query for depth clip mode and both of `wgpu-hal`'s gates are things
-every macOS device answers yes to — **and refuses a pipeline that asks for
-clamping without the feature**, because withholding alone would only move the
-lie.
-
-**One residual risk, and it is a guess rather than a measurement:** the quirk is
-keyed on a substring, so a real GPU whose name contains "virtual" would silently
-lose the capability. It is bounded and one-directional — it loses a feature and
-says so, rather than discarding geometry — and it is the same risk `wgpu-hal`
-accepts, but it is worth knowing it is not measured.
-
 ### MEASURED — CI's Metal device can serve neither query, and no mesh
 
 The counter probe ran. `Apple Paravirtual device`, macOS 26.5.2, and the answers
@@ -1458,30 +1388,6 @@ That is 14 blockers to 13 for about thirty lines.
 - **The Pages deploy for the un-link commit never ran.** GitHub returned 503 on
   `actions/deploy-pages` during an outage; the _build_ job passed every gate.
   The site on Pages is therefore one commit behind until that deploy is re-run.
-
-### What the WebGPU migration left: white-box tests are still vk-only
-
-The migration is done — the agnostic suite is async and runs on all four
-backends, the seam copies are merged into `crates/crcbl/tests/hal_seam_e2e.rs`,
-the samples deploy on `crcbl-webgpu`, and `crcbl-wgpu` is off the wasm build
-entirely. **One item from that plan did not ship.**
-
-`crcbl-vk/tests/vk_e2e/`'s `cull.rs`, `cull_stats.rs`, `draw_gen.rs`,
-`lights.rs`, `mesh.rs`, `shadow.rs`, `depth_probe.rs`, `sprite/`, `menu.rs`,
-`nine_slice.rs` and `button_skin.rs` drive `crcbl-render::ForwardRenderer` and
-read back internal GPU buffers and golden pixels. They name only `crcbl-render`
-types, so they **can** be agnostic — but only vk runs them white-box. mtl, dx12
-and webgpu get `render_e2e`'s black-box goldens and nothing else, so a bug in
-the cull pass or the draw-args buffers on those backends surfaces as "some scene
-looks wrong" rather than "this buffer holds the wrong value".
-
-That gap is now bigger than it was: the draw-args packing rewrote those buffers'
-layout, and vk is the only backend whose tests read them.
-
-Same shape as the seam merge that already worked — move them to
-`crates/crcbl/tests/`, drive through `crcbl::backend::open` under `CRCBL_GPU`,
-and add the four CI steps beside the existing suites. Expect it to find
-divergences, as the seam merge did on dx12.
 
 ### Non-zero `fill_buffer` is refused on the WebGPU backend
 
@@ -4805,55 +4711,6 @@ quarantined draw tests above). What remains:
   through a different path has to replay them too, or half the descriptor
   silently stops applying.
 
-## The four draw tests are quarantined on a real bug, and the cause is down to one standing candidate
-
-`crcbl-mtl`'s suite ran for the first time on a hosted runner on 2026-08-05 (run
-31042925024): 102 of 106 passed, and **the four that failed are exactly the four
-that make the GPU run a shader** —
-`a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
-`the_engines_own_triangle_draws_through_a_bind_group`,
-`an_indexed_draw_reads_the_bound_index_range` and
-`a_multi_draw_indirect_emits_every_argument_structure`. Each faults the same way
-—
-`DeviceLost("… Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)")`,
-every encoder `completed`, none faulted — and **this is a `crcbl-mtl` defect,
-not a runner limitation**: a standalone Swift probe drew the same triangle on
-the same image and read the correct texel, so the device rasterises; what hangs
-is this backend's command stream. Two candidates were differences between the
-probe's stream and the backend's; one (the render-target format, `Bgra8Unorm` vs
-`Rgba8Unorm`) has been ruled out by an experiment that faulted byte-identically.
-**The one still standing is the error-options command buffer**: every command
-buffer here is made by `crate::fault::command_buffer` with
-`commandBufferWithDescriptor:` +
-`MTLCommandBufferErrorOptionEncoderExecutionStatus`, where the probe used a
-plain `makeCommandBuffer()`. Next experiment: the same triangle through a
-command buffer made without the descriptor, as the only difference — which needs
-a test-only way to reach a plain command buffer, and is worth thinking about as
-a backend-owned "error-options-off" mode rather than a test reaching around. If
-that is ruled out too, the remaining differences are the blit encoder the probe
-did not have, the `retainedReferences` default, and the readback's
-managed-storage path — enumerate before guessing again.
-
-Until the cause is found, `.github/workflows/ci.yml`'s `mtl-e2e` job holds the
-faulting draws out **by name** so the rest of the suite stays a gate. **They
-come back the moment this is understood** — the filter is a quarantine with a
-reason, not a concession, and leaving it un-revisited would turn the one real
-bug this job found into a permanently green-looking hole. The fifth held-out
-test (`a_layer_swapchain_acquires_a_drawable_and_presents_it`) is `#[ignore]`d
-for an unrelated reason — a CI container's detached layer vends no drawable —
-and the job's filter names it separately so `--run-ignored all` does not sweep
-it up. **Real Apple GPUs remain uncovered** — every hosted runner reports
-`Apple M1 (Virtual)`, so a hosted green run is not evidence about hardware, and
-`docs/plan/09-backends-metal-dx12.md`'s on-hardware smoke stays on the list, as
-does `run-mtl-e2e.sh` on a real Mac.
-
-Two lessons from the investigation, worth keeping: **a diagnostic that can fail
-can destroy the evidence it was added to collect** (the fault reporter panicked
-inside the `debugSignposts` binding and substituted its own failure for the GPU
-fault it existed to report), and **a diagnostic tells you what it measured on
-the machine it ran on** — the device name `Apple Paravirtual device` is printed
-by every hosted image, including the two that execute shaders fine.
-
 ## What MTL5 left open on the swapchain
 
 - **`nextDrawable` and `presentDrawable:` are proven by nothing automated.**
@@ -5441,77 +5298,6 @@ declares no thread count, which is why the field exists) and wgpu keeps no
 module source after `create_shader_module`. Safe only while every compute shader
 is also run under Vulkan, which is true today and will not always be.
 
-### Metal draws hang, and it is our bug, not the runner
-
-**Corrected 2026-08-10.** An earlier version of this entry concluded the blocker
-was the runner's virtualised GPU. That was wrong, and the evidence against it
-was already in `.github/workflows/ci.yml`: **run 31037470086 ran a compute
-dispatch and two triangle draws from a standalone Swift script on this same
-`macos-26-arm64` image, and all three were correct.** The device draws. Ours
-does not.
-
-What `crates/crcbl/tests/render_e2e.rs` measured on 878f582, drawing one frame
-through `ForwardRenderer`:
-
-```
-Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)
-[MTLCommandBufferErrorDomain 2] on `Apple Paravirtual device`;
-encoders in recorded order: `cull` completed, `draw-args` completed,
-`forward` completed, `tonemap` completed, `crcbl copies` completed
-```
-
-Same signature as the four draw tests already quarantined in the `mtl-e2e` job:
-every encoder reports `completed`, none faulted, and the command buffer reports
-a hang anyway. **Compute is fine** — both compute passes completed here, and the
-dispatch and indirect-dispatch tests pass on this runner. So the fault is
-specific to this backend's _draw_ command stream.
-
-Two candidates are now dead, both killed by tests that were already green:
-
-- **Render-target format** — run 31080128007 ran the RGBA twin unfiltered and it
-  faulted byte-identically.
-- **The error-options command-buffer descriptor** —
-  `a_render_pass_clear_reads_back_the_exact_texels` is unfiltered, passes, and
-  goes through the same `fault::command_buffer` path with
-  `MTLCommandBufferErrorOptionEncoderExecutionStatus`, a render encoder, a blit
-  encoder after it on the same buffer, the same `submit` and the same
-  `HostReadback` poll.
-
-What is left is the encoder calls that exist only between `begin_render_pass`
-and `end_render_pass` on a draw. **Every candidate named so far is now dead,
-including the leading one.**
-
-- **Render-target format** — the RGBA twin faulted byte-identically (run
-  31080128007).
-- **The error-options command-buffer descriptor** —
-  `a_render_pass_clear_reads_back_the_exact_texels` is unfiltered, passes, and
-  goes through the same `fault::command_buffer` path, render encoder, blit
-  encoder after it, `submit` and `HostReadback` poll.
-- **The long draw forms** — killed by experiment on `326c751`. `crcbl-mtl`
-  emitted `drawPrimitives:vertexStart:vertexCount:` for a single instance from
-  zero (the spelling the working Swift probe used) and four quarantined draw
-  tests were released. **All four hung identically**, `canvas` and
-  `crcbl copies` both `completed`. The code is reverted; do not spend another
-  run on it.
-
-**What is left.** A render-pass clear succeeds and a draw does not, on the same
-device, through the same submit and readback. So the fault is in something only
-a draw sets up between `begin_render_pass` and `end_render_pass`: the render
-pipeline state object itself, the bind groups a draw needs, or the
-viewport/scissor. Nothing has been eliminated inside that set.
-
-The other half of the old candidate is still untested and cheap:
-`crcbl_mtl::adapter::features_of` reports `MULTI_DRAW_INDIRECT` and
-`INDIRECT_FIRST_INSTANCE` **unconditionally, with no `supportsFamily:` query**.
-That cannot affect a plain triangle's encoding, so it is unlikely to be this bug
-— but it is an unbacked capability claim regardless, and the kind this session
-has already found twice elsewhere.
-
-A useful next experiment, if someone wants one: bisect toward the Swift probe.
-It set up a pipeline state and drew; ours does the same plus bind groups and a
-viewport. Removing our extras one at a time, on a device that faults in under a
-second, converges faster than reasoning about it does.
-
 ### Settled: `setDepthStencilState(nil)` hung every Metal draw
 
 **Found by bisect, fixed in `8e40f55`.** For months every draw `crcbl-mtl`
@@ -5629,34 +5415,6 @@ Windows runner has a real desktop session. **WARP is the D3D12 software
 rasteriser that would close that gap the same way lavapipe closes Vulkan's** —
 no hardware purchase, no self-hosted runner. That is the better next investment
 than a Mac mini, and it is not blocked on anything.
-
-### The render layer runs on Vulkan, wgpu and Metal
-
-**Closed on `eab7b5d`.** `crates/crcbl/tests/render_e2e.rs` draws a frame
-through `ForwardRenderer` on whichever backend `CRCBL_GPU` names, and the Metal
-arm now runs in CI:
-
-```
-metal selected IndirectPerBatch / ArrayPages / Rasterised
-device on adapter 0 "Apple Paravirtual device" type=Integrated
-golden cube on metal — 256x192: 37860 pixel(s) differ at all (77.0264%),
-max channel delta 207, 1 over tolerance (0.0020%), ssim 0.999811
-```
-
-Three results in one run:
-
-- **`GeometryPath::IndirectPerBatch` is proven on the backend that selects it.**
-  Until now that arm had only run on Vulkan behind a deliberately weakened
-  device request, which is a forced selector rather than a degradation.
-- **A golden blessed on lavapipe matches Metal inside `Tolerance::RASTERISER`.**
-  That tolerance was calibrated for radv-versus-lavapipe; it holds across a
-  third, very different rasteriser. One pixel over, out of 49152.
-- The Metal arm was blocked only by the nil depth-stencil hang. Fixing that
-  unblocked it with no further work.
-
-**What remains uncovered: D3D12.** Its HAL suite passes 155/155 on WARP, but a
-frame still dies in `OffscreenSetup::open` — see the offscreen-ring entry. So
-the renderer runs on three backends of four.
 
 ### Settled: the render layer runs on all four backends
 
@@ -6458,28 +6216,6 @@ This was deliberately not built with the other two: nothing about a clamped
 extent is a _failure_, so it does not belong in the fault-injection shape those
 two took, and it wants its own decision about whether the recorder holds a clamp
 rule or a one-shot override.
-
-### Neither Metal nor D3D12 proves its validation layer caught anything
-
-`crcbl-vk` sets the standard: every test ends in `finish`, which calls
-`validation_report().assert_clean()`, and that method fails when the layer was
-**not** enabled — because a test that passes for want of a layer proves nothing.
-On top of that, `vk_e2e/validation_gate.rs` commits a deliberate violation and
-asserts the layer caught it.
-
-- **Metal has no validation at all.** No `MTL_DEBUG_LAYER` or
-  `MTL_SHADER_VALIDATION` anywhere in `crates/crcbl-mtl` or the workflows, and
-  no `debug.rs` in that crate. Seventy-one Metal device tests currently say
-  nothing about API misuse. Metal reports through `MTLCommandBuffer.error`
-  rather than a callback, so capturing it needs a small design decision;
-  `crates/crcbl-mtl/src/fault.rs` already builds synthetic `NSError`s and is the
-  natural home.
-- **D3D12 has the machinery and does not assert on it.**
-  `crates/crcbl-dx12/src/debug.rs` enables the layer and drains its info queue,
-  and one test reads the flag — but no dx12 test asserts a clean report at
-  teardown, and there is no deliberate-violation twin. The layer can be on, its
-  messages drained, and every one of the seventy-three device tests still green
-  with a validation error raised.
 
 ### The dedicated cross-backend job still compares two backends of two
 
@@ -7504,16 +7240,6 @@ the same line on `vk` and on `wgpu`.
 they are the two whose lowering this probe least exercises. Their artifacts were
 read and carry the right qualifier; CI is the only thing that can say the frame
 does too.
-
-### Two older entries this closes
-
-- **"`mesh.slang`'s seventh binding has two callers outside `crcbl-render`" is
-  spent and should be deleted.** Both bullets shipped: `crcbl-dx12`'s
-  `dxil::tests::registers_are_assigned_per_class_in_declaration_order` reads
-  `&[Cbv, Srv, Srv, Cbv, Srv, Srv, Srv]` and is green in a workspace run, and
-  `vk_e2e/depth_probe.rs` has its seventh entry and is green in
-  `run-vk-e2e.sh`'s `74 tests run: 74 passed`. Left in place only because this
-  slice was told to append to this file rather than restructure it.
 
 ### D3D12 allow-list: two entries, and what retires each
 
@@ -10921,24 +10647,6 @@ already does for query sets. Noted in `gpu-replay.js` and in
 `crcbl-webgpu/src/instance.rs`; it is the sort of thing that reads as correct
 right up until a caller believes it.
 
-### What `impl Instance` is still blocked on
-
-`backend()`, `adapters()`, `create_surface`, `destroy_surface` and
-`request_device` all have what they need now. **`surface_caps` does not**: it
-has no command and no reply shape, and unlike the device request there is no
-polled second half to hang the answer on — it returns
-`Result<SurfaceCaps, HalError>` synchronously, and a stream cannot answer during
-the call.
-
-So it has two honest shapes and the choice is open: answer `Err` until a reply
-has arrived, which makes every first call fail and pushes the retry onto the
-caller; or have the instance ask at `create_surface` time and keep the answer,
-so the synchronous call reads a value that crossed a frame earlier. The second
-is what the seam's polled shapes elsewhere suggest, and it is what the swapchain
-slice will need anyway. What must not happen is a `surface_caps` that guesses a
-format: the swapchain slice would believe it, and the guess would be right on
-the machine it was written on.
-
 ### Considered and declined
 
 - **`GPUAdapter.isFallbackAdapter` as `DeviceType::Cpu`.** It grades
@@ -10997,68 +10705,6 @@ instead, and `poll` becomes `absorb` plus a match when `Device` lands.
 - **Pre-existing drift, untouched:** `web/tools/browser-e2e.mjs`'s header still
   says "Five groups" while A through G exist.
 
-## The WebGPU parity gate: `write_buffer` aborts on any upload past 1 MiB
-
-`apps/render-harness` (a wasm `cdylib`), `web/harness/{index.html,main.js}`,
-`web/run-render-harness-e2e.sh` and `web/tools/render-harness-e2e.mjs` are the
-browser end of the cross-backend parity gate: they drive `crcbl::screenshot`'s
-non-blocking `OffscreenSetup` poll API over the whole golden `Scene` set through
-`crcbl-webgpu`, and are meant to read each frame back and compare it against
-`crcbl/tests/golden/<name>.png`, the same goldens the native `vk`/`mtl`/`dx12`
-`render_e2e` suite passes.
-
-The offscreen-surface wall is **closed** — `CreateOffscreenSurface` and the
-replayer's texture ring landed, so the open now gets past `create_surface`,
-opens the device and starts building the scene. It reaches the next crack
-instead, observed by running the gate under headless Chromium and reading
-`window.harnessResult` over CDP:
-
-```
-RuntimeError: unreachable
-  at __rust_start_panic
-  at <crcbl_webgpu::bytes::ByteWriter>::put_bytes
-  at <crcbl_webgpu::writer::StreamWriter>::write_buffer
-```
-
-**Two defects, and the second is why this was invisible.**
-
-- **The cap is the wrong size for what it guards.** `ByteWriter::put_bytes`
-  asserts a field is at most `tag::MAX_FIELD_BYTES` (1 MiB), whose own doc
-  describes what it is for: "a label, a push-constant block". But
-  `StreamWriter::write_buffer` sends an entire host→buffer upload through it,
-  and a golden scene's vertex/index/instance upload is larger than that. Decide
-  between raising the cap and chunking a large upload across several
-  `WriteBuffer` commands — chunking is the more durable answer, since any fixed
-  cap is a scene size waiting to exceed it, and the replayer can apply
-  consecutive chunks at increasing offsets without holding the whole upload.
-  Whatever is chosen must keep the writer and the reader agreeing, since the
-  reader enforces the same cap.
-- **It aborts instead of failing.** The `assert!` panics, and a panic in wasm is
-  `unreachable` — the whole module dies mid-frame. The gate showed an empty
-  table and "no scenes were driven" with no reason, because the harness's outer
-  catch records `fatal` while `render-harness-e2e.mjs` only prints `fatal` when
-  `started` is false. Two fixes: the backend should refuse an oversized field as
-  a `HalError` the caller can report, and the driver should surface
-  `result.fatal` whenever it is set, not only before start-up.
-
-Once uploads cross, the per-scene table will finally separate the 2D scenes
-(Sprite, Ui) from the forward-renderer ones (Cube, Lights, Spot, shadows, Ao,
-Ssr, Probes) and name whatever each still needs — the crack list this gate
-exists to produce.
-
-Still owed after that, unchanged: the harness stops at `State::Opened` and does
-not drive `OffscreenSetup::begin_readback` + `PendingReadback::poll`, which
-needs a self-referential `PendingReadback` hold across rAF frames, then the
-pixels over the ABI and a `crcbl-golden` `compare-png` against the golden.
-
-**Verified:** the gate builds and runs end-to-end under headless Chromium with
-SwiftShader; the panic above is its current observed output. **Note for anyone
-hitting the same wall:** `rustup target list --installed` does **not** list
-`wasm32-unknown-unknown` on this machine and `rustup target add` refuses it with
-a `libaddr2line` conflict, but the target's std is present in the toolchain
-sysroot and builds fine — rustup's metadata is out of step with its own files,
-so believe `cargo build --target wasm32-unknown-unknown`, not `rustup`.
-
 ## The WebGPU parity gate passes — wire it into CI
 
 `./web/run-render-harness-e2e.sh` drives all eleven golden `Scene`s through
@@ -11112,26 +10758,6 @@ not fix:
   table transcribes each shader's binding classes so the register assignment can
   be asserted, so a missing shader is an unasserted one.
 
-## Nothing enforces prettier, and files have drifted
-
-`AGENTS.md` requires prettier on every markdown and JS file we touch, but
-`.github/workflows/ci.yml` **runs no formatter check at all** — `grep prettier`
-finds nothing. `web/engine/gpu-replay.js` was prettier-dirty from the commit
-that landed the unrolled `drawIndexedIndirect` call until the limits fix
-reflowed it, and nothing noticed for either.
-
-Currently dirty (`npx prettier --list-different`), all pre-existing and left
-alone rather than reformatted as a drive-by:
-
-`web/demos/horde/main.js`, `web/engine/audio-worklet.js`, `web/engine/audio.js`,
-`web/engine/shell.js`, `web/engine/storage.js`, `docs/code-review.md`.
-
-Worth a CI step plus one formatting commit. Note the local `prettier` wrapper
-**prints "All files formatted correctly" even when a file is dirty**, and its
-exit code is swallowed by a pipe — the only trustworthy check is to format a
-copy and `cmp` it, or read `--list-different`'s file list. Several "prettier
-clean" claims in this repository's history were that wrapper, not prettier.
-
 ## Two swapchain holes the seam does not close on any backend
 
 Found while fixing dx12's missing acquire tracking; neither is a dx12 bug, and
@@ -11156,64 +10782,3 @@ neither should be fixed on one backend alone.
 The suite that would hold all four to an answer already exists
 (`crates/crcbl/tests/hal_seam_e2e.rs`, run by CI on WARP, lavapipe, Metal and
 wgpu), so these are decisions rather than infrastructure.
-
-## Switching the web samples to `crcbl-webgpu` — audited, go with four preconditions
-
-All five demos (`breakout`, `flappy`, `asteroids`, `horde`, `hud`) pass through
-`crcbl-webgpu` in a real browser — 43/39/35/44/33 checks, zero device errors —
-and group B confirms the _right_ backend from the log line
-(`hal: webgpu adapter "google swiftshader"`), not merely that some backend
-opened. Every still-refused command was traced to its callers and none is
-reachable from a demo or the ordinary frame path.
-
-**What "passes" does and does not mean.** The demo gate asserts the canvas has a
-backing store, is not one flat colour, changes across sixteen samples, and that
-the browser reported no WebGPU device errors. `browser-e2e.mjs` states its own
-ceiling: _"WHAT GROUP D DOES NOT PROVE: that the frame is the right image."_ The
-eleven golden `Scene`s DO compare pixel-for-pixel against the native goldens,
-but through `apps/render-harness`, not through the demos. So "looks right" for
-the demos rests on that parity generalising to their draw paths — reasonable,
-since they share the renderer, but not directly checked.
-
-**Preconditions, in order:**
-
-1. **`take_error` must land first.** `crcbl::engine`'s `acquire()` calls it at
-   the top of _every frame_, and its own comment says why: on WebGPU it is the
-   only way a failed pipeline is ever heard from, and without it the answer was
-   "a black canvas over a game that reported itself as playing". Today it
-   returns `None`. Deploying on a backend that cannot report a device failure is
-   how the office-machine OOM would have looked with no diagnosis at all.
-2. ~~Fix the canvas format preference.~~ **Done.** `surface_caps` answers the
-   browser's own `getPreferredCanvasFormat()` for a canvas surface, so the
-   warning and its per-frame copy are gone from every demo log, and
-   `BENIGN_FORMAT_WARNING` was removed from the browser gate — a regression now
-   fails group D instead of being filtered.
-3. **Keep one wgpu demo step in CI, and rename it so nobody deletes it.** Twelve
-   guard groups (G through S) assert `crcbl-webgpu`'s own seam in a real browser
-   — stream, surface, buffer, image, sampler, bind group layout, bind group,
-   shader module, pipeline layout, both pipelines, and group S's cleared-pixel
-   readback, the only real pixel check in that harness. **They run only in wgpu
-   mode**, because in webgpu mode the engine's own device owns the single stream
-   channel and a probe cannot install a second. Deleting the wgpu run would
-   delete the only browser gate on the new backend's seam — it is a
-   `crcbl-webgpu` gate wearing a wgpu costume.
-4. ~~Move the three defaults together, or none.~~ **Done, as the preferred
-   option:** the defaults stay `wgpu` and `pages.yml` sets
-   `CRCBL_WEB_BACKEND=webgpu` at its call sites. The retained wgpu seam step
-   depends on that default, and a developer running the scripts bare keeps
-   exercising the probe groups.
-
-**What the switch does NOT buy.** `crcbl-wgpu` is an unconditional dependency of
-the umbrella, so it stays linked into every wasm: the webgpu artifacts measure
-3–10 KB _larger_, and `wasm-bindgen` is still required because `wgpu` pulls
-`web-sys`. Making it per-target or optional is a separate change with the real
-payoff — a much smaller download, possibly no `wasm-bindgen` at all — and should
-not be conflated with this one.
-
-**A tripwire found while auditing.** `web/engine/gpu-replay.js` grants
-`DEBUG_MARKERS` unconditionally in `CORE_FEATURES`, but the encoder refuses
-`insert_debug_marker` and `end_debug_label` and fails at `finish`. So the device
-advertises a capability it cannot serve. Nothing calls those today, but the
-first code that branches on `Features::DEBUG_MARKERS` will take down a whole
-command buffer, a frame away from the call. Either wire the two commands or stop
-advertising the feature.
