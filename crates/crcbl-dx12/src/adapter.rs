@@ -541,16 +541,29 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   `GpuContext::open` logs which pacing story a run gets from it — which is
 ///   the structural reason a per-swapchain fact has to be answered at device
 ///   level whatever the backend.
+/// * [`Features::TIMELINE_SEMAPHORE`] — **unconditional, and there is no query
+///   to make.** `ID3D12Fence` is a monotonic `u64` counter with no separate
+///   binary form, and `CreateFence` is not an optional device capability: there
+///   is no D3D12 device without it, which is why the capability structures have
+///   no bit for it.
+///
+///   It waited for the calls rather than for a query, exactly as
+///   [`Features::COMPUTE`] did. `Device::create_semaphore` hands an
+///   `ID3D12Fence` out for both [`SemaphoreKind`](crcbl_hal::SemaphoreKind)s,
+///   `Device::submit` consumes it through `ID3D12CommandQueue::Wait` and
+///   `Signal`, and `Device::semaphore_value` and `Device::wait_semaphores` are
+///   the CPU half — `GetCompletedValue` and a `SetEventOnCompletion` armed with
+///   a deadline. `crates/crcbl/tests/hal_seam_e2e.rs`'s
+///   `a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it`
+///   drives the whole sequence on WARP, as it does on every other backend.
+///
+///   **This flag completes [`Features::GPU_DRIVEN`] on this backend**, so an
+///   adapter reporting [`Features::DESCRIPTOR_INDEXING`] now reports the whole
+///   named union and [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter)
+///   opens rather than refusing.
 ///
 /// # Absent, with the reason for each
 ///
-/// * [`Features::TIMELINE_SEMAPHORE`] — `ID3D12Fence` is a monotonic counter
-///   with no separate binary form, so this one is the seam's timeline almost
-///   verbatim, and `Device::wait_idle` already drives one. It stays off because
-///   the seam's semaphore is a *shared* completion point:
-///   `Device::create_semaphore` has to hand one out and
-///   `ID3D12CommandQueue::Wait` has to consume it on a submission, and the
-///   command slice owns both.
 /// * [`Features::DEBUG_MARKERS`] — PIX events go through `WinPixEventRuntime`,
 ///   a library this workspace does not depend on, so this needs a decision
 ///   before it needs a slice.
@@ -585,18 +598,20 @@ fn features_of(raw: &RawCaps) -> Features {
     if raw.block_compression {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
-    // No query for any of the seven: a GPU virtual address is not optional in
+    // No query for any of the eight: a GPU virtual address is not optional in
     // D3D12, anisotropic sampling is an architectural constant, compute is what
     // a DIRECT queue accepts by definition, the three indirect flags are
     // parameters and fields of `ExecuteIndirect` rather than capability bits,
-    // and the frame-latency waitable object predates D3D12 itself. See above.
+    // the frame-latency waitable object predates D3D12 itself, and `CreateFence`
+    // is on every D3D12 device there is. See above.
     out |= Features::BUFFER_DEVICE_ADDRESS
         | Features::SAMPLER_ANISOTROPY
         | Features::COMPUTE
         | Features::DRAW_INDIRECT_COUNT
         | Features::MULTI_DRAW_INDIRECT
         | Features::INDIRECT_FIRST_INSTANCE
-        | Features::PRESENT_FEEDBACK;
+        | Features::PRESENT_FEEDBACK
+        | Features::TIMELINE_SEMAPHORE;
     out
 }
 

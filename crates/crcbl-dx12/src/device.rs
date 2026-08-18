@@ -8,8 +8,10 @@
 //! [`Device::backend`], [`Device::caps`], [`Device::queue`],
 //! [`Device::write_buffer`], [`Device::create_command_encoder`],
 //! [`Device::submit`], [`Device::request_readback`], [`Device::poll_readback`]
-//! and [`Device::wait_idle`], and the presentation block: swapchains, acquire,
-//! present and the present wait. Everything else on the trait refuses with
+//! and [`Device::wait_idle`], the synchronisation block — both semaphore kinds,
+//! the waits and signals a submission carries, and the CPU-side read and
+//! deadline wait — and the presentation block: swapchains, acquire, present and
+//! the present wait. Everything else on the trait refuses with
 //! [`HalError::Unsupported`] whose `what` names the slice it arrives in, in the
 //! same voice `Dx12Instance` established. Nothing here is a stub that reports
 //! success.
@@ -69,7 +71,7 @@
 //! list is still running.
 
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crcbl_core::Pool;
 use crcbl_hal::{
@@ -81,10 +83,10 @@ use crcbl_hal::{
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
     MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc,
     QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
-    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
+    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, ShaderModuleDesc,
     ShaderModuleHandle, SubmitInfo, Support, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
-use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY};
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
@@ -102,7 +104,7 @@ use windows::Win32::Graphics::Direct3D12::{
     ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
-use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::{Interface, PCWSTR};
 
 use crate::binding::{self, BindGroupLayoutRecord, BindGroupRecord, VisibleHeaps};
@@ -117,6 +119,7 @@ use crate::pipeline::{self, ComputePipelineEntry, GraphicsPipelineEntry, Pipelin
 use crate::present::{self, PresentWait};
 use crate::retire::RetireQueue;
 use crate::swapchain::{self, SwapchainEntry};
+use crate::sync;
 use crate::view::Subresource;
 use crate::{buffer, conv, validate};
 
@@ -259,10 +262,31 @@ struct ReadbackEntry {
     buffer: BufferHandle,
     offset: u64,
     size: u64,
-    /// The fence value that covers the work this readback observes: the highest
-    /// one handed out when [`Device::request_readback`] was called, which is
-    /// exactly "everything submitted to this device before this call".
-    after: u64,
+    wait: ReadbackWait,
+}
+
+/// The completion point a readback observes.
+///
+/// Two arms because the seam has two: [`ReadbackDesc::after`] names a caller's
+/// timeline, and its absence means "everything submitted to this device before
+/// the request". `crcbl-mtl` splits the same call the same way.
+#[derive(Clone, Copy, Debug)]
+enum ReadbackWait {
+    /// The highest device-fence value handed out when
+    /// [`Device::request_readback`] was called, which is exactly "everything
+    /// submitted to this device before this call" and needs no synchronisation
+    /// object at all.
+    Submission(u64),
+    /// A caller's timeline semaphore reaching a value.
+    ///
+    /// Stored as a handle rather than as the fence, for the reason `buffer`
+    /// above is: a semaphore destroyed between the request and the poll then
+    /// fails lookup instead of being observed through a reference this entry
+    /// kept alive behind the caller's back.
+    Timeline {
+        semaphore: SemaphoreHandle,
+        value: u64,
+    },
 }
 
 /// Something a submission still needs, held until its fence value passes.
@@ -285,6 +309,42 @@ pub(crate) enum Retired {
         _list: ID3D12GraphicsCommandList,
         _allocator: ID3D12CommandAllocator,
     },
+    /// A destroyed semaphore's fence, held until the queue has reached the
+    /// operations that name it. See [`Device::destroy_semaphore`].
+    Semaphore { _raw: ID3D12Fence },
+}
+
+/// A semaphore: an `ID3D12Fence` either way, and `kind` is what tells them
+/// apart.
+///
+/// D3D12 has one synchronisation primitive rather than Vulkan's two, so the
+/// seam's binary semaphore is the same object used one-shot — the shape
+/// `crcbl-mtl` arrived at from the other direction, where `MTLSharedEvent` and
+/// `MTLEvent` are two types and the *timeline* half is the one with extra
+/// methods.
+#[derive(Debug)]
+struct SemaphoreEntry {
+    owner: u64,
+    raw: ID3D12Fence,
+    kind: SemaphoreKind,
+    /// The highest value **submitted** so far, which is not the same as the
+    /// highest reached: a `Signal` sits in the queue until the GPU gets to it.
+    /// The monotonicity check has to compare against this, or two submissions
+    /// in flight can signal the same value and the second wait is satisfied by
+    /// the first submission's work.
+    ///
+    /// It is also what a binary semaphore's wait and signal are *made of*: the
+    /// seam says a binary semaphore's `value` field is ignored, so a signal
+    /// takes the next integer and a wait takes the one most recently handed
+    /// out.
+    submitted: u64,
+}
+
+impl SemaphoreEntry {
+    /// Whether this is a timeline, which is the half with a CPU-visible value.
+    const fn is_timeline(&self) -> bool {
+        matches!(self.kind, SemaphoreKind::Timeline { .. })
+    }
 }
 
 owned!(
@@ -294,6 +354,7 @@ owned!(
     SamplerEntry,
     CommandBufferEntry,
     ReadbackEntry,
+    SemaphoreEntry,
 );
 
 /// Every table the device owns, behind one lock.
@@ -305,6 +366,7 @@ pub(crate) struct DeviceState {
     samplers: Pool<SamplerEntry>,
     command_buffers: Pool<CommandBufferEntry>,
     readbacks: Pool<ReadbackEntry>,
+    semaphores: Pool<SemaphoreEntry>,
     shader_modules: Pool<ShaderModuleEntry>,
     bind_group_layouts: Pool<BindGroupLayoutRecord>,
     bind_groups: Pool<BindGroupRecord>,
@@ -950,7 +1012,29 @@ impl DeviceInner {
         Ok(value)
     }
 
-    /// Blocks until the fence has reached `value`.
+    /// Blocks until the device fence has reached `value`.
+    ///
+    /// The unbounded form, for the two callers that have nothing to time out
+    /// against: [`Device::wait_idle`] and this struct's `Drop`. `Duration::MAX`
+    /// is not literally forever — see [`present::timeout_millis`] — so a wait
+    /// that outlives its clamp arrives here as the same `DeviceLost` a fence
+    /// short of its value would, which is the honest reading of a queue that
+    /// has not moved in seven weeks.
+    fn wait_for(&self, value: u64) -> Result<(), HalError> {
+        if self.wait_fence_until(&self.fence, value, Duration::MAX)? {
+            return Ok(());
+        }
+        Err(HalError::DeviceLost(format!(
+            "the wait for fence value {value} timed out at its ceiling{}",
+            debug::diagnosis(&self.raw)
+        )))
+    }
+
+    /// Blocks until `fence` has reached `value`, or until `timeout` elapses.
+    ///
+    /// `Ok(false)` is the timeout, which is a normal outcome the seam's
+    /// [`Device::wait_semaphores`] contract names explicitly; every other way of
+    /// not reaching the value is an error.
     ///
     /// # The wait uses a real event, and checks that it waited
     ///
@@ -960,30 +1044,38 @@ impl DeviceInner {
     /// `WaitForSingleObject` reports which way it returned, so a wait that did
     /// not happen is an `Err` here rather than a wait that silently does not
     /// wait — and a silent one is worse than none, because it would be trusted
-    /// at shutdown.
+    /// at shutdown. A null handle also cannot express a timeout at all.
     ///
     /// The event is created and closed inside the call rather than kept on the
     /// device. Two reasons, and the first is enough: an auto-reset event shared
     /// between two concurrent waiters lets one consume the other's signal, and a
     /// Win32 `HANDLE` is a raw pointer that `windows-rs` declares neither `Send`
     /// nor `Sync`, so storing one would cost this module the marker impl it
-    /// otherwise does not need.
-    fn wait_for(&self, value: u64) -> Result<(), HalError> {
-        if self.completed() >= value {
-            return Ok(());
+    /// otherwise does not need. `wgpu-hal`'s `dx12` backend creates and drops
+    /// one per timed wait for the same reasons.
+    fn wait_fence_until(
+        &self,
+        fence: &ID3D12Fence,
+        value: u64,
+        timeout: Duration,
+    ) -> Result<bool, HalError> {
+        // SAFETY: `fence` is a live interface this device created, and
+        // `GetCompletedValue` reads no pointer of ours.
+        if unsafe { fence.GetCompletedValue() } >= value {
+            return Ok(true);
         }
         // SAFETY: no security attributes, auto-reset, initially unsignalled,
         // unnamed. Every argument is a scalar or a null pointer the API
         // documents as optional.
         let event = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
             .map_err(|error| HalError::DeviceLost(format!("CreateEventW failed: {error}")))?;
-        // SAFETY: `event` is the handle just created and `value` is one this
-        // device signalled. The runtime signals the event when the fence reaches
-        // the value, including immediately if it already has.
-        let armed = unsafe { self.fence.SetEventOnCompletion(value, event) };
+        // SAFETY: `event` is the handle just created and `fence` is live. The
+        // runtime signals the event when the fence reaches the value, including
+        // immediately if it already has.
+        let armed = unsafe { fence.SetEventOnCompletion(value, event) };
         let waited = if armed.is_ok() {
             // SAFETY: `event` is a live event handle owned by this call.
-            Some(unsafe { WaitForSingleObject(event, INFINITE) })
+            Some(unsafe { WaitForSingleObject(event, present::timeout_millis(timeout)) })
         } else {
             None
         };
@@ -998,12 +1090,16 @@ impl DeviceInner {
                 debug::diagnosis(&self.raw)
             ))
         })?;
+        if waited == Some(WAIT_TIMEOUT) {
+            return Ok(false);
+        }
         if waited != Some(WAIT_OBJECT_0) {
             return Err(HalError::DeviceLost(format!(
                 "waiting for fence value {value} returned {waited:?} rather than WAIT_OBJECT_0"
             )));
         }
-        let completed = self.completed();
+        // SAFETY: as above.
+        let completed = unsafe { fence.GetCompletedValue() };
         if completed < value {
             // The shape a device removed mid-submission takes: the wait is
             // satisfied because the runtime abandoned the fence, not because
@@ -1014,7 +1110,7 @@ impl DeviceInner {
                 debug::diagnosis(&self.raw)
             )));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// What the GPU has finished.
@@ -1226,6 +1322,7 @@ impl Dx12Device {
             samplers: Pool::new(),
             command_buffers: Pool::new(),
             readbacks: Pool::new(),
+            semaphores: Pool::new(),
             shader_modules: Pool::new(),
             bind_group_layouts: Pool::new(),
             bind_groups: Pool::new(),
@@ -1562,6 +1659,77 @@ impl Dx12Device {
         let handle = self.state().swapchains.insert(entry);
         Ok(handle::stamp(self.inner.owner, handle))
     }
+
+    /// The fence and value each of a submission's waits becomes.
+    ///
+    /// Resolved before any of them reaches the queue, for the reason
+    /// [`Device::submit`] resolves its command buffers first: a submission that
+    /// failed halfway would leave the queue holding some of the ordering the
+    /// caller asked for and not the rest.
+    ///
+    /// Which value each wait carries is [`sync::wait_value`]'s decision, taken
+    /// away from D3D12 so it can be checked on any host.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`].
+    fn resolve_waits(
+        &self,
+        state: &DeviceState,
+        submit: &SubmitInfo<'_>,
+    ) -> Result<Vec<(ID3D12Fence, u64)>, HalError> {
+        let mut out = Vec::with_capacity(submit.waits.len());
+        for wait in submit.waits {
+            let entry = handle::lookup(
+                &state.semaphores,
+                "semaphore",
+                wait.semaphore,
+                self.inner.owner,
+            )?;
+            let value = sync::wait_value(entry.is_timeline(), entry.submitted, wait.value);
+            out.push((entry.raw.clone(), value));
+        }
+        Ok(out)
+    }
+
+    /// The fence and value each of a submission's signals becomes, with the
+    /// handle so the entry's floor can be moved once the queue has taken it.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`], and
+    /// [`HalError::InvalidDescriptor`] for a timeline signal that does not
+    /// exceed everything already submitted onto that semaphore.
+    fn resolve_signals(
+        &self,
+        state: &DeviceState,
+        submit: &SubmitInfo<'_>,
+    ) -> Result<Vec<(SemaphoreHandle, ID3D12Fence, u64)>, HalError> {
+        let mut out: Vec<(SemaphoreHandle, ID3D12Fence, u64)> =
+            Vec::with_capacity(submit.signals.len());
+        for signal in submit.signals {
+            let entry = handle::lookup(
+                &state.semaphores,
+                "semaphore",
+                signal.semaphore,
+                self.inner.owner,
+            )?;
+            // The floor is the highest value submitted onto this semaphore so
+            // far, *including* by an earlier signal in this same `SubmitInfo` —
+            // otherwise two signals on one semaphore in one submission would
+            // both be checked against the stale value and could take the same
+            // number twice. [`sync`] owns the rule and says what that costs.
+            let floor = out
+                .iter()
+                .filter(|(handle, _, _)| *handle == signal.semaphore)
+                .map(|(_, _, value)| *value)
+                .max()
+                .unwrap_or(entry.submitted);
+            let value = sync::signal_value(entry.is_timeline(), floor, signal.value)?;
+            out.push((signal.semaphore, entry.raw.clone(), value));
+        }
+        Ok(out)
+    }
 }
 
 impl Device for Dx12Device {
@@ -1602,9 +1770,6 @@ impl Device for Dx12Device {
              that can dispatch";
         const NO_QUERIES: &str = "no query sets are built on this backend; the timestamp period only a queue can answer \
              is the missing piece (the DX12 query slice)";
-        const NO_SEMAPHORES: &str = "ID3D12Fence is the seam's timeline almost verbatim, but ID3D12CommandQueue::Wait and \
-             a submission to attach it to are not built, so a semaphore handed out now would be a \
-             counter nothing can signal from the GPU (the DX12 command slice)";
 
         match capability {
             Capability::BufferFillZero
@@ -1669,10 +1834,24 @@ impl Device for Dx12Device {
             Capability::TimestampQuery
             | Capability::OcclusionQuery
             | Capability::PipelineStatisticsQuery => Support::No(NO_QUERIES),
-            Capability::TimelineSemaphore
-            | Capability::BinarySemaphore
-            | Capability::CpuTimelineWait
-            | Capability::TimelineWaitBeforeSignal => Support::No(NO_SEMAPHORES),
+            // `CreateFence` is on every D3D12 device, so `features_of` reports
+            // the flag unconditionally — but the answer is still the device's
+            // rather than a constant, because a backend claiming a capability
+            // its own caps deny is the lie this enum exists to catch.
+            Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
+                Features::TIMELINE_SEMAPHORE,
+                "this device reports no TIMELINE_SEMAPHORE",
+            ),
+            // D3D12 has one primitive, so a binary semaphore is the same
+            // `ID3D12Fence` driven one integer at a time and it is handed out
+            // whatever the flag says — which is what the seam requires, since a
+            // device with no timeline must still have a binary one to give.
+            Capability::BinarySemaphore => Support::Yes,
+            // A real `ID3D12Fence` blocks until somebody signals it, and it has
+            // a CPU-side `Signal` of its own, so `ID3D12CommandQueue::Wait` may
+            // be issued for a value nothing has submitted yet — which is how
+            // D3D12 expresses ordering in the first place.
+            Capability::TimelineWaitBeforeSignal => Support::Yes,
         }
     }
 
@@ -1903,13 +2082,22 @@ impl Device for Dx12Device {
     /// poll-shaped readback implementable in a browser and is why this backend
     /// is shaped the same way. See [`crcbl_hal::readback`].
     ///
-    /// # `after` is refused rather than ignored
+    /// # `after` is a completion point, so it must be a timeline
     ///
-    /// [`ReadbackDesc::after`] names a semaphore, and [`Device::create_semaphore`]
-    /// refuses — so no handle a caller can pass was ever issued, and the answer
-    /// is [`HalError::InvalidHandle`]. Ignoring it would be the bad kind of
-    /// silence: the readback would resolve against the wrong completion point
-    /// and hand back whatever happened to be in the buffer.
+    /// [`ReadbackDesc::after`] names a semaphore and a value, and the poll
+    /// reads that counter instead of the device fence. A **binary** semaphore
+    /// is refused rather than approximated: it has no CPU-visible value, so
+    /// there is nothing for a poll to compare against and the readback would
+    /// resolve against the wrong completion point — handing back whatever
+    /// happened to be in the buffer. `crcbl-mtl` refuses the same case for the
+    /// same reason.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`],
+    /// [`HalError::InvalidDescriptor`] for a buffer that is not
+    /// [`MemoryLocation::HostReadback`] or a range outside it, and
+    /// [`HalError::Unsupported`] for an `after` naming a binary semaphore.
     fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
         let mut state = self.state();
         let entry = handle::lookup(&state.buffers, "buffer", desc.buffer, self.inner.owner)?;
@@ -1930,19 +2118,36 @@ impl Device for Dx12Device {
                 desc.offset, entry.size
             )));
         }
-        if let Some(wait) = desc.after {
-            return Err(HalError::invalid_handle("semaphore", wait.semaphore));
-        }
-        // "Everything submitted to this device before this call" is exactly the
-        // highest fence value handed out, so an unqualified request needs no
-        // synchronisation object at all.
-        let after = state.next_fence_value;
+        let wait = match desc.after {
+            Some(after) => {
+                let semaphore = handle::lookup(
+                    &state.semaphores,
+                    "semaphore",
+                    after.semaphore,
+                    self.inner.owner,
+                )?;
+                if !semaphore.is_timeline() {
+                    return Err(HalError::Unsupported {
+                        backend: BackendKind::Dx12,
+                        what: "ReadbackDesc::after must name a timeline semaphore",
+                    });
+                }
+                ReadbackWait::Timeline {
+                    semaphore: after.semaphore,
+                    value: after.value,
+                }
+            }
+            // "Everything submitted to this device before this call" is exactly
+            // the highest fence value handed out, so an unqualified request
+            // needs no synchronisation object at all.
+            None => ReadbackWait::Submission(state.next_fence_value),
+        };
         let handle = state.readbacks.insert(ReadbackEntry {
             owner: self.inner.owner.id,
             buffer: desc.buffer,
             offset: desc.offset,
             size: desc.size,
-            after,
+            wait,
         });
         Ok(handle::stamp(self.inner.owner, handle))
     }
@@ -1954,18 +2159,23 @@ impl Device for Dx12Device {
     /// polling once per frame must not lose the frame to a readback that is one
     /// submission late.
     ///
-    /// The buffer is re-resolved from the handle stored at request time rather
-    /// than kept as a pointer, so a buffer destroyed between the request and the
-    /// poll fails lookup instead of having a freed mapping read.
+    /// Both completion points are read the same way — a counter sampled, never
+    /// an event armed. [`ReadbackWait::Submission`] reads the device fence and
+    /// [`ReadbackWait::Timeline`] reads the caller's semaphore; neither blocks.
+    ///
+    /// The buffer and the semaphore are re-resolved from the handles stored at
+    /// request time rather than kept as pointers, so either one destroyed
+    /// between the request and the poll fails lookup instead of being read
+    /// through a reference the caller thought they had released.
     fn poll_readback(
         &self,
         readback: ReadbackHandle,
         out: &mut [u8],
     ) -> Result<ReadbackState, HalError> {
         let mut state = self.state();
-        let (buffer, offset, size, after) = {
+        let (buffer, offset, size, wait) = {
             let entry = handle::lookup(&state.readbacks, "readback", readback, self.inner.owner)?;
-            (entry.buffer, entry.offset, entry.size, entry.after)
+            (entry.buffer, entry.offset, entry.size, entry.wait)
         };
         if out.len() as u64 != size {
             return Err(HalError::InvalidDescriptor(format!(
@@ -1973,7 +2183,18 @@ impl Device for Dx12Device {
                 out.len()
             )));
         }
-        if self.inner.completed() < after {
+        let reached = match wait {
+            ReadbackWait::Submission(after) => self.inner.completed() >= after,
+            ReadbackWait::Timeline { semaphore, value } => {
+                let entry =
+                    handle::lookup(&state.semaphores, "semaphore", semaphore, self.inner.owner)?;
+                // SAFETY: `raw` is a live fence this device created, and
+                // `GetCompletedValue` reads no pointer of ours.
+                let completed = unsafe { entry.raw.GetCompletedValue() };
+                completed >= value
+            }
+        };
+        if !reached {
             return Ok(ReadbackState::Pending);
         }
         // The work is done, so this is also a natural moment to sweep — a caller
@@ -2760,27 +2981,183 @@ impl Device for Dx12Device {
 
     // --- synchronisation ---
 
-    fn create_semaphore(&self, _desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
-        // `ID3D12Fence` is the seam's timeline semaphore almost verbatim, and
-        // `wait_idle` below already drives one. What is missing is the other
-        // half — `ID3D12CommandQueue::Wait`, and a submission to attach it to —
-        // so a semaphore handed out now would be a counter nothing can signal
-        // from the GPU.
-        Err(not_yet("semaphores (the DX12 command slice)"))
+    /// Creates a semaphore, which is an `ID3D12Fence` for either kind.
+    ///
+    /// # One primitive, two seam kinds
+    ///
+    /// D3D12 has no binary semaphore: `ID3D12Fence` is a monotonic `u64`
+    /// counter and that is the whole of its synchronisation vocabulary. So a
+    /// [`SemaphoreKind::Binary`] is the same object driven one integer at a
+    /// time, with the value kept in [`SemaphoreEntry::submitted`] — a signal
+    /// takes the next one and a wait takes the one most recently handed out,
+    /// which is the seam's "`value` is ignored for a binary semaphore" made
+    /// concrete. `crcbl-mtl` reached the same arrangement from the opposite
+    /// side, where the two kinds *are* two Metal types.
+    ///
+    /// **So a binary semaphore must be signalled by an earlier submission than
+    /// the one that waits on it**, which is how the seam says they are used —
+    /// the swapchain owns them, and `crcbl_dx12::swapchain` creates none: DXGI's
+    /// flip model hands back a back-buffer index synchronously, so acquire and
+    /// present are the implicit shape [`AcquiredFrame`] documents and neither
+    /// half needs one.
+    ///
+    /// `initial_value` is `CreateFence`'s own first argument, so a timeline
+    /// starts where the caller asked rather than at zero and then being nudged.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::Backend`] if `CreateFence` fails.
+    fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
+        let initial = match desc.kind {
+            SemaphoreKind::Timeline { initial_value } => initial_value,
+            // A binary semaphore's counter is private to this crate, so it
+            // starts at zero and the first signal is one.
+            SemaphoreKind::Binary => 0,
+        };
+        // SAFETY: `raw` is this device's live interface. `CreateFence` takes
+        // only scalars and writes the interface it returns.
+        let raw: ID3D12Fence =
+            unsafe { self.inner.raw.CreateFence(initial, D3D12_FENCE_FLAG_NONE) }.map_err(
+                |error| {
+                    HalError::Backend(format!(
+                        "CreateFence failed for a semaphore: {error}{}",
+                        debug::diagnosis(&self.inner.raw)
+                    ))
+                },
+            )?;
+        if let Some(label) = desc.label {
+            label_object(&raw, label);
+        }
+        let handle = self.state().semaphores.insert(SemaphoreEntry {
+            owner: self.inner.owner.id,
+            raw,
+            kind: desc.kind,
+            submitted: initial,
+        });
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
-    fn destroy_semaphore(&self, _semaphore: SemaphoreHandle) {}
+    /// Releases a semaphore, once the queue has passed the operations naming it.
+    ///
+    /// The fence goes on the retire queue rather than being dropped here, for
+    /// the reason [`Device::destroy_command_buffer`] gives: the seam's rule that
+    /// a caller waits first is a rule above the seam, and the cost of it being
+    /// broken is the driver reading a released fence out of a queued `Wait` or
+    /// `Signal`. Parking costs one queue entry.
+    ///
+    /// The value it is parked at is the last the device fence has handed out,
+    /// and that is sufficient rather than approximate: every submission issues
+    /// its semaphore operations *before* the device fence's own `Signal` on the
+    /// same queue, so a device fence that has reached that value has already
+    /// executed every semaphore operation submitted before this call.
+    fn destroy_semaphore(&self, semaphore: SemaphoreHandle) {
+        let mut state = self.state();
+        let Some(entry) = handle::take_owned(&mut state.semaphores, semaphore, self.inner.owner)
+        else {
+            return;
+        };
+        let at = state.next_fence_value;
+        state
+            .retire
+            .park(at, Retired::Semaphore { _raw: entry.raw });
+        self.inner.poll_retire(&mut state);
+    }
 
+    /// What the GPU has reached on a timeline.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`], and
+    /// [`HalError::Unsupported`] for a binary semaphore, whose counter is this
+    /// crate's private bookkeeping rather than a value the seam defines.
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
-        Err(HalError::invalid_handle("semaphore", semaphore))
+        let state = self.state();
+        let entry = handle::lookup(&state.semaphores, "semaphore", semaphore, self.inner.owner)?;
+        if !entry.is_timeline() {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Dx12,
+                what: "a binary semaphore has no value to read",
+            });
+        }
+        // SAFETY: `raw` is a live fence this device created and
+        // `GetCompletedValue` reads no pointer of ours, returning a `u64` by
+        // value.
+        Ok(unsafe { entry.raw.GetCompletedValue() })
     }
 
+    /// Blocks until every wait is satisfied, or until the timeout runs out.
+    ///
+    /// # A timeout is `Ok(false)`, and that is what the event buys
+    ///
+    /// [`DeviceInner::wait_for`] passes `Duration::MAX` because a device idle
+    /// has nothing to time out against, and treats a timeout as a lost device.
+    /// Here the seam's contract is explicit that a timeout is "a normal outcome
+    /// for a frame-pacing poll, not an error", so the same wait is given the
+    /// caller's budget and `WAIT_TIMEOUT` becomes `Ok(false)`. Returning an
+    /// error there would make a caller's pacing poll indistinguishable from a
+    /// lost device.
+    ///
+    /// `ID3D12Fence` offers one wait per fence, so several waits are performed
+    /// in sequence against a **shared deadline** — the same answer either way,
+    /// because the seam's contract is that *all* of them must be reached, and
+    /// the shared deadline is what stops N waits taking N times as long to time
+    /// out. `crcbl-mtl` does exactly this for exactly this reason.
+    ///
+    /// The event is created and closed per wait, which is the arrangement
+    /// `wgpu-hal`'s `dx12` backend uses for its own timed fence wait: the
+    /// registration a timed-out wait leaves on the fence names a handle this
+    /// call has closed, and `SetEvent` on a closed handle is the runtime's
+    /// problem to shrug at rather than a wait that silently did not wait. A
+    /// shared, longer-lived event would be worse in both directions — an
+    /// auto-reset event lets one concurrent waiter consume another's signal,
+    /// and a Win32 `HANDLE` is neither `Send` nor `Sync`.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`],
+    /// [`HalError::Unsupported`] for a binary semaphore — which D3D12 can only
+    /// wait on from a queue — and [`HalError::DeviceLost`] if the wait could not
+    /// be armed or returned with the fence short of its value.
     fn wait_semaphores(
         &self,
-        _waits: &[crcbl_hal::SemaphoreWait],
-        _timeout_ns: u64,
+        waits: &[crcbl_hal::SemaphoreWait],
+        timeout_ns: u64,
     ) -> Result<bool, HalError> {
-        Err(not_yet("semaphores (the DX12 command slice)"))
+        if waits.is_empty() {
+            return Ok(true);
+        }
+        let mut fences = Vec::with_capacity(waits.len());
+        {
+            let state = self.state();
+            for wait in waits {
+                let entry = handle::lookup(
+                    &state.semaphores,
+                    "semaphore",
+                    wait.semaphore,
+                    self.inner.owner,
+                )?;
+                if !entry.is_timeline() {
+                    return Err(HalError::Unsupported {
+                        backend: BackendKind::Dx12,
+                        what: "a binary semaphore cannot be waited on from the CPU",
+                    });
+                }
+                fences.push((entry.raw.clone(), wait.value));
+            }
+        }
+        // The lock is released before blocking: holding it across a wait would
+        // deadlock against the very submission that is going to signal.
+        let start = Instant::now();
+        for (fence, value) in fences {
+            let remaining = Duration::from_nanos(
+                timeout_ns
+                    .saturating_sub(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)),
+            );
+            if !self.inner.wait_fence_until(&fence, value, remaining)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Blocks until the device has finished everything submitted so far.
@@ -2849,15 +3226,30 @@ impl Device for Dx12Device {
     /// Executes command buffers on the queue, and signals the fence they retire
     /// against.
     ///
-    /// # Waits and signals are refused, not ignored
+    /// # Waits go on the queue before the lists, signals after
     ///
-    /// A [`SemaphoreWait`](crcbl_hal::SemaphoreWait) or
-    /// [`SemaphoreSignal`](crcbl_hal::SemaphoreSignal) names a semaphore, and
-    /// [`Device::create_semaphore`] refuses — so no handle in either list was
-    /// ever issued by any device, and the honest answer is
-    /// [`HalError::InvalidHandle`] rather than a refusal naming the slice.
-    /// Accepting them and doing nothing is the failure worth avoiding: the
-    /// caller believes the ordering it asked for exists.
+    /// `ID3D12CommandQueue::Wait` and `Signal` are queue operations rather than
+    /// parameters of the execute, so the submission's shape is spelled out in
+    /// the order they are issued: every wait, then `ExecuteCommandLists`, then
+    /// every signal. A queue processes its operations in order, which is what
+    /// makes that ordering the seam's "waits happen before any command buffer
+    /// runs; signals happen after all of them complete".
+    ///
+    /// **A wait on a value nothing has signalled is accepted**, which is
+    /// [`Capability::TimelineWaitBeforeSignal`] and where this backend parts
+    /// company with `crcbl-mtl`. An `ID3D12Fence` is a real object with a
+    /// CPU-side `Signal` of its own, so a queue wait blocks until *somebody*
+    /// signals rather than until an earlier submission on this queue does —
+    /// exactly `crcbl-vk`'s reading of a `VkSemaphore`. Metal has to refuse
+    /// because a wait it cannot satisfy stops the queue with no diagnostic
+    /// anywhere.
+    ///
+    /// A **timeline** signal must exceed everything already submitted onto that
+    /// semaphore, including an earlier signal in this same
+    /// [`SubmitInfo`]; a fence value that went backwards would leave every
+    /// waiter past it asleep for good, so it is
+    /// [`HalError::InvalidDescriptor`] rather than a hang. A **binary**
+    /// semaphore's `value` is ignored per the seam, and takes the next integer.
     ///
     /// # An empty submission is a no-op that still moves the fence
     ///
@@ -2870,12 +3262,6 @@ impl Device for Dx12Device {
         // bug with its own contract, and reporting it after a resolution failure
         // further down would lose it.
         self.inner.check_queue(queue)?;
-        if let Some(wait) = submit.waits.first() {
-            return Err(HalError::invalid_handle("semaphore", wait.semaphore));
-        }
-        if let Some(signal) = submit.signals.first() {
-            return Err(HalError::invalid_handle("semaphore", signal.semaphore));
-        }
 
         let mut state = self.state();
         // Everything is resolved before anything executes: a submission that
@@ -2904,6 +3290,22 @@ impl Device for Dx12Device {
                 _allocator: entry.allocator.clone(),
             });
         }
+        let waits = self.resolve_waits(&state, submit)?;
+        let signals = self.resolve_signals(&state, submit)?;
+
+        // Every wait is issued before any list executes, which is the seam's
+        // ordering rule expressed in the only place D3D12 has to express it.
+        for (fence, value) in &waits {
+            // SAFETY: `fence` is a live interface this device created and holds
+            // a reference to for the duration of the call, and the queue is
+            // externally synchronised by the state lock held here.
+            unsafe { self.inner.queue.Wait(fence, *value) }.map_err(|error| {
+                HalError::DeviceLost(format!(
+                    "ID3D12CommandQueue::Wait failed: {error}{}",
+                    debug::diagnosis(&self.inner.raw)
+                ))
+            })?;
+        }
 
         if !lists.is_empty() {
             // SAFETY: every entry is a live, closed command list this device
@@ -2913,6 +3315,29 @@ impl Device for Dx12Device {
             // the call. The queue is externally synchronised by the state lock
             // held here, which is the rule `ExecuteCommandLists` imposes.
             unsafe { self.inner.queue.ExecuteCommandLists(&lists) };
+        }
+
+        // The semaphore signals go on after the lists and before the device
+        // fence's own, so a caller waiting on a signalled value is waiting for
+        // this submission's work and not for the next one's.
+        for (semaphore, fence, value) in &signals {
+            // SAFETY: as the wait above.
+            unsafe { self.inner.queue.Signal(fence, *value) }.map_err(|error| {
+                HalError::DeviceLost(format!(
+                    "ID3D12CommandQueue::Signal failed for a semaphore: {error}{}",
+                    debug::diagnosis(&self.inner.raw)
+                ))
+            })?;
+            // Recorded only once the queue has taken it, so a failed signal
+            // leaves the semaphore's floor where it was rather than blocking
+            // the value a retry would use.
+            handle::lookup_mut(
+                &mut state.semaphores,
+                "semaphore",
+                *semaphore,
+                self.inner.owner,
+            )?
+            .submitted = *value;
         }
 
         // Reserve and signal, then park **whatever the signal answered**: a
@@ -3276,12 +3701,21 @@ impl Device for Dx12Device {
         // failure further down would lose it.
         self.inner.check_queue(queue)?;
         if let Some(wait) = present.waits.first() {
-            // `acquire_next_frame` hands out no present semaphore, so a caller
-            // following the seam splices an empty slice here. Anything else is
-            // a handle no device issued.
-            return Err(SurfaceError::Hal(HalError::invalid_handle(
-                "semaphore",
-                *wait,
+            // `acquire_next_frame` hands out no present semaphore — the
+            // implicit-acquire shape — so a caller following the seam splices an
+            // empty slice here, and `DXGI_PRESENT_PARAMETERS` has nowhere to put
+            // one anyway. The handle is resolved first so the two ways of
+            // getting here stay apart: a handle no device issued is
+            // [`HalError::InvalidHandle`], and a live semaphore this swapchain
+            // never gave out is a descriptor that named the wrong object.
+            // Refused either way rather than dropped, which would present a
+            // frame before the work it waits on has run.
+            let state = self.state();
+            handle::lookup(&state.semaphores, "semaphore", *wait, self.inner.owner)?;
+            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                "PresentInfo::waits names a semaphore, and this backend's acquire_next_frame hands \
+                 none out: DXGI presents with no wait to put one in"
+                    .to_string(),
             )));
         }
         let owner = self.inner.owner;
@@ -6277,6 +6711,403 @@ pub(crate) mod tests {
         );
     }
 
+    /// **A queue wait for a value nothing has signalled blocks, and a CPU signal
+    /// releases it** — [`Capability::TimelineWaitBeforeSignal`], and the one
+    /// synchronisation claim `crates/crcbl/tests/hal_seam_e2e.rs` cannot make.
+    ///
+    /// It cannot make it because the failure mode is a *hang*: a backend that
+    /// deadlocked rather than refusing would take the shared suite down with it,
+    /// so that suite leaves the capability unexercised and the evidence has to
+    /// live here — where a test can reach `ID3D12Fence::Signal` directly, which
+    /// is the CPU-side signal the seam has no verb for and `crcbl-mtl`'s
+    /// divergence entry names as the thing it is missing.
+    ///
+    /// **Both halves are asserted, and the first is what makes this a test
+    /// rather than a demonstration.** After the wait-only submission the device
+    /// fence must still be short of the value that submission reserved: a
+    /// `Wait` the queue never received would let it through at once, and the
+    /// signal below would then be releasing something that was never held.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_queue_wait_for_an_unsignalled_value_blocks_until_the_cpu_signals_it() {
+        /// What the submission waits for. Above the semaphore's initial value,
+        /// so nothing anywhere has reached it.
+        const AWAITED: u64 = 7;
+        /// How long the queue is watched for the wait it must be honouring.
+        /// Only the "the wait was dropped" direction is timing-dependent, and
+        /// that direction cannot fail spuriously: an honoured wait can never
+        /// let the fence through, however long this is.
+        const HELD: Duration = Duration::from_millis(50);
+
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let semaphore = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("wait before signal"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("every D3D12 device creates fences");
+        // The fence itself, so this test can play the part no seam call has: a
+        // signal that does not come from a submission.
+        let raw = {
+            let state = device.state();
+            handle::lookup(
+                &state.semaphores,
+                "semaphore",
+                semaphore,
+                device.inner.owner,
+            )
+            .expect("the semaphore was created a moment ago")
+            .raw
+            .clone()
+        };
+
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[SemaphoreWait {
+                        semaphore,
+                        value: AWAITED,
+                    }],
+                    signals: &[],
+                },
+            )
+            .expect("a wait on an unsignalled value is accepted, not refused");
+        let reserved = device.state().next_fence_value;
+
+        std::thread::sleep(HELD);
+        // SAFETY: the device fence is live and `GetCompletedValue` returns a
+        // `u64` by value.
+        let completed = unsafe { device.inner.fence.GetCompletedValue() };
+        assert!(
+            completed < reserved,
+            "the queue reached fence {completed} while waiting on a semaphore value nothing had \
+             signalled, so the Wait was dropped rather than issued"
+        );
+
+        // SAFETY: `raw` is the semaphore's live fence, held by this test for the
+        // duration of the call, and `Signal` takes a scalar.
+        unsafe { raw.Signal(AWAITED) }.expect("the CPU side of an ID3D12Fence");
+        device
+            .wait_idle()
+            .expect("the CPU signal released the queue");
+        assert_eq!(
+            device
+                .semaphore_value(semaphore)
+                .expect("a timeline has one"),
+            AWAITED,
+            "the semaphore did not end at the value the CPU signalled"
+        );
+        device.destroy_semaphore(semaphore);
+    }
+
+    /// **A CPU wait that runs out of time is `Ok(false)`, and a binary semaphore
+    /// has no CPU side at all.**
+    ///
+    /// The seam calls a timeout "a normal outcome for a frame-pacing poll, not
+    /// an error". A backend that answered `Err` there would compile, pass every
+    /// other test in this file, and turn a pacing poll into a lost device — so
+    /// this is what separates `WAIT_TIMEOUT` from the failure codes beside it,
+    /// and it goes red if they are ever folded together.
+    ///
+    /// The already-reached wait is asserted first for the reason the timeout
+    /// exists: a `wait_semaphores` that answered `Ok(false)` unconditionally
+    /// would satisfy the timeout assertion on its own.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_cpu_wait_times_out_as_ok_false_and_a_binary_semaphore_has_no_cpu_side() {
+        /// What the semaphore is created holding, so "already reached" is a
+        /// value rather than the zero every fence starts at.
+        const INITIAL: u64 = 3;
+        /// A value nothing will ever signal onto it.
+        const NEVER: u64 = INITIAL + 1;
+        /// Long enough to be a real wait, short enough not to pace the suite.
+        const BUDGET_NS: u64 = 2_000_000;
+
+        let (_instance, device) = open_device();
+        let timeline = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("cpu wait"),
+                kind: SemaphoreKind::Timeline {
+                    initial_value: INITIAL,
+                },
+            })
+            .expect("every D3D12 device creates fences");
+        assert_eq!(
+            device
+                .semaphore_value(timeline)
+                .expect("a timeline has one"),
+            INITIAL,
+            "the semaphore did not start at the value it was created with"
+        );
+        assert!(
+            device
+                .wait_semaphores(
+                    &[SemaphoreWait {
+                        semaphore: timeline,
+                        value: INITIAL,
+                    }],
+                    0,
+                )
+                .expect("a value already reached"),
+            "a wait for the value the fence already holds reported a timeout"
+        );
+        assert!(
+            !device
+                .wait_semaphores(
+                    &[SemaphoreWait {
+                        semaphore: timeline,
+                        value: NEVER,
+                    }],
+                    BUDGET_NS,
+                )
+                .expect("a timeout is not an error"),
+            "a value nothing signalled was reported as reached"
+        );
+        assert!(
+            device.wait_semaphores(&[], 0).expect("nothing to wait for"),
+            "an empty wait list has nothing left to satisfy"
+        );
+
+        // The binary half. It is handed out — the seam requires that of every
+        // device — and both CPU-side calls refuse it by name rather than
+        // reading the private counter this crate keeps for it.
+        let binary = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("binary"),
+                kind: SemaphoreKind::Binary,
+            })
+            .expect("a device with no timeline would still owe one of these");
+        let error = device
+            .semaphore_value(binary)
+            .expect_err("a binary semaphore has no seam-visible value");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+            "{error:?}"
+        );
+        let error = device
+            .wait_semaphores(
+                &[SemaphoreWait {
+                    semaphore: binary,
+                    value: 0,
+                }],
+                0,
+            )
+            .expect_err("a binary semaphore is GPU-waitable only");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+            "{error:?}"
+        );
+        device.destroy_semaphore(binary);
+        device.destroy_semaphore(timeline);
+    }
+
+    /// **A readback keyed on a caller's timeline observes that timeline**, not
+    /// the device fence.
+    ///
+    /// [`ReadbackDesc::after`] is the seam's way of saying "this data is ready
+    /// when *that* value arrives", and a backend that ignored it and used its
+    /// own submission counter would answer `Ready` for a buffer nothing had
+    /// written yet — a wrong picture with a clean log. So the `Pending` half is
+    /// asserted first, against a value nothing has signalled: without it a
+    /// backend that answered `Ready` immediately would pass on the second half
+    /// alone.
+    ///
+    /// A **binary** semaphore is refused, because it has no CPU-visible value
+    /// for a poll to compare against.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_readback_keyed_on_a_semaphore_waits_for_that_semaphore() {
+        /// What the readback waits for, and what the submission signals.
+        const AWAITED: u64 = 6;
+        const BYTES: u64 = 4;
+
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let target = device
+            .create_buffer(&buffer(BYTES, MemoryLocation::HostReadback))
+            .expect("a readback buffer");
+        let timeline = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("readback after"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("every D3D12 device creates fences");
+
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("keyed on a timeline"),
+                buffer: target,
+                offset: 0,
+                size: BYTES,
+                after: Some(SemaphoreWait {
+                    semaphore: timeline,
+                    value: AWAITED,
+                }),
+            })
+            .expect("a readback of a HostReadback buffer");
+
+        // Nothing has signalled the value, and the device fence is irrelevant —
+        // so a backend reading the wrong counter shows up right here.
+        let mut out = [POISON; BYTES as usize];
+        assert!(
+            matches!(
+                device.poll_readback(request, &mut out),
+                Ok(ReadbackState::Pending)
+            ),
+            "a readback keyed on an unsignalled timeline reported ready"
+        );
+        assert_eq!(out, [POISON; BYTES as usize], "a Pending poll wrote bytes");
+
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[SemaphoreSignal {
+                        semaphore: timeline,
+                        value: AWAITED,
+                    }],
+                },
+            )
+            .expect("a signal-only submission");
+        drain(&device, request, BYTES as usize);
+
+        // And a binary semaphore has no value for the poll to read, so it is
+        // refused at request time rather than silently keyed on something else.
+        let binary = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("readback after"),
+                kind: SemaphoreKind::Binary,
+            })
+            .expect("every device owes one of these");
+        let error = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: target,
+                offset: 0,
+                size: BYTES,
+                after: Some(SemaphoreWait {
+                    semaphore: binary,
+                    value: 1,
+                }),
+            })
+            .expect_err("a binary semaphore has no CPU-visible value");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+            "{error:?}"
+        );
+
+        device.destroy_readback(request);
+        device.destroy_semaphore(binary);
+        device.destroy_semaphore(timeline);
+        device.destroy_buffer(target);
+    }
+
+    /// **A timeline signal that does not move forwards is refused**, because the
+    /// alternative is a caller asleep for good.
+    ///
+    /// `ID3D12CommandQueue::Signal` will happily set a fence backwards, and
+    /// nothing in D3D12 reports it: every waiter past the higher value simply
+    /// never wakes, on a queue that is otherwise healthy. So the check is here,
+    /// and it is [`HalError::InvalidDescriptor`] — the value is a field the
+    /// caller can correct — which is the answer `crcbl-mtl` and `crcbl-wgpu`
+    /// both give.
+    ///
+    /// The second half is the one that is easy to miss: two signals on the same
+    /// semaphore in **one** `SubmitInfo` have to be checked against each other,
+    /// not only against what the semaphore already holds.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_timeline_signal_that_does_not_move_forwards_is_refused() {
+        const INITIAL: u64 = 4;
+
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let timeline = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("monotonic"),
+                kind: SemaphoreKind::Timeline {
+                    initial_value: INITIAL,
+                },
+            })
+            .expect("every D3D12 device creates fences");
+
+        for value in [INITIAL, INITIAL - 1] {
+            let error = device
+                .submit(
+                    queue,
+                    &SubmitInfo {
+                        command_buffers: &[],
+                        waits: &[],
+                        signals: &[SemaphoreSignal {
+                            semaphore: timeline,
+                            value,
+                        }],
+                    },
+                )
+                .expect_err("a timeline only moves forwards");
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "signalling {value} over {INITIAL}: {error:?}"
+            );
+        }
+
+        // Two signals in one submission, the second no higher than the first.
+        let error = device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[
+                        SemaphoreSignal {
+                            semaphore: timeline,
+                            value: INITIAL + 2,
+                        },
+                        SemaphoreSignal {
+                            semaphore: timeline,
+                            value: INITIAL + 1,
+                        },
+                    ],
+                },
+            )
+            .expect_err("the second signal is behind the first one in the same submission");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        // Nothing was submitted, so the floor never moved and the value the
+        // refused pair started with is still available.
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[SemaphoreSignal {
+                        semaphore: timeline,
+                        value: INITIAL + 2,
+                    }],
+                },
+            )
+            .expect("a signal above everything submitted so far");
+        device.wait_idle().expect("idle");
+        assert_eq!(
+            device
+                .semaphore_value(timeline)
+                .expect("a timeline has one"),
+            INITIAL + 2
+        );
+        device.destroy_semaphore(timeline);
+    }
+
     /// Every slice that has not arrived still refuses, by name — so none of them
     /// can be half-implemented without this saying so.
     #[test]
@@ -6294,27 +7125,6 @@ pub(crate) mod tests {
                         count: 1,
                     })
                     .expect_err("no query heaps yet"),
-            ),
-            (
-                "semaphores",
-                device
-                    .create_semaphore(&SemaphoreDesc {
-                        label: None,
-                        kind: SemaphoreKind::Timeline { initial_value: 0 },
-                    })
-                    .expect_err("no shared fence yet"),
-            ),
-            (
-                "semaphore waits",
-                device
-                    .wait_semaphores(
-                        &[SemaphoreWait {
-                            semaphore: unissued(),
-                            value: 1,
-                        }],
-                        0,
-                    )
-                    .expect_err("no fence a caller can hold yet"),
             ),
             // The seam requires this refusal at *layout creation* rather than at
             // the `push_constants` call, and it is the one refusal in this list
@@ -6530,6 +7340,18 @@ pub(crate) mod tests {
                     })
                     .expect_err("that pipeline layout was never issued"),
             ),
+            (
+                "semaphore waits",
+                device
+                    .wait_semaphores(
+                        &[SemaphoreWait {
+                            semaphore: unissued(),
+                            value: 1,
+                        }],
+                        0,
+                    )
+                    .expect_err("that semaphore was never issued"),
+            ),
         ];
         assert!(!landed.is_empty(), "nothing to check");
         for (what, error) in &landed {
@@ -6708,11 +7530,16 @@ pub(crate) mod tests {
     /// because `acquire_next_frame` hands none out.
     ///
     /// The seam's implicit-acquire shape means a conforming caller splices an
-    /// empty slice here, so anything in it is a handle no device issued — and
-    /// the answer has to say *semaphore*, not "swapchain", or a caller reading
-    /// the message goes looking at the wrong object. Asserted with a live-ish
-    /// swapchain handle position deliberately left unissued too: the semaphore
-    /// is checked first.
+    /// empty slice here, so anything in it is either a handle no device issued
+    /// or a semaphore this swapchain never gave out — and the answer has to say
+    /// *semaphore*, not "swapchain", or a caller reading the message goes
+    /// looking at the wrong object. Asserted with the swapchain handle
+    /// deliberately left unissued too: the semaphore is checked first.
+    ///
+    /// **Both cases are asserted, because `create_semaphore` landed.** A live
+    /// handle here used to be impossible; now it is not, and answering
+    /// `InvalidHandle` for a semaphore the caller is holding would send them
+    /// looking for a lifetime bug that is not there.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_present_with_a_semaphore_is_refused_on_the_semaphore() {
@@ -6737,6 +7564,29 @@ pub(crate) mod tests {
             matches!(hal, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
             "{hal:?}"
         );
+
+        let binary = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("present wait"),
+                kind: SemaphoreKind::Binary,
+            })
+            .expect("every D3D12 device creates fences");
+        let error = device
+            .present(
+                queue,
+                &PresentInfo {
+                    swapchain: unissued(),
+                    waits: &[binary],
+                    present_id: None,
+                },
+            )
+            .expect_err("this swapchain hands out no present semaphore");
+        let SurfaceError::Hal(hal) = error else {
+            panic!("a misplaced semaphore is not a surface condition: {error:?}");
+        };
+        assert!(matches!(hal, HalError::InvalidDescriptor(_)), "{hal:?}");
+        assert!(hal.to_string().contains("semaphore"), "{hal}");
+        device.destroy_semaphore(binary);
     }
 
     /// **`Features::PRESENT_FEEDBACK` is reported, and the seam's immediate
@@ -6771,13 +7621,16 @@ pub(crate) mod tests {
     /// The crate docs draw the line: `Unsupported` for a call this backend has
     /// not written, and [`HalError::InvalidHandle`] for anything it can genuinely
     /// diagnose. `query_results` and `semaphore_value` are on the far side of it
-    /// — they take a handle, no query set or semaphore exists to have issued
-    /// one, so "you handed me something that never resolved" is both true and
-    /// more useful than "the query slice is not here".
+    /// — they take a handle nothing issued, so "you handed me something that
+    /// never resolved" is both true and more useful than "the query slice is not
+    /// here".
     ///
-    /// Asserted beside the *creation* calls, which refuse the other way, because
+    /// Asserted beside `create_query_set`, which refuses the other way, because
     /// the claim is about the difference: a backend that answered `Unsupported`
-    /// everywhere would pass either assertion alone.
+    /// everywhere would pass either assertion alone. `create_semaphore` used to
+    /// stand beside it and now *succeeds*, so it is here as the third answer —
+    /// a call that landed, checked here so the pair above cannot quietly become
+    /// a rule about semaphores.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_query_set_and_a_semaphore_handle_refuse_as_unresolvable_not_as_unimplemented() {
@@ -6820,14 +7673,20 @@ pub(crate) mod tests {
             matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
             "{error:?}"
         );
-        let error = device
+        let semaphore = device
             .create_semaphore(&SemaphoreDesc {
-                label: None,
+                label: Some("unresolvable-handle probe"),
                 kind: SemaphoreKind::Timeline { initial_value: 0 },
             })
-            .expect_err("no shared fence yet");
+            .expect("every D3D12 device creates fences");
+        device.destroy_semaphore(semaphore);
+        // And the handle is dead afterwards rather than resolving to whatever
+        // takes its slot next, which is the whole of what `destroy` means here.
+        let error = device
+            .semaphore_value(semaphore)
+            .expect_err("that semaphore was destroyed");
         assert!(
-            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
             "{error:?}"
         );
 

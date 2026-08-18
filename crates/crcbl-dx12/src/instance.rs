@@ -815,7 +815,9 @@ impl PendingDevice for Dx12PendingDevice {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crcbl_hal::{DeviceType, Features, GeometryPath, Limits};
+    use crcbl_hal::{
+        Device as _, DeviceType, Features, GeometryPath, Limits, SemaphoreDesc, SemaphoreKind,
+    };
     /// The two constants the bindless rule is written against, named here so the
     /// test compares with D3D12's own numbers rather than through the function
     /// it is checking.
@@ -1196,27 +1198,28 @@ pub(crate) mod tests {
         );
     }
 
-    /// Every flag this backend reports has a call behind it, and every flag it
-    /// withholds is a call it has not written.
+    /// Every flag this backend reports has a call behind it, and the derived
+    /// path follows from them.
     ///
-    /// The flags asserted *missing* are missing because no call in this crate
-    /// makes them true — `CreateFence` handed out as a seam semaphore is the one
-    /// left — so this test goes red on the day a slice earns one, which is
-    /// exactly the day the crate docs' account of the derived path has to be
-    /// rewritten. The flags asserted *present* are the inverse half: dropping
-    /// one silently is red too.
+    /// Each flag below is asserted *present*, and each is here because a call in
+    /// this crate makes it true — dropping one silently is red, which is the
+    /// half that rots once a flag stops being newsworthy.
     ///
-    /// [`Features::COMPUTE`] joined that side with
-    /// `CreateComputePipelineState` and `Dispatch`, and
+    /// [`Features::COMPUTE`] joined the list with
+    /// `CreateComputePipelineState` and `Dispatch`,
     /// [`Features::MULTI_DRAW_INDIRECT`] and [`Features::DRAW_INDIRECT_COUNT`]
     /// with `ExecuteIndirect` for a *draw* — which is what moved the derived
     /// path off the per-batch floor and onto
     /// [`GeometryPath::IndirectCount`], asserted here so the move cannot happen
-    /// unnoticed in either direction.
+    /// unnoticed in either direction — and
+    /// [`Features::TIMELINE_SEMAPHORE`] with `CreateFence` handed out as a seam
+    /// semaphore and consumed by `ID3D12CommandQueue::Wait` and `Signal`.
     ///
-    /// The falsifying value on the other side is an adapter that reports the
-    /// waiting flag: that is a flag added ahead of the call behind it, which is
-    /// the mistake `crcbl-mtl` had to reverse.
+    /// That last one was the only member of [`Features::GPU_DRIVEN`] still
+    /// waiting on a call, so what this test now says is that **the whole bundle
+    /// is earned** on any adapter reporting
+    /// [`Features::DESCRIPTOR_INDEXING`] — and that flag is the WARP question
+    /// itself, which is why it is not asserted here.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn every_reported_flag_has_a_call_behind_it_and_the_path_follows() {
@@ -1233,18 +1236,19 @@ pub(crate) mod tests {
                 Features::COMPUTE,
                 Features::MULTI_DRAW_INDIRECT,
                 Features::DRAW_INDIRECT_COUNT,
+                Features::TIMELINE_SEMAPHORE,
             ] {
                 assert!(
                     !missing.contains(earned),
                     "{earned:?} has a call behind it and is not reported: {line}"
                 );
             }
-            // One flag left, and named rather than iterated: `Device::create_semaphore`
-            // has to hand an `ID3D12Fence` out and `ID3D12CommandQueue::Wait`
-            // has to consume it on a submission.
+            // What is left of the bundle is the WARP question and nothing else,
+            // so a missing flag that is not `DESCRIPTOR_INDEXING` is a flag this
+            // crate dropped rather than an adapter that lacks one.
             assert!(
-                missing.contains(Features::TIMELINE_SEMAPHORE),
-                "TIMELINE_SEMAPHORE is reported with no call behind it: {line}"
+                missing.difference(Features::DESCRIPTOR_INDEXING).is_empty(),
+                "a GPU-driven flag with a call behind it went missing: {missing:?} on {line}"
             );
             assert_eq!(
                 record.info.caps.geometry_path(),
@@ -1321,34 +1325,36 @@ pub(crate) mod tests {
     }
 
     /// The seam's convenience constructor requires compute **and** a timeline
-    /// semaphore, and this backend now has only the first — so `for_adapter` is
-    /// still refused, and the refusal names exactly what is left.
+    /// semaphore, and this backend now has both — so `for_adapter` opens a
+    /// device where it used to be refused for the gap.
     ///
-    /// The two halves are asserted separately on purpose. Compute is required
-    /// *and satisfied*, so it must be absent from the gap; a device that
-    /// reported it and could not dispatch would pass a test that only looked at
-    /// the whole set. The timeline semaphore is what remains, and this test is
-    /// what says so rather than letting the change go unnoticed.
+    /// The required half is asserted through the *call*, and the reported half
+    /// separately on the caps, because they are different claims: a backend that
+    /// reported the flags and could not create a fence would pass a test that
+    /// only read the caps, and `create_semaphore` is what closes that.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
-    fn the_default_device_desc_is_refused_for_the_gap() {
+    fn the_default_device_desc_opens_a_device_now_that_the_bundle_is_earned() {
         let instance = open();
         let adapter = pinned_adapter(&instance);
 
-        let error = instance
-            .request_device(&DeviceDesc::for_adapter(adapter))
-            .expect_err("this backend reports no timeline semaphore");
-        let HalError::UnsupportedFeatures { missing } = error else {
-            panic!("expected a feature gap, got {error:?}");
-        };
-        assert!(
-            missing.contains(Features::TIMELINE_SEMAPHORE),
-            "the call behind this is what this backend still owes: {missing:?}"
-        );
-        assert!(
-            !missing.contains(Features::COMPUTE),
-            "compute is required by for_adapter and this backend has it: {missing:?}"
-        );
+        let device = instance
+            .open_device(&DeviceDesc::for_adapter(adapter))
+            .expect("compute and a timeline semaphore are both reported now");
+        let features = device.caps().features;
+        for required in [Features::COMPUTE, Features::TIMELINE_SEMAPHORE] {
+            assert!(
+                features.contains(required),
+                "for_adapter requires {required:?} and the device it opened lacks it: {features:?}"
+            );
+        }
+        device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("for_adapter"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .map(|semaphore| device.destroy_semaphore(semaphore))
+            .expect("the flag the constructor required has the call behind it");
     }
 
     /// A device asked to be compatible with a surface handle nothing issued is

@@ -1047,15 +1047,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     // --- synchronisation ---
     Divergence {
         capability: Capability::TimelineSemaphore,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "ID3D12Fence is the seam's timeline almost verbatim, but the other half — \
-              ID3D12CommandQueue::Wait and a submission to attach it to — is not built, so a \
-              semaphore handed out now would be a counter nothing can signal from the GPU (the \
-              DX12 command slice)",
-    },
-    Divergence {
-        capability: Capability::TimelineSemaphore,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::ApiAbsence,
         why: "WebGPU has no semaphores. It orders submissions implicitly — one queue, executed in \
@@ -1065,20 +1056,6 @@ pub const DIVERGENCES: &[Divergence] = &[
               SemaphoreKind::Timeline; it used to hand out a handle whose semaphore_value answered \
               0 for ever, which is the succeed-while-doing-nothing shape this enum exists to make \
               visible",
-    },
-    Divergence {
-        capability: Capability::BinarySemaphore,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "create_semaphore refuses both kinds; see the TimelineSemaphore entry (the DX12 \
-              command slice)",
-    },
-    Divergence {
-        capability: Capability::CpuTimelineWait,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "there is no semaphore to wait on; see the TimelineSemaphore entry (the DX12 command \
-              slice)",
     },
     Divergence {
         capability: Capability::CpuTimelineWait,
@@ -1105,12 +1082,6 @@ pub const DIVERGENCES: &[Divergence] = &[
               so on this one-queue backend only an earlier submission could satisfy such a wait \
               and waiting would stop the queue rather than wait. The work is a signal call on the \
               seam",
-    },
-    Divergence {
-        capability: Capability::TimelineWaitBeforeSignal,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "there is no semaphore to wait on at all; see the TimelineSemaphore entry",
     },
     Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
@@ -1504,26 +1475,6 @@ mod tests {
         ),
         (
             Capability::PipelineStatisticsQuery,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::TimelineSemaphore,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::BinarySemaphore,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::CpuTimelineWait,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::TimelineWaitBeforeSignal,
             BackendKind::Dx12,
             DivergenceKind::Unwritten,
         ),

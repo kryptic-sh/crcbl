@@ -20,7 +20,10 @@
 //! `ID3D12Device` and a `D3D12_COMMAND_LIST_TYPE_DIRECT` queue, and the device
 //! it hands back creates buffers, images, image views and samplers, writes into
 //! a host-visible buffer, records an `ID3D12GraphicsCommandList`, runs it on the
-//! queue, and reads the result back through an `ID3D12Fence`. It also builds a
+//! queue, and reads the result back through an `ID3D12Fence`. Semaphores are
+//! that same fence handed to a caller: both seam kinds are created, a submission
+//! waits on them and signals them through `ID3D12CommandQueue::Wait` and
+//! `Signal`, and the CPU reads and blocks on a timeline. It also builds a
 //! `DXGI_SWAP_EFFECT_FLIP_DISCARD` swapchain on an `HWND`, acquires and presents
 //! through it, and answers
 //! [`Device::wait_until_presented`](crcbl_hal::Device::wait_until_presented)
@@ -38,9 +41,8 @@
 //! **Nothing in this crate is a stub that reports success** — a draw recorded
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
-//! the clear that no slice has written — queries, timeline semaphores, buffer
-//! fills, mesh dispatch, a push-constant range at pipeline-layout creation —
-//! refuses with
+//! the clear that no slice has written — queries, buffer fills, mesh dispatch, a
+//! push-constant range at pipeline-layout creation — refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
 //! yet" rather than "broken". A refusal that is *permanent* deliberately does
@@ -154,16 +156,22 @@
 //! `create_mesh_pipeline` and `DispatchMesh` are still unwritten, which is a gap
 //! in this crate rather than in any adapter.
 //!
-//! What is left of [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) waiting on a
-//! call is [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE)
-//! alone: `Device::create_semaphore` has to hand one out and
-//! `ID3D12CommandQueue::Wait` has to consume it.
-//! [`COMPUTE`](crcbl_hal::Features::COMPUTE),
+//! **Nothing in [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) is waiting on a
+//! call any more.** [`COMPUTE`](crcbl_hal::Features::COMPUTE),
 //! [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT),
-//! `DRAW_INDIRECT_COUNT` and
+//! `DRAW_INDIRECT_COUNT`,
 //! [`INDIRECT_FIRST_INSTANCE`](crcbl_hal::Features::INDIRECT_FIRST_INSTANCE)
-//! have all left that list, each on the slice that made its calls and read the
-//! result back in this crate's own tests.
+//! and finally
+//! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE) each left
+//! that list on the slice that made its calls and read the result back in this
+//! crate's own tests — the last of them when `Device::create_semaphore` began
+//! handing an `ID3D12Fence` out and `Device::submit` began consuming it through
+//! `ID3D12CommandQueue::Wait` and `Signal`. So
+//! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) opens a
+//! device here rather than reporting a gap, and what is left between an adapter
+//! and the whole bundle is
+//! [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) — which is
+//! the WARP question itself.
 //!
 //! **Read the WARP verdict off the SM6.6 line, never off the selected path.**
 //! The path is a statement about how much of this backend is written; the
@@ -317,6 +325,13 @@ mod retire;
 mod root;
 #[cfg(target_os = "windows")]
 mod swapchain;
+// What value a submission's semaphore wait and signal carry. Not Windows-only
+// for the reason `present` above is not — it holds no `windows` type — and that
+// matters here for the same reason it does in `root`: a fence signalled with a
+// value it has already been given does not fail, it hangs whatever was waiting
+// past it, and no D3D12 run reports that.
+#[cfg(any(target_os = "windows", test))]
+mod sync;
 #[cfg(target_os = "windows")]
 mod validate;
 #[cfg(target_os = "windows")]

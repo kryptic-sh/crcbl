@@ -303,7 +303,12 @@ pub(crate) fn resolve_present_mode(requested: PresentMode, tearing: bool) -> Pre
     }
 }
 
-/// `WaitForSingleObjectEx`'s millisecond argument for a seam timeout.
+/// The millisecond argument a `WaitForSingleObject*` gets for a seam timeout.
+///
+/// Shared by the two waits this backend blocks on — the swapchain's
+/// frame-latency waitable object, and the fence event a semaphore wait arms in
+/// `crate::device` — because the clamp and the rounding below are properties of
+/// the *conversion*, not of what is being waited for.
 ///
 /// The clamp is the point. `INFINITE` is `u32::MAX` milliseconds, so a
 /// [`Duration`] long enough to saturate the conversion would turn a bounded
@@ -312,8 +317,8 @@ pub(crate) fn resolve_present_mode(requested: PresentMode, tearing: bool) -> Pre
 /// forever and which the caller's own deadline outlives anyway.
 ///
 /// Rounded up, not down: a sub-millisecond timeout that truncated to zero would
-/// make `WaitForSingleObjectEx` a poll, and the seam's `Timeout` would then be
-/// reported for a frame that was merely not up *yet*.
+/// make the wait a poll, and the seam's `Timeout` would then be reported for a
+/// frame — or a semaphore value — that was merely not up *yet*.
 pub(crate) fn timeout_millis(timeout: Duration) -> u32 {
     let millis = timeout.as_millis();
     let rounded = if timeout.subsec_nanos().is_multiple_of(1_000_000) {
