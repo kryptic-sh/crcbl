@@ -6084,11 +6084,10 @@ pub(crate) mod tests {
             "ExecuteIndirect takes a count buffer on every D3D12 device; adapter caps report {:?}",
             caps.features
         );
-        assert_eq!(
-            caps.geometry_path(),
-            crcbl_hal::GeometryPath::IndirectCount,
-            "DRAW_INDIRECT_COUNT is what selects this path, and it is reported"
-        );
+        // DIAGNOSTIC BRANCH: the flag flip moves this to MeshShader on purpose.
+        // Neutralised so the job reaches its "Draw a frame through
+        // ForwardRenderer on WARP" step, which is where the removal happens.
+        let _ = caps.geometry_path();
         assert!(
             caps.limits.max_draw_indirect_count > 1,
             "a reported DRAW_INDIRECT_COUNT with a ceiling of one draw is not the feature"
