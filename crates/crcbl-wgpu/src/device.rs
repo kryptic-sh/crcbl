@@ -286,7 +286,7 @@ impl WgpuDevice {
         }
     }
 
-    fn unsupported(what: &'static str) -> HalError {
+    pub(crate) fn unsupported(what: &'static str) -> HalError {
         HalError::Unsupported {
             backend: BackendKind::Wgpu,
             what,
@@ -393,9 +393,18 @@ impl Device for WgpuDevice {
                  which this backend does not enable, so a pipeline layout has no immediate block \
                  to write",
             ),
+            // Not `gated`, and the flag it would read is really there: on a
+            // native adapter with wgpu's three binding-array features
+            // `hal_features_for` grants DESCRIPTOR_INDEXING, so a `gated` answer
+            // here would report Yes on this machine's radv. What wgpu lacks is
+            // not the array; it is the *runtime* half of it, which is why this
+            // is a flat No and why `create_bind_group_layout` refuses.
             C::BindlessDescriptorArray => hal::Support::No(
-                "wgpu's binding arrays need a fixed count in the layout and offer no partial \
-                 binding, so the runtime-sized form the seam describes has no expression",
+                "a wgpu binding array's length is the layout's fixed count and the length of the \
+                 slice a group is created with, and this backend's update_bind_group is \
+                 Unsupported — so nothing here chooses a length at group creation or fills a slot \
+                 afterwards, which is the whole of what VARIABLE_COUNT means; it is refused at \
+                 create_bind_group_layout rather than downgraded to a fixed array",
             ),
             C::StorageImageBinding => hal::Support::No(
                 "the seam carries the view dimension and texel format wgpu's StorageTexture \
@@ -902,6 +911,32 @@ impl Device for WgpuDevice {
         // descriptor-indexing flags, which have no wgpu counterpart at all and
         // so must be refused rather than dropped.
         desc.check_entries(&self.caps, BackendKind::Wgpu)?;
+        // **The refusal `Device::supports` declares**, and the one thing
+        // `check_entries` cannot make for us: it lets a `VARIABLE_COUNT` entry
+        // through on any device reporting `DESCRIPTOR_INDEXING`, which a native
+        // adapter with wgpu's three binding-array features does. Everything
+        // below would then build an ordinary fixed-size wgpu binding array out
+        // of it — the length coming from the layout's `count` rather than from
+        // the group, with no `update_bind_group` to fill a slot later. That is
+        // exactly the silent downgrade `crcbl_hal::BindingFlags` forbids, and
+        // `crate::binding`'s "`variable_count` is checked against the entries,
+        // not obeyed" is the long form of why wgpu has neither half.
+        //
+        // `Unsupported`, matching the answer `create_bind_group` gives the other
+        // end of the same capability — `crcbl-mtl` refuses this pair the same
+        // way and for the same reason, so a caller branching on the variant is
+        // not surprised at the second one.
+        if desc
+            .entries
+            .iter()
+            .any(|e| e.flags.contains(hal::BindingFlags::VARIABLE_COUNT))
+        {
+            return Err(Self::unsupported(
+                "a VARIABLE_COUNT bind group layout on wgpu: a binding array's length here is the \
+                 layout's fixed count and the slice a group is created with, and this backend has \
+                 no update_bind_group, so nothing chooses a length at group creation",
+            ));
+        }
         let entries: Vec<wgpu::BindGroupLayoutEntry> = desc
             .entries
             .iter()
@@ -944,22 +979,16 @@ impl Device for WgpuDevice {
         // to choose between the scalar and the array spelling — see
         // [`crate::binding`]. Resolved, not declared: these bound a caller's
         // `array_index`, and against the raw sentinel that bound is no bound at
-        // all. The variable binding is kept for the same reason:
-        // `BindGroupDesc::variable_count` describes that binding and no other.
+        // all.
         let counts = desc
             .entries
             .iter()
             .map(|e| (e.binding, e.resolved_count(&self.caps.limits)))
             .collect::<Vec<_>>();
-        let variable_binding = desc
-            .entries
-            .iter()
-            .find(|e| e.flags.contains(hal::BindingFlags::VARIABLE_COUNT))
-            .map(|e| e.binding);
         Ok(handle::insert(
             &mut self.pools.bind_group_layouts.lock().unwrap(),
             self.owner(),
-            BindGroupLayoutSlot::new(layout, counts, variable_binding),
+            BindGroupLayoutSlot::new(layout, counts),
         ))
     }
     fn destroy_bind_group_layout(&self, h: BindGroupLayoutHandle) {

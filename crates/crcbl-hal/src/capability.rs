@@ -971,8 +971,13 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::BindlessDescriptorArray,
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::ApiAbsence,
-        why: "wgpu's binding arrays need a fixed count in the layout and offer no partial binding, \
-              so the runtime-sized form the seam describes has no expression",
+        why: "a wgpu binding array's length is the layout's fixed count and the length of the \
+              slice a group is created with, and this backend has no update_bind_group — so \
+              nothing chooses a length at group creation or fills a slot afterwards, which is the \
+              whole of what VARIABLE_COUNT means. It is refused at create_bind_group_layout \
+              rather than downgraded to a fixed array. (wgpu does offer partial binding, behind \
+              PARTIALLY_BOUND_BINDING_ARRAY, which this backend requires before reporting \
+              DESCRIPTOR_INDEXING at all; that half is not what is missing)",
     },
     Divergence {
         capability: Capability::BindlessDescriptorArray,

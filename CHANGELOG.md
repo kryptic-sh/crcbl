@@ -521,6 +521,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-wgpu` now refuses a `BindingFlags::VARIABLE_COUNT` layout at
+  `create_bind_group_layout`**, with `HalError::Unsupported`, and refuses
+  `BindGroupDesc::variable_count` at `create_bind_group` with the same variant —
+  the shape `crcbl-mtl` already used for this pair. It used to accept both: the
+  layout became an ordinary fixed-size wgpu binding array and the field was
+  merely checked against the entry list, which is the silent downgrade to a
+  fixed array that `BindingFlags` requires a backend to refuse rather than
+  perform. A wgpu binding array's length is the layout's count and the length of
+  the slice a group is created with, and this backend has no
+  `update_bind_group`, so nothing here chooses a length at group creation or
+  fills a slot afterwards. The `Support::No` this backend already declared for
+  `Capability::BindlessDescriptorArray` — and its `DIVERGENCES` row — now say
+  that instead of claiming wgpu offers no partial binding, which it does, behind
+  `PARTIALLY_BOUND_BINDING_ARRAY`. Callers wanting a fixed array are unaffected:
+  a layout `count` above one still arrives as wgpu's array spelling.
+
 - **`crcbl-webgpu`'s byte primitives moved to a shared `bytes` module** so both
   directions of the stream read and write through one implementation rather than
   two that can drift. `DecodeError` is still re-exported from the crate root, so
@@ -659,6 +675,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **`crcbl_shaders::bindless_probe`** — the first committed shader in this
+  workspace that declares an **array of descriptors**. Until it landed, every
+  `Texture2DArray` here was one layered image, no committed SPIR-V declared
+  `RuntimeDescriptorArray` and no WGSL contained `binding_array`, so
+  `BindingFlags::VARIABLE_COUNT`, `BindGroupDesc::variable_count` and
+  `BindGroupEntry::array_index` had nothing to be proved against on any backend.
+  It is a compute shader over an unbounded `StructuredBuffer<uint> sources[]` at
+  the last and highest-numbered binding, with a scalar destination in front of
+  it, and it copies each descriptor's words into that descriptor's own block of
+  the output — so a readback says which element of the array was read from which
+  buffer. Emitted for SPIR-V and DXIL only: `crcbl-mtl` binds Metal's flat
+  argument tables and `crcbl-webgpu` has no binding arrays at all, so both
+  refuse the layout it needs and an MSL or WGSL artifact would be bytes nothing
+  loads.
+
+  With it, `Capability::BindlessDescriptorArray` is driven by the agnostic seam
+  suite instead of being reported as a coverage gap — 22 of 26 capabilities on
+  both `CRCBL_GPU=vk` and `CRCBL_GPU=wgpu`, up from 21.
 
 - **`crcbl_shaders::push_constant_raster`** — the first committed shader in this
   workspace that reads a push-constant block from the **graphics** stages, a

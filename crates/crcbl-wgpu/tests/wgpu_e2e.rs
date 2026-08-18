@@ -2471,16 +2471,35 @@ fn a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_droppe
             );
         }
 
-        // Both halves satisfied, so it builds — without which the two refusals
-        // above would pass just as well against a backend that refused every
-        // VARIABLE_COUNT layout there is.
-        let legal = device
+        // **Both halves of the ordering rule satisfied, and it is still
+        // refused** — by this backend rather than by the seam, and with a
+        // different error variant, which is what keeps the two refusals above
+        // meaningful. A backend that simply refused every `VARIABLE_COUNT`
+        // layout with one error could not produce this pair: `check_entries`
+        // answers `InvalidDescriptor` naming the placement, and only once the
+        // placement is legal does `crcbl-wgpu`'s own `Unsupported` arrive.
+        //
+        // The refusal itself is the honest half of
+        // `Capability::BindlessDescriptorArray` on this backend. wgpu takes a
+        // binding array's length from the layout's fixed count and from the
+        // slice a group is created with, and `update_bind_group` here is
+        // `Unsupported` — so a `VARIABLE_COUNT` layout accepted here would be a
+        // fixed array wearing a bindless declaration, which is exactly what
+        // `BindingFlags` says a backend must refuse rather than downgrade.
+        let error = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
                 label: Some("wgpu e2e variable count"),
                 entries: &[scalar, variable(ARRAY_BINDING)],
             })
-            .expect("last in the slice and highest-numbered is the legal placement");
-        device.destroy_bind_group_layout(legal);
+            .expect_err("this backend has no runtime-sized array to build");
+        assert!(
+            matches!(error, HalError::Unsupported { .. }),
+            "a capability this backend does not have is Unsupported, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("VARIABLE_COUNT"),
+            "the refusal must name what it refuses: {error}"
+        );
     } else {
         println!(
             "wgpu e2e: this adapter has no descriptor indexing, so no VARIABLE_COUNT layout can \
@@ -2499,21 +2518,29 @@ fn a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_droppe
 }
 
 /// A [`BindGroupDesc::variable_count`](crcbl_hal::BindGroupDesc::variable_count)
-/// the entries do not bear out is refused, by name.
+/// is refused by name, on every layout and every adapter.
 ///
-/// The field was dropped here without a word. wgpu sizes a binding array from
-/// the entry list itself and this backend's `update_bind_group` is
-/// `Unsupported`, so an explicit `n` chooses no allocation — but an `n` that
-/// disagrees with the entries is a caller bug either way, and a backend that
-/// ignores the field reports one group for two different descriptors.
+/// The field was dropped here without a word, and it cannot be honoured: wgpu
+/// takes a binding array's length from the layout's fixed count and from the
+/// slice a group is created with, and this backend's `update_bind_group` is
+/// `Unsupported`, so an explicit `n` chooses no allocation and no slot it leaves
+/// empty can ever be filled. That is why `create_bind_group_layout` refuses a
+/// `VARIABLE_COUNT` entry outright — see
+/// [`a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_dropped`]
+/// — and it is why the field is refused here rather than checked against the
+/// entries: with no layout on this backend able to declare a variable binding,
+/// there is nothing left for it to describe.
 ///
-/// The first half runs on every adapter: a layout that declares no
-/// `VARIABLE_COUNT` binding has nothing for the field to describe, and saying so
-/// needs no descriptor indexing. Only the counting half needs a `VARIABLE_COUNT`
-/// layout to fail against.
+/// **The same [`HalError::Unsupported`] the layout half returns**, which is the
+/// shape `crcbl-mtl` uses for this same pair: two ends of one capability
+/// answering with two different variants is what lets a caller branch on
+/// `Unsupported` and still be surprised at the second one.
+///
+/// Runs on every adapter, since it no longer needs a `VARIABLE_COUNT` layout to
+/// fail against.
 #[test]
 #[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped() {
+fn a_wgpu_variable_count_is_refused_not_dropped() {
     let (instance, device, surface, _queue, _format) = Headless::open_device();
     let (images, views) = sampled_views(device.as_ref(), 1);
     let sampler = device
@@ -2530,119 +2557,41 @@ fn a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped() {
     let filled = [sampler_entry, view_entry(0, views[0])];
 
     let scalar = array_layout(device.as_ref(), 1);
-    let no_array = refused(
-        device.as_ref(),
-        scalar,
-        &filled,
-        Some(2),
-        "a variable count on a layout that declares no VARIABLE_COUNT binding",
+    let error = device
+        .create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: Some("wgpu e2e variable count"),
+            layout: scalar,
+            entries: &filled,
+            variable_count: Some(1),
+        })
+        .expect_err("a variable count on a backend with no variable-length group");
+    assert!(
+        matches!(error, HalError::Unsupported { .. }),
+        "a capability this backend does not have is Unsupported, got {error:?}"
     );
-    for expected in ["variable_count", "no VARIABLE_COUNT binding"] {
+    let message = error.to_string();
+    for expected in ["variable_count", "VARIABLE_COUNT layout"] {
         assert!(
-            no_array.contains(expected),
-            "{expected:?} missing from {no_array}"
+            message.contains(expected),
+            "{expected:?} missing from {message}"
         );
     }
+
+    // **The same descriptor with the field cleared, and it builds.** Without
+    // this the refusal above would pass just as well against a backend that
+    // refused every bind group there is — including a `variable_count` of 1
+    // over one filled element, which is the closest a caller can come to asking
+    // for nothing at all and is still refused.
+    let group = device
+        .create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: Some("wgpu e2e no variable count"),
+            layout: scalar,
+            entries: &filled,
+            variable_count: None,
+        })
+        .expect("the same group without the field is an ordinary one");
+    device.destroy_bind_group(group);
     device.destroy_bind_group_layout(scalar);
-
-    if device
-        .caps()
-        .features
-        .contains(Features::DESCRIPTOR_INDEXING)
-    {
-        let entries = [
-            crcbl_hal::BindGroupLayoutEntry {
-                binding: SCALAR_BINDING,
-                visibility: ShaderStages::FRAGMENT,
-                kind: crcbl_hal::BindingKind::Sampler { comparison: false },
-                count: 1,
-                flags: crcbl_hal::BindingFlags::empty(),
-            },
-            crcbl_hal::BindGroupLayoutEntry {
-                binding: ARRAY_BINDING,
-                visibility: ShaderStages::FRAGMENT,
-                kind: crcbl_hal::BindingKind::SampledImage {
-                    view_type: ImageViewType::D2,
-                    sample_type: SampleType::Float,
-                },
-                count: ARRAY_COUNT,
-                flags: crcbl_hal::BindingFlags::VARIABLE_COUNT
-                    | crcbl_hal::BindingFlags::PARTIALLY_BOUND,
-            },
-        ];
-        let layout = device
-            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
-                label: Some("wgpu e2e variable count"),
-                entries: &entries,
-            })
-            .expect("a VARIABLE_COUNT array on the last and highest binding");
-
-        // One element supplied and one declared used: the count the entries
-        // bear out, so the group builds. Without this the refusals below would
-        // pass against a backend that refused the field outright.
-        let group = device
-            .create_bind_group(&crcbl_hal::BindGroupDesc {
-                label: Some("wgpu e2e variable count agrees"),
-                layout,
-                entries: &filled,
-                variable_count: Some(1),
-            })
-            .expect("a variable count the entries bear out");
-        device.destroy_bind_group(group);
-
-        // Inside the layout's ceiling and still a slot this group never fills.
-        // Vulkan would allocate it and let `update_bind_group` write it later;
-        // wgpu has neither the slot nor the update.
-        let unfilled = refused(
-            device.as_ref(),
-            layout,
-            &filled,
-            Some(ARRAY_COUNT),
-            "a variable count above what the entries fill",
-        );
-        for expected in ["variable_count is 2", "fills 1", "binding 1"] {
-            assert!(
-                unfilled.contains(expected),
-                "{expected:?} missing from {unfilled}"
-            );
-        }
-
-        // Past the layout's own ceiling, which the message names.
-        let over = refused(
-            device.as_ref(),
-            layout,
-            &filled,
-            Some(ARRAY_COUNT + 1),
-            "a variable count above the layout's declared count",
-        );
-        for expected in ["variable_count is 3", "binding 1's 2 elements"] {
-            assert!(over.contains(expected), "{expected:?} missing from {over}");
-        }
-
-        // A group that names the variable binding nowhere fills none of it,
-        // which is a disagreement like any other rather than a case with no
-        // answer.
-        let absent = refused(
-            device.as_ref(),
-            layout,
-            &[sampler_entry],
-            Some(1),
-            "a variable count on a group that never names the variable binding",
-        );
-        for expected in ["variable_count is 1", "fills 0", "binding 1"] {
-            assert!(
-                absent.contains(expected),
-                "{expected:?} missing from {absent}"
-            );
-        }
-        device.destroy_bind_group_layout(layout);
-    } else {
-        println!(
-            "wgpu e2e: this adapter has no descriptor indexing, so no VARIABLE_COUNT layout can \
-             be created here for a variable count to be checked against; the scalar refusal above \
-             still ran"
-        );
-    }
 
     assert!(
         device.take_error().is_none(),
@@ -2845,8 +2794,15 @@ fn a_wgpu_bind_group_layout_wgpu_rejects_arrives_as_an_error_from_the_call() {
                 sample_type: SampleType::Float,
             },
             count: u32::MAX,
-            flags: crcbl_hal::BindingFlags::VARIABLE_COUNT
-                | crcbl_hal::BindingFlags::PARTIALLY_BOUND,
+            // `PARTIALLY_BOUND` alone, and not the `VARIABLE_COUNT` this
+            // declaration used to carry: that flag is refused outright by this
+            // backend — see
+            // `a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_dropped`
+            // — so a layout carrying it would never reach the resolution this
+            // case is about. The sentinel is a property of `count` and is
+            // resolved for every entry regardless of flags, so the proof is the
+            // same one.
+            flags: crcbl_hal::BindingFlags::PARTIALLY_BOUND,
         }];
         let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {

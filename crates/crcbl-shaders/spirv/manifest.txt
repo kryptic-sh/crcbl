@@ -8,6 +8,15 @@ target = spirv_1_5
 dxc-version = 1.9(1-0d3ee6b5)(1.9.0.1)
 dxil-model = 6_6
 
+[bindless_probe]
+source = shaders/bindless_probe.slang
+source-sha256 = 32f26712800aa3344a9c28ecbcc9b6633949de2f31385d3a635f1a217ad8082a
+targets = spirv, dxil
+spirv = spirv/bindless_probe.spv
+spirv-sha256 = 35c2e712cb0e1fd23695fbf871b982f3c3e5f92df791085e038670d5ac4e988f
+dxil = computeMain:dxil/bindless_probe.computeMain.dxil:38d94973a0ca8b6eae9f1d2018aeca7eeaa9eab61503d372220d07ddfbc8844e
+entry-points = computeMain:glcompute
+
 [clear_counters]
 source = shaders/clear_counters.slang
 source-sha256 = c49d76e2b98396fad6a4b903d6c26aa141901c2ec6ccef397e37c02cda2106f9

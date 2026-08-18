@@ -4928,21 +4928,29 @@ fn exercise_push_constants_on_compute(headless: &Headless) -> Exercise {
     outcome
 }
 
-/// Primes the destination, runs `record` inside a compute pass, reads the result
-/// back and says which of the three outcomes it is.
+/// Primes the destination, runs `record` inside a compute pass, and reads the
+/// destination back as words — or hands back the error `finish` refused with.
 ///
 /// Split out of [`exercise_push_constants_on_compute`] so the recording — which
 /// is the only part that is about push constants — sits next to the pipeline it
-/// needs, with the barriers, the submit and the comparison out of the way. The
-/// barrier shape is [`ComputeProbe::run`]'s, and for its reasons.
-fn push_constant_dispatch(
+/// needs, with the barriers and the submit out of the way, and shared with
+/// [`exercise_bindless_descriptor_array`] once that arrived: the two differ in
+/// what they record and in what the words are compared against, and in nothing
+/// between. The barrier shape is [`ComputeProbe::run`]'s, and for its reasons.
+///
+/// # Errors
+///
+/// Whatever [`finish`](crcbl::hal::CommandEncoder::finish) refused with, for a
+/// backend that defers its errors to the end of recording. Every caller turns
+/// that into [`Exercise::Refused`].
+fn primed_dispatch(
     headless: &Headless,
     prime: crcbl::hal::BufferHandle,
     destination: crcbl::hal::BufferHandle,
     staging: crcbl::hal::BufferHandle,
     bytes: u64,
     record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
-) -> Exercise {
+) -> Result<Vec<u32>, HalError> {
     let device = headless.device.as_ref();
     let barrier = |buffer, from, to| crcbl::hal::BufferBarrier {
         buffer,
@@ -5001,10 +5009,7 @@ fn push_constant_dispatch(
         size: bytes,
     });
 
-    let commands = match encoder.finish() {
-        Err(error) => return Exercise::Refused(error),
-        Ok(commands) => commands,
-    };
+    let commands = encoder.finish()?;
     device
         .submit(headless.queue, &SubmitInfo::new(&[commands]))
         .expect("submit");
@@ -5013,10 +5018,29 @@ fn push_constant_dispatch(
 
     let mut read = poisoned(bytes as usize);
     headless.readback(staging, bytes, &mut read);
-    let words: Vec<u32> = read
+    Ok(read
         .chunks_exact(4)
         .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
-        .collect();
+        .collect())
+}
+
+/// Says which of the three outcomes a push-constant dispatch produced.
+///
+/// The classification is what is left of [`primed_dispatch`]'s old body once the
+/// mechanics moved out: the words come from a dispatch of
+/// `push_constant_probe.slang`, and every arm below is about [`PUSHED`].
+fn push_constant_dispatch(
+    headless: &Headless,
+    prime: crcbl::hal::BufferHandle,
+    destination: crcbl::hal::BufferHandle,
+    staging: crcbl::hal::BufferHandle,
+    bytes: u64,
+    record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
+) -> Exercise {
+    let words = match primed_dispatch(headless, prime, destination, staging, bytes, record) {
+        Err(error) => return Exercise::Refused(error),
+        Ok(words) => words,
+    };
 
     if words == PUSHED.values {
         Exercise::Worked
@@ -6581,6 +6605,472 @@ fn exercise_query_set_creation(headless: &Headless, kind: QueryKind) -> Exercise
     outcome
 }
 
+// --- the bindless path -----------------------------------------------------
+
+/// The word every element of the bindless destination holds before the dispatch.
+///
+/// [`FILL_POISON`]'s job for this exercise, and a different value from it, from
+/// [`PUSH_CONSTANT_POISON`] and from every word the source buffers hold, so that
+/// "this destination was never written" stays separable from "the shader wrote
+/// it" and from "some other exercise's primer reached it".
+const BINDLESS_POISON: u32 = 0xB0B0_0B0B;
+
+/// Descriptors the array binding declares room for, against the
+/// `SOURCE_COUNT` the bind group actually uses.
+///
+/// **One more than the group fills, which is the point of the capability.**
+/// [`BindingFlags::VARIABLE_COUNT`](crcbl::hal::BindingFlags::VARIABLE_COUNT)
+/// makes the layout's count a *ceiling* and
+/// [`BindGroupDesc::variable_count`](crcbl::hal::BindGroupDesc) the length the
+/// group chooses inside it; a ceiling equal to the length would be satisfied by
+/// a backend that ignored the field and sized the array from the layout, which
+/// is exactly the fixed-array downgrade this capability separates out.
+///
+/// Only one more, because the array's descriptors count against a device's
+/// per-stage storage-buffer budget: with the destination beside them this layout
+/// stays inside [`PORTABLE_STORAGE_BUFFERS_PER_STAGE`], asserted below.
+const BINDLESS_CEILING: u32 = crcbl::shaders::bindless_probe::SOURCE_COUNT + 1;
+
+const _: () = assert!(
+    BINDLESS_CEILING < crcbl::hal::PORTABLE_STORAGE_BUFFERS_PER_STAGE,
+    "the array's ceiling plus the destination is more storage buffers in one stage than a WebGPU \
+     device guarantees, so this layout is one a portable backend may refuse for a reason that has \
+     nothing to do with bindless"
+);
+
+/// Word `word` of source buffer `source`, as the caller writes it and as the
+/// shader must read it back.
+///
+/// **Distinct across every source *and* every word**, which is what makes the
+/// two failure modes separable. A backend that bound the array's first
+/// descriptor for every index — the flat-argument-table shape — returns source
+/// 0's block four times over; one that read each buffer at the wrong offset
+/// returns the right source with its words rotated. A constant per buffer would
+/// hide the second and a constant everywhere would hide both.
+///
+/// The high byte is a fixed tag so that no word can collide with
+/// [`BINDLESS_POISON`] or be zero, which the two `SilentlyIgnored` arms below
+/// depend on.
+const fn bindless_word(source: u32, word: u32) -> u32 {
+    0xBD00_0000 | (source << 8) | word
+}
+
+// The premise both `SilentlyIgnored` arms rest on, checked at compile time
+// because every side is a constant. A source word equal to the poison would make
+// a dispatch that never ran read back as one that worked, and a source word of
+// zero would do the same for an array whose descriptors delivered nothing.
+const _: () = {
+    let mut source = 0;
+    while source < crcbl::shaders::bindless_probe::SOURCE_COUNT {
+        let mut word = 0;
+        while word < crcbl::shaders::bindless_probe::WORDS_PER_SOURCE {
+            assert!(
+                bindless_word(source, word) != BINDLESS_POISON,
+                "a source word equals BINDLESS_POISON, so a dispatch that never ran and one that \
+                 read the array are no longer distinguishable"
+            );
+            assert!(
+                bindless_word(source, word) != 0,
+                "a source word is zero, so an array that delivered nothing and one that was read \
+                 are no longer distinguishable"
+            );
+            word += 1;
+        }
+        source += 1;
+    }
+};
+
+/// What the destination must hold when every descriptor was read from the buffer
+/// the group put in it.
+fn bindless_expected() -> Vec<u32> {
+    use crcbl::shaders::bindless_probe::{SOURCE_COUNT, WORDS_PER_SOURCE};
+    (0..SOURCE_COUNT)
+        .flat_map(|source| (0..WORDS_PER_SOURCE).map(move |word| bindless_word(source, word)))
+        .collect()
+}
+
+/// Drives [`Capability::BindlessDescriptorArray`](crcbl::hal::Capability::BindlessDescriptorArray)
+/// and reports whether the words a shader read out of a descriptor array are the
+/// words the caller put in its descriptors.
+///
+/// # Why this one needs its own fixture, and its own shader
+///
+/// Nothing else here can answer it. Every other layout in this file is a fixed
+/// list of scalar bindings, and — until `bindless_probe.slang` — no committed
+/// artifact declared a resource array at all: every `Texture2DArray` in
+/// `crcbl-shaders` is one layered image rather than an array of descriptors, no
+/// committed SPIR-V declared `RuntimeDescriptorArray`, and no WGSL contained
+/// `binding_array`. So the capability was `Unexercised` while every backend
+/// declared an answer for it.
+///
+/// The layout is the capability's own definition: a
+/// [`BindingFlags::VARIABLE_COUNT`](crcbl::hal::BindingFlags::VARIABLE_COUNT)
+/// entry declaring a [`BINDLESS_CEILING`] it does not fill, and a
+/// [`BindGroupDesc::variable_count`](crcbl::hal::BindGroupDesc) choosing the
+/// length inside it. The array is the last entry and the highest binding number,
+/// which `crcbl_hal::BindGroupLayoutDesc::check_entries` requires of every
+/// backend and which the shader's declaration order matches.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// The destination is primed with [`BINDLESS_POISON`] through a copy from a host
+/// buffer — a copy rather than a `fill_buffer`, for the reason
+/// [`ComputeProbe::run`] gives — and each of the array's descriptors gets a
+/// **different** buffer holding [`bindless_word`]'s pattern. Then one workgroup
+/// per descriptor is dispatched and the destination is read back:
+///
+/// * the pattern — every descriptor was read from its own buffer, at the right
+///   offsets. [`Exercise::Worked`].
+/// * [`BINDLESS_POISON`] throughout — the prime landed and the dispatch produced
+///   nothing at all. [`Exercise::SilentlyIgnored`].
+/// * zeros throughout — the prime was overwritten, so the shader ran, and every
+///   descriptor it read delivered nothing. [`Exercise::SilentlyIgnored`] as
+///   well, because both are the seam accepting a request and changing nothing
+///   observable.
+/// * anything else — the array was bound wrongly, and the panic names the first
+///   element that disagreed and what the two most likely shapes look like.
+///
+/// # A refusal can arrive at four different points
+///
+/// `crcbl-mtl` refuses every [`BindingFlags`](crcbl::hal::BindingFlags) at
+/// `create_bind_group_layout` because it binds Metal's flat argument tables;
+/// `crcbl-webgpu` refuses because WebGPU has no binding arrays at all; and
+/// `crcbl-wgpu` refuses there too, because a wgpu binding array's length is the
+/// layout's fixed count rather than something a group chooses. A backend that
+/// accepted the layout and not the group would refuse at `create_bind_group` —
+/// which is where all three also refuse `variable_count` — and one that defers
+/// its errors would refuse at [`finish`](crcbl::hal::CommandEncoder::finish), so
+/// every step is matched rather than the first alone.
+///
+/// The shader module is the one step that panics instead, for
+/// [`exercise_push_constants_on_compute`]'s reason: it is reached only after the
+/// layout was accepted, which no backend without descriptor arrays gets to, and
+/// the artifact deliberately ships SPIR-V and DXIL alone.
+fn exercise_bindless_descriptor_array(headless: &Headless) -> Exercise {
+    use crcbl::shaders::bindless_probe::{DESTINATION_BYTES, SOURCE_BYTES, SOURCE_COUNT};
+
+    let device = headless.device.as_ref();
+
+    let prime = device
+        .create_buffer(&BufferDesc {
+            label: Some("bindless prime"),
+            size: DESTINATION_BYTES,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a host-upload buffer");
+    let primer: Vec<u8> = core::iter::repeat_n(BINDLESS_POISON, bindless_expected().len())
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    device
+        .write_buffer(prime, 0, &primer)
+        .expect("a host-upload buffer is what write_buffer is for");
+
+    let destination = device
+        .create_buffer(&BufferDesc {
+            label: Some("bindless destination"),
+            size: DESTINATION_BYTES,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a device-local buffer");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("bindless readback"),
+            size: DESTINATION_BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+
+    // One buffer per descriptor, each with its own contents. Distinct buffers
+    // rather than one buffer at four offsets: two descriptors resolving to the
+    // same object would let a backend that dropped one of them still look
+    // correct, which is `crcbl-wgpu`'s array suite's reason for the same choice.
+    let upload = device
+        .create_buffer(&BufferDesc {
+            label: Some("bindless source upload"),
+            size: SOURCE_BYTES * u64::from(SOURCE_COUNT),
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a host-upload buffer");
+    let source_bytes: Vec<u8> = bindless_expected()
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    device
+        .write_buffer(upload, 0, &source_bytes)
+        .expect("write");
+    let sources: Vec<crcbl::hal::BufferHandle> = (0..SOURCE_COUNT)
+        .map(|index| {
+            device
+                .create_buffer(&BufferDesc {
+                    label: Some(&format!("bindless source {index}")),
+                    size: SOURCE_BYTES,
+                    usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .expect("a device-local buffer")
+        })
+        .collect();
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("bindless upload"),
+        queue: headless.queue,
+    });
+    for (index, source) in sources.iter().enumerate() {
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+            src: upload,
+            src_offset: SOURCE_BYTES * index as u64,
+            dst: *source,
+            dst_offset: 0,
+            size: SOURCE_BYTES,
+        });
+    }
+    let barriers: Vec<crcbl::hal::BufferBarrier> = sources
+        .iter()
+        .map(|source| crcbl::hal::BufferBarrier {
+            buffer: *source,
+            from: ResourceState::TransferDst,
+            to: ResourceState::ShaderRead,
+            queue_transfer: None,
+        })
+        .collect();
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &barriers,
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(upload);
+
+    // The destination first and the array last, which is both halves of the rule
+    // `check_entries` enforces — last in the slice and highest-numbered — and the
+    // order `bindless_probe.slang` declares them in, which `crcbl_shaders`'
+    // `declaration_order` lint holds it to.
+    let layout_entries = [
+        crcbl::hal::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: false,
+            },
+            count: 1,
+            flags: crcbl::hal::BindingFlags::empty(),
+        },
+        crcbl::hal::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: BINDLESS_CEILING,
+            // `VARIABLE_COUNT` alone. `PARTIALLY_BOUND` would say the shader may
+            // read a descriptor the group never wrote, and this group writes
+            // every descriptor it declares — declaring it would widen what a
+            // backend is allowed to leave uninitialised without widening
+            // anything this exercise observes, and reading an unwritten
+            // descriptor is undefined rather than wrong.
+            flags: crcbl::hal::BindingFlags::VARIABLE_COUNT,
+        },
+    ];
+    let outcome = match device.create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
+        label: Some("bindless probe"),
+        entries: &layout_entries,
+    }) {
+        Err(error) => Exercise::Refused(error),
+        Ok(bind_group_layout) => {
+            let mut group_entries = vec![crcbl::hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::whole_buffer(destination),
+            }];
+            group_entries.extend(sources.iter().enumerate().map(|(index, source)| {
+                crcbl::hal::BindGroupEntry {
+                    binding: 1,
+                    // The whole bindless write path in one field: one entry per
+                    // descriptor, each naming which element of the array it
+                    // fills.
+                    array_index: index as u32,
+                    resource: crcbl::hal::BindingResource::whole_buffer(*source),
+                }
+            }));
+            let outcome = match device.create_bind_group(&crcbl::hal::BindGroupDesc {
+                label: Some("bindless probe"),
+                layout: bind_group_layout,
+                entries: &group_entries,
+                // Below `BINDLESS_CEILING`: the length is chosen here, which is
+                // what the capability is.
+                variable_count: Some(SOURCE_COUNT),
+            }) {
+                Err(error) => Exercise::Refused(error),
+                Ok(bind_group) => {
+                    let outcome = bindless_dispatch(
+                        headless,
+                        bind_group_layout,
+                        bind_group,
+                        prime,
+                        destination,
+                        staging,
+                    );
+                    device.destroy_bind_group(bind_group);
+                    outcome
+                }
+            };
+            device.destroy_bind_group_layout(bind_group_layout);
+            outcome
+        }
+    };
+
+    for source in sources {
+        device.destroy_buffer(source);
+    }
+    device.destroy_buffer(staging);
+    device.destroy_buffer(destination);
+    device.destroy_buffer(prime);
+    outcome
+}
+
+/// Builds the pipeline over `bind_group_layout`, dispatches one workgroup per
+/// descriptor, and says which of the outcomes the readback is.
+///
+/// Split out of [`exercise_bindless_descriptor_array`] so that the buffers and
+/// the descriptor array — which is what that function is about — are not
+/// interleaved with a pipeline every other compute exercise here also builds.
+fn bindless_dispatch(
+    headless: &Headless,
+    bind_group_layout: crcbl::hal::BindGroupLayoutHandle,
+    bind_group: crcbl::hal::BindGroupHandle,
+    prime: crcbl::hal::BufferHandle,
+    destination: crcbl::hal::BufferHandle,
+    staging: crcbl::hal::BufferHandle,
+) -> Exercise {
+    use crcbl::shaders::bindless_probe::{DESTINATION_BYTES, SOURCE_COUNT, WORKGROUP_SIZE};
+
+    let device = headless.device.as_ref();
+    let set_layouts = [bind_group_layout];
+    let pipeline_layout = match device.create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
+        label: Some("bindless probe"),
+        bind_group_layouts: &set_layouts,
+        push_constants: None,
+    }) {
+        Err(error) => return Exercise::Refused(error),
+        Ok(pipeline_layout) => pipeline_layout,
+    };
+
+    let module = device
+        .create_shader_module(&crcbl::hal::ShaderModuleDesc {
+            label: Some("bindless_probe.slang"),
+            spirv: crcbl::shaders::BINDLESS_PROBE.spirv(),
+            // Both `None`, and that is the artifact rather than an omission: the
+            // source declares neither target, because the two backends that
+            // would load them refuse this layout above and could never reach
+            // here.
+            wgsl: crcbl::shaders::BINDLESS_PROBE.wgsl(),
+            msl: crcbl::shaders::BINDLESS_PROBE.msl(),
+            dxil: &crcbl::shaders::BINDLESS_PROBE.dxil_containers(),
+        })
+        .expect(
+            "this backend accepted a VARIABLE_COUNT layout and then refused the committed \
+             bindless_probe artifact — that is a fixture problem rather than a capability answer",
+        );
+    let entry_point = crcbl::shaders::BINDLESS_PROBE
+        .entry_point(crcbl::shaders::Stage::Compute)
+        .expect("the probe has exactly one compute entry point");
+    let outcome = match device.create_compute_pipeline(&crcbl::hal::ComputePipelineDesc {
+        label: Some("bindless probe"),
+        layout: pipeline_layout,
+        compute: crcbl::hal::ShaderEntry {
+            module,
+            entry_point,
+        },
+        workgroup_size: [WORKGROUP_SIZE, 1, 1],
+    }) {
+        Err(error) => Exercise::Refused(error),
+        Ok(pipeline) => {
+            let read = primed_dispatch(
+                headless,
+                prime,
+                destination,
+                staging,
+                DESTINATION_BYTES,
+                |e| {
+                    e.bind_compute_pipeline(pipeline);
+                    e.bind_group(0, bind_group, &[], pipeline_layout);
+                    // One workgroup per descriptor: the shader takes its array
+                    // index from `SV_GroupID`, which is the dynamically uniform
+                    // value descriptor indexing is defined for.
+                    e.dispatch(SOURCE_COUNT, 1, 1);
+                },
+            );
+            device.destroy_compute_pipeline(pipeline);
+            match read {
+                Err(error) => Exercise::Refused(error),
+                Ok(words) => bindless_outcome(&words),
+            }
+        }
+    };
+    device.destroy_shader_module(module);
+    device.destroy_pipeline_layout(pipeline_layout);
+    outcome
+}
+
+/// Which outcome a bindless readback is.
+fn bindless_outcome(words: &[u32]) -> Exercise {
+    let want = bindless_expected();
+    if words == want.as_slice() {
+        return Exercise::Worked;
+    }
+    if words.iter().all(|word| *word == BINDLESS_POISON) {
+        eprintln!(
+            "crcbl hal seam e2e: the destination still holds {BINDLESS_POISON:#010x} throughout, \
+             so the dispatch wrote nothing at all"
+        );
+        return Exercise::SilentlyIgnored;
+    }
+    if words.iter().all(|word| *word == 0) {
+        eprintln!(
+            "crcbl hal seam e2e: the dispatch overwrote the prime with zeros, so the shader ran \
+             and every descriptor it read through the array delivered nothing"
+        );
+        return Exercise::SilentlyIgnored;
+    }
+
+    use crcbl::shaders::bindless_probe::WORDS_PER_SOURCE;
+    let index = words
+        .iter()
+        .zip(&want)
+        .position(|(got, expected)| got != expected)
+        .expect("the two agree word for word only on the arm above");
+    let block = index as u32 / WORDS_PER_SOURCE;
+    let flat = words
+        .chunks_exact(WORDS_PER_SOURCE as usize)
+        .all(|chunk| chunk == &want[..WORDS_PER_SOURCE as usize]);
+    panic!(
+        "element {index} of the destination came back {:#010x} where {:#010x} was written into \
+         descriptor {block}'s own buffer. The dispatch left {words:#010x?} against \
+         {want:#010x?}.\n  Every word here came out of the descriptor array and landed somewhere \
+         the array did not put it, which is a wrong picture with a clean log. \
+         {}",
+        words[index],
+        want[index],
+        if flat {
+            "Every block holds the FIRST descriptor's words, which is the flat-argument-table \
+             shape: the array's index was dropped and one descriptor answered for all of them."
+        } else {
+            "The blocks differ from each other, so the array was indexed — a descriptor was \
+             filled from the wrong buffer, or a buffer was read at the wrong offset."
+        },
+    )
+}
+
 /// Drives [`Capability::StorageImageBinding`](crcbl::hal::Capability::StorageImageBinding):
 /// a layout holding [`BindingKind::StorageImage`](crcbl::hal::BindingKind::StorageImage)
 /// entries, and a pipeline layout over it.
@@ -6723,10 +7213,10 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::DrawIndirectCount => exercise_draw_indirect_count(headless),
         C::IndirectArgumentPaddedStride => exercise_indirect_argument_padded_stride(headless),
         C::MeshShading | C::TaskShaderStage => Exercise::Unexercised(NEEDS_MESH_ARTIFACTS),
-        C::BindlessDescriptorArray => Exercise::Unexercised(
-            "needs a bind-group layout built for the capability and a shader that reads it; \
-             the compute probe's layout is a fixed three-buffer one",
-        ),
+        // The one that left the unexercised list most recently, and it took a
+        // new shader to do it: `bindless_probe.slang` is the first committed
+        // artifact in the tree to declare an array of descriptors at all.
+        C::BindlessDescriptorArray => exercise_bindless_descriptor_array(headless),
         // The one that left that pair, and it left because the capability is
         // narrower than the reason was: it is about the layout, not about a
         // shader reading it. See `exercise_storage_image_binding`.

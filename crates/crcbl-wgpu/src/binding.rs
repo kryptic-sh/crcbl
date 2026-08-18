@@ -21,7 +21,7 @@
 //! `0..n` with `n` below the layout's count, under
 //! `wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY`. That one is passed through.
 //!
-//! # `variable_count` is checked against the entries, not obeyed
+//! # `variable_count` has no meaning here, so it is refused rather than obeyed
 //!
 //! [`BindGroupDesc::variable_count`] says how many elements of a
 //! [`VARIABLE_COUNT`](crcbl_hal::BindingFlags::VARIABLE_COUNT) array the group
@@ -34,11 +34,18 @@
 //! above is — and this backend's `update_bind_group` is
 //! [`HalError::Unsupported`] because WebGPU bind groups are immutable once
 //! created. So an explicit `n` chooses nothing the entry list has not already
-//! said, and the two ways to "honour" it both fail: dropping it is the silent
-//! downgrade this module exists to refuse, and padding the slice out to `n`
-//! would bind resources the caller never named. It is checked instead, by
-//! [`check_variable_count`] — an `n` the entries contradict is a caller bug
-//! this backend can name today, whichever way the seam's field grows later.
+//! said, and every way to "honour" it fails: dropping it is a silent downgrade,
+//! padding the slice out to `n` would bind resources the caller never named,
+//! and merely *checking* it against the entries would leave a layout that
+//! declares a runtime-sized array behaving as a fixed one — which is precisely
+//! the downgrade [`BindingFlags`](crcbl_hal::BindingFlags) forbids, and which
+//! `Device::supports` answers [`Support::No`](crcbl_hal::Support::No) for.
+//!
+//! So `create_bind_group_layout` refuses a `VARIABLE_COUNT` entry outright and
+//! [`check_variable_count`] refuses the field, with the same error variant at
+//! both ends. What survives here is the *fixed* array: a layout `count` above
+//! one still arrives as `TextureViewArray` and friends, which is what the
+//! density rule above is about.
 
 use crcbl_hal::{self as hal, BindGroupDesc, HalError};
 
@@ -74,18 +81,6 @@ pub(crate) struct Bound {
     /// count, never off `resources.len()`.
     array: bool,
     resources: Resources,
-}
-
-impl Bound {
-    /// How many array elements this binding was given.
-    fn elements(&self) -> u32 {
-        let count = match &self.resources {
-            Resources::Buffers(buffers) => buffers.len(),
-            Resources::Views(views) => views.len(),
-            Resources::Samplers(samplers) => samplers.len(),
-        };
-        count as u32
-    }
 }
 
 /// The same resources, borrowed in the shapes `wgpu::BindingResource` takes.
@@ -226,50 +221,30 @@ pub(crate) fn resolve(
             resources,
         });
     }
-    check_variable_count(desc, layout, &bound)?;
+    check_variable_count(desc)?;
     Ok(bound)
 }
 
-/// Checks [`BindGroupDesc::variable_count`] against what the group supplies, or
-/// says why the two cannot both be true.
+/// Refuses a [`BindGroupDesc::variable_count`], which is the group half of the
+/// answer `create_bind_group_layout` gives.
 ///
-/// See the module docs on why agreeing with the entries is the whole of what
-/// the field can mean here.
+/// The field exists to choose the length of a
+/// [`VARIABLE_COUNT`](crcbl_hal::BindingFlags::VARIABLE_COUNT) array, and this
+/// backend refuses every layout that declares one — so a `Some` here is a caller
+/// asking for a shape no layout on this backend can have, rather than a value to
+/// check against entries or to ignore. See the module docs for why wgpu has
+/// neither half of what the field means.
 ///
-/// The binding it describes is the one the layout declared `VARIABLE_COUNT` on,
-/// which [`BindGroupLayoutSlot`] recorded at creation because wgpu's layout
-/// cannot be asked for it. A `variable_count` on a layout that declares no such
-/// binding is refused in `crcbl-vk`'s words, because it is the same caller bug.
-fn check_variable_count(
-    desc: &BindGroupDesc<'_>,
-    layout: &BindGroupLayoutSlot,
-    bound: &[Bound],
-) -> Result<(), HalError> {
-    let Some(requested) = desc.variable_count else {
-        return Ok(());
-    };
-    let Some(binding) = layout.variable_binding() else {
-        return Err(HalError::InvalidDescriptor(
-            "BindGroupDesc::variable_count on a layout that declares no VARIABLE_COUNT binding"
-                .to_string(),
+/// **The same variant the layout half uses**, for `crcbl-mtl`'s reason: the two
+/// ends of one capability refusing with two different errors is what lets a
+/// caller branch on [`HalError::Unsupported`] and still be surprised here.
+fn check_variable_count(desc: &BindGroupDesc<'_>) -> Result<(), HalError> {
+    if desc.variable_count.is_some() {
+        return Err(crate::device::WgpuDevice::unsupported(
+            "BindGroupDesc::variable_count on a wgpu bind group: a binding array's length here is \
+             the layout's fixed count and the slice the group is created with, and this backend \
+             refuses every VARIABLE_COUNT layout, so no group has a variable length to choose",
         ));
-    };
-    let ceiling = layout
-        .count(binding)
-        .unwrap_or_else(|| unreachable!("the variable binding came from the layout's own entries"));
-    // Zero when the group names that binding nowhere, which is a disagreement
-    // like any other rather than a case of its own.
-    let elements = bound
-        .iter()
-        .find(|slot| slot.binding == binding)
-        .map_or(0, Bound::elements);
-    if requested != elements {
-        return Err(HalError::InvalidDescriptor(format!(
-            "BindGroupDesc::variable_count is {requested}, but this group fills {elements} of \
-             binding {binding}'s {ceiling} elements; wgpu takes a binding array's length from the \
-             entry list itself and this backend has no update_bind_group, so a slot the \
-             descriptor leaves empty can never be filled later"
-        )));
     }
     Ok(())
 }

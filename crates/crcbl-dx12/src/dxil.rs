@@ -849,6 +849,20 @@ mod tests {
         // its own entry point reached, so the union is what the source declares.
         let cases: &[(&str, &crcbl_shaders::Shader, &[&str], &[RegisterClass])] = &[
             (
+                "bindless_probe",
+                &crcbl_shaders::BINDLESS_PROBE,
+                &["computeMain"],
+                // The written destination at binding 0 and the **unbounded**
+                // descriptor array at binding 1 — the one shipped source whose
+                // array has no compile-time length, and therefore the one whose
+                // `t0` covers the rest of the `t` file rather than a single
+                // register. It also earns its place in `resource_table`'s space
+                // assertion below: Slang moves an unbounded array into a space
+                // of its own unless the source pins it, and that source pins it
+                // precisely because this backend builds every range in space 0.
+                &[Uav, Srv],
+            ),
+            (
                 "compute_probe",
                 &crcbl_shaders::COMPUTE_PROBE,
                 &["computeMain"],

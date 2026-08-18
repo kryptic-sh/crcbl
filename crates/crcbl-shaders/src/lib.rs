@@ -146,6 +146,16 @@
 //! The DXIL column never shared the gap: HLSL has root constants and Slang
 //! lowers the same block to an ordinary `cbuffer`. The rule is WGSL's.
 //!
+//! # A third source declares fewer targets, and for an unrelated reason
+//!
+//! [`bindless_probe`] ships `spirv, dxil` alone. That is **not** the rule above
+//! — Slang's WGSL target has `binding_array` and would emit something naga
+//! accepts. It is that `crcbl-mtl` binds Metal's flat argument tables and
+//! `crcbl-webgpu` has no binding arrays at all, so both refuse the layout that
+//! shader needs at `create_bind_group_layout` and neither can ever dispatch it.
+//! The two omitted artifacts would be bytes nothing loads, which is the same
+//! outcome as the push-constant pair's and arrives by a different route.
+//!
 //! # Nothing here knows a backend
 //!
 //! This crate has no dependencies at all, not even `crcbl-hal`. It hands out
@@ -188,6 +198,11 @@ pub mod push_constant_probe;
 /// which is the fact a backend implementing the *graphics* half of
 /// `PushConstantRange` needs and cannot otherwise get.
 pub mod push_constant_raster;
+
+/// The lengths `bindless_probe.slang` declares — and where each of its
+/// artifacts puts the descriptor array, which is the fact a backend
+/// implementing `BindingFlags::VARIABLE_COUNT` needs and cannot otherwise get.
+pub mod bindless_probe;
 
 /// The workgroup size and uniform block `cull.slang` declares, in the layouts
 /// that shader declares.
@@ -732,8 +747,8 @@ mod tests {
         );
     }
 
-    /// Every shipped shader has an MSL artifact, and it names the entry points
-    /// the manifest recorded from the SPIR-V.
+    /// Every shipped shader **that has** an MSL artifact names in it the entry
+    /// points the manifest recorded from the SPIR-V.
     ///
     /// The same check as the WGSL one above and for the same reason: the Metal
     /// backend looks a function up **by name** in the compiled `MTLLibrary`, so
@@ -744,13 +759,21 @@ mod tests {
     /// The attribute is checked as well as the name, because a stage-qualified
     /// function is the only kind Metal will accept into a pipeline slot — an
     /// unqualified `vertexMain` compiles and then fails at pipeline creation.
+    ///
+    /// **Absence is legitimate and is checked elsewhere**, exactly as it is for
+    /// WGSL above: `bindless_probe.slang` declares no `msl` target because
+    /// `crcbl-mtl` binds flat argument tables and refuses its layout outright,
+    /// so demanding an artifact from every shader here would be demanding one
+    /// nothing could ever load. That a shader which *does* declare the target
+    /// has the artifact is [`manifest`]'s job.
     #[test]
     fn every_shipped_shader_has_msl_naming_the_same_entry_points() {
-        assert!(!ALL.is_empty(), "the crate ships no shaders at all");
+        let mut checked = 0_usize;
         for shader in ALL {
-            let msl = shader
-                .msl()
-                .unwrap_or_else(|| panic!("{}: no MSL artifact", shader.name()));
+            let Some(msl) = shader.msl() else {
+                continue;
+            };
+            checked += 1;
             for entry in shader.entry_points() {
                 let attribute = match entry.stage() {
                     Stage::Vertex => "[[vertex]]",
@@ -775,6 +798,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            checked > 0,
+            "no shader has an MSL artifact, so this check covered nothing"
+        );
     }
 
     /// A shader with no text column reports absence, not an empty source — the

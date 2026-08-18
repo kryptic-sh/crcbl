@@ -298,53 +298,38 @@ failure.**
    that unblocked dx12's and Metal's rows, which is why it was worth doing
    properly rather than three times.
 
-   **The fourth is not the exercise it was recorded as, and the deletion no
-   longer waits on it.** `crates/crcbl-wgpu/tests/wgpu_e2e.rs` does hold the
-   only bind group built with a `variable_count` **against a real device** — the
-   rest (`crcbl-webgpu/tests/stream.rs`, `tests/corpus/mod.rs`,
-   `crcbl-dx12/src/binding.rs`) have no device behind them. But read what it
-   asserts:
-   `a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped` creates
-   the layout, creates one group whose count the entries bear out, destroys it,
-   and asserts the refusal messages for the counts that disagree. **No pipeline,
-   no dispatch, no shader.** It proves the seam's refusal contract, which the
-   agnostic suites already drive on every backend; it proves nothing about
-   descriptor indexing. `crcbl-vk`'s
-   `a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier` is
-   the same shape — deliberately so, asserting that a device _without_
-   `DESCRIPTOR_INDEXING` refuses the flags rather than ignoring them, since "a
-   bindless array quietly downgraded to a fixed one reads garbage at index
-   4097". A layout on a real device, no group and no shader. So the deletion's
-   cost is a duplicate refusal check, not a lost GPU exercise, and goal 3 does
-   not depend on closing the Metal row first.
+   **The fourth is closed, and it took a shader.**
+   `crates/crcbl-shaders/shaders/bindless_probe.slang` is the first committed
+   artifact in the tree to declare an array of descriptors — an unbounded
+   `StructuredBuffer<uint> sources[]` at the last and highest-numbered binding —
+   and `exercise_bindless_descriptor_array` in
+   `crates/crcbl/tests/hal_seam_e2e.rs` binds four distinct buffers into it,
+   dispatches one workgroup per descriptor and asserts each descriptor's own
+   words came back in that descriptor's own block.
+   `Capability:: BindlessDescriptorArray` is driven on every backend the suite
+   runs, so the per-backend refusal checks that remain — `crcbl-vk`'s
+   `a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier` and
+   `crcbl-wgpu`'s pair — are a duplicate of a contract the agnostic suite now
+   drives, not the only thing holding it.
 
-   **Driving `BindlessDescriptorArray` for real needs a shader artifact that
-   does not exist**, checked three independent ways: no `.slang` source declares
-   a resource array (every `Texture2DArray` is one layered image, which
-   `crcbl_shaders::mesh`'s `GpuMaterial` doc says is deliberate — a layer index
-   needs no feature, a descriptor index needs `DESCRIPTOR_INDEXING`, which
-   `crcbl-mtl` withdraws); every committed SPIR-V module declares only `Shader`,
-   `DrawParameters`, `ImageQuery` and `MeshShadingEXT`, with no
-   `RuntimeDescriptorArray` and no `SPV_EXT_descriptor_indexing`; and no WGSL
-   contains `binding_array`. Every `OpTypeRuntimeArray` present is an SSBO tail
-   inside a block. So this row is a shader-artifact task shaped like
-   `push_constant_probe.slang` was, not a test-only one — and the array must be
-   the last and highest-numbered binding, because `declaration_order` is linted
-   and `BindGroupLayoutDesc::check_entries` enforces both halves.
-
-   **A second, independent blocker: `crcbl-wgpu` declares a `Support::No` its
-   own device does not honour.** Its `BindlessDescriptorArray` reason in
-   `crcbl-wgpu/src/device.rs` says wgpu "offer[s] no partial binding" — while
-   `hal_features_for` in `crcbl-wgpu/src/instance.rs` _requires_
-   `PARTIALLY_BOUND_BINDING_ARRAY` (alongside `TEXTURE_BINDING_ARRAY` and the
-   non-uniform-indexing feature) before it will grant `DESCRIPTOR_INDEXING`, and
-   grants it on this machine's RADV adapter. `create_bind_group_layout` then
-   passes `check_entries` and builds a real array binding. An honest exercise
-   would score `Worked` against a declared `No` on that backend and fail the
-   suite. This is the same class of defect CI twice caught elsewhere — a backend
-   performing a capability it denies — and it is evidence for the deletion
-   rather than work to do before it: the crate leaving takes the false
-   declaration with it.
+   **`crcbl-wgpu`'s dishonest `Support::No` is fixed, by refusing rather than by
+   implementing.** Its reason used to say wgpu "offer[s] no partial binding"
+   while `hal_features_for` in `crcbl-wgpu/src/instance.rs` _requires_
+   `PARTIALLY_BOUND_BINDING_ARRAY` before granting `DESCRIPTOR_INDEXING` — and
+   `create_bind_group_layout` then built a real fixed-size array from a
+   `VARIABLE_COUNT` entry, which would have scored `Worked` against a declared
+   `No`. It now refuses a `VARIABLE_COUNT` layout with `HalError::Unsupported`
+   and refuses `BindGroupDesc::variable_count` at `create_bind_group` with the
+   same variant, which is the shape `crcbl-mtl` already used for the pair. The
+   reason and the `DIVERGENCES` row say what is actually missing: a wgpu binding
+   array's length is the layout's count and the length of the slice a group is
+   created with, and there is no `update_bind_group` to fill a slot later. This
+   was deliberately not an implementation — the crate is scheduled for deletion.
+   Fallout, all of it followed through: `BindGroupLayoutSlot::variable_binding`
+   is gone, `crcbl_wgpu::binding::check_variable_count` collapsed to the
+   refusal, and
+   `a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped` is now
+   `a_wgpu_variable_count_is_refused_not_dropped`.
 
    **`naga` does NOT leave with it, and notes here said otherwise twice.**
    `crcbl-shaders` takes `naga` as its own **dev-dependency** (`version = "30"`,
@@ -853,12 +838,11 @@ The seam suite drives most of `Capability::ALL` with real GPU work; the tally it
 prints on every run is the current answer and this entry does not restate it —
 earlier versions did, and were wrong within a day.
 
-**Five remain unexercised, for three different reasons:**
+**Four remain unexercised, for three different reasons:**
 
 - **A fixture that does not exist yet.** `SamplerAnisotropy` needs a shader that
   samples a minified texture at a grazing angle and a second to compare against;
-  the committed raster artifact samples nothing. `BindlessDescriptorArray` needs
-  a bind-group layout built for the capability and a shader that indexes it.
+  the committed raster artifact samples nothing.
 - **An observable the seam cannot reach.** `BinarySemaphore`'s claim is ordering
   between two submissions, and on a one-queue backend a dropped binary semaphore
   is indistinguishable from an honoured one.
@@ -868,6 +852,12 @@ earlier versions did, and were wrong within a day.
 **`TimelineWaitBeforeSignal` left that list** when `Device::signal_semaphore`
 arrived: `exercise_timeline_wait_before_signal` submits a wait for a value
 nothing on the queue will ever produce and opens it from the test thread.
+
+**`BindlessDescriptorArray` left it** when `bindless_probe.slang` and
+`exercise_bindless_descriptor_array` landed — the first committed artifact in
+the tree to declare a resource array. What that leaves open is one arm nobody
+here can run: see "The bindless exercise has never reached a D3D12 device"
+below.
 
 **The residual risk, written down rather than assumed away.** A backend that
 accepts such a wait and then never releases it stops its queue with nothing in
@@ -891,6 +881,59 @@ two argument structures a draw read, and CI's Metal device reports no
 `PipelineStatisticsQuery` can never be driven further than set creation by
 anything a caller records, because `CommandEncoder` has no begin/end query verb.
 Their `Yes` means a set can be made and read, which is what Vulkan's means too.
+
+### The bindless exercise has never reached a D3D12 device
+
+`exercise_bindless_descriptor_array` and `bindless_probe.slang` landed
+2026-08-19 and were run on `CRCBL_GPU=vk` (RADV Navi31, Mesa 26.1.7) and
+`CRCBL_GPU=wgpu` here. **The dx12 arm has run nowhere.** `crcbl-dx12` answers
+`gated(DESCRIPTOR_INDEXING)` off `RawCaps::dynamic_resources`, and WARP has been
+measured at binding tier 3 with SM 6.6, so on CI it will declare `Yes` and must
+actually work. If it does not, that is a finding about the backend's bindless
+path, not a reason to weaken the exercise.
+
+**What to look at first if it goes red**, in order of how likely each is:
+
+- **The register space.** Slang moves an _unbounded_ array into a register space
+  of its own: without an explicit annotation `dxc -dumpbin` reported this
+  binding at `t0,space1`, and `crcbl_dx12::binding::ranges` builds every
+  descriptor range with `RegisterSpace: 0`. The source therefore pins it with
+  `: register(t0, space0)` — the only `register` annotation in
+  `crates/crcbl-shaders/shaders/`, documented at the declaration. `crcbl-dx12`'s
+  `dxil` module asserts space 0 over every committed container and now lists
+  `bindless_probe` in `registers_are_assigned_per_class_in_declaration_order`,
+  but that test is Windows-only and has never executed. The `-dumpbin` reading
+  is the only evidence the annotation worked.
+- **The unbounded range's placement in the table.** The layout's two entries are
+  a UAV (`destination`, binding 0) and an SRV (`sources`, binding 1) in one view
+  table; `plan_layout` gives an unbounded range `count: 0` for the table-offset
+  arithmetic and `declared: u32::MAX` for the root signature. D3D12 wants an
+  unbounded range last in its table, which it is here — unverified.
+- **The heap size.** `allocate_group` sizes the group from
+  `BindGroupDesc::variable_count`, which this exercise sets to `SOURCE_COUNT`
+  (4) against a declared ceiling of `BINDLESS_CEILING` (5), so five is what the
+  root signature declares and four is what is allocated.
+
+**Also unrun anywhere:** the Metal and WebGPU arms. Both declare `Support::No`
+and refuse at `create_bind_group_layout`, so what CI proves for them is the
+refusal, not the array.
+
+### `exercise_push_constants_on_compute`'s RADV note is stale
+
+Its doc comment still carries a section headed "The shader indexes its block
+with a divergent index, and that does not work on RADV", saying the exercise is
+"honest about a real defect" and that `push_constant_probe.slang` reads
+`constants.values[index]` through a pointer. The shader has since been changed
+to the `switch (index)` over `values.x`/`.y`/`.z`/`.w` that very paragraph
+prescribes, and the exercise passes on this machine's RADV Navi31. The panic
+message in `push_constant_dispatch` points back at the same stale claim ("which
+is the driver reading the block with a divergent index and is not this backend's
+doing").
+
+Not fixed here because it is unrelated to the slice that found it. The
+measurement itself is worth keeping — it is the reason the shader is written the
+way it is, and `push_constant_probe.slang`'s own comment records it correctly —
+so the fix is to rewrite the section as history rather than delete it.
 
 ### The seam cannot use occlusion or pipeline-statistics queries at all
 
