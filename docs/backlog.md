@@ -57,8 +57,8 @@ why it has drifted.
 
 **The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
 below is built, so the count is now exact rather than approximate:
-`Capability::ALL` is **25** variants and `DIVERGENCES` holds **48** reviewed
-rows — dx12 7, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing, "28
+`Capability::ALL` is **25** variants and `DIVERGENCES` holds **47** reviewed
+rows — dx12 7, WebGPU 17, wgpu 13, Metal 10, Vulkan 0. (The earlier framing, "28
 declared `Features` bits and roughly 96 refusal sites", said the same thing less
 precisely and is superseded.)
 
@@ -74,8 +74,8 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Twenty blockers: dx12 7, Metal 9, WebGPU 4.** That is what stands between here
-and the deletion, and it can now be asked rather than re-derived.
+**Nineteen blockers: dx12 7, Metal 9, WebGPU 3.** That is what stands between
+here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
 recall — and two of them had been recorded in this file the wrong way round:
@@ -695,8 +695,6 @@ capabilities carrying a `Yes` on a keeper backend with no test anywhere that
 drives them. These are the riskiest rows in the table, because a wrong `Yes`
 fails at a user's frame rather than in CI:
 
-- **`StencilReference`** — vk, dx12 and Metal all claim it, all three have a
-  `set_stencil_reference`, and no suite calls it and no render code sets it.
 - **`StorageImageBinding`** — claimed by vk, dx12 and Metal;
   `BindingKind:: StorageImage` appears only in the WebGPU stream's encoder-level
   tests. Nothing in `crcbl-render` declares one.
@@ -813,7 +811,7 @@ hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
 
 ### dx12's remaining blockers, ordered — and two reasons that were wrong
 
-dx12 owns 7 of the 20 parity blockers and none is an API absence. Planned
+dx12 owns 7 of the 19 parity blockers and none is an API absence. Planned
 2026-08-18 against the `windows` 0.62.2 bindings and `wgpu-hal`'s dx12 backend
 on disk. **Two of the divergence list's own stated reasons did not survive
 reading the code**, and both change what the work is:
@@ -996,7 +994,7 @@ untidy.
 supersedes — macos-26 executes correctly and the hang was
 `setDepthStencilState:nil`.
 
-### WebGPU's four blockers, ordered — and an ordering landmine
+### WebGPU's three blockers, ordered — and an ordering landmine
 
 Planned 2026-08-18 against the normative WebGPU IDL, `web-sys 0.3.104`'s
 generated bindings and `wgpu-core 30.0.0`. **Every slice here is verifiable on
@@ -1014,12 +1012,7 @@ until the timestamp slice lands.**
 
 **The order:**
 
-1. **`SetStencilReference`** — one tag, no gate, no seam change, no design
-   question. It re-establishes the whole tag → fixture → JS decoder → replayer →
-   probe pipeline on the smallest possible payload. Its probe group draws twice
-   with the same pipeline and the same draw, differing only by whether the
-   command was recorded: one target reads back the draw colour, the other the
-   clear.
+1. ~~`SetStencilReference`~~ — **landed**, proved by browser probe group AC.
 2. **The query spine, and `OcclusionQuery`.** `FAMILY_QUERY` has held eight
    empty tag slots since the format was designed; this fills them. It goes
    second because `OcclusionQuery`'s gating feature is reported on **every**
@@ -1066,12 +1059,6 @@ deletion from a claim into a failing check.
    own empty compute pass carrying `timestampWrites` — no pipeline, no dispatch
    — which is the WebGPU equivalent of the backend-opened encoder Metal needs.
    **Implement, do not narrow.**
-4. **`StencilReference` says the value "would be dropped rather than applied".**
-   Nothing is dropped: the call records unsupported and `finish()` refuses the
-   entire command buffer. The crate's own test asserts exactly that. The same
-   wrong story appears a second time in the declaration's doc comment. This
-   matters to a caller — not a subtly wrong frame, a hard refusal at the
-   boundary.
 
 **And a live feature leak both files predicted and neither closed:**
 `crcbl-webgpu` reports `Features::TIMESTAMP_QUERY` from the browser's own
