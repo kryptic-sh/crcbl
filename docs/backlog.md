@@ -1191,6 +1191,39 @@ remembering when the next probe is written, because a measurement that fails on
 an unexpected answer stops being a measurement and becomes an assumption with a
 stack trace.
 
+### MEASURED — where a push-constant block actually lands, per target
+
+The artifact that three separate divergence rows described and that did not
+exist now ships: `push_constant_probe.slang`, emitted for spirv, msl and dxil,
+whose dispatch writes the constants into a buffer word by word. Read out of the
+**emitted files**, not assumed:
+
+| target | the block lands at                                                       | the bound buffer |
+| ------ | ------------------------------------------------------------------------ | ---------------- |
+| SPIR-V | `PushConstant` storage class, member offset 0, 16 bytes — no set/binding | set 0, binding 0 |
+| MSL    | `buffer(1)`                                                              | `buffer(0)`      |
+| DXIL   | `cb0` — register `b0`, space 0, size 16                                  | `u0`             |
+
+**This corrects Metal's row, and makes that slice smaller.** The MSL puts the
+block **behind** the bound buffer, not ahead of it. `ui.slang`'s old artifact
+put it first only because it declared the push constant first, and the
+declaration-order lint now has its first shipped exercise — so `crcbl-mtl` can
+bind the block one past the last binding rather than shifting every table entry.
+
+Two of the three are asserted by a test that reads the committed artifact;
+DXIL's is read but not asserted, because its resource table lives in the DXBC
+`RDEF` chunk and this crate is dependency-free by design. The test asserts the
+container ships and the doc says which claim is which.
+
+**WGSL is excluded and that was checked rather than asserted:** slangc _does_
+emit a WGSL artifact for this source, and naga refuses it for a missing binding
+decoration. So the validation sweep is not weakened — a shader declaring no wgsl
+target contributes nothing to it, and one that declares it again is caught.
+
+**What this unblocks:** dx12's and Metal's `PushConstants` rows, and the
+re-homing of `crcbl-wgpu`'s push-constant-range exercise, which is one of the
+two coverage losses still standing between here and that crate's deletion.
+
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
 They were declined for a reason that turns out to be wrong (above), and they now
