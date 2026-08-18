@@ -817,38 +817,26 @@ it has, so the renderer never exercises the path in anger and the seam suite is
 the only thing that does. Not a defect — recorded so the closed coverage gap is
 not read as the engine having started using push constants.
 
-### `TimestampQuery` is driven on render passes only
+### An unwritten timestamp query does not read back as zero
 
-Both `timestamp_writes: Some(..)` sites in `crates/crcbl/tests/hal_seam_e2e.rs`
-are `begin_render_pass` — the timed pass and the coincident-index refusal. Since
-timestamps moved into the pass descriptor they live on **both** `RenderPassDesc`
-and `ComputePassDesc`, so the capability's surface spans two paths and the
-exercise walks one. Same signature as the push-constant gap that was closed
-today: a capability covering two pipeline types, driven through one.
+Measured while closing the render-only gap above (now closed — the exercise
+times a compute pass beside the render one). With the compute pass's
+`timestamp_writes` removed so queries 2 and 3 are never written, `query_results`
+over the whole set came back **all four zero on vk — including the render pair
+that was written**. Vulkan zeroes the entire read when any query in the range is
+unavailable rather than reporting per query.
 
-**Scoped before recording, because it is narrower than that one was:**
+Two consequences worth keeping:
 
-- **vk and dx12 share the path.** Both funnel through `open_pass_timestamps(..)`
-  from either pass — `crcbl-vk/src/command.rs` and `crcbl-dx12/src/command.rs`
-  each call it from `begin_render_pass` and `begin_compute_pass` — so a
-  render-pass test does cover the compute arm on those two.
-- **Metal is unaffected.** `refuse_timestamps` refuses on every Mac, so it
-  declares `No` and refuses both kinds.
-- **WebGPU has two encodings.** `crcbl-webgpu`'s `writer.rs` carries a separate
-  `begin_compute_pass` with its own pair of queries over the wire, decoded
-  separately in `web/engine/gpu-replay.js`. A defect in that encoding, its
-  decode, or its `GPUComputePassDescriptor.timestampWrites` construction is
-  invisible today.
-
-So it is one backend's untested path rather than four. Closing it is small — a
-timed compute pass beside the timed render pass in `exercise_timestamp_query`,
-asserting the same "two ticks, ordered, non-zero" claim — and `compute_probe` is
-already the shader every compute exercise uses, so it needs no artifact.
-
-**Worth generalising:** "the capability spans two pipeline types, the exercise
-walks one" has now produced two real findings in a day. It is worth checking
-deliberately whenever a capability's definition mentions neither _graphics_ nor
-_compute_.
+- **Zero is not a per-query sentinel.** A test priming its destination and
+  checking "did this query get written" cannot rely on the others surviving. The
+  timestamp exercise primes with `QUERY_POISON` _and_ checks zero, because which
+  one an unwritten query keeps is the backend's business.
+- **The whole-range zero is why the render branch fires first there.** The
+  compute pair's own assertion is unreachable on vk for that particular break —
+  it exists for the asymmetric case where a backend writes one pass kind and
+  drops the other, which is exactly what `crcbl-webgpu`'s separate
+  `begin_compute_pass` encoding makes possible and nothing else would catch.
 
 ### The doc gate does not cover private items
 

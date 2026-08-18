@@ -6109,8 +6109,22 @@ fn exercise_depth_clamp(headless: &Headless) -> Exercise {
 /// either.
 const QUERY_POISON: u64 = 0x5A5A_5A5A_5A5A_5A5A;
 
-/// Queries the timestamp exercise writes: one before the timed work, one after.
-const TIMESTAMP_QUERIES: u32 = 2;
+/// Queries the timestamp exercise writes: a pair bracketing a **render** pass,
+/// then a pair bracketing a **compute** one.
+///
+/// **Two passes rather than one, because the capability covers two paths.**
+/// Since timestamps moved into the pass descriptor they live on
+/// [`RenderPassDesc`](crcbl::hal::RenderPassDesc) *and*
+/// [`ComputePassDesc`](crcbl::hal::ComputePassDesc), and on `crcbl-webgpu` those
+/// are two different stream commands carrying two different pairs of queries,
+/// decoded separately in `web/engine/gpu-replay.js`. A render-only exercise left
+/// that second encoding untested. `crcbl-vk` and `crcbl-dx12` funnel both kinds
+/// through one `open_pass_timestamps`, so for them this is the same path twice —
+/// which is a fine thing for a test to prove rather than assume.
+const TIMESTAMP_QUERIES: u32 = 4;
+
+/// Where the compute pass's pair sits in the set, after the render pass's.
+const TIMESTAMP_COMPUTE_FIRST: u32 = 2;
 
 /// Bytes one resolved query occupies, and so the stride
 /// [`resolve_query_set`](crcbl::hal::CommandEncoder::resolve_query_set) writes
@@ -6251,6 +6265,23 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
     });
     encoder.end_render_pass();
 
+    // **The second path the capability covers.** Empty on purpose: what is
+    // being tested is that the *pass descriptor's* two queries were carried,
+    // encoded and written — not how long a dispatch takes. An empty pass is
+    // also why the assertion below allows the two ticks to be equal where the
+    // render pass's must strictly increase: two writes with nothing between
+    // them can land in one tick of a coarse counter, which is a property of the
+    // clock rather than a lost write, and a zero is what a lost write leaves.
+    encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
+        label: Some("timed empty compute pass"),
+        timestamp_writes: Some(crcbl::hal::PassTimestampWrites {
+            set,
+            beginning_of_pass: TIMESTAMP_COMPUTE_FIRST,
+            end_of_pass: TIMESTAMP_COMPUTE_FIRST + 1,
+        }),
+    });
+    encoder.end_compute_pass();
+
     let outcome = match encoder.finish() {
         Err(error) => Exercise::Refused(error),
         Ok(commands) => {
@@ -6260,11 +6291,16 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
             device.wait_idle().expect("idle");
             device.destroy_command_buffer(commands);
 
-            let mut ticks = [0u64; TIMESTAMP_QUERIES as usize];
+            // Primed rather than zeroed: a query nothing wrote does not
+            // reliably read back as zero — vk returns whatever the pool held —
+            // so zero is not the sentinel it looks like. `QUERY_POISON` is a
+            // value no clock produces, which makes "this query was never
+            // written" distinguishable from "this query holds a tick".
+            let mut ticks = [QUERY_POISON; TIMESTAMP_QUERIES as usize];
             device
                 .query_results(set, 0, &mut ticks)
                 .expect("reading a set this exercise created, over the range it created it with");
-            let [start, end] = ticks;
+            let [start, end, compute_start, compute_end] = ticks;
             if start == 0 && end == 0 {
                 // The documented degrade for a device without the feature, and
                 // therefore what a wrong `Support::Yes` produces.
@@ -6290,6 +6326,42 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
                      µs at {period} ns/tick",
                     ticks_elapsed = end - start,
                     micros = (end - start) as f64 * period / 1_000.0,
+                );
+
+                // The compute pass's pair, held to the same claim as the render
+                // pass's except for the tie: a zero is a query nothing wrote, and
+                // on a backend where the two pass kinds are separate encodings —
+                // `crcbl-webgpu` carries them as different stream commands — this
+                // is the only thing that reads the second one.
+                // Both sentinels, because which one an unwritten query keeps is
+                // the backend's business: vk zeroes the whole read when any
+                // query in the range is unavailable — measured, it zeroes the
+                // render pair too, which the branch above catches first — while
+                // a backend that wrote the render pair and dropped this one
+                // leaves either a zero or the poison this read was primed with.
+                // That asymmetric case is the one this exists for, since
+                // `crcbl-webgpu` encodes the two pass kinds separately.
+                assert!(
+                    !(compute_start == 0 && compute_end == 0)
+                        && compute_start != QUERY_POISON
+                        && compute_end != QUERY_POISON,
+                    "the render pass wrote {start} then {end} and the compute pass left \
+                     {compute_start} and {compute_end} — still the poison this read was primed \
+                     with, so nothing wrote those two queries. The pass descriptor carried them \
+                     and something between there and the device dropped them, which on a backend \
+                     encoding compute and render passes separately is a whole path failing while \
+                     the other passes."
+                );
+                assert!(
+                    compute_end >= compute_start,
+                    "the compute pass opened at {compute_start} and closed at {compute_end}, \
+                     which is a clock running backwards or two queries read in the wrong order. \
+                     Equal is allowed here and not for the render pass, because this pass is \
+                     empty and two writes with nothing between them may share a tick."
+                );
+                eprintln!(
+                    "crcbl hal seam e2e: the empty compute pass spanned {} tick(s)",
+                    compute_end - compute_start,
                 );
                 // The refusal that keeps the pair meaningful, on a backend that
                 // has just shown it takes the pair at all. A pass writing both
