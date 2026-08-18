@@ -108,6 +108,14 @@
 //! | [`__crcbl_web_gpu_probe_msaa_state`](shim::__crcbl_web_gpu_probe_msaa_state) | `() -> i32` | Drain, and answer one of the `MSAA_*` codes. |
 //! | [`__crcbl_web_gpu_probe_msaa_bytes_ptr`](shim::__crcbl_web_gpu_probe_msaa_bytes_ptr) | `() -> i32` | Where the resolved texels start, once [`__crcbl_web_gpu_probe_msaa_state`](shim::__crcbl_web_gpu_probe_msaa_state) answers [`MSAA_READY`]. |
 //! | [`__crcbl_web_gpu_probe_msaa_bytes_len`](shim::__crcbl_web_gpu_probe_msaa_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the MSAA probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_occlusion`](shim::__crcbl_web_gpu_probe_occlusion) | `() -> i32` | Encode one frame — a [`PROBE_OCCLUSION_QUERIES`]-query [`QueryKind::Occlusion`] set, a `QUERY_RESOLVE` destination filled with [`PROBE_OCCLUSION_SENTINEL`], the reset and the resolve over it, the copy, a `request_readback` against [`PROBE_OCCLUSION_READBACK`], and a `query_results` ask reading the same queries the other way. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_occlusion_poll`](shim::__crcbl_web_gpu_probe_occlusion_poll) | `() -> i32` | Poll the occlusion readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_occlusion_state`](shim::__crcbl_web_gpu_probe_occlusion_state) | `() -> i32` | Drain, and answer one of the `OCCLUSION_*` codes. |
+//! | [`__crcbl_web_gpu_probe_occlusion_bytes_ptr`](shim::__crcbl_web_gpu_probe_occlusion_bytes_ptr) | `() -> i32` | Where the resolved values start, once [`__crcbl_web_gpu_probe_occlusion_state`](shim::__crcbl_web_gpu_probe_occlusion_state) answers [`OCCLUSION_READY`]. |
+//! | [`__crcbl_web_gpu_probe_occlusion_bytes_len`](shim::__crcbl_web_gpu_probe_occlusion_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the occlusion probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_occlusion_values_state`](shim::__crcbl_web_gpu_probe_occlusion_values_state) | `() -> i32` | Drain, and answer one of the `OCCLUSION_VALUES_*` codes — where the **direct read** has got to. |
+//! | [`__crcbl_web_gpu_probe_occlusion_values_ptr`](shim::__crcbl_web_gpu_probe_occlusion_values_ptr) | `() -> i32` | Where that read's values start, one little-endian `u64` per query. |
+//! | [`__crcbl_web_gpu_probe_occlusion_values_len`](shim::__crcbl_web_gpu_probe_occlusion_values_len) | `() -> i32` | How many bytes there are. **Zero is a failed read**, not an empty success. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -370,10 +378,11 @@ use crcbl_hal::{
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
     IndexFormat, LoadOp, MemoryLocation, MultisampleState, Offset3d, ParityVerdict,
     PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PresentInfo, PresentMode,
-    PrimitiveState, PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d,
-    RenderPassDesc, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
-    ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo,
-    SurfaceCaps, SurfaceHandle, SwapchainDesc, SwapchainHandle, divergence, parity_verdict,
+    PrimitiveState, PrimitiveTopology, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle,
+    ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, ResourceState, SampleType,
+    SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle,
+    SwapchainDesc, SwapchainHandle, divergence, parity_verdict,
 };
 
 use crate::device::DeviceProbe;
@@ -707,6 +716,51 @@ pub const MSAA_UNDECODABLE: u32 = 5;
 /// The one code here with no [`STENCIL_UNASKED`] counterpart, because it is the
 /// one probe whose fixture the device can refuse to supply.
 pub const MSAA_UNSUPPORTED: u32 = 6;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const OCCLUSION_UNASKED: u32 = 0;
+/// The setup frame — a [`PROBE_OCCLUSION_QUERIES`]-query occlusion set, the
+/// resolve destination filled with [`PROBE_OCCLUSION_SENTINEL`], the readback
+/// buffer, an encoder that resets the whole range and resolves it over the
+/// sentinel, the copy, the submit, the request, and the
+/// [`query_results`](crate::StreamWriter::query_results) ask that reads the same
+/// queries the other way — is on the stream, and no poll has been issued.
+pub const OCCLUSION_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const OCCLUSION_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const OCCLUSION_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_occlusion_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_occlusion_bytes_len`] carry them — one
+/// little-endian `u64` per query, and every byte zero if the resolve reached the
+/// destination and the set holds the unwritten queries it was created with.
+pub const OCCLUSION_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`DRAW_UNDECODABLE`]'s twin.
+pub const OCCLUSION_UNDECODABLE: u32 = 5;
+
+/// Nothing has asked for the values, or there is no channel to ask through.
+pub const OCCLUSION_VALUES_UNASKED: u32 = 0;
+/// The [`query_results`](crate::StreamWriter::query_results) ask is on the
+/// stream and its [`Reply::QueryResults`] has not arrived.
+///
+/// **No poll, unlike every readback here.** The replayer answers this one when
+/// its own map settles, so there is nothing for a later frame to ask again —
+/// which is also why there is no pending code between this and
+/// [`OCCLUSION_VALUES_READY`].
+pub const OCCLUSION_VALUES_WAITING: u32 = 1;
+/// The values are in.
+/// [`shim::__crcbl_web_gpu_probe_occlusion_values_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_occlusion_values_len`] carry them, one
+/// little-endian `u64` per query.
+///
+/// **An empty list is this reply's only way of saying the read failed**, so a
+/// `READY` of zero length is a failure rather than a success with nothing in it
+/// — see [`Command::QueryResults`](crate::Command::QueryResults).
+pub const OCCLUSION_VALUES_READY: u32 = 2;
 
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
@@ -4143,6 +4197,175 @@ pub const fn probe_msaa_copy() -> BufferImageCopy {
     }
 }
 
+// The occlusion probe (group AE): the one gate that shows a QUERY SET being
+// built, recorded against and read. Every handle it names is `11 << 32` — a
+// generation past the MSAA probe's `10 << 32` — so its four live resources never
+// land in another probe's slot in the shared page. It creates two buffers, which
+// the one type that carries two here distinguishes by index; the query set, the
+// queue, the command buffer and the readback are each the only one of their kind
+// at this generation.
+//
+// It is here because `Capability::OcclusionQuery` is declared supported on this
+// backend and no native test can witness that: the seam suite
+// (`exercise_query_set_creation` in `crates/crcbl/tests/hal_seam_e2e.rs`) is a
+// native binary and this backend runs in a browser.
+//
+// **WHAT THE CAPABILITY CLAIMS IS A SET, AND NOTHING MORE.**
+// `crcbl_hal::CommandEncoder` has no begin/end query verb — its whole query
+// vocabulary is the reset, the timestamp write and the resolve — so nothing a
+// caller records through this seam can ever *write* an occlusion query, on this
+// backend or on the Vulkan one. So the observable is not a count: it is that the
+// set exists, that the seam's verbs reach the browser naming it, and that a
+// resolve of it lands where it was told to.
+//
+// **THE SENTINEL IS WHAT MAKES THE ZERO MEAN SOMETHING.** An unwritten query
+// resolves to zero on the implementation this gate runs against, and zero is
+// also what an untouched allocation reads as — so on its own "all zero" is the
+// answer a replayer that did nothing would give. The destination is therefore
+// filled with `PROBE_OCCLUSION_SENTINEL` first, and the two readings then mean
+// two different things:
+//
+//   every byte zero        the resolve ran and overwrote the sentinel, over a
+//                          set the browser really created. The only pass.
+//   the sentinel survives  the resolve was dropped, or refused — a validation
+//                          error is reported out of band and the copy still
+//                          runs, so this is what a refused resolve looks like.
+//
+// **THE ZERO IS DAWN'S, NOT THE SPECIFICATION'S**, and that is worth stating
+// because the gate asserts it: `gpuweb/gpuweb#1072` opened the question of
+// whether resolving a never-begun query should be disallowed or should follow
+// D3D12 and Metal in producing 0, and the specification's validation rules for
+// `resolveQuerySet` (a 256-aligned `destinationOffset`, a `QUERY_RESOLVE`
+// destination, a range inside the set) say nothing about the value. This gate
+// runs under Chromium on every platform — `web/run-probe-e2e.sh` says so — so
+// what it measures is one implementation's answer, and a browser that answered
+// otherwise would fail here naming the value it gave rather than passing
+// quietly.
+
+/// How many queries the occlusion probe's set holds.
+///
+/// Thirty-two, which is [`PROBE_OCCLUSION_BYTES`] of resolved values — a
+/// multiple of the 256-byte `destinationOffset` alignment WebGPU imposes, so the
+/// probe could resolve at a non-zero offset without growing the buffer, and far
+/// enough from `1` that a replayer creating a one-query set would be caught by
+/// the length that came back.
+pub const PROBE_OCCLUSION_QUERIES: u32 = 32;
+
+/// How many bytes [`PROBE_OCCLUSION_QUERIES`] resolve to.
+///
+/// Eight per query — `wgpu-types`' `QUERY_SIZE`, and what
+/// `GPUCommandEncoder.resolveQuerySet` writes per query for both of WebGPU's
+/// query types.
+pub const PROBE_OCCLUSION_BYTES: u64 = PROBE_OCCLUSION_QUERIES as u64 * 8;
+
+/// The byte the resolve destination is filled with before the resolve.
+///
+/// **Not zero**, which is what an unwritten query resolves to and what an
+/// untouched allocation reads as: the whole point is that a destination the
+/// resolve never reached is distinguishable from one it did. Not `0xFF` either,
+/// which is the other value a driver or a debug allocator is apt to poison with.
+pub const PROBE_OCCLUSION_SENTINEL: u8 = 0xA7;
+
+/// The occlusion set the probe creates, records against and reads. `11 << 32`.
+pub const PROBE_OCCLUSION_SET: QuerySetHandle = match QuerySetHandle::from_bits(11 << 32) {
+    Some(set) => set,
+    None => panic!("generation 11 is not zero"),
+};
+
+/// The set's descriptor: [`QueryKind::Occlusion`], which is the one kind this
+/// backend serves, at [`PROBE_OCCLUSION_QUERIES`] queries.
+#[must_use]
+pub const fn probe_occlusion_set_desc() -> QuerySetDesc<'static> {
+    QuerySetDesc {
+        label: Some("crcbl-webgpu occlusion set"),
+        kind: QueryKind::Occlusion,
+        count: PROBE_OCCLUSION_QUERIES,
+    }
+}
+
+/// The buffer the queries resolve into. `11 << 32`, index `0`.
+pub const PROBE_OCCLUSION_RESOLVE_BUFFER: BufferHandle = match BufferHandle::from_bits(11 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 11 is not zero"),
+};
+
+/// The resolve destination's descriptor.
+///
+/// [`BufferUsage::QUERY_RESOLVE`] because WebGPU refuses a resolve into a buffer
+/// without it — one of the two rules the replayer names rather than letting the
+/// browser report out of band. [`BufferUsage::TRANSFER_DST`] so the sentinel can
+/// be written into it and [`BufferUsage::TRANSFER_SRC`] so the copy can read it
+/// back out; on the device rather than host-visible, because WebGPU lets
+/// `MAP_READ` combine with `COPY_DST` and nothing else.
+#[must_use]
+pub const fn probe_occlusion_resolve_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu occlusion resolve buffer"),
+        size: PROBE_OCCLUSION_BYTES,
+        usage: BufferUsage::QUERY_RESOLVE
+            .union(BufferUsage::TRANSFER_SRC)
+            .union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The buffer the resolved values are copied into and read back from.
+/// `11 << 32`, index `1`.
+pub const PROBE_OCCLUSION_BUFFER: BufferHandle = match BufferHandle::from_bits((11 << 32) | 1) {
+    Some(buffer) => buffer,
+    None => panic!("generation 11 is not zero"),
+};
+
+/// The readback buffer — the shape every readback probe here uses, at this
+/// probe's size.
+#[must_use]
+pub const fn probe_occlusion_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu occlusion buffer"),
+        size: PROBE_OCCLUSION_BYTES,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The sentinel, as the bytes `write_buffer` uploads into the resolve
+/// destination.
+#[must_use]
+pub fn probe_occlusion_sentinel_bytes() -> Vec<u8> {
+    vec![PROBE_OCCLUSION_SENTINEL; PROBE_OCCLUSION_BYTES as usize]
+}
+
+/// The copy that carries the resolved values into the host-readable buffer.
+#[must_use]
+pub const fn probe_occlusion_copy() -> BufferCopy {
+    BufferCopy {
+        src: PROBE_OCCLUSION_RESOLVE_BUFFER,
+        src_offset: 0,
+        dst: PROBE_OCCLUSION_BUFFER,
+        dst_offset: 0,
+        size: PROBE_OCCLUSION_BYTES,
+    }
+}
+
+/// The queue the occlusion probe names in its command encoder. `11 << 32`.
+pub const PROBE_OCCLUSION_QUEUE: QueueHandle = match QueueHandle::from_bits(11 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 11 is not zero"),
+};
+
+/// The command buffer the occlusion probe finishes its encoder into. `11 << 32`.
+pub const PROBE_OCCLUSION_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(11 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 11 is not zero"),
+    };
+
+/// The in-flight readback the occlusion probe requests and polls. `11 << 32`.
+pub const PROBE_OCCLUSION_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(11 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 11 is not zero"),
+};
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -4961,6 +5184,139 @@ impl MsaaProbe {
     }
 }
 
+/// One occlusion-query exercise's **readback** half, from the frame that set it
+/// up to the bytes that came back.
+///
+/// [`StencilProbe`]'s state machine on the occlusion probe's handle: the setup
+/// frame ends in the same `request_readback` and is answered by the same
+/// [`Reply::ReadbackReady`] / [`Reply::ReadbackPending`].
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum OcclusionProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — one little-endian `u64` per eight, every one
+        /// zero if the resolve overwrote [`PROBE_OCCLUSION_SENTINEL`].
+        bytes: Vec<u8>,
+    },
+}
+
+impl OcclusionProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`DrawProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
+/// The same exercise's **direct-read** half: the
+/// [`query_results`](crate::StreamWriter::query_results) ask and the
+/// [`Reply::QueryResults`] that answers it.
+///
+/// **A second, independent path to one answer.** The readback half above reads
+/// the bytes a resolve *this probe recorded* wrote into a buffer it owns; this
+/// half asks the replayer to read the same queries its own way — which on WebGPU
+/// is a resolve, a copy and a map of the replayer's own making, because a
+/// `GPUQuerySet` has no accessor. Two mechanisms, one set, one expected answer.
+///
+/// **No poll and no pending state**, unlike every readback here: the replayer
+/// answers when its map settles rather than when it is asked again, so there is
+/// nothing for a later frame to re-ask and nothing between `Waiting` and
+/// `Ready`.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the values.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum OcclusionValuesProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The ask is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`QueryResults`](crate::Command::QueryResults), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The values are in — **empty if the replayer could not serve the read**,
+    /// which is the only way [`Reply::QueryResults`] can say so.
+    Ready {
+        /// One little-endian `u64` per query, in query order.
+        bytes: Vec<u8>,
+    },
+}
+
+impl OcclusionValuesProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there.
+    ///
+    /// The values are flattened to little-endian bytes rather than carried as
+    /// `u64`s, so the shim hands them out through the same pointer-and-length
+    /// pair every other probe here uses — and through a *defined* encoding
+    /// rather than whatever a `Vec<u64>` happens to occupy.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        let bytes = match reply {
+            Reply::QueryResults { values, .. } => values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            // A reply of another shape naming this ask is a replayer bug; it is
+            // answered exactly once either way, so this cannot go on waiting.
+            _ => Vec::new(),
+        };
+        *self = Self::Ready { bytes };
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -5083,6 +5439,14 @@ struct Probe {
     /// A decode error the MSAA drain hit, for [`MSAA_UNDECODABLE`]. Its own
     /// string for [`reason`](Self::reason)'s reason.
     msaa_reason: String,
+    occlusion: OcclusionProbe,
+    /// A decode error the occlusion drain hit, for [`OCCLUSION_UNDECODABLE`].
+    /// Its own string for [`reason`](Self::reason)'s reason.
+    occlusion_reason: String,
+    /// The direct-read half of the same exercise — see [`OcclusionValuesProbe`].
+    /// It has no reason of its own: a decode error is one channel's, and
+    /// [`occlusion_reason`](Self::occlusion_reason) is where it is reported.
+    occlusion_values: OcclusionValuesProbe,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -5120,6 +5484,9 @@ impl Probe {
             stencil_reason: String::new(),
             msaa: MsaaProbe::Unasked,
             msaa_reason: String::new(),
+            occlusion: OcclusionProbe::Unasked,
+            occlusion_reason: String::new(),
+            occlusion_values: OcclusionValuesProbe::Unasked,
             parity: ParityReport::new(),
         }
     }
@@ -5545,6 +5912,8 @@ impl Probe {
                 self.depth.absorb(&replies);
                 self.stencil.absorb(&replies);
                 self.msaa.absorb(&replies);
+                self.occlusion.absorb(&replies);
+                self.occlusion_values.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -6675,6 +7044,166 @@ impl Probe {
     fn msaa_bytes(&self) -> &[u8] {
         match &self.msaa {
             MsaaProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the occlusion setup frame: an occlusion query set, a resolve
+    /// destination filled with [`PROBE_OCCLUSION_SENTINEL`], an encoder that
+    /// resets the whole range and resolves it over that sentinel, the copy into a
+    /// host-readable buffer, the submit, the readback request — **and the
+    /// [`query_results`](crate::StreamWriter::query_results) ask that reads the
+    /// same queries the other way**.
+    ///
+    /// **Both paths in one frame, and that is what makes them a pair.** They read
+    /// the same set of the same queries at the same point in the stream: one
+    /// through a resolve this probe recorded, one through a resolve the replayer
+    /// records for itself, because a `GPUQuerySet` has no accessor. Two
+    /// mechanisms disagreeing would be a finding, and issuing them a frame apart
+    /// would let a reader wonder whether the set had changed in between.
+    ///
+    /// The reset is in there deliberately although WebGPU has no reset: the seam
+    /// requires every caller to record one, so a frame that skipped it would not
+    /// be the frame a caller writes. It is the documented no-op, and what it
+    /// exercises is that the replayer takes it and records nothing rather than
+    /// refusing the command buffer.
+    ///
+    /// `false` until a device has opened, [`request_readback`](Self::request_readback)'s
+    /// ordering rule — every command here is a device method.
+    fn request_occlusion(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_query_set(PROBE_OCCLUSION_SET, &probe_occlusion_set_desc());
+                stream.create_buffer(
+                    PROBE_OCCLUSION_RESOLVE_BUFFER,
+                    &probe_occlusion_resolve_buffer_desc(),
+                );
+                stream.create_buffer(PROBE_OCCLUSION_BUFFER, &probe_occlusion_buffer_desc());
+                stream.write_buffer(
+                    PROBE_OCCLUSION_RESOLVE_BUFFER,
+                    0,
+                    &probe_occlusion_sentinel_bytes(),
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu occlusion encoder"),
+                    queue: PROBE_OCCLUSION_QUEUE,
+                });
+                stream.reset_query_set(PROBE_OCCLUSION_SET, 0..PROBE_OCCLUSION_QUERIES);
+                stream.resolve_query_set(
+                    PROBE_OCCLUSION_SET,
+                    0..PROBE_OCCLUSION_QUERIES,
+                    PROBE_OCCLUSION_RESOLVE_BUFFER,
+                    0,
+                );
+                stream.copy_buffer_to_buffer(&probe_occlusion_copy());
+                stream.finish(PROBE_OCCLUSION_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_OCCLUSION_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_OCCLUSION_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu occlusion readback"),
+                        buffer: PROBE_OCCLUSION_BUFFER,
+                        offset: 0,
+                        size: PROBE_OCCLUSION_BYTES,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if !encoded {
+            return false;
+        }
+        self.occlusion = OcclusionProbe::Requested;
+        self.occlusion_reason.clear();
+        // The direct read is *awaited* where everything above is fire-and-forget,
+        // so it goes through `encode_awaited`: a `Reply::QueryResults` naming a
+        // sequence nobody registered is refused for the whole buffer.
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        if let Some(sequence) = channel.encode_awaited(|stream| {
+            stream.query_results(PROBE_OCCLUSION_SET, 0, PROBE_OCCLUSION_QUERIES)
+        }) {
+            self.occlusion_values = OcclusionValuesProbe::Waiting { sequence };
+        }
+        true
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// occlusion readback and register its wait, unless it is already waiting or
+    /// ready — [`poll_draw`](Self::poll_draw)'s protocol on the occlusion handle.
+    ///
+    /// The direct read is not polled: the replayer answers it when its own map
+    /// settles, so there is nothing to ask again. See [`OcclusionValuesProbe`].
+    fn poll_occlusion(&mut self) -> bool {
+        if !matches!(
+            self.occlusion,
+            OcclusionProbe::Requested | OcclusionProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_OCCLUSION_READBACK))
+        else {
+            return false;
+        };
+        self.occlusion = OcclusionProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the occlusion readback has got to.
+    fn occlusion_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.occlusion_reason = error.to_string();
+            return OCCLUSION_UNDECODABLE;
+        }
+        match &self.occlusion {
+            OcclusionProbe::Unasked => OCCLUSION_UNASKED,
+            OcclusionProbe::Requested => OCCLUSION_REQUESTED,
+            OcclusionProbe::Waiting { .. } => OCCLUSION_WAITING,
+            OcclusionProbe::Pending => OCCLUSION_PENDING,
+            OcclusionProbe::Ready { .. } => OCCLUSION_READY,
+        }
+    }
+
+    /// The bytes the occlusion readback came back with, or an empty slice if it
+    /// has not.
+    fn occlusion_bytes(&self) -> &[u8] {
+        match &self.occlusion {
+            OcclusionProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Drain, absorb, and report where the direct read has got to.
+    ///
+    /// It shares [`drain`](Self::drain) with the readback half rather than
+    /// draining again, which is the module's rule: one drain per frame, dispatched
+    /// to every waiter. A decode error is reported through
+    /// [`occlusion_state`](Self::occlusion_state) — one channel, one reason.
+    fn occlusion_values_state(&mut self) -> u32 {
+        let _ = self.drain();
+        match &self.occlusion_values {
+            OcclusionValuesProbe::Unasked => OCCLUSION_VALUES_UNASKED,
+            OcclusionValuesProbe::Waiting { .. } => OCCLUSION_VALUES_WAITING,
+            OcclusionValuesProbe::Ready { .. } => OCCLUSION_VALUES_READY,
+        }
+    }
+
+    /// The values the direct read came back with, as little-endian bytes, or an
+    /// empty slice if it has not answered.
+    fn occlusion_values_bytes(&self) -> &[u8] {
+        match &self.occlusion_values {
+            OcclusionValuesProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -8597,6 +9126,97 @@ pub mod shim {
         })
     }
 
+    /// Encode the occlusion setup frame — an occlusion query set, a resolve
+    /// destination primed with a sentinel, the reset and the resolve, the copy,
+    /// the readback request, and the direct-read ask beside it.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// probe is re-entered, or another channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_occlusion()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the occlusion readback once. `1` when a poll is on the stream, `0`
+    /// when there is nothing to poll for. The direct read is never polled — the
+    /// replayer answers it when its own map settles.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_occlusion()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `OCCLUSION_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.occlusion_state(),
+            Err(_) => super::OCCLUSION_UNASKED,
+        })
+    }
+
+    /// Where the resolved values start, once
+    /// [`__crcbl_web_gpu_probe_occlusion_state`] answers
+    /// [`super::OCCLUSION_READY`]. Null while it has not; the pointer is stable
+    /// until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.occlusion_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_occlusion_bytes_ptr`] points at —
+    /// the occlusion readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.occlusion_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `OCCLUSION_VALUES_*` codes — where the
+    /// **direct read** has got to.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_values_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.occlusion_values_state(),
+            Err(_) => super::OCCLUSION_VALUES_UNASKED,
+        })
+    }
+
+    /// Where the direct read's values start, once
+    /// [`__crcbl_web_gpu_probe_occlusion_values_state`] answers
+    /// [`super::OCCLUSION_VALUES_READY`]. One little-endian `u64` per query.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_values_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.occlusion_values_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_occlusion_values_ptr`] points at.
+    ///
+    /// **Zero is a failure rather than an empty success**: the seam never asks
+    /// for no values, so an empty
+    /// [`Reply::QueryResults`](crate::Reply::QueryResults) is the only way that
+    /// reply can say the read could not be served.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_values_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.occlusion_values_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -8731,7 +9351,11 @@ mod tests {
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_msaa,
         __crcbl_web_gpu_probe_msaa_bytes_len, __crcbl_web_gpu_probe_msaa_bytes_ptr,
         __crcbl_web_gpu_probe_msaa_poll, __crcbl_web_gpu_probe_msaa_samples,
-        __crcbl_web_gpu_probe_msaa_state, __crcbl_web_gpu_probe_parity,
+        __crcbl_web_gpu_probe_msaa_state, __crcbl_web_gpu_probe_occlusion,
+        __crcbl_web_gpu_probe_occlusion_bytes_len, __crcbl_web_gpu_probe_occlusion_bytes_ptr,
+        __crcbl_web_gpu_probe_occlusion_poll, __crcbl_web_gpu_probe_occlusion_state,
+        __crcbl_web_gpu_probe_occlusion_values_len, __crcbl_web_gpu_probe_occlusion_values_ptr,
+        __crcbl_web_gpu_probe_occlusion_values_state, __crcbl_web_gpu_probe_parity,
         __crcbl_web_gpu_probe_parity_checked, __crcbl_web_gpu_probe_parity_failures_len,
         __crcbl_web_gpu_probe_parity_failures_ptr, __crcbl_web_gpu_probe_parity_held,
         __crcbl_web_gpu_probe_parity_report_len, __crcbl_web_gpu_probe_parity_report_ptr,
@@ -11914,6 +12538,224 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_stencil_state(), STENCIL_READY);
         assert_eq!(stencil_bytes(), masked);
         assert_eq!(&stencil_bytes()[..4], PROBE_STENCIL_FIRST_BYTES);
+    }
+
+    /// The occlusion probe's readback bytes, read the way JS reads them.
+    fn occlusion_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_occlusion_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_occlusion_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the occlusion probe answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::occlusion` bytes,
+        // which nothing between the two calls above can have moved — neither
+        // export allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// The occlusion probe's direct-read values, read the way JS reads them.
+    fn occlusion_values() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_occlusion_values_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_occlusion_values_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the occlusion probe answered a values length with no pointer"
+        );
+        // SAFETY: as `occlusion_bytes`, on `Probe::occlusion_values`.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// An occlusion request before a device opens is refused and encodes nothing.
+    #[test]
+    fn an_occlusion_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_occlusion(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_occlusion_state(), OCCLUSION_UNASKED);
+        assert_eq!(
+            __crcbl_web_gpu_probe_occlusion_values_state(),
+            OCCLUSION_VALUES_UNASKED
+        );
+    }
+
+    /// **The setup frame is the whole spine, in the order a caller records it.**
+    ///
+    /// The set, the two buffers, the sentinel upload, the encoder, the reset over
+    /// the whole range, the resolve over the sentinel, the copy, the finish, the
+    /// submit, the readback request and the direct-read ask — and the reset is in
+    /// there although WebGPU has no reset, because the seam requires every caller
+    /// to record one and a frame that skipped it would not be the frame a caller
+    /// writes.
+    #[test]
+    fn the_occlusion_export_encodes_the_whole_query_spine() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_occlusion(), 1);
+        let frame = take_frame();
+        let names: Vec<&str> = frame.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateQuerySet",
+                "CreateBuffer",
+                "CreateBuffer",
+                "WriteBuffer",
+                "CreateCommandEncoder",
+                "ResetQuerySet",
+                "ResolveQuerySet",
+                "CopyBufferToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+                "QueryResults",
+            ],
+        );
+        assert_eq!(
+            frame[0],
+            Command::CreateQuerySet {
+                set: PROBE_OCCLUSION_SET,
+                label: Some("crcbl-webgpu occlusion set".into()),
+                kind: QueryKind::Occlusion,
+                count: PROBE_OCCLUSION_QUERIES,
+            }
+        );
+        assert_eq!(
+            frame[6],
+            Command::ResolveQuerySet {
+                set: PROBE_OCCLUSION_SET,
+                first_query: 0,
+                query_count: PROBE_OCCLUSION_QUERIES,
+                dst: PROBE_OCCLUSION_RESOLVE_BUFFER,
+                dst_offset: 0,
+            }
+        );
+        assert_eq!(
+            frame[11],
+            Command::QueryResults {
+                set: PROBE_OCCLUSION_SET,
+                first_query: 0,
+                query_count: PROBE_OCCLUSION_QUERIES,
+            }
+        );
+        assert_eq!(__crcbl_web_gpu_probe_occlusion_state(), OCCLUSION_REQUESTED);
+        assert_eq!(
+            __crcbl_web_gpu_probe_occlusion_values_state(),
+            OCCLUSION_VALUES_WAITING
+        );
+    }
+
+    /// **The sentinel covers the whole destination**, so a resolve that reached
+    /// only part of it leaves the rest saying so rather than reading as a zero the
+    /// resolve wrote. And the sentinel is not zero, which is the value the gate
+    /// asserts the resolve produces.
+    #[test]
+    fn the_occlusion_sentinel_covers_the_destination_and_is_not_the_answer() {
+        let sentinel = probe_occlusion_sentinel_bytes();
+        assert_eq!(sentinel.len() as u64, PROBE_OCCLUSION_BYTES);
+        assert_eq!(sentinel.len() as u64, probe_occlusion_copy().size);
+        assert_eq!(
+            sentinel.len() as u64,
+            probe_occlusion_resolve_buffer_desc().size
+        );
+        assert!(
+            sentinel
+                .iter()
+                .all(|byte| *byte == PROBE_OCCLUSION_SENTINEL)
+        );
+        assert_ne!(PROBE_OCCLUSION_SENTINEL, 0);
+    }
+
+    /// **The resolve destination carries the usage WebGPU demands of one.**
+    /// `QUERY_RESOLVE` is the bit the replayer refuses a resolve without, and the
+    /// two transfer bits are what let the sentinel in and the values out.
+    #[test]
+    fn the_occlusion_resolve_destination_is_usable_as_one() {
+        let desc = probe_occlusion_resolve_buffer_desc();
+        assert!(desc.usage.contains(BufferUsage::QUERY_RESOLVE));
+        assert!(desc.usage.contains(BufferUsage::TRANSFER_DST));
+        assert!(desc.usage.contains(BufferUsage::TRANSFER_SRC));
+        assert_eq!(desc.memory, MemoryLocation::DeviceLocal);
+        // And the readback buffer is a separate one, because WebGPU lets
+        // `MAP_READ` combine with `COPY_DST` and nothing else.
+        assert_ne!(PROBE_OCCLUSION_RESOLVE_BUFFER, PROBE_OCCLUSION_BUFFER);
+        assert_eq!(
+            probe_occlusion_buffer_desc().memory,
+            MemoryLocation::HostReadback
+        );
+    }
+
+    /// The whole occlusion exchange through the exports alone: request, poll, a
+    /// `ReadbackReady` carrying zeros for every query, and a `QueryResults`
+    /// carrying the same values the other way. A `cargo test` has no
+    /// `navigator.gpu`, so the replayer is stood in for by a `ReplyWriter` — which
+    /// is why this proves the state machine and the browser gate proves the value.
+    #[test]
+    fn both_occlusion_reads_reach_their_exports_as_the_values_the_browser_answered() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_occlusion(), 1);
+        let setup = take_frame();
+        // The direct-read ask is the frame's last command, and the poll below is
+        // the next command on the channel.
+        let values_sequence = 1 + setup.len() as u64;
+        let poll_sequence = 2 + setup.len() as u64;
+
+        assert_eq!(__crcbl_web_gpu_probe_occlusion_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_occlusion_state(), OCCLUSION_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_OCCLUSION_READBACK,
+            }]
+        );
+
+        let resolved = vec![0u8; PROBE_OCCLUSION_BYTES as usize];
+        let values = vec![0u64; PROBE_OCCLUSION_QUERIES as usize];
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_OCCLUSION_READBACK, &resolved);
+        replies.query_results(values_sequence, PROBE_OCCLUSION_SET, 0, &values);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_occlusion_state(), OCCLUSION_READY);
+        assert_eq!(occlusion_bytes(), resolved);
+        assert_eq!(
+            __crcbl_web_gpu_probe_occlusion_values_state(),
+            OCCLUSION_VALUES_READY
+        );
+        assert_eq!(
+            occlusion_values().len() as u64,
+            PROBE_OCCLUSION_BYTES,
+            "one little-endian u64 per query"
+        );
+        assert!(occlusion_values().iter().all(|byte| *byte == 0));
+    }
+
+    /// **A direct read the replayer could not serve answers an empty list**, and
+    /// that is the only way `Reply::QueryResults` can say so — so the exports must
+    /// not report it as a `READY` with values. The state is `READY` and the length
+    /// is zero, which is what the gate distinguishes.
+    #[test]
+    fn an_unservable_direct_read_answers_ready_with_no_values() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_occlusion(), 1);
+        let values_sequence = 1 + take_frame().len() as u64;
+
+        let mut replies = ReplyWriter::new();
+        replies.query_results(values_sequence, PROBE_OCCLUSION_SET, 0, &[]);
+        deliver(replies.bytes());
+
+        assert_eq!(
+            __crcbl_web_gpu_probe_occlusion_values_state(),
+            OCCLUSION_VALUES_READY
+        );
+        assert_eq!(__crcbl_web_gpu_probe_occlusion_values_len(), 0);
+        assert!(occlusion_values().is_empty());
     }
 
     /// The MSAA probe's bytes, read the way JS reads them.

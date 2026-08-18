@@ -1,8 +1,9 @@
-// The `crcbl-webgpu` seam groups — G through AC — and nothing else.
+// The `crcbl-webgpu` seam groups — G through AE — and nothing else.
 //
-// The letters are allocation order rather than run order: AC runs between W and
-// X, where a group that reads bytes back has to sit on a platform whose canvas
-// readback strands everything queued behind it. Its own comment says why.
+// The letters are allocation order rather than run order: AC, AD and AE run
+// between W and X, where a group that reads bytes back has to sit on a platform
+// whose canvas readback strands everything queued behind it. Each one's own
+// comment says why.
 //
 // **THE ONLY GATE THAT DRIVES THIS SEAM COMMAND BY COMMAND.** Everything else
 // about the command stream is checked without a browser: `stream-decode.mjs`
@@ -2755,6 +2756,183 @@ export async function runProbeGroups({
           `${msaa.otherCount} some other colour; first wrong at byte ${msaa.firstWrong} ` +
           `(sample ${JSON.stringify(msaa.sample)})` +
           `${msaa.error ? ` — ${msaa.error}` : ''}`
+  );
+
+  // **THE QUERY GATE, AND THE ONLY EXERCISE `Capability::OcclusionQuery` HAS ON
+  // THIS BACKEND.** The native seam suite that holds the other four backends to
+  // that declaration (`exercise_query_set_creation` in
+  // `crates/crcbl/tests/hal_seam_e2e.rs`) is a native binary and cannot open this
+  // one, so without this group the `Support::Yes` is a sentence nothing tests.
+  //
+  // WHAT THE CAPABILITY CLAIMS, AND IT IS WORTH BEING EXACT: a
+  // `QueryKind::Occlusion` query set, and nothing more.
+  // `crcbl_hal::CommandEncoder` has no begin/end query verb — its whole query
+  // vocabulary is the reset, the timestamp write and the resolve — so nothing a
+  // caller records through this seam can ever *write* an occlusion query, here or
+  // on the Vulkan backend whose `Yes` means the same thing. There is no count to
+  // be plausible about, and this group does not pretend there is one.
+  //
+  // WHAT IT DOES: wasm records a 32-query occlusion set, a `QUERY_RESOLVE`
+  // destination filled with a sentinel byte, the seam's `reset_query_set` over
+  // the whole range (which WebGPU has no call for and the replayer records
+  // nothing for), a `resolve_query_set` over that sentinel, a copy into a
+  // host-readable buffer, and the readback — plus a `query_results` ask on the
+  // same queries, which the replayer serves through a resolve, a copy and a map
+  // of its own because a `GPUQuerySet` has no accessor. The page loop replays it,
+  // and the 256 bytes that come back each way say what happened.
+  //
+  // **THE SENTINEL IS WHAT MAKES THE ZERO MEAN SOMETHING**, and that is the whole
+  // design constraint: an unwritten query resolves to zero, and zero is also what
+  // an untouched allocation reads as, so "all zero" on its own is the answer a
+  // replayer that did nothing would give. Primed, the two readings mean two
+  // things and only one is a pass:
+  //
+  //   every byte zero        the resolve ran, over a set the browser really
+  //                          created, and overwrote the sentinel. The only pass.
+  //   the sentinel survives  the resolve was dropped or refused. A WebGPU
+  //                          validation error is reported out of band and the
+  //                          copy still runs, so this is exactly what a refused
+  //                          resolve looks like from here.
+  //
+  // **THE ZERO IS THE IMPLEMENTATION'S, NOT THE SPECIFICATION'S.**
+  // `gpuweb/gpuweb#1072` opened the question of whether resolving a never-begun
+  // query should be disallowed or should follow D3D12 and Metal in producing 0,
+  // and `resolveQuerySet`'s published validation rules — a 256-aligned
+  // `destinationOffset`, a `QUERY_RESOLVE` destination, a range inside the set —
+  // say nothing about the value. This gate runs under Chromium on all three
+  // platforms (`web/run-probe-e2e.sh` says so), so what it asserts is one
+  // implementation's answer; a browser that answered otherwise fails here naming
+  // the value it gave rather than passing quietly.
+  //
+  // AND THE SECOND PATH IS NOT A SECOND ASSERTION OF THE FIRST. The readback
+  // reads bytes a resolve *wasm recorded* wrote into a buffer wasm owns; the
+  // direct read is `Device::query_results`, which reaches the same queries
+  // through machinery the replayer builds for itself. Two mechanisms agreeing on
+  // one answer is what neither of them alone can say.
+  //
+  // WHERE IT BELONGS IN THE RUN: **before X**, groups AC and AD's reason exactly.
+  // X, Y, Z and AA are expected to fail on Windows because the page has one
+  // `GPUDevice` and therefore one queue, and X's stuck canvas readback strands
+  // every `mapAsync` queued after it. This group reads bytes back — twice, since
+  // the direct read is a `mapAsync` of the replayer's own — so behind X it would
+  // be stranded too, and it is not in that platform's `--expect-fail` list. Ahead
+  // of X it resolves like AC and AD do, and it makes X no worse: what strands the
+  // canvas groups is their own present, not the number of submits before them.
+  // Its letter is the next free one rather than its position, because renumbering
+  // X onwards would rewrite an `--expect-fail` list that records a measurement.
+  group('AE — an occlusion query set is built, resolved and read back');
+
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_OCCLUSION_*`, spelled out here
+  // rather than imported, as every expected value in this file is.
+  const PROBE_OCCLUSION_QUERIES = 32;
+  const PROBE_OCCLUSION_BYTES = PROBE_OCCLUSION_QUERIES * 8;
+  const PROBE_OCCLUSION_SENTINEL = 0xa7;
+
+  const occlusionStart = await evaluate(
+    page,
+    `(async () => {
+     const { startOcclusionProbe } = await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     return { started: startOcclusionProbe({ exports }) };
+   })()`
+  );
+  // Poll across frames exactly as group AC does, and wait for BOTH answers: the
+  // readback's poll settles on its own schedule and the direct read settles when
+  // the replayer's map does, so a run that took only the first would report on
+  // whichever arrived earlier.
+  const occlusion = occlusionStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readOcclusionProbe, readOcclusionValues, pollOcclusionProbe,
+                   OCCLUSION, OCCLUSION_VALUES } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readOcclusionProbe({ exports, memory: exports.memory });
+           if (r.state === OCCLUSION.UNDECODABLE) {
+             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           }
+           const v = readOcclusionValues({ exports, memory: exports.memory });
+           if (r.state !== OCCLUSION.READY ||
+               v.state !== OCCLUSION_VALUES.READY) {
+             pollOcclusionProbe({ exports });
+             return null;
+           }
+           // Both are in: classify every byte here rather than shipping 512 of
+           // them out. Which of the two readings came back is the whole verdict,
+           // so the counts are what crosses — a run that overwrote part of the
+           // destination is a different failure from one that overwrote none of
+           // it, and the message has to be able to say which.
+           const classify = (bytes) => {
+             let zero = 0;
+             let sentinel = 0;
+             let other = 0;
+             let firstWrong = -1;
+             for (let at = 0; at < bytes.length; at += 1) {
+               if (bytes[at] === 0) zero += 1;
+               else {
+                 if (firstWrong < 0) firstWrong = at;
+                 if (bytes[at] === ${PROBE_OCCLUSION_SENTINEL}) sentinel += 1;
+                 else other += 1;
+               }
+             }
+             return { len: bytes.length, zero, sentinel, other, firstWrong };
+           };
+           return {
+             done: true,
+             state: r.name,
+             valuesState: v.name,
+             readback: classify(r.bytes),
+             values: classify(v.bytes),
+             sample: [...r.bytes.slice(0, 8)],
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+  check(
+    'AE',
+    'wasm encoded the occlusion setup frame — the set, the sentinel, the reset, the resolve, the copy, the request, and the direct read beside it',
+    occlusionStart?.started === true,
+    occlusionStart?.started
+      ? 'the query set-and-resolve frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'AE',
+    'the resolve reached the destination it named — every resolved byte is zero and none is the sentinel it was primed with',
+    occlusion?.done === true &&
+      occlusion.readback?.len === PROBE_OCCLUSION_BYTES &&
+      occlusion.readback.zero === PROBE_OCCLUSION_BYTES,
+    occlusion?.done !== true
+      ? `no occlusion readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : occlusion.readback?.zero === PROBE_OCCLUSION_BYTES
+        ? `${occlusion.readback.len} bytes, every one zero — the resolve overwrote all ${PROBE_OCCLUSION_QUERIES} queries' worth of the 0x${PROBE_OCCLUSION_SENTINEL.toString(16)} sentinel`
+        : `state ${occlusion.state}, ${occlusion.readback?.len ?? 0} bytes: ` +
+          `${occlusion.readback?.zero ?? 0} zero, ${occlusion.readback?.sentinel ?? 0} still the sentinel ` +
+          '(the resolve was dropped or refused), ' +
+          `${occlusion.readback?.other ?? 0} some other value; first wrong at byte ${occlusion.readback?.firstWrong ?? -1} ` +
+          `(sample ${JSON.stringify(occlusion.sample)})` +
+          `${occlusion.error ? ` — ${occlusion.error}` : ''}`
+  );
+  check(
+    'AE',
+    'Device::query_results read the same set the other way and answered the same values — one u64 per query, every one zero',
+    occlusion?.done === true &&
+      occlusion.values?.len === PROBE_OCCLUSION_BYTES &&
+      occlusion.values.zero === PROBE_OCCLUSION_BYTES,
+    occlusion?.done !== true
+      ? `no direct read in ${TIMEOUT_MS} ms — the replayer's own map never resolved or the reply never reached wasm`
+      : occlusion.values?.len === 0
+        ? `state ${occlusion.valuesState} with no values, which is the only way a QueryResults reply says the read could not be served${occlusion.error ? ` — ${occlusion.error}` : ''}`
+        : occlusion.values?.zero === PROBE_OCCLUSION_BYTES
+          ? `${occlusion.values.len} bytes, every one zero — the same answer the resolve wrote, through machinery the replayer built for itself`
+          : `state ${occlusion.valuesState}, ${occlusion.values?.len ?? 0} bytes: ` +
+            `${occlusion.values?.zero ?? 0} zero, ${occlusion.values?.other ?? 0} something else; ` +
+            `first wrong at byte ${occlusion.values?.firstWrong ?? -1}` +
+            `${occlusion.error ? ` — ${occlusion.error}` : ''}`
   );
 
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**

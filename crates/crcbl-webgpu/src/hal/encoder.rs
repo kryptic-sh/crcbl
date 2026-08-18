@@ -3,11 +3,11 @@
 //! # The honesty mechanism for unit-returning ops
 //!
 //! A recording method that has a [`StreamWriter`](crate::StreamWriter) command
-//! encodes it. One that does not — the count-buffer and mesh draws, and the
-//! three query-set ops — returns `()` and cannot report
-//! an error inline. Silently dropping it would let a scene that hits it replay a
-//! command buffer missing the op and render **subtly wrong**, which is the
-//! worst outcome the seam has.
+//! encodes it. One that does not — the count-buffer and mesh draws, and
+//! [`write_timestamp`](CommandEncoder::write_timestamp) — returns `()` and
+//! cannot report an error inline. Silently dropping it would let a scene that
+//! hits it replay a command buffer missing the op and render **subtly wrong**,
+//! which is the worst outcome the seam has.
 //!
 //! So an unwired op records its name onto the encoder instead, and
 //! [`finish`](CommandEncoder::finish) — which *can* return an error — refuses,
@@ -303,22 +303,37 @@ impl CommandEncoder for WebGpuCommandEncoder {
 
     // --- queries ---
 
-    fn reset_query_set(&mut self, _set: QuerySetHandle, _range: Range<u32>) {
-        self.record_unsupported("reset_query_set is not yet wired into the WebGPU stream");
+    fn reset_query_set(&mut self, set: QuerySetHandle, range: Range<u32>) {
+        // Wired, and the command it becomes is a no-op: WebGPU has no reset, and
+        // an unwritten query resolves to zero by specification, so there is
+        // nothing for one to do. It is carried rather than dropped here because
+        // this method returns `()` — a range naming a set the replayer does not
+        // hold then reaches the device error queue by name instead of vanishing.
+        // See `Command::ResetQuerySet`.
+        self.channel
+            .with(|c| c.encode(|stream| stream.reset_query_set(set, range)));
     }
 
     fn write_timestamp(&mut self, _set: QuerySetHandle, _index: u32) {
-        self.record_unsupported("write_timestamp is not yet wired into the WebGPU stream");
+        // The one query verb that stays unwired, and not for want of a slice:
+        // WebGPU takes timestamps only at pass boundaries, through a render or
+        // compute pass's `timestampWrites`, and this call names an arbitrary
+        // point in the command stream. `create_query_set` refuses
+        // `QueryKind::Timestamp` for the same reason and with the same sentence,
+        // so no live handle can reach here at all — this is the second lock on a
+        // door, not the first.
+        self.record_unsupported(super::device::NO_TIMESTAMP_SET);
     }
 
     fn resolve_query_set(
         &mut self,
-        _set: QuerySetHandle,
-        _range: Range<u32>,
-        _dst: BufferHandle,
-        _dst_offset: u64,
+        set: QuerySetHandle,
+        range: Range<u32>,
+        dst: BufferHandle,
+        dst_offset: u64,
     ) {
-        self.record_unsupported("resolve_query_set is not yet wired into the WebGPU stream");
+        self.channel
+            .with(|c| c.encode(|stream| stream.resolve_query_set(set, range, dst, dst_offset)));
     }
 
     // --- finish ---

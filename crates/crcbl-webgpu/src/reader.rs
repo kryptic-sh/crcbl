@@ -1029,6 +1029,25 @@ impl<'a> StreamReader<'a> {
                     color_targets,
                 })
             }
+            tag::CREATE_QUERY_SET_TAG => {
+                // The handle, the label, the kind code, then the count. See
+                // `Command::CreateQuerySet`.
+                let set = r.read_handle("CreateQuerySet::set")?;
+                let label = r.read_opt_string("QuerySetDesc::label")?;
+                let kind_code = r.read_u8()?;
+                let kind =
+                    tag::query_kind_from_code(kind_code).ok_or(DecodeError::InvalidEnum {
+                        field: "QuerySetDesc::kind",
+                        code: kind_code.into(),
+                    })?;
+                let count = r.read_u32()?;
+                Ok(Command::CreateQuerySet {
+                    set,
+                    label,
+                    kind,
+                    count,
+                })
+            }
             tag::DESTROY_COMPUTE_PIPELINE_TAG => Ok(Command::DestroyComputePipeline {
                 pipeline: r.read_handle("DestroyComputePipeline::pipeline")?,
             }),
@@ -1061,6 +1080,9 @@ impl<'a> StreamReader<'a> {
             }),
             tag::DESTROY_SAMPLER_TAG => Ok(Command::DestroySampler {
                 sampler: r.read_handle("DestroySampler::sampler")?,
+            }),
+            tag::DESTROY_QUERY_SET_TAG => Ok(Command::DestroyQuerySet {
+                set: r.read_handle("DestroyQuerySet::set")?,
             }),
             tag::BEGIN_DEBUG_LABEL_TAG => Ok(Command::BeginDebugLabel {
                 label: r.read_string("BeginDebugLabel::label")?,
@@ -1237,6 +1259,45 @@ impl<'a> StreamReader<'a> {
                 Ok(Command::DispatchIndirect { buffer, offset })
             }
             tag::END_COMPUTE_PASS_TAG => Ok(Command::EndComputePass),
+            tag::RESET_QUERY_SET_TAG => {
+                // The set, then the range as a first index and a count. See
+                // `Command::ResetQuerySet`.
+                let set = r.read_handle("ResetQuerySet::set")?;
+                let first_query = r.read_u32()?;
+                let query_count = r.read_u32()?;
+                Ok(Command::ResetQuerySet {
+                    set,
+                    first_query,
+                    query_count,
+                })
+            }
+            tag::RESOLVE_QUERY_SET_TAG => {
+                // The set and its range, then the destination and its byte
+                // offset. See `Command::ResolveQuerySet`.
+                let set = r.read_handle("ResolveQuerySet::set")?;
+                let first_query = r.read_u32()?;
+                let query_count = r.read_u32()?;
+                let dst = r.read_handle("ResolveQuerySet::dst")?;
+                let dst_offset = r.read_u64()?;
+                Ok(Command::ResolveQuerySet {
+                    set,
+                    first_query,
+                    query_count,
+                    dst,
+                    dst_offset,
+                })
+            }
+            tag::QUERY_RESULTS_TAG => {
+                // The set and the range to read. See `Command::QueryResults`.
+                let set = r.read_handle("QueryResults::set")?;
+                let first_query = r.read_u32()?;
+                let query_count = r.read_u32()?;
+                Ok(Command::QueryResults {
+                    set,
+                    first_query,
+                    query_count,
+                })
+            }
             tag::ENUMERATE_ADAPTERS_TAG => Ok(Command::EnumerateAdapters),
             tag::REQUEST_DEVICE_TAG => {
                 let adapter = AdapterId(r.read_u32()?);

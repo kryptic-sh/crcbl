@@ -247,6 +247,47 @@ export const MSAA = Object.freeze({
 });
 
 /**
+ * The `OCCLUSION_*` codes `__crcbl_web_gpu_probe_occlusion_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The occlusion probe is a readback at heart — its setup frame ends in the same
+ * `request_readback` — so its codes mirror {@link READBACK} exactly. `READY`
+ * carries one little-endian `u64` per query, resolved out of a `GPUQuerySet`
+ * over a destination that was filled with a sentinel first: whether those bytes
+ * are the sentinel or zero is the whole evidence that the resolve ran against a
+ * set the browser really created, which is the one claim no native suite can
+ * make about this backend.
+ */
+export const OCCLUSION = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
+ * The `OCCLUSION_VALUES_*` codes
+ * `__crcbl_web_gpu_probe_occlusion_values_state` answers.
+ *
+ * The *other* half of the same exercise: `Device::query_results` reading the
+ * same queries through a resolve, a copy and a map the **replayer** performs,
+ * because a `GPUQuerySet` has no accessor. Three codes rather than six, because
+ * there is nothing to poll — the replayer answers when its own map settles, so
+ * there is no `PENDING` between `WAITING` and `READY` and no poll to issue.
+ *
+ * **`READY` with no values is a failed read**, not an empty success: the seam
+ * never asks for zero values, so an empty list is the only way a `QueryResults`
+ * reply can say it could not be served.
+ */
+export const OCCLUSION_VALUES = Object.freeze({
+  UNASKED: 0,
+  WAITING: 1,
+  READY: 2,
+});
+
+/**
  * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1546,6 +1587,121 @@ export function readMsaaProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: msaaStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the occlusion codes. Its own function
+ * for {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function occlusionStateName(state) {
+  const found = Object.entries(OCCLUSION).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * The same helper again, for the direct read's own three codes.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function occlusionValuesStateName(state) {
+  const found = Object.entries(OCCLUSION_VALUES).find(
+    ([, code]) => code === state
+  );
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to build an occlusion query set, resolve it over a sentinel, and
+ * start reading the result back — **both ways at once**.
+ *
+ * The only gate anywhere that puts a `GPUQuerySet` on this backend's wire. One
+ * frame carries the set, a `QUERY_RESOLVE` destination filled with a sentinel,
+ * the seam's reset (which WebGPU has no call for and the replayer records
+ * nothing for), the resolve over that sentinel, the copy, the readback request
+ * — and a `query_results` ask that reads the same queries the other way, through
+ * a resolve the *replayer* performs. Two mechanisms, one set, one expected
+ * answer; {@link pollOcclusionProbe} drives the readback's poll,
+ * {@link readOcclusionProbe} reads its bytes, and
+ * {@link readOcclusionValues} reads the direct read's.
+ *
+ * Its answer is *data* and it needs a **device**, so `false` before one has
+ * opened is ordering rather than failure — wait for {@link readDeviceProbe} to
+ * say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startOcclusionProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_occlusion() === 1;
+}
+
+/**
+ * Poll the occlusion readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. The direct read is never
+ * polled: the replayer answers it when its own map settles. See
+ * `__crcbl_web_gpu_probe_occlusion_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollOcclusionProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_occlusion_poll() === 1;
+}
+
+/**
+ * Read where the occlusion readback has got to, and its bytes once it is
+ * `READY`.
+ *
+ * {@link readDrawProbe}'s query sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readOcclusionProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_occlusion_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_occlusion_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_occlusion_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: occlusionStateName(state), bytes };
+}
+
+/**
+ * Read where the **direct** query read has got to, and its values once it is
+ * `READY`.
+ *
+ * The values are little-endian `u64`s and are handed over as bytes rather than
+ * as a `BigUint64Array` view, because a typed array of that width needs its
+ * offset aligned and nothing about a wasm allocation promises one. The caller
+ * reads them eight at a time, which is what the gate does.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readOcclusionValues({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_occlusion_values_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_occlusion_values_ptr();
+  const len = exports.__crcbl_web_gpu_probe_occlusion_values_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: occlusionValuesStateName(state), bytes };
 }
 
 /**

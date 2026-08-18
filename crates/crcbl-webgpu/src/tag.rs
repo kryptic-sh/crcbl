@@ -29,8 +29,8 @@
 use crcbl_hal::{
     BindingKind, BindingResource, BlendFactor, BlendOp, CompareOp, CompositeAlpha, CullMode,
     DeviceType, FilterMode, Format, FrontFace, ImageType, ImageViewType, IndexFormat, LoadOp,
-    MemoryLocation, PolygonMode, PresentMode, PrimitiveTopology, ResourceState, SampleType,
-    SamplerAddressMode, StencilOp, StoreOp,
+    MemoryLocation, PolygonMode, PresentMode, PrimitiveTopology, QueryKind, ResourceState,
+    SampleType, SamplerAddressMode, StencilOp, StoreOp,
 };
 
 use crate::reply::SurfaceCapsFailure;
@@ -239,7 +239,14 @@ pub const FAMILY_COPY: u8 = 0x78;
 /// One past the copy-and-fill family.
 pub const FAMILY_COPY_END: u8 = 0x80;
 
-/// First tag of the query family: query sets, timestamps, resolves.
+/// First tag of the query family: the query **verbs** — the reset, the resolve
+/// and the direct read.
+///
+/// Not the query set itself. [`CREATE_QUERY_SET_TAG`] and
+/// [`DESTROY_QUERY_SET_TAG`] sit in the creation and destruction families for
+/// [`REQUEST_READBACK_TAG`]'s reason: they carry a handle the caller allocated
+/// from a descriptor, which is what puts a command in those families whatever
+/// the object is. What is left here names no new handle.
 pub const FAMILY_QUERY: u8 = 0x80;
 /// One past the query family.
 pub const FAMILY_QUERY_END: u8 = 0x88;
@@ -377,6 +384,18 @@ pub const REQUEST_READBACK_TAG: u8 = 0x0B;
 /// and format arrive later, with [`CREATE_SWAPCHAIN_TAG`]. See
 /// [`Command::CreateOffscreenSurface`](crate::Command::CreateOffscreenSurface).
 pub const CREATE_OFFSCREEN_SURFACE_TAG: u8 = 0x0C;
+/// [`Command::CreateQuerySet`](crate::Command::CreateQuerySet).
+///
+/// **In the creation family rather than [`FAMILY_QUERY`]**, which is the split
+/// [`REQUEST_READBACK_TAG`] already argues:
+/// [`create_query_set`](crcbl_hal::Device::create_query_set) allocates a
+/// [`QuerySetHandle`](crcbl_hal::QuerySetHandle) the caller writes into the
+/// stream from a [`QuerySetDesc`](crcbl_hal::QuerySetDesc), so it is an ordinary
+/// creation and takes the CREATE/DESTROY pair every resource takes. What is left
+/// for the query family is the *verbs* — the reset, the resolve and the read —
+/// which name no new handle. Written out rather than as `FAMILY_CREATE + 13`,
+/// for [`CREATE_SAMPLER_TAG`]'s reason.
+pub const CREATE_QUERY_SET_TAG: u8 = 0x0D;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -430,6 +449,11 @@ pub const DESTROY_COMMAND_BUFFER_TAG: u8 = 0x2B;
 /// Written out rather than as `FAMILY_DESTROY + 12`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const DESTROY_READBACK_TAG: u8 = 0x2C;
+/// [`Command::DestroyQuerySet`](crate::Command::DestroyQuerySet) — the release
+/// half of [`CREATE_QUERY_SET_TAG`], in the destruction family beside it for
+/// that tag's reason. Written out rather than as `FAMILY_DESTROY + 13`, for
+/// [`CREATE_SAMPLER_TAG`]'s reason.
+pub const DESTROY_QUERY_SET_TAG: u8 = 0x2D;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel) — opens a
 /// labelled region, which becomes `pushDebugGroup(label)` on whichever scope is
 /// open.
@@ -551,6 +575,35 @@ pub const FILL_BUFFER_TAG: u8 = 0x7C;
 /// It makes no object and is not recorded on the implicit-current encoder — the
 /// replayer submits it straight to the queue.
 pub const WRITE_BUFFER_TAG: u8 = 0x7D;
+/// [`Command::ResetQuerySet`](crate::Command::ResetQuerySet) — the first tag of
+/// the query family, [`FAMILY_QUERY`], and **the documented no-op**.
+///
+/// WebGPU has no reset: a `GPUQuerySet` is not a pool a caller re-arms, and its
+/// unwritten queries resolve to zero by specification. The seam still makes
+/// every caller record one so the Vulkan path is never the special case — see
+/// [`reset_query_set`](crcbl_hal::CommandEncoder::reset_query_set) — so the
+/// command crosses whole, exactly as [`PIPELINE_BARRIER_TAG`] does, and the
+/// replayer records nothing for it. Carried rather than dropped in the encoder
+/// because the call returns `()`: a range naming a set the replayer does not
+/// hold, or running past that set's `count`, is then a message on the device
+/// error queue instead of a silence.
+pub const RESET_QUERY_SET_TAG: u8 = 0x80;
+/// [`Command::ResolveQuerySet`](crate::Command::ResolveQuerySet) — the copy of a
+/// query range into a buffer, which becomes
+/// `resolveQuerySet(querySet, firstQuery, queryCount, destination,
+/// destinationOffset)` on the implicit-current encoder.
+pub const RESOLVE_QUERY_SET_TAG: u8 = 0x81;
+/// [`Command::QueryResults`](crate::Command::QueryResults) — the direct read
+/// [`query_results`](crcbl_hal::Device::query_results) asks for, answered by a
+/// [`Reply::QueryResults`](crate::Reply::QueryResults) naming its sequence.
+///
+/// **In the query family rather than [`FAMILY_DEVICE`]**, where a `Device`
+/// method that makes no object would otherwise go: the reply table already
+/// placed its answer in [`REPLY_FAMILY_QUERY`], whose own docs name
+/// `Device::query_results` as the call that family answers. The two tables are
+/// grouped by the family of *call*, so putting the ask anywhere else would leave
+/// one exchange split across two families.
+pub const QUERY_RESULTS_TAG: u8 = 0x82;
 /// [`Command::CreateSwapchain`](crate::Command::CreateSwapchain) — the first tag
 /// of the presentation family, [`FAMILY_PRESENT`]. It configures a canvas's
 /// context; see the command for why `image_count` and `present_mode` are carried
@@ -900,6 +953,45 @@ pub const fn memory_location_from_code(code: u8) -> Option<MemoryLocation> {
         MEMORY_DEVICE_LOCAL => Some(MemoryLocation::DeviceLocal),
         MEMORY_HOST_UPLOAD => Some(MemoryLocation::HostUpload),
         MEMORY_HOST_READBACK => Some(MemoryLocation::HostReadback),
+        _ => None,
+    }
+}
+
+// ── QueryKind ─────────────────────────────────────────────────────────────────
+//
+// Carried by [`Command::CreateQuerySet`](crate::Command::CreateQuerySet). All
+// three codes exist on the wire although the replayer serves only one of them:
+// `GPUQueryType` is exactly `'occlusion'` and `'timestamp'`, so a statistics set
+// has nothing to become, and a timestamp set is refused before it is encoded —
+// see `crate::hal::WebGpuDevice::create_query_set`. Writing all three means a
+// kind this backend gains later is a replayer arm rather than a wire change, and
+// means a fold between two of them is a decode failure rather than the wrong
+// pool being created.
+
+/// [`QueryKind::Timestamp`].
+pub const QUERY_KIND_TIMESTAMP: u8 = 0x00;
+/// [`QueryKind::Occlusion`].
+pub const QUERY_KIND_OCCLUSION: u8 = 0x01;
+/// [`QueryKind::PipelineStatistics`].
+pub const QUERY_KIND_PIPELINE_STATISTICS: u8 = 0x02;
+
+/// The wire code for a [`QueryKind`].
+#[must_use]
+pub const fn query_kind_code(kind: QueryKind) -> u8 {
+    match kind {
+        QueryKind::Timestamp => QUERY_KIND_TIMESTAMP,
+        QueryKind::Occlusion => QUERY_KIND_OCCLUSION,
+        QueryKind::PipelineStatistics => QUERY_KIND_PIPELINE_STATISTICS,
+    }
+}
+
+/// The [`QueryKind`] a wire code names, or `None` if it names none.
+#[must_use]
+pub const fn query_kind_from_code(code: u8) -> Option<QueryKind> {
+    match code {
+        QUERY_KIND_TIMESTAMP => Some(QueryKind::Timestamp),
+        QUERY_KIND_OCCLUSION => Some(QueryKind::Occlusion),
+        QUERY_KIND_PIPELINE_STATISTICS => Some(QueryKind::PipelineStatistics),
         _ => None,
     }
 }
@@ -1974,7 +2066,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 66] = [
+    const TAGS: [(&str, u8, u8); 71] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         (
@@ -2012,6 +2104,7 @@ mod tests {
             FAMILY_CREATE,
         ),
         ("RequestReadback", REQUEST_READBACK_TAG, FAMILY_CREATE),
+        ("CreateQuerySet", CREATE_QUERY_SET_TAG, FAMILY_CREATE),
         (
             "DestroyComputePipeline",
             DESTROY_COMPUTE_PIPELINE_TAG,
@@ -2049,6 +2142,7 @@ mod tests {
             FAMILY_DESTROY,
         ),
         ("DestroyReadback", DESTROY_READBACK_TAG, FAMILY_DESTROY),
+        ("DestroyQuerySet", DESTROY_QUERY_SET_TAG, FAMILY_DESTROY),
         ("BeginDebugLabel", BEGIN_DEBUG_LABEL_TAG, FAMILY_ENCODER),
         ("EndDebugLabel", END_DEBUG_LABEL_TAG, FAMILY_ENCODER),
         ("InsertDebugMarker", INSERT_DEBUG_MARKER_TAG, FAMILY_ENCODER),
@@ -2099,6 +2193,9 @@ mod tests {
         ("CopyImageToImage", COPY_IMAGE_TO_IMAGE_TAG, FAMILY_COPY),
         ("FillBuffer", FILL_BUFFER_TAG, FAMILY_COPY),
         ("WriteBuffer", WRITE_BUFFER_TAG, FAMILY_COPY),
+        ("ResetQuerySet", RESET_QUERY_SET_TAG, FAMILY_QUERY),
+        ("ResolveQuerySet", RESOLVE_QUERY_SET_TAG, FAMILY_QUERY),
+        ("QueryResults", QUERY_RESULTS_TAG, FAMILY_QUERY),
         ("CreateSwapchain", CREATE_SWAPCHAIN_TAG, FAMILY_PRESENT),
         ("AcquireNextFrame", ACQUIRE_NEXT_FRAME_TAG, FAMILY_PRESENT),
         ("Present", PRESENT_TAG, FAMILY_PRESENT),
@@ -2267,6 +2364,17 @@ mod tests {
         );
         for m in memory {
             assert_eq!(memory_location_from_code(memory_location_code(m)), Some(m));
+        }
+
+        let query_kind = [
+            QueryKind::Timestamp,
+            QueryKind::Occlusion,
+            QueryKind::PipelineStatistics,
+        ];
+        let codes: Vec<u8> = query_kind.iter().map(|k| query_kind_code(*k)).collect();
+        assert_eq!(distinct(&codes), codes.len(), "two QueryKinds share a code");
+        for kind in query_kind {
+            assert_eq!(query_kind_from_code(query_kind_code(kind)), Some(kind));
         }
 
         let image_type = [ImageType::D1, ImageType::D2, ImageType::D3];
@@ -2659,6 +2767,7 @@ mod tests {
         assert_eq!(resource_state_from_code(0xFF), None);
         assert_eq!(store_op_from_code(0xFF), None);
         assert_eq!(memory_location_from_code(0xFF), None);
+        assert_eq!(query_kind_from_code(0xFF), None);
         assert_eq!(image_type_from_code(0xFF), None);
         assert_eq!(image_view_type_from_code(0xFF), None);
         assert_eq!(filter_mode_from_code(0xFF), None);
@@ -2680,6 +2789,10 @@ mod tests {
         // The one directly above the last claimed code, which is where an
         // off-by-one in either table lands and where `0xFF` never would.
         assert_eq!(image_type_from_code(IMAGE_TYPE_D3 + 1), None);
+        assert_eq!(
+            query_kind_from_code(QUERY_KIND_PIPELINE_STATISTICS + 1),
+            None
+        );
         assert_eq!(resource_state_from_code(RESOURCE_STATE_PRESENT + 1), None);
         assert_eq!(image_view_type_from_code(IMAGE_VIEW_TYPE_D3 + 1), None);
         assert_eq!(filter_mode_from_code(FILTER_MODE_LINEAR + 1), None);

@@ -43,7 +43,7 @@ use crcbl_hal::{
     ComputePipelineHandle, Device, DeviceCaps, DeviceRequestState, DisplayTiming, Features,
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageViewDesc,
     ImageViewHandle, MeshPipelineDesc, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle,
-    PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
+    PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
     ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
     SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support,
     SurfaceError, SwapchainDesc, SwapchainHandle,
@@ -228,6 +228,68 @@ impl ErrorQueue {
     }
 }
 
+/// WebGPU's answer for [`Capability::TimestampQuery`], shared by
+/// [`WebGpuDevice::create_query_set`]'s refusal and the device's declaration so
+/// the two cannot drift.
+///
+/// **The one refusal in this slice that is load-bearing rather than
+/// descriptive.** `crcbl-render`'s `PassTimers::new` gates on the device
+/// reporting [`Features::TIMESTAMP_QUERY`] — which this backend does report,
+/// because the engine asks for it optionally and `timestamp-query` is a real
+/// `GPUFeatureName` — and then creates a set. If that succeeded, every frame
+/// would record `reset_query_set` and `write_timestamp`, and
+/// [`finish`](CommandEncoder::finish) refuses a whole command buffer that
+/// reached an unwired op. So the refusal here is what keeps the demos rendering,
+/// and it is a refusal by name rather than an absence.
+pub(super) const NO_TIMESTAMP_SET: &str = "WebGPU takes timestamps only through a render or compute pass's timestampWrites, and the \
+     seam's write_timestamp is an arbitrary point in the command stream — so a timestamp set this \
+     backend created could never be written";
+
+/// WebGPU's answer for [`Capability::PipelineStatisticsQuery`], shared for
+/// [`NO_TIMESTAMP_SET`]'s reason.
+pub(super) const NO_STATISTICS_SET: &str = "GPUQueryType is exactly 'occlusion' and 'timestamp', so there is no pipeline-statistics query \
+     set for WebGPU to create";
+
+/// One [`Device::query_results`] exchange for one query set.
+///
+/// [`ErrorQueue`]'s shape, and for its reason: nothing here can block on a
+/// browser, so the call pumps, hands back whatever has arrived, and encodes an
+/// awaited ask when none is outstanding.
+#[derive(Debug, Default)]
+struct QueryReadQueue {
+    /// The answer that arrived and has not been handed out, as the range it
+    /// covers and the values in it.
+    arrived: Option<(u32, Vec<u64>)>,
+    /// Sequence of the ask whose answer has not arrived, or `None` when none is
+    /// out.
+    waiting: Option<u64>,
+}
+
+impl QueryReadQueue {
+    /// Take this set's answer out of a drained frame's replies.
+    fn absorb(&mut self, set: QuerySetHandle, replies: &[(u64, Reply)]) {
+        let Some(sequence) = self.waiting else {
+            return;
+        };
+        let Some((_, reply)) = replies.iter().find(|(candidate, _)| *candidate == sequence) else {
+            return;
+        };
+        // Answered, whatever it says — [`ErrorQueue::absorb`]'s rule: one command
+        // is answered exactly once, so leaving this set would wait for a second
+        // reply the channel would refuse.
+        self.waiting = None;
+        if let Reply::QueryResults {
+            set: answered,
+            first_query,
+            values,
+        } = reply
+            && *answered == set
+        {
+            self.arrived = Some((*first_query, values.clone()));
+        }
+    }
+}
+
 // ── WebGpuDevice ───────────────────────────────────────────────────────────
 
 /// An open device: encodes resource, pass and submission commands onto the
@@ -241,6 +303,18 @@ pub struct WebGpuDevice {
     /// Readbacks in flight, keyed by handle bits. Guarded so the device stays
     /// `Send + Sync` on native, where the seam demands it.
     readbacks: Mutex<HashMap<u64, ReadbackTracker>>,
+    /// How many queries each live query set holds, keyed by handle bits.
+    ///
+    /// The seam documents [`HalError::InvalidDescriptor`] for a
+    /// [`query_results`](Device::query_results) range that exceeds the set, and
+    /// that is decidable here rather than a frame away: the browser is not
+    /// needed to know how big a set this device asked for. Every entry is an
+    /// occlusion set — [`create_query_set`](Device::create_query_set) refuses
+    /// the other two kinds — so no kind is stored beside the count.
+    query_sets: Mutex<HashMap<u64, u32>>,
+    /// One [`QueryReadQueue`] per set a read has been asked of, keyed by handle
+    /// bits.
+    query_reads: Mutex<HashMap<u64, QueryReadQueue>>,
     /// The out-of-band errors the browser has reported, and the ask in flight
     /// for more. Guarded for [`readbacks`](Self::readbacks)'s reason.
     errors: Mutex<ErrorQueue>,
@@ -261,6 +335,8 @@ impl WebGpuDevice {
             graphics_queue,
             pool,
             readbacks: Mutex::new(HashMap::new()),
+            query_sets: Mutex::new(HashMap::new()),
+            query_reads: Mutex::new(HashMap::new()),
             errors: Mutex::new(ErrorQueue::default()),
             swapchains: Mutex::new(HashMap::new()),
         }
@@ -301,6 +377,17 @@ impl WebGpuDevice {
             tracker.absorb(&replies);
         }
         drop(readbacks);
+        let mut reads = self
+            .query_reads
+            .lock()
+            .expect("the query-read map was poisoned");
+        for (bits, queue) in reads.iter_mut() {
+            let Some(set) = QuerySetHandle::from_bits(*bits) else {
+                continue;
+            };
+            queue.absorb(set, &replies);
+        }
+        drop(reads);
         self.errors
             .lock()
             .expect("the device error queue was poisoned")
@@ -323,10 +410,11 @@ impl Device for WebGpuDevice {
     /// backend the two come apart more than anywhere else: a command crosses the
     /// stream and the browser executes it a turn later, so a method can return
     /// `Ok` here and be refused there.
-    /// [`TimestampQuery`](Capability::TimestampQuery) is the shape — the HAL call
-    /// returns `()`, and no command in the stream carries it, so what a caller
-    /// sees is [`finish`](crcbl_hal::CommandEncoder::finish) refusing the whole
-    /// command buffer. This method reports the behaviour.
+    /// [`MeshShading`](Capability::MeshShading) is the shape — the HAL call
+    /// [`draw_mesh_tasks`](crcbl_hal::CommandEncoder::draw_mesh_tasks) returns
+    /// `()`, and no command in the stream carries it, so what a caller sees is
+    /// [`finish`](crcbl_hal::CommandEncoder::finish) refusing the whole command
+    /// buffer. This method reports the behaviour.
     ///
     /// The semaphores used to be the clearest case and are no longer one:
     /// [`create_semaphore`](Self::create_semaphore) handed out a handle whose
@@ -352,7 +440,6 @@ impl Device for WebGpuDevice {
              carries the value so the replayer can refuse a non-zero one rather than write the \
              wrong bytes";
         const NO_MESH: &str = NO_MESH_STAGE;
-        const NOT_STREAMED: &str = "not yet wired into the WebGPU command stream";
         // One sentence for the three, because they are one obstacle: there is no
         // semaphore object, so there is nothing to signal, read or wait on.
         const NO_TIMELINE: &str = "WebGPU has no semaphores. It orders submissions implicitly and its only completion \
@@ -424,14 +511,22 @@ impl Device for WebGpuDevice {
                 Features::SAMPLER_ANISOTROPY,
                 "this device reports no SAMPLER_ANISOTROPY",
             ),
-            // Two of the three are creatable in WebGPU and simply not streamed
-            // yet; the third has no query type to create, so it is the API
-            // rather than the slice and its sentence says which.
-            Capability::TimestampQuery | Capability::OcclusionQuery => Support::No(NOT_STREAMED),
-            Capability::PipelineStatisticsQuery => Support::No(
-                "GPUQueryType is exactly 'occlusion' and 'timestamp', so there is no \
-                 pipeline-statistics query set for WebGPU to create",
-            ),
+            Capability::TimestampQuery => Support::No(NO_TIMESTAMP_SET),
+            // **And this claims exactly what the capability defines and no
+            // more.** `Capability::OcclusionQuery` is "a QueryKind::Occlusion
+            // query set" — `crcbl_hal::CommandEncoder` has no begin/end query
+            // verb, so nothing a caller records through this seam can ever write
+            // one, and the same is true of the Vulkan backend's `Yes`. What is
+            // claimed here is that `create_query_set` builds a real
+            // `GPUQuerySet` of the size asked for, that the seam's three query
+            // verbs reach the browser against it, and that `query_results` reads
+            // it back. `'occlusion'` needs no `GPUFeatureName`, so this is a
+            // constant rather than a device question: every device this backend
+            // opens serves it. Probe group AE is what holds the claim to a
+            // value — the native seam suite is a native binary and cannot open
+            // this backend.
+            Capability::OcclusionQuery => Support::Yes,
+            Capability::PipelineStatisticsQuery => Support::No(NO_STATISTICS_SET),
             // WebGPU has no semaphore of any kind. It orders submissions
             // implicitly — one queue, executed in order, hazards tracked by the
             // browser — and its only completion signal is
@@ -773,34 +868,163 @@ impl Device for WebGpuDevice {
 
     // --- queries ---
 
-    fn create_query_set(&self, _desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
-        // Needed, but the stream has no query commands yet — a later slice adds
-        // them. Refuse loudly: a caller handed a query-set handle nothing backs
-        // would write timestamps into a set that does not exist.
-        Err(HalError::Unsupported {
-            backend: BackendKind::WebGpu,
-            what: "query sets are not yet wired into the WebGPU stream",
-        })
+    /// Creates an **occlusion** query set, and refuses the other two kinds by
+    /// name.
+    ///
+    /// `GPUQuerySet` is core WebGPU for `'occlusion'`: no `GPUFeatureName` gates
+    /// it, so every device this backend can open serves it. The two refusals
+    /// carry `NO_TIMESTAMP_SET` and `NO_STATISTICS_SET`, the same sentences
+    /// [`supports`](Device::supports) declares, so a refusal and a declaration
+    /// cannot drift.
+    ///
+    /// **Refusing the timestamp kind is what keeps a frame recordable.** See
+    /// `NO_TIMESTAMP_SET` for the chain: this backend reports
+    /// [`Features::TIMESTAMP_QUERY`] when the browser does, and
+    /// `crcbl-render`'s `PassTimers` builds itself on that flag alone — so an
+    /// accepted timestamp set would put a `write_timestamp` into every frame,
+    /// and [`finish`](CommandEncoder::finish) refuses the whole command buffer
+    /// over one.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::Unsupported`] for [`QueryKind::Timestamp`] and
+    /// [`QueryKind::PipelineStatistics`], and
+    /// [`HalError::InvalidDescriptor`] for a set of no queries — WebGPU's
+    /// `GPUQuerySetDescriptor.count` has a minimum of one, and a zero-length set
+    /// accepted here would be a handle whose every read is out of range.
+    fn create_query_set(&self, desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
+        match desc.kind {
+            QueryKind::Timestamp => {
+                return Err(HalError::Unsupported {
+                    backend: BackendKind::WebGpu,
+                    what: NO_TIMESTAMP_SET,
+                });
+            }
+            QueryKind::PipelineStatistics => {
+                return Err(HalError::Unsupported {
+                    backend: BackendKind::WebGpu,
+                    what: NO_STATISTICS_SET,
+                });
+            }
+            QueryKind::Occlusion => {}
+        }
+        if desc.count == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "a query set of 0 queries: GPUQuerySetDescriptor.count has a minimum of 1, and \
+                 every read of such a set would be out of range"
+                    .to_string(),
+            ));
+        }
+        let handle: QuerySetHandle = self.pool.alloc();
+        self.channel
+            .with(|channel| channel.encode(|stream| stream.create_query_set(handle, desc)));
+        self.query_sets
+            .lock()
+            .expect("the query-set map was poisoned")
+            .insert(handle.to_bits(), desc.count);
+        Ok(handle)
     }
 
-    fn destroy_query_set(&self, _set: QuerySetHandle) {
-        // Nothing to encode: the stream has no query commands, so
-        // `create_query_set` refuses and no live handle ever reaches this. A
-        // documented no-op, not a silent drop of real work.
+    fn destroy_query_set(&self, set: QuerySetHandle) {
+        self.channel
+            .with(|channel| channel.encode(|stream| stream.destroy_query_set(set)));
+        self.query_sets
+            .lock()
+            .expect("the query-set map was poisoned")
+            .remove(&set.to_bits());
+        // The read queue goes with it. A reply still in flight for this set then
+        // finds no waiter, which is the same as any answer arriving for a
+        // sequence nobody kept — `pump` offers it to every waiter and no waiter
+        // takes it.
+        self.query_reads
+            .lock()
+            .expect("the query-read map was poisoned")
+            .remove(&set.to_bits());
     }
 
+    /// Reads query values back, **a frame late**.
+    ///
+    /// [`take_error`](Device::take_error)'s shape, and for its reason: nothing
+    /// here can block on a browser, so this pumps, hands back an answer that has
+    /// arrived, and otherwise encodes an awaited ask and reports that the answer
+    /// is not here yet. A caller that reads every frame — which is what a
+    /// profiler does — gets values from the frame before, and one that reads
+    /// once gets an `Err` and has to ask again.
+    ///
+    /// **The seam's own bounds check is answered here rather than on the wire.**
+    /// How many queries this device asked for is known locally, so a read past
+    /// the end is [`HalError::InvalidDescriptor`] at the call, which is what the
+    /// seam documents and what tells a caller its range is wrong rather than its
+    /// timing.
+    ///
+    /// **An empty `out` never reaches the browser.** Reading nothing is
+    /// satisfied by writing nothing, and answering it over the wire would spend
+    /// a round trip to learn that — and would make the empty `values` list a
+    /// failed read is answered with ambiguous. See
+    /// [`Command::QueryResults`](crate::Command::QueryResults).
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] for a set this device did not create or has
+    /// destroyed, [`HalError::InvalidDescriptor`] for a range that exceeds the
+    /// set, and [`HalError::Backend`] while the browser has not answered — which
+    /// includes a read the replayer could not serve, whose reason reaches the
+    /// caller through [`take_error`](Device::take_error).
     fn query_results(
         &self,
-        _set: QuerySetHandle,
-        _first_query: u32,
-        _out: &mut [u64],
+        set: QuerySetHandle,
+        first_query: u32,
+        out: &mut [u64],
     ) -> Result<(), HalError> {
-        // Needed, but unwired for `create_query_set`'s reason. Refuse loudly
-        // rather than return zeros a profiler would read as real timings.
-        Err(HalError::Unsupported {
-            backend: BackendKind::WebGpu,
-            what: "query results are not yet wired into the WebGPU stream",
-        })
+        let count = *self
+            .query_sets
+            .lock()
+            .expect("the query-set map was poisoned")
+            .get(&set.to_bits())
+            .ok_or_else(|| HalError::invalid_handle("query set", set))?;
+        let Ok(wanted) = u32::try_from(out.len()) else {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a read of {} queries, which is more than a u32 query index holds",
+                out.len()
+            )));
+        };
+        if u64::from(first_query) + u64::from(wanted) > u64::from(count) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "queries {first_query}..{} of a {count}-query set",
+                u64::from(first_query) + u64::from(wanted)
+            )));
+        }
+        if out.is_empty() {
+            return Ok(());
+        }
+
+        self.pump();
+        let mut reads = self
+            .query_reads
+            .lock()
+            .expect("the query-read map was poisoned");
+        let queue = reads.entry(set.to_bits()).or_default();
+        // An answer for a different range is one this caller no longer wants —
+        // it asked for something else since. Dropped rather than kept, so the
+        // ask below is issued instead of waiting behind a stale reply.
+        if let Some((answered, values)) = queue.arrived.take()
+            && answered == first_query
+            && values.len() == out.len()
+        {
+            out.copy_from_slice(&values);
+            return Ok(());
+        }
+        if queue.waiting.is_none() {
+            queue.waiting = self.channel.with(|channel| {
+                channel.encode_awaited(|stream| stream.query_results(set, first_query, wanted))
+            });
+        }
+        Err(HalError::Backend(format!(
+            "the browser has not answered queries {first_query}..{} of query set {:#x} yet; the \
+             ask is on the stream and the values arrive in a later frame",
+            u64::from(first_query) + u64::from(wanted),
+            set.to_bits()
+        )))
     }
 
     // --- synchronisation ---

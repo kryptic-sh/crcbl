@@ -1661,8 +1661,10 @@ fn every_command_has_its_own_name() {
     // `Features::DEBUG_MARKERS` add two more names beside BeginDebugLabel
     // (EndDebugLabel, InsertDebugMarker). The offscreen surface
     // (CreateOffscreenSurface) is the twin of CreateSurface and adds one name of
-    // its own, and the out-of-band error ask (TakeError) adds the last.
-    assert_eq!(names.len(), 67);
+    // its own, and the out-of-band error ask (TakeError) adds one more. The query
+    // spine adds the last five: three CreateQuerySets, one per QueryKind, and one
+    // each of DestroyQuerySet, ResetQuerySet, ResolveQuerySet and QueryResults.
+    assert_eq!(names.len(), 72);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

@@ -90,6 +90,11 @@ const REQUEST_READBACK_TAG = 0x0b;
 // offscreen target names no canvas key, and its ring's size and format arrive
 // later with the swapchain, not the surface.
 const CREATE_OFFSCREEN_SURFACE_TAG = 0x0c;
+// `create_query_set` allocates a `QuerySetHandle` from a descriptor, so it sits
+// in the creation family for `REQUEST_READBACK_TAG`'s reason rather than in the
+// query family — which holds the query *verbs* only. See `crcbl-webgpu`'s `tag`
+// module.
+const CREATE_QUERY_SET_TAG = 0x0d;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
@@ -103,6 +108,7 @@ const DESTROY_COMPUTE_PIPELINE_TAG = 0x29;
 const DESTROY_GRAPHICS_PIPELINE_TAG = 0x2a;
 const DESTROY_COMMAND_BUFFER_TAG = 0x2b;
 const DESTROY_READBACK_TAG = 0x2c;
+const DESTROY_QUERY_SET_TAG = 0x2d;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -168,6 +174,15 @@ const FILL_BUFFER_TAG = 0x7c;
 // op. In the copy-and-fill family because it is a queue-side data transfer, the
 // upload counterpart of the copies.
 const WRITE_BUFFER_TAG = 0x7d;
+// The query family: the verbs, not the set. `ResetQuerySet` is the documented
+// no-op — WebGPU has no reset, and an unwritten query resolves to zero by
+// specification — carried so a range naming a set the replayer does not hold is
+// a message rather than a silence. `ResolveQuerySet` is the encoder's
+// `resolveQuerySet`. `QueryResults` is the only one of the three that is
+// *answered*, by a `QueryResults` reply naming its sequence.
+const RESET_QUERY_SET_TAG = 0x80;
+const RESOLVE_QUERY_SET_TAG = 0x81;
+const QUERY_RESULTS_TAG = 0x82;
 // The presentation family: configuring a canvas swapchain, acquiring its frame,
 // presenting (a no-op the browser composites on rAF), unconfiguring, and
 // reconfiguring an already-configured swapchain in place.
@@ -237,6 +252,17 @@ const INDEX_FORMAT = ['Uint16', 'Uint32'];
 
 /** `tag::MEMORY_*`. */
 const MEMORY_LOCATION = ['DeviceLocal', 'HostUpload', 'HostReadback'];
+
+/**
+ * `tag::QUERY_KIND_*`.
+ *
+ * All three cross although `GPUQueryType` is exactly `'occlusion'` and
+ * `'timestamp'`: the seam refuses the other two at `create_query_set`, and the
+ * wire carries what the caller wrote so that a fold between the codes decodes to
+ * a different command rather than creating the wrong pool. `gpu-replay.js` is
+ * where each refusal is named.
+ */
+const QUERY_KIND = ['Timestamp', 'Occlusion', 'PipelineStatistics'];
 
 /**
  * `tag::IMAGE_TYPE_*`.
@@ -1895,6 +1921,23 @@ function decodeCommand(r) {
         colorTargets,
       };
     }
+    case CREATE_QUERY_SET_TAG: {
+      // The handle, the label, the kind code, then the count. All three kinds
+      // decode although the replayer serves only `Occlusion`: the wire carries
+      // what the caller wrote, and `gpu-replay.js` names each refusal.
+      const set = r.readHandle('CreateQuerySet::set');
+      const label = r.readOptString('QuerySetDesc::label');
+      const kind = r.readEnum('QuerySetDesc::kind', QUERY_KIND);
+      return { name: 'CreateQuerySet', set, label, kind, count: r.readU32() };
+    }
+    case DESTROY_QUERY_SET_TAG:
+      // Its own tag and its own table again, and — like the pipeline destroys —
+      // one whose empty slot is the *ordinary* case: a caller that asked for a
+      // timestamp set got an `Err` and destroys the handle it pre-allocated.
+      return {
+        name: 'DestroyQuerySet',
+        set: r.readHandle('DestroyQuerySet::set'),
+      };
     case DESTROY_GRAPHICS_PIPELINE_TAG:
       // Its own tag and its own table again: a graphics pipeline's id is allowed
       // to be the same eight bytes as anything else's, and — like the
@@ -2111,6 +2154,49 @@ function decodeCommand(r) {
       // Body-less: it closes the pass `BeginComputePass` opened, on the
       // implicit-current encoder.
       return { name: 'EndComputePass' };
+    case RESET_QUERY_SET_TAG: {
+      // The set, then the range as a first index and a count — never as its two
+      // ends, so an empty range is `0` rather than something this decoder would
+      // have to check for inversion. The replayer records nothing for it; see
+      // `gpu-replay.js`.
+      const set = r.readHandle('ResetQuerySet::set');
+      return {
+        name: 'ResetQuerySet',
+        set,
+        firstQuery: r.readU32(),
+        queryCount: r.readU32(),
+      };
+    }
+    case RESOLVE_QUERY_SET_TAG: {
+      // The set and its range, then the destination and its byte offset (`u64`,
+      // `BigInt`). The two rules WebGPU imposes on that destination — a
+      // 256-aligned offset and `QUERY_RESOLVE` usage — are the replayer's, which
+      // is where the buffer's usage bits are.
+      const set = r.readHandle('ResolveQuerySet::set');
+      const firstQuery = r.readU32();
+      const queryCount = r.readU32();
+      const dst = r.readHandle('ResolveQuerySet::dst');
+      return {
+        name: 'ResolveQuerySet',
+        set,
+        firstQuery,
+        queryCount,
+        dst,
+        dstOffset: r.readU64(),
+      };
+    }
+    case QUERY_RESULTS_TAG: {
+      // The set and the range to read. Answered, by a `QueryResults` reply
+      // naming this command's sequence — see `gpu-replay.js` for why serving it
+      // costs a resolve, a copy and a map.
+      const set = r.readHandle('QueryResults::set');
+      return {
+        name: 'QueryResults',
+        set,
+        firstQuery: r.readU32(),
+        queryCount: r.readU32(),
+      };
+    }
     case DISPATCH_TAG:
       // The three workgroup counts, in the order the HAL call takes them.
       return {

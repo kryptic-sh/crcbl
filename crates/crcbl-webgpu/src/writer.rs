@@ -11,10 +11,10 @@ use crcbl_hal::{
     DeviceDesc, Extent3d, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageBarrier, ImageCopy,
     ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc,
     ImageViewHandle, IndexFormat, MultisampleState, Offset3d, PipelineLayoutDesc,
-    PipelineLayoutHandle, PresentInfo, PrimitiveState, QueueTransfer, ReadbackDesc, ReadbackHandle,
-    Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait,
-    ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo,
-    SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
+    PipelineLayoutHandle, PresentInfo, PrimitiveState, QuerySetDesc, QuerySetHandle, QueueTransfer,
+    ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
+    SemaphoreSignal, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
+    StencilFaceState, SubmitInfo, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
 };
 
 use crate::bytes::ByteWriter;
@@ -909,6 +909,25 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_query_set`](crcbl_hal::Device::create_query_set), with
+    /// the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow [`QuerySetDesc`]'s
+    /// declaration order behind the handle. **Every
+    /// [`QueryKind`](crcbl_hal::QueryKind) encodes**, including the two the
+    /// replayer refuses: the writer carries what the caller gives, and the
+    /// refusal belongs where the WebGPU vocabulary is. See
+    /// [`Command::CreateQuerySet`](crate::Command::CreateQuerySet).
+    pub fn create_query_set(&mut self, set: QuerySetHandle, desc: &QuerySetDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_QUERY_SET_TAG);
+        self.bytes.put_handle(set);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_u8(tag::query_kind_code(desc.kind));
+        self.bytes.put_u32(desc.count);
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -1053,6 +1072,16 @@ impl StreamWriter {
     pub fn destroy_readback(&mut self, readback: ReadbackHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_READBACK_TAG);
         self.bytes.put_handle(readback);
+        sequence
+    }
+
+    /// [`Device::destroy_query_set`](crcbl_hal::Device::destroy_query_set).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason. Releasing a `GPUQuerySet` is its `destroy()`.
+    pub fn destroy_query_set(&mut self, set: QuerySetHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_QUERY_SET_TAG);
+        self.bytes.put_handle(set);
         sequence
     }
 
@@ -1274,6 +1303,74 @@ impl StreamWriter {
     /// [`begin_compute_pass`](Self::begin_compute_pass) opened.
     pub fn end_compute_pass(&mut self) -> u64 {
         self.push_tag(tag::END_COMPUTE_PASS_TAG)
+    }
+
+    // ── Queries ──────────────────────────────────────────────────────────────
+
+    /// [`reset_query_set`](crcbl_hal::CommandEncoder::reset_query_set), on the
+    /// implicit-current encoder — **the documented no-op**.
+    ///
+    /// The range crosses as a first index and a count rather than as a pair, so
+    /// an empty range is `0` rather than something a decoder has to check for
+    /// inversion, and so it is the same shape
+    /// [`resolve_query_set`](Self::resolve_query_set) carries. See
+    /// [`Command::ResetQuerySet`](crate::Command::ResetQuerySet) for why a
+    /// command WebGPU cannot perform is still written.
+    pub fn reset_query_set(&mut self, set: QuerySetHandle, range: Range<u32>) -> u64 {
+        let sequence = self.push_tag(tag::RESET_QUERY_SET_TAG);
+        self.bytes.put_handle(set);
+        self.bytes.put_u32(range.start);
+        self.bytes.put_u32(range.end.saturating_sub(range.start));
+        sequence
+    }
+
+    /// [`resolve_query_set`](crcbl_hal::CommandEncoder::resolve_query_set), on
+    /// the implicit-current encoder.
+    ///
+    /// The whole call: the set, the range as a first index and a count, then the
+    /// destination and its byte offset. Nothing is checked here — the two rules
+    /// WebGPU imposes on the destination are the replayer's, which is where the
+    /// buffer's usage bits actually are; see
+    /// [`Command::ResolveQuerySet`](crate::Command::ResolveQuerySet).
+    pub fn resolve_query_set(
+        &mut self,
+        set: QuerySetHandle,
+        range: Range<u32>,
+        dst: BufferHandle,
+        dst_offset: u64,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::RESOLVE_QUERY_SET_TAG);
+        self.bytes.put_handle(set);
+        self.bytes.put_u32(range.start);
+        self.bytes.put_u32(range.end.saturating_sub(range.start));
+        self.bytes.put_handle(dst);
+        self.bytes.put_u64(dst_offset);
+        sequence
+    }
+
+    /// [`Device::query_results`](crcbl_hal::Device::query_results).
+    ///
+    /// **Answered**, so it goes through
+    /// [`StreamChannel::encode_awaited`](crate::web::StreamChannel::encode_awaited)
+    /// for [`poll_readback`](Self::poll_readback)'s reason: the
+    /// [`Reply::QueryResults`](crate::Reply::QueryResults) naming the returned
+    /// sequence is refused, whole buffer at a time, unless something is already
+    /// waiting on it.
+    ///
+    /// `query_count` is the caller's `out.len()`. See
+    /// [`Command::QueryResults`](crate::Command::QueryResults) for why the
+    /// replayer needs a resolve, a copy and a map to serve it.
+    pub fn query_results(
+        &mut self,
+        set: QuerySetHandle,
+        first_query: u32,
+        query_count: u32,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::QUERY_RESULTS_TAG);
+        self.bytes.put_handle(set);
+        self.bytes.put_u32(first_query);
+        self.bytes.put_u32(query_count);
+        sequence
     }
 
     /// [`finish`](crcbl_hal::CommandEncoder::finish) — consumes the

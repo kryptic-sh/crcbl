@@ -1025,11 +1025,14 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::TimestampQuery,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::Unwritten,
-        why: "a timestamp query set is creatable — GPUQueryType has 'timestamp' — and none is \
-              built here. The limit the slice will meet is that no encoder carries a \
+        why: "a timestamp query set is creatable — GPUQueryType has 'timestamp' — and \
+              create_query_set refuses it all the same, because no encoder carries a \
               writeTimestamp: WebGPU takes timestamps only through a render or compute pass's \
-              timestampWrites, so the seam's arbitrary-point write_timestamp has to narrow to pass \
-              boundaries (the WebGPU query slice)",
+              timestampWrites, and the seam's write_timestamp names an arbitrary point in the \
+              command stream. A set that could never be written is a handle a profiler would fill \
+              with zeros and report as timings, so the refusal is the honest answer and the work \
+              is narrowing the seam's verb to pass boundaries. The rest of the query spine is \
+              built: the occlusion row retired with it",
     },
     Divergence {
         capability: Capability::OcclusionQuery,
@@ -1045,15 +1048,6 @@ pub const DIVERGENCES: &[Divergence] = &[
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::Unwritten,
         why: "no query sets are built on this backend; see the TimestampQuery entry",
-    },
-    Divergence {
-        capability: Capability::OcclusionQuery,
-        backend: BackendKind::WebGpu,
-        kind: DivergenceKind::Unwritten,
-        why: "an occlusion query set is creatable — GPUQueryType has 'occlusion', and \
-              beginOcclusionQuery/endOcclusionQuery record against a pass's occlusionQuerySet — \
-              and none is built here. The seam has no begin/end call of its own, so what each side \
-              owes is still open (the WebGPU query slice)",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
@@ -1759,7 +1753,7 @@ mod tests {
             BackendKind::Metal,
             DivergenceKind::Unwritten,
         ),
-        // The browser's three. Everything else `crcbl-webgpu` refuses is WebGPU
+        // The browser's two. Everything else `crcbl-webgpu` refuses is WebGPU
         // itself refusing, which is why this is the short list and not the long
         // one.
         (
@@ -1769,11 +1763,6 @@ mod tests {
         ),
         (
             Capability::TimestampQuery,
-            BackendKind::WebGpu,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::OcclusionQuery,
             BackendKind::WebGpu,
             DivergenceKind::Unwritten,
         ),

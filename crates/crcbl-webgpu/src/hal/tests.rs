@@ -940,22 +940,17 @@ fn dispatch_indirect_encodes_rather_than_refusing_at_finish() {
 #[test]
 fn needed_but_unwired_device_methods_refuse_loudly() {
     let (_channel, device) = device_on_fresh_channel();
-    assert!(matches!(
-        device.query_results(
-            Handle::from_bits((1 << 32) | 2).expect("a real handle"),
-            0,
-            &mut [0u64; 1],
+    assert!(
+        matches!(
+            device.query_results(
+                Handle::from_bits((1 << 32) | 2).expect("a real handle"),
+                0,
+                &mut [0u64; 1],
+            ),
+            Err(HalError::InvalidHandle { .. })
         ),
-        Err(HalError::Unsupported { .. })
-    ));
-    assert!(matches!(
-        device.create_query_set(&crcbl_hal::QuerySetDesc {
-            label: None,
-            kind: crcbl_hal::QueryKind::Timestamp,
-            count: 1,
-        }),
-        Err(HalError::Unsupported { .. })
-    ));
+        "a set this device never created names no pool, whatever the browser would say"
+    );
     assert!(
         matches!(
             device.create_mesh_pipeline(&mesh_pipeline_desc()),
@@ -963,6 +958,249 @@ fn needed_but_unwired_device_methods_refuse_loudly() {
         ),
         "a mesh pipeline is legitimately refused: WebGPU has no mesh stage"
     );
+}
+
+// ── the query spine ────────────────────────────────────────────────────────
+
+/// **The timestamp kind must stay refused, and this is the guard on the whole
+/// demo site.**
+///
+/// `crcbl-render`'s `PassTimers::new` decides whether to time a frame from
+/// [`Features::TIMESTAMP_QUERY`] on the device's caps and from
+/// `create_query_set` succeeding — nothing else. This backend reports that flag
+/// whenever the browser does, because the engine asks for it optionally and
+/// `timestamp-query` is a real `GPUFeatureName`, so `create_query_set` is the
+/// only thing standing between a browser with timestamps and a
+/// `write_timestamp` in every frame — which
+/// [`finish`](crcbl_hal::CommandEncoder::finish) refuses a whole command buffer
+/// over.
+///
+/// **What turns it red.** `create_query_set` accepting `Timestamp`. The caps
+/// here carry the flag deliberately, so this is the arrangement the failure
+/// would actually happen in rather than one where the device could not have
+/// asked.
+#[test]
+fn a_timestamp_set_is_refused_even_on_a_device_that_reports_the_feature() {
+    use crcbl_hal::{QueryKind, QuerySetDesc};
+
+    let channel = SharedChannel::new();
+    let device = WebGpuDevice::new(
+        channel.clone(),
+        DeviceCaps {
+            features: Features::COMPUTE | Features::TIMESTAMP_QUERY,
+            limits: crcbl_hal::Limits::minimum(),
+        },
+        HandlePool::new(),
+    );
+    assert!(
+        device.caps().features.contains(Features::TIMESTAMP_QUERY),
+        "this test is only meaningful on a device that reports the feature"
+    );
+
+    let refused = device.create_query_set(&QuerySetDesc {
+        label: Some("graph pass timers"),
+        kind: QueryKind::Timestamp,
+        count: 2,
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(HalError::Unsupported {
+                backend: BackendKind::WebGpu,
+                ..
+            })
+        ),
+        "a timestamp set must be refused however capable the device is: {refused:?}"
+    );
+    assert!(
+        matches!(
+            device.create_query_set(&QuerySetDesc {
+                label: None,
+                kind: QueryKind::PipelineStatistics,
+                count: 2,
+            }),
+            Err(HalError::Unsupported { .. })
+        ),
+        "GPUQueryType has no statistics member"
+    );
+    // And nothing was put on the stream by either refusal: a command encoded for
+    // a set the caller never got back would create a pool nothing releases.
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    assert!(
+        commands.is_empty(),
+        "a refused create_query_set encodes nothing: {commands:?}"
+    );
+}
+
+/// **An occlusion set is created, recorded against, read and released — the
+/// whole spine, in the order a caller drives it.**
+///
+/// The declaration this holds is `Capability::OcclusionQuery`, and what it
+/// claims is exactly what the capability defines: a set of the size asked for
+/// exists, and the seam's verbs reach the stream naming it. The browser gate's
+/// group AE is what holds the *values* to it.
+///
+/// **What turns it red.** A verb going back to `record_unsupported`, which
+/// `finish` would then refuse over; a command encoding under the wrong tag; or
+/// the range arriving with its halves swapped.
+#[test]
+fn the_occlusion_query_spine_reaches_the_stream() {
+    use crcbl_hal::{BufferHandle, QueryKind, QuerySetDesc};
+
+    let (channel, device) = device_on_fresh_channel();
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("the graphics queue");
+    let set = device
+        .create_query_set(&QuerySetDesc {
+            label: Some("visibility"),
+            kind: QueryKind::Occlusion,
+            count: 8,
+        })
+        .expect("an occlusion set is core WebGPU");
+    let dst: BufferHandle = Handle::from_bits((3 << 32) | 4).expect("a real handle");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    encoder.reset_query_set(set, 0..8);
+    encoder.resolve_query_set(set, 2..5, dst, 256);
+    encoder
+        .finish()
+        .expect("every query verb but write_timestamp is wired, so finish succeeds");
+    device.destroy_query_set(set);
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    let names: Vec<_> = commands.iter().map(crate::Command::name).collect();
+    assert_eq!(
+        names,
+        vec![
+            "CreateQuerySet",
+            "CreateCommandEncoder",
+            "ResetQuerySet",
+            "ResolveQuerySet",
+            "Finish",
+            "DestroyQuerySet",
+        ],
+    );
+    let Some(crate::Command::CreateQuerySet { kind, count, .. }) = commands.first() else {
+        panic!("the first command creates the set: {commands:?}");
+    };
+    assert_eq!(*kind, QueryKind::Occlusion);
+    assert_eq!(*count, 8);
+    let Some(crate::Command::ResolveQuerySet {
+        first_query,
+        query_count,
+        dst_offset,
+        ..
+    }) = commands.get(3)
+    else {
+        panic!("the fourth command is the resolve: {commands:?}");
+    };
+    assert_eq!(
+        (*first_query, *query_count),
+        (2, 3),
+        "the range crosses as a first index and a count, not as its two ends"
+    );
+    assert_eq!(*dst_offset, 256);
+}
+
+/// **`query_results` answers the bounds question itself and defers the rest.**
+///
+/// Two halves, and the pair is the check: a read inside the set encodes an ask
+/// and reports that the answer is not here yet, and a read one query past the
+/// end is refused with [`HalError::InvalidDescriptor`] without touching the
+/// stream. `Ok` alone is what an implementation doing nothing answers to
+/// everything, and it is the refusal beside it that makes the deferral mean
+/// something — the seam's own `exercise_query_set_creation` makes the same pair
+/// the check for the four native backends.
+///
+/// **What turns it red.** An over-long read encoding a command or answering
+/// anything but `InvalidDescriptor`; an in-range read failing to put an ask on
+/// the stream, which would leave a caller polling for an answer nobody asked
+/// for.
+#[test]
+fn a_read_past_the_end_of_a_query_set_is_refused_without_asking_the_browser() {
+    use crcbl_hal::{QueryKind, QuerySetDesc};
+
+    let (channel, device) = device_on_fresh_channel();
+    let set = device
+        .create_query_set(&QuerySetDesc {
+            label: None,
+            kind: QueryKind::Occlusion,
+            count: 4,
+        })
+        .expect("an occlusion set is core WebGPU");
+
+    let mut past_the_end = [0u64; 5];
+    assert!(
+        matches!(
+            device.query_results(set, 0, &mut past_the_end),
+            Err(HalError::InvalidDescriptor(_))
+        ),
+        "the seam documents InvalidDescriptor for a range that exceeds the set"
+    );
+    let mut inside = [0u64; 4];
+    assert!(
+        matches!(
+            device.query_results(set, 0, &mut inside),
+            Err(HalError::Backend(_))
+        ),
+        "an in-range read this browser has not answered yet is a deferral, not a refusal"
+    );
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    let names: Vec<_> = commands.iter().map(crate::Command::name).collect();
+    assert_eq!(
+        names,
+        vec!["CreateQuerySet", "QueryResults"],
+        "the over-long read encodes nothing and the in-range one encodes exactly one ask"
+    );
+}
+
+/// **The values the browser answers with are the values the caller gets.**
+///
+/// [`take_error`](crcbl_hal::Device::take_error)'s protocol on a query set: the
+/// first call encodes the ask and defers, the reply is fed in, and the next call
+/// hands the values over. The values are neither zero nor sequential, so a path
+/// that answered a fresh buffer — or the query indices — is a different reading.
+///
+/// **What turns it red.** The second call still deferring (the reply was never
+/// absorbed), or `out` coming back holding anything but what the reply carried.
+#[test]
+fn an_answered_query_read_hands_back_the_browsers_own_values() {
+    use crcbl_hal::{QueryKind, QuerySetDesc};
+
+    let (channel, device) = device_on_fresh_channel();
+    let set = device
+        .create_query_set(&QuerySetDesc {
+            label: None,
+            kind: QueryKind::Occlusion,
+            count: 4,
+        })
+        .expect("an occlusion set is core WebGPU");
+
+    let mut out = [0u64; 2];
+    assert!(
+        device.query_results(set, 1, &mut out).is_err(),
+        "the first call is the ask"
+    );
+    // The channel is fresh, so `create_query_set` holds sequence 0 and the ask
+    // above holds 1 — the same arithmetic `opened_instance` relies on.
+    let values = vec![0x0102_0304_0506_0708, 0x1112_1314_1516_1718];
+    feed(&channel, |w| w.query_results(1, set, 1, &values));
+
+    device
+        .query_results(set, 1, &mut out)
+        .expect("the answer has arrived, so the read succeeds");
+    assert_eq!(out.to_vec(), values, "the browser's own values reach out");
 }
 
 // ── semaphores: the timeline half refuses, the binary half does not ────────

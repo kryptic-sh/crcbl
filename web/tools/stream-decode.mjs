@@ -883,6 +883,39 @@ const EXPECTED = [
   // destroy — the one whose empty slot is the ordinary case: the replayer refuses
   // a pipeline it cannot build and the caller destroys the handle anyway.
   { name: 'DestroyGraphicsPipeline', pipeline: handle(133, 134) },
+  // The query set, in the creation family for `RequestReadback`'s reason.
+  // `Occlusion` is the only kind the replayer serves, and the count is neither a
+  // power of two nor byte-sized so a decoder reading the wrong width shows.
+  {
+    name: 'CreateQuerySet',
+    set: handle(210, 211),
+    label: 'occlusion pool',
+    kind: 'Occlusion',
+    count: 0x00010203,
+  },
+  // The unlabelled twin, and the kind the seam refuses. It is on the wire all
+  // the same, so a fold between the three kind codes decodes to a different
+  // command rather than the same one.
+  {
+    name: 'CreateQuerySet',
+    set: handle(212, 213),
+    label: null,
+    kind: 'Timestamp',
+    count: 2,
+  },
+  // The third kind, which no `GPUQueryType` has: carried for the reason above,
+  // and the code that completes the table.
+  {
+    name: 'CreateQuerySet',
+    set: handle(214, 215),
+    label: null,
+    kind: 'PipelineStatistics',
+    count: 3,
+  },
+  // Its own command and its own table again. Like the pipeline destroys, the
+  // empty slot is the ordinary case: a caller that asked for a timestamp set got
+  // an `Err` and still destroys the handle it allocated.
+  { name: 'DestroyQuerySet', set: handle(216, 217) },
   // The three debug ops, in the order a caller records them. The two labelled
   // ones carry different strings so a decoder that read the marker out of the
   // region's field answers a different command, and the body-less
@@ -1033,6 +1066,34 @@ const EXPECTED = [
     offset: 96n,
   },
   { name: 'EndComputePass' },
+  // The three query verbs, outside any pass — `resolveQuerySet` is a
+  // `GPUCommandEncoder` method, not a pass one. Each carries a distinct range,
+  // and every `firstQuery` is non-zero because zero is what a dropped field
+  // reads as.
+  {
+    name: 'ResetQuerySet',
+    set: handle(218, 219),
+    firstQuery: 7,
+    queryCount: 11,
+  },
+  // The destination offset is a multiple of 256 —
+  // `QUERY_RESOLVE_BUFFER_ALIGNMENT`, which the replayer refuses anything else
+  // against — and past a `u32`, so the field's width is pinned.
+  {
+    name: 'ResolveQuerySet',
+    set: handle(220, 221),
+    firstQuery: 13,
+    queryCount: 17,
+    dst: handle(222, 223),
+    dstOffset: 0x0000000100000100n,
+  },
+  // The direct read, whose answer is a `QueryResults` reply.
+  {
+    name: 'QueryResults',
+    set: handle(224, 225),
+    firstQuery: 19,
+    queryCount: 23,
+  },
   { name: 'BeginComputePass', label: null },
   // The copy that carries a dispatch's storage-buffer output to a host buffer.
   // Distinct source and destination, and its two offsets and the size are three

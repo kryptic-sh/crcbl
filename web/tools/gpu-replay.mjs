@@ -644,6 +644,29 @@ function stubBuffer(desc) {
 }
 
 /**
+ * A `GPUQuerySet` as `createQuerySet` answers one.
+ *
+ * `label`, `type` and `count` are read off the descriptor for
+ * {@link stubBuffer}'s reason — they are the three members a real `GPUQuerySet`
+ * reports back, so a check reading them is reading what was asked for.
+ *
+ * @param {{ label?: string, type: string, count: number }} desc
+ */
+function stubQuerySet(desc) {
+  const set = {
+    label: desc.label ?? '',
+    type: desc.type,
+    count: desc.count,
+    /** How many times the replayer destroyed it. */
+    destroys: 0,
+    destroy() {
+      set.destroys += 1;
+    },
+  };
+  return set;
+}
+
+/**
  * A `GPUTextureView` as `createView` answers one.
  *
  * `label` is read off the descriptor for {@link stubBuffer}'s reason. `of` is
@@ -1119,6 +1142,7 @@ function stubComputePass() {
  *   `createComputePipeline` — which a real WebGPU device does not do for a bad
  *   entry point (that surfaces asynchronously through `uncapturederror`), but may
  *   for an out-of-memory or a device already lost.
+ * @param {unknown} [options.refuseQuerySets] The same for `createQuerySet`.
  */
 function stubDevice(
   features = [],
@@ -1132,6 +1156,7 @@ function stubDevice(
     refusePipelineLayouts,
     refuseComputePipelines,
     refuseRenderPipelines,
+    refuseQuerySets,
   } = {}
 ) {
   const device = {
@@ -1216,6 +1241,30 @@ function stubDevice(
       writeBuffer(buffer, offset, data) {
         device.bufferWrites.push({ buffer, offset, data });
       },
+      /**
+       * Records a submission at `device.submissions`.
+       *
+       * Here because a `QueryResults` submits a command buffer of the
+       * replayer's *own* making — WebGPU has no way to read a `GPUQuerySet`, so
+       * the read is a resolve, a copy and a map — rather than one a `Submit`
+       * command named. A stub without it would make that arm throw, which
+       * `Replayer#takeError` says a replay arm must never do.
+       *
+       * @param {object[]} buffers
+       */
+      submit(buffers) {
+        device.submissions.push(buffers);
+      },
+    },
+    /** @type {object[][]} Every `queue.submit`, in order. */
+    submissions: [],
+    /** @type {object[]} Every `GPUQuerySetDescriptor`, in order. */
+    createdQuerySets: [],
+    /** @param {{ label?: string, type: string, count: number }} desc */
+    createQuerySet(desc) {
+      device.createdQuerySets.push(desc);
+      if (refuseQuerySets !== undefined) throw refuseQuerySets;
+      return stubQuerySet(desc);
     },
     /** @param {{ label?: string, size: number, usage: number }} desc */
     createBuffer(desc) {
@@ -1370,6 +1419,33 @@ function stubDevice(
          */
         clearBuffer(buffer, offset, size) {
           encoder.bufferFills.push({ buffer, offset, size });
+        },
+        /**
+         * @type {Array<{ set: object, firstQuery: number, queryCount: number,
+         *   dst: object, dstOffset: number }>} Every `resolveQuerySet`, in
+         *   order. There is no `resetQuerySet` beside it and cannot be: WebGPU
+         *   has no such call, which is what makes the seam's reset a no-op.
+         */
+        queryResolves: [],
+        /**
+         * @param {object} set
+         * @param {number} firstQuery
+         * @param {number} queryCount
+         * @param {object} dst
+         * @param {number} dstOffset
+         */
+        resolveQuerySet(set, firstQuery, queryCount, dst, dstOffset) {
+          encoder.queryResolves.push({
+            set,
+            firstQuery,
+            queryCount,
+            dst,
+            dstOffset,
+          });
+        },
+        /** A finished command buffer, for the submits `QueryResults` makes. */
+        finish() {
+          return { of: encoder };
         },
         /** @type {string[]} Every `pushDebugGroup` label, in order. */
         debugGroups: [],
@@ -1552,6 +1628,8 @@ function handle(index, generation) {
  *             maxImage2d?: number, reason?: string, unsupported?: bigint,
  *             caps?: object, cause?: number, messages?: string[],
  *             readback?: { index: number, generation: number },
+ *             set?: { index: number, generation: number },
+ *             firstQuery?: number, values?: bigint[],
  *             data?: number[] } | undefined}
  */
 function decodeOneReply(bytes) {
@@ -1657,6 +1735,23 @@ function decodeOneReply(bytes) {
     // learns why, rather than being told to poll again for ever.
     const readback = readHandle();
     return { tag: 'ReadbackFailed', sequence, readback, reason: string() };
+  }
+  if (tag === 0x18) {
+    // `QueryResults`: the set, the first query, then a count and that many
+    // `u64`s. Read whole, because the values *are* the behaviour — and an empty
+    // list is the one way this reply says the read could not be served, so a
+    // check has to be able to tell zero values from some.
+    const set = readHandle();
+    const firstQuery = view.getUint32(at, true);
+    at += 4;
+    const count = view.getUint32(at, true);
+    at += 4;
+    const values = [];
+    for (let i = 0; i < count; i += 1) {
+      values.push(view.getBigUint64(at, true));
+      at += 8;
+    }
+    return { tag: 'QueryResults', sequence, set, firstQuery, values };
   }
   if (tag === 0x20) {
     // `DeviceErrors`: a count, then that many length-prefixed messages. Read
@@ -2285,6 +2380,16 @@ async function main() {
       'TakeError',
       'DestroyReadback',
       'DestroyCommandBuffer',
+      // The query spine. `CreateQuerySet` refuses every kind but `Occlusion` on
+      // the error queue, `ResetQuerySet` is the documented no-op that WebGPU has
+      // no call for, `ResolveQuerySet` records on the encoder, and `QueryResults`
+      // answers — with an empty list and a named reason when it cannot serve the
+      // read, because a sequence nobody answers is one wasm waits on for ever.
+      'CreateQuerySet',
+      'DestroyQuerySet',
+      'ResetQuerySet',
+      'ResolveQuerySet',
+      'QueryResults',
       // The presentation family. CreateSwapchain configures, AcquireNextFrame
       // acquires, DestroySwapchain unconfigures, ReconfigureSwapchain re-configures
       // in place; Present is the documented no-op that neither throws nor touches
@@ -6746,6 +6851,349 @@ async function main() {
     check(
       error !== null && error.includes('no render pass open'),
       `a SetStencilReference with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+
+  // ---- the query spine: a set, the three verbs, and the read that answers ----
+  //
+  // `Capability::OcclusionQuery` is declared supported on this backend, and this
+  // is where the *arms* are held to it; probe group AE is where the values are.
+  // The four commands are checked against what the replayer told the browser —
+  // the `GPUQuerySetDescriptor`, the `resolveQuerySet` call recorded on the
+  // encoder, the reply that came back — because none of them has a return value
+  // and every one of them can go wrong quietly.
+  const querySetCommand = {
+    name: 'CreateQuerySet',
+    set: handle(90, 1),
+    label: 'visibility',
+    kind: 'Occlusion',
+    count: 4,
+  };
+  /**
+   * Creates the occlusion set above on `replayer` and hands back its entry.
+   *
+   * @param {Replayer} replayer
+   */
+  const openedQuerySet = (replayer) => {
+    replayer.replay(frameOf(querySetCommand, 610n));
+    return replayer.querySets.get(querySetCommand.set);
+  };
+  {
+    // **An Occlusion set reaches createQuerySet as `type: 'occlusion'` with the
+    // count it was asked for**, and is filed under the handle wasm allocated.
+    // The label crosses too: a descriptor with none passes none, which is
+    // `#createBuffer`'s rule.
+    const { replayer, device } = await readyWithDevice();
+    const entry = openedQuerySet(replayer);
+    checkEqual(
+      device.createdQuerySets,
+      [{ label: 'visibility', type: 'occlusion', count: 4 }],
+      'a CreateQuerySet asks for a GPUQuerySet of the type and count the descriptor named'
+    );
+    check(
+      entry !== undefined && entry.count === 4,
+      'and files it under its handle with the count the range checks need'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid CreateQuerySet leaves the error queue empty'
+    );
+  }
+  {
+    // **A Timestamp set is refused by name and nothing is created.** This is the
+    // replayer agreeing with the seam, not duplicating it: `create_query_set` on
+    // the Rust side refuses the kind before it is encoded, because WebGPU writes
+    // timestamps only at a pass's `timestampWrites`. A set that got through here
+    // would be one nothing could ever write, and its resolve would read back as
+    // a frame that took no time.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf({ ...querySetCommand, kind: 'Timestamp' }, 610n));
+    replayer.replay(
+      frameOf(
+        { ...querySetCommand, set: handle(91, 1), kind: 'PipelineStatistics' },
+        611n
+      )
+    );
+    const first = replayer.takeError();
+    const second = replayer.takeError();
+    check(
+      first !== null &&
+        first.includes('Timestamp') &&
+        second !== null &&
+        second.includes('PipelineStatistics') &&
+        device.createdQuerySets.length === 0 &&
+        replayer.querySets.get(querySetCommand.set) === undefined,
+      `neither kind WebGPU cannot serve reaches createQuerySet (${JSON.stringify([first, second])})`
+    );
+  }
+  {
+    // **A DestroyQuerySet destroys the set and releases the slot**, and a destroy
+    // naming nothing live is a no-op — the ordinary case here, since a caller
+    // that asked for a timestamp set got an `Err` and destroys its handle anyway.
+    const { replayer } = await readyWithDevice();
+    const entry = openedQuerySet(replayer);
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf({ name: 'DestroyQuerySet', set: handle(90, 7) }, 611n)
+      );
+      replayer.replay(
+        frameOf({ name: 'DestroyQuerySet', set: handle(99, 1) }, 612n)
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        entry.set.destroys === 0 &&
+        replayer.querySets.get(querySetCommand.set) !== undefined,
+      `a stale generation and an empty slot are both no-ops (${String(thrown)})`
+    );
+    replayer.replay(
+      frameOf({ name: 'DestroyQuerySet', set: querySetCommand.set }, 613n)
+    );
+    check(
+      entry.set.destroys === 1 &&
+        replayer.querySets.get(querySetCommand.set) === undefined,
+      'and destroying it by its own handle destroys the GPUQuerySet and frees the slot'
+    );
+  }
+  {
+    // **A ResetQuerySet records nothing at all**, because WebGPU has no reset —
+    // and it still checks its range, which is the only reason the command
+    // crosses. A valid one touches neither the encoder nor the error queue.
+    const { replayer, device } = await readyWithDevice();
+    openedQuerySet(replayer);
+    replayer.replay(frameOf(encoderCommand, 620n));
+    const encoder = device.createdEncoders.at(-1);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'ResetQuerySet',
+          set: querySetCommand.set,
+          firstQuery: 1,
+          queryCount: 3,
+        },
+        621n
+      )
+    );
+    check(
+      encoder.queryResolves.length === 0 && replayer.pendingErrors === 0,
+      'a ResetQuerySet inside its set records nothing and reports nothing'
+    );
+    replayer.replay(
+      frameOf(
+        {
+          name: 'ResetQuerySet',
+          set: querySetCommand.set,
+          firstQuery: 2,
+          queryCount: 3,
+        },
+        622n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('4-query set'),
+      `a reset running past the set's count names the set's size (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A ResolveQuerySet reaches the encoder with the set and destination
+    // resolved and the u64 offset narrowed.** The offset is 256 rather than 0 —
+    // zero is what a dropped field reads as, and it is also the only value that
+    // satisfies the alignment rule by accident.
+    const { replayer, device } = await readyWithDevice();
+    const entry = openedQuerySet(replayer);
+    const dstH = handle(92, 1);
+    replayer.replay(
+      frameOf(
+        {
+          ...storageBufferAt(dstH),
+          usage: ['QUERY_RESOLVE', 'TRANSFER_SRC'],
+        },
+        619n
+      )
+    );
+    const dst = replayer.buffers.get(dstH);
+    replayer.replay(frameOf(encoderCommand, 620n));
+    const encoder = device.createdEncoders.at(-1);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'ResolveQuerySet',
+          set: querySetCommand.set,
+          firstQuery: 1,
+          queryCount: 2,
+          dst: dstH,
+          dstOffset: 256n,
+        },
+        621n
+      )
+    );
+    checkEqual(
+      encoder.queryResolves,
+      [{ set: entry.set, firstQuery: 1, queryCount: 2, dst, dstOffset: 256 }],
+      'a ResolveQuerySet records resolveQuerySet(set, firstQuery, queryCount, dst, dstOffset)'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid ResolveQuerySet leaves the error queue empty'
+    );
+  }
+  {
+    // **The two rules WebGPU imposes on a resolve destination are refused by
+    // name, and nothing is recorded either time.** A misaligned offset and a
+    // buffer without `QUERY_RESOLVE` are both validation errors the browser
+    // would report out of band — a frame later, attributed to nothing — so
+    // catching them at the command is the whole point.
+    const { replayer, device } = await readyWithDevice();
+    openedQuerySet(replayer);
+    const alignedH = handle(93, 1);
+    const wrongUsageH = handle(94, 1);
+    replayer.replay(
+      frameOf({ ...storageBufferAt(alignedH), usage: ['QUERY_RESOLVE'] }, 617n)
+    );
+    replayer.replay(
+      frameOf(
+        { ...storageBufferAt(wrongUsageH), usage: ['TRANSFER_DST'] },
+        618n
+      )
+    );
+    replayer.replay(frameOf(encoderCommand, 620n));
+    const encoder = device.createdEncoders.at(-1);
+    const resolve = {
+      name: 'ResolveQuerySet',
+      set: querySetCommand.set,
+      firstQuery: 0,
+      queryCount: 1,
+      dst: alignedH,
+      dstOffset: 128n,
+    };
+    replayer.replay(frameOf(resolve, 621n));
+    const misaligned = replayer.takeError();
+    replayer.replay(
+      frameOf({ ...resolve, dst: wrongUsageH, dstOffset: 0n }, 622n)
+    );
+    const unusable = replayer.takeError();
+    check(
+      misaligned !== null &&
+        misaligned.includes('128') &&
+        misaligned.includes('256') &&
+        unusable !== null &&
+        unusable.includes('QUERY_RESOLVE') &&
+        encoder.queryResolves.length === 0,
+      `a misaligned offset and a destination without QUERY_RESOLVE are both named (${JSON.stringify([misaligned, unusable])})`
+    );
+  }
+  {
+    // **A ResolveQuerySet inside an open pass is a mid-frame ordering fault**,
+    // because `resolveQuerySet` is a `GPUCommandEncoder` method: the error queue,
+    // not a throw, and nothing recorded.
+    const { replayer, device } = await readyWithDevice();
+    openedQuerySet(replayer);
+    const dstH = handle(95, 1);
+    replayer.replay(
+      frameOf({ ...storageBufferAt(dstH), usage: ['QUERY_RESOLVE'] }, 619n)
+    );
+    openedPass(replayer, device);
+    const encoder = device.createdEncoders.at(-1);
+    replayer.replay(
+      frameOf(
+        {
+          name: 'ResolveQuerySet',
+          set: querySetCommand.set,
+          firstQuery: 0,
+          queryCount: 1,
+          dst: dstH,
+          dstOffset: 0n,
+        },
+        621n
+      )
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null &&
+        error.includes('open pass') &&
+        encoder.queryResolves.length === 0,
+      `a resolve inside a pass names the ordering fault and records nothing (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A QueryResults answers with the values the map produced**, by way of the
+    // resolve-copy-map WebGPU forces: there is no accessor on a `GPUQuerySet`, so
+    // the read is a scratch QUERY_RESOLVE buffer, a copy into a mappable one, a
+    // submit and a `mapAsync`. The stub buffer's mapped bytes are `offset + i`
+    // modulo 251, so the two `u64`s that come back are a value neither zeroed nor
+    // constant — which is what an arm answering an empty allocation would give.
+    const { replayer, device } = await readyWithDevice();
+    openedQuerySet(replayer);
+    replayer.clear();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'QueryResults',
+          set: querySetCommand.set,
+          firstQuery: 1,
+          queryCount: 2,
+        },
+        630n
+      )
+    );
+    await settle();
+    const reply = decodeOneReply(replayer.replies);
+    const scratch = device.created.slice(-2);
+    check(
+      reply?.tag === 'QueryResults' &&
+        reply.sequence === 630n &&
+        reply.firstQuery === 1 &&
+        reply.values.length === 2 &&
+        reply.values.some((value) => value !== 0n),
+      `a QueryResults answers its own sequence with one u64 per query (${JSON.stringify(reply, (_, v) => (typeof v === 'bigint' ? String(v) : v))})`
+    );
+    checkEqual(
+      scratch.map((desc) => ({ size: desc.size, usage: desc.usage })),
+      [
+        { size: 16, usage: 0x0200 | 0x0004 },
+        { size: 16, usage: 0x0008 | 0x0001 },
+      ],
+      'and it sized both scratch buffers at 8 bytes a query — QUERY_RESOLVE|COPY_SRC, then COPY_DST|MAP_READ'
+    );
+    check(
+      device.submissions.length === 1 && replayer.pendingErrors === 0,
+      'the resolve and the copy went in one submission and nothing was reported'
+    );
+  }
+  {
+    // **A QueryResults the replayer cannot serve still answers**, with an empty
+    // list and the reason on the error queue. `Reply::QueryResults` has no failed
+    // counterpart, and a sequence nobody answers is one wasm waits on for ever —
+    // so empty is how this reply says "no values", and the seam never asks for
+    // zero of them.
+    const { replayer } = await readyWithDevice();
+    openedQuerySet(replayer);
+    replayer.clear();
+    replayer.replay(
+      frameOf(
+        {
+          name: 'QueryResults',
+          set: querySetCommand.set,
+          firstQuery: 3,
+          queryCount: 2,
+        },
+        631n
+      )
+    );
+    await settle();
+    const reply = decodeOneReply(replayer.replies);
+    const error = replayer.takeError();
+    check(
+      reply?.tag === 'QueryResults' &&
+        reply.sequence === 631n &&
+        reply.values.length === 0 &&
+        error !== null &&
+        error.includes('4-query set'),
+      `an unservable read answers an empty list and names why (${JSON.stringify(error)})`
     );
   }
   {

@@ -21,10 +21,10 @@ use crcbl_hal::{
     ImageAspect, ImageBarrier, ImageCopy, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
     ImageType, ImageUsage, ImageViewDesc, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
     MultisampleState, Offset3d, PipelineLayoutDesc, PolygonMode, PresentInfo, PresentMode,
-    PrimitiveState, PrimitiveTopology, PushConstantRange, QueueTransfer, ReadbackDesc, Rect2d,
-    RenderPassDesc, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal,
-    SemaphoreWait, ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp,
-    StencilState, StoreOp, SubmitInfo, SwapchainDesc, Viewport, depth,
+    PrimitiveState, PrimitiveTopology, PushConstantRange, QueryKind, QuerySetDesc, QueueTransfer,
+    ReadbackDesc, Rect2d, RenderPassDesc, ResourceState, SampleType, SamplerAddressMode,
+    SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry, ShaderModuleDesc, ShaderStages,
+    StencilFaceState, StencilOp, StencilState, StoreOp, SubmitInfo, SwapchainDesc, Viewport, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -895,6 +895,40 @@ pub fn every_command() -> Vec<Command> {
         Command::DestroyGraphicsPipeline {
             pipeline: handle(133, 134),
         },
+        // The query set, in the creation family for `RequestReadback`'s reason.
+        // `Occlusion` is the only kind the replayer serves, so this is the kind
+        // the browser gate drives — and the `count` is neither a power of two nor
+        // byte-sized, so a decoder reading the wrong width shows.
+        Command::CreateQuerySet {
+            set: handle(210, 211),
+            label: Some("occlusion pool".into()),
+            kind: QueryKind::Occlusion,
+            count: 0x0001_0203,
+        },
+        // The unlabelled twin, and the kind `create_query_set` refuses at the
+        // seam. It is on the wire all the same — the writer carries what the
+        // caller gives — so a fold between the three kind codes decodes to a
+        // different command rather than the same one.
+        Command::CreateQuerySet {
+            set: handle(212, 213),
+            label: None,
+            kind: QueryKind::Timestamp,
+            count: 2,
+        },
+        // The third kind, which no `GPUQueryType` has: carried for the reason
+        // above, and the code that completes the table.
+        Command::CreateQuerySet {
+            set: handle(214, 215),
+            label: None,
+            kind: QueryKind::PipelineStatistics,
+            count: 3,
+        },
+        // Its own command and its own table again. Like the pipeline destroys,
+        // the empty slot is the ordinary case: a caller that asked for a
+        // timestamp set got an `Err` and still destroys the handle it allocated.
+        Command::DestroyQuerySet {
+            set: handle(216, 217),
+        },
         // The three debug ops, in the order a caller records them. The two
         // labelled ones carry DIFFERENT strings so a decoder that read the marker
         // out of the region's field — or replayed one as the other — answers a
@@ -1069,6 +1103,34 @@ pub fn every_command() -> Vec<Command> {
             offset: 96,
         },
         Command::EndComputePass,
+        // The three query verbs, outside any pass — `resolveQuerySet` is a
+        // `GPUCommandEncoder` method, not a pass one. The reset's range and the
+        // resolve's differ in both fields, so a fold between the two commands
+        // shows; and `first_query` is non-zero in each, because zero is what a
+        // dropped field reads as.
+        Command::ResetQuerySet {
+            set: handle(218, 219),
+            first_query: 7,
+            query_count: 11,
+        },
+        // The resolve's destination offset is a multiple of 256 —
+        // `QUERY_RESOLVE_BUFFER_ALIGNMENT`, which the replayer refuses anything
+        // else against — and past a `u32`, so the field's width is pinned.
+        Command::ResolveQuerySet {
+            set: handle(220, 221),
+            first_query: 13,
+            query_count: 17,
+            dst: handle(222, 223),
+            dst_offset: 0x0000_0001_0000_0100,
+        },
+        // The direct read, whose answer is a `Reply::QueryResults`. Its range is
+        // a third distinct pair, so none of the three commands can be mistaken
+        // for another.
+        Command::QueryResults {
+            set: handle(224, 225),
+            first_query: 19,
+            query_count: 23,
+        },
         // The unlabelled twin of the pass above: `None` and `Some(_)` are
         // different values.
         Command::BeginComputePass { label: None },
@@ -1589,6 +1651,42 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 color_targets,
             },
         ),
+        Command::CreateQuerySet {
+            set,
+            label,
+            kind,
+            count,
+        } => stream.create_query_set(
+            *set,
+            &QuerySetDesc {
+                label: label.as_deref(),
+                kind: *kind,
+                count: *count,
+            },
+        ),
+        Command::DestroyQuerySet { set } => stream.destroy_query_set(*set),
+        Command::ResetQuerySet {
+            set,
+            first_query,
+            query_count,
+        } => stream.reset_query_set(*set, *first_query..*first_query + *query_count),
+        Command::ResolveQuerySet {
+            set,
+            first_query,
+            query_count,
+            dst,
+            dst_offset,
+        } => stream.resolve_query_set(
+            *set,
+            *first_query..*first_query + *query_count,
+            *dst,
+            *dst_offset,
+        ),
+        Command::QueryResults {
+            set,
+            first_query,
+            query_count,
+        } => stream.query_results(*set, *first_query, *query_count),
         Command::DestroyComputePipeline { pipeline } => stream.destroy_compute_pipeline(*pipeline),
         Command::DestroyGraphicsPipeline { pipeline } => {
             stream.destroy_graphics_pipeline(*pipeline)

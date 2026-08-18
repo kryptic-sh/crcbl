@@ -324,6 +324,29 @@ const COPY_BYTES_PER_ROW_ALIGNMENT = 256n;
 const GPU_MAP_READ = 0x0001;
 
 /**
+ * The alignment `GPUCommandEncoder.resolveQuerySet`'s `destinationOffset` must
+ * satisfy.
+ *
+ * A constant of the specification rather than a limit anything reports, like
+ * {@link COPY_BYTES_PER_ROW_ALIGNMENT}: `wgpu-types` spells the same number
+ * `QUERY_RESOLVE_BUFFER_ALIGNMENT`, and `wgpu-core`'s
+ * `command::query::resolve_query_set` checks it before anything else about the
+ * call. Refused here rather than left to the browser because a WebGPU validation
+ * error arrives out of band — a frame later, attributed to nothing — so the
+ * command that carried the offset would not be the one named.
+ */
+const QUERY_RESOLVE_BUFFER_ALIGNMENT = 256n;
+
+/**
+ * Bytes one resolved query occupies in the destination buffer.
+ *
+ * `wgpu-types`' `QUERY_SIZE`: a `GPUQuerySet` resolves one `u64` per query, for
+ * both of the types WebGPU has. It is what {@link Replayer#queryResults} sizes
+ * its scratch buffers with and what turns a query count into a byte length.
+ */
+const QUERY_RESULT_BYTES = 8;
+
+/**
  * Bytes per texel for the colour formats a linear buffer↔image copy makes sense
  * for, keyed by the `GPUTextureFormat` string {@link TEXTURE_FORMAT} maps to.
  *
@@ -2781,6 +2804,21 @@ export class Replayer {
    */
   #readbacks = new HandleTable();
   /**
+   * The `GPUQuerySet` behind each live query-set handle, and how many queries it
+   * holds.
+   *
+   * Its own table for the reason every table here is its own — a handle carries
+   * no kind — and one that four later commands *read*: the reset, the resolve,
+   * the direct read and the destroy all name a set. The `count` is kept beside
+   * the object because `GPUQuerySet.count` is the number the browser was asked
+   * for and every range this replayer refuses is refused against it: WebGPU
+   * would report an out-of-range resolve out of band, a frame later and
+   * attributed to nothing.
+   *
+   * @type {HandleTable<{ set: GPUQuerySet, count: number }>}
+   */
+  #querySets = new HandleTable();
+  /**
    * The encoder recording commands right now, or `null` between a
    * {@link Replayer#finish} and the next {@link Replayer#createCommandEncoder}.
    *
@@ -2901,6 +2939,16 @@ export class Replayer {
    */
   get buffers() {
     return this.#buffers;
+  }
+
+  /**
+   * The query sets that are live right now, on the same terms — each the
+   * `{ set, count }` {@link Replayer#createQuerySet} filed.
+   *
+   * @type {HandleTable<{ set: GPUQuerySet, count: number }>}
+   */
+  get querySets() {
+    return this.#querySets;
   }
 
   /**
@@ -3356,6 +3404,21 @@ export class Replayer {
           break;
         case 'DestroyCommandBuffer':
           this.#destroyCommandBuffer(command);
+          break;
+        case 'CreateQuerySet':
+          this.#createQuerySet(sequence, command);
+          break;
+        case 'DestroyQuerySet':
+          this.#destroyQuerySet(command);
+          break;
+        case 'ResetQuerySet':
+          this.#resetQuerySet(sequence, command);
+          break;
+        case 'ResolveQuerySet':
+          this.#resolveQuerySet(sequence, command);
+          break;
+        case 'QueryResults':
+          this.#queryResults(sequence, command);
           break;
         default:
           throw new ReplayError(String(command.name), sequence);
@@ -6843,6 +6906,361 @@ export class Replayer {
    */
   #destroyCommandBuffer(command) {
     this.#commandBuffers.remove(command.commandBuffer);
+  }
+
+  /**
+   * Creates a `GPUQuerySet` and files it under the handle wasm allocated.
+   *
+   * {@link Replayer#createBuffer}'s shape — synchronous, no reply, every failure
+   * to the error queue — with one refusal of its own beside the usual three.
+   *
+   * **`GPUQueryType` IS EXACTLY `'occlusion'` AND `'timestamp'`**, so a
+   * `PipelineStatistics` set has nothing to become and is refused by name. A
+   * `Timestamp` one is refused too, and that refusal is this replayer agreeing
+   * with the seam rather than duplicating it: `create_query_set` on the Rust side
+   * refuses the kind before it is encoded, because WebGPU takes timestamps only
+   * through a pass's `timestampWrites` and the seam's `write_timestamp` names an
+   * arbitrary point in the command stream. A set that reached here would be one
+   * nothing could ever write, and its resolve would read as a frame that took no
+   * time.
+   *
+   * `'occlusion'` needs no `GPUFeatureName`, so nothing here consults the
+   * device's features: every device this replayer opens serves it.
+   *
+   * @param {bigint} sequence
+   * @param {{ set: { index: number, generation: number }, label: string | null,
+   *           kind: string, count: number }} command
+   */
+  #createQuerySet(sequence, command) {
+    const named = `query set ${command.set.index}.${command.set.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    if (command.kind !== 'Occlusion') {
+      this.#deviceError(
+        `${named} asks for a ${command.kind} query set, and ` +
+          (command.kind === 'Timestamp'
+            ? "WebGPU writes timestamps only through a pass's timestampWrites, so a set created " +
+              'here could never be written'
+            : "GPUQueryType is exactly 'occlusion' and 'timestamp', so there is no such set to " +
+              'create')
+      );
+      return;
+    }
+    let set;
+    try {
+      set = this.#device.createQuerySet({
+        ...(command.label === null ? {} : { label: command.label }),
+        type: 'occlusion',
+        count: command.count,
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#querySets.insert(command.set, { set, count: command.count });
+  }
+
+  /**
+   * Destroys a query set and lets go of its slot.
+   *
+   * `GPUQuerySet.destroy()` is the release, exactly as it is for a buffer, and a
+   * destroy naming nothing live is a no-op in both of its ways — an empty slot
+   * and a stale generation. The empty slot is the ordinary case here rather than
+   * an edge one: a caller that asked for a timestamp set got an `Err` from the
+   * seam and still destroys the handle it pre-allocated.
+   *
+   * @param {{ set: { index: number, generation: number } }} command
+   */
+  #destroyQuerySet(command) {
+    this.#querySets.remove(command.set)?.set.destroy();
+  }
+
+  /**
+   * The documented no-op: **WebGPU has no query reset**, so this records
+   * nothing.
+   *
+   * A `GPUQuerySet` is not a pool a caller re-arms, and the specification defines
+   * an unwritten query to resolve as zero — so there is nothing for a reset to do
+   * and nothing it could break. The seam requires every caller to record one all
+   * the same, because Vulkan forbids reading a pool that was never reset and
+   * making everybody call it keeps the Vulkan path from being the special case.
+   *
+   * **What it does do is check**, and that is the reason the command crosses at
+   * all: `CommandEncoder::reset_query_set` returns `()`, so a range naming a set
+   * this replayer does not hold — or running past that set's `count` — has
+   * nowhere else to be reported. Recording nothing and checking nothing would be
+   * indistinguishable from the command never having been sent.
+   *
+   * @param {bigint} sequence
+   * @param {{ set: { index: number, generation: number }, firstQuery: number,
+   *           queryCount: number }} command
+   */
+  #resetQuerySet(sequence, command) {
+    const named = `a query reset (command ${sequence})`;
+    if (!this.#currentEncoder) {
+      this.#deviceError(`${named} ran with no command encoder open`);
+      return;
+    }
+    this.#resolveQueryRange(named, command);
+  }
+
+  /**
+   * Copies a query range into a buffer — `resolveQuerySet(querySet, firstQuery,
+   * queryCount, destination, destinationOffset)`.
+   *
+   * **ON THE ENCODER, NOT A PASS.** `resolveQuerySet` is a `GPUCommandEncoder`
+   * method, so a stream that reached it with a pass still open is a malformed
+   * recording; it goes to the error queue rather than throwing, which is
+   * {@link Replayer#setScissor}'s judgement about a mid-frame ordering fault.
+   *
+   * **TWO VALIDATION RULES ARE REFUSED BY NAME HERE**, and both are WebGPU's
+   * rather than this stream's:
+   *
+   *   * `destinationOffset` must be a multiple of
+   *     {@link QUERY_RESOLVE_BUFFER_ALIGNMENT}. `wgpu-core`'s
+   *     `command::query::resolve_query_set` checks
+   *     `destination_offset.is_multiple_of(QUERY_RESOLVE_BUFFER_ALIGNMENT)`
+   *     before anything else about the call.
+   *   * `destination` must carry `GPUBufferUsage.QUERY_RESOLVE`. The same
+   *     function calls `check_usage(BufferUsages::QUERY_RESOLVE)` on it, and
+   *     `GPUBuffer.usage` is readable here so the check needs nothing the
+   *     browser has not already published.
+   *
+   * Both would otherwise be a WebGPU validation error reported on the device — a
+   * frame later, attributed to no command — so naming them at the command that
+   * carried them is what makes the diagnosis the recording rather than the
+   * device.
+   *
+   * @param {bigint} sequence
+   * @param {{ set: { index: number, generation: number }, firstQuery: number,
+   *           queryCount: number, dst: { index: number, generation: number },
+   *           dstOffset: bigint }} command
+   */
+  #resolveQuerySet(sequence, command) {
+    const named = `a query resolve (command ${sequence})`;
+    if (!this.#currentEncoder) {
+      this.#deviceError(`${named} ran with no command encoder open`);
+      return;
+    }
+    if (this.#currentPass || this.#currentComputePass) {
+      this.#deviceError(
+        `${named} ran inside an open pass, and resolveQuerySet is a GPUCommandEncoder method`
+      );
+      return;
+    }
+    const entry = this.#resolveQueryRange(named, command);
+    if (!entry) return;
+    const dst = this.#buffers.get(command.dst);
+    if (dst === undefined) {
+      this.#deviceError(
+        `${named} resolves into buffer ${command.dst.index}.${command.dst.generation}, which this ` +
+          'replayer holds no live buffer under'
+      );
+      return;
+    }
+    if (command.dstOffset % QUERY_RESOLVE_BUFFER_ALIGNMENT !== 0n) {
+      this.#deviceError(
+        `${named} resolves at destination offset ${command.dstOffset}, which WebGPU requires to ` +
+          `be a multiple of ${QUERY_RESOLVE_BUFFER_ALIGNMENT}`
+      );
+      return;
+    }
+    if ((dst.usage & GPU_BUFFER_USAGE.QUERY_RESOLVE) === 0) {
+      this.#deviceError(
+        `${named} resolves into a buffer whose usage ${dst.usage} does not include ` +
+          `QUERY_RESOLVE (${GPU_BUFFER_USAGE.QUERY_RESOLVE})`
+      );
+      return;
+    }
+    this.#currentEncoder.resolveQuerySet(
+      entry.set,
+      command.firstQuery,
+      command.queryCount,
+      dst,
+      Number(command.dstOffset)
+    );
+  }
+
+  /**
+   * Resolves a command's query set and checks its range against that set's
+   * `count`.
+   *
+   * Shared by the reset, the resolve and the direct read because all three name a
+   * range of one set and all three are wrong in the same two ways — and because
+   * an out-of-range range is what WebGPU reports out of band, so each of them
+   * needs the same sentence at the command rather than a device error a frame
+   * later.
+   *
+   * @param {string} named
+   * @param {{ set: { index: number, generation: number }, firstQuery: number,
+   *           queryCount: number }} command
+   * @returns {{ set: GPUQuerySet, count: number } | null} The entry, or `null`
+   *   once the reason is on the error queue.
+   */
+  #resolveQueryRange(named, command) {
+    const entry = this.#querySets.get(command.set);
+    if (entry === undefined) {
+      this.#deviceError(
+        `${named} names query set ${command.set.index}.${command.set.generation}, which this ` +
+          'replayer holds no live query set under'
+      );
+      return null;
+    }
+    if (command.firstQuery + command.queryCount > entry.count) {
+      this.#deviceError(
+        `${named} covers queries ${command.firstQuery}..` +
+          `${command.firstQuery + command.queryCount} of a ${entry.count}-query set`
+      );
+      return null;
+    }
+    return entry;
+  }
+
+  /**
+   * Answers a direct query read — the values, on the reply channel.
+   *
+   * **WEBGPU CANNOT READ A `GPUQuerySet` AT ALL**, which is the whole shape of
+   * this method: there is no accessor, so the only way to a value is to resolve
+   * the range into a buffer, copy that into a mappable one and map it. Three
+   * objects and a submit for what the seam calls a read, and it is not an
+   * extravagance — it is what the API offers.
+   *
+   * ANSWERED LATER, like {@link Replayer#enumerateAdapters} and unlike
+   * {@link Replayer#pollReadback}: the map is a promise, so the reply is queued
+   * when it settles rather than inside this call. The far side's
+   * `Device::query_results` reports that the answer is not here yet and asks
+   * again next frame, which is the same protocol `Device::take_error` runs.
+   *
+   * **EXACTLY ONE REPLY ON EVERY PATH, AND AN EMPTY ONE MEANS FAILED.**
+   * `Reply::QueryResults` has no failed counterpart, and a sequence nobody
+   * answers stays registered on the far side for ever — so a read this replayer
+   * cannot serve is answered with an empty `values` list and its reason goes on
+   * the error queue. Empty is unambiguous because the seam never asks for zero
+   * values: `Device::query_results` with an empty `out` is answered without
+   * touching the wire.
+   *
+   * @param {bigint} sequence
+   * @param {{ set: { index: number, generation: number }, firstQuery: number,
+   *           queryCount: number }} command
+   */
+  #queryResults(sequence, command) {
+    const named = `a query read (command ${sequence})`;
+    if (!this.#device) {
+      this.#failQueryResults(
+        sequence,
+        command,
+        `${named} ran before any device opened`
+      );
+      return;
+    }
+    const entry = this.#querySets.get(command.set);
+    if (entry === undefined) {
+      this.#failQueryResults(
+        sequence,
+        command,
+        `${named} names query set ${command.set.index}.${command.set.generation}, which this ` +
+          'replayer holds no live query set under'
+      );
+      return;
+    }
+    if (command.firstQuery + command.queryCount > entry.count) {
+      this.#failQueryResults(
+        sequence,
+        command,
+        `${named} covers queries ${command.firstQuery}..` +
+          `${command.firstQuery + command.queryCount} of a ${entry.count}-query set`
+      );
+      return;
+    }
+    const bytes = command.queryCount * QUERY_RESULT_BYTES;
+    let resolved;
+    let mapped;
+    try {
+      // Both are this replayer's own and neither outlives the read: the scratch
+      // one exists because `resolveQuerySet` needs a QUERY_RESOLVE destination
+      // and the mappable one because MAP_READ may not be combined with it.
+      resolved = this.#device.createBuffer({
+        label: 'crcbl query resolve',
+        size: bytes,
+        usage: GPU_BUFFER_USAGE.QUERY_RESOLVE | GPU_BUFFER_USAGE.COPY_SRC,
+      });
+      mapped = this.#device.createBuffer({
+        label: 'crcbl query readback',
+        size: bytes,
+        usage: GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.MAP_READ,
+      });
+      const encoder = this.#device.createCommandEncoder({
+        label: 'crcbl query read',
+      });
+      encoder.resolveQuerySet(
+        entry.set,
+        command.firstQuery,
+        command.queryCount,
+        resolved,
+        0
+      );
+      encoder.copyBufferToBuffer(resolved, 0, mapped, 0, bytes);
+      this.#device.queue.submit([encoder.finish()]);
+    } catch (error) {
+      resolved?.destroy();
+      mapped?.destroy();
+      this.#failQueryResults(
+        sequence,
+        command,
+        `${named} could not be recorded: ${String(error)}`
+      );
+      return;
+    }
+    this.#inFlight += 1;
+    mapped
+      .mapAsync(GPU_MAP_READ, 0, bytes)
+      .then(() => {
+        // A fresh copy for `getMappedRange`'s reason — the view is onto memory
+        // the destroy below reclaims — and a `BigUint64Array` because a resolved
+        // query is a `u64` and the reply writer takes `BigInt`s.
+        const values = [
+          ...new BigUint64Array(mapped.getMappedRange(0, bytes).slice(0)),
+        ];
+        this.#replies.queryResults(
+          sequence,
+          command.set,
+          command.firstQuery,
+          values
+        );
+        this.#queued = true;
+      })
+      .catch((error) => {
+        this.#failQueryResults(
+          sequence,
+          command,
+          `${named} could not be mapped: ${String(error)}`
+        );
+      })
+      .finally(() => {
+        resolved.destroy();
+        mapped.destroy();
+        this.#inFlight -= 1;
+      });
+  }
+
+  /**
+   * Answers a query read that cannot be served: an empty value list, and the
+   * reason on the error queue.
+   *
+   * Both destinations, for {@link Replayer#requestReadback}'s reason — the error
+   * queue is what tells the engine its device is unwell, and the reply is what
+   * stops the one caller waiting on *these values* from waiting for ever.
+   *
+   * @param {bigint} sequence
+   * @param {{ set: { index: number, generation: number }, firstQuery: number }} command
+   * @param {string} reason
+   */
+  #failQueryResults(sequence, command, reason) {
+    this.#deviceError(reason);
+    this.#replies.queryResults(sequence, command.set, command.firstQuery, []);
+    this.#queued = true;
   }
 
   /**

@@ -25,9 +25,9 @@ use crcbl_hal::{
     GraphicsPipelineHandle, ImageBarrier, ImageCopy, ImageHandle, ImageSubresourceLayers,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, IndexFormat,
     MemoryLocation, MultisampleState, Offset3d, PipelineLayoutHandle, PresentMode, PrimitiveState,
-    PushConstantRange, QueueHandle, ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle,
-    SemaphoreHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleHandle, ShaderStages,
-    SurfaceHandle, SwapchainHandle, Viewport,
+    PushConstantRange, QueryKind, QuerySetHandle, QueueHandle, ReadbackHandle, Rect2d,
+    SamplerAddressMode, SamplerHandle, SemaphoreHandle, SemaphoreSignal, SemaphoreWait,
+    ShaderModuleHandle, ShaderStages, SurfaceHandle, SwapchainHandle, Viewport,
 };
 
 /// A command decoded out of a stream buffer.
@@ -532,6 +532,32 @@ pub enum Command {
         /// still builds.
         color_targets: Vec<ColorTargetState>,
     },
+    /// [`Device::create_query_set`](crcbl_hal::Device::create_query_set), with
+    /// the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`CreateBuffer`](Self::CreateBuffer)'s
+    /// reason, and it is a *creation* rather than a query-family command for the
+    /// same one: it names a handle and a descriptor. See
+    /// [`CREATE_QUERY_SET_TAG`](crate::tag::CREATE_QUERY_SET_TAG).
+    ///
+    /// **Only [`QueryKind::Occlusion`] ever
+    /// reaches a browser through this backend.** `GPUQueryType` is exactly
+    /// `'occlusion'` and `'timestamp'`, and the timestamp one is refused at the
+    /// seam before it is encoded — WebGPU takes timestamps only through a pass's
+    /// `timestampWrites`, so a set this backend created could never be written.
+    /// The other two kinds are still carried on the wire so that a fold between
+    /// them is a decode failure rather than the wrong pool, and the replayer
+    /// refuses each by name.
+    CreateQuerySet {
+        /// Id the replayer stores the new object at.
+        set: QuerySetHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// What it measures.
+        kind: QueryKind,
+        /// How many queries it holds. Query indices are `0..count`.
+        count: u32,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -638,6 +664,16 @@ pub enum Command {
     DestroyGraphicsPipeline {
         /// Id to release.
         pipeline: GraphicsPipelineHandle,
+    },
+    /// [`Device::destroy_query_set`](crcbl_hal::Device::destroy_query_set).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is — and, as with the pipelines, the empty slot
+    /// is ordinary rather than an edge case: a caller that asked for a timestamp
+    /// set got an `Err` and still destroys the handle it pre-allocated.
+    DestroyQuerySet {
+        /// Id to release.
+        set: QuerySetHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label) —
     /// opens a named region, which becomes `pushDebugGroup(label)`.
@@ -897,6 +933,94 @@ pub enum Command {
     /// pass is a malformed stream the replayer routes to the error queue rather
     /// than throwing on — see `web/engine/gpu-replay.js`.
     EndComputePass,
+    /// [`reset_query_set`](crcbl_hal::CommandEncoder::reset_query_set) — **the
+    /// documented no-op**, on the implicit-current encoder.
+    ///
+    /// WebGPU has no reset. A `GPUQuerySet` is not a pool a caller re-arms, and
+    /// the specification defines an unwritten query to resolve as zero, so there
+    /// is nothing for a reset to do and nothing it could break. The seam still
+    /// requires every caller to record one — Vulkan forbids reading a pool that
+    /// was never reset, and making everybody call it keeps the Vulkan path from
+    /// being the special case — so the command crosses whole and the replayer
+    /// records nothing, exactly as [`PipelineBarrier`](Self::PipelineBarrier)
+    /// does.
+    ///
+    /// **Carried rather than dropped at the seam**, because
+    /// `CommandEncoder::reset_query_set` returns `()` and so has no way to report
+    /// anything: a range naming a set the replayer does not hold, or one running
+    /// past that set's `count`, reaches the device error queue by name instead of
+    /// vanishing. That is the only observable this command has.
+    ResetQuerySet {
+        /// Which query set.
+        set: QuerySetHandle,
+        /// First query of the range to reset.
+        first_query: u32,
+        /// How many queries the range covers. The seam passes a
+        /// [`Range<u32>`](core::ops::Range) and this is its length, because a
+        /// count is what WebGPU's own resolve takes and an empty range is then
+        /// `0` rather than a pair a decoder has to check for inversion.
+        query_count: u32,
+    },
+    /// [`resolve_query_set`](crcbl_hal::CommandEncoder::resolve_query_set) — the
+    /// copy of a query range into a buffer, on the implicit-current encoder.
+    ///
+    /// Becomes `resolveQuerySet(querySet, firstQuery, queryCount, destination,
+    /// destinationOffset)`, which is a `GPUCommandEncoder` method and so is
+    /// refused inside an open pass rather than recorded.
+    ///
+    /// **Two validation rules the replayer refuses by name**, both of them
+    /// WebGPU's rather than this stream's, and both decidable there rather than
+    /// here:
+    ///
+    ///   * `dst_offset` must be a multiple of 256 — `wgpu-types`'
+    ///     `QUERY_RESOLVE_BUFFER_ALIGNMENT`, which `wgpu-core`'s
+    ///     `command::query::resolve_query_set` checks first of all.
+    ///   * `dst` must carry [`BufferUsage::QUERY_RESOLVE`](crcbl_hal::BufferUsage::QUERY_RESOLVE)
+    ///     — `wgpu-core` checks `BufferUsages::QUERY_RESOLVE` on the same call.
+    ///
+    /// Either one is a WebGPU validation error the browser would report out of
+    /// band, a frame later and attributed to nothing; refusing them by name at
+    /// the command that carried them is what makes the diagnosis the command
+    /// rather than the device.
+    ResolveQuerySet {
+        /// Which query set.
+        set: QuerySetHandle,
+        /// First query of the range to resolve.
+        first_query: u32,
+        /// How many queries the range covers — see
+        /// [`ResetQuerySet`](Self::ResetQuerySet) on why a count and not a pair.
+        query_count: u32,
+        /// Buffer the results are written into.
+        dst: BufferHandle,
+        /// Byte offset within `dst`. A multiple of 256 — see the variant docs.
+        dst_offset: u64,
+    },
+    /// [`Device::query_results`](crcbl_hal::Device::query_results) — the direct
+    /// read, without a resolve-to-buffer round trip of the caller's own.
+    ///
+    /// **Answered**, by a [`Reply::QueryResults`](crate::Reply::QueryResults)
+    /// naming this command's sequence, and answered a frame or more later:
+    /// WebGPU has no way to read a `GPUQuerySet` at all, so the replayer serves
+    /// this by resolving into a scratch buffer of its own, copying that into a
+    /// mappable one and mapping it — which is a promise, exactly as
+    /// [`PollReadback`](Self::PollReadback)'s map is. It goes through
+    /// [`StreamChannel::encode_awaited`](crate::web::StreamChannel::encode_awaited)
+    /// for that reason.
+    ///
+    /// **One reply, whatever happens.** There is no failed counterpart to
+    /// `Reply::QueryResults`, so a read the replayer cannot serve is answered
+    /// with an *empty* `values` list and the reason goes on the device error
+    /// queue. Empty is unambiguous because the seam side never asks for zero
+    /// values — `query_results` with an empty `out` is answered without touching
+    /// the wire.
+    QueryResults {
+        /// Which query set.
+        set: QuerySetHandle,
+        /// First query to read.
+        first_query: u32,
+        /// How many queries to read — `out.len()` at the seam.
+        query_count: u32,
+    },
     /// [`Device::create_command_encoder`](crcbl_hal::Device::create_command_encoder).
     ///
     /// **It carries no handle**, unlike every other creation on this stream, and
@@ -1410,6 +1534,7 @@ impl Command {
             Self::CreatePipelineLayout { .. } => "CreatePipelineLayout",
             Self::CreateComputePipeline { .. } => "CreateComputePipeline",
             Self::CreateGraphicsPipeline { .. } => "CreateGraphicsPipeline",
+            Self::CreateQuerySet { .. } => "CreateQuerySet",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
             Self::DestroyImage { .. } => "DestroyImage",
@@ -1421,6 +1546,7 @@ impl Command {
             Self::DestroyPipelineLayout { .. } => "DestroyPipelineLayout",
             Self::DestroyComputePipeline { .. } => "DestroyComputePipeline",
             Self::DestroyGraphicsPipeline { .. } => "DestroyGraphicsPipeline",
+            Self::DestroyQuerySet { .. } => "DestroyQuerySet",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::EndDebugLabel => "EndDebugLabel",
             Self::InsertDebugMarker { .. } => "InsertDebugMarker",
@@ -1441,6 +1567,9 @@ impl Command {
             Self::Dispatch { .. } => "Dispatch",
             Self::DispatchIndirect { .. } => "DispatchIndirect",
             Self::EndComputePass => "EndComputePass",
+            Self::ResetQuerySet { .. } => "ResetQuerySet",
+            Self::ResolveQuerySet { .. } => "ResolveQuerySet",
+            Self::QueryResults { .. } => "QueryResults",
             Self::CreateCommandEncoder { .. } => "CreateCommandEncoder",
             Self::EndRenderPass => "EndRenderPass",
             Self::CopyImageToBuffer { .. } => "CopyImageToBuffer",
