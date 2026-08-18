@@ -324,13 +324,18 @@ jobs:
   # site three times over and its three uploads would collide on one artifact
   # name.
   #
-  # **`continue-on-error` COMES OFF ONCE EACH HAS BEEN GREEN THREE RUNS.** It is
-  # here because neither platform's browser gate has ever run: an unproven gate
-  # that blocks the Pages deploy is worse than no gate, and one that silently
-  # never fails is worse still, so this is a state with an exit condition and not
-  # a setting. Whoever reads three green runs off the job history deletes the
-  # line — and the deploy job below still does not need these, so removing it
-  # makes them a red check on the run rather than a block on publishing.
+  # **`continue-on-error` is a state with an exit condition, not a setting.** An
+  # unproven gate that blocks the Pages deploy is worse than no gate, and one
+  # that silently never fails is worse still, so each job carries it only until
+  # it has been green three runs.
+  #
+  # **macOS has served its three and the line is gone** — 57/57 over groups G to
+  # AA on every one, headless against a real Apple adapter. Windows keeps it:
+  # its first run found no WebGPU adapter at all, its second died reading
+  # Chrome's port file, and its third reached 53/57 with four readbacks timing
+  # out. That last number is a measurement rather than a failure to chase, and
+  # the job stays advisory until it either serves all 57 or is taught which
+  # groups this platform cannot serve.
   probe-macos:
     name: probe the seam on macOS
     needs: build
@@ -343,7 +348,6 @@ jobs:
     # on does not change under it while it is still unproven.
     runs-on: macos-15
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
