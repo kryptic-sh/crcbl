@@ -147,17 +147,21 @@ failure.**
    `crcbl-webgpu`. Its own runner is `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`,
    and all three workflows (`ci.yml`, `pages.yml`, `cron.yml`) name it.
 
-   **The deletion costs four GPU exercises that exist nowhere else**, and this
-   is not a `DIVERGENCES` row, so nothing else would flag it.
-   `crates/crcbl-wgpu/tests/wgpu_e2e.rs` is the only place in the workspace that
-   attaches an MSAA resolve view to a real device (every other site, including
-   `crcbl-render`'s `graph.rs`, passes `None`), the only one that drives a
-   padded indirect stride (the positive sites all use the tight stride), the
-   only one that builds a bind group with a `variable_count`, and the only one
-   that creates a pipeline layout with a real push-constant range. Each has to
-   be re-homed into the agnostic suites or given up **deliberately** — three of
-   the four capabilities behind them are declared `Yes` by backends that no test
-   exercises, so losing these leaves the claims resting on nothing.
+   **The deletion was going to cost four GPU exercises that exist nowhere else**
+   — not a `DIVERGENCES` row, so nothing else would have flagged it. **Two are
+   now closed.** The seam suite's raster fixture drives a padded indirect stride
+   positively (the first in the tree; every other site uses the tight stride),
+   and an MSAA resolve now runs on vk, wgpu, Metal and dx12 there plus on WebGPU
+   through browser probe group AD — where `crcbl-wgpu`'s suite had been the only
+   thing in the workspace attaching a resolve view to a real device.
+
+   **Two remain**, both in `crates/crcbl-wgpu/tests/wgpu_e2e.rs`: the only bind
+   group built with a `variable_count`, and the only pipeline layout with a real
+   push-constant range. Each has to be re-homed or given up **deliberately** —
+   the capabilities behind them are declared `Yes` by backends no test
+   exercises, so losing them leaves those claims resting on nothing. Note the
+   push-constant one wants the same committed shader artifact dx12 and Metal
+   both need, so it is one piece of work serving three purposes.
 
    **`naga` does NOT leave with it, and notes here said otherwise twice.**
    `crcbl-shaders` takes `naga` as its own **dev-dependency** (`version = "30"`,
@@ -1069,13 +1073,10 @@ gate permanently clear and manufacture, on the one WebGPU row that does not have
 it, exactly the unprovable-by-construction shape Metal has on eight.
 
 **What has no browser-side evidence at all**, and matters because after
-`crcbl-wgpu` is deleted these are claims resting on nothing:
-`MsaaResolveAttachment` — no probe group makes a multisampled texture and
-nothing in the engine sets a resolve attachment, so the replayer code is
-exercised only against the node stub; `DepthClamp` — every probe pipeline sets
-it false; `BinarySemaphore` — unprovable by construction and honestly declared
-so; and `SamplerAnisotropy`, whose `Yes` arm is **unreachable** because the
-limit is pinned to 1.
+`crcbl-wgpu` is deleted these are claims resting on nothing: `DepthClamp` —
+every probe pipeline sets it false; `BinarySemaphore` — unprovable by
+construction and honestly declared so; and `SamplerAnisotropy`, whose `Yes` arm
+is **unreachable** because the limit is pinned to 1.
 
 ### Two create-image paths accept a format the device cannot serve
 
