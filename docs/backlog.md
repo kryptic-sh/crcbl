@@ -145,7 +145,21 @@ failure.**
    `crcbl-shaders` manifests merely _mention_ it in comments, as do
    `crcbl-golden`, `crcbl-core`'s `surface.rs` and three files in
    `crcbl-webgpu`. Its own runner is `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`,
-   and all three workflows (`ci.yml`, `pages.yml`, `cron.yml`) name it.
+   and all three workflows (`ci.yml`, `pages.yml`, `cron.yml`) name it. The
+   workspace root's `Cargo.toml` holds the `path` entry the member manifest
+   resolves through, so that is a second manifest edit and not just a comment.
+
+   **The lockfile was checked and is not a hazard, which is worth recording
+   because the manifests imply it might be.** `crcbl-mtl`'s comment justifies
+   `objc2-quartz-core` and `objc2-core-foundation` as "already in this
+   workspace's lockfile — `wgpu-hal` resolves them for `crcbl-wgpu`", which
+   stops being the reason once `wgpu-hal` goes. Both are single-version
+   (`0.3.2`) with three dependents — `crcbl-mtl`, `raw-window-metal` and
+   `wgpu-hal` — so `raw-window-metal` keeps them resolved and no version
+   unification changes. What the deletion actually owes here is a reworded
+   comment, the same debt as `crcbl-shaders`' `naga` pin below, not a dependency
+   fix. Note `cargo deny` runs `--all-features` in CI, so any duplicate a
+   narrower local check would miss shows up there.
 
    **The deletion was going to cost four GPU exercises that exist nowhere else**
    — not a `DIVERGENCES` row, so nothing else would have flagged it. **Two are
