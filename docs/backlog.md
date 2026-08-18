@@ -57,8 +57,8 @@ why it has drifted.
 
 **The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
 below is built, so the count is now exact rather than approximate:
-`Capability::ALL` is **25** variants and `DIVERGENCES` holds **55** reviewed
-rows — dx12 14, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
+`Capability::ALL` is **25** variants and `DIVERGENCES` holds **51** reviewed
+rows — dx12 10, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
 "28 declared `Features` bits and roughly 96 refusal sites", said the same thing
 less precisely and is superseded.)
 
@@ -74,7 +74,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Twenty-seven blockers: dx12 14, Metal 9, WebGPU 4.** That is what stands
+**Twenty-three blockers: dx12 10, Metal 9, WebGPU 4.** That is what stands
 between here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -804,7 +804,7 @@ hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
 
 ### dx12's remaining blockers, ordered — and two reasons that were wrong
 
-dx12 owns 14 of the 27 parity blockers and none is an API absence. Planned
+dx12 owns 10 of the 23 parity blockers and none is an API absence. Planned
 2026-08-18 against the `windows` 0.62.2 bindings and `wgpu-hal`'s dx12 backend
 on disk. **Two of the divergence list's own stated reasons did not survive
 reading the code**, and both change what the work is:
@@ -834,12 +834,9 @@ need it.
    have: the row pitch came from the format's block size rather than the plane's
    texel size, so every copy of a multi-plane depth format read the buffer at
    the wrong stride.
-2. **Sync** (`TimelineSemaphore`, `BinarySemaphore`, `CpuTimelineWait`,
-   `TimelineWaitBeforeSignal`). Four rows for one body of work; half flip the
-   existing `exercise_timeline`. `ID3D12Fence` has all three methods and
-   `ID3D12CommandQueue::Wait` permits waiting on an unsignalled value, which is
-   what makes wait-before-signal a genuine `Yes` here where Metal says no. The
-   crate already writes the event-wait idiom twice; what is new is a timeout.
+2. ~~Sync~~ — **landed**, four rows in one slice. It also implemented
+   `ReadbackDesc::after`, whose refusal reason ("`create_semaphore` refuses")
+   the same change made false.
 3. **Queries** (three rows, all flipping existing exercises). The one thing
    `wgpu-hal` does not have to solve and this seam does: `query_results` is a
    _device_ call, and D3D12 has no CPU-side read of a query heap — so a query
