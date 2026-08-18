@@ -2099,7 +2099,12 @@ impl Device for Dx12Device {
             // the flag unconditionally — but the answer is still the device's
             // rather than a constant, because a backend claiming a capability
             // its own caps deny is the lie this enum exists to catch.
-            Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
+            // `ID3D12Fence` carries all three: `GetCompletedValue` to read,
+            // `SetEventOnCompletion` to wait, and a CPU-side `Signal` to
+            // advance. One object, so one flag.
+            Capability::TimelineSemaphore
+            | Capability::CpuTimelineWait
+            | Capability::CpuTimelineSignal => gated(
                 Features::TIMELINE_SEMAPHORE,
                 "this device reports no TIMELINE_SEMAPHORE",
             ),
@@ -3659,6 +3664,57 @@ impl Device for Dx12Device {
         // `GetCompletedValue` reads no pointer of ours, returning a `u64` by
         // value.
         Ok(unsafe { entry.raw.GetCompletedValue() })
+    }
+
+    /// Advances a timeline from the host with `ID3D12Fence::Signal`.
+    ///
+    /// The CPU-side twin of the queue's `Signal`, and it goes through the same
+    /// [`sync::signal_value`] rule against the same floor: the highest value
+    /// *submitted*, not the highest reached. Comparing against
+    /// `GetCompletedValue` instead would let the host take a number a queued
+    /// `Signal` is already going to use, and the fence would then go backwards
+    /// when the queue got to it — silently, which is what [`crate::sync`] exists
+    /// for.
+    ///
+    /// The floor is moved only after `Signal` returns, for the reason the
+    /// submission path gives: a failed signal that had already claimed the value
+    /// would block the number a retry would use.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`];
+    /// [`HalError::Unsupported`] for a binary semaphore, whose counter is this
+    /// crate's private bookkeeping rather than a value the seam defines;
+    /// [`HalError::InvalidDescriptor`] for a value that does not exceed the
+    /// floor; and [`HalError::DeviceLost`] if `Signal` fails.
+    fn signal_semaphore(&self, semaphore: SemaphoreHandle, value: u64) -> Result<(), HalError> {
+        let mut state = self.state();
+        let entry = handle::lookup(&state.semaphores, "semaphore", semaphore, self.inner.owner)?;
+        if !entry.is_timeline() {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Dx12,
+                what: "a binary semaphore has no value to signal; its counter is crcbl-dx12's own \
+                       bookkeeping, driven one integer at a time by the submissions that use it",
+            });
+        }
+        let signalled = sync::signal_value(true, entry.submitted, value)?;
+        let fence = entry.raw.clone();
+        // SAFETY: `fence` is a live fence this device created, and `Signal`
+        // takes it and a `u64` by value.
+        unsafe { fence.Signal(signalled) }.map_err(|error| {
+            HalError::DeviceLost(format!(
+                "ID3D12Fence::Signal failed for a semaphore: {error}{}",
+                debug::diagnosis(&self.inner.raw)
+            ))
+        })?;
+        handle::lookup_mut(
+            &mut state.semaphores,
+            "semaphore",
+            semaphore,
+            self.inner.owner,
+        )?
+        .submitted = signalled;
+        Ok(())
     }
 
     /// Blocks until every wait is satisfied, or until the timeout runs out.

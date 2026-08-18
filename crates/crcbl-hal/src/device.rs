@@ -911,6 +911,43 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// semaphore, which has no value to read.
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError>;
 
+    /// Signals a timeline semaphore to `value` from the **CPU**.
+    ///
+    /// The half [`semaphore_value`](Self::semaphore_value) had no counterpart
+    /// for. It is what lets a submission wait on a value no earlier submission
+    /// will produce: the caller opens the gate when it is ready, from whatever
+    /// thread it likes. Every backend's API has it — `vkSignalSemaphore`,
+    /// `ID3D12Fence::Signal`, `MTLSharedEvent`'s `setSignaledValue:` — and
+    /// [`Capability::CpuTimelineSignal`](crate::Capability::CpuTimelineSignal)
+    /// is the claim to perform it.
+    ///
+    /// # `value` must move the timeline forwards
+    ///
+    /// It must be **strictly greater** than the value the semaphore already
+    /// holds. Vulkan refuses a lower one; D3D12 and Metal set a fence or an
+    /// event backwards without any diagnostic at all, and then every waiter past
+    /// the higher value stops waking on a queue that is otherwise healthy. So
+    /// the rule is the seam's rather than one backend's, and it is the rule
+    /// [`SemaphoreSignal::value`](crate::SemaphoreSignal::value) already carries
+    /// for the submission-side signal.
+    ///
+    /// A backend that tracks the values submissions have already been *given* to
+    /// signal holds `value` above those too, which is stricter than reading the
+    /// counter: a signal sitting in a queue has not fired yet, so signalling
+    /// past it would still make the timeline go backwards when it does. That is
+    /// a caller error everywhere, including on Vulkan — there it is a validation
+    /// error rather than a returned one.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`]; [`HalError::Unsupported`] for a binary
+    /// semaphore, which has no value to signal, and on a backend with no
+    /// timeline at all — see [`crate::sync`], where WebGPU is the case; and
+    /// [`HalError::InvalidDescriptor`] when `value` does not move the timeline
+    /// forwards, because a number the caller can correct is not a capability the
+    /// backend lacks.
+    fn signal_semaphore(&self, semaphore: SemaphoreHandle, value: u64) -> Result<(), HalError>;
+
     /// Blocks until every `(semaphore, value)` pair has been reached, or until
     /// `timeout_ns` elapses.
     ///

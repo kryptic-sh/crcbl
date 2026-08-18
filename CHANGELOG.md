@@ -16,6 +16,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_hal::Device` gained a required `signal_semaphore` method: the CPU can
+  now advance a timeline.** The seam could read a timeline (`semaphore_value`)
+  and block on one (`wait_semaphores`) and had no way to move one, so a wait for
+  a value no earlier submission would signal could only ever be satisfied by
+  later work — which on a one-queue backend is work the queue cannot reach.
+  `signal_semaphore(semaphore, value)` maps onto `vkSignalSemaphore`,
+  `ID3D12Fence::Signal` and `MTLSharedEvent`'s `setSignaledValue:`.
+
+  **`value` must be strictly greater than the value the semaphore already
+  holds**, and a backend that tracks what submissions have been given to signal
+  holds it above those too. Vulkan refuses a lower value itself; D3D12 and Metal
+  set a fence or an event backwards with no diagnostic at all, and every waiter
+  past the higher value then stops waking on a queue that looks healthy. The
+  refusal is `HalError::InvalidDescriptor` — a number the caller can correct —
+  and a **binary** semaphore is `HalError::Unsupported`, following
+  `semaphore_value`. There is no default implementation: a backend that has not
+  answered fails to compile.
+
+  `crcbl-webgpu` and `crcbl-wgpu` refuse: WebGPU has no semaphore object at all,
+  and a wgpu timeline is per-submission completion rather than something to
+  signal. `crcbl_hal::Capability::CpuTimelineSignal` is the new claim, with a
+  `DIVERGENCES` row for each.
+
+- **`crcbl-mtl` performs `Capability::TimelineWaitBeforeSignal`.** `submit` used
+  to refuse a wait for a timeline value nothing had encoded a signal past,
+  because with one queue and no host signal nothing could ever satisfy it. The
+  host signal is what was missing; the refusal is gone, and Metal's reviewed
+  divergence row with it. **The parity blocker set is now twelve rows — dx12 5,
+  Metal 6, WebGPU 1.** A caller that submits such a wait and never signals the
+  value stops the Metal queue, exactly as the same mistake stops a Vulkan queue.
+
 - **`crcbl_hal::BindingKind::StorageImage` gained `view_type` and `format`, and
   WebGPU can now build a storage-texture layout.** The variant used to carry
   `read_only` alone, which is everything Vulkan, Metal and D3D12 need — each

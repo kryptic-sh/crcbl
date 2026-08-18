@@ -1203,17 +1203,22 @@ impl Device for MetalDevice {
             Capability::TimestampQuery | Capability::PipelineStatisticsQuery => {
                 Support::No(NO_COUNTER_SAMPLED_SET)
             }
-            // `MTLSharedEvent` is the seam's timeline almost verbatim.
-            Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
+            // `MTLSharedEvent` is the seam's timeline almost verbatim: a
+            // monotonic `u64` the GPU signals and waits on, the host reads
+            // through `signaledValue` and writes through `setSignaledValue:`.
+            Capability::TimelineSemaphore
+            | Capability::CpuTimelineWait
+            | Capability::CpuTimelineSignal => gated(
                 Features::TIMELINE_SEMAPHORE,
                 "this device reports no TIMELINE_SEMAPHORE",
             ),
             Capability::BinarySemaphore => Support::Yes,
-            Capability::TimelineWaitBeforeSignal => Support::No(
-                "this backend runs one queue and the seam gives no way to signal an MTLSharedEvent \
-                 from the CPU, so only an earlier submission can satisfy such a wait — it would \
-                 stop the queue rather than wait",
-            ),
+            // `encodeWaitForEvent:value:` blocks the command buffer until the
+            // event reaches the value, and `setSignaledValue:` can deliver that
+            // value from outside the queue — so a wait may be submitted before
+            // anything has signalled it. One queue is not the obstacle it was
+            // while the seam had no host signal to pair with the wait.
+            Capability::TimelineWaitBeforeSignal => Support::Yes,
         }
     }
 
@@ -2244,6 +2249,60 @@ impl Device for MetalDevice {
         Ok(shared.signaledValue())
     }
 
+    /// Advances a timeline from the host with `MTLSharedEvent`'s
+    /// `setSignaledValue:`.
+    ///
+    /// This is what makes a submit-time wait on a value nothing has encoded
+    /// satisfiable on a one-queue backend
+    /// ([`Capability::TimelineWaitBeforeSignal`](crcbl_hal::Capability::TimelineWaitBeforeSignal)):
+    /// the value arrives from outside the queue, so the queue does not have to
+    /// reach a later submission to produce it. [`Device::submit`] refused such a
+    /// wait until this call existed, and no longer does.
+    ///
+    /// # The floor is what has been *encoded*, not what has been signalled
+    ///
+    /// `setSignaledValue:` is a plain assignment: Metal will set the event
+    /// backwards without a diagnostic, and every waiter past the higher value
+    /// then stops waking on a queue that is otherwise healthy. So the seam's
+    /// forwards-only rule is checked here, against the same `encoded` floor
+    /// [`Device::submit`] uses — a signal sitting in a committed command buffer
+    /// has not fired yet, and comparing against `signaledValue` would let the
+    /// host take a number that submission is already going to use.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`];
+    /// [`HalError::Unsupported`] for a binary semaphore, which is a plain
+    /// `MTLEvent` with no host-visible value; and
+    /// [`HalError::InvalidDescriptor`] for a value that does not exceed the
+    /// floor.
+    fn signal_semaphore(&self, semaphore: SemaphoreHandle, value: u64) -> Result<(), HalError> {
+        let mut state = self.state();
+        let entry = lookup(&state.semaphores, "semaphore", semaphore, &*self.inner)?;
+        let Some(shared) = entry.shared.as_ref() else {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Metal,
+                what: "a binary semaphore has no value to signal; it is an MTLEvent driven one \
+                       integer at a time by the submissions that use it",
+            });
+        };
+        let floor = entry.encoded;
+        if value <= floor {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a timeline semaphore signalled with {value} has already been signalled with \
+                 {floor}; MTLSharedEvent values are monotonic and a waiter on the higher value \
+                 would never wake"
+            )));
+        }
+        let shared = shared.clone();
+        shared.setSignaledValue(value);
+        let local = local_handle::<SemaphoreEntry, _>("semaphore", semaphore, &*self.inner)?;
+        if let Some(entry) = state.semaphores.get_mut(local) {
+            entry.encoded = value;
+        }
+        Ok(())
+    }
+
     /// Blocks until every wait is satisfied, or until the timeout runs out.
     ///
     /// Metal offers one wait per event (`waitUntilSignaledValue:timeoutMS:`)
@@ -2361,22 +2420,22 @@ impl Device for MetalDevice {
     ///   commit order — the same property `wait_idle` has relied on since MTL2.
     /// * **The command buffers themselves** are committed in order.
     ///
-    /// # Wait-before-signal is refused rather than deadlocked
+    /// # Wait-before-signal, and where the value comes from
     ///
     /// That same commit ordering is what makes a wait for a value **no earlier
-    /// submission has encoded** unsatisfiable: the queue would have to reach a
-    /// later submission to signal it, and it cannot while an earlier one is
-    /// still waiting. This device has one queue and the seam offers no CPU-side
-    /// signal, so there is nowhere else the value could come from. Metal reports
-    /// nothing for that — the queue simply stops, with the process alive and no
-    /// log line anywhere — so the check is made here and turns a silent hang
-    /// into an [`HalError::Unsupported`]. That variant rather than
-    /// [`HalError::InvalidDescriptor`]: the wait is well-formed and `crcbl-vk`
-    /// performs it, so what is missing is the capability
-    /// ([`Capability::TimelineWaitBeforeSignal`](crcbl_hal::Capability::TimelineWaitBeforeSignal),
-    /// on the reviewed divergence list for this backend) rather than a field the
-    /// caller got wrong. The seam's own use satisfies it by construction: a
-    /// frames-in-flight timeline waits on the value the *previous* frame
+    /// submission has encoded** unsatisfiable *from the queue*: the queue would
+    /// have to reach a later submission to signal it, and it cannot while an
+    /// earlier one is still waiting. With one queue and no host-side signal
+    /// there was nowhere else the value could come from, so such a wait was
+    /// refused here rather than left to stop the queue in silence.
+    ///
+    /// [`Device::signal_semaphore`] is where it comes from now, and the refusal
+    /// is gone with it — which is what
+    /// [`Capability::TimelineWaitBeforeSignal`](crcbl_hal::Capability::TimelineWaitBeforeSignal)
+    /// claims on this backend. A caller that submits such a wait and never
+    /// signals the value still stops this queue, exactly as the same mistake
+    /// stops a Vulkan queue; the seam's own use avoids it by construction, since
+    /// a frames-in-flight timeline waits on the value the *previous* frame
     /// signalled.
     ///
     /// # Timeline values may not go backwards
@@ -2438,30 +2497,21 @@ impl Device for MetalDevice {
             // A binary semaphore's value is the one most recently encoded onto
             // it; the seam says its `value` field is ignored.
             let value = if entry.shared.is_some() {
-                // **Wait-before-signal is a deadlock here, so it is refused.**
-                // This device has one queue and the seam gives no way to signal
-                // an event from the CPU, so the only thing that can ever move a
-                // timeline is a submission on this queue — and a queue cannot
-                // reach a later submission's signal while an earlier one is
-                // still waiting for it. Metal has no diagnostic for that: the
-                // queue simply stops, with the process alive and nothing in any
-                // log. Vulkan behaves the same way for the same reason; the
-                // difference is only that this one can be caught.
+                // Taken as given, **including a value nothing has encoded a
+                // signal past**. This used to be refused, because with one queue
+                // and no host-side signal the only thing that could move a
+                // timeline was a submission on this queue, and a queue cannot
+                // reach a later submission's signal while an earlier one waits
+                // for it. [`Device::signal_semaphore`] is the way out of that:
+                // the value can now arrive from outside the queue, which is what
+                // `encodeWaitForEvent:value:` is for and what
+                // `Capability::TimelineWaitBeforeSignal` claims.
                 //
-                // **`Unsupported`, not `InvalidDescriptor`.** The wait is
-                // well-formed and `crcbl-vk` performs it; what is absent is
-                // anywhere for the signal to come from, which is exactly
-                // `Capability::TimelineWaitBeforeSignal` and is on the reviewed
-                // divergence list for this backend. A caller matching on the
-                // variant can split its submission in two; one reading "your
-                // descriptor is wrong" would go looking for a typo.
-                if wait.value > entry.encoded {
-                    return Err(unsupported(
-                        "a wait for a timeline value nothing submitted has encoded a signal past: \
-                         on a single queue only an earlier submission can satisfy it, so this \
-                         would stop the queue rather than wait",
-                    ));
-                }
+                // A caller that submits such a wait and then never signals it
+                // stops this queue, silently — Metal reports nothing for that.
+                // So does Vulkan, for the same reason, and the seam does not
+                // pretend otherwise on either: ordering is the caller's, and
+                // that is what `SemaphoreWait` has always meant.
                 wait.value
             } else {
                 entry.encoded
@@ -4537,27 +4587,26 @@ using namespace metal;\n\
     /// `encodeWaitForEvent:value:` on this backend. The first is that a wait on
     /// an already-signalled value does not **wedge** the submission it gates —
     /// the failure that would otherwise appear as a hang with nothing to point
-    /// at. The second is the deadlock guard: with one queue and no CPU-side
-    /// signal, a wait for a value no earlier submission encoded can never be
-    /// satisfied, and refusing it is the only way that ends in a message rather
-    /// than in silence.
+    /// at. The second is that the gate can be opened from the **host**: the
+    /// submission waits for a value nothing on the queue will ever produce, and
+    /// [`Device::signal_semaphore`] produces it, which is the whole of
+    /// [`Capability::TimelineWaitBeforeSignal`](crcbl_hal::Capability::TimelineWaitBeforeSignal)
+    /// on a one-queue backend.
     ///
     /// **What turns it red.** A wait encoded onto a command buffer that is
     /// never committed, or encoded after the work rather than before it, leaves
-    /// the copy's completion point unreachable and `drain` hits its deadline.
-    /// Dropping the guard makes the first half return `Ok` — and, run for real
-    /// in that shape, would stop the queue, which is what the guard exists to
-    /// prevent. Refusing it as anything but [`HalError::Unsupported`] turns it
-    /// red too: that variant is the one a caller branches on, and
-    /// [`Capability::TimelineWaitBeforeSignal`](crcbl_hal::Capability::TimelineWaitBeforeSignal)
-    /// is what the refusal answers.
+    /// the copy's completion point unreachable and `drain` hits its deadline. So
+    /// does a `signal_semaphore` that does not reach the event — which is the
+    /// failure this half exists for, and the reason the gate value is one no
+    /// submission here signals: if the copy ran anyway, the wait was dropped.
     ///
-    /// It deliberately does **not** claim to prove the wait *gated* anything.
-    /// Proving that needs an observation taken between two submissions, and
-    /// every such observation is a race rather than an assertion.
+    /// It deliberately does **not** claim to prove the wait *gated* anything at
+    /// a particular instant. Proving that needs an observation taken between two
+    /// submissions, and every such observation is a race rather than an
+    /// assertion.
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_wait_runs_when_it_is_satisfiable_and_is_refused_when_it_is_not() {
+    fn a_wait_runs_and_a_host_signal_is_what_opens_a_gate_nothing_submitted_will() {
         let (_instance, device) = open_device();
         let queue = device
             .queue(QueueKind::Graphics)
@@ -4569,52 +4618,12 @@ using namespace metal;\n\
             })
             .expect("this device reports TIMELINE_SEMAPHORE");
 
-        // Nothing has encoded a signal yet, so this wait could only be met by a
-        // later submission — which the queue can never reach while it waits.
-        let error = device
-            .submit(
-                queue,
-                &SubmitInfo {
-                    command_buffers: &[],
-                    waits: &[SemaphoreWait {
-                        semaphore,
-                        value: 1,
-                    }],
-                    signals: &[],
-                },
-            )
-            .expect_err("nothing can ever satisfy that wait");
-        // `Unsupported`, because the wait is well-formed — `crcbl-vk` performs
-        // exactly this one — and what is absent is the capability. A caller
-        // matching on the variant can split its submission in two; one told its
-        // descriptor was invalid would go looking for a typo.
-        assert!(
-            matches!(&error, HalError::Unsupported { backend, .. } if *backend == BackendKind::Metal),
-            "{error:?}"
-        );
-
         let source = [0xDEu8, 0xAD, 0xBE, 0xEF];
         let upload = device
             .create_buffer(&buffer(4, MemoryLocation::HostUpload))
             .expect("an upload buffer");
         device.write_buffer(upload, 0, &source).expect("writable");
         let readback = readback_buffer(&device, 4);
-
-        // Signal in its own, earlier submission, so the gate is open before the
-        // work that waits on it is committed.
-        device
-            .submit(
-                queue,
-                &SubmitInfo {
-                    command_buffers: &[],
-                    waits: &[],
-                    signals: &[SemaphoreSignal {
-                        semaphore,
-                        value: 1,
-                    }],
-                },
-            )
-            .expect("a signal-only submission is legal");
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
             label: Some("crcbl-mtl gated"),
@@ -4628,6 +4637,8 @@ using namespace metal;\n\
             size: 4,
         });
         let commands = encoder.finish().expect("the recording is complete");
+        // Nothing has encoded a signal onto this semaphore, and nothing will:
+        // the only thing that can ever move it to 1 is the host call below.
         device
             .submit(
                 queue,
@@ -4640,7 +4651,7 @@ using namespace metal;\n\
                     signals: &[],
                 },
             )
-            .expect("the gate is already open");
+            .expect("a wait for a value the host will signal");
         let request = device
             .request_readback(&ReadbackDesc {
                 label: None,
@@ -4650,7 +4661,24 @@ using namespace metal;\n\
                 after: None,
             })
             .expect("a HostReadback buffer, in range");
+
+        device
+            .signal_semaphore(semaphore, 1)
+            .expect("the host opens the gate");
+        assert_eq!(device.semaphore_value(semaphore).expect("a timeline"), 1);
         assert_eq!(drain(&device, request, 4), source);
+
+        // And the forwards-only rule, on the host side of the same event.
+        // `MTLSharedEvent` would take either of these without a word.
+        for backwards in [0, 1] {
+            let error = device
+                .signal_semaphore(semaphore, backwards)
+                .expect_err("a timeline only moves forwards");
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "signalling {backwards} over 1: {error:?}"
+            );
+        }
 
         device.destroy_readback(request);
         device.destroy_command_buffer(commands);

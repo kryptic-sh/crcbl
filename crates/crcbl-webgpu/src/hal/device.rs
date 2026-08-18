@@ -548,11 +548,12 @@ impl Device for WebGpuDevice {
             // browser — and its only completion signal is
             // `GPUQueue.onSubmittedWorkDone()`, which resolves for everything
             // submitted so far and carries no value. So there is no counter to
-            // advance, none to read, and nothing for a CPU wait to block on;
-            // `create_semaphore` refuses the timeline kind and the other two
-            // follow from that.
+            // advance, none to read, nothing for a CPU wait to block on and
+            // nothing for a CPU signal to move; `create_semaphore` refuses the
+            // timeline kind and the other three follow from that.
             Capability::TimelineSemaphore
             | Capability::CpuTimelineWait
+            | Capability::CpuTimelineSignal
             | Capability::TimelineWaitBeforeSignal => Support::No(NO_TIMELINE),
             // The one that stays. `crcbl_hal::sync` requires every device to
             // hand out a binary semaphore because WSI acquire is where they come
@@ -1105,6 +1106,21 @@ impl Device for WebGpuDevice {
             backend: BackendKind::WebGpu,
             what: "semaphore_value: every semaphore on this backend is binary, and WebGPU has no \
                    counter behind one",
+        })
+    }
+
+    /// Refuses: there is no timeline on this backend to advance.
+    ///
+    /// A host signal needs a [`SemaphoreKind::Timeline`], `create_semaphore`
+    /// hands out none, and the binary kind the seam does require is a pool slot
+    /// with no counter behind it. `Ok(())` would be the shape this backend's
+    /// semaphores were built in the first time — success, and nothing anywhere
+    /// moved.
+    fn signal_semaphore(&self, _semaphore: SemaphoreHandle, _value: u64) -> Result<(), HalError> {
+        Err(HalError::Unsupported {
+            backend: BackendKind::WebGpu,
+            what: "signal_semaphore: WebGPU has no timeline to advance; submissions are ordered \
+                   and hazard-tracked by the browser",
         })
     }
 

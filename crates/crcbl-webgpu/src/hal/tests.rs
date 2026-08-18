@@ -1272,6 +1272,12 @@ fn the_timeline_semaphore_calls_refuse_instead_of_succeeding_at_nothing() {
         "there is no timeline to block on, so Ok(true) would be claiming a wait was satisfied \
          that was never evaluated: {waited:?}"
     );
+    let signalled = device.signal_semaphore(binary, 1);
+    assert!(
+        matches!(signalled, Err(HalError::Unsupported { .. })),
+        "there is no timeline to advance, so Ok(()) would be claiming a signal landed somewhere \
+         nothing can observe: {signalled:?}"
+    );
     device.destroy_semaphore(binary);
 
     // And the declarations say the same thing the calls do. The fixture's device
@@ -1285,6 +1291,7 @@ fn the_timeline_semaphore_calls_refuse_instead_of_succeeding_at_nothing() {
     for capability in [
         Capability::TimelineSemaphore,
         Capability::CpuTimelineWait,
+        Capability::CpuTimelineSignal,
         Capability::TimelineWaitBeforeSignal,
     ] {
         assert!(

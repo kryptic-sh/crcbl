@@ -2189,6 +2189,78 @@ fn wait_idle_and_semaphore_waits_are_recorded_and_satisfied() {
     );
 }
 
+/// A host signal moves the timeline, and one that would move it backwards is
+/// refused rather than accepted.
+///
+/// **What turns it red.** Dropping the `<=` check makes the second half return
+/// `Ok`, which is the whole failure: a timeline that goes backwards leaves every
+/// waiter past the higher value asleep on a device that reports nothing wrong.
+/// Reporting the value as a constant — which this backend did until
+/// [`Device::signal_semaphore`] existed — turns the first half red, and so does
+/// ignoring `initial_value`, which is why the semaphore is not created at zero.
+///
+/// Refusing with anything but [`HalError::InvalidDescriptor`] is red too: the
+/// seam splits "a number you can correct" from "a capability this backend
+/// lacks", and a caller branching on `Unsupported` to pick a fallback would take
+/// the fallback for a typo.
+#[test]
+fn a_host_signal_moves_a_timeline_forwards_and_only_forwards() {
+    let (_recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let semaphore = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("frame"),
+            kind: SemaphoreKind::Timeline { initial_value: 5 },
+        })
+        .expect("the gpu_driven preset has timeline semaphores");
+    assert_eq!(
+        device.semaphore_value(semaphore).expect("value"),
+        5,
+        "the timeline did not start where it was created"
+    );
+
+    device.signal_semaphore(semaphore, 9).expect("forwards");
+    assert_eq!(device.semaphore_value(semaphore).expect("value"), 9);
+
+    for backwards in [0, 5, 9] {
+        let error = device
+            .signal_semaphore(semaphore, backwards)
+            .expect_err("a timeline only moves forwards");
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "signalling {backwards} over 9: {error:?}"
+        );
+    }
+    assert_eq!(
+        device.semaphore_value(semaphore).expect("value"),
+        9,
+        "a refused signal must leave the counter where it was"
+    );
+
+    // A binary semaphore has no value to signal, exactly as it has none to
+    // read — and it is the kind every device must still hand out.
+    let binary = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("acquire"),
+            kind: SemaphoreKind::Binary,
+        })
+        .expect("WSI acquire needs one on every device");
+    let error = device
+        .signal_semaphore(binary, 1)
+        .expect_err("a binary semaphore carries no value");
+    assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
+
+    device.destroy_semaphore(binary);
+    device.destroy_semaphore(semaphore);
+    let error = device
+        .signal_semaphore(semaphore, 10)
+        .expect_err("the handle is dead");
+    assert!(
+        matches!(error, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn images_are_validated_against_the_devices_limits() {
     let instance = NullInstance::portable();

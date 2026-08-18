@@ -2155,6 +2155,220 @@ fn exercise_timeline(headless: &Headless, claim: TimelineClaim) -> Exercise {
     outcome
 }
 
+/// Drives [`Device::signal_semaphore`] — the **host** advancing a timeline — and
+/// reports what happened.
+///
+/// Its own sequence rather than a third arm of [`exercise_timeline`], because it
+/// submits nothing at all: the claim is that a value the host asks for arrives,
+/// and a submission in the way would only add a reason for this to fail that is
+/// not the one under test.
+///
+/// # What each outcome means
+///
+/// * [`Exercise::Refused`] — either `create_semaphore` would not hand out a
+///   timeline, or the backend has no host signal for one. `crcbl-wgpu` is the
+///   second case: its counter is a record of what each submission will have
+///   completed, so there is no object to signal.
+/// * [`Exercise::SilentlyIgnored`] — the call returned `Ok` and the counter did
+///   not move, which is the shape this whole mechanism exists to separate from a
+///   working call.
+/// * [`Exercise::Worked`] — the counter reads what the host signalled. The
+///   forwards-only rule is asserted rather than scored, because a backend that
+///   moves the counter and accepts a value moving it backwards has the
+///   capability and a bug: scoring it as unsupported would say the wrong thing.
+fn exercise_cpu_timeline_signal(headless: &Headless) -> Exercise {
+    /// What the semaphore is created holding, so a backend that ignored
+    /// `initial_value` is visible before the signal is ever sent.
+    const INITIAL: u64 = 5;
+    /// What the host signals. Above [`INITIAL`], because a timeline only moves
+    /// forwards.
+    const SIGNALLED: u64 = 9;
+
+    let device = headless.device.as_ref();
+    let timeline = match device.create_semaphore(&crcbl::hal::SemaphoreDesc {
+        label: Some("crcbl hal seam e2e host signal"),
+        kind: crcbl::hal::SemaphoreKind::Timeline {
+            initial_value: INITIAL,
+        },
+    }) {
+        Ok(timeline) => timeline,
+        Err(error) => return Exercise::Refused(error),
+    };
+
+    let outcome = match device.signal_semaphore(timeline, SIGNALLED) {
+        Err(error) => Exercise::Refused(error),
+        Ok(()) => match device.semaphore_value(timeline) {
+            Ok(SIGNALLED) => {
+                // The rule the seam states for this call, on a backend that has
+                // just shown it performs the call at all. Vulkan refuses a
+                // value at or below the counter itself; D3D12 and Metal both
+                // set one backwards without a word, and then every waiter past
+                // the higher value stops waking on a healthy queue.
+                for backwards in [0, INITIAL, SIGNALLED] {
+                    let refusal = device.signal_semaphore(timeline, backwards);
+                    assert!(
+                        matches!(refusal, Err(HalError::InvalidDescriptor(_))),
+                        "signalling {backwards} onto a timeline already holding {SIGNALLED} must \
+                         be refused as InvalidDescriptor — the value is a number the caller can \
+                         correct, not a capability the backend lacks: {refusal:?}"
+                    );
+                }
+
+                // The other half of the same call's contract, and the half
+                // nothing on a real backend held to it: a binary semaphore has
+                // no value, so signalling one is `Unsupported` — the backend
+                // genuinely cannot do it — and not `InvalidDescriptor`, which
+                // would send a caller looking for a bad number in a call whose
+                // numbers are all fine. `crcbl-hal`'s null backend asserted this
+                // and no real one did, so vk could refuse it through the wrong
+                // variant with every gate green.
+                // A backend that hands out no binary semaphore at all owes
+                // nothing here; `Capability::BinarySemaphore` is where that is
+                // declared, and this exercise is not it.
+                if let Ok(binary) = device.create_semaphore(&crcbl::hal::SemaphoreDesc {
+                    label: Some("crcbl hal seam e2e binary signal"),
+                    kind: crcbl::hal::SemaphoreKind::Binary,
+                }) {
+                    let refusal = device.signal_semaphore(binary, 1);
+                    device.destroy_semaphore(binary);
+                    assert!(
+                        matches!(refusal, Err(HalError::Unsupported { .. })),
+                        "signalling a binary semaphore must be refused as Unsupported — it \
+                         carries no value for a host signal to advance, which is a thing the \
+                         backend cannot do rather than a number the caller got wrong: {refusal:?}"
+                    );
+                }
+
+                Exercise::Worked
+            }
+            Ok(INITIAL) => Exercise::SilentlyIgnored,
+            Ok(value) => panic!(
+                "the host signalled {SIGNALLED} and the timeline reads {value}, which is neither \
+                 that nor the {INITIAL} it was created with — the counter moved and moved to the \
+                 wrong place"
+            ),
+            Err(error) => Exercise::Refused(error),
+        },
+    };
+
+    device.destroy_semaphore(timeline);
+    outcome
+}
+
+/// Drives a submitted wait on a value **nothing submitted will signal**, and
+/// opens it from the host.
+///
+/// # Why this cannot deadlock the suite
+///
+/// It used to be unexercised because a wait the backend accepted and could not
+/// satisfy stops the queue with nothing in any log, and every later call in the
+/// run blocks behind it. [`Device::signal_semaphore`] is what changed that, and
+/// the order below is what makes it safe rather than merely likely:
+///
+/// 1. The host signals the gate **before anything is submitted**, and the
+///    counter is read back to prove it moved. A backend with no host signal is
+///    [`Exercise::Refused`] here and one whose signal does nothing is
+///    [`Exercise::SilentlyIgnored`] — both having submitted nothing.
+/// 2. Only then is the wait submitted — for the *next* value, which nothing on
+///    the queue will ever produce.
+/// 3. The host signals that value, using the call step 1 already proved works.
+/// 4. The completion is observed through [`Device::wait_semaphores`] with
+///    [`SEMAPHORE_DEADLINE_NS`], never `wait_idle`, so the only unbounded call
+///    left in the sequence is `submit` — which no backend here blocks in.
+///
+/// # What each outcome means
+///
+/// * [`Exercise::Refused`] — no timeline, no host signal, or the backend refuses
+///   the wait itself. `crcbl-wgpu` refuses twice over: its timeline is
+///   per-submission completion, so there is nothing to signal and nothing for a
+///   queue-side wait to block on.
+/// * [`Exercise::SilentlyIgnored`] — the wait was accepted, the gate was opened,
+///   and the submission's own signal never arrived inside the deadline.
+/// * [`Exercise::Worked`] — the submission ran, which it could only do on the
+///   value the host produced.
+fn exercise_timeline_wait_before_signal(headless: &Headless) -> Exercise {
+    /// What the host signals to prove it can, before anything is submitted.
+    const OPENED: u64 = 1;
+    /// What the submitted wait asks for. Above [`OPENED`], so nothing that has
+    /// happened yet satisfies it and no submission ever will.
+    const GATE: u64 = 2;
+
+    let device = headless.device.as_ref();
+    let timeline = |label| {
+        device.create_semaphore(&crcbl::hal::SemaphoreDesc {
+            label: Some(label),
+            kind: crcbl::hal::SemaphoreKind::Timeline { initial_value: 0 },
+        })
+    };
+    let gate = match timeline("crcbl hal seam e2e gate") {
+        Ok(gate) => gate,
+        Err(error) => return Exercise::Refused(error),
+    };
+    let done = match timeline("crcbl hal seam e2e gated completion") {
+        Ok(done) => done,
+        Err(error) => {
+            device.destroy_semaphore(gate);
+            return Exercise::Refused(error);
+        }
+    };
+
+    let outcome = (|| {
+        // Step 1: nothing is submitted until the host signal is known to have
+        // *moved the counter*, not merely to have returned `Ok`. A signal that
+        // answers `Ok` and does nothing is the one failure that would leave the
+        // wait below unsatisfiable with a submission already on the queue, and
+        // this is where it is caught — before there is a queue to stop.
+        if let Err(error) = device.signal_semaphore(gate, OPENED) {
+            return Exercise::Refused(error);
+        }
+        match device.semaphore_value(gate) {
+            Ok(OPENED) => {}
+            Ok(_) => return Exercise::SilentlyIgnored,
+            Err(error) => return Exercise::Refused(error),
+        }
+        // Step 2: a wait for a value no submission will ever signal, carrying a
+        // signal of its own so the completion has something to observe.
+        if let Err(error) = device.submit(
+            headless.queue,
+            &SubmitInfo {
+                command_buffers: &[],
+                waits: &[crcbl::hal::SemaphoreWait {
+                    semaphore: gate,
+                    value: GATE,
+                }],
+                signals: &[crcbl::hal::SemaphoreSignal {
+                    semaphore: done,
+                    value: 1,
+                }],
+            },
+        ) {
+            return Exercise::Refused(error);
+        }
+        // Step 3: the same call as step 1, so a failure here is a backend that
+        // signals once and not twice rather than one that cannot signal.
+        device
+            .signal_semaphore(gate, GATE)
+            .expect("the host signal worked before the submission and must work after it");
+        // Step 4: bounded, so a wait this backend cannot satisfy ends in a
+        // verdict rather than in a hung run.
+        match device.wait_semaphores(
+            &[crcbl::hal::SemaphoreWait {
+                semaphore: done,
+                value: 1,
+            }],
+            SEMAPHORE_DEADLINE_NS,
+        ) {
+            Ok(true) => Exercise::Worked,
+            Ok(false) => Exercise::SilentlyIgnored,
+            Err(error) => Exercise::Refused(error),
+        }
+    })();
+
+    device.destroy_semaphore(done);
+    device.destroy_semaphore(gate);
+    outcome
+}
+
 // --- the capability seam ----------------------------------------------------
 //
 // `crcbl_hal::Capability` is the enum every backend answers for through an
@@ -6032,10 +6246,6 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
          the draws recordable, so an exercise here would score dx12 as declaring unsupported \
          something it performs, and fail. Adding it therefore waits on the DX12 mesh reporting \
          slice rather than on an artifact";
-    const NEEDS_TWO_SUBMISSIONS: &str = "needs a submission whose wait can outlive the test if the backend hangs rather than \
-         refuses, so driving it wants a timeout the seam's wait_semaphores only offers in \
-         nanoseconds and a backend that blocks in submit would deadlock this suite";
-
     match capability {
         C::BufferFillZero => exercise_fill(headless, 0),
         // Four equal bytes: what Metal's byte-wide `fillBuffer:` can encode.
@@ -6092,7 +6302,14 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
              because submission order already provides it; creation alone would assert that a \
              handle came back and nothing about what it does",
         ),
-        C::TimelineWaitBeforeSignal => Exercise::Unexercised(NEEDS_TWO_SUBMISSIONS),
+        C::CpuTimelineSignal => exercise_cpu_timeline_signal(headless),
+        // The one that left the unexercised list, and it left because
+        // `Device::signal_semaphore` arrived: the wait is satisfied from the
+        // test thread instead of by a second submission the queue can never
+        // reach. `exercise_timeline_wait_before_signal` says how the sequence is
+        // ordered so that a backend which cannot do it refuses before anything
+        // is submitted, rather than stopping the queue for the rest of the run.
+        C::TimelineWaitBeforeSignal => exercise_timeline_wait_before_signal(headless),
     }
 }
 

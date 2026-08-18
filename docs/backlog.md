@@ -168,8 +168,8 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Fourteen blockers: dx12 5, Metal 7, WebGPU 2.** That is what stands between
-here and the deletion, and it can now be asked rather than re-derived.
+**Twelve blockers: dx12 5, Metal 6, WebGPU 1.** That is what stands between here
+and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
 recall — and two of them had been recorded in this file the wrong way round:
@@ -648,7 +648,7 @@ The seam suite drives most of `Capability::ALL` with real GPU work; the tally it
 prints on every run is the current answer and this entry does not restate it —
 earlier versions did, and were wrong within a day.
 
-**Six remain unexercised, for three different reasons:**
+**Five remain unexercised, for three different reasons:**
 
 - **A fixture that does not exist yet.** `SamplerAnisotropy` needs a shader that
   samples a minified texture at a grazing angle and a second to compare against;
@@ -656,10 +656,26 @@ earlier versions did, and were wrong within a day.
   a bind-group layout built for the capability and a shader that indexes it.
 - **An observable the seam cannot reach.** `BinarySemaphore`'s claim is ordering
   between two submissions, and on a one-queue backend a dropped binary semaphore
-  is indistinguishable from an honoured one. `TimelineWaitBeforeSignal` needs a
-  wait that can outlive the test if a backend hangs rather than refuses.
+  is indistinguishable from an honoured one.
 - **Artifacts per backend.** `MeshShading` and `TaskShaderStage` need committed
   mesh and task shaders for each backend that can run one.
+
+**`TimelineWaitBeforeSignal` left that list** when `Device::signal_semaphore`
+arrived: `exercise_timeline_wait_before_signal` submits a wait for a value
+nothing on the queue will ever produce and opens it from the test thread.
+
+**The residual risk, written down rather than assumed away.** A backend that
+accepts such a wait and then never releases it stops its queue with nothing in
+any log, and `Headless::drop` calls `wait_idle` on the panic path, so the run
+would wedge until nextest's `terminate-after` kills it rather than reporting.
+Two things bound that: the exercise reads the counter back after its **first**
+host signal and gives up before submitting anything if it did not move (proved
+by red-checking a no-op `signal_semaphore` in `crcbl-vk` — the run failed and
+`wait_idle` still answered `Ok`), and the only unbounded call left in the
+sequence is `submit`, which no backend blocks in. What is _not_ covered is a
+backend whose host signal moves the counter and whose queue-side wait never
+observes it; on Metal and D3D12 that has not been run on real hardware from
+here, only reasoned from the APIs.
 
 **And two capabilities are unexercised on Metal alone**, which the tally shows
 as a lower number there than elsewhere: both indirect exercises turn on which of
@@ -1036,15 +1052,9 @@ Three of those flags change what the renderer _builds_: `MESH_SHADER` and
 5. **`PipelineStatisticsQuery`** — only if the probe finds the statistic counter
    set. This is the one slice with **no upstream to read**: `wgpu-hal`'s Metal
    `create_query_set` is `todo!()` for it.
-6. **`TimelineWaitBeforeSignal`** — the only Metal row whose gating flag is
-   already reported, so the only one the parity report can prove on its own.
-   `MTLSharedEvent::setSignaledValue:` exists and `crcbl-mtl` already calls it;
-   what is missing is a `Device::signal_semaphore` on the seam. Either add it
-   (shared with dx12's `ID3D12Fence::Signal`) or reclassify the row `Declined`
-   with the honest reason — the decline is ours, not Metal's.
-7. **`DrawIndirectCount`** — largest non-mesh slice and likely a seam change
+6. **`DrawIndirectCount`** — largest non-mesh slice and likely a seam change
    (see corrections). `wgpu-hal`'s Metal version is an empty `//TODO`.
-8. **`MeshShading` + `TaskShaderStage`** — last, splits in four, and re-keys
+7. **`MeshShading` + `TaskShaderStage`** — last, splits in four, and re-keys
    Metal's goldens twice. The MSL is already committed and `xcrun metal` already
    compiles it in CI.
 
@@ -1059,7 +1069,7 @@ Three of those flags change what the renderer _builds_: `MESH_SHADER` and
    either a hardware runner or an explicit "unproven here" state — not a
    retirement.
 
-9. **`BindlessDescriptorArray`** — last or `Declined`. The blocker is in
+8. **`BindlessDescriptorArray`** — last or `Declined`. The blocker is in
    `crcbl-shaders`, not `crcbl-mtl`, and closing it reopens the backend's
    barrier model.
 

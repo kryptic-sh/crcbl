@@ -810,7 +810,9 @@ impl Device for NullDevice {
                 Features::PIPELINE_STATISTICS_QUERY,
                 "this preset did not grant PIPELINE_STATISTICS_QUERY",
             ),
-            Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
+            Capability::TimelineSemaphore
+            | Capability::CpuTimelineWait
+            | Capability::CpuTimelineSignal => gated(
                 Features::TIMELINE_SEMAPHORE,
                 "this preset did not grant TIMELINE_SEMAPHORE",
             ),
@@ -1453,19 +1455,76 @@ impl Device for NullDevice {
         {
             return Err(self.unsupported("timeline semaphores"));
         }
-        Ok(self.insert(ObjectKind::Semaphore, desc.label, Detail::None))
+        let (timeline, value) = match desc.kind {
+            SemaphoreKind::Timeline { initial_value } => (true, initial_value),
+            SemaphoreKind::Binary => (false, 0),
+        };
+        Ok(self.insert(
+            ObjectKind::Semaphore,
+            desc.label,
+            Detail::Semaphore { timeline, value },
+        ))
     }
 
     fn destroy_semaphore(&self, semaphore: SemaphoreHandle) {
         self.remove(ObjectKind::Semaphore, semaphore.to_bits());
     }
 
+    /// The value the host has signalled onto this timeline, starting at the one
+    /// it was created with.
+    ///
+    /// A signal a *submission* carries does not move it: nothing here executes,
+    /// so the submission is in the recorded stream and has not run. That is the
+    /// same answer this gave when it was a constant `0`, minus the part that was
+    /// wrong about a semaphore created with a non-zero `initial_value`.
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
         self.check(ObjectKind::Semaphore, semaphore.to_bits(), "semaphore")?;
-        // Nothing ever executes, so every submitted signal has already
-        // "completed"; reporting the highest signalled value would need a
-        // per-semaphore counter that no test has asked for yet.
-        Ok(0)
+        let state = self.recorder.lock();
+        let Some(Detail::Semaphore { timeline, value }) = state
+            .get(ObjectKind::Semaphore, semaphore.to_bits())
+            .map(|object| &object.detail)
+        else {
+            // `check` above released the lock, so another thread could have
+            // destroyed it in between. That is the same outcome as passing a
+            // dead handle, and it is reported as one.
+            return Err(HalError::invalid_handle("semaphore", semaphore));
+        };
+        if !*timeline {
+            return Err(self.unsupported("a binary semaphore has no value to read"));
+        }
+        Ok(*value)
+    }
+
+    /// Signals the timeline from the host, and refuses a value that does not
+    /// move it forwards.
+    ///
+    /// The one call on this backend whose *rule* is executed rather than
+    /// recorded, and it has to be: the seam's guarantee is that a caller which
+    /// signals backwards is told so on every backend, and a recorder that
+    /// accepted it would be the one place the mistake is invisible.
+    fn signal_semaphore(&self, semaphore: SemaphoreHandle, value: u64) -> Result<(), HalError> {
+        self.check(ObjectKind::Semaphore, semaphore.to_bits(), "semaphore")?;
+        let mut state = self.recorder.lock();
+        let Some(Detail::Semaphore {
+            timeline,
+            value: held,
+        }) = state
+            .get_mut(ObjectKind::Semaphore, semaphore.to_bits())
+            .map(|object| &mut object.detail)
+        else {
+            return Err(HalError::invalid_handle("semaphore", semaphore));
+        };
+        if !*timeline {
+            return Err(self.unsupported("a binary semaphore has no value to signal"));
+        }
+        if value <= *held {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a timeline semaphore signalled with {value} already holds {held}; a timeline only \
+                 moves forwards and a waiter on the higher value would never wake"
+            )));
+        }
+        *held = value;
+        Ok(())
     }
 
     fn wait_semaphores(&self, waits: &[SemaphoreWait], _timeout_ns: u64) -> Result<bool, HalError> {

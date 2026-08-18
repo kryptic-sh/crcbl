@@ -424,6 +424,11 @@ impl Device for WgpuDevice {
                 "this device reports no TIMELINE_SEMAPHORE",
             ),
             C::BinarySemaphore => hal::Support::Yes,
+            C::CpuTimelineSignal => hal::Support::No(
+                "wgpu has no standalone semaphore object to signal; the counter behind a timeline \
+                 here is this crate's record of what each submission will have completed, so a \
+                 host signal would move a number nothing on the queue can see",
+            ),
             C::TimelineWaitBeforeSignal => hal::Support::No(
                 "wgpu has no standalone semaphore object; a timeline here is per-submission \
                  completion, so a wait on a value nothing submitted will signal can only hang",
@@ -1312,6 +1317,20 @@ impl Device for WgpuDevice {
             )),
         }
     }
+    /// Refuses: the counter behind a timeline here is this crate's record of
+    /// what each submission will have completed, not an object anything can
+    /// signal.
+    ///
+    /// Moving that number from the host would make `semaphore_value` report a
+    /// value no submission produced, while nothing on the queue could see it —
+    /// the succeed-and-change-nothing shape `Capability` exists to make visible.
+    fn signal_semaphore(&self, _semaphore: SemaphoreHandle, _value: u64) -> Result<(), HalError> {
+        Err(Self::unsupported(
+            "signal_semaphore: wgpu has no semaphore object to signal, and a timeline here is \
+             per-submission completion",
+        ))
+    }
+
     fn wait_semaphores(
         &self,
         waits: &[hal::SemaphoreWait],

@@ -1612,7 +1612,13 @@ impl Device for VkDevice {
             // the answer is still the device's rather than a constant, because a
             // backend claiming a capability its own caps deny is the exact lie
             // this enum exists to catch.
-            Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
+            // `vkSignalSemaphore` is part of the same Vulkan 1.2 promotion as
+            // the counter read and the host wait, and `crcbl-vk` requires
+            // `timelineSemaphore` at device creation — so the three arrive
+            // together or the device is not opened.
+            Capability::TimelineSemaphore
+            | Capability::CpuTimelineWait
+            | Capability::CpuTimelineSignal => gated(
                 Features::TIMELINE_SEMAPHORE,
                 "this device reports no TIMELINE_SEMAPHORE",
             ),
@@ -2315,6 +2321,50 @@ impl Device for VkDevice {
         // SAFETY: `entry.raw` is a live timeline semaphore of this device.
         unsafe { self.inner.raw.get_semaphore_counter_value(entry.raw) }
             .map_err(|error| conv::hal_error("vkGetSemaphoreCounterValue", error))
+    }
+
+    /// `vkSignalSemaphore`, with the seam's forwards-only rule checked first.
+    ///
+    /// Vulkan requires the rule itself — the layers answer a value at or below
+    /// the counter with `VUID-VkSemaphoreSignalInfo-value-03258`, seen from this
+    /// crate while red-checking the seam suite's exercise — but a validation
+    /// message is not a `Result`, and on a build without layers there is nothing
+    /// at all. So the counter is read and compared here,
+    /// which is what makes the refusal the same *returned* error a caller sees
+    /// on D3D12 and Metal, where the API would set the value backwards in
+    /// silence.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`]; [`HalError::Unsupported`] for a binary
+    /// semaphore, which has no value to signal; and
+    /// [`HalError::InvalidDescriptor`] for a value that does not exceed the one
+    /// the timeline already holds.
+    fn signal_semaphore(&self, semaphore: SemaphoreHandle, value: u64) -> Result<(), HalError> {
+        let state = self.inner.state();
+        let entry = lookup(&state.semaphores, "semaphore", semaphore, &self.inner)?;
+        if !entry.timeline {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Vulkan,
+                what: "a binary semaphore has no value to signal",
+            });
+        }
+        // SAFETY: `entry.raw` is a live timeline semaphore of this device.
+        let held = unsafe { self.inner.raw.get_semaphore_counter_value(entry.raw) }
+            .map_err(|error| conv::hal_error("vkGetSemaphoreCounterValue", error))?;
+        if value <= held {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a timeline semaphore signalled with {value} already holds {held}; a timeline only \
+                 moves forwards and a waiter on the higher value would never wake"
+            )));
+        }
+        let info = vk::SemaphoreSignalInfo::default()
+            .semaphore(entry.raw)
+            .value(value);
+        // SAFETY: `info` borrows only locals that outlive the call and names a
+        // live timeline semaphore of this device.
+        unsafe { self.inner.raw.signal_semaphore(&info) }
+            .map_err(|error| conv::hal_error("vkSignalSemaphore", error))
     }
 
     fn wait_semaphores(&self, waits: &[SemaphoreWait], timeout_ns: u64) -> Result<bool, HalError> {

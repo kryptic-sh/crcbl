@@ -56,7 +56,8 @@
 //! implementing it as a no-op: [`Device::create_semaphore`](crate::Device::create_semaphore)
 //! answers [`HalError::Unsupported`](crate::HalError::Unsupported) for
 //! [`SemaphoreKind::Timeline`], and so do
-//! [`Device::semaphore_value`](crate::Device::semaphore_value) and
+//! [`Device::semaphore_value`](crate::Device::semaphore_value),
+//! [`Device::signal_semaphore`](crate::Device::signal_semaphore) and
 //! [`Device::wait_semaphores`](crate::Device::wait_semaphores). The
 //! [`SemaphoreKind::Binary`] half is still handed out, because WSI acquire is
 //! where binary semaphores come from and every device must have one to give.
@@ -175,11 +176,11 @@ mod tests {
     /// they come from. A backend that refused both would satisfy every test
     /// that only checks the timeline half.
     ///
-    /// `initial_value` is deliberately not asserted here: [`crate::null`]
-    /// records rather than executes, so its `semaphore_value` is a constant and
-    /// asserting against it would be asserting the value unfinished code
-    /// already returns. The counter's behaviour belongs to the backends that
-    /// have one.
+    /// `initial_value` is deliberately not asserted here: this test is about
+    /// which *kinds* a device hands out. What [`crate::null`] does with the
+    /// value is `a_host_signal_moves_a_timeline_forwards_and_only_forwards`, and
+    /// the counter a submission advances belongs to the backends that execute
+    /// one.
     #[test]
     fn only_the_timeline_kind_needs_the_timeline_feature() {
         use crate::null::NullInstance;

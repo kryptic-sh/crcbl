@@ -582,6 +582,14 @@ pub(super) enum Detail {
     ShaderModule { dxil_entry_points: Vec<String> },
     /// A query set: how many queries it holds, so a range can be checked.
     QuerySet { count: u32 },
+    /// A semaphore: whether it is a timeline, and the value it holds.
+    ///
+    /// `value` starts at
+    /// [`SemaphoreKind::Timeline::initial_value`](crate::SemaphoreKind::Timeline)
+    /// and moves only when the host signals it. A signal a *submission* carries
+    /// does not move it, for the reason nothing else here executes either: the
+    /// submission is recorded, not run.
+    Semaphore { timeline: bool, value: u64 },
     /// A swapchain: its image ring and rotation state.
     Swapchain {
         extent: (u32, u32),

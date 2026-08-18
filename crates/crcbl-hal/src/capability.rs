@@ -431,15 +431,31 @@ capabilities! {
     /// fence-shaped API looks like before its wait half is wired up.
     CpuTimelineWait,
 
+    /// [`signal_semaphore`](crate::Device::signal_semaphore): the **CPU**
+    /// advancing a timeline, rather than a submission.
+    ///
+    /// Its own capability for the same reason
+    /// [`CpuTimelineWait`](Self::CpuTimelineWait) is: the two host-side halves
+    /// are separable. A backend that emulates a timeline over per-submission
+    /// completion could move a counter on demand and still have no queue-side
+    /// wait to pair it with, and one with a real semaphore object has both.
+    ///
+    /// The claim is the observable one — that
+    /// [`semaphore_value`](crate::Device::semaphore_value) reports the value the
+    /// host asked for, and that a value which would move the timeline backwards
+    /// is refused rather than accepted.
+    CpuTimelineSignal,
+
     /// Waiting — from the CPU, or in a [`SubmitInfo`](crate::SubmitInfo) — on a
     /// timeline value that **nothing submitted so far will signal**, expecting
-    /// later work to satisfy it.
+    /// a later signal to satisfy it.
     ///
-    /// A real semaphore object blocks until somebody signals it. A backend that
-    /// emulates timelines over per-submission completion, or that has one queue
-    /// and no CPU-side signal, has nothing for a future signal to arrive on, so
-    /// such a wait could only ever stop the queue; refusing is the honest answer
-    /// and it is a genuine behavioural divergence rather than a missing call.
+    /// A real semaphore object blocks until somebody signals it, and
+    /// [`CpuTimelineSignal`](Self::CpuTimelineSignal) is what lets the host be
+    /// the somebody. A backend that emulates timelines over per-submission
+    /// completion has no object for a future signal to arrive on, so such a wait
+    /// could only ever stop the queue; refusing is the honest answer and it is a
+    /// genuine behavioural divergence rather than a missing call.
     TimelineWaitBeforeSignal,
 }
 
@@ -491,10 +507,11 @@ impl Capability {
             Self::TimestampQuery => Some(Features::TIMESTAMP_QUERY),
             Self::OcclusionQuery => Some(Features::OCCLUSION_QUERY),
             Self::PipelineStatisticsQuery => Some(Features::PIPELINE_STATISTICS_QUERY),
-            // All three are about one object, so one flag governs them.
-            Self::TimelineSemaphore | Self::CpuTimelineWait | Self::TimelineWaitBeforeSignal => {
-                Some(Features::TIMELINE_SEMAPHORE)
-            }
+            // All four are about one object, so one flag governs them.
+            Self::TimelineSemaphore
+            | Self::CpuTimelineWait
+            | Self::CpuTimelineSignal
+            | Self::TimelineWaitBeforeSignal => Some(Features::TIMELINE_SEMAPHORE),
         }
     }
 }
@@ -1082,21 +1099,27 @@ pub const DIVERGENCES: &[Divergence] = &[
               — see the TimelineSemaphore entry",
     },
     Divergence {
+        capability: Capability::CpuTimelineSignal,
+        backend: BackendKind::Wgpu,
+        kind: DivergenceKind::ApiAbsence,
+        why: "wgpu has no standalone semaphore object to signal. The counter behind a timeline \
+              here is this crate's own record of what each submission will have completed, so a \
+              host signal would move a number nothing on the queue can see",
+    },
+    Divergence {
+        capability: Capability::CpuTimelineSignal,
+        backend: BackendKind::WebGpu,
+        kind: DivergenceKind::ApiAbsence,
+        why: "create_semaphore refuses the timeline kind, so there is no counter for a host signal \
+              to advance; WebGPU has no signalable object of any kind — see the TimelineSemaphore \
+              entry",
+    },
+    Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::ApiAbsence,
         why: "wgpu has no standalone semaphore object; a timeline here is per-submission \
               completion, so a wait on a value nothing submitted will signal can only hang",
-    },
-    Divergence {
-        capability: Capability::TimelineWaitBeforeSignal,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::Unwritten,
-        why: "MTLSharedEvent has both halves — setSignaledValue: from the CPU and \
-              encodeWaitForEvent:value: on a command buffer — but the seam offers no CPU signal, \
-              so on this one-queue backend only an earlier submission could satisfy such a wait \
-              and waiting would stop the queue rather than wait. The work is a signal call on the \
-              seam",
     },
     Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
@@ -1722,11 +1745,6 @@ mod tests {
             Capability::PipelineStatisticsQuery,
             BackendKind::Metal,
             DivergenceKind::Unclassified,
-        ),
-        (
-            Capability::TimelineWaitBeforeSignal,
-            BackendKind::Metal,
-            DivergenceKind::Unwritten,
         ),
         // The browser's one. Everything else `crcbl-webgpu` refuses is WebGPU
         // itself refusing, which is why this is the short list and not the long
