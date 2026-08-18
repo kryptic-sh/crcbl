@@ -873,17 +873,13 @@ itself.
 
 Planned 2026-08-18 against `objc2-metal 0.3.2` and `wgpu-hal 30.0.0` on disk.
 
-**The structural finding first, because it applies to every backend and not just
-Metal.** Eight of Metal's nine rows sit behind a `Features` flag that
-`crcbl-mtl` reports on **no device** — `DRAW_INDIRECT_COUNT`, `MESH_SHADER`,
-`TASK_SHADER`, `PUSH_CONSTANTS`, `DESCRIPTOR_INDEXING`, `TIMESTAMP_QUERY`,
-`OCCLUSION_QUERY`, `PIPELINE_STATISTICS_QUERY`. `is_parity_gap` returns `false`
-when the gate is clear, so **deleting one of those rows without turning its flag
-on leaves the parity report green over evidence nobody has.** The snapshot test
-notices the row left; nothing notices that its replacement proves nothing. So
-every slice has three parts, not one: the backend call, the flag in
-`features_of`, and evidence that flipping the flag broke no golden. The dx12
-plan spotted this for mesh specifically; it is general.
+**The mechanism hole this plan found has since shipped.** Eight of Metal's nine
+rows sit behind a `Features` flag `crcbl-mtl` reports on no device, and the old
+rule excused a refusal whenever the device withheld the gate — so a row could be
+retired by a device that could not have proved anything either way. `Support`
+now separates the backend's refusal from the device's, and a plain `Support::No`
+needs a listed row on **every** device, so a slice can retire its row only by
+making the backend answer `Support::Yes`.
 
 Three of those flags change what the renderer _builds_: `MESH_SHADER` and
 `DRAW_INDIRECT_COUNT` both move `GeometryPath`, and `DESCRIPTOR_INDEXING` moves
