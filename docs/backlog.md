@@ -10614,6 +10614,13 @@ _pixels_ against the same references the native suites use — the gap the sRGB
 bug went through, since the goldens covered the offscreen path that already
 worked and the browser gate read only text.
 
+**The comparison is deterministic across machines, which was not assumed.** The
+first green CI run reported the same pixel counts as the local one to the digit
+— `ssr` 25611 differing and 459 over tolerance, `ui` 3872 and 506. So hosted
+SwiftShader and local Chromium agree exactly, the expected-fail list is not
+machine-specific noise, and a future change to either scene will move the
+numbers rather than drift them.
+
 **The two exclusions are not a suppression.** A listed scene that starts
 _passing_ fails the run and says the list is stale, so the moment a driver
 update or a fix makes either match, CI forces the list to be updated. Both print
