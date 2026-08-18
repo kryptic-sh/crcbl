@@ -67,18 +67,17 @@
 // otherwise print nothing and succeed.
 
 import { spawn } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { browserFlags, findBrowser, stopBrowser } from './browser-launch.mjs';
+import {
+  browserFlags,
+  findBrowser,
+  readDevToolsPort,
+  stopBrowser,
+} from './browser-launch.mjs';
 import { ISOLATION_HEADERS, MIME, serve } from './serve.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -765,12 +764,10 @@ async function launch(binary, mode) {
       console.error(stderr.join('\n'));
       fail(`the browser stopped before it listened (${exited})`);
     }
-    if (existsSync(portFile)) {
-      const [port, path] = readFileSync(portFile, 'utf8').split('\n');
-      if (port && path) {
-        browser.endpoint = `ws://127.0.0.1:${port}${path}`;
-        return browser;
-      }
+    const endpoint = readDevToolsPort(portFile);
+    if (endpoint) {
+      browser.endpoint = `ws://127.0.0.1:${endpoint.port}${endpoint.path}`;
+      return browser;
     }
     await pause(50);
   }

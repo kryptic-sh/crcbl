@@ -46,17 +46,16 @@
 //   2  the harness could not run at all (no browser, no adapter, wasm failed).
 
 import { spawn } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { browserFlags, findBrowser, stopBrowser } from './browser-launch.mjs';
+import {
+  browserFlags,
+  findBrowser,
+  readDevToolsPort,
+  stopBrowser,
+} from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
 const LAUNCH_TIMEOUT_MS = 30_000;
@@ -120,12 +119,10 @@ async function launch(binary) {
       browser.stop();
       return fail(`the browser stopped before it listened (${exited})`);
     }
-    if (existsSync(portFile)) {
-      const [port, path] = readFileSync(portFile, 'utf8').split('\n');
-      if (port && path) {
-        browser.endpoint = `ws://127.0.0.1:${port}${path}`;
-        return browser;
-      }
+    const endpoint = readDevToolsPort(portFile);
+    if (endpoint) {
+      browser.endpoint = `ws://127.0.0.1:${endpoint.port}${endpoint.path}`;
+      return browser;
     }
     await pause(50);
   }

@@ -36,7 +36,7 @@
 // Windows in `hardware` mode.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 
 /**
@@ -98,6 +98,47 @@ function candidates() {
  * @param {(message: string) => never} fail
  * @returns {string}
  */
+/**
+ * Reads Chrome's `DevToolsActivePort`, or answers `null` if it is not readable
+ * *yet*.
+ *
+ * # Why this is not just `readFileSync`
+ *
+ * Chrome writes this file and **keeps the handle open**. On Windows that handle
+ * is exclusive, so a reader that arrives while Chrome still holds it gets
+ * `EBUSY: resource busy or locked` rather than the contents — and the callers
+ * here poll on a deadline, so the right answer to that is "not yet", not an
+ * exception. A first Windows CI run died exactly this way, before it could even
+ * reach the question it was there to ask.
+ *
+ * The file is also written in two steps, so a read can legitimately land on a
+ * half-written file with a port and no path. That is the same "not yet".
+ *
+ * `ENOENT` is included for the window before Chrome has written it at all.
+ * Anything else is thrown, **including `EACCES`**: a caller that retried past a
+ * permissions fault would spend its whole deadline and then report "the browser
+ * never wrote DevToolsActivePort", which is a true sentence about the wrong
+ * problem. If a Windows run ever produces `EACCES` for a file Chrome merely
+ * holds, add it here with that run cited — not in advance.
+ *
+ * @param {string} portFile
+ * @returns {{port: string, path: string} | null}
+ */
+export function readDevToolsPort(portFile) {
+  let contents;
+  try {
+    contents = readFileSync(portFile, 'utf8');
+  } catch (error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (error).code;
+    if (code === 'EBUSY' || code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+  const [port, path] = contents.split('\n');
+  return port && path ? { port, path } : null;
+}
+
 export function findBrowser(fail) {
   const explicit = process.env.CRCBL_CHROMIUM;
   if (explicit) {
