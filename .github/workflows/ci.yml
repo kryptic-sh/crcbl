@@ -564,21 +564,13 @@ jobs:
       # `--no-install-recommends` keeps it to a handful of X libraries, where
       # `marco` or `xfwm4` would drag in half a desktop.
       - name: Install Xvfb, openbox, the X client libraries and the ALSA headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            xvfb \
-            openbox \
-            libasound2-dev \
-            libxcb1 \
-            libxcb-randr0 \
-            libxcb-xinput0 \
-            libxcb-xtest0 \
-            libxkbcommon0 \
-            libxkbcommon-x11-0 \
-            libvulkan1 \
-            mesa-vulkan-drivers \
-            vulkan-validationlayers
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            xvfb openbox libasound2-dev libxcb1 libxcb-randr0 libxcb-xinput0
+            libxcb-xtest0 libxkbcommon0 libxkbcommon-x11-0 libvulkan1
+            mesa-vulkan-drivers vulkan-validationlayers
       # Starts Xvfb on a private display number, polls for its socket with a
       # deadline and a liveness check on the child, runs the `#[ignore]`d suite
       # with `--features x11-e2e`, and dumps the server log tail on any
@@ -932,13 +924,11 @@ jobs:
       # fails, because in CI a skipped pass is the trap
       # `docs/plan/12-testing.md` names.
       - name: Install sway, the ALSA headers, the Vulkan loader and lavapipe
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            sway \
-            libasound2-dev \
-            libwayland-client0 \
-            libvulkan1 \
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            sway libasound2-dev libwayland-client0 libvulkan1
             mesa-vulkan-drivers
       # Scaffolds into a temporary directory, builds it with its own
       # `CARGO_TARGET_DIR`, checks `rustfmt` and `clippy` on the generated
@@ -993,13 +983,11 @@ jobs:
       # `libasound2-dev` is the odd one out in this list: the ALSA headers
       # `cpal` links against rather than anything Vulkan. See the `clippy` job.
       - name: Install the Vulkan loader, lavapipe and the validation layers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libvulkan1 \
-            mesa-vulkan-drivers \
-            vulkan-validationlayers \
-            vulkan-tools \
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
             libasound2-dev
       # The ICD is pinned rather than discovered: a GitHub runner that grew a
       # GPU tomorrow would otherwise silently stop testing the software path,
@@ -1594,18 +1582,12 @@ jobs:
       # about a display: the ALSA headers `cpal` links against. See the `clippy`
       # job.
       - name: Install Xvfb, the X client libraries and lavapipe
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            xvfb \
-            libxcb1 \
-            libxcb-randr0 \
-            libxcb-xinput0 \
-            libxkbcommon0 \
-            libxkbcommon-x11-0 \
-            libvulkan1 \
-            mesa-vulkan-drivers \
-            libasound2-dev
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            xvfb libxcb1 libxcb-randr0 libxcb-xinput0 libxkbcommon0
+            libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers libasound2-dev
       # The ICD is pinned for the same reason `vk-e2e` pins it: a runner that
       # grew a GPU tomorrow would otherwise stop testing the software path
       # silently. The script fails if the manifest resolves to nothing, and
@@ -1762,12 +1744,11 @@ jobs:
       # `crcbl-audio` before and does now. See the `clippy (linux)` job for the
       # `-dev`-versus-runtime argument.
       - name: Install the Vulkan loader, lavapipe and the ALSA headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev \
-            libvulkan1 \
-            mesa-vulkan-drivers
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            libasound2-dev libvulkan1 mesa-vulkan-drivers
       # Both backends are pinned to lavapipe because it is the only driver a
       # runner has; the script says so out loud, since that configuration
       # compares two backends rather than two drivers. Crossing the pins is what
@@ -2338,12 +2319,11 @@ jobs:
       # A coverage number that says how much of the *backend* code a runner
       # happens to be able to reach is not measuring the test suite.
       - name: Install the ALSA headers, the Vulkan loader and lavapipe
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev \
-            libvulkan1 \
-            mesa-vulkan-drivers
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            libasound2-dev libvulkan1 mesa-vulkan-drivers
       # Pinned to the software ICD for the reason `vk-e2e` pins it: a runner
       # that grew a GPU tomorrow would otherwise change what this job measures
       # without a commit.
