@@ -1868,7 +1868,55 @@ pure refactor with no capability change at all — **has landed**, and the
 existing Metal e2e and render jobs are what prove it: nothing about it can be
 executed off a Mac, and the local gates only type-check it.
 
-**Decided: (1), and the research is why rather than taste.**
+### BLOCKED ON THE SHADER TOOLCHAIN — Slang cannot write an ICB
+
+**This overturns the decision below, and it was found by trying to build the
+kernel.** The design picked deferred encoding so a compute kernel could write
+the `MTLIndirectCommandBuffer`. **Slang cannot express that kernel.** Its Metal
+target has no indirect-command-buffer support: an ICB parameter is silently
+dropped rather than diagnosed, and Slang's own "Metal-Specific Functionalities"
+page lists what the target does implement — mesh shaders, parameter blocks as
+argument buffers, `SubpassInput` framebuffer fetch, specialization constants as
+function constants, address spaces — with no `command_buffer` or
+`render_command` anywhere, and an explicit unsupported list that does not
+mention them either because they were never in scope.
+
+Every shader in this repo is Slang; `crcbl-shaders`' whole build is `.slang` →
+spirv/msl/dxil/wgsl, and the `shaders (committed artifacts match their sources)`
+CI job hashes each source against its artifacts.
+
+**So `DrawIndirectCount` on Metal is not "unwritten" in the ordinary sense.** It
+is blocked on something outside this repo, and the honest options are:
+
+1. **Hand-write one `.metal` kernel as a standing exception.** It is the only
+   shader in the tree with no `.slang` source, so the artifact-hash job needs an
+   exception mechanism it does not have, and the file can never be regenerated
+   by the pipeline that produces every other artifact. Small in lines, permanent
+   in cost.
+2. **Wait for Slang.** Out of our control and unscheduled; the row stays open
+   indefinitely and the deferral refactor sits with no consumer.
+3. **Take MoltenVK's route** — read the count back and loop on the CPU. Correct
+   and simple, and it stalls the frame, which is why it was rejected above. It
+   would close the row with a performance regression on the path
+   `crcbl-render`'s GPU-driven work exists to make fast.
+4. **Leave the row open with this as its reason**, reclassified from `Unwritten`
+   to something that says "the toolchain cannot express it", which is closer to
+   `ApiAbsence` in spirit than to work nobody has done.
+
+My reading: (4) now and (1) only if something else also needs hand-written MSL,
+because one exception to a hashed pipeline is a rule with an asterisk forever.
+(3) fails the standard this project sets.
+
+**And it makes the deferral refactor speculative for now.** `crcbl_mtl`'s
+`RenderRecording` landed and is verified green on CI, and it is
+behaviour-neutral — but its consumer was this kernel. It is not wasted (it is
+the prerequisite for _any_ pre-pass work on this backend, including a
+hand-written kernel) and it is not harmful, but it currently has no caller,
+which is worth saying plainly rather than leaving it to look load-bearing.
+
+**Decided below: (1), and the research is why rather than taste** — recorded as
+it stood, because the reasoning about MoltenVK, pre-encoding and pass-splitting
+is still correct and still decides the shape _if_ a kernel can ever be written.
 
 - **MoltenVK does not take the ICB route at all.** It implements
   `vkCmdDrawIndirectCount` by reading the count back to the CPU and looping
