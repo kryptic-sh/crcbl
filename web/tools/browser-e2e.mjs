@@ -16,7 +16,7 @@
 // a WebGPU device and puts pixels on the canvas. A black canvas passes every
 // check those two can make.
 //
-// WHAT IT ASSERTS. Five groups, printed in order:
+// WHAT IT ASSERTS. Seven groups, printed in order:
 //
 //   A  the platform — `navigator.gpu`, an adapter, **that this browser can
 //      report canvas pixels at all** (see below; this one is not a formality),
@@ -31,6 +31,10 @@
 //      and the canvas changes from frame to frame while the ball is in flight
 //   E  focus and pause — a blurred canvas pauses and runs no ticks, focus
 //      coming back does not resume on its own, and Escape does
+//   F  a finger — real touch contacts, which a dispatched mouse is not
+//   G  the frame is sRGB-encoded — the demo's own flat clear colour, read off
+//      the canvas as the browser composited it and compared against the byte an
+//      sRGB target holds. Only for a demo whose clear reaches the screen
 //
 // THE READBACK IS THE PART THAT NEEDED PROVING. Three ways to get a WebGPU
 // canvas's pixels into JS look equivalent and are not, measured on Chromium 150
@@ -60,6 +64,16 @@
 // different size through a different backend, and calling those two comparable
 // would be a lie a tolerance could hide. "Not blank, changing with the ball,
 // with no device errors behind it" is the honest ceiling for this harness.
+//
+// GROUP G IS THE ONE EXCEPTION TO THAT, AND IT IS DELIBERATELY NARROW. It
+// compares no rendered image; it compares the demo's own *clear colour*, which
+// is a flat fill of one exact byte that every rasteriser produces identically
+// and that therefore needs no tolerance table and no expected-fail list. What
+// that buys is the one claim group D cannot make: the frame went out sRGB-
+// encoded. A canvas configured without its `-srgb` viewFormat presents every
+// value a transfer function too dark, and each of group D's checks passes on
+// such a frame — which is how it reached a visitor. See the group for why a
+// mid-range colour is the whole of the design.
 //
 // EXIT STATUS. Non-zero if any check fails *or* if zero checks ran. The second
 // half is not decoration: `docs/plan/12-testing.md` names a silently-skipped
@@ -143,6 +157,21 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * Two rows use it and they are `null` for different reasons: hud takes no input
  * at all, and lumen takes plenty but has no run to begin — which is why this
  * says "no start key" rather than "no input".
+ *
+ * `backdrop` is the other optional key, and it is what group G reads. It names
+ * the demo's clear colour twice over: `encoded` is the byte an sRGB target holds
+ * and `unencoded` is the byte the same clear leaves in a linear one, with
+ * `share` the fraction of the canvas the flat fill has to cover for the sample
+ * to count. `source` names the Rust constant the pair was computed from, so the
+ * next reader can check the arithmetic rather than trust it.
+ *
+ * **A row without one is a demo whose clear colour never reaches the screen**,
+ * and there are three: asteroids ends its run under the start menu's
+ * full-screen scrim, so `art::SPACE` is only ever seen dimmed; horde tiles grass
+ * sprites over every pixel of `art::GROUND`; and lumen has no `clear_color` pass
+ * at all — it is a lit room, and the nearest thing to a flat region in its frame
+ * is under a tenth of the canvas. None of the three can make this claim, and a
+ * row that quietly skipped it would be the check passing for the wrong reason.
  */
 const EXPECTATIONS = {
   breakout: {
@@ -167,6 +196,16 @@ const EXPECTATIONS = {
     // WAITING with nothing over it — the state a tap serves from, and the
     // reason the tap binding exists at all.
     touch: { paddle: true, lives: /Lives: (\d+)/, pause: true },
+    // `apps/breakout/src/art.rs`'s `SURROUND`, the letterbox either side of the
+    // play field. The smallest share any row here claims, because it is only the
+    // margins — but it is a flat clear at an exact byte all the same, and the
+    // two candidate colours are nine levels apart.
+    backdrop: {
+      source: 'breakout::art::SURROUND',
+      encoded: [10, 10, 15],
+      unencoded: [1, 1, 1],
+      share: 0.15,
+    },
   },
   flappy: {
     key: 'Space',
@@ -183,6 +222,16 @@ const EXPECTATIONS = {
     // a value above the one from before the taps is a flap and cannot be
     // anything else. `\by:` and not `y:`, or the line's own `vy:` matches first.
     touch: { height: /\by: (-?[\d.]+)/, pause: true },
+    // `apps/flappy/src/art.rs`'s `SKY`, `[0.147, 0.420, 0.787]`, and the widest
+    // separation any row here has: seventy levels in red between the encoded
+    // colour and the linear one, on three quarters of the canvas. Nothing about
+    // that colour is a fixed point of the transfer function in any channel.
+    backdrop: {
+      source: 'flappy::art::SKY',
+      encoded: [107, 173, 229],
+      unencoded: [37, 107, 201],
+      share: 0.4,
+    },
   },
   // `rock x` and not the ship's: this game's ship is stationary until the
   // player thrusts, and Space only fires. The rocks drift on their own from the
@@ -248,6 +297,18 @@ const EXPECTATIONS = {
     waiting: (line) => line.includes('[HUD] tick: 1  wave: 1'),
     moving: /rolls: (\d+)/,
     movingLabel: 'the ticker rolls new numbers under its own steam',
+    // `apps/hud/src/page.rs`'s `BACKDROP`, `[0.05, 0.06, 0.09]`, and the row
+    // this check was written against: hud is a scripted page rather than a game,
+    // so nothing it draws ever covers the clear and nothing it does depends on
+    // when the sample lands. The pre-fix canvas this gate saved into
+    // `target/web-e2e/` held rgb(13,15,23) over the same share of the same
+    // frame — the linear colour below, the shipped bug, on disk.
+    backdrop: {
+      source: 'hud::page::BACKDROP',
+      encoded: [63, 69, 85],
+      unencoded: [13, 15, 23],
+      share: 0.6,
+    },
   },
   // **The other demo with no start key.** `apps/lumen` is a lighting fixture
   // rather than a game: there is no run to begin, so there is no waiting state
@@ -313,6 +374,36 @@ const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
 
 /** How many times the canvas is read back once the ball is in flight. */
 const SAMPLE_COUNT = 16;
+
+/**
+ * How far a backdrop channel may drift from the byte `EXPECTATIONS` names.
+ *
+ * The same window `crates/crcbl-webgpu/src/probe.rs` allows its present probe,
+ * and for the same reason: the hardware evaluates the sRGB transfer function and
+ * the specification fixes neither its precision nor its rounding, so a component
+ * landing a level either side of the arithmetic answer is conforming. Two levels
+ * is nowhere near enough to reach the unencoded colour — the nearest pair any
+ * row here uses is nine levels apart, and the widest is seventy.
+ *
+ * Both adapters this gate runs against — `google swiftshader` and a real
+ * `amd rdna-3` — returned every backdrop byte *exactly*, so this window has
+ * never had to absorb anything. If a platform ever needs it widened, that is a
+ * finding to report rather than a number to raise.
+ */
+const BACKDROP_TOLERANCE = 2;
+
+/**
+ * How many frames the backdrop check looks at before giving its verdict.
+ *
+ * It takes the *best* of them, and that is deliberate rather than lenient. A
+ * game decides for itself what covers its clear colour at any instant — flappy
+ * puts a menu and a scrim over the whole sky the moment the bird dies, which is
+ * a second or two after group C launches it — so a single sample is a race
+ * against the simulation and nothing else. One frame holding the encoded colour
+ * over a large area is the whole claim; a run with no encode has no such frame
+ * at any instant, because every one of them is the linear colour instead.
+ */
+const BACKDROP_SAMPLES = 8;
 
 /**
  * The culling-statistics line `crcbl_render::cull_stats` logs when a readback
@@ -964,6 +1055,77 @@ const describe = (sample) =>
       ({ rgb, share }) => `rgb(${rgb.join(',')}) ${(share * 100).toFixed(1)}%`
     )
     .join(', ');
+
+/**
+ * How much of the canvas is the demo's clear colour, encoded and unencoded.
+ *
+ * **This is the sampler the sRGB check reads, and it cannot be
+ * {@link SAMPLE_CANVAS}**: that one quantises to five bits a channel so that two
+ * rasterisers disagreeing in the last bit do not read as different frames, and
+ * the claim here is about an exact byte. `rgb(10,10,15)` and `rgb(8,8,16)` are
+ * one colour after that shift, and the second is not the sRGB encode of
+ * anything.
+ *
+ * Two counts come back rather than one, because "the backdrop is not the colour
+ * it should be" and "the backdrop is the colour a target with no encode would
+ * hold" are different failures and only the second names its own cause. The
+ * exact dominant colour comes back beside them so a frame that is neither can
+ * still be read by a human.
+ *
+ * `toDataURL()` and not `drawImage(canvas, …)`, for the reason in the header.
+ *
+ * @param {string} selector The canvas to sample.
+ * @param {number[]} encoded The sRGB encode of the clear colour, per channel.
+ * @param {number[]} unencoded What the same clear leaves in a linear target.
+ */
+const SAMPLE_BACKDROP = (selector, encoded, unencoded) => `(async () => {
+  const canvas = document.querySelector(${JSON.stringify(selector)});
+  if (!canvas || !canvas.width || !canvas.height) return null;
+  const image = new Image();
+  image.src = canvas.toDataURL();
+  await image.decode();
+  const scratch = document.createElement('canvas');
+  scratch.width = canvas.width;
+  scratch.height = canvas.height;
+  const context = scratch.getContext('2d', { willReadFrequently: true });
+  context.drawImage(image, 0, 0);
+  const pixels = context.getImageData(0, 0, scratch.width, scratch.height).data;
+  const want = ${JSON.stringify(encoded)};
+  const linear = ${JSON.stringify(unencoded)};
+  const tolerance = ${BACKDROP_TOLERANCE};
+  const histogram = new Map();
+  let hit = 0;
+  let dark = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    const key = (pixels[i] << 16) | (pixels[i + 1] << 8) | pixels[i + 2];
+    histogram.set(key, (histogram.get(key) ?? 0) + 1);
+    let isEncoded = true;
+    let isLinear = true;
+    for (let c = 0; c < 3; c += 1) {
+      if (Math.abs(pixels[i + c] - want[c]) > tolerance) isEncoded = false;
+      if (Math.abs(pixels[i + c] - linear[c]) > tolerance) isLinear = false;
+    }
+    if (isEncoded) hit += 1;
+    if (isLinear) dark += 1;
+  }
+  const total = pixels.length / 4;
+  let bestKey = 0;
+  let bestCount = -1;
+  for (const [key, count] of histogram) {
+    if (count > bestCount) {
+      bestCount = count;
+      bestKey = key;
+    }
+  }
+  return {
+    width: scratch.width,
+    height: scratch.height,
+    encoded: hit / total,
+    unencoded: dark / total,
+    dominant: [(bestKey >> 16) & 255, (bestKey >> 8) & 255, bestKey & 255],
+    dominantShare: bestCount / total,
+  };
+})()`;
 
 /**
  * Where breakout's paddle is, as a fraction of the canvas's width.
@@ -2534,6 +2696,78 @@ try {
         `status ${runningAgain ?? (await evaluate(page, `crcbl.status()`))}`
       );
     }
+  }
+
+  // **THE ONE CHECK HERE THAT IS ABOUT THE COLOUR OF THE FRAME RATHER THAN
+  // ABOUT THERE BEING ONE**, and the gap the rest of this file left open. Group
+  // D asks whether the canvas has more than one colour and whether it changes;
+  // both of those pass identically on a frame that is a transfer function too
+  // dark, which is exactly what the demo site shipped — a canvas configured
+  // without its `-srgb` viewFormat, so every value the engine wrote went out
+  // unencoded. `crcbl-golden` and the render harness compare pixels but render
+  // *offscreen*, through `Replayer#configureOffscreenSwapchain`, which owns its
+  // own textures and never calls `context.configure` — the path that was never
+  // broken.
+  //
+  // **A FLAT CLEAR AT A MID-RANGE COLOUR IS THE WHOLE DESIGN.** 0.0 and 1.0 are
+  // fixed points of the sRGB transfer function and encode to themselves, so a
+  // clear to black or white reads back the same whether the encode happened or
+  // not — the shape of a check that cannot fail, and the reason the probe's own
+  // present gate stopped clearing to red. Every colour in `EXPECTATIONS` is
+  // mid-range in at least one channel and none is a fixed point in any. A flat
+  // fill also needs no per-platform tolerance and no expected-fail list: it is
+  // one clear, so every rasteriser produces the same bytes, and both of the ones
+  // this gate has run against produced them exactly.
+  //
+  // **AND IT IS A PICTURE, WHICH IS WHAT THE PROBE'S GROUPS I AND X ARE NOT.**
+  // Those two are not a gap this fills — reintroduce the shipped bug and group I
+  // goes red on its own — but every byte they compare is copied out on the GPU
+  // by `crcbl-webgpu` and handed to wasm over the reply channel, and both drive
+  // the probe exports on a page with no engine running. Neither asks the browser
+  // what it *composited*, and neither is a demo. This reads the result off the
+  // element a visitor looks at, through the same `toDataURL` the header measured
+  // as the one spelling that reports a WebGPU canvas at all.
+  //
+  // The canvas written below is this group's evidence: it is the same
+  // `toDataURL` of the same element a moment later, so a failure here comes with
+  // the picture that produced it.
+  if (EXPECTED.backdrop) {
+    group('G — the frame is sRGB-encoded');
+
+    const { source, encoded, unencoded, share } = EXPECTED.backdrop;
+    let best = null;
+    for (let i = 0; i < BACKDROP_SAMPLES; i += 1) {
+      const sample = await evaluate(
+        page,
+        SAMPLE_BACKDROP('#canvas', encoded, unencoded)
+      );
+      if (sample && (!best || sample.encoded > best.encoded)) best = sample;
+      if (best && best.encoded >= share) break;
+    }
+
+    const want = `rgb(${encoded.join(',')})`;
+    const linear = `rgb(${unencoded.join(',')})`;
+    check(
+      'G',
+      `the ${source} clear reaches the canvas sRGB-encoded`,
+      best !== null && best.encoded >= share,
+      best === null
+        ? 'nothing sampled — the canvas reported no pixels'
+        : best.encoded >= share
+          ? `${want} over ${(best.encoded * 100).toFixed(1)}% of the canvas, ` +
+            `against the ${(share * 100).toFixed(1)}% this demo owes`
+          : `expected ${want} over at least ${(share * 100).toFixed(1)}% of the ` +
+            `canvas and found it on ${(best.encoded * 100).toFixed(1)}%; the ` +
+            `dominant colour is rgb(${best.dominant.join(',')}) at ` +
+            `${(best.dominantShare * 100).toFixed(1)}%` +
+            (best.unencoded >= share
+              ? ` — THE FRAME CAME BACK UNENCODED, ${linear} on ` +
+                `${(best.unencoded * 100).toFixed(1)}% of it: the canvas was ` +
+                `configured without its -srgb viewFormat, or the acquired frame ` +
+                `was viewed in the base format, and every frame this demo ` +
+                `presents is a transfer function too dark`
+              : '')
+    );
   }
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

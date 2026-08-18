@@ -3,37 +3,30 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### A demo whose colours are all wrong still passes every browser check
+### The canvas encode is gated for three demos, not six
 
-The sRGB canvas bug itself is fixed — `gpu-replay.js` configures the browser's
-preferred base format and attaches its `-srgb` view format, the agnostic seam
-suite asserts on every backend that a surface offers an sRGB format, that
-`preferred_format` picks it, and that a clear lands the **exact encoded bytes**,
-and the user confirmed the deployed demos look right. What has not changed is
-the reason it reached a user at all.
+Group G in `web/tools/browser-e2e.mjs` closed the gap the sRGB bug reached a
+user through: it reads a demo's own on-screen canvas through `toDataURL` and
+holds the demo's flat clear colour against the byte an sRGB target holds. It is
+the only check anywhere that reads engine output off the element a visitor looks
+at — the probe gate's groups I and X cover both halves of the mechanism, but
+every byte either compares is copied out on the GPU into wasm on a page with no
+engine running.
 
-**`web/tools/browser-e2e.mjs` never compares a demo's pixels to a reference.**
-Its per-demo expectations are log lines and HUD text — that the game started,
-that a key press moved something, that cull statistics answered. The only pixel
-assertion in the file is the **readback control**, which clears a canvas of its
-own (`CONTROL_RGB = [0, 51, 204]`, matched within 8 per channel) purely to
-decide whether an adapter can be read back at all. It is not the engine's canvas
-and it says nothing about the engine's encode.
+**What remains is that only `breakout`, `flappy` and `hud` can make the claim.**
+The other three carry no `backdrop` row and the driver says why per demo:
+`asteroids` ends under its start menu's full-screen scrim, `horde` tiles grass
+sprites over every pixel of `GROUND`, and `lumen` has no `clear_color` pass at
+all. So a regression that spared those three demos' clears and broke only
+`lumen`'s tone mapping would still pass. Closing it needs a different observable
+than a flat fill — the flat fill is what makes the current check exact on
+SwiftShader and paravirtual Metal without a tolerance, and that property is
+worth keeping rather than trading for coverage.
 
-So the coverage split is: the golden harness compares pixels but renders
-**offscreen**, which is the path that already worked; the browser gate drives
-the **canvas** path but only looks at text. The bug lived exactly in the gap.
-
-**What would close it:** one demo screenshot compared against a golden through
-the canvas path, at a colour that is not a fixed point of the transfer function.
-That is the same missing piece as the entry below about dx12's and Metal's
-presented path, and probably the same harness.
-
-The capture half already exists and does not need building: the file's own
-header records that `canvas.toDataURL()` returns the real pixels while
-`drawImage` plus `getImageData` yields transparent black on a WebGPU canvas —
-"look equivalent and are not", measured on Chromium 150. So the work is a
-reference image and a comparison, against a path the harness can already read.
+Measured, not assumed: with `surfaceCapsFor` offering only linear formats, `hud`
+scores **33 of 34** with group G the only failure, while group D's "the canvas
+is not one flat colour" passes on `rgb(8,8,16)` at 89.2%. The same broken build
+fails the probe gate too, so neither gate is load-bearing alone.
 
 ### TOP PRIORITY — backend feature parity, enforced so it cannot rot
 

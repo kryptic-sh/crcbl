@@ -32,6 +32,19 @@
 #   which turns touch emulation on and dispatches real contacts. The named guard
 #   below insists that group ran.
 #
+#   It is also the only gate that reads **the sRGB encode off a picture**.
+#   `web/run-probe-e2e.sh` covers both halves of the mechanism and covers them
+#   well — its group I fails if the caps offer no sRGB format, its group X if the
+#   canvas is configured or viewed without one — but every byte either of them
+#   compares is copied out on the GPU and handed to wasm, and both drive
+#   `crcbl-webgpu`'s probe exports on a page with no engine running. Neither ever
+#   asks the browser what it composited, and neither is a demo. Group G here
+#   reads a demo's own flat clear colour off the element a visitor looks at,
+#   through `toDataURL`, and compares it against the byte an sRGB target holds —
+#   a mid-range colour, because 0.0 and 1.0 encode to themselves and a check
+#   against either cannot fail. It is the shape of the check the "frames come
+#   back dark" bug got past, and the guard below insists it ran.
+#
 #   It is also the only gate on **cross-origin isolation**. `web/tools/serve.mjs`
 #   sends COOP and COEP, `web/build.sh --serve` runs that same server, and the
 #   driver asserts `crossOriginIsolated === true` inside the loaded document —
@@ -352,6 +365,29 @@ if [ -z "$TOUCH" ]; then
     echo "               'touch-action: none' in web/style.css is ungated" >&2
     exit 1
 fi
+
+# And the same argument for the sRGB encode, which is the one claim in the
+# driver that a *silently absent* row would take away without failing anything.
+# Every other check in the file passes on a canvas presenting a transfer function
+# too dark — that is how the bug reached a visitor — so group G going missing
+# leaves a green run and no encode gate anywhere on the demo path.
+#
+# The demo list is spelled out here as well as in the driver's `EXPECTATIONS`,
+# and the duplication is the point: these three are the demos whose clear colour
+# actually reaches the screen, so dropping `backdrop` from one of their rows has
+# to fail somewhere rather than shrink the gate. The other three cannot make the
+# claim at all and the driver says why per row. Renaming the check in the driver
+# is meant to fail here and be renamed here too.
+case "$DEMO" in
+    breakout | flappy | hud)
+        ENCODE="$(grep -F 'clear reaches the canvas sRGB-encoded' "${OUTPUT}.plain" || true)"
+        if [ -z "$ENCODE" ]; then
+            echo "crcbl web e2e: the driver never compared $DEMO's clear colour against its sRGB encode;" >&2
+            echo "               the canvas viewFormats in web/engine/gpu-replay.js are ungated on the demo path" >&2
+            exit 1
+        fi
+        ;;
+esac
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
