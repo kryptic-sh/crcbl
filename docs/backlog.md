@@ -607,6 +607,54 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
+### Reporting dx12 mesh shading removes the WARP device — measured, then reverted
+
+**This was attempted and reverted, and the reason is a real defect rather than a
+CI accident.** Reporting `Features::MESH_SHADER` from
+`D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` routes `crcbl-render` onto
+`GeometryPath::MeshShader` for every D3D12 adapter. On WARP the frame then never
+completes:
+
+```
+the cube frame renders on MeshShader: HAL: ID3D12Resource::Map failed:
+The GPU device instance has been suspended. Use GetDeviceRemovedReason to
+determine the appropriate action. (0x887A0005)
+```
+
+`0x887A0005` is `DXGI_ERROR_DEVICE_REMOVED`. Four `render_e2e` tests fail that
+way — `the_cube_scene_draws_the_same_frame_on_every_geometry_path`, the same for
+`ao`, and both scenes' golden tests — and every one of them fails inside
+`draw_and_readback`, so **the frame never renders**; no pixel is ever compared.
+
+**The narrowing that matters:** `crcbl-dx12`'s own
+`a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible`
+**passes on the same WARP runner**, drawing through a mesh pipeline and an
+amplification stage and reading the attachment back. So the backend's mesh
+pipeline is not broken in general. What removes the device is `crcbl-render`'s
+mesh path specifically — the amplification stage descending the cluster DAG, its
+bind groups, and its dispatch sizes — none of which the probe exercises.
+
+Untested hypotheses, in the order worth trying: a `DispatchMesh` group count
+past what TIER_1 permits (the per-dimension ceiling is a spec limit, and
+`crcbl-render` derives its counts from cluster counts rather than clamping); a
+payload larger than the amplification-stage limit; a root-signature or
+descriptor mismatch WARP enforces where RADV does not. None has been checked —
+this needs a Windows machine with the debug layer and `GetDeviceRemovedReason`,
+which nothing here has.
+
+**Why it is a revert and not a workaround.** Gating the report on the adapter
+name would hide a real defect behind CI's specific device, and the flag is
+either honest or it is not. `crcbl-vk` proves the paths _can_ agree: on an RX
+7900 XTX the same test draws `MeshShader` against `IndirectCount` with **0
+channels differing, budget 0**. dx12 must reach the same bar.
+
+**What the attempt is worth keeping for.** The implementation, the tier+shader
+model gate (`TIER_1` and SM 6.6 together, because the committed DXIL is built at
+`6_6`), the `FeatureQuery` move out of `mod tests`, the `instance.rs` derivation
+assertion, and the seam exercise are all written and reviewed; the revert is
+`6fe2d41` and they can be recovered from it rather than rewritten. The blocking
+question is only the device removal.
+
 ### dx12 mesh shading: the calls exist, the flag does not
 
 `crcbl-dx12` now builds mesh pipelines and records both mesh draws — the
