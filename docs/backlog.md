@@ -1166,6 +1166,15 @@ longer guesses, which is what `Unclassified` was for.
 formula regardless of the family. **Metal's `MeshShading` and `TaskShaderStage`
 cannot be proved by this CI**, however the backend is written.
 
+**A third thing this device cannot drive, found later:** both indirect
+exercises. Their observable is which of two argument structures a draw read, and
+this device reports no `max_draw_indirect_count` above one — so a single call
+can only ever reach the first. `DrawIndirectCount` and
+`IndirectArgumentPaddedStride` are therefore unexercised on Metal while every
+other backend drives them. The exercise says so in its reason rather than
+scoring a pass it did not earn, which is the right behaviour and also means the
+Metal arm silently covers two capabilities less than the others.
+
 **What this means for the goal**, and it needs a decision rather than more work:
 four of Metal's nine blockers — two query rows and two mesh rows — are now known
 to be unprovable on the only Metal machine this project has. The options are a
