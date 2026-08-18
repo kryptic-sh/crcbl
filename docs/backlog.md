@@ -1074,6 +1074,44 @@ it false; `BinarySemaphore` — unprovable by construction and honestly declared
 so; and `SamplerAnisotropy`, whose `Yes` arm is **unreachable** because the
 limit is pinned to 1.
 
+### Two create-image paths accept a format the device cannot serve
+
+Found while building the seam suite's raster fixture, which needed a
+depth-stencil attachment and hit both:
+
+- **`crcbl-vk::create_image` does not check format support.** Asking for
+  `D24UnormS8Uint` as a `DEPTH_STENCIL_ATTACHMENT` on radv returns `Ok`, while
+  the validation layer reports `VK_ERROR_FORMAT_NOT_SUPPORTED` from
+  `vkGetPhysicalDeviceImageFormatProperties2` and then two more VUIDs at view
+  and pipeline creation. The first draft of that fixture **passed on undefined
+  behaviour** before the layer output was read.
+- **`crcbl-wgpu::create_image` is not wrapped in `checked()`**, unlike
+  `create_graphics_pipeline` next to it — a format the device did not enable
+  arrives through the uncaptured-error handler and a live-looking handle comes
+  back anyway.
+
+**The root cause is a seam gap, not two backend bugs.** `DeviceCaps` carries
+features and numeric limits and **no format table**, so a caller has no portable
+way to ask which depth-stencil format is usable as an attachment. The fixture
+works around it by trying `D32FloatS8Uint`, then `D24UnormS8Uint`, and checking
+_both_ channels — the returned `HalError` and `Device::take_error` — which is
+the shape every caller would otherwise have to reinvent.
+
+Worth deciding as one question: does `DeviceCaps` grow a format-capability
+query, or do the backends validate at `create_image` and refuse? The first is
+more useful (a caller can choose), the second is cheaper and closes the UB.
+
+### A wgpu pipeline refusal is `Backend`, not `Unsupported`
+
+`crcbl-wgpu::create_graphics_pipeline` refuses through `checked()`, which
+produces `HalError::Backend`. On a wgpu device lacking `POLYGON_MODE_LINE` or
+`DEPTH_CLIP_CONTROL`, `Support::NotOnThisDevice` would meet a `Backend` error
+and the seam suite's "a capability refusal is `Unsupported` and nothing else"
+assertion would fire. Not reproducible on this machine — the adapter here has
+both features — but the raster exercises made it **reachable where it was not
+before**, so it is a live hazard on a poorer device rather than a theoretical
+one.
+
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
 They were declined for a reason that turns out to be wrong (above), and they now
