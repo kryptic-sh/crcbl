@@ -74,7 +74,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Fifteen blockers: dx12 5, Metal 8, WebGPU 2.** That is what stands between
+**Fourteen blockers: dx12 5, Metal 7, WebGPU 2.** That is what stands between
 here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -1273,7 +1273,7 @@ the pending case this capability is defined around is driven by nothing at all.
 ### DECISION NEEDED — what "parity holds" has to mean before `crcbl-wgpu` goes
 
 The stated order is: reach parity, then delete `crcbl-wgpu`. Goal 2 is done and
-gated. Parity is at **15 blockers**, down from 29, and the composition now
+gated. Parity is at **14 blockers**, down from 29, and the composition now
 matters more than the number — because **a strict reading of "all blockers
 closed" is not reachable with the hardware this project has.**
 
