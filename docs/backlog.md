@@ -623,10 +623,28 @@ is deliberately a separate change because it is not a one-line flag flip:
   type is a coherence error, so the compiler enforces this rather than it being
   a preference.
 - Reporting the flag flips `GeometryPath::from_features` to
-  `GeometryPath::MeshShader` for **every** D3D12 adapter, which re-keys every
-  golden image keyed on `(GeometryPath, BindingModel, LightingPath)` and breaks
-  the `IndirectCount` assertion in `instance.rs`. So the change carries a golden
-  re-bless, which is exactly why it did not ride along with the implementation.
+  `GeometryPath::MeshShader` for **every** D3D12 adapter, and breaks the
+  `IndirectCount` assertion in `instance.rs`.
+
+  **There is no golden re-bless, and this entry said there was.** Checked: no
+  golden is keyed on `(GeometryPath, BindingModel, LightingPath)` or on any part
+  of it — `draw_scene_and_match_its_golden` takes the golden's name as a literal
+  argument, the 27 files under `crates/crcbl/tests/golden/` carry no path or
+  backend in their names, and nothing in `crcbl-golden` mentions `LightingPath`
+  at all. What reporting the flag actually does is make
+  `the_cube_scene_draws_the_same_frame_on_every_geometry_path` a _real_
+  cross-path comparison on dx12 instead of a self-comparison: that test opens
+  the device twice, once asking for the mesh-stage features and once with them
+  subtracted, and asserts the two frames are byte-identical on one adapter. It
+  already guards against the degenerate case — `best_path != lesser_path` must
+  equal whether the adapter offers mesh shading, because "a self-comparison that
+  reads as a cross-path one is worse than no test".
+
+  So the requirement is that dx12's mesh path draw _exactly_ what its indirect
+  path draws, which is a test that must pass rather than an image to re-bless.
+  That makes this an ordinary slice, and the reason it did not ride along with
+  the implementation is narrower than recorded: it is a behaviour change to
+  every D3D12 adapter, and worth landing where it can be reverted on its own.
 
 Retiring the `MeshShading` and `TaskShaderStage` dx12 divergences happens there
 and not before: a row leaves on `Support::Yes`, and that answer is gated on the
