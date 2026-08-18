@@ -323,8 +323,8 @@ failure.**
    a resource array (every `Texture2DArray` is one layered image, which
    `crcbl_shaders::mesh`'s `GpuMaterial` doc says is deliberate — a layer index
    needs no feature, a descriptor index needs `DESCRIPTOR_INDEXING`, which
-   `crcbl-mtl` withdraws); the 17 committed SPIR-V modules declare only
-   `Shader`, `DrawParameters`, `ImageQuery` and `MeshShadingEXT`, with no
+   `crcbl-mtl` withdraws); every committed SPIR-V module declares only `Shader`,
+   `DrawParameters`, `ImageQuery` and `MeshShadingEXT`, with no
    `RuntimeDescriptorArray` and no `SPV_EXT_descriptor_indexing`; and no WGSL
    contains `binding_array`. Every `OpTypeRuntimeArray` present is an SSBO tail
    inside a block. So this row is a shader-artifact task shaped like
@@ -799,37 +799,38 @@ or redefine the capability in terms of the reported feature rather than the
 callable surface — which would weaken what it asserts for every backend to
 accommodate one, and is worth naming only to reject.
 
-### `PushConstants` is driven on compute only, on every backend
+### The graphics push-constant path is unrun on Metal and dx12
 
-`Capability::PushConstants` is stage-agnostic — its own doc says
-"`push_constants` and the `PipelineLayoutDesc::push_constants` range they are
-written through". `exercise_push_constants` drives it with
-`push_constant_probe.slang`, which is a **compute** shader
-(`SV_DispatchThreadID`). So the capability reports as _driven_ on every backend
-while only half its surface is covered: no test anywhere pushes constants
-through a graphics pipeline.
+`exercise_push_constants_on_graphics` in `crates/crcbl/tests/hal_seam_e2e.rs`
+closed the coverage gap this entry used to record: it draws twice in one render
+pass with different `push_constant_raster.slang` blocks and asserts each draw
+saw its own, with the vertex stage taking its rectangle from the block and the
+fragment stage its colour. Verified on vk against real hardware (RADV Navi31),
+and `Refused` on wgpu, which is that backend's answer at layout creation because
+it never enables wgpu's `IMMEDIATES`.
 
-**That is not a rounding error, because the plumbing genuinely differs by
-stage.** dx12 maps the range to a root parameter whose _shader visibility_ is
-computed per stage — `crcbl_dx12::conv::shader_visibility`, which gained `MESH`
-and `TASK` arms this week. Metal splices a per-stage shadow and sends it with
-`setVertexBytes:`/`setFragmentBytes:` rather than the compute call, and its
-render path now records the block instead of writing it eagerly. Vulkan's
-`vkCmdPushConstants` takes a stage mask that a compute-only test never varies. A
-backend that got any of those wrong for the graphics stages would pass every
-gate this repo has.
+**The Metal and dx12 arms were type-checked only** —
+`--target aarch64-apple-darwin` and `--target x86_64-pc-windows-msvc` — so CI is
+the first thing that runs them, and three pieces of arithmetic run there for the
+first time:
 
-**Nothing in the engine would catch it either:** `crcbl-render` passes
-`push_constants: None` at every render-pass site it has, so the renderer never
-exercises the path in anger.
+- `crcbl_mtl::argument::plan` computing a block index for a layout with **no
+  bind groups at all**. The index is zero, and `msl/push_constant_raster.metal`
+  puts the block at `[[buffer(0)]]` in both entry points, but no push constant
+  has occupied index 0 before — `push_constant_probe`'s sits behind one binding.
+- `crcbl-mtl`'s **render** arm of `push_constants`, which records
+  `RenderCommand::PushConstants` with a `Vec<u8>` copy and replays it as
+  `setVertexBytes:`/`setFragmentBytes:`. That copy is exactly what the second
+  draw's assertion is about, and nothing had ever made two draws either side of
+  a `push_constants` on Metal.
+- `crcbl_dx12::conv::shader_visibility` resolving `VERTEX | FRAGMENT` to
+  `D3D12_SHADER_VISIBILITY_ALL`, and `push_constants` taking its
+  `SetGraphicsRoot32BitConstants` branch rather than the compute one.
 
-**What would close it:** a raster shader that reads a push-constant block, and a
-seam exercise that draws twice in one pass with _different_ blocks, asserting
-each draw saw its own. Two draws rather than one is the point — a single draw
-cannot tell a copied block from a shared one, which is exactly the failure the
-Metal deferral's `Vec<u8>` copy exists to prevent. `crcbl-shaders`' committed
-`triangle` reads no constants, so this is a shader-artifact slice of the same
-shape `push_constant_probe` itself was.
+**`crcbl-render` still passes `push_constants: None`** at every render-pass site
+it has, so the renderer never exercises the path in anger and the seam suite is
+the only thing that does. Not a defect — recorded so the closed coverage gap is
+not read as the engine having started using push constants.
 
 ### The doc gate does not cover private items
 

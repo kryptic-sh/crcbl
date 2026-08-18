@@ -3473,7 +3473,7 @@ const RASTER_BEYOND: [f32; 4] = [0.6, 0.15, 0.85, 1.0];
 /// separates "the render pass ran at all". Every pass here loads with
 /// [`LoadOp::Clear`], so a texel that still holds this was never touched by a
 /// pass — which is a broken fixture rather than a capability verdict, and
-/// [`RasterRead::from_bytes`] panics on it rather than folding it into one.
+/// [`Raster::render_target`] panics on it rather than folding it into one.
 const RASTER_POISON: u8 = 0x5B;
 
 /// The value the stencil plane is cleared to, and the reference
@@ -3618,14 +3618,34 @@ fn raster_texel_is(texel: &[u8], want: [u8; 4]) -> bool {
         .all(|(got, expected)| got.abs_diff(*expected) <= LEVEL_TOLERANCE)
 }
 
+/// The texel at `(column, row)` of a whole colour target.
+fn raster_texel(read: &[u8], column: u32, row: u32) -> [u8; 4] {
+    let index = (row * RASTER_WIDTH + column) as usize * 4;
+    read[index..index + 4].try_into().expect("four bytes")
+}
+
+/// Texels of a whole colour target that are not [`RASTER_BACKGROUND`].
+///
+/// The number that separates a wireframe from a fill without a threshold — a
+/// wireframe leaves the centre clear and still covers texels — and both from a
+/// draw that never happened.
+fn raster_drawn(read: &[u8]) -> usize {
+    let background = raster_levels(RASTER_BACKGROUND);
+    read.chunks_exact(4)
+        .filter(|texel| !raster_texel_is(texel, background))
+        .count()
+}
+
 /// What one raster pass left in the colour target.
 ///
-/// Two numbers rather than the whole image, because two are what every exercise
-/// below actually asks: which colour reached the centre, and how much of the
-/// target stopped being the background at all. The second is what separates a
-/// wireframe from a fill without a threshold — a wireframe leaves the centre
-/// clear and still covers texels — and what separates it from a draw that never
-/// happened.
+/// Two numbers rather than the whole image, because two are what the exercises
+/// that draw [`RASTER_TRIANGLE`] actually ask: which colour reached the centre,
+/// and how much of the target stopped being the background at all — see
+/// [`raster_drawn`] for what the second one separates.
+///
+/// The one exercise that asks something else — [`exercise_push_constants_on_graphics`],
+/// whose two draws deliberately cover *different* columns — reads
+/// [`Raster::render_target`] directly rather than widening this.
 #[derive(Debug)]
 struct RasterRead {
     /// The texel at the centre of the target, which [`RASTER_TRIANGLE`] covers.
@@ -3635,36 +3655,19 @@ struct RasterRead {
 }
 
 impl RasterRead {
-    /// Reads the two numbers out of a whole target, failing loudly on the two
-    /// ways the fixture itself can be broken.
+    /// Reads the two numbers out of a whole target.
+    ///
+    /// The two ways the fixture itself can be broken are checked by
+    /// [`Raster::render_target`], which is the only thing that produces the
+    /// bytes this takes.
     fn from_bytes(read: &[u8]) -> Self {
         assert_eq!(
             read.len(),
             RASTER_BYTES as usize,
             "the readback is not the whole colour target"
         );
-        assert!(
-            !read.iter().all(|byte| *byte == POISON),
-            "the staging buffer still holds {POISON:#04x} in all {RASTER_BYTES} bytes, so nothing \
-             was copied out of the colour target at all — the readback never landed, and this \
-             exercise proves nothing about what was drawn either way"
-        );
-        assert!(
-            !read.iter().all(|byte| *byte == RASTER_POISON),
-            "every texel still holds the {RASTER_POISON:#04x} the target was primed with, so the \
-             render pass never ran: its LoadOp::Clear alone would have replaced this. Nothing \
-             about the draw inside it can be read off a pass that did not happen."
-        );
-
-        let background = raster_levels(RASTER_BACKGROUND);
-        let centre_texel = ((RASTER_HEIGHT / 2) * RASTER_WIDTH + RASTER_WIDTH / 2) as usize;
-        let centre = read[centre_texel * 4..centre_texel * 4 + 4]
-            .try_into()
-            .expect("four bytes");
-        let drawn = read
-            .chunks_exact(4)
-            .filter(|texel| !raster_texel_is(texel, background))
-            .count();
+        let centre = raster_texel(read, RASTER_WIDTH / 2, RASTER_HEIGHT / 2);
+        let drawn = raster_drawn(read);
         Self { centre, drawn }
     }
 
@@ -3957,28 +3960,15 @@ impl Raster {
         primitive: PrimitiveState,
         depth_stencil: Option<crcbl::hal::DepthStencilState>,
     ) -> Result<crcbl::hal::GraphicsPipelineHandle, HalError> {
-        let color_targets = [crcbl::hal::ColorTargetState::opaque(RASTER_FORMAT)];
-        let entry = |stage| {
-            crcbl::hal::ShaderEntry {
-                module: self.module,
-                // The manifest's name rather than a literal, for
-                // `ComputeProbe::new`'s reason: it is read out of the artifact's
-                // own entry-point table by the compile script.
-                entry_point: crcbl::shaders::TRIANGLE
-                    .entry_point(stage)
-                    .expect("the triangle artifact names both of its stages"),
-            }
-        };
-        device.create_graphics_pipeline(&crcbl::hal::GraphicsPipelineDesc {
-            label: Some(label),
-            layout: self.pipeline_layout,
-            vertex: entry(crcbl::shaders::Stage::Vertex),
-            fragment: Some(entry(crcbl::shaders::Stage::Fragment)),
+        raster_pipeline(
+            device,
+            label,
+            self.pipeline_layout,
+            self.module,
+            &crcbl::shaders::TRIANGLE,
             primitive,
             depth_stencil,
-            multisample: crcbl::hal::MultisampleState::default(),
-            color_targets: &color_targets,
-        })
+        )
     }
 
     /// Primes the target, runs `record` inside one render pass, and reads the
@@ -3990,10 +3980,7 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// Whatever `finish` returned. That is where a refusal this seam's encoders
-    /// defer surfaces — `crcbl-wgpu`'s padded-stride refusal is recorded at the
-    /// call and reported here — so the caller reads it as
-    /// [`Exercise::Refused`] rather than losing it.
+    /// [`render_target`](Self::render_target)'s.
     fn render(
         &self,
         headless: &Headless,
@@ -4001,6 +3988,32 @@ impl Raster {
         depth: Option<&StencilTarget>,
         record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
     ) -> Result<RasterRead, HalError> {
+        let read = self.render_target(headless, label, depth, record)?;
+        Ok(RasterRead::from_bytes(&read))
+    }
+
+    /// [`render`](Self::render) without the reading: the whole colour target, so
+    /// an exercise whose observable is not [`RasterRead`]'s two numbers can ask
+    /// its own question of it.
+    ///
+    /// The two ways the *fixture* can be broken are checked here rather than in
+    /// either reader, because they are facts about the pass rather than about
+    /// what was drawn in it — and a second reader that forgot to check them
+    /// would report a pass that never happened as a capability verdict.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `finish` returned. That is where a refusal this seam's encoders
+    /// defer surfaces — `crcbl-wgpu`'s padded-stride refusal is recorded at the
+    /// call and reported here — so the caller reads it as
+    /// [`Exercise::Refused`] rather than losing it.
+    fn render_target(
+        &self,
+        headless: &Headless,
+        label: &'static str,
+        depth: Option<&StencilTarget>,
+        record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
+    ) -> Result<Vec<u8>, HalError> {
         let device = headless.device.as_ref();
         let extent = Extent3d::d2(RASTER_WIDTH, RASTER_HEIGHT);
         let range = ImageSubresourceRange::all(RASTER_FORMAT);
@@ -4114,7 +4127,19 @@ impl Raster {
 
         let mut read = poisoned(RASTER_BYTES as usize);
         headless.readback(self.staging, RASTER_BYTES, &mut read);
-        Ok(RasterRead::from_bytes(&read))
+        assert!(
+            !read.iter().all(|byte| *byte == POISON),
+            "the staging buffer still holds {POISON:#04x} in all {RASTER_BYTES} bytes, so nothing \
+             was copied out of the colour target at all — the readback never landed, and this \
+             exercise proves nothing about what was drawn either way"
+        );
+        assert!(
+            !read.iter().all(|byte| *byte == RASTER_POISON),
+            "every texel still holds the {RASTER_POISON:#04x} the target was primed with, so the \
+             render pass never ran: its LoadOp::Clear alone would have replaced this. Nothing \
+             about the draw inside it can be read off a pass that did not happen."
+        );
+        Ok(read)
     }
 
     fn destroy(self, device: &dyn Device) {
@@ -4130,6 +4155,54 @@ impl Raster {
         device.destroy_image_view(self.color_view);
         device.destroy_image(self.color);
     }
+}
+
+/// A graphics pipeline against `layout` and `module`, over the raster fixture's
+/// colour target.
+///
+/// Split out of [`Raster::pipeline`] when [`exercise_push_constants_on_graphics`]
+/// needed one built over a *different* layout and module — a layout carrying a
+/// push-constant range, and the artifact that reads it. What stays shared is the
+/// part that describes the target rather than the exercise: the colour-target
+/// state and the multisample state are [`Raster`]'s, and a second copy of them
+/// is a second thing to change the day [`RASTER_FORMAT`] does.
+///
+/// # Errors
+///
+/// Whatever `create_graphics_pipeline` returned, which for
+/// [`PolygonMode::Line`] and [`PrimitiveState::depth_clamp`] on a device without
+/// the feature is the capability's refusal and is the point.
+fn raster_pipeline(
+    device: &dyn Device,
+    label: &'static str,
+    layout: crcbl::hal::PipelineLayoutHandle,
+    module: crcbl::hal::ShaderModuleHandle,
+    shader: &crcbl::shaders::Shader,
+    primitive: PrimitiveState,
+    depth_stencil: Option<crcbl::hal::DepthStencilState>,
+) -> Result<crcbl::hal::GraphicsPipelineHandle, HalError> {
+    let color_targets = [crcbl::hal::ColorTargetState::opaque(RASTER_FORMAT)];
+    let entry = |stage| {
+        crcbl::hal::ShaderEntry {
+            module,
+            // The manifest's name rather than a literal, for
+            // `ComputeProbe::new`'s reason: it is read out of the artifact's own
+            // entry-point table by the compile script.
+            entry_point: shader
+                .entry_point(stage)
+                .expect("the artifact names both of its graphics stages"),
+        }
+    };
+    device.create_graphics_pipeline(&crcbl::hal::GraphicsPipelineDesc {
+        label: Some(label),
+        layout,
+        vertex: entry(crcbl::shaders::Stage::Vertex),
+        fragment: Some(entry(crcbl::shaders::Stage::Fragment)),
+        primitive,
+        depth_stencil,
+        multisample: crcbl::hal::MultisampleState::default(),
+        color_targets: &color_targets,
+    })
 }
 
 /// Stages `bytes` into a device-local storage buffer, on its own submission.
@@ -4560,7 +4633,7 @@ fn exercise_indirect_argument_padded_stride(headless: &Headless) -> Exercise {
 /// and [`push_constant_dispatch`] keeps the two apart.
 const PUSH_CONSTANT_POISON: u32 = 0x5A5A_A5A5;
 
-/// The block [`exercise_push_constants`] pushes.
+/// The block [`exercise_push_constants_on_compute`] pushes.
 ///
 /// **One distinct word per index, not a repeated value.**
 /// `push_constant_probe.slang` writes `values[i]` into element `i` of its
@@ -4599,8 +4672,34 @@ const _: () = {
     }
 };
 
-/// Drives [`Capability::PushConstants`] and reports whether the words the caller
-/// pushed are the words the shader read.
+/// Drives [`Capability::PushConstants`] through **both** halves of the surface
+/// it names, and reports the first one that is not [`Exercise::Worked`].
+///
+/// The capability is stage-agnostic by its own definition — `push_constants` and
+/// the `PipelineLayoutDesc::push_constants` range they are written through — and
+/// for a long time only [`exercise_push_constants_on_compute`] existed, so it
+/// counted as driven on every backend while nothing anywhere pushed a constant
+/// through a graphics pipeline. The plumbing is genuinely different there: D3D12
+/// computes the root parameter's shader visibility from the range's stages,
+/// Metal has one argument table per stage and sends the block with
+/// `setVertexBytes:`/`setFragmentBytes:` — recorded rather than written eagerly —
+/// and Vulkan's stage mask is a value a compute-only range never varies.
+/// [`exercise_push_constants_on_graphics`] is the other half.
+///
+/// **Sequential rather than combined**, because the two halves are not
+/// independent answers about one device: the graphics half builds its own
+/// pipeline layout with its own range, and a backend that refuses at layout
+/// creation refuses both. Running it after a compute half that did not work
+/// would report the same refusal twice and hide which one was asked first.
+fn exercise_push_constants(headless: &Headless) -> Exercise {
+    match exercise_push_constants_on_compute(headless) {
+        Exercise::Worked => exercise_push_constants_on_graphics(headless),
+        other => other,
+    }
+}
+
+/// Drives [`Capability::PushConstants`] from a compute dispatch and reports
+/// whether the words the caller pushed are the words the shader read.
 ///
 /// # Why this one needs its own fixture
 ///
@@ -4680,7 +4779,7 @@ const _: () = {
 /// the source argues for and takes the divergent index out of the load. Until
 /// then this exercise is honest about a real defect and reports it where it
 /// happens rather than passing quietly on the one device that hides it.
-fn exercise_push_constants(headless: &Headless) -> Exercise {
+fn exercise_push_constants_on_compute(headless: &Headless) -> Exercise {
     use crcbl::shaders::push_constant_probe::{CONSTANTS_SIZE, WORD_COUNT, WORKGROUP_SIZE};
 
     let device = headless.device.as_ref();
@@ -4832,10 +4931,10 @@ fn exercise_push_constants(headless: &Headless) -> Exercise {
 /// Primes the destination, runs `record` inside a compute pass, reads the result
 /// back and says which of the three outcomes it is.
 ///
-/// Split out of [`exercise_push_constants`] so the recording — which is the only
-/// part that is about push constants — sits next to the pipeline it needs, with
-/// the barriers, the submit and the comparison out of the way. The barrier shape
-/// is [`ComputeProbe::run`]'s, and for its reasons.
+/// Split out of [`exercise_push_constants_on_compute`] so the recording — which
+/// is the only part that is about push constants — sits next to the pipeline it
+/// needs, with the barriers, the submit and the comparison out of the way. The
+/// barrier shape is [`ComputeProbe::run`]'s, and for its reasons.
 fn push_constant_dispatch(
     headless: &Headless,
     prime: crcbl::hal::BufferHandle,
@@ -4957,9 +5056,301 @@ fn push_constant_dispatch(
              which is a wrong picture with a clean log. Three things produce it, and the readback \
              above says which: the range reached the shader at the wrong offset, only part of the \
              block was delivered, or every element holds one and the same pushed word — see \
-             `exercise_push_constants` on that last one, which is the driver reading the block \
-             with a divergent index and is not this backend's doing.",
+             `exercise_push_constants_on_compute` on that last one, which is the driver reading \
+             the block with a divergent index and is not this backend's doing.",
             words[index], PUSHED.values[index], PUSHED.values,
+        )
+    }
+}
+
+/// The clip-space rectangle the **first** draw's block spans.
+///
+/// The left band of the colour target, full height. Full height is not decoration:
+/// the seam samples the target's centre row, and a rectangle symmetric about
+/// `y = 0` is one whose coverage of that row does not depend on which sign
+/// convention clip-space Y carries — [`RASTER_TRIANGLE`]'s reason for being
+/// symmetric about `x = 0`, and the same reason this exercise separates its two
+/// draws by *column* and never by row.
+const PUSH_CONSTANT_FIRST_RECT: [f32; 4] = [-0.9, -1.0, -0.1, 1.0];
+
+/// The clip-space rectangle the **second** draw's block spans: the right band,
+/// disjoint from [`PUSH_CONSTANT_FIRST_RECT`] with the target's middle columns
+/// left as background between them.
+const PUSH_CONSTANT_SECOND_RECT: [f32; 4] = [0.1, -1.0, 0.9, 1.0];
+
+/// The column [`exercise_push_constants_on_graphics`] reads the first draw's
+/// verdict from, well inside [`PUSH_CONSTANT_FIRST_RECT`] and well outside the
+/// second's — which the exercise checks rather than assumes.
+const PUSH_CONSTANT_FIRST_COLUMN: u32 = RASTER_WIDTH / 4;
+
+/// The column the second draw's verdict is read from.
+const PUSH_CONSTANT_SECOND_COLUMN: u32 = RASTER_WIDTH - RASTER_WIDTH / 4;
+
+/// Whether the centre of `column` falls strictly inside the clip-space span
+/// `rect` covers.
+///
+/// The premise both verdicts rest on, so it is computed from the rectangle the
+/// shader is actually handed rather than restated as a pixel range beside it: a
+/// rectangle edited without its sample column moving with it would otherwise
+/// read the background and be scored as a block that never arrived.
+fn push_constant_column_is_covered(rect: [f32; 4], column: u32) -> bool {
+    let [min_x, _, max_x, _] = rect;
+    let centre = (f64::from(column) + 0.5) / f64::from(RASTER_WIDTH) * 2.0 - 1.0;
+    centre > f64::from(min_x) && centre < f64::from(max_x)
+}
+
+/// What the two draws left in the colour target.
+#[derive(Debug)]
+struct BandRead {
+    /// The texel at [`PUSH_CONSTANT_FIRST_COLUMN`] of the centre row.
+    first: [u8; 4],
+    /// The texel at [`PUSH_CONSTANT_SECOND_COLUMN`] of the centre row.
+    second: [u8; 4],
+    /// Texels that are not [`RASTER_BACKGROUND`], for a panic that has to say
+    /// what the pass actually covered.
+    drawn: usize,
+}
+
+impl BandRead {
+    fn from_bytes(read: &[u8]) -> Self {
+        let row = RASTER_HEIGHT / 2;
+        Self {
+            first: raster_texel(read, PUSH_CONSTANT_FIRST_COLUMN, row),
+            second: raster_texel(read, PUSH_CONSTANT_SECOND_COLUMN, row),
+            drawn: raster_drawn(read),
+        }
+    }
+
+    /// The two texels and the levels each colour in play would have put there.
+    fn diagnosis(&self) -> String {
+        format!(
+            "column {PUSH_CONSTANT_FIRST_COLUMN} is {:?} and column {PUSH_CONSTANT_SECOND_COLUMN} \
+             is {:?}, with {} of {} texels not the background.\n  background {:?}\n  first {:?}\n  \
+             second {:?}",
+            self.first,
+            self.second,
+            self.drawn,
+            RASTER_WIDTH * RASTER_HEIGHT,
+            raster_levels(RASTER_BACKGROUND),
+            raster_levels(RASTER_FIRST),
+            raster_levels(RASTER_SECOND),
+        )
+    }
+}
+
+/// Drives [`Capability::PushConstants`] from a graphics pipeline: **two draws in
+/// one render pass, with different blocks, each asserting it saw its own.**
+///
+/// # Two draws, because one cannot tell a copied block from a shared one
+///
+/// A single draw is satisfied by any implementation that delivers *a* block —
+/// including one that keeps a pointer into a shadow a later
+/// [`push_constants`](crcbl::hal::CommandEncoder::push_constants) splices in
+/// place, which is exactly what `crcbl-mtl`'s `RenderCommand::PushConstants`
+/// carries a `Vec<u8>` copy to prevent. So this pushes one block, draws, pushes
+/// a second, and draws again, and the two draws are told apart in the picture
+/// rather than by which call was made.
+///
+/// # The two stages read different halves of the block
+///
+/// `push_constant_raster.slang` takes its **rectangle** from the block in the
+/// vertex stage and its **colour** from the block in the fragment stage, and
+/// pulls no vertices from anywhere — the pipeline layout carries no bind group
+/// at all. So a pixel of the expected colour in the expected column is a value
+/// the pipeline had no source for other than the block, and a block that reached
+/// one stage and not the other is visible rather than folded into one verdict:
+///
+/// * the fragment stage alone — `rect` arrived zero, all four corners collapse
+///   onto the clip-space origin and **nothing is drawn at all**;
+/// * the vertex stage alone — the bands are drawn in black, which no colour here
+///   is, and the final arm names the texel.
+///
+/// # What each reading means
+///
+/// The first draw's block spans [`PUSH_CONSTANT_FIRST_RECT`] in [`RASTER_FIRST`]
+/// and the second's spans [`PUSH_CONSTANT_SECOND_RECT`] in [`RASTER_SECOND`],
+/// two disjoint columns of the target:
+///
+/// * each column its own colour — every draw saw its own block, in both stages.
+///   [`Exercise::Worked`].
+/// * both columns the background — neither rectangle arrived, so the block was
+///   accepted and never delivered. [`Exercise::SilentlyIgnored`], which is what
+///   the seam's rule against a quiet no-op is for.
+/// * the first column drawn and the second background — **the second draw saw
+///   the first draw's block**, and this is the failure the two-draw shape exists
+///   to catch.
+/// * the first column background and the second drawn — the first draw saw the
+///   *second's* block, which is what a write applied to the whole pass rather
+///   than to the draws after it looks like.
+/// * anything else — the panic prints both texels and every colour in play.
+///
+/// # A refusal can arrive at three different points
+///
+/// [`exercise_push_constants_on_compute`]'s note applies unchanged, with one
+/// addition: this layout's range names `ShaderStages::VERTEX | FRAGMENT` where
+/// that one names `ShaderStages::COMPUTE`, so a backend that has push constants
+/// for compute and not for the graphics stages refuses *here* and is reported
+/// rather than hidden. That is the whole point of the second half.
+fn exercise_push_constants_on_graphics(headless: &Headless) -> Exercise {
+    use crcbl::shaders::push_constant_raster::{CONSTANTS_SIZE, Constants, VERTEX_COUNT};
+
+    let device = headless.device.as_ref();
+
+    // The premise both verdicts rest on: each draw's sample column is inside its
+    // own rectangle and outside the other's, so "which block did this draw see"
+    // is answerable from one texel per draw.
+    for (which, rect, own, other) in [
+        (
+            "first",
+            PUSH_CONSTANT_FIRST_RECT,
+            PUSH_CONSTANT_FIRST_COLUMN,
+            PUSH_CONSTANT_SECOND_COLUMN,
+        ),
+        (
+            "second",
+            PUSH_CONSTANT_SECOND_RECT,
+            PUSH_CONSTANT_SECOND_COLUMN,
+            PUSH_CONSTANT_FIRST_COLUMN,
+        ),
+    ] {
+        assert!(
+            push_constant_column_is_covered(rect, own),
+            "the {which} draw's rectangle {rect:?} does not cover column {own}, which is where \
+             this exercise reads its verdict"
+        );
+        assert!(
+            !push_constant_column_is_covered(rect, other),
+            "the {which} draw's rectangle {rect:?} covers column {other}, which is the other \
+             draw's verdict — the two draws would no longer be separable"
+        );
+    }
+
+    // Both graphics stages, because the shader reads the block from both — and
+    // because a mask naming one is a mask a backend can get right by accident.
+    let stages = crcbl::hal::ShaderStages::VERTEX | crcbl::hal::ShaderStages::FRAGMENT;
+
+    // The fixture whole, for its colour target and its prime/clear/readback: the
+    // geometry it stages and the layout it builds belong to `triangle.slang` and
+    // go unused here, which costs two buffers and buys the same pass every other
+    // raster exercise is read out of.
+    let raster = Raster::open(headless);
+    // No bind group: the shader pulls no vertices and reads nothing but the
+    // block, which is what makes the picture evidence about the block.
+    let outcome = match device.create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
+        label: Some("push constant raster"),
+        bind_group_layouts: &[],
+        push_constants: Some(crcbl::hal::PushConstantRange {
+            stages,
+            offset: 0,
+            size: CONSTANTS_SIZE,
+        }),
+    }) {
+        Err(error) => Exercise::Refused(error),
+        Ok(pipeline_layout) => {
+            let module = device
+                .create_shader_module(&crcbl::hal::ShaderModuleDesc {
+                    label: Some("push_constant_raster.slang"),
+                    spirv: crcbl::shaders::PUSH_CONSTANT_RASTER.spirv(),
+                    // `None`, and that is the artifact rather than an omission:
+                    // the source declares no `wgsl` target because WGSL has no
+                    // push constants.
+                    wgsl: crcbl::shaders::PUSH_CONSTANT_RASTER.wgsl(),
+                    msl: crcbl::shaders::PUSH_CONSTANT_RASTER.msl(),
+                    dxil: &crcbl::shaders::PUSH_CONSTANT_RASTER.dxil_containers(),
+                })
+                .expect(
+                    "this backend accepted a push-constant range over the graphics stages and then \
+                     refused the committed push_constant_raster artifact — that is a fixture \
+                     problem rather than a capability answer",
+                );
+            let outcome = match raster_pipeline(
+                device,
+                "push constant raster",
+                pipeline_layout,
+                module,
+                &crcbl::shaders::PUSH_CONSTANT_RASTER,
+                PrimitiveState::default(),
+                None,
+            ) {
+                Err(error) => Exercise::Refused(error),
+                Ok(pipeline) => {
+                    let block = |color, rect| Constants { color, rect }.to_bytes();
+                    let first = block(RASTER_FIRST, PUSH_CONSTANT_FIRST_RECT);
+                    let second = block(RASTER_SECOND, PUSH_CONSTANT_SECOND_RECT);
+                    let read =
+                        raster.render_target(headless, "push constant raster", None, |encoder| {
+                            encoder.bind_graphics_pipeline(pipeline);
+                            encoder.push_constants(stages, 0, &first, pipeline_layout);
+                            encoder.draw(0..VERTEX_COUNT, 0..1);
+                            encoder.push_constants(stages, 0, &second, pipeline_layout);
+                            encoder.draw(0..VERTEX_COUNT, 0..1);
+                        });
+                    device.destroy_graphics_pipeline(pipeline);
+                    match read {
+                        Err(error) => Exercise::Refused(error),
+                        Ok(read) => push_constant_bands(&BandRead::from_bytes(&read)),
+                    }
+                }
+            };
+            device.destroy_shader_module(module);
+            device.destroy_pipeline_layout(pipeline_layout);
+            outcome
+        }
+    };
+
+    raster.destroy(device);
+    outcome
+}
+
+/// Which of [`exercise_push_constants_on_graphics`]' readings `read` is.
+///
+/// Split out so the arms and their messages sit together rather than four
+/// levels inside the resource handling above.
+fn push_constant_bands(read: &BandRead) -> Exercise {
+    let background = raster_levels(RASTER_BACKGROUND);
+    let first_drew = raster_texel_is(&read.first, raster_levels(RASTER_FIRST));
+    let second_drew = raster_texel_is(&read.second, raster_levels(RASTER_SECOND));
+    let first_clear = raster_texel_is(&read.first, background);
+    let second_clear = raster_texel_is(&read.second, background);
+
+    if first_drew && second_drew {
+        Exercise::Worked
+    } else if first_clear && second_clear {
+        // The pass ran — `Raster::render_target` has already refused a target
+        // that still holds the prime — and neither rectangle reached the vertex
+        // stage, so both quads collapsed to no area. This is what a
+        // `push_constants` call that was accepted and dropped looks like on a
+        // graphics pipeline.
+        eprintln!(
+            "crcbl hal seam e2e: the pass cleared and neither draw covered anything, so no \
+             rectangle reached the vertex stage and the push-constant block was never delivered"
+        );
+        Exercise::SilentlyIgnored
+    } else if first_drew && second_clear {
+        panic!(
+            "the second draw drew the FIRST draw's rectangle: {}. Both draws saw the block pushed \
+             before the first of them, so the second push_constants either never reached the \
+             pipeline or was written into a buffer the first draw had already been given a pointer \
+             to. That is the failure two draws exist to catch — one draw cannot tell a block that \
+             was copied for it from one that is shared with the draw beside it.",
+            read.diagnosis()
+        )
+    } else if first_clear && second_drew {
+        panic!(
+            "the first draw drew nothing and the second drew its own rectangle: {}. Both draws saw \
+             the block pushed before the SECOND of them, so the write reached the whole pass \
+             instead of only the draws recorded after it — a block applied eagerly at submission \
+             rather than in the order the encoder recorded.",
+            read.diagnosis()
+        )
+    } else {
+        panic!(
+            "the pass left colours this exercise never pushed: {}. The vertex stage takes its \
+             rectangle and the fragment stage its colour from the same block and the pipeline \
+             reads nothing else, so a band drawn in a colour that is neither of the two pushed is \
+             a block that arrived corrupted or at the wrong offset — black bands are the shape a \
+             block delivered to the vertex stage alone takes.",
+            read.diagnosis()
         )
     }
 }

@@ -125,6 +125,18 @@ msl-sha256 = 9165ec1593109bdbcb23603a34308d62da3172d1f56dd5a54cb37b76cda8b31c
 dxil = computeMain:dxil/push_constant_probe.computeMain.dxil:c84ada0087de1ec143b50ab49f102b28d9c44a7f26c9c7ce444ad579d69e7707
 entry-points = computeMain:glcompute
 
+[push_constant_raster]
+source = shaders/push_constant_raster.slang
+source-sha256 = ed9a8dd2a267b43d84bbc879998cd6cd1ea79b94a404ada11eff169ba79fae84
+targets = spirv, msl, dxil
+spirv = spirv/push_constant_raster.spv
+spirv-sha256 = 1e00a98b2556d45d5c91ae1c18bf8910e8c495c40acb8517f7145fb52a829012
+msl = msl/push_constant_raster.metal
+msl-sha256 = a87e22ac787dc5a7889bcf53d6409593b7d0118b0c4b2a04344f4a1b9aed74be
+dxil = vertexMain:dxil/push_constant_raster.vertexMain.dxil:5e9ce71d0e83d321a1814e07366db5b8ea1beba10b430d46d3bbd3d155b56e02
+dxil = fragmentMain:dxil/push_constant_raster.fragmentMain.dxil:a92f34d2b17e50be678e5de0ddc77ee8d84262247f2c24bbb7f596339fca7407
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [sprite]
 source = shaders/sprite.slang
 source-sha256 = 9f93c3c70fefed9fcb2b5653295fb497f9d18a8a27ed53dd5127a84d80363cc3

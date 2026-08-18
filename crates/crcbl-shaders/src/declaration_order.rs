@@ -33,7 +33,9 @@
 //! and the numbered bindings keep the slots the backend assigns.
 //!
 //! `push_constant_probe.slang` is the one shipped source that exercises this
-//! arm, and its MSL is what shows the rule doing its job: the block lands at
+//! arm — `push_constant_raster.slang` declares a block too, but no numbered
+//! binding for it to sort against, so the rule holds there vacuously. The
+//! probe's MSL is what shows the rule doing its job: the block lands at
 //! `buffer(1)`, behind the one numbered binding, exactly where
 //! [`crate::push_constant_probe`] records it. Declared the other way round it
 //! would take `buffer(0)` — which is what `ui.slang`'s artifact did until

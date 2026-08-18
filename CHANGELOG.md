@@ -660,6 +660,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_shaders::push_constant_raster`** — the first committed shader in this
+  workspace that reads a push-constant block from the **graphics** stages, a
+  vertex/fragment pair emitted for SPIR-V, MSL and DXIL and, like
+  `push_constant_probe` beside it, deliberately not for WGSL. The vertex stage
+  takes the clip-space rectangle it draws from the block and the fragment stage
+  takes the colour it writes, and the pipeline pulls no vertices from anywhere —
+  so the layout it needs carries no bind group at all and the picture it
+  produces has no source but the block. The module publishes the block's byte
+  layout and the vertex count, because a backend with only a module and an entry
+  point can guess neither.
+
+  It exists because `Capability::PushConstants` is stage-agnostic while
+  everything driving it was a compute dispatch, so every backend counted as
+  covered while the plumbing that actually differs by stage — D3D12's per-stage
+  root-parameter visibility, Metal's per-stage argument tables and
+  `setVertexBytes:`/`setFragmentBytes:`, Vulkan's stage mask — had nothing
+  asserting it. The seam suite now draws twice in one render pass with different
+  blocks and requires each draw to have seen its own, which one draw cannot
+  distinguish from two draws sharing one.
+
 - **A removed D3D12 device now names the operation it died on.** `crcbl-dx12`
   turns DRED — Device Removed Extended Data — on before the first
   `D3D12CreateDevice`, forcing `SetAutoBreadcrumbsEnablement` and

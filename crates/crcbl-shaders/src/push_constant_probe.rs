@@ -94,6 +94,51 @@ impl Constants {
     }
 }
 
+/// `OpVariable`s in the `PushConstant` storage class, counted by walking the
+/// module's instruction stream.
+///
+/// A scan for the bare storage-class number would match any operand that
+/// happened to equal it — which is a check that cannot fail — so the words are
+/// stepped through by length instead: five header words, then each instruction
+/// as `(word_count << 16) | opcode` followed by its operands.
+///
+/// Test-only and shared with [`crate::push_constant_raster`], which asks the
+/// same question of the raster artifact. It lives here because this is the
+/// module whose test also runs it over a shader that has *no* push constant,
+/// which is what shows the walk is finding the storage class rather than a
+/// coincidence.
+#[cfg(test)]
+pub(crate) fn push_constant_variables(words: &[u32]) -> usize {
+    /// `OpVariable`, whose third operand word is the storage class.
+    const OP_VARIABLE: u32 = 59;
+    /// `StorageClass PushConstant`.
+    const PUSH_CONSTANT: u32 = 9;
+    /// Words of a SPIR-V module header, before the first instruction.
+    const HEADER_WORDS: usize = 5;
+    /// Where the storage class sits within an `OpVariable`, after the opcode
+    /// word, the result type and the result id.
+    const STORAGE_CLASS_WORD: usize = 3;
+
+    let mut found = 0;
+    let mut cursor = HEADER_WORDS;
+    while cursor < words.len() {
+        let length = (words[cursor] >> 16) as usize;
+        assert!(length > 0, "a zero-length instruction never terminates");
+        assert!(
+            cursor + length <= words.len(),
+            "instruction at word {cursor} runs past the end of the module"
+        );
+        if words[cursor] & 0xffff == OP_VARIABLE
+            && length > STORAGE_CLASS_WORD
+            && words[cursor + STORAGE_CLASS_WORD] == PUSH_CONSTANT
+        {
+            found += 1;
+        }
+        cursor += length;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,43 +256,5 @@ mod tests {
             crate::PUSH_CONSTANT_PROBE.dxil("computeMain").is_some(),
             "the shader no longer ships the DXIL container the docs above describe"
         );
-    }
-
-    /// `OpVariable`s in the `PushConstant` storage class, counted by walking
-    /// the module's instruction stream.
-    ///
-    /// A scan for the bare storage-class number would match any operand that
-    /// happened to equal it — which is a check that cannot fail — so the words
-    /// are stepped through by length instead: five header words, then each
-    /// instruction as `(word_count << 16) | opcode` followed by its operands.
-    fn push_constant_variables(words: &[u32]) -> usize {
-        /// `OpVariable`, whose third operand word is the storage class.
-        const OP_VARIABLE: u32 = 59;
-        /// `StorageClass PushConstant`.
-        const PUSH_CONSTANT: u32 = 9;
-        /// Words of a SPIR-V module header, before the first instruction.
-        const HEADER_WORDS: usize = 5;
-        /// Where the storage class sits within an `OpVariable`, after the
-        /// opcode word, the result type and the result id.
-        const STORAGE_CLASS_WORD: usize = 3;
-
-        let mut found = 0;
-        let mut cursor = HEADER_WORDS;
-        while cursor < words.len() {
-            let length = (words[cursor] >> 16) as usize;
-            assert!(length > 0, "a zero-length instruction never terminates");
-            assert!(
-                cursor + length <= words.len(),
-                "instruction at word {cursor} runs past the end of the module"
-            );
-            if words[cursor] & 0xffff == OP_VARIABLE
-                && length > STORAGE_CLASS_WORD
-                && words[cursor + STORAGE_CLASS_WORD] == PUSH_CONSTANT
-            {
-                found += 1;
-            }
-            cursor += length;
-        }
-        found
     }
 }

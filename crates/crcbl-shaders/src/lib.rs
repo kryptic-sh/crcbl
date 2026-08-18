@@ -130,15 +130,18 @@
 //! declares `wgsl`, so in the rendering path the rule reads as the flat
 //! prohibition it used to be.
 //!
-//! [`push_constant_probe`] is the one source that does read a push constant, and
-//! it is an exception rather than a loophole: it declares `spirv, msl, dxil` and
-//! no `wgsl`, so no unloadable artifact is produced. It exists because
-//! `crcbl_hal::PushConstantRange` and `Features::PUSH_CONSTANTS` had nothing to
-//! be proved against on any backend — that module records the slot each of its
-//! three artifacts puts the block at. Adding `wgsl` back to its declaration is
-//! caught rather than merely forbidden: `tests/wgsl_validation.rs` runs naga
-//! over every committed `wgsl/*.wgsl`, and the module Slang emits for that
-//! source was put through it to confirm it is refused with the message above.
+//! [`push_constant_probe`] and [`push_constant_raster`] are the two sources that
+//! do read a push constant, and they are an exception rather than a loophole:
+//! each declares `spirv, msl, dxil` and no `wgsl`, so no unloadable artifact is
+//! produced. They exist because `crcbl_hal::PushConstantRange` and
+//! `Features::PUSH_CONSTANTS` had nothing to be proved against on any backend —
+//! the first through a compute dispatch, the second through a draw, because the
+//! slot a backend computes and the call it makes both differ by stage. Each
+//! module records the slot its own artifacts put the block at. Adding `wgsl`
+//! back to either declaration is caught rather than merely forbidden:
+//! `tests/wgsl_validation.rs` runs naga over every committed `wgsl/*.wgsl`, and
+//! the module Slang emits for such a source was put through it to confirm it is
+//! refused with the message above.
 //!
 //! The DXIL column never shared the gap: HLSL has root constants and Slang
 //! lowers the same block to an ordinary `cbuffer`. The rule is WGSL's.
@@ -179,6 +182,12 @@ pub mod compute_probe;
 /// the fact a backend implementing `PushConstantRange` needs and cannot
 /// otherwise get.
 pub mod push_constant_probe;
+
+/// The push-constant block `push_constant_raster.slang` reads from both
+/// graphics stages — and the slot each of its artifacts puts that block at,
+/// which is the fact a backend implementing the *graphics* half of
+/// `PushConstantRange` needs and cannot otherwise get.
+pub mod push_constant_raster;
 
 /// The workgroup size and uniform block `cull.slang` declares, in the layouts
 /// that shader declares.
