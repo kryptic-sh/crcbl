@@ -105,14 +105,14 @@ jobs:
       # workspace for the host died in that build script before reaching a line
       # of our own code, and the whole board went red at once.
       #
-      # The `-dev` package, unlike the runtime-only Wayland and X11 packages the
-      # e2e jobs install: those libraries are `dlopen`ed and this one is linked,
-      # so it needs the headers and `alsa.pc`. Every other linux job that
-      # compiles the workspace repeats this step and points back here.
+      # Hardened, and shared: two runs hung twenty minutes on a silent apt
+      # mirror and were cancelled by the job timeout. The action retries a
+      # hung attempt as well as a failing one — see it for why those differ.
       - name: Install the ALSA headers cpal links against
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: libasound2-dev
       - run:
           cargo clippy --workspace --all-targets --all-features --locked -- -D
           warnings
@@ -136,11 +136,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: docs
-      # ALSA headers for `cpal`; see the `clippy` job for why.
+      # ALSA headers for `cpal`; see the action for why it retries.
       - name: Install the ALSA headers cpal links against
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: libasound2-dev
       # `--no-deps`: only our own docs are our problem. Catches broken
       # intra-doc links, which is what a workspace of cross-referencing crates
       # accumulates fastest.
@@ -306,11 +307,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
-      # ALSA headers for `cpal`; see the `clippy` job for why.
+      # ALSA headers for `cpal`; see the action for why it retries.
       - name: Install the ALSA headers cpal links against
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: libasound2-dev
       - run: cargo nextest run --workspace --all-features --locked --profile ci
       # nextest does not run doctests — without this step every `//!`/`///`
       # example in the engine is unexecuted documentation.
@@ -497,16 +499,12 @@ jobs:
       # `crcbl-audio` before and does now. See the `clippy (linux)` job for the
       # `-dev`-versus-runtime argument.
       - name: Install sway and the ALSA headers cpal links against
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            sway \
-            libasound2-dev \
-            libwayland-client0 \
-            libxkbcommon0 \
-            libvulkan1 \
-            mesa-vulkan-drivers \
-            vulkan-validationlayers
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            sway libasound2-dev libwayland-client0 libxkbcommon0 libvulkan1
+            mesa-vulkan-drivers vulkan-validationlayers
       # Starts headless sway in a private XDG_RUNTIME_DIR, polls for the socket
       # with a deadline and a liveness check on the child, runs the
       # `#[ignore]`d suite with `--features wayland-e2e`, and dumps the
@@ -2264,9 +2262,10 @@ jobs:
       # is `crcbl-net`'s, but `cargo test` on its manifest builds the workspace
       # dependency graph that reaches `crcbl-audio`.
       - name: Install the ALSA headers cpal links against
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: libasound2-dev
       # The fuzz target's formatting is checked by the `rustfmt` job: this
       # toolchain is pinned to a nightly with no `cargo-fmt` in it.
       - name: Replay named corpus assertions

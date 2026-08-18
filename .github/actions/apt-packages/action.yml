@@ -1,0 +1,48 @@
+name: Install apt packages, retrying a mirror that stops answering
+description: >-
+  Installs Debian packages with `apt-get`, retrying an attempt that fails *or
+  hangs*. Every linux job here needs something from apt — the ALSA headers
+  `cpal` links against, sway, the Vulkan loader — and a runner whose mirror goes
+  quiet should cost a retry, not a whole board.
+
+inputs:
+  packages:
+    description: Space-separated package names.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # WHY THIS IS NOT TWO PLAIN apt-get LINES. Two runs in one session hung
+    # here for twenty minutes and were killed by the job timeout, taking a
+    # green board down and reporting it as "cancelled" — which reads like
+    # somebody pushed over the run rather than like a mirror that stopped
+    # answering.
+    #
+    # A retry alone does not fix that: a hang is not a failure, and never
+    # returns to be retried. So each attempt is wrapped in `timeout`, which
+    # turns the hang into a non-zero exit the loop can act on. Callers add
+    # their own `timeout-minutes` as a backstop under the job's.
+    #
+    # Three attempts with a widening gap: a mirror briefly unreachable comes
+    # back inside a minute, and one that does not is a real outage worth
+    # failing loudly for rather than waiting out.
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -uo pipefail
+        # Unquoted on purpose: the input is a space-separated list and apt
+        # takes them as separate arguments.
+        # shellcheck disable=SC2086
+        for attempt in 1 2 3; do
+          if timeout 120 sudo apt-get update \
+            && timeout 240 sudo apt-get install -y --no-install-recommends $PACKAGES; then
+            exit 0
+          fi
+          delay=$((attempt * 10))
+          echo "apt-get attempt ${attempt} of 3 failed or hung; retrying in ${delay}s"
+          sleep "${delay}"
+        done
+        echo "::error::apt-get could not install '${PACKAGES}' in three attempts — the runner's mirror is unreachable, which is not a fault in this repository"
+        exit 1
