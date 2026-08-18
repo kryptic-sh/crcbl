@@ -268,10 +268,11 @@ impl ByteWriter {
     /// float on this stream does.
     ///
     /// **The stencil `reference` crosses whole**, even though it is not a WebGPU
-    /// pipeline field — it is set per-pass through `setStencilReference`, and the
-    /// replayer drops it there, the way `workgroup_size` is dropped. Carrying it
-    /// keeps the HAL struct round-tripping and lets a transposition among the
-    /// three masks be caught.
+    /// pipeline field — it is per-pass state, so the replayer drops it here the
+    /// way `workgroup_size` is dropped and takes the value a draw compares
+    /// against from [`set_stencil_reference`](Self::set_stencil_reference)
+    /// instead. Carrying it keeps the HAL struct round-tripping and lets a
+    /// transposition among the three masks be caught.
     fn put_depth_stencil_state(&mut self, state: &DepthStencilState) {
         self.put_u8(tag::format_code(state.format));
         self.put_bool(state.depth_write);
@@ -1132,6 +1133,16 @@ impl StreamWriter {
     pub fn set_scissor(&mut self, rect: &Rect2d) -> u64 {
         let sequence = self.push_tag(tag::SET_SCISSOR_TAG);
         self.bytes.put_rect(*rect);
+        sequence
+    }
+
+    /// [`set_stencil_reference`](crcbl_hal::CommandEncoder::set_stencil_reference),
+    /// on the open render pass — the whole `u32`, which is what WebGPU's
+    /// `GPUStencilValue` is too. See
+    /// [`Command::SetStencilReference`](crate::Command::SetStencilReference).
+    pub fn set_stencil_reference(&mut self, reference: u32) -> u64 {
+        let sequence = self.push_tag(tag::SET_STENCIL_REFERENCE_TAG);
+        self.bytes.put_u32(reference);
         sequence
     }
 

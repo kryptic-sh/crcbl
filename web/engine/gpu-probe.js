@@ -200,6 +200,26 @@ export const DEPTH = Object.freeze({
 });
 
 /**
+ * The `STENCIL_*` codes `__crcbl_web_gpu_probe_stencil_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The stencil probe is a readback at heart — its setup frame ends in the same
+ * `request_readback` — so its codes mirror {@link READBACK} exactly. `READY`
+ * carries the 64×64 `Rgba8Unorm` texels of a target two draws competed for, and
+ * which colour they hold is the whole evidence that a `setStencilReference`
+ * decided which draw survived: the one claim no native suite can make about this
+ * backend.
+ */
+export const STENCIL = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+});
+
+/**
  * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1341,6 +1361,77 @@ export function readDepthProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: depthStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the stencil codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function stencilStateName(state) {
+  const found = Object.entries(STENCIL).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to draw twice into one target with a different stencil reference
+ * before each, and start reading the target back on the device it opened.
+ *
+ * {@link startDrawProbe}'s masked sibling, and the only gate anywhere that shows
+ * a `setStencilReference` deciding which fragments survive. The pass clears a
+ * `depth24plus-stencil8` plane to a known value and the pipeline compares
+ * `Equal` against a *baked* reference that never matches, so the colour that
+ * comes back says which of the two per-pass references took effect.
+ * {@link pollStencilProbe} drives the poll and {@link readStencilProbe} reads the
+ * bytes when they land. Its answer is *data* and it needs a **device**, so
+ * `false` before one has opened is ordering rather than failure — wait for
+ * {@link readDeviceProbe} to say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startStencilProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_stencil() === 1;
+}
+
+/**
+ * Poll the stencil readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_stencil_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollStencilProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_stencil_poll() === 1;
+}
+
+/**
+ * Read where the stencil readback has got to, and its bytes once it is `READY`.
+ *
+ * {@link readDrawProbe}'s masked sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readStencilProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_stencil_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_stencil_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_stencil_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: stencilStateName(state), bytes };
 }
 
 /**

@@ -3,8 +3,8 @@
 //! # The honesty mechanism for unit-returning ops
 //!
 //! A recording method that has a [`StreamWriter`](crate::StreamWriter) command
-//! encodes it. One that does not — and several draws, the query writes and the
-//! viewport/scissor state have no command yet — returns `()` and cannot report
+//! encodes it. One that does not — the count-buffer and mesh draws, and the
+//! three query-set ops — returns `()` and cannot report
 //! an error inline. Silently dropping it would let a scene that hits it replay a
 //! command buffer missing the op and render **subtly wrong**, which is the
 //! worst outcome the seam has.
@@ -175,8 +175,9 @@ impl CommandEncoder for WebGpuCommandEncoder {
             .with(|c| c.encode(|stream| stream.set_scissor(rect)));
     }
 
-    fn set_stencil_reference(&mut self, _reference: u32) {
-        self.record_unsupported("set_stencil_reference is not yet wired into the WebGPU stream");
+    fn set_stencil_reference(&mut self, reference: u32) {
+        self.channel
+            .with(|c| c.encode(|stream| stream.set_stencil_reference(reference)));
     }
 
     fn bind_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {

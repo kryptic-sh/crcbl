@@ -865,6 +865,8 @@ function stubRenderPass() {
      *   Every `setScissorRect`, in order.
      */
     scissors: [],
+    /** @type {number[]} Every `setStencilReference`, in order. */
+    stencilReferences: [],
     /**
      * @type {Array<{ buffer: object, format: string, offset: number }>} Every
      *   `setIndexBuffer`, in order.
@@ -932,6 +934,10 @@ function stubRenderPass() {
      */
     setScissorRect(x, y, width, height) {
       pass.scissors.push({ x, y, width, height });
+    },
+    /** @param {number} reference */
+    setStencilReference(reference) {
+      pass.stencilReferences.push(reference);
     },
     /**
      * @param {object} buffer
@@ -2250,6 +2256,7 @@ async function main() {
       'PushConstants',
       'SetViewport',
       'SetScissor',
+      'SetStencilReference',
       'BindIndexBuffer',
       'Draw',
       'DrawIndexed',
@@ -6706,6 +6713,39 @@ async function main() {
     check(
       error !== null && error.includes('no render pass open'),
       `a SetScissor with no pass open goes to the error queue (${JSON.stringify(error)})`
+    );
+  }
+  {
+    // **A SetStencilReference records setStencilReference with the whole u32**,
+    // unnarrowed. The value is neither 0 — WebGPU's own initial value for a fresh
+    // pass, which an arm that recorded nothing would be indistinguishable from —
+    // nor byte-sized, so an arm that truncated it shows.
+    const { replayer, device } = await readyWithDevice();
+    const pass = openedPass(replayer, device);
+    replayer.replay(
+      frameOf({ name: 'SetStencilReference', reference: 0x00beef2a }, 603n)
+    );
+    checkEqual(
+      pass.stencilReferences,
+      [0x00beef2a],
+      'a SetStencilReference records setStencilReference(reference)'
+    );
+    check(
+      replayer.pendingErrors === 0,
+      'a valid SetStencilReference leaves the error queue empty'
+    );
+  }
+  {
+    // **A SetStencilReference with no pass open is a mid-frame ordering fault**,
+    // the judgement SetScissor above makes: the error queue, not a throw.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(
+      frameOf({ name: 'SetStencilReference', reference: 1 }, 603n)
+    );
+    const error = replayer.takeError();
+    check(
+      error !== null && error.includes('no render pass open'),
+      `a SetStencilReference with no pass open goes to the error queue (${JSON.stringify(error)})`
     );
   }
   {

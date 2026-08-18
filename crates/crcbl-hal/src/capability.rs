@@ -822,14 +822,6 @@ pub const DIVERGENCES: &[Divergence] = &[
               ResolveSubresource, so there is nothing for a resolve view to attach to (the DX12 \
               pipeline slice)",
     },
-    Divergence {
-        capability: Capability::StencilReference,
-        backend: BackendKind::WebGpu,
-        kind: DivergenceKind::Unwritten,
-        why: "GPURenderPassEncoder.setStencilReference(reference) is in the API; what is absent is \
-              a SetStencilReference tag in this crate's command stream, so the value would be \
-              dropped rather than applied (the WebGPU stream slice)",
-    },
     // --- draws ---
     Divergence {
         capability: Capability::DrawIndirectCount,
@@ -1781,14 +1773,9 @@ mod tests {
             BackendKind::Metal,
             DivergenceKind::Unwritten,
         ),
-        // The browser's four. Everything else `crcbl-webgpu` refuses is WebGPU
+        // The browser's three. Everything else `crcbl-webgpu` refuses is WebGPU
         // itself refusing, which is why this is the short list and not the long
         // one.
-        (
-            Capability::StencilReference,
-            BackendKind::WebGpu,
-            DivergenceKind::Unwritten,
-        ),
         (
             Capability::StorageImageBinding,
             BackendKind::WebGpu,

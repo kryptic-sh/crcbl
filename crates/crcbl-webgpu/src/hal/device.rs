@@ -322,9 +322,11 @@ impl Device for WebGpuDevice {
     /// **The answer is about behaviour, not about return codes**, and on this
     /// backend the two come apart more than anywhere else: a command crosses the
     /// stream and the browser executes it a turn later, so a method can return
-    /// `Ok` here and be refused there. [`StencilReference`](Capability::StencilReference)
-    /// is the shape — the call encodes, and no command in the stream carries it.
-    /// This method reports the behaviour.
+    /// `Ok` here and be refused there.
+    /// [`TimestampQuery`](Capability::TimestampQuery) is the shape — the HAL call
+    /// returns `()`, and no command in the stream carries it, so what a caller
+    /// sees is [`finish`](crcbl_hal::CommandEncoder::finish) refusing the whole
+    /// command buffer. This method reports the behaviour.
     ///
     /// The semaphores used to be the clearest case and are no longer one:
     /// [`create_semaphore`](Self::create_semaphore) handed out a handle whose
@@ -380,7 +382,14 @@ impl Device for WebGpuDevice {
             // this backend answers for.
             Capability::DepthImageCopy => Support::Yes,
             Capability::MsaaResolveAttachment => Support::Yes,
-            Capability::StencilReference => Support::No(NOT_STREAMED),
+            // `GPURenderPassEncoder.setStencilReference(reference)` is core
+            // WebGPU with an initial value of 0, and the stream carries a
+            // `SetStencilReference` tag for it. The browser gate's stencil group
+            // is what holds this `Yes` to a value rather than to a survived call:
+            // it clears a stencil plane to a known value, compares `Equal`
+            // against a pipeline reference that never matches, and reads back
+            // which of two draws survived.
+            Capability::StencilReference => Support::Yes,
             Capability::DrawIndirectCount => Support::No(NO_COUNT_BUFFER_DRAW),
             Capability::IndirectArgumentPaddedStride => Support::No(
                 "WebGPU's drawIndirect reads one tightly packed argument structure and has no \

@@ -971,6 +971,14 @@ const EXPECTED = [
     name: 'SetScissor',
     rect: { x: -3, y: 4, width: 320, height: 200 },
   },
+  // The stencil reference the pass sets before its masked draws. Neither 0 —
+  // WebGPU's own initial value for a fresh pass, which a dropped field would
+  // reproduce — nor a value that fits in a byte, so a decoder reading the wrong
+  // width shows.
+  {
+    name: 'SetStencilReference',
+    reference: 0x00beef2a,
+  },
   // The index buffer for the UI pass's indexed draw. Distinct handle and a
   // non-zero `BigInt` offset, `Uint16` so the format pairs with a `Uint32`
   // nowhere else.

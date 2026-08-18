@@ -97,6 +97,11 @@
 //! | [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) | `() -> i32` | Drain, and answer one of the `DEPTH_*` codes. |
 //! | [`__crcbl_web_gpu_probe_depth_bytes_ptr`](shim::__crcbl_web_gpu_probe_depth_bytes_ptr) | `() -> i32` | Where the depth plane starts, once [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) answers [`DEPTH_READY`]. |
 //! | [`__crcbl_web_gpu_probe_depth_bytes_len`](shim::__crcbl_web_gpu_probe_depth_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the depth probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_stencil`](shim::__crcbl_web_gpu_probe_stencil) | `() -> i32` | Encode one frame — an `Rgba8Unorm` target and a [`Format::D24UnormS8Uint`] one, a pipeline comparing the stencil plane [`CompareOp::Equal`] against [`PROBE_STENCIL_BAKED`], a pass that clears the plane to [`PROBE_STENCIL_CLEARED`] and draws twice with `set_stencil_reference` before each, the copy, and a `request_readback` against [`PROBE_STENCIL_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_stencil_poll`](shim::__crcbl_web_gpu_probe_stencil_poll) | `() -> i32` | Poll the stencil readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_stencil_state`](shim::__crcbl_web_gpu_probe_stencil_state) | `() -> i32` | Drain, and answer one of the `STENCIL_*` codes. |
+//! | [`__crcbl_web_gpu_probe_stencil_bytes_ptr`](shim::__crcbl_web_gpu_probe_stencil_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_stencil_state`](shim::__crcbl_web_gpu_probe_stencil_state) answers [`STENCIL_READY`]. |
+//! | [`__crcbl_web_gpu_probe_stencil_bytes_len`](shim::__crcbl_web_gpu_probe_stencil_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the stencil probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -636,6 +641,31 @@ pub const DEPTH_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`DRAW_UNDECODABLE`]'s twin.
 pub const DEPTH_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const STENCIL_UNASKED: u32 = 0;
+/// The setup frame — a colour target and a [`Format::D24UnormS8Uint`]
+/// depth-stencil target, a pipeline that compares the stencil plane
+/// [`CompareOp::Equal`] against [`PROBE_STENCIL_BAKED`], a pass that clears the
+/// plane to [`PROBE_STENCIL_CLEARED`] and draws twice with a
+/// `set_stencil_reference` before each, the copy, the submit and the request —
+/// is on the stream, and no poll has been issued.
+pub const STENCIL_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const STENCIL_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const STENCIL_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_stencil_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_stencil_bytes_len`] carry them — 64×64
+/// `Rgba8Unorm` texels, every one [`PROBE_STENCIL_FIRST_BYTES`] if both
+/// references reached the browser and were applied.
+pub const STENCIL_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`DRAW_UNDECODABLE`]'s twin.
+pub const STENCIL_UNDECODABLE: u32 = 5;
 
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
@@ -3290,6 +3320,454 @@ pub const fn probe_depth_copy() -> BufferImageCopy {
     }
 }
 
+// The stencil probe (group AC): the one gate that shows a SET STENCIL REFERENCE
+// deciding which fragments survive. Every handle it names is `9 << 32` — a
+// generation past the depth probe's `8 << 32` — so its seven live resources never
+// land in another probe's slot in the shared page. It creates two images and two
+// views, which the two types that carry two here distinguish by index; the
+// buffer, the module, the layouts and the pipeline are each the only one of their
+// kind at this generation.
+//
+// It is here because `Capability::StencilReference` is declared supported on this
+// backend and no native test can witness that: the seam suite
+// (`exercise_stencil_reference` in `crates/crcbl/tests/hal_seam_e2e.rs`) is a
+// native binary and this backend runs in a browser.
+//
+// **THE OBSERVABLE IS A VALUE, NOT A SURVIVED CALL.** A frame that recorded
+// `setStencilReference` and had it ignored raises no error anywhere — the draw
+// still runs, the readback still resolves, and the only difference is which
+// fragments the stencil test discarded. So the probe is built so that exactly one
+// reading follows from "both references were applied" and every other way it can
+// go lands somewhere else. See [`probe_stencil_pipeline_desc`] for the three
+// outcomes and what each of them means.
+
+/// The stencil value the probe's pass clears its plane to, and the value the
+/// first draw's reference matches.
+///
+/// **Not `0`**, which is WebGPU's own initial reference for a fresh pass and the
+/// value a `stencilClearValue` that never crossed would leave: a probe that
+/// cleared to zero could not tell "the reference arrived" from "nothing
+/// happened and both defaults agreed".
+pub const PROBE_STENCIL_CLEARED: u32 = 0x2A;
+
+/// The reference the second draw is given — a value the cleared plane does not
+/// hold, so every one of its fragments must be discarded.
+pub const PROBE_STENCIL_MISS: u32 = 0x11;
+
+/// The reference baked into the pipeline's
+/// [`StencilState::reference`](crcbl_hal::StencilState::reference).
+///
+/// **It matches nothing.** WebGPU has no pipeline-side reference at all, so the
+/// replayer drops this field — and a backend that did honour it instead of the
+/// per-pass value would discard *both* draws, which is the third reading the gate
+/// distinguishes. Distinct from [`PROBE_STENCIL_CLEARED`] and
+/// [`PROBE_STENCIL_MISS`] so it can never be mistaken for either.
+pub const PROBE_STENCIL_BAKED: u32 = 0x33;
+
+/// The stencil read mask the comparison sees through — every bit, so the mask is
+/// not a second reason a reference could fail to match.
+pub const PROBE_STENCIL_READ_MASK: u32 = 0xFF;
+
+/// Texels across and down the colour target the stencil probe draws into and
+/// reads back. [`PROBE_READBACK_SIZE`]'s figure, for its 256-byte-row reason.
+pub const PROBE_STENCIL_SIZE: u32 = PROBE_READBACK_SIZE;
+
+/// One 8-bit channel as the `f32` a clear colour and a WGSL literal carry it as.
+///
+/// The probe's three colours are chosen as `Rgba8Unorm` *bytes* — that is what
+/// the readback compares — and this is the one place they become floats, so the
+/// clear the pass loads with and the bytes the gate asserts cannot drift apart.
+const fn unorm8(byte: u8) -> f32 {
+    byte as f32 / 255.0
+}
+
+/// The colour the pass clears its target to, as the bytes a `Rgba8Unorm` texel
+/// holds. **The reading that means the *first* reference never took effect**:
+/// neither draw survived, so the pipeline's own [`PROBE_STENCIL_BAKED`] decided
+/// both.
+///
+/// The three colours here are pairwise distinct as multisets, not merely as
+/// tuples: no two of them are a channel permutation of each other, so a path that
+/// swapped `r` and `b` on the way out cannot turn one into another. Each is a
+/// mid-tone — away from `0` and `255`, which is what an untouched or saturated
+/// channel reads as.
+pub const PROBE_STENCIL_BACKGROUND_BYTES: [u8; 4] = [30, 90, 150, 255];
+
+/// The colour the first draw writes. **The one reading that means both
+/// references were applied**, and the only one the gate passes on.
+pub const PROBE_STENCIL_FIRST_BYTES: [u8; 4] = [60, 130, 200, 255];
+
+/// The colour the second draw writes. **The reading that means the *second*
+/// reference never took effect** — either the call was dropped or the stencil
+/// test is not enabled at all, and the draw that should have been discarded drew
+/// over the first.
+pub const PROBE_STENCIL_SECOND_BYTES: [u8; 4] = [200, 70, 110, 255];
+
+/// The queue the stencil probe names in its command encoder. `9 << 32`.
+pub const PROBE_STENCIL_QUEUE: QueueHandle = match QueueHandle::from_bits(9 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 9 is not zero"),
+};
+
+/// The command buffer the stencil probe finishes its encoder into. `9 << 32`.
+pub const PROBE_STENCIL_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(9 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 9 is not zero"),
+    };
+
+/// The in-flight readback the stencil probe requests and polls. `9 << 32`.
+pub const PROBE_STENCIL_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(9 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 9 is not zero"),
+};
+
+/// The colour target the stencil probe draws into and copies out of. `9 << 32`,
+/// index `0`.
+pub const PROBE_STENCIL_IMAGE: ImageHandle = match ImageHandle::from_bits(9 << 32) {
+    Some(image) => image,
+    None => panic!("generation 9 is not zero"),
+};
+
+/// The colour target's descriptor — the draw probe's image at this generation.
+#[must_use]
+pub const fn probe_stencil_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu stencil colour image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_STENCIL_SIZE, PROBE_STENCIL_SIZE),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The colour target's view. `9 << 32`, index `0`.
+pub const PROBE_STENCIL_IMAGE_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(9 << 32) {
+    Some(view) => view,
+    None => panic!("generation 9 is not zero"),
+};
+
+/// The view of [`probe_stencil_image_desc`]'s image the pass renders into.
+pub const PROBE_STENCIL_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu stencil colour view"),
+    image: PROBE_STENCIL_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The depth-stencil target whose stencil plane the draws are tested against.
+/// `9 << 32`, index `1`.
+pub const PROBE_STENCIL_PLANE_IMAGE: ImageHandle = match ImageHandle::from_bits((9 << 32) | 1) {
+    Some(image) => image,
+    None => panic!("generation 9 is not zero"),
+};
+
+/// The depth-stencil target's descriptor.
+///
+/// **[`Format::D24UnormS8Uint`], which is WebGPU's `depth24plus-stencil8`** — the
+/// only stencil format in core WebGPU. Its sibling `depth32float-stencil8` is
+/// behind the `depth32float-stencil8` feature, and this probe's device asks for
+/// nothing optional, so a probe that named it would be refused on a conforming
+/// browser. Nothing here reads the *depth* plane back, which is what makes
+/// `depth24plus`'s undefined memory layout irrelevant: the plane is written and
+/// tested on the GPU and never copied.
+///
+/// [`ImageUsage::DEPTH_STENCIL_ATTACHMENT`] alone — no `TRANSFER_SRC`, because
+/// the evidence is the colour target and not the plane.
+#[must_use]
+pub const fn probe_stencil_plane_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu stencil plane image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_STENCIL_SIZE, PROBE_STENCIL_SIZE),
+        format: Format::D24UnormS8Uint,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+    }
+}
+
+/// The depth-stencil target's view. `9 << 32`, index `1`.
+pub const PROBE_STENCIL_PLANE_VIEW: ImageViewHandle =
+    match ImageViewHandle::from_bits((9 << 32) | 1) {
+        Some(view) => view,
+        None => panic!("generation 9 is not zero"),
+    };
+
+/// The view of [`probe_stencil_plane_image_desc`]'s image the pass attaches.
+///
+/// [`ImageSubresourceRange::all`] of a depth-stencil format is
+/// [`ImageAspect::DEPTH`] **and** [`ImageAspect::STENCIL`], so the replayer
+/// records both planes off this view and the attachment reaches WebGPU with all
+/// four load and store ops — which a `depth24plus-stencil8` attachment requires
+/// and a depth-only one forbids.
+pub const PROBE_STENCIL_PLANE_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu stencil plane view"),
+    image: PROBE_STENCIL_PLANE_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::D24UnormS8Uint,
+    range: ImageSubresourceRange::all(Format::D24UnormS8Uint),
+};
+
+/// The buffer the drawn pixels are copied into and read back from. `9 << 32`.
+pub const PROBE_STENCIL_BUFFER: BufferHandle = match BufferHandle::from_bits(9 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 9 is not zero"),
+};
+
+/// The readback buffer's descriptor — `64 * 64 * 4` bytes, one `Rgba8Unorm`
+/// texel per four.
+#[must_use]
+pub const fn probe_stencil_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu stencil buffer"),
+        size: (PROBE_STENCIL_SIZE as u64) * (PROBE_STENCIL_SIZE as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The clear the stencil pass loads with — [`PROBE_STENCIL_BACKGROUND_BYTES`] in
+/// the colour slot and [`PROBE_STENCIL_CLEARED`] in the stencil one.
+///
+/// The depth slot is `0.0` and inert: the pipeline's `depth_compare` is
+/// [`CompareOp::Always`] and it writes no depth, so nothing here can discard a
+/// fragment for a reason other than the stencil test — which is the whole point
+/// of a probe whose evidence is *which* fragments survived.
+#[must_use]
+pub const fn probe_stencil_clear_value() -> ClearValue {
+    ClearValue {
+        color: [
+            unorm8(PROBE_STENCIL_BACKGROUND_BYTES[0]),
+            unorm8(PROBE_STENCIL_BACKGROUND_BYTES[1]),
+            unorm8(PROBE_STENCIL_BACKGROUND_BYTES[2]),
+            unorm8(PROBE_STENCIL_BACKGROUND_BYTES[3]),
+        ],
+        depth: 0.0,
+        stencil: PROBE_STENCIL_CLEARED,
+    }
+}
+
+/// The colour attachment the stencil pass writes — cleared to the background and
+/// stored, so the copy afterwards reads what the draws left.
+#[must_use]
+pub const fn probe_stencil_color_attachment() -> ColorAttachment {
+    ColorAttachment {
+        view: PROBE_STENCIL_IMAGE_VIEW,
+        resolve: None,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: probe_stencil_clear_value(),
+    }
+}
+
+/// The depth-stencil attachment the stencil pass tests against — the plane
+/// cleared to [`PROBE_STENCIL_CLEARED`].
+///
+/// `read_only: false` because a read-only attachment reaches WebGPU with none of
+/// the four load and store ops, and the clear is what puts the known value in the
+/// plane.
+#[must_use]
+pub const fn probe_stencil_attachment() -> DepthStencilAttachment {
+    DepthStencilAttachment {
+        view: PROBE_STENCIL_PLANE_VIEW,
+        read_only: false,
+        depth_load: LoadOp::Clear,
+        depth_store: StoreOp::Discard,
+        stencil_load: LoadOp::Clear,
+        stencil_store: StoreOp::Store,
+        clear: probe_stencil_clear_value(),
+    }
+}
+
+/// The image→buffer copy that moves the drawn pixels into the readback buffer —
+/// the draw probe's copy on this probe's colour target and buffer.
+#[must_use]
+pub const fn probe_stencil_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_STENCIL_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_STENCIL_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_STENCIL_SIZE, PROBE_STENCIL_SIZE),
+    }
+}
+
+/// Two fullscreen triangles in one WGSL module, each a flat colour of its own.
+///
+/// **No vertex buffers**, [`PROBE_DRAW_WGSL`]'s trick: `vsMain` positions from
+/// `@builtin(vertex_index)` alone and `vertex % 3u` makes vertices `3..6` the
+/// same oversized triangle as `0..3`, so one draw of each range covers the whole
+/// target. What differs between them is the colour, chosen by `vertex < 3u` —
+/// [`PROBE_STENCIL_FIRST_BYTES`] for the first, [`PROBE_STENCIL_SECOND_BYTES`]
+/// for the second — and carried to the fragment stage flat, since all three
+/// vertices of a triangle agree.
+///
+/// **Each channel is spelled `n.0/255.0`**, the byte the readback is compared
+/// against divided by the `Rgba8Unorm` maximum, rather than a decimal that would
+/// have to be kept in step by hand. `the_stencil_wgsl_paints_the_colours_the_gate_asserts`
+/// is what holds the string to the constants.
+pub const PROBE_STENCIL_WGSL: &str = concat!(
+    "struct VsOut { @builtin(position) position: vec4<f32>, ",
+    "@location(0) colour: vec4<f32> }; ",
+    "@vertex fn vsMain(@builtin(vertex_index) vertex: u32) -> VsOut { ",
+    "var positions = array<vec2<f32>, 3>(",
+    "vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0)); ",
+    "var out: VsOut; ",
+    "out.position = vec4<f32>(positions[vertex % 3u], 0.0, 1.0); ",
+    "out.colour = select(",
+    "vec4<f32>(200.0/255.0, 70.0/255.0, 110.0/255.0, 255.0/255.0), ",
+    "vec4<f32>(60.0/255.0, 130.0/255.0, 200.0/255.0, 255.0/255.0), ",
+    "vertex < 3u); ",
+    "return out; } ",
+    "@fragment fn fsMain(in: VsOut) -> @location(0) vec4<f32> { return in.colour; }"
+);
+
+/// The shader module the stencil probe's frame creates. WGSL only, on
+/// [`PROBE_GRAPHICS_SHADER_MODULE_DESC`]'s terms.
+pub const PROBE_STENCIL_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu stencil shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_STENCIL_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The shader-module handle the stencil probe's pipeline names. `9 << 32`.
+pub const PROBE_STENCIL_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(9 << 32) {
+        Some(module) => module,
+        None => panic!("generation 9 is not zero"),
+    };
+
+/// The pipeline-layout handle the stencil probe's pipeline is built against.
+/// `9 << 32`.
+pub const PROBE_STENCIL_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(9 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 9 is not zero"),
+    };
+
+/// The pipeline layout the stencil probe's frame creates. **Empty** — the shaders
+/// bind nothing.
+pub const PROBE_STENCIL_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu stencil pipeline layout"),
+    bind_group_layouts: &[],
+    push_constants: None,
+};
+
+/// The graphics-pipeline handle the stencil probe binds and draws with.
+/// `9 << 32`.
+pub const PROBE_STENCIL_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits(9 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 9 is not zero"),
+    };
+
+/// The one colour target the stencil pipeline writes — opaque, so a surviving
+/// fragment's colour reaches the texel exactly rather than blended with the
+/// clear underneath it.
+pub const PROBE_STENCIL_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTargetState {
+    format: Format::Rgba8Unorm,
+    blend: None,
+    write_mask: ColorWrites::ALL,
+}];
+
+/// Both faces of the stencil test: compare [`CompareOp::Equal`] and write
+/// nothing back whatever happens.
+///
+/// Front and back are identical because the triangles are not culled and their
+/// winding is not the subject; keeping every op [`StencilOp::Keep`] beside
+/// `write_mask: 0` is what makes the second draw see the same plane the first
+/// one did.
+const PROBE_STENCIL_FACE: crcbl_hal::StencilFaceState = crcbl_hal::StencilFaceState {
+    compare: CompareOp::Equal,
+    fail_op: crcbl_hal::StencilOp::Keep,
+    depth_fail_op: crcbl_hal::StencilOp::Keep,
+    pass_op: crcbl_hal::StencilOp::Keep,
+};
+
+/// The pipeline the stencil probe binds before both of its draws.
+///
+/// # The three readings, and why only one of them is a pass
+///
+/// The plane is cleared to [`PROBE_STENCIL_CLEARED`] and this pipeline compares
+/// [`CompareOp::Equal`] against it, writing nothing back. Two draws follow, in one
+/// pass, with the reference set differently before each: [`PROBE_STENCIL_CLEARED`]
+/// then the first triangle, [`PROBE_STENCIL_MISS`] then the second. So
+///
+/// * [`PROBE_STENCIL_FIRST_BYTES`] is the only reading a browser that applied
+///   both values produces — the first draw passed the test, the second was
+///   discarded;
+/// * [`PROBE_STENCIL_SECOND_BYTES`] means the second reference never took effect,
+///   so the draw that should have been discarded drew over the first;
+/// * [`PROBE_STENCIL_BACKGROUND_BYTES`] means the *first* reference never took
+///   effect either, which is what the pipeline's own [`PROBE_STENCIL_BAKED`]
+///   produces.
+///
+/// **The order is not free to reverse.** Drawing the rejected reference first
+/// would make "the stencil test is not enabled" and "both references were
+/// applied" produce the same texel, because the last draw would win either way.
+///
+/// `depth_write: false` with [`CompareOp::Always`] keeps the depth half inert, so
+/// a discarded fragment has exactly one explanation.
+#[must_use]
+pub const fn probe_stencil_pipeline_desc() -> GraphicsPipelineDesc<'static> {
+    GraphicsPipelineDesc {
+        label: Some("crcbl-webgpu stencil pipeline"),
+        layout: PROBE_STENCIL_PIPELINE_LAYOUT,
+        vertex: ShaderEntry {
+            module: PROBE_STENCIL_SHADER_MODULE,
+            entry_point: "vsMain",
+        },
+        fragment: Some(ShaderEntry {
+            module: PROBE_STENCIL_SHADER_MODULE,
+            entry_point: "fsMain",
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleList,
+            front_face: FrontFace::Ccw,
+            cull_mode: CullMode::None,
+            polygon_mode: PolygonMode::Fill,
+            depth_clamp: false,
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: Format::D24UnormS8Uint,
+            depth_write: false,
+            depth_compare: CompareOp::Always,
+            stencil: Some(crcbl_hal::StencilState {
+                front: PROBE_STENCIL_FACE,
+                back: PROBE_STENCIL_FACE,
+                read_mask: PROBE_STENCIL_READ_MASK,
+                write_mask: 0,
+                reference: PROBE_STENCIL_BAKED,
+            }),
+            bias: DepthBias {
+                constant: 0.0,
+                slope_scale: 0.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: MultisampleState {
+            samples: 1,
+            mask: !0,
+            alpha_to_coverage: false,
+        },
+        color_targets: &PROBE_STENCIL_COLOR_TARGETS,
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -3981,6 +4459,68 @@ impl DepthProbe {
     }
 }
 
+/// One stencil-reference exercise, from the frame that set it up to the bytes
+/// that came back.
+///
+/// [`DrawProbe`]'s state machine on the stencil probe's handle: the setup frame
+/// ends in the same `request_readback` and is answered by the same
+/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
+/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending).
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum StencilProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — one `Rgba8Unorm` texel per four, every one
+        /// [`PROBE_STENCIL_FIRST_BYTES`] if both references were applied.
+        bytes: Vec<u8>,
+    },
+}
+
+impl StencilProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`DrawProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -4095,6 +4635,10 @@ struct Probe {
     /// A decode error the depth drain hit, for [`DEPTH_UNDECODABLE`]. Its own
     /// string for [`reason`](Self::reason)'s reason.
     depth_reason: String,
+    stencil: StencilProbe,
+    /// A decode error the stencil drain hit, for [`STENCIL_UNDECODABLE`]. Its own
+    /// string for [`reason`](Self::reason)'s reason.
+    stencil_reason: String,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -4128,6 +4672,8 @@ impl Probe {
             indirect_reason: String::new(),
             depth: DepthProbe::Unasked,
             depth_reason: String::new(),
+            stencil: StencilProbe::Unasked,
+            stencil_reason: String::new(),
             parity: ParityReport::new(),
         }
     }
@@ -4551,6 +5097,7 @@ impl Probe {
                 self.reconfig.absorb(&replies);
                 self.indirect.absorb(&replies);
                 self.depth.absorb(&replies);
+                self.stencil.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -5416,6 +5963,132 @@ impl Probe {
     fn depth_bytes(&self) -> &[u8] {
         match &self.depth {
             DepthProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the stencil setup frame: a colour target and a
+    /// `depth24plus-stencil8` one, the pipeline that compares the plane
+    /// [`CompareOp::Equal`], a pass that clears both and draws twice with a
+    /// **different stencil reference before each**, and the copy of the colour
+    /// target out to the buffer that is read back.
+    ///
+    /// **One frame, many commands, no reply** — [`request_draw`](Self::request_draw)'s
+    /// shape with a depth-stencil attachment added and a second draw, and the two
+    /// `set_stencil_reference` commands that are the whole point: the first names
+    /// [`PROBE_STENCIL_CLEARED`], which the plane holds, and the second
+    /// [`PROBE_STENCIL_MISS`], which it does not. See
+    /// [`probe_stencil_pipeline_desc`] for what each possible reading means.
+    ///
+    /// `false` until a device has opened, [`request_readback`](Self::request_readback)'s
+    /// ordering rule — every command here is a device method.
+    fn request_stencil(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(PROBE_STENCIL_IMAGE, &probe_stencil_image_desc());
+                stream.create_image_view(PROBE_STENCIL_IMAGE_VIEW, &PROBE_STENCIL_VIEW_DESC);
+                stream.create_image(PROBE_STENCIL_PLANE_IMAGE, &probe_stencil_plane_image_desc());
+                stream.create_image_view(PROBE_STENCIL_PLANE_VIEW, &PROBE_STENCIL_PLANE_VIEW_DESC);
+                stream.create_buffer(PROBE_STENCIL_BUFFER, &probe_stencil_buffer_desc());
+                stream.create_shader_module(
+                    PROBE_STENCIL_SHADER_MODULE,
+                    &PROBE_STENCIL_SHADER_MODULE_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_STENCIL_PIPELINE_LAYOUT,
+                    &PROBE_STENCIL_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_graphics_pipeline(
+                    PROBE_STENCIL_PIPELINE,
+                    &probe_stencil_pipeline_desc(),
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu stencil encoder"),
+                    queue: PROBE_STENCIL_QUEUE,
+                });
+                let attachments = [probe_stencil_color_attachment()];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu stencil pass"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: Some(probe_stencil_attachment()),
+                    render_area: Rect2d::from_size(PROBE_STENCIL_SIZE, PROBE_STENCIL_SIZE),
+                });
+                stream.bind_graphics_pipeline(PROBE_STENCIL_PIPELINE);
+                stream.set_stencil_reference(PROBE_STENCIL_CLEARED);
+                stream.draw(0..3, 0..1);
+                stream.set_stencil_reference(PROBE_STENCIL_MISS);
+                stream.draw(3..6, 0..1);
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_stencil_copy());
+                stream.finish(PROBE_STENCIL_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_STENCIL_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_STENCIL_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu stencil readback"),
+                        buffer: PROBE_STENCIL_BUFFER,
+                        offset: 0,
+                        size: probe_stencil_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.stencil = StencilProbe::Requested;
+            self.stencil_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// stencil readback and register its wait, unless it is already waiting or
+    /// ready — [`poll_draw`](Self::poll_draw)'s protocol on the stencil handle.
+    fn poll_stencil(&mut self) -> bool {
+        if !matches!(
+            self.stencil,
+            StencilProbe::Requested | StencilProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_STENCIL_READBACK))
+        else {
+            return false;
+        };
+        self.stencil = StencilProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the stencil readback has got to.
+    fn stencil_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.stencil_reason = error.to_string();
+            return STENCIL_UNDECODABLE;
+        }
+        match &self.stencil {
+            StencilProbe::Unasked => STENCIL_UNASKED,
+            StencilProbe::Requested => STENCIL_REQUESTED,
+            StencilProbe::Waiting { .. } => STENCIL_WAITING,
+            StencilProbe::Pending => STENCIL_PENDING,
+            StencilProbe::Ready { .. } => STENCIL_READY,
+        }
+    }
+
+    /// The bytes the stencil readback came back with, or an empty slice if it
+    /// has not.
+    fn stencil_bytes(&self) -> &[u8] {
+        match &self.stencil {
+            StencilProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -7212,6 +7885,61 @@ pub mod shim {
         })
     }
 
+    /// Encode the stencil setup frame — two targets, the masked pipeline, a pass
+    /// that draws twice with a different stencil reference before each, the copy
+    /// and the readback request.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// probe is re-entered, or another channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_stencil() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_stencil()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the stencil readback once. `1` when a poll is on the stream, `0` when
+    /// there is nothing to poll for.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_stencil_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_stencil()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `STENCIL_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_stencil_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.stencil_state(),
+            Err(_) => super::STENCIL_UNASKED,
+        })
+    }
+
+    /// Where the stencil probe's drawn pixels start, once
+    /// [`__crcbl_web_gpu_probe_stencil_state`] answers
+    /// [`super::STENCIL_READY`]. Null while it has not; the pointer is stable
+    /// until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_stencil_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.stencil_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_stencil_bytes_ptr`] points at — the
+    /// stencil readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_stencil_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.stencil_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -7354,9 +8082,11 @@ mod tests {
         __crcbl_web_gpu_probe_reconfigure_bytes_ptr, __crcbl_web_gpu_probe_reconfigure_poll,
         __crcbl_web_gpu_probe_reconfigure_state, __crcbl_web_gpu_probe_sampler,
         __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_stencil, __crcbl_web_gpu_probe_stencil_bytes_len,
+        __crcbl_web_gpu_probe_stencil_bytes_ptr, __crcbl_web_gpu_probe_stencil_poll,
+        __crcbl_web_gpu_probe_stencil_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -10238,6 +10968,292 @@ mod tests {
         // The clear value is neither of the two numbers an unwritten depth plane
         // holds, which is what makes the gate's comparison evidence.
         const { assert!(PROBE_DEPTH_CLEAR > 0.0 && PROBE_DEPTH_CLEAR < 1.0) };
+    }
+
+    /// The stencil probe's bytes, read the way JS reads them.
+    fn stencil_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_stencil_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_stencil_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the stencil probe answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::stencil` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// How [`PROBE_STENCIL_WGSL`] spells one `Rgba8Unorm` colour: each channel as
+    /// its byte over the format's maximum, in `r, g, b, a` order.
+    ///
+    /// Built here from the byte constants rather than copied out of the shader,
+    /// so the assertions below compare the string with the values the gate reads
+    /// back instead of with themselves.
+    fn wgsl_colour(bytes: [u8; 4]) -> String {
+        format!(
+            "vec4<f32>({}.0/255.0, {}.0/255.0, {}.0/255.0, {}.0/255.0)",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        )
+    }
+
+    /// **The shader paints the two colours the gate tells apart, on the right
+    /// sides of the `select`.**
+    ///
+    /// The whole `select(…)` is matched rather than the two colours separately:
+    /// with the arms swapped each colour is still present, the shader still
+    /// compiles, and the probe reports the exact opposite of what happened.
+    #[test]
+    fn the_stencil_wgsl_paints_the_colours_the_gate_asserts() {
+        let select = format!(
+            "select({}, {}, vertex < 3u)",
+            wgsl_colour(PROBE_STENCIL_SECOND_BYTES),
+            wgsl_colour(PROBE_STENCIL_FIRST_BYTES),
+        );
+        assert!(
+            PROBE_STENCIL_WGSL.contains(&select),
+            "the WGSL gives vertices 0..3 the first colour and 3..6 the second: {PROBE_STENCIL_WGSL}"
+        );
+    }
+
+    /// **The clear the pass loads with is the background byte for byte**, so a
+    /// texel no draw reached reads back as the value the gate calls "neither
+    /// reference took effect" rather than as something near it.
+    #[test]
+    fn the_stencil_clear_is_the_background_colour_the_gate_asserts() {
+        let clear = probe_stencil_clear_value();
+        for (channel, byte) in clear.color.iter().zip(PROBE_STENCIL_BACKGROUND_BYTES) {
+            let encoded = (channel * 255.0).round() as u8;
+            assert_eq!(encoded, byte, "the clear encodes to the background bytes");
+        }
+        assert_eq!(clear.stencil, PROBE_STENCIL_CLEARED);
+    }
+
+    /// **No two of the three colours are a channel permutation of each other**,
+    /// so a path that swapped `r` and `b` on the way out cannot turn one reading
+    /// into another — which would make the probe report a pass for a failure.
+    /// Each channel is also a mid-tone, away from the `0` and `255` an untouched
+    /// or saturated one reads as.
+    #[test]
+    fn the_three_stencil_colours_survive_a_channel_swap() {
+        let sorted = |bytes: [u8; 4]| {
+            let mut rgb = [bytes[0], bytes[1], bytes[2]];
+            rgb.sort_unstable();
+            rgb
+        };
+        let background = sorted(PROBE_STENCIL_BACKGROUND_BYTES);
+        let first = sorted(PROBE_STENCIL_FIRST_BYTES);
+        let second = sorted(PROBE_STENCIL_SECOND_BYTES);
+        assert_ne!(background, first);
+        assert_ne!(background, second);
+        assert_ne!(first, second);
+        for bytes in [
+            PROBE_STENCIL_BACKGROUND_BYTES,
+            PROBE_STENCIL_FIRST_BYTES,
+            PROBE_STENCIL_SECOND_BYTES,
+        ] {
+            let [r, g, b, a] = bytes;
+            assert_eq!(a, 255, "every colour is opaque");
+            assert!(
+                r != g && g != b && r != b,
+                "the three channels differ: {bytes:?}"
+            );
+            for channel in [r, g, b] {
+                assert!(
+                    channel > 0 && channel < 255,
+                    "every channel is a mid-tone: {bytes:?}"
+                );
+            }
+        }
+    }
+
+    /// **Every stencil handle is generation nine**, a generation past the depth
+    /// probe's `8 << 32` and every probe before it: the two images, their two
+    /// views, the readback buffer, the command buffer, the queue and the readback
+    /// are all live at once and none may land in another probe's slot in the
+    /// shared page.
+    #[test]
+    fn the_stencil_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_STENCIL_IMAGE.to_bits(),
+            PROBE_STENCIL_IMAGE_VIEW.to_bits(),
+            PROBE_STENCIL_PLANE_IMAGE.to_bits(),
+            PROBE_STENCIL_PLANE_VIEW.to_bits(),
+            PROBE_STENCIL_BUFFER.to_bits(),
+            PROBE_STENCIL_SHADER_MODULE.to_bits(),
+            PROBE_STENCIL_PIPELINE_LAYOUT.to_bits(),
+            PROBE_STENCIL_PIPELINE.to_bits(),
+            PROBE_STENCIL_COMMAND_BUFFER.to_bits(),
+            PROBE_STENCIL_QUEUE.to_bits(),
+            PROBE_STENCIL_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 9, "every stencil handle is generation nine");
+        }
+        // The two images and the two views share a generation, so their indices
+        // are what keeps them apart.
+        assert_ne!(
+            PROBE_STENCIL_IMAGE.to_bits(),
+            PROBE_STENCIL_PLANE_IMAGE.to_bits()
+        );
+        assert_ne!(
+            PROBE_STENCIL_IMAGE_VIEW.to_bits(),
+            PROBE_STENCIL_PLANE_VIEW.to_bits()
+        );
+        // A generation clear of the depth probe (`8 << 32`), the nearest
+        // neighbour.
+        assert_ne!(PROBE_STENCIL_IMAGE.to_bits(), PROBE_DEPTH_IMAGE.to_bits());
+    }
+
+    /// **The pipeline compares `Equal` against a baked reference that matches
+    /// nothing, and writes no stencil back.**
+    ///
+    /// Each of those is load-bearing: a comparison other than `Equal` would let
+    /// the miss through, a baked reference equal to the cleared value would make
+    /// "the reference arrived" indistinguishable from "the pipeline decided", and
+    /// a non-zero write mask would let the first draw change the plane the second
+    /// is tested against.
+    #[test]
+    fn the_stencil_pipeline_can_only_be_satisfied_by_the_per_pass_reference() {
+        let stencil = probe_stencil_pipeline_desc()
+            .depth_stencil
+            .and_then(|ds| ds.stencil)
+            .expect("the stencil pipeline has a stencil state");
+        assert_eq!(stencil.front, stencil.back);
+        assert_eq!(stencil.front.compare, CompareOp::Equal);
+        assert_eq!(stencil.write_mask, 0, "nothing writes the plane back");
+        assert_eq!(stencil.read_mask, PROBE_STENCIL_READ_MASK);
+        assert_eq!(stencil.reference, PROBE_STENCIL_BAKED);
+        // The three values are pairwise distinct, so each of the gate's three
+        // readings has exactly one cause.
+        assert_ne!(PROBE_STENCIL_BAKED, PROBE_STENCIL_CLEARED);
+        assert_ne!(PROBE_STENCIL_BAKED, PROBE_STENCIL_MISS);
+        assert_ne!(PROBE_STENCIL_CLEARED, PROBE_STENCIL_MISS);
+        // And `0` is none of them: it is WebGPU's own initial reference for a
+        // fresh pass, so a probe that used it could not tell a reference that
+        // arrived from one that never did.
+        assert_ne!(PROBE_STENCIL_CLEARED, 0);
+        assert_ne!(PROBE_STENCIL_MISS, 0);
+    }
+
+    /// The stencil half: **one export, a whole frame** whose two draws are each
+    /// preceded by a `SetStencilReference`, in that order.
+    #[test]
+    fn the_stencil_export_encodes_a_reference_before_each_draw() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_stencil(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateShaderModule",
+                "CreatePipelineLayout",
+                "CreateGraphicsPipeline",
+                "CreateCommandEncoder",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "SetStencilReference",
+                "Draw",
+                "SetStencilReference",
+                "Draw",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "each draw is preceded by its own stencil reference"
+        );
+        // The values and their order, which the name list above cannot see. The
+        // matching reference comes first: reversing the two would make "the
+        // stencil test is not enabled" and "both references were applied" produce
+        // the same texel.
+        let references: Vec<u32> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::SetStencilReference { reference } => Some(*reference),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(references, vec![PROBE_STENCIL_CLEARED, PROBE_STENCIL_MISS]);
+        // The two draws cover the same triangle from different vertex ranges, so
+        // the colour is the only thing that differs between them.
+        let draws: Vec<(u32, u32)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Draw { vertices, .. } => Some((vertices.start, vertices.end)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(draws, vec![(0, 3), (3, 6)]);
+        // The pass clears the stencil plane and stores it, and has the colour
+        // target the copy afterwards reads.
+        let pass = commands
+            .iter()
+            .find_map(|command| match command {
+                Command::BeginRenderPass {
+                    color_attachments,
+                    depth_stencil_attachment,
+                    ..
+                } => Some((color_attachments.clone(), *depth_stencil_attachment)),
+                _ => None,
+            })
+            .expect("the frame begins a render pass");
+        assert_eq!(pass.0, vec![probe_stencil_color_attachment()]);
+        assert_eq!(pass.1, Some(probe_stencil_attachment()));
+    }
+
+    /// A stencil request before a device opens is refused and encodes nothing.
+    #[test]
+    fn a_stencil_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_stencil(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_stencil_state(), STENCIL_UNASKED);
+    }
+
+    /// The whole stencil exchange through the exports alone: request, poll, and a
+    /// `ReadbackReady` carrying the first draw's colour for every texel, which
+    /// reaches the bytes exports. A `cargo test` has no `navigator.gpu`, so the
+    /// replayer is stood in for by a `ReplyWriter` — which is why this proves the
+    /// state machine and the browser gate proves the value.
+    #[test]
+    fn the_stencil_readback_reaches_the_bytes_exports_as_the_first_draws_colour() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_stencil(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_stencil_state(), STENCIL_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_stencil_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_stencil_state(), STENCIL_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_STENCIL_READBACK,
+            }]
+        );
+
+        let texels = (PROBE_STENCIL_SIZE as usize) * (PROBE_STENCIL_SIZE as usize);
+        let mut masked = Vec::new();
+        for _ in 0..texels {
+            masked.extend_from_slice(&PROBE_STENCIL_FIRST_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_STENCIL_READBACK, &masked);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_stencil_state(), STENCIL_READY);
+        assert_eq!(stencil_bytes(), masked);
+        assert_eq!(&stencil_bytes()[..4], PROBE_STENCIL_FIRST_BYTES);
     }
 
     /// The probe must not take a channel from an engine that has one, because

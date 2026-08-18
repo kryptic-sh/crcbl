@@ -497,9 +497,11 @@ pub enum Command {
     /// [`format`](crcbl_hal::ColorTargetState) — are the replayer's, because only
     /// it faces WebGPU, and each is a value the wire form claims. The stencil
     /// [`reference`](crcbl_hal::StencilState::reference) crosses too and the
-    /// replayer drops it: it is not a pipeline field in WebGPU but a per-pass one
-    /// set through `setStencilReference`, so it is dropped like `workgroup_size`
-    /// rather than lost. See `web/engine/gpu-replay.js`.
+    /// replayer drops it: it is not a pipeline field in WebGPU but a per-pass one,
+    /// so it is dropped like `workgroup_size` rather than lost, and
+    /// [`SetStencilReference`](Self::SetStencilReference) is the command that
+    /// carries the value the draws actually compare against. See
+    /// `web/engine/gpu-replay.js`.
     CreateGraphicsPipeline {
         /// Id the replayer stores the new object at.
         pipeline: GraphicsPipelineHandle,
@@ -736,6 +738,28 @@ pub enum Command {
     SetScissor {
         /// Scissor rectangle.
         rect: Rect2d,
+    },
+    /// [`set_stencil_reference`](crcbl_hal::CommandEncoder::set_stencil_reference)
+    /// — the value subsequent draws compare the stencil plane against, on the
+    /// open render pass.
+    ///
+    /// [`SetScissor`](Self::SetScissor)'s shape with a `u32` instead of a
+    /// rectangle, and it becomes `setStencilReference(reference)`. **The whole
+    /// `u32` crosses and nothing narrows it**: WebGPU takes a `GPUStencilValue`,
+    /// which is a `u32` too, and the pipeline's own
+    /// [`StencilState::read_mask`](crcbl_hal::StencilState::read_mask) is what
+    /// decides which of its bits the comparison sees.
+    ///
+    /// It is a *pass* state and not a pipeline field, which is why
+    /// [`CreateGraphicsPipeline`](Self::CreateGraphicsPipeline) carries a
+    /// `reference` the replayer drops: a pipeline built once serves passes that
+    /// compare against different values, so the value has to arrive per pass.
+    /// WebGPU's initial value for a fresh pass is `0`, so a pass that never
+    /// records this compares against zero rather than against whatever the last
+    /// pass set.
+    SetStencilReference {
+        /// Value subsequent draws compare against.
+        reference: u32,
     },
     /// [`bind_index_buffer`](crcbl_hal::CommandEncoder::bind_index_buffer) — the
     /// index buffer for subsequent indexed draws, on the open render pass.
@@ -1406,6 +1430,7 @@ impl Command {
             Self::PushConstants { .. } => "PushConstants",
             Self::SetViewport { .. } => "SetViewport",
             Self::SetScissor { .. } => "SetScissor",
+            Self::SetStencilReference { .. } => "SetStencilReference",
             Self::BindIndexBuffer { .. } => "BindIndexBuffer",
             Self::Draw { .. } => "Draw",
             Self::DrawIndexed { .. } => "DrawIndexed",

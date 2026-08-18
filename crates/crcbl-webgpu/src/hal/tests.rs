@@ -15,8 +15,8 @@ use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
     CompositeAlpha, Device, DeviceCaps, DeviceDesc, DeviceType, Features, Format, HalError,
-    Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc,
-    ReadbackState, SubmitInfo, SurfaceCaps,
+    Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QuerySetHandle, QueueKind,
+    ReadbackDesc, ReadbackState, SubmitInfo, SurfaceCaps,
 };
 
 use crate::ReplyWriter;
@@ -789,14 +789,15 @@ fn finish_fails_loudly_after_recording_an_unwired_op() {
         .expect("the graphics queue");
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
 
-    // `set_stencil_reference` has no stream command yet; recording it must make
-    // finish refuse rather than replay a command buffer missing the state.
-    encoder.set_stencil_reference(0);
+    // `write_timestamp` has no stream command yet; recording it must make finish
+    // refuse rather than replay a command buffer missing the write.
+    let set = QuerySetHandle::from_bits(1 << 32).expect("generation 1 is not zero");
+    encoder.write_timestamp(set, 0);
     let Err(HalError::Unsupported { what, .. }) = encoder.finish() else {
         panic!("finish must refuse a recorded unwired op");
     };
     assert!(
-        what.contains("set_stencil_reference"),
+        what.contains("write_timestamp"),
         "the error names the op: {what}"
     );
 }
@@ -845,6 +846,46 @@ fn the_debug_marker_ops_encode_rather_than_refusing_at_finish() {
         panic!("the third command is the marker: {commands:?}");
     };
     assert_eq!(label, "cull done", "the marker carries the caller's label");
+}
+
+/// **`set_stencil_reference` reaches the stream with its value intact.**
+///
+/// The declaration side of `Capability::StencilReference`, which this backend
+/// answers `Support::Yes` for. It used to record an unwired op, so a frame that
+/// set a stencil reference lost its whole command buffer at `finish` — this
+/// pins both halves of the fix: the frame finishes, and the value the caller
+/// gave is the value on the wire.
+///
+/// The reference is deliberately neither `0` nor small: `0` is WebGPU's own
+/// initial value for a fresh pass, so a writer that encoded the tag and dropped
+/// the field would still produce the reading a correct one does.
+#[test]
+fn set_stencil_reference_encodes_rather_than_refusing_at_finish() {
+    let (channel, device) = device_on_fresh_channel();
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("the graphics queue");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+
+    encoder.set_stencil_reference(0x00BE_EF2A);
+    encoder
+        .finish()
+        .expect("set_stencil_reference is wired, so finish succeeds");
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    let names: Vec<_> = commands.iter().map(crate::Command::name).collect();
+    assert_eq!(
+        names,
+        vec!["CreateCommandEncoder", "SetStencilReference", "Finish"],
+        "the stencil reference encodes a command of its own"
+    );
+    let Some(crate::Command::SetStencilReference { reference }) = commands.get(1) else {
+        panic!("the second command is the stencil reference: {commands:?}");
+    };
+    assert_eq!(*reference, 0x00BE_EF2A, "the whole u32 crosses");
 }
 
 // ── (h) the indirect dispatch ──────────────────────────────────────────────

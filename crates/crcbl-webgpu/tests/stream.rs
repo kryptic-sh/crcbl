@@ -1650,7 +1650,8 @@ fn every_command_has_its_own_name() {
     // CopyBufferToBuffer), the
     // remaining copies and fill (CopyBufferToImage, CopyImageToImage, FillBuffer),
     // the host→buffer upload (WriteBuffer), the dynamic viewport and scissor the
-    // graph sets on every pass (SetViewport, SetScissor), the UI pass's indexed
+    // graph sets on every pass and the stencil reference a masked pass sets
+    // (SetViewport, SetScissor, SetStencilReference), the UI pass's indexed
     // draw (BindIndexBuffer, DrawIndexed), the indirect draws the geometry path
     // unrolls (DrawIndirect, DrawIndexedIndirect), the no-op barrier
     // (PipelineBarrier, twice but one name), and the presentation
@@ -1661,7 +1662,7 @@ fn every_command_has_its_own_name() {
     // (EndDebugLabel, InsertDebugMarker). The offscreen surface
     // (CreateOffscreenSurface) is the twin of CreateSurface and adds one name of
     // its own, and the out-of-band error ask (TakeError) adds the last.
-    assert_eq!(names.len(), 66);
+    assert_eq!(names.len(), 67);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -2567,9 +2568,10 @@ fn every_nested_graphics_pipeline_enum_refuses_an_unclaimed_code() {
 }
 
 /// **The stencil `reference` is carried on the wire and round-trips**, even
-/// though it is not a WebGPU pipeline field — it is set per-pass through
-/// `setStencilReference`, and the replayer drops it there. A writer that resolved
-/// it away would still decode, so this pins it to the byte: the value survives.
+/// though it is not a WebGPU pipeline field — it is per-pass state, so the
+/// replayer drops it here and takes what a draw compares against from the pass's
+/// own [`Command::SetStencilReference`]. A writer that resolved it away would
+/// still decode, so this pins it to the byte: the value survives.
 #[test]
 fn a_graphics_pipelines_stencil_reference_is_carried_rather_than_resolved() {
     let desc = rich_graphics_pipeline();

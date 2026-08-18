@@ -136,6 +136,11 @@ const BIND_INDEX_BUFFER_TAG = 0x4e;
 // region's tag would leave an unbalanced group behind every marker.
 const END_DEBUG_LABEL_TAG = 0x4f;
 const INSERT_DEBUG_MARKER_TAG = 0x50;
+// The dynamic stencil reference a pass sets before its masked draws, recorded on
+// the open render pass as `setStencilReference`. Past the debug markers rather
+// than beside the scissor because a tag byte is a wire value: the encoder family
+// grows at its end so the committed fixture keeps meaning what it meant.
+const SET_STENCIL_REFERENCE_TAG = 0x51;
 const DRAW_TAG = 0x60;
 // The indexed draw the UI pass records, on the open render pass as `drawIndexed`.
 const DRAW_INDEXED_TAG = 0x61;
@@ -1381,8 +1386,9 @@ class ByteReader {
    * The stencil rides a presence byte and, when present, its `front` and `back`
    * faces come in that order — distinct in the fixture so a front/back swap goes
    * red — followed by the three masks. `reference` is decoded here even though it
-   * is not a WebGPU pipeline field: it is a per-pass value `gpu-replay.js` drops
-   * to `setStencilReference`, so it round-trips but does not reach
+   * is not a WebGPU pipeline field: it is per-pass state, so `gpu-replay.js`
+   * drops it and takes what a draw compares against from the pass's own
+   * `SetStencilReference` command instead. It round-trips but does not reach
    * `createRenderPipeline`. The three bias floats close it out.
    *
    * @returns {{ format: string, depthWrite: boolean, depthCompare: string,
@@ -2058,6 +2064,10 @@ function decodeCommand(r) {
       // the wire; `setScissorRect` takes unsigned, so a negative is the
       // replayer's to refuse. See `gpu-replay.js`.
       return { name: 'SetScissor', rect: r.readRect() };
+    case SET_STENCIL_REFERENCE_TAG:
+      // One `u32`, which is what WebGPU's `GPUStencilValue` is too, so nothing
+      // narrows it. See `gpu-replay.js`.
+      return { name: 'SetStencilReference', reference: r.readU32() };
     case BIND_INDEX_BUFFER_TAG: {
       // The buffer, its byte offset (`u64`, `BigInt`), then the index-format
       // code. See `gpu-replay.js`.

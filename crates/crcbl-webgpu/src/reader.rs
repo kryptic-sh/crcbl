@@ -1116,6 +1116,9 @@ impl<'a> StreamReader<'a> {
             tag::SET_SCISSOR_TAG => Ok(Command::SetScissor {
                 rect: r.read_rect()?,
             }),
+            tag::SET_STENCIL_REFERENCE_TAG => Ok(Command::SetStencilReference {
+                reference: r.read_u32()?,
+            }),
             tag::BIND_INDEX_BUFFER_TAG => {
                 // The buffer, its byte offset, then the index-format code. See
                 // `Command::BindIndexBuffer`.

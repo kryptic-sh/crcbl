@@ -489,6 +489,14 @@ pub const END_DEBUG_LABEL_TAG: u8 = 0x4F;
 /// a marker opens no region, so folding the two would make an unbalanced
 /// `pushDebugGroup` out of every marker.
 pub const INSERT_DEBUG_MARKER_TAG: u8 = 0x50;
+/// [`Command::SetStencilReference`](crate::Command::SetStencilReference) — the
+/// dynamic stencil reference on the open render pass, which becomes
+/// `setStencilReference(reference)`.
+///
+/// Past [`INSERT_DEBUG_MARKER_TAG`] rather than beside [`SET_SCISSOR_TAG`], its
+/// nearest sibling: a tag byte is a wire value, so the encoder family grows at
+/// its end and the committed fixture keeps meaning what it meant.
+pub const SET_STENCIL_REFERENCE_TAG: u8 = 0x51;
 /// [`Command::Draw`](crate::Command::Draw).
 pub const DRAW_TAG: u8 = 0x60;
 /// [`Command::DrawIndexed`](crate::Command::DrawIndexed) — an indexed draw,
@@ -1966,7 +1974,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 65] = [
+    const TAGS: [(&str, u8, u8); 66] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         (
@@ -2070,6 +2078,11 @@ mod tests {
         ("SetViewport", SET_VIEWPORT_TAG, FAMILY_ENCODER),
         ("SetScissor", SET_SCISSOR_TAG, FAMILY_ENCODER),
         ("BindIndexBuffer", BIND_INDEX_BUFFER_TAG, FAMILY_ENCODER),
+        (
+            "SetStencilReference",
+            SET_STENCIL_REFERENCE_TAG,
+            FAMILY_ENCODER,
+        ),
         ("Draw", DRAW_TAG, FAMILY_DRAW),
         ("DrawIndexed", DRAW_INDEXED_TAG, FAMILY_DRAW),
         ("DrawIndirect", DRAW_INDIRECT_TAG, FAMILY_DRAW),

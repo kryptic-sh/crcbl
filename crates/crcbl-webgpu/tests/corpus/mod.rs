@@ -1001,6 +1001,13 @@ pub fn every_command() -> Vec<Command> {
                 height: 200,
             },
         },
+        // The stencil reference the pass sets before its masked draws. Neither
+        // `0` — WebGPU's own initial value for a fresh pass, which a dropped
+        // field would reproduce — nor a value that fits in a byte, so a decoder
+        // reading the wrong width shows.
+        Command::SetStencilReference {
+            reference: 0x00BE_EF2A,
+        },
         // The index buffer for the UI pass's indexed draw. Distinct handle and a
         // non-zero offset, and `Uint16` here so the format pairs with the `Uint32`
         // no other command carries — a fold to the other width would show.
@@ -1624,6 +1631,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         } => stream.push_constants(*stages, *offset, data, *layout),
         Command::SetViewport { viewport } => stream.set_viewport(viewport),
         Command::SetScissor { rect } => stream.set_scissor(rect),
+        Command::SetStencilReference { reference } => stream.set_stencil_reference(*reference),
         Command::BindIndexBuffer {
             buffer,
             offset,

@@ -1,4 +1,8 @@
-// The `crcbl-webgpu` seam groups — G through AB — and nothing else.
+// The `crcbl-webgpu` seam groups — G through AC — and nothing else.
+//
+// The letters are allocation order rather than run order: AC runs between W and
+// X, where a group that reads bytes back has to sit on a platform whose canvas
+// readback strands everything queued behind it. Its own comment says why.
 //
 // **THE ONLY GATE THAT DRIVES THIS SEAM COMMAND BY COMMAND.** Everything else
 // about the command stream is checked without a browser: `stream-decode.mjs`
@@ -2435,6 +2439,158 @@ export async function runProbeGroups({
           `first wrong at byte ${fill.firstWrong} (sample around the boundary ${JSON.stringify(fill.sample)}; ` +
           `want zero then [${PROBE_FILL_PATTERN_BYTES.join(', ')}])` +
           `${fill.error ? ` — ${fill.error}` : ''}`
+  );
+
+  // **THE STENCIL GATE, AND THE ONLY EXERCISE `Capability::StencilReference` HAS
+  // ON THIS BACKEND.** The native seam suite that holds the other four backends
+  // to that declaration (`exercise_stencil_reference` in
+  // `crates/crcbl/tests/hal_seam_e2e.rs`) is a native binary and cannot open this
+  // one, so without this group the `Support::Yes` is a sentence nothing tests.
+  //
+  // WHAT IT DOES: wasm records a `depth24plus-stencil8` plane cleared to 0x2A, an
+  // `Rgba8Unorm` target cleared to a background colour, and a pipeline that
+  // compares the plane `Equal` against a *baked* pipeline-side reference of 0x33
+  // — which matches nothing, and which WebGPU has no pipeline field for anyway.
+  // Two draws follow in one pass, each preceded by its own `setStencilReference`:
+  // 0x2A, which the plane holds, then the first triangle; 0x11, which it does
+  // not, then the second. The page loop replays it and the 16384 texels that come
+  // back say which draws survived.
+  //
+  // **THE OBSERVABLE IS A VALUE, NOT A SURVIVED CALL**, which is the whole design
+  // constraint: a `setStencilReference` that is dropped raises no error, the draw
+  // still runs, and the readback still resolves. So the three possible readings
+  // are made to mean three different things and only one of them is a pass:
+  //
+  //   the first colour   both references were applied — the first draw passed the
+  //                      test and the second was discarded. The only pass.
+  //   the second colour  the SECOND reference never took effect, so the draw that
+  //                      should have been discarded drew over the first. That is
+  //                      a dropped call, or a stencil test not enabled at all.
+  //   the background     the FIRST reference never took effect either, which is
+  //                      what the pipeline's own baked 0x33 produces.
+  //
+  // The order of the two draws is not free to reverse: with the rejected
+  // reference first, "the test is not enabled" and "both references were applied"
+  // would produce the same texel, because the last draw would win either way.
+  //
+  // The three colours are pairwise distinct as *multisets*, so a channel swap
+  // anywhere on the way out cannot turn one reading into another, and every
+  // channel is a mid-tone away from the 0 and 255 an untouched or saturated one
+  // reads as.
+  //
+  // WHERE IT BELONGS IN THE RUN: **before X**, and that is not cosmetic. X, Y, Z
+  // and AA are expected to fail on Windows because the page has one `GPUDevice`
+  // and therefore one queue, and X's stuck canvas readback strands every
+  // `mapAsync` queued after it. This group reads bytes back, so behind X it would
+  // be stranded too — and it is not in that platform's `--expect-fail` list, so
+  // it would turn the Windows job red. Ahead of X it resolves like S through W
+  // do, and it makes X no worse: what strands the canvas groups is their own
+  // present, not the number of submits before them. Its letter is the next free
+  // one rather than its position, because renumbering X onwards would rewrite an
+  // `--expect-fail` list that records a measurement.
+  group('AC — a stencil reference decides which of two draws survives');
+
+  const PROBE_STENCIL_PIXELS = 64 * 64;
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_STENCIL_*_BYTES`, spelled out
+  // here rather than imported, as every expected value in this file is.
+  const PROBE_STENCIL_FIRST_BYTES = [60, 130, 200, 255];
+  const PROBE_STENCIL_SECOND_BYTES = [200, 70, 110, 255];
+  const PROBE_STENCIL_BACKGROUND_BYTES = [30, 90, 150, 255];
+
+  const stencilStart = await evaluate(
+    page,
+    `(async () => {
+     const { startStencilProbe } = await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     return { started: startStencilProbe({ exports }) };
+   })()`
+  );
+  // Poll across frames exactly as group T does.
+  const stencil = stencilStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readStencilProbe, pollStencilProbe, STENCIL } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readStencilProbe({ exports, memory: exports.memory });
+           if (r.state === STENCIL.UNDECODABLE) {
+             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           }
+           if (r.state !== STENCIL.READY) {
+             pollStencilProbe({ exports });
+             return null;
+           }
+           // Ready: classify every texel here rather than shipping 16384 of them
+           // out. Which of the three colours came back is the whole verdict, so
+           // the counts are what crosses — a run that produced a mixture is a
+           // different failure from one that produced the wrong colour evenly,
+           // and the message has to be able to say which.
+           const want = ${JSON.stringify(PROBE_STENCIL_FIRST_BYTES)};
+           const second = ${JSON.stringify(PROBE_STENCIL_SECOND_BYTES)};
+           const background = ${JSON.stringify(PROBE_STENCIL_BACKGROUND_BYTES)};
+           const same = (at, colour) =>
+             r.bytes[at] === colour[0] &&
+             r.bytes[at + 1] === colour[1] &&
+             r.bytes[at + 2] === colour[2] &&
+             r.bytes[at + 3] === colour[3];
+           let firstCount = 0;
+           let secondCount = 0;
+           let backgroundCount = 0;
+           let otherCount = 0;
+           let firstWrong = -1;
+           for (let at = 0; at + 3 < r.bytes.length; at += 4) {
+             if (same(at, want)) firstCount += 1;
+             else {
+               if (firstWrong < 0) firstWrong = at;
+               if (same(at, second)) secondCount += 1;
+               else if (same(at, background)) backgroundCount += 1;
+               else otherCount += 1;
+             }
+           }
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.length,
+             firstCount,
+             secondCount,
+             backgroundCount,
+             otherCount,
+             firstWrong,
+             sample: [...r.bytes.slice(0, 8)],
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+  check(
+    'AC',
+    'wasm encoded the stencil setup frame — two targets, the masked pipeline, a reference before each of two draws, the copy, the request',
+    stencilStart?.started === true,
+    stencilStart?.started
+      ? 'the stencil draw-and-read frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'AC',
+    'the stencil reference decided which draw survived — the whole target is the first draw’s colour',
+    stencil?.done === true &&
+      stencil.len === PROBE_STENCIL_PIXELS * 4 &&
+      stencil.firstCount === PROBE_STENCIL_PIXELS,
+    stencil?.done !== true
+      ? `no stencil readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : stencil.firstCount === PROBE_STENCIL_PIXELS
+        ? `${stencil.len} bytes, every texel [${PROBE_STENCIL_FIRST_BYTES.join(', ')}] — the 0x11 draw was discarded and the 0x2A one was not`
+        : `state ${stencil.state}, ${stencil.len ?? 0} bytes: ` +
+          `${stencil.firstCount} first, ${stencil.secondCount} second ` +
+          '(the second setStencilReference changed nothing), ' +
+          `${stencil.backgroundCount} background ` +
+          '(neither did the first, so the pipeline’s baked 0x33 decided both), ' +
+          `${stencil.otherCount} some other colour; first wrong at byte ${stencil.firstWrong} ` +
+          `(sample ${JSON.stringify(stencil.sample)})` +
+          `${stencil.error ? ` — ${stencil.error}` : ''}`
   );
 
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**

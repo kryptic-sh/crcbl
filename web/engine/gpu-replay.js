@@ -3282,6 +3282,9 @@ export class Replayer {
         case 'SetScissor':
           this.#setScissor(sequence, command);
           break;
+        case 'SetStencilReference':
+          this.#setStencilReference(sequence, command);
+          break;
         case 'BindIndexBuffer':
           this.#bindIndexBuffer(sequence, command);
           break;
@@ -5103,9 +5106,11 @@ export class Replayer {
    *     the way {@link webgpuTextureFormatFor} refuses a gated format against the
    *     device's own features. `false` proceeds and sets nothing.
    *   * **The stencil `reference` is DROPPED, not lost.** WebGPU has no
-   *     `stencilReference` in the pipeline — it is set per-pass through
-   *     `GPURenderPassEncoder.setStencilReference` — so it is dropped here the way
-   *     `workgroupSize` is, and its round trip in Rust is what keeps it carried.
+   *     `stencilReference` in the pipeline — it is per-pass state — so it is
+   *     dropped here the way `workgroupSize` is, and
+   *     {@link Replayer#setStencilReference} is what carries the value a draw
+   *     actually compares against. Its round trip in Rust is what keeps the
+   *     pipeline field carried.
    *   * **`DepthBias.constant` is `f32` on the seam and `GPUDepthBias` is an
    *     integer.** A non-integer (or out-of-`i32`) value would make WebIDL's
    *     `[EnforceRange] long` conversion throw synchronously, so it is refused by
@@ -5926,6 +5931,31 @@ export class Replayer {
     }
     const { x, y, width, height } = command.rect;
     this.#currentPass.setScissorRect(x, y, width, height);
+  }
+
+  /**
+   * Sets the stencil reference on the open render pass — the wire `u32` →
+   * `setStencilReference(reference)`.
+   *
+   * ON THE PASS, for {@link Replayer#setViewport}'s reason, and the value passes
+   * straight through: `GPUStencilValue` is a `u32` too, so there is nothing to
+   * narrow and nothing a negative could mean. What the pipeline's
+   * `stencilReadMask` does not cover, the comparison does not see — which is the
+   * pipeline's business, not this arm's. With no pass open it goes to the error
+   * queue, {@link Replayer#setScissor}'s judgement: a mid-frame ordering fault on
+   * the far side, not a reason to abandon the rest of the frame.
+   *
+   * @param {bigint} sequence
+   * @param {{ reference: number }} command
+   */
+  #setStencilReference(sequence, command) {
+    if (!this.#currentPass) {
+      this.#deviceError(
+        `a stencil reference was set (command ${sequence}) with no render pass open`
+      );
+      return;
+    }
+    this.#currentPass.setStencilReference(command.reference);
   }
 
   /**
