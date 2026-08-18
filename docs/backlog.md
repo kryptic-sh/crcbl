@@ -51,15 +51,45 @@ grid**: a path argument, the load through `crcbl::assets::DirSource`, the
 conversion, frame-on-load, orbit/pan/zoom/`F`, and one directional light. Every
 module's docs name its own omission; this is the list in one place.
 
-- **The grid floor.** The one part of milestone 1 that is missing.
-  `build_render_scene` sizes a `SceneDesc`'s pools for the document alone, and a
-  grid is a second resident mesh plus a second material row — so it is an edit
-  to how `crate::model` assembles the scene (append a `MeshDesc` and a
-  `GpuMaterial`, widen `Capacities`), not a pass to add in `crate::gpu`.
-  `crcbl-greybox` already has plane primitives sized in metres, so the geometry
-  need not be written; the open question is whether the grid is a mesh at all or
-  a screen-space shader, which is what every other engine ends up doing to keep
-  the lines a constant width at any zoom.
+- **The grid floor.** The one part of milestone 1 that is missing, and the "mesh
+  or screen-space shader" question is now answerable rather than open.
+
+  **The industry answer is the screen-space shader**, and for a reason a mesh
+  cannot address: a grid drawn as geometry has lines whose _screen_ width
+  changes with zoom, so it needs a density LOD to stay legible, and it either
+  ends at its own edges or is drawn absurdly large. Blender's overlay grid,
+  Godot 4's editor grid and Unity's all draw a full-screen pass instead,
+  reconstructing the ground plane per fragment by intersecting the view ray with
+  `y = 0` and using screen-space derivatives (`fwidth`) for a constant-width,
+  anti-aliased line that fades with distance. That is the correct-robust-and-
+  performant answer: one triangle, no pool growth, no LOD, and lines that look
+  the same at every zoom.
+
+  **What blocks it here is depth, and this was measured rather than assumed.**
+  `crcbl_render::forward::add_passes` returns exactly one `ImageId` — the HDR
+  colour — and nothing on that type exposes the depth image it renders against.
+  So a grid pass added in `apps/viewer`'s `gpu.rs`, beside the menu and UI
+  passes, **cannot be occluded by the model**: it would draw over or under the
+  whole thing with no depth test. The earlier framing here — mesh means a scene
+  change, shader means a pass in `crate::gpu` — was right about the mesh half
+  and wrong about the shader half being local.
+
+  So the real choice is:
+  1. **Return the depth `ImageId` from `forward::add_passes` too**, and put the
+     grid pass in the viewer. Keeps editor chrome out of the engine, and the
+     change is small — the graph already hands back an image, and handing back
+     the depth it already owns is not a new concept. Widens a public API for one
+     consumer today, which is the honest cost.
+  2. **Put the grid in `crcbl-render`** behind a flag. No API change, wrong
+     layer: a reference grid is editor furniture, and every sample that is not
+     an editor would carry it.
+  3. **Grid as scene geometry.** Works with no API change at all and inherits
+     depth for free, which is its whole appeal — and buys the zoom and LOD
+     problems that made every editor stop doing it.
+
+  My reading is (1). Not started; recorded so the next session does not
+  re-derive the depth finding, which is what made the question decidable.
+
 - **Milestone 2 in whole** — the mesh/material/texture panels, the wireframe and
   normals views, the exposure slider. `crate::gpu` has a `UiRenderer` pass now,
   so the blocker is no longer the pass: it is that none of those listings has
