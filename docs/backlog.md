@@ -74,7 +74,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Sixteen blockers: dx12 5, Metal 9, WebGPU 2.** That is what stands between
+**Fifteen blockers: dx12 5, Metal 8, WebGPU 2.** That is what stands between
 here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -949,17 +949,23 @@ Same exercise as the dx12 pass, and it found more. Two of these mislead about
 _who owns the work_, which is what makes them expensive rather than merely
 untidy.
 
-1. **`PushConstants`: the obstacle does not exist, and it is written down three
-   times.** The row, `MetalDevice::supports`, `features_of`'s docs and the
-   pipeline-layout refusal all say the committed MSL puts a push-constant block
-   at `buffer(0)`, ahead of every bound buffer. **No committed MSL declares a
-   push-constant block at all** — `msl/ui.metal` has `vertices` at `buffer(0)`
-   and `constants` at `buffer(1)`, and `binding.rs`'s own module docs say so, so
-   two files in one crate contradict each other. This is the **same 2026-08
-   shader change** that made dx12's push-constant reason wrong: the block was
-   replaced by a uniform buffer because WGSL cannot carry one. The obstacle is a
-   missing test artifact — and it is the _same_ artifact dx12 needs, so build it
-   once.
+1. ~~`PushConstants`~~ — **closed.** The obstacle never existed, and it was
+   written down three times. Measured from the artifact the block lands at
+   `buffer(1)`, _behind_ the bound buffer, so nothing shifted and the slice was
+   smaller than its row implied. Left here as the record of what the wrong
+   reason cost: three planning passes took it at face value.
+
+   The original wording, for reference: The row, `MetalDevice::supports`,
+   `features_of`'s docs and the pipeline-layout refusal all say the committed
+   MSL puts a push-constant block at `buffer(0)`, ahead of every bound buffer.
+   **No committed MSL declares a push-constant block at all** — `msl/ui.metal`
+   has `vertices` at `buffer(0)` and `constants` at `buffer(1)`, and
+   `binding.rs`'s own module docs say so, so two files in one crate contradict
+   each other. This is the **same 2026-08 shader change** that made dx12's
+   push-constant reason wrong: the block was replaced by a uniform buffer
+   because WGSL cannot carry one. The obstacle is a missing test artifact — and
+   it is the _same_ artifact dx12 needs, so build it once.
+
 2. **`TimestampQuery`: stated as unknowable, and the unknown is the wrong one.**
    The row turns on whether a timestamp can be taken at an arbitrary point, and
    `create_query_set` says a stage boundary "is not somewhere the seam's call
@@ -1338,7 +1344,7 @@ the pending case this capability is defined around is driven by nothing at all.
 ### DECISION NEEDED — what "parity holds" has to mean before `crcbl-wgpu` goes
 
 The stated order is: reach parity, then delete `crcbl-wgpu`. Goal 2 is done and
-gated. Parity is at **16 blockers**, down from 29, and the composition now
+gated. Parity is at **15 blockers**, down from 29, and the composition now
 matters more than the number — because **a strict reading of "all blockers
 closed" is not reachable with the hardware this project has.**
 
