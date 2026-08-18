@@ -57,8 +57,8 @@ why it has drifted.
 
 **The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
 below is built, so the count is now exact rather than approximate:
-`Capability::ALL` is **25** variants and `DIVERGENCES` holds **47** reviewed
-rows — dx12 7, WebGPU 17, wgpu 13, Metal 10, Vulkan 0. (The earlier framing, "28
+`Capability::ALL` is **25** variants and `DIVERGENCES` holds **46** reviewed
+rows — dx12 6, WebGPU 17, wgpu 13, Metal 10, Vulkan 0. (The earlier framing, "28
 declared `Features` bits and roughly 96 refusal sites", said the same thing less
 precisely and is superseded.)
 
@@ -74,7 +74,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Nineteen blockers: dx12 7, Metal 9, WebGPU 3.** That is what stands between
+**Eighteen blockers: dx12 6, Metal 9, WebGPU 3.** That is what stands between
 here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -815,7 +815,7 @@ hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
 
 ### dx12's remaining blockers, ordered — and two reasons that were wrong
 
-dx12 owns 7 of the 19 parity blockers and none is an API absence. Planned
+dx12 owns 6 of the 18 parity blockers and none is an API absence. Planned
 2026-08-18 against the `windows` 0.62.2 bindings and `wgpu-hal`'s dx12 backend
 on disk. **Two of the divergence list's own stated reasons did not survive
 reading the code**, and both change what the work is:
@@ -851,10 +851,9 @@ need it.
 3. ~~Queries~~ — **landed.** The hidden-resolve-buffer shape it needed is in the
    commit; a statistics set still refuses `query_results`, which is the seam
    defect below rather than a backend gap.
-4. **MSAA resolve.** Small implementation, but the first slice needing a test
-   written. It can avoid `NEEDS_PIPELINE` entirely: clear a multisampled
-   attachment with `resolve: Some(view)`, then read the resolve target back — a
-   clear needs no pipeline. Runs on vk and Metal too.
+4. ~~MSAA resolve~~ — **landed.** The trap was this backend's own: a `D2`
+   render-target view addresses layer zero alone, so reading the layer count
+   would have planned a resolve per layer for a descriptor covering one.
 5. **Push constants.** Small implementation; the evidence costs a new committed
    shader artifact, since nothing in the engine would consume one. WGSL cannot
    carry it, so the artifact's target list excludes wgsl and both wgpu backends
