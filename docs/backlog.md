@@ -873,6 +873,121 @@ need it.
 — and must shrink the dx12-local test asserting every remaining refusal names
 itself.
 
+### Metal's nine blockers, ordered — and a hole in the parity mechanism
+
+Planned 2026-08-18 against `objc2-metal 0.3.2` and `wgpu-hal 30.0.0` on disk.
+
+**The structural finding first, because it applies to every backend and not just
+Metal.** Eight of Metal's nine rows sit behind a `Features` flag that
+`crcbl-mtl` reports on **no device** — `DRAW_INDIRECT_COUNT`, `MESH_SHADER`,
+`TASK_SHADER`, `PUSH_CONSTANTS`, `DESCRIPTOR_INDEXING`, `TIMESTAMP_QUERY`,
+`OCCLUSION_QUERY`, `PIPELINE_STATISTICS_QUERY`. `is_parity_gap` returns `false`
+when the gate is clear, so **deleting one of those rows without turning its flag
+on leaves the parity report green over evidence nobody has.** The snapshot test
+notices the row left; nothing notices that its replacement proves nothing. So
+every slice has three parts, not one: the backend call, the flag in
+`features_of`, and evidence that flipping the flag broke no golden. The dx12
+plan spotted this for mesh specifically; it is general.
+
+Three of those flags change what the renderer _builds_: `MESH_SHADER` and
+`DRAW_INDIRECT_COUNT` both move `GeometryPath`, and `DESCRIPTOR_INDEXING` moves
+`BindingModel`. The other five move nothing, which makes them the cheap ones.
+
+**The order:**
+
+1. **A counter probe that closes no rows and unblocks three.** One `#[ignore]`d
+   test on the existing Metal CI job printing `supportsFamily` for the three
+   families mesh shaders need, all five `supportsCounterSampling:` answers,
+   every `counterSets()` name, and a `sampleTimestamps:gpuTimestamp:`
+   correlation across a sleep. That last one is the measured
+   `timestamp_period_ns` the adapter currently says Metal has no way to report —
+   and `wgpu-hal` fabricates it as 1.0 on Apple silicon and 83.333 on Intel,
+   calling it "the dangerous but easy thing" in its own comment. We do not have
+   to guess. Needs one manifest line: `MTLCounters`, which the manifest
+   currently calls deliberately absent.
+2. **`PushConstants`** — small, moves no golden, and its unknown is measurable
+   _here_ rather than on CI (see the corrections below).
+3. **`TimestampQuery`** — the exercise already exists and only has to flip.
+   Metal is _easier_ than D3D12 here: `resolveCounterRange:` reads on the CPU
+   with no submit, where D3D12 needs a hidden resolve buffer and its own list.
+4. **`OcclusionQuery`** — downstream of the seam's query redesign, which was
+   already shaped by Metal's `visibilityResultBuffer` being pass-level. Metal's
+   own part is small, and one decision is its own: use
+   `MTLVisibilityResultMode::Counting`, not the `Boolean` wgpu-hal picks for
+   WebGPU's sake, since the design's `PreciseOcclusionCount` capability exists
+   exactly to let Metal answer `Yes` there.
+5. **`PipelineStatisticsQuery`** — only if the probe finds the statistic counter
+   set. This is the one slice with **no upstream to read**: `wgpu-hal`'s Metal
+   `create_query_set` is `todo!()` for it.
+6. **`TimelineWaitBeforeSignal`** — the only Metal row whose gating flag is
+   already reported, so the only one the parity report can prove on its own.
+   `MTLSharedEvent::setSignaledValue:` exists and `crcbl-mtl` already calls it;
+   what is missing is a `Device::signal_semaphore` on the seam. Either add it
+   (shared with dx12's `ID3D12Fence::Signal`) or reclassify the row `Declined`
+   with the honest reason — the decline is ours, not Metal's.
+7. **`DrawIndirectCount`** — largest non-mesh slice and likely a seam change
+   (see corrections). `wgpu-hal`'s Metal version is an empty `//TODO`.
+8. **`MeshShading` + `TaskShaderStage`** — last, splits in four, and re-keys
+   Metal's goldens twice. The MSL is already committed and `xcrun metal` already
+   compiles it in CI.
+9. **`BindlessDescriptorArray`** — last or `Declined`. The blocker is in
+   `crcbl-shaders`, not `crcbl-mtl`, and closing it reopens the backend's
+   barrier model.
+
+### Five Metal divergence reasons that are wrong
+
+Same exercise as the dx12 pass, and it found more. Two of these mislead about
+_who owns the work_, which is what makes them expensive rather than merely
+untidy.
+
+1. **`PushConstants`: the obstacle does not exist, and it is written down three
+   times.** The row, `MetalDevice::supports`, `features_of`'s docs and the
+   pipeline-layout refusal all say the committed MSL puts a push-constant block
+   at `buffer(0)`, ahead of every bound buffer. **No committed MSL declares a
+   push-constant block at all** — `msl/ui.metal` has `vertices` at `buffer(0)`
+   and `constants` at `buffer(1)`, and `binding.rs`'s own module docs say so, so
+   two files in one crate contradict each other. This is the **same 2026-08
+   shader change** that made dx12's push-constant reason wrong: the block was
+   replaced by a uniform buffer because WGSL cannot carry one. The obstacle is a
+   missing test artifact — and it is the _same_ artifact dx12 needs, so build it
+   once.
+2. **`TimestampQuery`: stated as unknowable, and the unknown is the wrong one.**
+   The row turns on whether a timestamp can be taken at an arbitrary point, and
+   `create_query_set` says a stage boundary "is not somewhere the seam's call
+   can reach". But **every `write_timestamp` in this repository is outside every
+   pass** — the render graph writes before `begin_*_pass` and after
+   `end_*_pass`, and the seam exercise writes between a barrier and a copy.
+   Outside a pass the backend may open its own encoder, so the boundary is
+   reachable, and `wgpu-hal` ships exactly that route. `Unclassified` is still
+   the right kind — whether _this device_ samples at all needs a Mac — but the
+   dependency named is wrong.
+3. **Mesh and task: the rows say the work is in the backend; part of it is in
+   the seam.** `MeshPipelineDesc` carries no object- or mesh-stage threadgroup
+   sizes, and `drawMeshThreadgroups:` requires both. That is the identical gap
+   `ComputePipelineDesc::workgroup_size` was added to fill, argued in those
+   exact terms — `wgpu-hal` escapes it by reflecting naga; this project commits
+   pre-generated MSL and cannot. **`crcbl-mtl` cannot close those rows alone.**
+4. **`DrawIndirectCount`: the shared constant omits what the backend states
+   twice.** It describes the work as a compute kernel encoding into an
+   `MTLIndirectCommandBuffer`. True and insufficient: that kernel must be
+   dispatched **before the render encoder was opened**, and the seam calls
+   `draw_indirect_count` inside the pass. The constant exists precisely so the
+   list and the backend cannot drift, and they have drifted the other way — the
+   backend now carries a material fact the shared sentence does not. It changes
+   the estimate from "encode an ICB" to "split the render encoder, or change the
+   seam".
+5. **`BindlessDescriptorArray`: true reason, wrong owner.** It reads as backend
+   work. The gating fact is that an argument buffer bound where a shader
+   declared vertex data _silently reads descriptor words as vertices_, so it
+   needs `crcbl-shaders` to emit different MSL. A second unstated cost: the
+   backend's barrier model rests on every resource being automatically tracked,
+   which argument buffers break.
+
+**Two smaller drifts, noted:** `crcbl-mtl`'s manifest still says the
+`macos-latest` runner hangs the command buffer, which CI's own comment
+supersedes — macos-26 executes correctly and the hang was
+`setDepthStencilState:nil`.
+
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
 They were declined for a reason that turns out to be wrong (above), and they now
