@@ -2813,9 +2813,10 @@ const NO_MULTISAMPLING: &str = "this device reports a max_sample_count below the
 ///   one that applied it; the levels can, and they are 34 to 73 apart.
 ///
 /// An error out of [`finish`](crcbl::hal::CommandEncoder::finish) is the third
-/// outcome and the one `crcbl-dx12` takes: its `begin_render_pass` refuses an
-/// attachment carrying a resolve view outright, since a D3D12 resolve is a
-/// `ResolveSubresource` after the pass rather than a field of the attachment.
+/// outcome. No backend answers that way now — `crcbl-dx12` did until it learnt
+/// to issue the `ResolveSubresource` after the pass that D3D12 wants instead of
+/// a field on the attachment — but the arm stays, because a refusal deferred to
+/// `finish` is how this seam's encoders report one.
 ///
 /// # The multisampled *view* is what nothing had asked for before
 ///

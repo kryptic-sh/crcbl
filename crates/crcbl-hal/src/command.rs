@@ -171,6 +171,13 @@ pub struct ColorAttachment {
     /// [`ResourceState::ColorAttachment`]; the HAL does not transition it.
     pub view: ImageViewHandle,
     /// MSAA resolve destination, if any.
+    ///
+    /// Like [`view`](Self::view), and for the same reason it says so: this must
+    /// already be in [`ResourceState::ColorAttachment`]. Every backend reads it
+    /// that way — `crcbl-vk` names `COLOR_ATTACHMENT_OPTIMAL` as the resolve
+    /// image's layout and `crcbl-dx12` transitions out of `RENDER_TARGET` and
+    /// back — so the seam should say it rather than leave three backends
+    /// agreeing by coincidence..
     pub resolve: Option<ImageViewHandle>,
     /// Start-of-pass behaviour.
     pub load: LoadOp,
