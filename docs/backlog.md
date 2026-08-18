@@ -1171,6 +1171,10 @@ counterSets = 0
 common set timestamp / stage utilization / statistic  present = false
 ```
 
+The timestamp correlation answered too:
+`wall_ns=53410875 cpu_delta=0 gpu_delta=0`. `sampleTimestamps:gpuTimestamp:` is
+**inert** on this device — a real 53 ms of wall clock and neither clock moved.
+
 **Both `Unclassified` rows are settled, and not in the direction the plan
 hoped.** The device reports sampling at three points and then exposes **zero
 counter sets**, so no `MTLCounterSampleBufferDescriptor` can name one and
@@ -1192,6 +1196,24 @@ to be unprovable on the only Metal machine this project has. The options are a
 hardware macOS runner, an explicit "implemented but unproven here" state that a
 reviewer accepts once, or leaving them open indefinitely. Closing them on a
 device that cannot execute them is not among the options.
+
+### A measurement test must not read a truthful zero as a broken apparatus
+
+The Metal counter probe reddened CI twice on its own assertions, and both were
+the same mistake in different clothes. It asserted that a device claiming
+counter sampling must expose a counter set, and that a CPU timestamp must move
+across a sleep — each on the reasoning that otherwise the test never reached a
+device.
+
+Both fired. Both were wrong: the runner printed its device name and then
+answered zero counter sets, and `cpu_delta=0 gpu_delta=0` across 53 ms of real
+wall clock. It reached a device; the device's counter infrastructure is inert.
+
+**A zero is data.** The honest reachability signal is the one thing that cannot
+be a measurement — an empty device name — and that assertion stays. Worth
+remembering when the next probe is written, because a measurement that fails on
+an unexpected answer stops being a measurement and becomes an assumption with a
+stack trace.
 
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
