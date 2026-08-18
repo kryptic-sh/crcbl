@@ -245,6 +245,33 @@ failure.**
    workspace root's `Cargo.toml` holds the `path` entry the member manifest
    resolves through, so that is a second manifest edit and not just a comment.
 
+   **A second CI job goes with it, and the inventory above did not name it:**
+   `cross-backend image compare (vk vs wgpu)`, which runs
+   `crates/crcbl/tests/run-cross-backend-e2e.sh`. Its own header calls it
+   `docs/plan/12-testing.md`'s "the tier system's regression net" and the P5
+   gate, P5 being "when a _second_ backend implements the seam". After the
+   deletion **no two backends share a runner** — vk on Linux, dx12 on Windows,
+   Metal on macOS, WebGPU in a browser — so there is no pair left to compare on
+   one machine.
+
+   **The loss is smaller than that framing suggests, and the difference is
+   measured rather than argued.** Goldens are shared, not backend-keyed: the 27
+   images under `crates/crcbl/tests/golden/` carry no backend in their names
+   (the four matching "mesh" are geometry scenes), so every backend already
+   compares against the same references on its own runner and cross-backend
+   agreement survives transitively. What actually goes is the **direct** pixel
+   comparison, whose bound is tighter than golden tolerance — the runner's own
+   worked example is two backends differing in 84.23% of pixels at a max channel
+   delta of 1, none over tolerance — together with its refusal to pass two blank
+   frames, which is the check that both backends rendered at all.
+
+   So the options are: drop the job with the crate and rely on shared goldens;
+   or re-point it across runners, comparing vk's Linux frames against dx12's
+   Windows frames through uploaded artifacts, which is a bigger job than the one
+   being deleted and buys a comparison across two software rasterisers that
+   already disagree in the last bit. Worth deciding deliberately rather than
+   discovering when the job's name stops resolving.
+
    **The lockfile was checked and is not a hazard, which is worth recording
    because the manifests imply it might be.** `crcbl-mtl`'s comment justifies
    `objc2-quartz-core` and `objc2-core-foundation` as "already in this
@@ -1523,6 +1550,27 @@ thing plus hardware. (3) is defensible on its own terms and is the only one that
 does not make the deletion wait on Metal's mesh support, which nothing in the
 engine uses on that backend today. But it is a scope call, not a technical one,
 and it is the last thing standing between here and goal 3.
+
+**What has changed since this was written, and it sharpens the question rather
+than answering it.** `crcbl-webgpu` now has **zero** divergences —
+`REVIEWED_BLOCKERS` does not name it at all, after `StorageImageBinding` gained
+the seam field it needed and `TimestampQuery` was closed by moving timestamps
+into the pass descriptor. The blocker list is **eleven rows across two
+backends**: dx12 5, Metal 6.
+
+That matters because the browser backend is the one `crcbl-wgpu`'s deletion is
+_about_. The replacement for the path `crcbl-wgpu` used to serve now implements
+the whole seam with nothing outstanding, which is the strongest form position
+(3) could ever take: the question is no longer "is the replacement ready" but
+"does an unrelated backend's unfinished work gate an unrelated crate's removal".
+Every remaining row belongs to dx12 or Metal, neither of which `crcbl-wgpu` has
+ever served — it runs Vulkan underneath on Linux and is not built for macOS or
+Windows CI at all.
+
+Position (1) and (2) are now really about **when parity is declared done**, not
+about whether the deletion is safe. They can be separated: nothing about
+deleting `crcbl-wgpu` makes dx12's mesh reporting or Metal's counter sets
+harder, and keeping the crate does not make either easier.
 
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
