@@ -1115,43 +1115,22 @@ both features — but the raster exercises made it **reachable where it was not
 before**, so it is a live hazard on a poorer device rather than a theoretical
 one.
 
-### MEASURED — CI's Metal device ignores depth clamping, and there is no gate
+### SHIPPED — depth clamping is withheld where it was measured not to work
 
-The probe ran and the answer is unambiguous:
+The probe answered that this runner ignores `MTLDepthClipMode::Clamp` entirely,
+with and without a depth attachment, while its four controls passed. Real Metal
+honours it. `crcbl-mtl` now withholds `Features::DEPTH_CLAMP` from a device
+whose name says virtual — `wgpu-hal`'s own precedent, for its mesh gate, since
+Metal has no query for depth clip mode and both of `wgpu-hal`'s gates are things
+every macOS device answers yes to — **and refuses a pipeline that asks for
+clamping without the feature**, because withholding alone would only move the
+lie.
 
-```
-Clamp at z=1.5, no depth attachment,           drew = false
-Clamp at z=1.5, D32Float depth attachment,     drew = false
-this device ignores MTLDepthClipMode::Clamp entirely
-```
-
-All four controls passed — a triangle inside the volume drew, and one past the
-far plane under `Clip` did not, both with and without an attachment — so the
-fixture is sound and the "needs a depth attachment" explanation is **dead**. The
-seam's exercise is right, and vk, wgpu and WARP all rasterise it.
-
-**This is the paravirtual device, not Metal.** Dawn maps `unclippedDepth` to
-`MTLDepthClipMode::Clamp`, the WebGPU CTS covers this exact geometry, and Dawn's
-expectations carry no Apple Silicon entry for it — so real Metal honours it and
-only this runner does not. Same device that reports three counter sampling
-points with zero counter sets.
-
-**The problem is that there is no honest gate to hang it on.** Metal has no
-query for depth clip mode. `wgpu-hal`'s two gates are `macOS_GPUFamily1_v1` —
-the _baseline_ macOS feature set, value 10000, which every macOS device answers
-yes to — and "is this macOS". Neither can come back false here.
-
-**Decided: withhold `Features::DEPTH_CLAMP` when the device reports itself
-virtual**, which is precedent `wgpu-hal` sets itself with `!is_virtual` for mesh
-shaders, and which `crcbl-mtl`'s adapter already measures and prints. Then
-`Support::granted` answers `NotOnThisDevice`, the parity report says _unprovable
-here_ rather than green, and no `DIVERGENCES` row lies about real hardware.
-
-**It needs a second half to be correct, and this is the part worth not
-forgetting:** withholding the flag is only honest if the backend then _refuses_
-a pipeline that asks for depth clamping. "Declared unsupported must refuse with
-the documented error" is half the parity contract, and a backend that withholds
-a feature and then silently sets the mode anyway has just moved the lie.
+**One residual risk, and it is a guess rather than a measurement:** the quirk is
+keyed on a substring, so a real GPU whose name contains "virtual" would silently
+lose the capability. It is bounded and one-directional — it loses a feature and
+says so, rather than discarding geometry — and it is the same risk `wgpu-hal`
+accepts, but it is worth knowing it is not measured.
 
 ### MEASURED — CI's Metal device can serve neither query, and no mesh
 
