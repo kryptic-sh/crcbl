@@ -94,9 +94,10 @@ pub enum LoadError {
     NoGeometry(PathBuf),
     /// The box around the document's geometry is not finite.
     ///
-    /// Refused rather than drawn, because the camera cannot be framed on it —
-    /// see the [module docs](self) and [`world_bounds`], which is also where
-    /// the one non-finite position this does *not* catch is written down.
+    /// Refused rather than drawn, because the camera cannot be framed on it.
+    /// Raised for an infinity by the box itself and for a `NaN` by
+    /// [`has_non_finite_position`], which is a separate pass for a reason
+    /// [`world_bounds`] gives.
     NonFiniteGeometry(PathBuf),
 }
 
@@ -185,6 +186,9 @@ pub fn load(path: &Path) -> Result<Model, LoadError> {
     // Before the conversion, not after: the conversion is what builds meshlets
     // out of these positions, and a non-finite one reaching that is a worse
     // failure than a message.
+    if has_non_finite_position(&imported) {
+        return Err(LoadError::NonFiniteGeometry(path.to_path_buf()));
+    }
     let bounds =
         world_bounds(&imported).ok_or_else(|| LoadError::NoGeometry(path.to_path_buf()))?;
     if !bounds.min.is_finite() || !bounds.max.is_finite() {
@@ -219,16 +223,46 @@ pub fn load(path: &Path) -> Result<Model, LoadError> {
 /// therefore always in the safe direction: the camera can be framed wider than
 /// the drawn model, never tighter, and the skip that caused it was logged.
 ///
-/// # A lone `NaN` corner is absorbed, and that is `Aabb`'s behaviour
+/// # The box cannot report a `NaN`, so [`has_non_finite_position`] does
 ///
-/// `Aabb::from_points` folds points in with `f32::min` and `f32::max`, which
-/// both return the *other* operand when one side is `NaN`. So a single `NaN`
-/// coordinate among finite ones disappears and the box that comes out is the
-/// finite one — while an infinity, or a mesh whose every position is `NaN`,
-/// propagates and is what [`load`] refuses. That is the right split for this
-/// application either way: a box that is finite is a box the camera can be
-/// framed on, and the odd degenerate vertex behind it draws as a degenerate
-/// triangle rather than taking the process down.
+/// `Aabb::from_points` skips a `NaN` lane rather than propagating it, so that a
+/// cull box always contains its finite points instead of rejecting geometry
+/// that is on screen. The box it returns is therefore finite whatever the
+/// positions were, and testing it — which is what this note used to describe as
+/// sufficient — cannot see a `NaN` at all. An infinity still propagates, having
+/// a defined ordering, and [`load`] keeps that check for it.
+///
+/// So the positions are read once more before the fold. That earlier note
+/// dismissed the scan as too costly for "a case that draws as a degenerate
+/// triangle"; the case it was actually weighing was a box that came back finite
+/// while no longer containing the model, which frames the camera on geometry
+/// that is not there.
+/// Whether any vertex position in the document is `NaN` or infinite.
+///
+/// Separate from [`world_bounds`], and reading the positions a second time,
+/// because the box cannot answer this. `Aabb::from_points` skips a `NaN` lane
+/// rather than propagating it — deliberately, so that a cull box always
+/// contains its finite points instead of rejecting geometry that is on screen —
+/// and by the time the fold has run the offending coordinate is gone. Only an
+/// infinity, which orders normally, still shows up in the result.
+///
+/// The second pass is a load-time linear scan that stops at the first bad
+/// value, against a document already fully in memory. It buys the distinction
+/// between [`LoadError::NoGeometry`] and [`LoadError::NonFiniteGeometry`],
+/// which folding the test into `world_bounds`' `Option` would lose.
+#[must_use]
+fn has_non_finite_position(scene: &GltfScene) -> bool {
+    scene.meshes().iter().any(|mesh| {
+        mesh.primitives().iter().any(|primitive| {
+            primitive
+                .positions()
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        })
+    })
+}
+
 #[must_use]
 pub fn world_bounds(scene: &GltfScene) -> Option<Aabb> {
     let mut corners = Vec::new();
@@ -360,5 +394,20 @@ mod tests {
         let error = load(&path).expect_err("an infinite corner has no bounding box");
         assert!(matches!(error, LoadError::NonFiniteGeometry(_)), "{error}");
         assert!(error.to_string().contains("NaN"), "{error}");
+    }
+
+    /// **A `NaN` corner is refused, and the box is not what notices it.**
+    ///
+    /// Its neighbour above uses an infinity, which survives the fold on
+    /// ordering and so reaches `load`'s finite check. A `NaN` never does:
+    /// `Aabb::from_points` skips that lane so the cull box keeps containing its
+    /// finite points, and what comes out is finite no matter what went in. This
+    /// is the test that the extra position scan exists and runs — remove
+    /// `has_non_finite_position` from `load` and only this goes red.
+    #[test]
+    fn a_nan_vertex_position_is_refused_though_the_box_comes_out_finite() {
+        let (_dir, path) = written("nan.glb", &fixture::nan_glb());
+        let error = load(&path).expect_err("a NaN corner has no bounding box");
+        assert!(matches!(error, LoadError::NonFiniteGeometry(_)), "{error}");
     }
 }

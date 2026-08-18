@@ -57,15 +57,26 @@ pub fn empty_glb() -> Vec<u8> {
 /// Nothing in the importer looks at a float's *value*, so this is a document
 /// that loads cleanly and has no bounding box — see [`crate::model`].
 ///
-/// Infinity rather than `NaN`, and the difference is load-bearing:
-/// `Aabb::from_points` folds points in with `f32::min`/`f32::max`, and those
-/// two return the *other* operand when one is `NaN`. So a lone `NaN` corner is
-/// silently absorbed and an infinite one propagates, which makes this the
-/// document that reaches the check.
+/// Infinity survives the fold on ordering, so the corner may sit anywhere —
+/// unlike [`nan_glb`], where the position is the whole point.
 #[must_use]
 pub fn non_finite_glb() -> Vec<u8> {
     let mut positions = POSITIONS;
     positions[0][1] = f32::INFINITY;
+    document(&node_clause(Vec3::ZERO, true), positions)
+}
+
+/// A `.glb` with one `NaN` corner.
+///
+/// The index does not matter, and that is the point: `Aabb::from_points` skips
+/// a `NaN` lane from every position, so this document's bounding box comes out
+/// finite and indistinguishable from a healthy one. It is refused by
+/// `crate::model`'s position scan instead — which is what makes this fixture
+/// the thing that proves the scan runs.
+#[must_use]
+pub fn nan_glb() -> Vec<u8> {
+    let mut positions = POSITIONS;
+    positions[2][0] = f32::NAN;
     document(&node_clause(Vec3::ZERO, true), positions)
 }
 

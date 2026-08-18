@@ -113,22 +113,6 @@ say which `(mesh, primitive)` each of its `instances` came from, or to carry
 per-instance bounds; neither exists, and adding one to `crcbl-scene` for a
 cosmetic framing difference was not worth it here.
 
-### `Aabb::from_points` absorbs a lone `NaN`, and nothing says so
-
-`crcbl_render::cull::Aabb::from_points` folds points with `Vec3::min`/`max`,
-which are `f32::min`/`f32::max` per lane — and those return the _other_ operand
-when one side is `NaN`. So a single `NaN` coordinate among finite ones vanishes
-and the box that comes out is the finite one, while an infinity propagates.
-Found while writing `apps/viewer`'s non-finite guard: the first fixture used a
-`NaN` corner and the guard did not fire.
-
-Neither behaviour is wrong for culling, which is what the type is for, and the
-absorbing one is arguably the friendlier default. It is written down because it
-is surprising, because `from_points`' docs argue carefully about `None` versus
-an infinite sentinel and say nothing about this, and because the next caller to
-use it as a validity check — as the viewer nearly did — will get a pass on a
-document with a `NaN` in it. A doc sentence on `from_points` would close it.
-
 ### The one device-loss ordering that does not hold
 
 `gpu-replay.js` now watches `GPUDevice.lost` and files the loss once, first,

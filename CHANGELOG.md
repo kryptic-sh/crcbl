@@ -1996,6 +1996,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`Aabb::from_points` could return a finite box that did not contain its own
+  points.** The fold used `Vec3::min`/`Vec3::max`, which glam writes as a bare
+  `if self.x < rhs.x { self.x } else { rhs.x }`. Every comparison against `NaN`
+  is false, so those return the _incoming_ point and throw the accumulator away:
+  one `NaN` vertex followed by one finite vertex left a box that looked healthy
+  and no longer enclosed the geometry, and a box that does not contain its
+  points culls what is on screen — the direction `crcbl_render::cull` documents
+  a cull must never err in. It now folds through `f32::min`/`f32::max` per lane,
+  which skip the unusable operand, so an odd `NaN` coordinate is ignored and
+  every finite point stays enclosed. A lane with no finite value at all is still
+  `NaN`, so a wholly degenerate mesh remains visible as one, and infinities are
+  unaffected.
+
+  **`apps/viewer` gained a vertex scan because of it.** Its `NonFiniteGeometry`
+  check tested the resulting box, which can no longer observe a `NaN` at all;
+  positions are now tested before the fold. The prior behaviour was recorded —
+  in a doc comment, a fixture and the backlog — as `f32::min`'s
+  absorb-everywhere rule, the opposite of what the dependency does, and the
+  fixture had been built around the wrong half deliberately.
+
 - **lumen's free-fly camera turned the wrong way.** The left arrow turned the
   view right and the right arrow turned it left. Yaw is measured from `-Z` and
   rises toward `+X`, which is the right-hand side — so

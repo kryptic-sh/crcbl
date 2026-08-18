@@ -85,6 +85,31 @@ impl Aabb {
     /// nothing, and the usual encoding for one — `min` at `+INFINITY`, `max` at
     /// `-INFINITY` — is a pair of values that survive into a buffer and turn
     /// every later comparison into a `NaN`.
+    ///
+    /// # A `NaN` lane is skipped, so this is not a validity check
+    ///
+    /// The fold goes through `f32::min`/`f32::max` per lane, which return the
+    /// **other** operand when one side is `NaN`. An unusable coordinate is
+    /// therefore ignored and the box still contains every finite point. Only a
+    /// lane with no finite value at all comes out `NaN`, so a wholly degenerate
+    /// mesh is still visible as one. An infinity has a defined ordering, is
+    /// real data, and is kept.
+    ///
+    /// **It is deliberately not [`Vec3::min`]/[`Vec3::max`]**, and the
+    /// difference was a bug rather than a preference. glam 0.33 writes those as
+    /// a bare `if self.x < rhs.x { self.x } else { rhs.x }`; every comparison
+    /// against `NaN` is false, so they yield the *incoming* point and discard
+    /// the accumulator. One `NaN` vertex followed by one finite vertex produced
+    /// a **finite box that did not contain the geometry** — which culls what is
+    /// on screen, the direction this module's header says a cull must never err
+    /// in. `a_nan_is_skipped_from_every_position_and_never_shrinks_the_box`
+    /// covers every position because the defect was positional, and it fails
+    /// against the glam form.
+    ///
+    /// What this costs callers is detection: `from_points(…).is_some()`, and
+    /// equally a finiteness test on the box that comes out, cannot tell you the
+    /// points were finite. A caller needing that must test the points
+    /// themselves before folding — `apps/viewer`'s `model` module does.
     #[must_use]
     pub fn from_points(points: impl IntoIterator<Item = Vec3>) -> Option<Self> {
         let mut points = points.into_iter();
@@ -94,8 +119,25 @@ impl Aabb {
             max: first,
         };
         for point in points {
-            bounds.min = bounds.min.min(point);
-            bounds.max = bounds.max.max(point);
+            // Per lane through `f32::min`/`f32::max` rather than `Vec3::min`/
+            // `Vec3::max`. glam writes those as a bare `if self.x < rhs.x`,
+            // which is false whenever either side is `NaN` and so yields the
+            // *incoming* point — discarding everything accumulated so far. One
+            // `NaN` vertex followed by one finite vertex therefore produced a
+            // finite box that did not contain the geometry, which culls what is
+            // on screen. `f32::min`/`f32::max` return the other operand instead,
+            // so an unusable coordinate is skipped and the box still contains
+            // every finite point.
+            bounds.min = Vec3::new(
+                bounds.min.x.min(point.x),
+                bounds.min.y.min(point.y),
+                bounds.min.z.min(point.z),
+            );
+            bounds.max = Vec3::new(
+                bounds.max.x.max(point.x),
+                bounds.max.y.max(point.y),
+                bounds.max.z.max(point.z),
+            );
         }
         Some(bounds)
     }
@@ -399,6 +441,66 @@ mod tests {
             bounds_min: [-0.5, -0.5, -0.5],
             bounds_max: [0.5, 0.5, 0.5],
         }
+    }
+
+    /// Where a `NaN` sits decides whether [`Aabb::from_points`] keeps it, and
+    /// the deciding line is in `glam` rather than here.
+    ///
+    /// `Vec3::min` is not `f32::min`. glam 0.33 writes it as
+    /// `if self.x < rhs.x { self.x } else { rhs.x }`, and every comparison
+    /// against `NaN` is false, so the expression returns **`rhs`** whichever
+    /// side is unusable. The fold seeds the box with the first point and makes
+    /// each later point the `rhs`, so a `NaN` that arrives later overwrites a
+    /// finite accumulator, while a `NaN` seeded into the accumulator is
+    /// overwritten by the first finite point after it.
+    ///
+    /// This is asserted because the behaviour was previously recorded the other
+    /// way round — as `f32::min`'s absorb-everywhere rule — and a caller
+    /// deciding whether to validate its own points will act on which one is
+    /// true. A `glam` upgrade that switched to `f32::min` would silently make
+    /// the common case absorb, so this test is the thing that would notice.
+    #[test]
+    fn a_nan_is_skipped_from_every_position_and_never_shrinks_the_box() {
+        let nan = Vec3::new(f32::NAN, 0.0, 0.0);
+        let low = Vec3::new(-1.0, -1.0, -1.0);
+        let high = Vec3::new(1.0, 1.0, 1.0);
+        let want = Aabb {
+            min: low,
+            max: high,
+        };
+
+        // Every position, because the defect this replaced was positional: the
+        // bare comparison yielded the incoming point, so a NaN anywhere but
+        // last threw away the extent gathered before it and still came back
+        // finite. Leading, middle and trailing all have to hold.
+        for (label, points) in [
+            ("leading", vec![nan, low, high]),
+            ("middle", vec![low, nan, high]),
+            ("trailing", vec![low, high, nan]),
+            ("before a finite point", vec![low, high, nan, low]),
+        ] {
+            let box_ = Aabb::from_points(points).expect("not empty");
+            assert_eq!(
+                box_, want,
+                "a NaN {label} must be skipped, leaving exactly the box the finite points make"
+            );
+        }
+
+        let infinite = Aabb::from_points([low, Vec3::new(f32::INFINITY, 0.0, 0.0), high])
+            .expect("three points is not empty");
+        assert_eq!(
+            infinite.max.x,
+            f32::INFINITY,
+            "an infinity has a defined ordering, so it is real data and is kept — only the \
+             unorderable value is skipped"
+        );
+
+        let all_nan = Aabb::from_points([nan, nan]).expect("two points is not empty");
+        assert!(
+            all_nan.min.x.is_nan() && all_nan.max.x.is_nan(),
+            "with nothing finite to fall back to in that lane the NaN is all there is, so a wholly \
+             degenerate mesh still reports as non-finite rather than as a plausible box"
+        );
     }
 
     /// A **live** instance of mesh 0 at `translation`.
