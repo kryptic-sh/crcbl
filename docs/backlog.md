@@ -24,16 +24,16 @@ So the coverage split is: the golden harness compares pixels but renders
 **offscreen**, which is the path that already worked; the browser gate drives
 the **canvas** path but only looks at text. The bug lived exactly in the gap.
 
-Worth noting the control's comment is wrong in a way that would mislead the next
-reader: it says the clear is "sRGB-encoded 0, 51, 204", but 51 is `0.2 × 255`,
-i.e. the value an **unencoded** canvas produces — an sRGB view would give
-about 123. The check does discriminate (123 is far outside the tolerance of 8);
-only the comment has the sign backwards.
-
 **What would close it:** one demo screenshot compared against a golden through
 the canvas path, at a colour that is not a fixed point of the transfer function.
 That is the same missing piece as the entry below about dx12's and Metal's
 presented path, and probably the same harness.
+
+The capture half already exists and does not need building: the file's own
+header records that `canvas.toDataURL()` returns the real pixels while
+`drawImage` plus `getImageData` yields transparent black on a WebGPU canvas —
+"look equivalent and are not", measured on Chromium 150. So the work is a
+reference image and a comparison, against a path the harness can already read.
 
 ### TOP PRIORITY — backend feature parity, enforced so it cannot rot
 
