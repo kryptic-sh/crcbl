@@ -2075,6 +2075,43 @@ rather than a matter of taste.** Its six rows split three ways, all measured:
 | `BindlessDescriptorArray`                   | writable — Metal's argument buffers do carry resource arrays; this backend binds flat tables |
 | `DrawIndirectCount`                         | writable, and now fully de-risked — the device creates _and executes_ ICBs                   |
 
+**`BindlessDescriptorArray` is expressible in Slang, and the way it is expressed
+is the whole finding.** `shaders/bindless_probe.slang` declares its array as
+`StructuredBuffer<uint> sources[] : register(t0, space0)`, and that annotation —
+load-bearing for the DXIL space assignment — is what makes the Metal target
+useless. `slangc -target metal` on it **exits 0** and emits
+
+    [[kernel]] void computeMain(..., uint device* destination_1 [[buffer(18446744073709551615)]], uint device*  sources_1[])
+
+`18446744073709551615` is `(uint64)-1`: an unassigned binding. `sources_1[]` is
+an entry-point parameter with no attribute at all. Neither can compile. Recast
+as a `ParameterBlock<Sources>` holding the array, the same compiler emits a real
+argument buffer —
+
+    [[kernel]] void computeMain(..., uint device* destination_1 [[buffer(1)]], Sources_default_0 constant* sources_1 [[buffer(0)]])
+
+— and still emits SPIR-V. So the row is blocked by the shader's HLSL-register
+formulation, not by Slang's Metal target. What is still unknown is whether Metal
+accepts `struct Sources_default_0 { uint device* items_0[]; }` — a flexible
+array member inside an argument buffer — which only a Mac can answer; a probe is
+being written to ask it.
+
+**The reusable lesson is the exit code.** This is the second place Slang's Metal
+target has failed by emitting plausible garbage rather than diagnosing: the ICB
+parameter is silently dropped, and here a binding index comes out as `-1`. A
+zero exit from `slangc -target metal` is not evidence the shader is usable, so
+any new Metal target declaration needs its artifact read or a device asked.
+
+**Recasting is not free, and that is the next decision.** `ParameterBlock` maps
+to a descriptor set in SPIR-V and a space in HLSL, so rewriting
+`bindless_probe.slang` changes the committed SPIR-V and DXIL, and with them the
+bind-group layouts `crcbl-vk` and `crcbl-dx12` already pass. The alternatives
+are a second Metal-only source (duplication, and two files to drift) or leaving
+the vk/dx12 formulation alone and accepting that this one shader has no Metal
+artifact. Do not choose until the probe says Metal takes the argument buffer at
+all — recasting a working shader to reach a path the device may refuse is the
+wrong order.
+
 So **four of six can never go green on the hardware this project has**, whatever
 anyone writes. "Metal fully closed" is not reachable by working harder; it is
 reachable only by buying a Mac runner. That is the whole content of position (1)
