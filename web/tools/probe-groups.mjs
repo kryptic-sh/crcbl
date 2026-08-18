@@ -1,4 +1,4 @@
-// The `crcbl-webgpu` seam groups — G through Z — and nothing else.
+// The `crcbl-webgpu` seam groups — G through AB — and nothing else.
 //
 // **THE ONLY GATE THAT DRIVES THIS SEAM COMMAND BY COMMAND.** Everything else
 // about the command stream is checked without a browser: `stream-decode.mjs`
@@ -2907,5 +2907,86 @@ export async function runProbeGroups({
           `first wrong at texel ${depth.firstWrong} (${depth.firstWrongValue} against ${PROBE_DEPTH_CLEAR}; ` +
           `the first four bytes were ${JSON.stringify(depth.sample)})` +
           `${depth.error ? ` — ${depth.error}` : ''}`
+  );
+
+  // **THE PARITY REPORT, AND THE ONLY GROUP HERE THAT CONSTRUCTS A
+  // `WebGpuDevice` AT ALL.** Every other group drives `StreamWriter` and the
+  // replayer: `crates/crcbl-webgpu/src/probe.rs` imports the writer, the
+  // transport and the reply decoder and nothing from `crate::hal`, so the
+  // groups above prove the encoding and the replay and prove nothing about
+  // `impl Device` — which is where every `Support` answer lives. The native
+  // seam suite that holds the other four backends to their declarations
+  // (`the_parity_report_matches_the_reviewed_divergence_list` in
+  // `crates/crcbl/tests/hal_seam_e2e.rs`) is a native binary and cannot reach a
+  // browser. So until this group existed, every `supports()` answer this
+  // backend gives was checked by nothing anywhere.
+  //
+  // WHAT IT ACTUALLY DOES: wasm builds a `WebGpuDevice` around the `DeviceCaps`
+  // the browser reported for the device this page opened in group G, walks
+  // `Capability::ALL` through `Device::supports`, and runs each answer through
+  // `crcbl_hal::parity_verdict` against `DIVERGENCES`. Both directions fail: a
+  // refusal with no row saying why, and a row for something this device turns
+  // out to have. The comparison is in Rust because `DIVERGENCES` is Rust data
+  // — nothing on this side of the boundary can see it — so what crosses is the
+  // matrix and the disagreements.
+  //
+  // WHERE IT BELONGS IN THE RUN, and why last is safe: this is the one probe
+  // that asks the browser nothing. It puts no command on the stream, registers
+  // no wait and drains nothing, so it cannot be stranded by work queued ahead
+  // of it — which matters on Windows, where X, Y, Z and AA are expected to fail
+  // because a stuck canvas readback strands everything behind it on the single
+  // queue. Those four time out rather than hanging, so the run reaches this
+  // group; if they ever became a hang, this group would move to just before X.
+  // All it needs is that group G's device opened.
+  group(
+    'AB — a WebGpuDevice’s supports() matrix matches the reviewed divergence list'
+  );
+
+  const parity = await evaluate(
+    page,
+    `(async () => {
+     const { runParityProbe } = await import('/engine/gpu-probe.js');
+     const { exports, memory } = globalThis.crcbl;
+     return runParityProbe({ exports, memory });
+   })()`
+  );
+
+  // The vacuity guard, and it is the whole reason `checked` and `held` are
+  // exported beside the verdict. A report that walked no capabilities agrees
+  // with every list there is; one where every capability was left unprovable by
+  // a device that withheld its gating feature settled nothing. Both would print
+  // `MATCHED`. The token count is checked against `checked` as well, so a matrix
+  // that lost entries on the way out is not read as a shorter run.
+  const tokens = parity?.report ? parity.report.split(' ') : [];
+  check(
+    'AB',
+    'a WebGpuDevice was built on the caps the browser reported and its whole supports() matrix came back',
+    parity?.name !== undefined &&
+      parity.name !== 'NO_DEVICE' &&
+      parity.checked > 0 &&
+      parity.held > 0 &&
+      tokens.length === parity.checked,
+    parity?.name === undefined
+      ? 'the parity export answered nothing — no wasm instance on the page'
+      : parity.name === 'NO_DEVICE'
+        ? 'no device has opened, so there were no caps to build a WebGpuDevice around'
+        : `${parity.checked} capabilities, ${parity.held} settled and ` +
+          `${parity.checked - parity.held} unprovable on this device: ${parity.report}`
+  );
+
+  // The verdict. `failures` is asserted empty beside it rather than instead of
+  // it: the state and the text are written from the same walk, and a check on
+  // one alone would let a mismatch with no message — or a message with no
+  // mismatch — through.
+  check(
+    'AB',
+    'every capability’s declaration agrees with crcbl_hal::DIVERGENCES, in both directions',
+    parity?.name === 'MATCHED' && parity.failures === '',
+    parity?.name === 'MATCHED' && parity.failures === ''
+      ? `${parity.held} settled declarations, every one reviewed`
+      : `${parity?.name}: ` +
+          (parity?.failures
+            ? parity.failures.trimEnd().split('\n').join(' | ')
+            : 'no report ran')
   );
 }

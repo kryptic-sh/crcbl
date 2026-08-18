@@ -1550,3 +1550,84 @@ export function readFillProbe({ exports, memory }) {
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: fillStateName(state), bytes };
 }
+
+/**
+ * The `PARITY_*` codes `__crcbl_web_gpu_probe_parity` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * `NO_DEVICE` is ordering rather than failure — there is no `DeviceCaps` to
+ * build a `WebGpuDevice` around until the device request has come back, so wait
+ * for {@link readDeviceProbe} to say `OPENED`. `MATCHED` and `MISMATCHED` are
+ * the verdict, and `MISMATCHED` always comes with `failures`.
+ */
+export const PARITY = Object.freeze({
+  UNASKED: 0,
+  NO_DEVICE: 1,
+  MATCHED: 2,
+  MISMATCHED: 3,
+});
+
+/**
+ * The same state-name helper again, for the parity codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function parityStateName(state) {
+  const found = Object.entries(PARITY).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Run the parity report: walk a real `WebGpuDevice`'s whole `supports()` matrix
+ * on the device the browser opened, and hold every answer against
+ * `crcbl_hal::DIVERGENCES`.
+ *
+ * THE ONE PROBE THAT ASKS THE BROWSER NOTHING, and the reason it needs no
+ * `start`/`poll`/`read` trio. Every other probe here puts a command on the
+ * stream and waits for the page's loop to replay it; this one compares two
+ * things wasm already holds — the caps that came back with the device, and a
+ * `const` list — so it is one call, and its answer is ready when it returns. It
+ * neither drains nor encodes, so calling it cannot take a reply another probe
+ * was waiting on, and nothing queued ahead of it can strand it.
+ *
+ * `checked` and `held` are the vacuity guard: a report that walked no
+ * capabilities agrees with every list there is, and one where every capability
+ * was left unprovable by a device that withheld its gating feature settled
+ * nothing. The gate asserts both against the matrix rather than trusting
+ * `MATCHED`.
+ *
+ * The call allocates, so the four views over wasm memory are built after it.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, checked: number, held: number,
+ *   report: string, failures: string }} `report` is one `Capability=verdict`
+ *   token per capability, space separated; `failures` is one disagreement per
+ *   line and empty when `state` is `MATCHED`.
+ */
+export function runParityProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_parity() >>> 0;
+  const checked = exports.__crcbl_web_gpu_probe_parity_checked() >>> 0;
+  const held = exports.__crcbl_web_gpu_probe_parity_held() >>> 0;
+  const report = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_parity_report_ptr(),
+    exports.__crcbl_web_gpu_probe_parity_report_len() >>> 0
+  );
+  const failures = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_parity_failures_ptr(),
+    exports.__crcbl_web_gpu_probe_parity_failures_len() >>> 0
+  );
+  return {
+    state,
+    name: parityStateName(state),
+    checked,
+    held,
+    report,
+    failures,
+  };
+}

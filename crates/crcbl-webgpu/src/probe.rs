@@ -97,6 +97,13 @@
 //! | [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) | `() -> i32` | Drain, and answer one of the `DEPTH_*` codes. |
 //! | [`__crcbl_web_gpu_probe_depth_bytes_ptr`](shim::__crcbl_web_gpu_probe_depth_bytes_ptr) | `() -> i32` | Where the depth plane starts, once [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) answers [`DEPTH_READY`]. |
 //! | [`__crcbl_web_gpu_probe_depth_bytes_len`](shim::__crcbl_web_gpu_probe_depth_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the depth probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
+//! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
+//! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
+//! | [`__crcbl_web_gpu_probe_parity_report_ptr`](shim::__crcbl_web_gpu_probe_parity_report_ptr) | `() -> i32` | Where the matrix starts — one `Capability=verdict` token per capability. |
+//! | [`__crcbl_web_gpu_probe_parity_report_len`](shim::__crcbl_web_gpu_probe_parity_report_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_parity_failures_ptr`](shim::__crcbl_web_gpu_probe_parity_failures_ptr) | `() -> i32` | Where the disagreements start, one per line. Empty on [`PARITY_MATCHED`]. |
+//! | [`__crcbl_web_gpu_probe_parity_failures_len`](shim::__crcbl_web_gpu_probe_parity_failures_len) | `() -> i32` | How long that text is, in UTF-8 bytes. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -336,6 +343,7 @@
 //! `web/engine/gpu-probe.js` is the page's half, and
 //! `web/tools/browser-e2e.mjs` is what drives it in a real browser.
 
+use core::fmt::Write as _;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -343,21 +351,22 @@ use crcbl_hal::{
     AdapterId, Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
     BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
     BlendState, BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage,
-    ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle,
+    Capability, ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle,
     CommandEncoderDesc, CompareOp, CompositeAlpha, ComputePassDesc, ComputePipelineDesc,
-    ComputePipelineHandle, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
+    ComputePipelineHandle, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState, Device,
     DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
     GraphicsPipelineHandle, ImageAspect, ImageCopy, ImageDesc, ImageHandle, ImageSubresourceLayers,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
-    IndexFormat, LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc,
-    PipelineLayoutHandle, PolygonMode, PresentInfo, PresentMode, PrimitiveState, PrimitiveTopology,
-    QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, ResourceState, SampleType,
-    SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle,
-    SwapchainDesc, SwapchainHandle,
+    IndexFormat, LoadOp, MemoryLocation, MultisampleState, Offset3d, ParityVerdict,
+    PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PresentInfo, PresentMode,
+    PrimitiveState, PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d,
+    RenderPassDesc, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
+    ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo,
+    SurfaceCaps, SurfaceHandle, SwapchainDesc, SwapchainHandle, divergence, parity_verdict,
 };
 
 use crate::device::DeviceProbe;
+use crate::hal::{HandlePool, SharedChannel, WebGpuDevice};
 use crate::instance::AdapterProbe;
 use crate::reply::{Reply, SurfaceCapsFailure};
 use crate::web::{StreamChannel, install};
@@ -627,6 +636,22 @@ pub const DEPTH_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`DRAW_UNDECODABLE`]'s twin.
 pub const DEPTH_UNDECODABLE: u32 = 5;
+
+/// Nothing has run the report, or there is no channel to have opened a device
+/// through.
+pub const PARITY_UNASKED: u32 = 0;
+/// No device has opened yet, so there is no [`DeviceCaps`](crcbl_hal::DeviceCaps)
+/// to build a [`WebGpuDevice`] around and nothing to
+/// report. An ordering rule rather than a failure — wait for
+/// [`DEVICE_OPENED`].
+pub const PARITY_NO_DEVICE: u32 = 1;
+/// Every capability's declaration agrees with
+/// [`DIVERGENCES`](crcbl_hal::DIVERGENCES).
+pub const PARITY_MATCHED: u32 = 2;
+/// At least one declaration disagrees with it, in one direction or the other.
+/// [`shim::__crcbl_web_gpu_probe_parity_failures_ptr`] carries which, one per
+/// line.
+pub const PARITY_MISMATCHED: u32 = 3;
 
 /// The side of the square texture the readback probe clears and reads back.
 ///
@@ -3956,6 +3981,55 @@ impl DepthProbe {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The parity report
+// ---------------------------------------------------------------------------
+
+/// The last run of the parity report: what every capability answered, and every
+/// answer that disagrees with [`DIVERGENCES`](crcbl_hal::DIVERGENCES).
+///
+/// **The browser counterpart of `the_parity_report_matches_the_reviewed_divergence_list`**
+/// in `crates/crcbl/tests/hal_seam_e2e.rs`. That test is a native binary and
+/// this backend runs in a browser, so every [`Support`] answer
+/// [`WebGpuDevice`] gives is a declaration nothing
+/// holds it to — the browser gate's other groups drive the writer and the
+/// replayer and never construct a [`Device`](crcbl_hal::Device) at all. This is
+/// what constructs one and reads its whole matrix.
+#[derive(Debug)]
+struct ParityReport {
+    /// One of the `PARITY_*` codes.
+    state: u32,
+    /// How many capabilities were walked — [`Capability::ALL`]'s length once the
+    /// report has run, and `0` when it has not. The vacuity guard: a report that
+    /// walked nothing agrees with everything.
+    checked: u32,
+    /// How many of those were **settled** — every verdict except
+    /// [`ParityVerdict::UnprovableHere`], which is a device that withheld the
+    /// gate and so a run that learnt nothing. See [`Probe::run_parity`] for why
+    /// the two differ here and not in the native suite.
+    held: u32,
+    /// The whole matrix, one `Capability=verdict` token per capability separated
+    /// by spaces, so a CI log carries the report on one line rather than only the
+    /// verdict.
+    report: String,
+    /// The disagreements, one per line, in [`Capability::ALL`] order. Empty when
+    /// [`state`](Self::state) is [`PARITY_MATCHED`].
+    failures: String,
+}
+
+impl ParityReport {
+    /// A report nothing has run yet.
+    const fn new() -> Self {
+        Self {
+            state: PARITY_UNASKED,
+            checked: 0,
+            held: 0,
+            report: String::new(),
+            failures: String::new(),
+        }
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -4021,6 +4095,9 @@ struct Probe {
     /// A decode error the depth drain hit, for [`DEPTH_UNDECODABLE`]. Its own
     /// string for [`reason`](Self::reason)'s reason.
     depth_reason: String,
+    /// The last run of the parity report. Nothing on the channel feeds it — see
+    /// [`run_parity`](Self::run_parity).
+    parity: ParityReport,
 }
 
 impl Probe {
@@ -4051,6 +4128,7 @@ impl Probe {
             indirect_reason: String::new(),
             depth: DepthProbe::Unasked,
             depth_reason: String::new(),
+            parity: ParityReport::new(),
         }
     }
 
@@ -5340,6 +5418,145 @@ impl Probe {
             DepthProbe::Ready { bytes } => bytes,
             _ => &[],
         }
+    }
+
+    /// Walk a real [`WebGpuDevice`]'s whole
+    /// [`supports`](crcbl_hal::Device::supports) matrix and hold every answer
+    /// against [`DIVERGENCES`](crcbl_hal::DIVERGENCES), in every direction
+    /// [`parity_verdict`] distinguishes.
+    ///
+    /// **`the_parity_report_matches_the_reviewed_divergence_list` in
+    /// `crates/crcbl/tests/hal_seam_e2e.rs`, in a browser.** The rule is
+    /// [`parity_verdict`]'s and so is that test's: a
+    /// [`Support::No`](crcbl_hal::Support::No) needs a row on every device, a
+    /// [`Support::Yes`](crcbl_hal::Support::Yes) for a listed pair means the row
+    /// is stale, and a
+    /// [`Support::NotOnThisDevice`](crcbl_hal::Support::NotOnThisDevice) is
+    /// excused only when the device really did withhold the gate.
+    ///
+    /// # Why this exists at all
+    ///
+    /// Every `supports` answer this backend gives is a declaration nothing holds
+    /// it to. The native seam suite is a native binary and this backend runs in a
+    /// browser; the browser gate's other groups drive [`StreamWriter`] and the
+    /// replayer and never construct a [`Device`](crcbl_hal::Device). This is what
+    /// constructs one and reads its whole matrix.
+    ///
+    /// # The device is real; its channel is not, and does not need to be
+    ///
+    /// [`supports`](crcbl_hal::Device::supports) reads
+    /// [`DeviceCaps::features`](crcbl_hal::DeviceCaps) and encodes nothing, so
+    /// the device is built around [`opened`](Self::opened) — **the caps the
+    /// browser reported for the device this page actually opened** — over a
+    /// [`SharedChannel::new`] that is never installed and never written to. That
+    /// is what makes this report safe to run at any point in the page's order: it
+    /// puts no command on the stream, registers no wait and drains nothing, so it
+    /// can neither be stranded by work queued ahead of it nor strand anything
+    /// behind it. Taking the page's own channel would need a [`SharedChannel`]
+    /// built from the probe's [`Rc`], which exists only on `wasm32` — a one-sided
+    /// `cfg` for a channel no call here would touch.
+    ///
+    /// # What this device can and cannot settle
+    ///
+    /// [`probe_device_desc`] asks for **nothing optional**, so the capabilities
+    /// whose answers come from [`Support::granted`](crcbl_hal::Support::granted)
+    /// are [`UnprovableHere`](ParityVerdict::UnprovableHere) on this page: the
+    /// device withheld the gate, and a run that cannot answer is not a pass.
+    /// [`held`](ParityReport::held) is the count that *was* settled, beside
+    /// [`checked`](ParityReport::checked), so a report cannot look complete by
+    /// being empty. Every other capability — every `Support::No` and every
+    /// `Support::Yes` — is held here exactly as the native suite holds it.
+    fn run_parity(&mut self) -> u32 {
+        let Some(caps) = self.opened() else {
+            self.parity = ParityReport::new();
+            self.parity.state = PARITY_NO_DEVICE;
+            return PARITY_NO_DEVICE;
+        };
+        let device = WebGpuDevice::new(SharedChannel::new(), caps, HandlePool::new());
+        // Read off the device rather than written here: a report that named the
+        // backend itself would go on agreeing with the list after the device
+        // started answering as something else.
+        let backend = device.backend();
+        let features = device.caps().features;
+
+        let mut report = String::new();
+        let mut failures = String::new();
+        let mut checked: u32 = 0;
+        let mut held: u32 = 0;
+        for capability in Capability::ALL {
+            let declared = device.supports(*capability);
+            let verdict = parity_verdict(*capability, backend, declared, features);
+            let why = declared.reason().unwrap_or("no reason given");
+            checked = checked.saturating_add(1);
+            if !report.is_empty() {
+                report.push(' ');
+            }
+            report.push_str(capability.name());
+            match verdict {
+                // The stale direction, and the one `parity_verdict` cannot answer
+                // on its own: it reports that the backend performs the capability,
+                // and whether that contradicts a row is this report's question.
+                ParityVerdict::Supported => {
+                    held = held.saturating_add(1);
+                    match divergence(*capability, backend) {
+                        Some(entry) => {
+                            report.push_str("=yes:STALE-ROW");
+                            let _ = writeln!(
+                                failures,
+                                "{capability}: DIVERGENCES says {backend} lacks it — {} — and this \
+                                 device has it. Delete the entry.",
+                                entry.why
+                            );
+                        }
+                        None => report.push_str("=yes"),
+                    }
+                }
+                ParityVerdict::Reviewed(_) => {
+                    held = held.saturating_add(1);
+                    report.push_str("=no:reviewed");
+                }
+                // Not a failure and not a pass: this device withheld the gate, so
+                // the run learnt nothing about the backend. Counted out of `held`
+                // rather than folded into the greens.
+                ParityVerdict::UnprovableHere(_) => report.push_str("=unprovable-here"),
+                ParityVerdict::Unreviewed => {
+                    held = held.saturating_add(1);
+                    report.push_str("=no:UNREVIEWED");
+                    let _ = writeln!(
+                        failures,
+                        "{capability}: {backend} refuses it ({why}) and no DIVERGENCES entry says \
+                         why. Add one with the reason, or fix the backend.",
+                    );
+                }
+                ParityVerdict::FalseDeviceGate => {
+                    held = held.saturating_add(1);
+                    report.push_str("=no:FALSE-DEVICE-GATE");
+                    let _ = writeln!(
+                        failures,
+                        "{capability}: {backend} blamed this device ({why}), but the device \
+                         withheld nothing — the capability's gate is {:?} and this device reports \
+                         {:?}. Declare Support::No with a reason and add a DIVERGENCES row, or fix \
+                         the backend.",
+                        capability.gating_feature(),
+                        features
+                    );
+                }
+            }
+        }
+
+        let state = if failures.is_empty() {
+            PARITY_MATCHED
+        } else {
+            PARITY_MISMATCHED
+        };
+        self.parity = ParityReport {
+            state,
+            checked,
+            held,
+            report,
+            failures,
+        };
+        state
     }
 
     /// Encode the dispatch setup frame: a compute pipeline that writes a storage
@@ -6994,6 +7211,105 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Run the parity report against the device the browser opened, and answer
+    /// one of the `PARITY_*` codes.
+    ///
+    /// **THE ONE EXPORT HERE THAT ASKS THE BROWSER NOTHING.** Every other probe
+    /// puts a command on the stream and waits; this one builds a
+    /// [`WebGpuDevice`](crate::hal::WebGpuDevice) around the caps that already
+    /// came back, walks its whole
+    /// [`supports`](crcbl_hal::Device::supports) matrix and compares it with
+    /// [`DIVERGENCES`](crcbl_hal::DIVERGENCES) — so it is one call with no `poll`
+    /// and no `state` beside it, the way `__crcbl_web_gpu_probe_surface` is one
+    /// call for its own reason. It
+    /// neither drains nor encodes, so calling it disturbs no probe in flight.
+    ///
+    /// [`super::PARITY_NO_DEVICE`] when nothing has opened yet, which is ordering
+    /// rather than failure — wait for [`__crcbl_web_gpu_probe_device_state`] to
+    /// answer [`super::DEVICE_OPENED`]. **Allocates**, so any view onto wasm
+    /// memory is built after it rather than before.
+    ///
+    /// Calling it twice reports twice: the report is rebuilt from the device's
+    /// current caps each time and replaces the last one.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_parity() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.run_parity(),
+            Err(_) => super::PARITY_UNASKED,
+        })
+    }
+
+    /// How many capabilities the last [`__crcbl_web_gpu_probe_parity`] walked —
+    /// [`Capability::ALL`](crcbl_hal::Capability::ALL)'s length once it has run,
+    /// and `0` when it has not.
+    ///
+    /// **The vacuity guard, and the reason it is exported at all**: a report that
+    /// walked nothing agrees with every list there is, so the gate asserts this
+    /// against the matrix it received rather than trusting a green verdict.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_parity_checked() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.parity.checked,
+            Err(_) => 0,
+        })
+    }
+
+    /// How many of those were **settled** rather than left unprovable by a
+    /// device that withheld the capability's gating feature. Allocates nothing.
+    ///
+    /// Lower than [`__crcbl_web_gpu_probe_parity_checked`] here and equal to it
+    /// in the native suite, because the device this probe opens asks for nothing
+    /// optional — the [module docs](super#the-device-this-asks-for-and-why-it-asks-for-so-little)
+    /// say why it asks for so little.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_parity_held() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.parity.held,
+            Err(_) => 0,
+        })
+    }
+
+    /// Where the matrix belonging to the last [`__crcbl_web_gpu_probe_parity`]
+    /// starts — one `Capability=verdict` token per capability, space separated.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_parity_report_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.parity.report.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that matrix is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_parity_report_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.parity.report.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// Where the disagreements start — one per line, empty when the last
+    /// [`__crcbl_web_gpu_probe_parity`] answered
+    /// [`super::PARITY_MATCHED`]. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_parity_failures_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.parity.failures.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that text is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_parity_failures_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.parity.failures.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -7027,16 +7343,20 @@ mod tests {
         __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_indirect,
         __crcbl_web_gpu_probe_indirect_bytes_len, __crcbl_web_gpu_probe_indirect_bytes_ptr,
         __crcbl_web_gpu_probe_indirect_poll, __crcbl_web_gpu_probe_indirect_state,
-        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_pipeline_layout,
-        __crcbl_web_gpu_probe_present, __crcbl_web_gpu_probe_present_bytes_len,
-        __crcbl_web_gpu_probe_present_bytes_ptr, __crcbl_web_gpu_probe_present_poll,
-        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_reconfigure,
-        __crcbl_web_gpu_probe_reconfigure_bytes_len, __crcbl_web_gpu_probe_reconfigure_bytes_ptr,
-        __crcbl_web_gpu_probe_reconfigure_poll, __crcbl_web_gpu_probe_reconfigure_state,
-        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
-        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
-        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
-        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_parity,
+        __crcbl_web_gpu_probe_parity_checked, __crcbl_web_gpu_probe_parity_failures_len,
+        __crcbl_web_gpu_probe_parity_failures_ptr, __crcbl_web_gpu_probe_parity_held,
+        __crcbl_web_gpu_probe_parity_report_len, __crcbl_web_gpu_probe_parity_report_ptr,
+        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_present,
+        __crcbl_web_gpu_probe_present_bytes_len, __crcbl_web_gpu_probe_present_bytes_ptr,
+        __crcbl_web_gpu_probe_present_poll, __crcbl_web_gpu_probe_present_state,
+        __crcbl_web_gpu_probe_reconfigure, __crcbl_web_gpu_probe_reconfigure_bytes_len,
+        __crcbl_web_gpu_probe_reconfigure_bytes_ptr, __crcbl_web_gpu_probe_reconfigure_poll,
+        __crcbl_web_gpu_probe_reconfigure_state, __crcbl_web_gpu_probe_sampler,
+        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
+        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
+        __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -9928,5 +10248,118 @@ mod tests {
         assert!(install(&engine));
         assert_eq!(__crcbl_web_gpu_probe_adapters(), 0);
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_UNASKED);
+    }
+
+    /// The matrix the last `parity` call left, read the way JS reads it.
+    fn parity_report() -> String {
+        let len = __crcbl_web_gpu_probe_parity_report_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_parity_report_ptr();
+        assert!(
+            !ptr.is_null(),
+            "the probe answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `ParityReport::report`, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        String::from_utf8(bytes.to_vec()).expect("the probe's report is a Rust String")
+    }
+
+    /// The disagreements the last `parity` call left, read the same way.
+    fn parity_failures() -> String {
+        let len = __crcbl_web_gpu_probe_parity_failures_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_parity_failures_ptr();
+        assert!(
+            !ptr.is_null(),
+            "the probe answered a length with no pointer"
+        );
+        // SAFETY: as `parity_report`, on `ParityReport::failures`.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        String::from_utf8(bytes.to_vec()).expect("the probe's failures are a Rust String")
+    }
+
+    /// **The report cannot pass by walking nothing**, which is the one way a
+    /// parity check agrees with every list there is.
+    ///
+    /// The browser group asserts the same three numbers against a real device;
+    /// this asserts them through the exports with no browser, so the ABI — six
+    /// symbols and a `PARITY_*` code — is held here rather than only in a gate
+    /// that needs a GPU. What it deliberately does **not** assert is the verdict:
+    /// the answers depend on `DIVERGENCES` and on a real device's features, and
+    /// a native copy of that comparison would be a second place to update.
+    #[test]
+    fn the_parity_report_refuses_before_a_device_and_then_walks_every_capability() {
+        // Before a device there is nothing to build a `WebGpuDevice` around, and
+        // the counts stay zero rather than reporting an empty agreement.
+        assert_eq!(__crcbl_web_gpu_probe_parity(), PARITY_NO_DEVICE);
+        assert_eq!(__crcbl_web_gpu_probe_parity_checked(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_parity_held(), 0);
+
+        open_device();
+        let state = __crcbl_web_gpu_probe_parity();
+        assert!(
+            state == PARITY_MATCHED || state == PARITY_MISMATCHED,
+            "a device has opened, so the report must have run; got {state}"
+        );
+        let checked = __crcbl_web_gpu_probe_parity_checked() as usize;
+        assert_eq!(
+            checked,
+            Capability::ALL.len(),
+            "the report walked {checked} of {} capabilities",
+            Capability::ALL.len()
+        );
+
+        // Every capability is named once, and every verdict is one of the five
+        // tokens — a token this test does not know about is a verdict the report
+        // learnt to print and nothing learnt to read.
+        let report = parity_report();
+        let tokens: Vec<&str> = report.split(' ').collect();
+        assert_eq!(tokens.len(), checked, "{report}");
+        for capability in Capability::ALL {
+            assert!(
+                tokens
+                    .iter()
+                    .any(|token| token.starts_with(&format!("{}=", capability.name()))),
+                "{capability} is missing from the matrix: {report}"
+            );
+        }
+        for token in &tokens {
+            let (_, verdict) = token.split_once('=').expect("every token is name=verdict");
+            assert!(
+                matches!(
+                    verdict,
+                    "yes"
+                        | "yes:STALE-ROW"
+                        | "no:reviewed"
+                        | "no:UNREVIEWED"
+                        | "no:FALSE-DEVICE-GATE"
+                        | "unprovable-here"
+                ),
+                "unknown verdict token {token:?} in {report}"
+            );
+        }
+
+        // `held` is the settled count, and it is what stops an all-`unprovable`
+        // run reading as a pass. This device reports only `Features::COMPUTE`, so
+        // the two feature-gated capabilities are unprovable and the rest are not.
+        let held = __crcbl_web_gpu_probe_parity_held() as usize;
+        let unprovable = tokens
+            .iter()
+            .filter(|token| token.ends_with("=unprovable-here"))
+            .count();
+        assert_eq!(held, checked - unprovable, "{report}");
+        assert!(
+            held > 0,
+            "nothing was settled, so the report asserted nothing"
+        );
+
+        // The failures text and the verdict agree — one of them alone would let a
+        // mismatch print as a pass, or a pass print a message.
+        let failures = parity_failures();
+        assert_eq!(
+            failures.is_empty(),
+            state == PARITY_MATCHED,
+            "state {state} against failures {failures:?}"
+        );
     }
 }
