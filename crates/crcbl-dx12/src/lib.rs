@@ -23,7 +23,11 @@
 //! queue, and reads the result back through an `ID3D12Fence`. Semaphores are
 //! that same fence handed to a caller: both seam kinds are created, a submission
 //! waits on them and signals them through `ID3D12CommandQueue::Wait` and
-//! `Signal`, and the CPU reads and blocks on a timeline. It also builds a
+//! `Signal`, and the CPU reads and blocks on a timeline. All three query kinds
+//! are `ID3D12QueryHeap`s the device creates, writes timestamps into and reads
+//! back — the read through a resolve and a submission of its own, because
+//! **D3D12 has no CPU-side read of a query heap at all**; see
+//! `crcbl_dx12::query`. It also builds a
 //! `DXGI_SWAP_EFFECT_FLIP_DISCARD` swapchain on an `HWND`, acquires and presents
 //! through it, and answers
 //! [`Device::wait_until_presented`](crcbl_hal::Device::wait_until_presented)
@@ -41,7 +45,7 @@
 //! **Nothing in this crate is a stub that reports success** — a draw recorded
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
-//! the clear that no slice has written — queries, buffer fills, mesh dispatch, a
+//! the clear that no slice has written — buffer fills, mesh dispatch, a
 //! push-constant range at pipeline-layout creation — refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
@@ -202,8 +206,21 @@
 //! measured per format and gates `create_image`,
 //! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) arrived with
 //! `create_sampler`, [`COMPUTE`](crcbl_hal::Features::COMPUTE) arrived with
-//! `create_compute_pipeline` and `dispatch`, and the three indirect flags
-//! arrived with the `ExecuteIndirect` draws — see `crcbl_dx12::draw`.
+//! `create_compute_pipeline` and `dispatch`, the three indirect flags
+//! arrived with the `ExecuteIndirect` draws — see `crcbl_dx12::draw` — and the
+//! three query flags arrived with `CreateQueryHeap` and the reads behind it.
+//!
+//! **The query flags are also the one place an adapter and a device from it
+//! report different caps.**
+//! [`TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) obliges a
+//! [`Limits::timestamp_period_ns`](crcbl_hal::Limits::timestamp_period_ns), and
+//! the period is `1e9 / ID3D12CommandQueue::GetTimestampFrequency()` — a queue
+//! call, with no queue in sight when `crcbl_dx12::adapter` fills its caps in. So
+//! the *flag* is reported at the adapter, because
+//! [`DeviceDesc::required_features`](crcbl_hal::DeviceDesc::required_features)
+//! is checked against the adapter and a flag that first appeared at device open
+//! could never be required, and the *number* is filled in by `Dx12Device::open`
+//! once its queue exists.
 //!
 //! # `Dx12Instance` exists only on Windows, and is unlinked here on purpose
 //!
@@ -313,6 +330,14 @@ mod pipeline;
 // `cargo test` on any host runs the swapchain and present-wait arithmetic.
 #[cfg(any(target_os = "windows", test))]
 mod present;
+// What a query result occupies and where one lands in a buffer. Not
+// Windows-only for the reason `present` above is not — it holds no `windows`
+// type — and that matters here because D3D12 chooses the resolve stride and
+// takes no parameter to narrow it: a destination sized at the seam's one `u64`
+// per query is a buffer overrun on a statistics set, and the runtime reports
+// nothing.
+#[cfg(any(target_os = "windows", test))]
+mod query;
 #[cfg(target_os = "windows")]
 mod retire;
 // Where every binding of a pipeline layout lands among the root parameters,

@@ -6,13 +6,14 @@
 //! Barriers, buffer↔buffer, buffer↔image and image↔image copies, render passes
 //! with a real `ClearRenderTargetView`/`ClearDepthStencilView`, viewport,
 //! scissor and stencil reference — plus pipelines, bind groups, index buffers,
-//! every draw the seam has (direct, indexed, indirect and indirect-count), and
-//! dispatches both direct and indirect. [`finish`](CommandEncoder::finish)
-//! closes the list and hands back a pooled [`CommandBufferHandle`] the device
-//! can submit.
+//! every draw the seam has (direct, indexed, indirect and indirect-count),
+//! dispatches both direct and indirect, and the query verbs — a timestamp
+//! written with `EndQuery` and a range resolved into a buffer with
+//! `ResolveQueryData`. [`finish`](CommandEncoder::finish) closes the list and
+//! hands back a pooled [`CommandBufferHandle`] the device can submit.
 //!
-//! What still needs a slice — buffer fills, MSAA resolve attachments, query
-//! sets, mesh dispatch, push constants — **fails the encoder** rather than
+//! What still needs a slice — buffer fills, MSAA resolve attachments, mesh
+//! dispatch, push constants — **fails the encoder** rather than
 //! recording nothing, so `finish` returns the refusal instead of a command
 //! buffer that submits and draws nothing. That is `crcbl-mtl`'s rule in its
 //! command slice, and it is the failure
@@ -21,7 +22,11 @@
 //!
 //! The indirect path's arithmetic — offsets, strides, spans and the
 //! index-buffer view's size — lives in [`crate::draw`], which holds no `windows`
-//! type and is therefore the one part of it a non-Windows host can test.
+//! type and is therefore the one part of it a non-Windows host can test. The
+//! query path's arithmetic lives in [`crate::query`] for the same reason, and it
+//! carries the one bound D3D12 will not report: `ResolveQueryData` writes the
+//! width its query type defines and takes no stride, so a destination sized at
+//! the seam's one `u64` per query is a buffer overrun on a statistics set.
 //!
 //! # Failures are recorded and reported at `finish`
 //!
@@ -79,8 +84,8 @@ use crcbl_hal::{
     CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePassDesc,
     ComputePipelineHandle, DrawIndirect, DrawIndirectCount, Extent3d, Format,
     GraphicsPipelineHandle, HalError, ImageAspect, ImageCopy, ImageHandle, ImageSubresourceLayers,
-    ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d, PipelineLayoutHandle, QuerySetHandle,
-    QueueTransfer, Rect2d, RenderPassDesc, ShaderStages, Viewport,
+    ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d, PipelineLayoutHandle, QueryKind,
+    QuerySetHandle, QueueTransfer, Rect2d, RenderPassDesc, ShaderStages, Viewport,
 };
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D12::{
@@ -93,17 +98,19 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION, D3D12_TEXTURE_COPY_LOCATION_0,
     D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
     D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT,
-    ID3D12CommandAllocator, ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12Resource,
+    ID3D12CommandAllocator, ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12QueryHeap,
+    ID3D12Resource,
 };
 use windows::core::Interface;
 
 use crate::conv;
 use crate::device::{
     AttachmentRef, BoundCompute, BoundPipeline, BoundRoot, BufferRef, CommandBufferEntry,
-    DeviceInner, ImageRef,
+    DeviceInner, ImageRef, QuerySetRef,
 };
 use crate::draw::{IndirectKind, check_count, plan_index_binding, plan_indirect};
 use crate::instance::not_yet;
+use crate::query;
 
 /// A batch of resource-state transitions, and the references they borrowed.
 ///
@@ -216,6 +223,9 @@ pub(crate) struct Dx12CommandEncoder {
     list: Option<ID3D12GraphicsCommandList>,
     /// Every resource a recorded command names. See the module docs.
     retained: Vec<ID3D12Resource>,
+    /// Every query heap a recorded command names, held for the same reason and
+    /// separately because `ID3D12QueryHeap` is not an `ID3D12Resource`.
+    query_heaps: Vec<ID3D12QueryHeap>,
     /// The first failure. Every later command is dropped and `finish` returns
     /// this.
     failed: Option<HalError>,
@@ -264,6 +274,7 @@ impl Dx12CommandEncoder {
             allocator: None,
             list: None,
             retained: Vec::new(),
+            query_heaps: Vec::new(),
             failed: None,
             pipeline: None,
             compute: None,
@@ -332,6 +343,29 @@ impl Dx12CommandEncoder {
             Ok(buffer) => {
                 self.retain(&buffer.raw);
                 Some(buffer)
+            }
+            Err(error) => {
+                self.fail(error);
+                None
+            }
+        }
+    }
+
+    /// Resolves a query set and takes a reference to its heap, or records the
+    /// failure.
+    ///
+    /// The reference is what a query heap needs for the reason a resource does:
+    /// `EndQuery` and `ResolveQueryData` capture the heap at record time and the
+    /// list retains nothing, so a set destroyed before the submission completes
+    /// would be freed under a running list.
+    fn query_set(&mut self, handle: QuerySetHandle) -> Option<QuerySetRef> {
+        match self.device.query_set(handle) {
+            Ok(set) => {
+                let raw = set.raw.as_raw();
+                if !self.query_heaps.iter().any(|held| held.as_raw() == raw) {
+                    self.query_heaps.push(set.raw.clone());
+                }
+                Some(set)
             }
             Err(error) => {
                 self.fail(error);
@@ -1938,32 +1972,153 @@ impl CommandEncoder for Dx12CommandEncoder {
 
     // --- queries ---
 
-    /// Accepted and dropped.
+    /// Records **nothing**, and still checks everything it was given.
     ///
-    /// The seam asks every caller to reset unconditionally so the Vulkan path is
-    /// never the special case; D3D12 query heaps need no reset, and failing here
-    /// would fail a call a correct caller always makes.
-    fn reset_query_set(&mut self, _set: QuerySetHandle, _range: Range<u32>) {}
-
-    /// Accepted and dropped, which is what the seam documents for a device
-    /// without [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY)
-    /// — and `crate::adapter` reports none.
-    fn write_timestamp(&mut self, _set: QuerySetHandle, _index: u32) {}
-
-    /// Fails the encoder, because this one has a destination.
+    /// `wgpu-hal`'s dx12 backend documents its own `reset_queries` as a no-op
+    /// and that is the API's fact rather than a shortcut: a D3D12 query heap has
+    /// no reset, because `BeginQuery`/`EndQuery` overwrite a slot outright and
+    /// `ResolveQueryData` reads whatever is in it. Vulkan is the one that needs
+    /// `vkCmdResetQueryPool`, which is why the seam has every caller reset
+    /// unconditionally.
     ///
-    /// Unlike the two above, dropping a resolve leaves `dst` holding whatever
-    /// was there and a caller reading it as timings. That is not degradation, it
-    /// is wrong data — so this refuses, and as a stale handle rather than a
-    /// missing slice: no query set exists to have issued one.
+    /// The handle and the range are resolved all the same, because "no command"
+    /// is not "no obligation": the seam suite resets a set through a submitted
+    /// command buffer precisely so that a backend handing out a handle its own
+    /// encoder does not recognise fails at `finish` — and a range past the end
+    /// of the set is a caller bug every other backend reports.
+    fn reset_query_set(&mut self, set: QuerySetHandle, range: Range<u32>) {
+        if self.list().is_none() || !self.outside_a_pass("reset_query_set") {
+            return;
+        }
+        let Some(resolved) = self.query_set(set) else {
+            return;
+        };
+        if let Err(error) = query::check_range(
+            resolved.count,
+            range.start,
+            u64::from(range.end.saturating_sub(range.start)),
+        ) {
+            self.fail(error);
+        }
+    }
+
+    /// `EndQuery` with no `BeginQuery`, which is how D3D12 spells a timestamp.
+    ///
+    /// A timestamp is the one query type that is an *instant* rather than an
+    /// interval, so `D3D12_QUERY_TYPE_TIMESTAMP` is ended without ever being
+    /// begun — `wgpu-hal`'s dx12 `write_timestamp` records exactly this call.
+    ///
+    /// **A set of another kind fails the encoder rather than being written.**
+    /// `EndQuery` with a mismatched type is a debug-layer error and silence in a
+    /// release runtime, and the value a later read produced would be a number
+    /// from a pool nobody wrote — which is worse than a refusal a caller can see.
+    fn write_timestamp(&mut self, set: QuerySetHandle, index: u32) {
+        if self.list().is_none() || !self.outside_a_pass("write_timestamp") {
+            return;
+        }
+        let Some(resolved) = self.query_set(set) else {
+            return;
+        };
+        if !matches!(resolved.kind, QueryKind::Timestamp) {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "write_timestamp names a {:?} query set; a timestamp is written into a \
+                 QueryKind::Timestamp set and D3D12 would end a query of the wrong type in it",
+                resolved.kind
+            )));
+            return;
+        }
+        // One query, so the seam's own bound is the whole check.
+        if let Err(error) = query::check_range(resolved.count, index, 1) {
+            self.fail(error);
+            return;
+        }
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, `resolved.raw` is a live query
+        // heap this device created and this encoder retained above, the type is
+        // the one the heap was created for, and `index` was bounds-checked
+        // against the heap's own query count.
+        unsafe {
+            list.EndQuery(&resolved.raw, resolved.query_type, index);
+        }
+    }
+
+    /// `ResolveQueryData` into the caller's buffer.
+    ///
+    /// **D3D12 chooses the stride and the seam assumes it is eight**, which is
+    /// the one thing this call has to check that the others do not:
+    /// `crate::query::check_destination` refuses an offset D3D12 will not take
+    /// and a destination the resolve would run off the end of. A
+    /// pipeline-statistics set is where that stops being theoretical — it
+    /// resolves eleven `u64`s per query — and without the check a caller that
+    /// sized its buffer at the seam's one `u64` per query would have D3D12 write
+    /// past the end of it with nothing anywhere reporting so.
+    ///
+    /// A [`MemoryLocation::DeviceLocal`] `dst` must already be in
+    /// [`ResourceState::TransferDst`](crcbl_hal::ResourceState::TransferDst),
+    /// which is `D3D12_RESOURCE_STATE_COPY_DEST` and what `ResolveQueryData`
+    /// requires of a destination — a barrier the caller records, exactly as it
+    /// does for a copy. A [`MemoryLocation::HostReadback`] one is already there
+    /// and cannot leave, and a [`MemoryLocation::HostUpload`] one can never get
+    /// there, which is why it is refused below.
     fn resolve_query_set(
         &mut self,
         set: QuerySetHandle,
-        _range: Range<u32>,
-        _dst: BufferHandle,
-        _dst_offset: u64,
+        range: Range<u32>,
+        dst: BufferHandle,
+        dst_offset: u64,
     ) {
-        self.fail(HalError::invalid_handle("query set", set));
+        if self.list().is_none() || !self.outside_a_pass("resolve_query_set") {
+            return;
+        }
+        let (Some(resolved), Some(buffer)) = (self.query_set(set), self.buffer(dst)) else {
+            return;
+        };
+        // **An upload-heap destination has no legal state to be in.** D3D12 pins
+        // a resource there to `GENERIC_READ` for its whole lifetime — which is
+        // why `plan_barriers` drops barriers on host-visible buffers — so it can
+        // never reach the `COPY_DEST` a resolve requires, and D3D12 would report
+        // that rather than this crate. The readback heap is the other
+        // host-visible one and is pinned to `COPY_DEST` itself, so it is exactly
+        // right; only this one is impossible.
+        if matches!(buffer.location, MemoryLocation::HostUpload) {
+            self.fail(HalError::InvalidDescriptor(
+                "resolve_query_set's destination is a HostUpload buffer, which D3D12 pins to \
+                 GENERIC_READ for its lifetime; ResolveQueryData needs a destination in \
+                 COPY_DEST, so use a DeviceLocal or HostReadback buffer"
+                    .to_string(),
+            ));
+            return;
+        }
+        let queries = u64::from(range.end.saturating_sub(range.start));
+        if let Err(error) =
+            query::check_range(resolved.count, range.start, queries).and_then(|()| {
+                query::check_destination(resolved.kind, dst_offset, queries, buffer.size)
+            })
+        {
+            self.fail(error);
+            return;
+        }
+        if queries == 0 {
+            // A resolve of nothing, which the seam allows and D3D12 has no call
+            // for: `NumQueries` of zero is not a legal `ResolveQueryData`.
+            return;
+        }
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, `resolved.raw` and `buffer.raw`
+        // are live interfaces this encoder retained above, the type is the one
+        // the heap was created for, the range was bounds-checked against the
+        // heap's query count, and the destination span was checked against the
+        // buffer's size and D3D12's offset alignment.
+        unsafe {
+            list.ResolveQueryData(
+                &resolved.raw,
+                resolved.query_type,
+                range.start,
+                range.end - range.start,
+                &buffer.raw,
+                dst_offset,
+            );
+        }
     }
 
     // --- finish ---
@@ -1999,6 +2154,7 @@ impl CommandEncoder for Dx12CommandEncoder {
             allocator,
             list,
             retained: core::mem::take(&mut self.retained),
+            query_heaps: core::mem::take(&mut self.query_heaps),
         }))
     }
 }

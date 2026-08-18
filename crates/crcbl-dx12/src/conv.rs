@@ -55,7 +55,8 @@
 use crcbl_hal::{
     BindingKind, BlendFactor, BlendOp, BufferUsage, ColorWrites, CompareOp, CullMode, FilterMode,
     Format, ImageAspect, ImageType, ImageUsage, IndexFormat, MemoryLocation, PolygonMode,
-    PrimitiveTopology, ResourceState, SamplerAddressMode, SamplerDesc, ShaderStages, StencilOp,
+    PrimitiveTopology, QueryKind, ResourceState, SamplerAddressMode, SamplerDesc, ShaderStages,
+    StencilOp,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_PRIMITIVE_TOPOLOGY, D3D_PRIMITIVE_TOPOLOGY_LINELIST, D3D_PRIMITIVE_TOPOLOGY_LINESTRIP,
@@ -74,6 +75,9 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_DESCRIPTOR_RANGE_TYPE_UAV, D3D12_FILL_MODE, D3D12_FILL_MODE_SOLID,
     D3D12_FILL_MODE_WIREFRAME, D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE,
     D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT, D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+    D3D12_QUERY_DATA_PIPELINE_STATISTICS, D3D12_QUERY_HEAP_TYPE, D3D12_QUERY_HEAP_TYPE_OCCLUSION,
+    D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, D3D12_QUERY_HEAP_TYPE_TIMESTAMP, D3D12_QUERY_TYPE,
+    D3D12_QUERY_TYPE_OCCLUSION, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, D3D12_QUERY_TYPE_TIMESTAMP,
     D3D12_SHADER_VISIBILITY, D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_PIXEL,
     D3D12_SHADER_VISIBILITY_VERTEX, D3D12_STENCIL_OP, D3D12_STENCIL_OP_DECR,
     D3D12_STENCIL_OP_DECR_SAT, D3D12_STENCIL_OP_INCR, D3D12_STENCIL_OP_INCR_SAT,
@@ -740,6 +744,61 @@ pub(crate) const fn shader_visibility(stages: ShaderStages) -> D3D12_SHADER_VISI
         D3D12_SHADER_VISIBILITY_ALL
     }
 }
+
+/// The heap a [`QueryKind`]'s queries live in, and the type each query is.
+///
+/// **Two enumerations rather than one**, because D3D12 has two: the heap type
+/// goes in `D3D12_QUERY_HEAP_DESC` at creation and the query type goes on every
+/// `BeginQuery`, `EndQuery` and `ResolveQueryData` afterwards. They are not
+/// interchangeable — `D3D12_QUERY_HEAP_TYPE_TIMESTAMP` is `1` and
+/// `D3D12_QUERY_TYPE_TIMESTAMP` is `2` — so a backend that kept one and passed
+/// it to both would create an occlusion heap and resolve it as statistics, with
+/// no error anywhere.
+///
+/// # Occlusion counts samples, and `BINARY_OCCLUSION` does not
+///
+/// [`QueryKind::Occlusion`] is "samples that passed the depth test", so it maps
+/// to `D3D12_QUERY_TYPE_OCCLUSION` and not to `_BINARY_OCCLUSION`, which answers
+/// zero or non-zero and is what `wgpu-hal`'s dx12 backend uses because WebGPU's
+/// occlusion query is a boolean. Both resolve one `UINT64` per query, so the
+/// choice is invisible to every size in [`crate::query`] and visible in exactly
+/// one place: the number a caller reads. `crcbl-vk` creates
+/// `vk::QueryType::OCCLUSION` for the same reason.
+pub(crate) const fn query_types(kind: QueryKind) -> (D3D12_QUERY_HEAP_TYPE, D3D12_QUERY_TYPE) {
+    match kind {
+        QueryKind::Timestamp => (D3D12_QUERY_HEAP_TYPE_TIMESTAMP, D3D12_QUERY_TYPE_TIMESTAMP),
+        QueryKind::Occlusion => (D3D12_QUERY_HEAP_TYPE_OCCLUSION, D3D12_QUERY_TYPE_OCCLUSION),
+        QueryKind::PipelineStatistics => (
+            D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS,
+            D3D12_QUERY_TYPE_PIPELINE_STATISTICS,
+        ),
+    }
+}
+
+/// [`crate::query::result_bytes`] against the structures D3D12 actually
+/// resolves.
+///
+/// **The one thing `crate::query` cannot check itself.** That module is compiled
+/// on hosts with no D3D12 so its arithmetic can be tested at all, which means
+/// its strides are literals — and a literal that drifted from the ABI would size
+/// every resolve destination wrongly while every test over it still passed. This
+/// is where the two meet, and it is a `const` block, so a `windows` upgrade that
+/// changed either structure fails the build rather than a run.
+const _: () = {
+    assert!(
+        crate::query::result_bytes(QueryKind::Timestamp) == size_of::<u64>() as u64,
+        "a timestamp resolves as one UINT64"
+    );
+    assert!(
+        crate::query::result_bytes(QueryKind::Occlusion) == size_of::<u64>() as u64,
+        "an occlusion query resolves as one UINT64"
+    );
+    assert!(
+        crate::query::result_bytes(QueryKind::PipelineStatistics)
+            == size_of::<D3D12_QUERY_DATA_PIPELINE_STATISTICS>() as u64,
+        "a statistics query resolves as a whole D3D12_QUERY_DATA_PIPELINE_STATISTICS"
+    );
+};
 
 #[cfg(test)]
 mod tests {

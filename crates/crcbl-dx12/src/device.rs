@@ -10,7 +10,9 @@
 //! [`Device::submit`], [`Device::request_readback`], [`Device::poll_readback`]
 //! and [`Device::wait_idle`], the synchronisation block — both semaphore kinds,
 //! the waits and signals a submission carries, and the CPU-side read and
-//! deadline wait — and the presentation block: swapchains, acquire, present and
+//! deadline wait — the query block: heaps of all three kinds, and both of the
+//! seam's ways of reading one back — and the presentation block: swapchains,
+//! acquire, present and
 //! the present wait. Everything else on the trait refuses with
 //! [`HalError::Unsupported`] whose `what` names the slice it arrives in, in the
 //! same voice `Dx12Instance` established. Nothing here is a stub that reports
@@ -77,14 +79,15 @@ use crcbl_core::Pool;
 use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BindingResource, BufferDesc, BufferHandle,
-    Capability, CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
-    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming, Extent3d, Features,
-    Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc,
-    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
-    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, ShaderModuleDesc,
-    ShaderModuleHandle, SubmitInfo, Support, SurfaceError, SwapchainDesc, SwapchainHandle,
+    BufferUsage, Capability, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
+    ComputePipelineDesc, ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming,
+    Extent3d, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc,
+    ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle,
+    ImageViewType, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
+    QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
+    ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind,
+    ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support, SurfaceError, SwapchainDesc,
+    SwapchainHandle,
 };
 use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY};
@@ -95,12 +98,12 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_FENCE_FLAG_NONE, D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_HEAP_FLAG_NONE,
     D3D12_HEAP_PROPERTIES, D3D12_INDIRECT_ARGUMENT_DESC, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
     D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
-    D3D12_MEMORY_POOL_UNKNOWN, D3D12_RANGE, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-    D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_ROOT_PARAMETER_TYPE,
-    D3D12_SAMPLER_DESC, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN,
-    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue,
-    ID3D12CommandSignature, ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence,
-    ID3D12GraphicsCommandList, ID3D12Object, ID3D12PipelineState, ID3D12Resource,
+    D3D12_MEMORY_POOL_UNKNOWN, D3D12_QUERY_HEAP_DESC, D3D12_QUERY_TYPE, D3D12_RANGE,
+    D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER,
+    D3D12_ROOT_PARAMETER_TYPE, D3D12_SAMPLER_DESC, D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+    D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList,
+    ID3D12CommandQueue, ID3D12CommandSignature, ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence,
+    ID3D12GraphicsCommandList, ID3D12Object, ID3D12PipelineState, ID3D12QueryHeap, ID3D12Resource,
     ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
@@ -117,6 +120,7 @@ use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id, not_yet};
 use crate::pipeline::{self, ComputePipelineEntry, GraphicsPipelineEntry, PipelineLayoutEntry};
 use crate::present::{self, PresentWait};
+use crate::query;
 use crate::retire::RetireQueue;
 use crate::swapchain::{self, SwapchainEntry};
 use crate::sync;
@@ -250,6 +254,10 @@ pub(crate) struct CommandBufferEntry {
     pub(crate) list: ID3D12GraphicsCommandList,
     /// Every resource the recorded commands name. See [`crate::retire`].
     pub(crate) retained: Vec<ID3D12Resource>,
+    /// Every query heap the recorded commands name, held for the same reason
+    /// and separately because it is a different interface. See
+    /// [`Retired::QueryHeap`].
+    pub(crate) query_heaps: Vec<ID3D12QueryHeap>,
 }
 
 /// An in-flight readback request.
@@ -312,6 +320,73 @@ pub(crate) enum Retired {
     /// A destroyed semaphore's fence, held until the queue has reached the
     /// operations that name it. See [`Device::destroy_semaphore`].
     Semaphore { _raw: ID3D12Fence },
+    /// A query heap a recorded command names.
+    ///
+    /// Apart from [`Resource`](Self::Resource) because a query heap is **not**
+    /// an `ID3D12Resource` — it is its own interface with no resource states, no
+    /// GPU virtual address and no place in `CommandBufferEntry::retained`. It
+    /// needs the same treatment all the same: `EndQuery` and `ResolveQueryData`
+    /// capture the heap at record time and the list retains nothing, so a set
+    /// destroyed while a submission naming it is in flight is the same
+    /// use-after-free every resource here is parked against.
+    QueryHeap { _raw: ID3D12QueryHeap },
+}
+
+/// A query set: the heap the GPU writes into, and the buffer a read comes back
+/// through.
+///
+/// # Why a query set owns a buffer nothing above the seam asked for
+///
+/// **D3D12 has no CPU-side read of a query heap.** `ID3D12QueryHeap` cannot be
+/// mapped, has no `GetData`, and exposes nothing but its own creation: the only
+/// way a result leaves it is `ResolveQueryData`, which is a *command list* call
+/// writing into a buffer resource. `vkGetQueryPoolResults` and
+/// `MTLCounterSampleBuffer`'s `resolveCounterRange:` are both device-side calls
+/// with no encoder, and [`Device::query_results`] is shaped like them — so this
+/// backend is the one that has to supply the buffer and the submission
+/// underneath, and this field is that buffer.
+///
+/// It sits on the readback heap, whose resources are created in
+/// `D3D12_RESOURCE_STATE_COPY_DEST` and can never leave it — which is exactly
+/// the state `ResolveQueryData` requires of a destination, so the resolve needs
+/// no barrier and the map afterwards needs no copy.
+///
+/// The cost is one committed resource per query set, sized by
+/// [`query::resolve_buffer_bytes`]. Created with the set rather than on first
+/// read: [`Capability::TimestampQuery`] names `query_results` as part of what
+/// the capability *is*, so a timestamp set that is never read that way is the
+/// exception rather than the case worth deferring an allocation for.
+#[derive(Debug)]
+struct QuerySetEntry {
+    owner: u64,
+    raw: ID3D12QueryHeap,
+    kind: QueryKind,
+    /// The type every `EndQuery` and `ResolveQueryData` on this heap names. Kept
+    /// beside `kind` rather than re-derived at each call, because
+    /// [`conv::query_types`] returns it with the heap type it must agree with.
+    query_type: D3D12_QUERY_TYPE,
+    count: u32,
+    /// The readback buffer [`Device::query_results`] resolves into.
+    ///
+    /// A seam handle rather than the resource, so the destination is allocated,
+    /// labelled, bounds-checked and released by exactly the code every other
+    /// buffer on this device is — and so a set destroyed while a read of it is
+    /// in flight frees its pool slot rather than leaking one. See above for why
+    /// a query set owns a buffer at all.
+    resolve: BufferHandle,
+}
+
+/// What [`crate::command`] needs to know about a query set.
+///
+/// A copy of the fields rather than a borrow, for the reason [`BufferRef`] is:
+/// the encoder resolves handles with the device lock held and records without
+/// it.
+#[derive(Debug)]
+pub(crate) struct QuerySetRef {
+    pub(crate) raw: ID3D12QueryHeap,
+    pub(crate) kind: QueryKind,
+    pub(crate) query_type: D3D12_QUERY_TYPE,
+    pub(crate) count: u32,
 }
 
 /// A semaphore: an `ID3D12Fence` either way, and `kind` is what tells them
@@ -355,6 +430,7 @@ owned!(
     CommandBufferEntry,
     ReadbackEntry,
     SemaphoreEntry,
+    QuerySetEntry,
 );
 
 /// Every table the device owns, behind one lock.
@@ -367,6 +443,7 @@ pub(crate) struct DeviceState {
     command_buffers: Pool<CommandBufferEntry>,
     readbacks: Pool<ReadbackEntry>,
     semaphores: Pool<SemaphoreEntry>,
+    query_sets: Pool<QuerySetEntry>,
     shader_modules: Pool<ShaderModuleEntry>,
     bind_group_layouts: Pool<BindGroupLayoutRecord>,
     bind_groups: Pool<BindGroupRecord>,
@@ -715,6 +792,70 @@ impl DeviceInner {
             slices: entry.slices,
             samples: entry.samples,
         })
+    }
+
+    /// Resolves a query set handle for the encoder.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`].
+    pub(crate) fn query_set(&self, handle: QuerySetHandle) -> Result<QuerySetRef, HalError> {
+        let state = self.state();
+        let entry = handle::lookup(&state.query_sets, "query set", handle, self.owner)?;
+        Ok(QuerySetRef {
+            raw: entry.raw.clone(),
+            kind: entry.kind,
+            query_type: entry.query_type,
+            count: entry.count,
+        })
+    }
+
+    /// Runs one command list on the queue and blocks until the GPU has finished
+    /// it.
+    ///
+    /// **The one-shot submission [`Device::query_results`] is built on**, and
+    /// the reason that call needs one at all: D3D12's only route out of a query
+    /// heap is `ResolveQueryData`, which is recorded rather than called, while
+    /// the seam's read is a device call with no encoder anywhere in it.
+    ///
+    /// The list and its allocator go on [`crate::retire`]'s queue at the value
+    /// this reserves rather than being dropped when the wait returns, so a
+    /// `Signal` that failed leaks them instead of freeing a list the driver may
+    /// still be reading — the same trade [`Device::submit`] makes and for the
+    /// same reason.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::DeviceLost`] from the signal or the wait.
+    fn run_and_wait(
+        &self,
+        allocator: ID3D12CommandAllocator,
+        list: ID3D12GraphicsCommandList,
+    ) -> Result<(), HalError> {
+        let value = {
+            let mut state = self.state();
+            let lists = [Some(ID3D12CommandList::from(list.clone()))];
+            // SAFETY: `list` is a live, closed command list this device created
+            // and is held both by this call and by the retire queue below for
+            // the duration of its execution. The array is a live local borrowed
+            // for the call, and the queue is externally synchronised by the
+            // state lock held here.
+            unsafe { self.queue.ExecuteCommandLists(&lists) };
+            let signalled = self.signal(&mut state);
+            let at = state.next_fence_value;
+            state.retire.park(
+                at,
+                Retired::Recording {
+                    _list: list,
+                    _allocator: allocator,
+                },
+            );
+            signalled?
+        };
+        self.wait_for(value)?;
+        let mut state = self.state();
+        self.poll_retire(&mut state);
+        Ok(())
     }
 
     /// Resolves a colour attachment's render target view.
@@ -1313,7 +1454,25 @@ impl Dx12Device {
         // `open_device` before this call; `optional_features` is satisfied by
         // construction, which is exactly what `DeviceDesc::optional_features`
         // documents ("check `Device::caps` afterwards to find out").
-        let caps = record.info.caps;
+        //
+        // **One field is amended, and it is the one no adapter can answer.**
+        // `Features::TIMESTAMP_QUERY` obliges a `Limits::timestamp_period_ns`,
+        // and the period is `1e9 / ID3D12CommandQueue::GetTimestampFrequency()`
+        // — a *queue* call, and `crate::adapter` computes its caps before any
+        // device or queue exists. So the flag is reported there, where
+        // `DeviceDesc::required_features` is checked against it, and the number
+        // is filled in here, where there is finally something to ask.
+        let mut caps = record.info.caps;
+        // SAFETY: `queue` is the live `ID3D12CommandQueue` created immediately
+        // above. `GetTimestampFrequency` takes no pointer of ours and writes the
+        // `u64` it returns.
+        let frequency = unsafe { queue.GetTimestampFrequency() }.map_err(|error| {
+            HalError::Backend(format!(
+                "ID3D12CommandQueue::GetTimestampFrequency failed on a DIRECT queue, which is                  where D3D12 defines it: {error}{}",
+                debug::diagnosis(&raw)
+            ))
+        })?;
+        caps.limits.timestamp_period_ns = query::timestamp_period_ns(frequency)?;
         let owner = Owner::new(next_owner_id());
         let state = DeviceState {
             buffers: Pool::new(),
@@ -1323,6 +1482,7 @@ impl Dx12Device {
             command_buffers: Pool::new(),
             readbacks: Pool::new(),
             semaphores: Pool::new(),
+            query_sets: Pool::new(),
             shader_modules: Pool::new(),
             bind_group_layouts: Pool::new(),
             bind_groups: Pool::new(),
@@ -1761,15 +1921,13 @@ impl Device for Dx12Device {
         let gated = |feature: Features, why: &'static str| -> Support {
             Support::granted(has, feature, why)
         };
-        // One sentence for the three fills and one for the three queries: they
-        // are three capabilities refused at one site apiece, and three
-        // paraphrases of one obstacle would read like three obstacles.
+        // One sentence for the three fills: they are three capabilities refused
+        // at one site, and three paraphrases of one obstacle would read like
+        // three obstacles.
         const NO_FILL: &str = "D3D12's fill is ClearUnorderedAccessViewUint, which takes a descriptor from a \
              shader-visible heap that crcbl_dx12::descriptor does not create. A deliberate \
              non-fix: crcbl-render zeroes its counters with a clear dispatch, which runs anywhere \
              that can dispatch";
-        const NO_QUERIES: &str = "no query sets are built on this backend; the timestamp period only a queue can answer \
-             is the missing piece (the DX12 query slice)";
 
         match capability {
             Capability::BufferFillZero
@@ -1831,9 +1989,26 @@ impl Device for Dx12Device {
                 Features::SAMPLER_ANISOTROPY,
                 "this device reports no SAMPLER_ANISOTROPY",
             ),
-            Capability::TimestampQuery
-            | Capability::OcclusionQuery
-            | Capability::PipelineStatisticsQuery => Support::No(NO_QUERIES),
+            // `CreateQueryHeap` takes all three heap types on every D3D12
+            // device, so `features_of` reports the three flags unconditionally
+            // — but the answer is still read off this device's own caps, for the
+            // reason the semaphore arms below give. `Device::create_query_set`
+            // builds the heap and the readback buffer a result comes back
+            // through, `CommandEncoder::write_timestamp` and `resolve_query_set`
+            // record `EndQuery` and `ResolveQueryData`, and
+            // `Device::query_results` submits a resolve of its own and reads it.
+            Capability::TimestampQuery => gated(
+                Features::TIMESTAMP_QUERY,
+                "this device reports no TIMESTAMP_QUERY",
+            ),
+            Capability::OcclusionQuery => gated(
+                Features::OCCLUSION_QUERY,
+                "this device reports no OCCLUSION_QUERY",
+            ),
+            Capability::PipelineStatisticsQuery => gated(
+                Features::PIPELINE_STATISTICS_QUERY,
+                "this device reports no PIPELINE_STATISTICS_QUERY",
+            ),
             // `CreateFence` is on every D3D12 device, so `features_of` reports
             // the flag unconditionally — but the answer is still the device's
             // rather than a constant, because a backend claiming a capability
@@ -2960,23 +3135,252 @@ impl Device for Dx12Device {
 
     // --- queries ---
 
-    fn create_query_set(&self, _desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
-        Err(not_yet("query sets (the DX12 query slice)"))
+    /// Creates a query heap, and the readback buffer a result comes back
+    /// through.
+    ///
+    /// The buffer is the part no other backend needs; [`QuerySetEntry`] says
+    /// why. Both objects are created here so that a failure leaves neither
+    /// behind — a heap filed in the pool with no destination would be a set
+    /// [`Device::query_results`] could never answer for.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`] for a count of zero, or
+    /// [`HalError::Backend`] / [`HalError::OutOfDeviceMemory`] from
+    /// `CreateQueryHeap` or the resolve buffer's creation.
+    fn create_query_set(&self, desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
+        let bytes = query::resolve_buffer_bytes(desc.kind, desc.count)?;
+        let (heap_type, query_type) = conv::query_types(desc.kind);
+        let heap_desc = D3D12_QUERY_HEAP_DESC {
+            Type: heap_type,
+            Count: desc.count,
+            NodeMask: FIRST_NODE,
+        };
+        let mut heap: Option<ID3D12QueryHeap> = None;
+        // SAFETY: `heap_desc` is a live, fully initialised local borrowed for
+        // the duration of the call, `heap` is a live `Option` the call writes
+        // through, and `ID3D12QueryHeap` is the IID asked for. A failure leaves
+        // it `None`, which is why it is read back rather than assumed.
+        unsafe { self.inner.raw.CreateQueryHeap(&heap_desc, &mut heap) }
+            .map_err(|error| creation_error(&self.inner.raw, "CreateQueryHeap", &error))?;
+        let raw = heap.ok_or_else(|| {
+            HalError::Backend("CreateQueryHeap reported success and wrote no heap".to_string())
+        })?;
+
+        // A plain seam buffer, so the resolve destination is allocated,
+        // labelled and released by exactly the code every other buffer is.
+        // `HostReadback` is what makes it mappable *and* what leaves it
+        // permanently in `COPY_DEST`, which is the state `ResolveQueryData`
+        // requires of a destination — so the resolve needs no barrier.
+        let resolve_label = desc.label.map(|label| format!("{label} [resolve]"));
+        let resolve = self.create_buffer(&BufferDesc {
+            label: resolve_label.as_deref(),
+            size: bytes,
+            usage: BufferUsage::QUERY_RESOLVE | BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })?;
+
+        if let Some(label) = desc.label {
+            label_object(&raw, label);
+        }
+        let handle = self.state().query_sets.insert(QuerySetEntry {
+            owner: self.inner.owner.id,
+            raw,
+            kind: desc.kind,
+            query_type,
+            count: desc.count,
+            resolve,
+        });
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
-    fn destroy_query_set(&self, _set: QuerySetHandle) {}
+    /// Releases the heap and its resolve buffer.
+    ///
+    /// **The heap is parked and the buffer is not**, which is the difference
+    /// between the two objects rather than an inconsistency. The heap can be
+    /// named by a command list a caller recorded and has not submitted yet, so
+    /// it goes on [`crate::retire`]'s queue at the last value handed out, for
+    /// the reason [`Device::destroy_command_buffer`] parks. The buffer is
+    /// touched by exactly one list — the one [`Device::query_results`] records,
+    /// submits and *waits on* inside a single call, holding its own reference
+    /// throughout — so dropping this reference here can never free a resource
+    /// the GPU is reading, and it is what every other `destroy_buffer` does.
+    fn destroy_query_set(&self, set: QuerySetHandle) {
+        let taken = {
+            let mut state = self.state();
+            let Some(entry) = handle::take_owned(&mut state.query_sets, set, self.inner.owner)
+            else {
+                return;
+            };
+            let at = state.next_fence_value;
+            state
+                .retire
+                .park(at, Retired::QueryHeap { _raw: entry.raw });
+            self.inner.poll_retire(&mut state);
+            entry.resolve
+        };
+        // Outside the guard, because this takes the same lock and it is not
+        // reentrant. The buffer's own reference goes here; a `query_results`
+        // running concurrently holds its own clone for the length of its call,
+        // and so cannot be reading a released resource.
+        self.destroy_buffer(taken);
+    }
 
+    /// Reads a query set back, through a resolve and a submission of this
+    /// call's own.
+    ///
+    /// # This is the one seam call D3D12 has no shape for
+    ///
+    /// The seam reads results "directly, without a resolve-to-buffer round
+    /// trip", which is `vkGetQueryPoolResults` and Metal's
+    /// `resolveCounterRange:`: device calls, no encoder, no queue.
+    /// **`ID3D12QueryHeap` has no such call at all** — it cannot be mapped and
+    /// has no `GetData`, and `ResolveQueryData` is a command list method. So the
+    /// round trip is not avoidable here; it is moved *inside* this call, which
+    /// records a one-shot list, submits it and blocks on the fence through
+    /// [`DeviceInner::run_and_wait`] before mapping the set's own readback
+    /// buffer.
+    ///
+    /// That is genuinely expensive — a submission and a queue drain per read —
+    /// and it is why [`resolve_query_set`](crcbl_hal::CommandEncoder::resolve_query_set)
+    /// exists beside it: a profiler reading a timer ring every frame should
+    /// resolve into its own buffer inside the frame's command buffer and read
+    /// that back through [`Device::request_readback`], which costs nothing
+    /// extra. This call is for the one-off, and it is correct rather than fast.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`],
+    /// [`HalError::InvalidDescriptor`] if the range exceeds the set, and
+    /// [`HalError::Unsupported`] for a
+    /// [`QueryKind::PipelineStatistics`] set — see below.
+    ///
+    /// # A statistics set is refused rather than half-read
+    ///
+    /// `out` is one `u64` per query and D3D12 resolves a whole
+    /// `D3D12_QUERY_DATA_PIPELINE_STATISTICS` — eleven of them — so there is no
+    /// `out.len()` that both names a legal query range and matches what the
+    /// resolve wrote. Returning the first counter would be answering a different
+    /// question in the shape of this one, so this refuses and says so.
+    /// `crcbl-vk` meets the same wall from the other side, where the mismatch is
+    /// `VUID-vkGetQueryPoolResults-dataSize-00817`; the fix is a seam that
+    /// carries a result width, and it is not this slice's.
     fn query_results(
         &self,
         set: QuerySetHandle,
-        _first_query: u32,
-        _out: &mut [u64],
+        first_query: u32,
+        out: &mut [u64],
     ) -> Result<(), HalError> {
-        // The seam says a device without `TIMESTAMP_QUERY` returns zeros rather
-        // than failing, so the profiler HUD degrades instead of breaking — but
-        // that applies to a query set that exists. None can, so the handle
-        // cannot resolve, and `InvalidHandle` is the honest answer.
-        Err(HalError::invalid_handle("query set", set))
+        let (heap, kind, query_type, resolve) = {
+            let state = self.state();
+            let entry = handle::lookup(&state.query_sets, "query set", set, self.inner.owner)?;
+            query::check_range(entry.count, first_query, out.len() as u64)?;
+            // The refusal is written as "this kind does not resolve one `u64`
+            // per query" rather than as "this kind is statistics", so it is the
+            // shape of `out` that decides it — and a fourth query kind wider
+            // than a `u64` would be refused here rather than reading whichever
+            // of its counters happened to come first.
+            if query::result_bytes(entry.kind) != size_of::<u64>() as u64 {
+                return Err(HalError::Unsupported {
+                    backend: BackendKind::Dx12,
+                    what: "query_results reads one u64 per query and D3D12 resolves a whole \
+                           D3D12_QUERY_DATA_PIPELINE_STATISTICS per statistics query; use \
+                           resolve_query_set with a destination sized for that",
+                });
+            }
+            let resolve =
+                handle::lookup(&state.buffers, "buffer", entry.resolve, self.inner.owner)?
+                    .raw
+                    .clone();
+            (entry.raw.clone(), entry.kind, entry.query_type, resolve)
+        };
+        if out.is_empty() {
+            return Ok(());
+        }
+
+        // Every kind that reaches here resolves exactly one `u64` per query —
+        // the refusal above is what guarantees it — so the bytes the resolve
+        // writes and the bytes `out` holds are the same number, and the copy
+        // below cannot be told to overrun either.
+        let bytes = size_of_val(out);
+        let offset = query::span_bytes(kind, u64::from(first_query));
+        let (allocator, list) = self.inner.open_list(Some("crcbl-dx12 query_results"))?;
+        // SAFETY: `list` is a live list this call just opened and is recording,
+        // `heap` and `resolve` are live interfaces this device created and this
+        // call holds references to for longer than the submission below, and the
+        // range was bounds-checked against the heap's own query count. The
+        // destination offset is a multiple of the result width, which is what
+        // `AlignedDestinationBufferOffset` requires, and the destination is on
+        // the readback heap and so permanently in `COPY_DEST`.
+        unsafe {
+            list.ResolveQueryData(
+                &heap,
+                query_type,
+                first_query,
+                out.len() as u32,
+                &resolve,
+                offset,
+            );
+        }
+        // SAFETY: `list` is the list recorded into immediately above and is
+        // closed exactly once — nothing else holds it in a recording state.
+        unsafe { list.Close() }.map_err(|error| {
+            HalError::Backend(format!(
+                "ID3D12GraphicsCommandList::Close failed for a query resolve: {error}"
+            ))
+        })?;
+        self.inner.run_and_wait(allocator, list)?;
+
+        // A `D3D12_RANGE` is expressed in `usize`; only reachable on a 32-bit
+        // host, where the resolve buffer could not have existed either.
+        let begin = usize::try_from(offset).map_err(|_| {
+            HalError::InvalidDescriptor(format!(
+                "query offset {offset} does not fit this host's address space"
+            ))
+        })?;
+        // The read range is not decoration on a readback heap: it is what tells
+        // the runtime which bytes the CPU is about to look at.
+        let read = D3D12_RANGE {
+            Begin: begin,
+            End: begin + bytes,
+        };
+        let mut mapped: *mut core::ffi::c_void = core::ptr::null_mut();
+        // SAFETY: `resolve` is a live buffer on the readback heap this device
+        // created with the set, and subresource 0 is the only one a buffer has.
+        // Both pointers name live locals.
+        unsafe { resolve.Map(0, Some(&read), Some(&mut mapped)) }
+            .map_err(|error| HalError::Backend(format!("ID3D12Resource::Map failed: {error}")))?;
+        if mapped.is_null() {
+            return Err(HalError::Backend(
+                "ID3D12Resource::Map reported success and wrote no pointer".to_string(),
+            ));
+        }
+        // SAFETY: `mapped` points at the resolve buffer's whole allocation,
+        // which `create_query_set` sized for the set's whole query count, and
+        // the span was bounds-checked against that count above. The two regions
+        // cannot overlap: `out` is a caller-owned slice and the source is the
+        // buffer's own mapping. The fence has passed the resolve, so every byte
+        // it wrote is visible.
+        //
+        // Copied as **bytes** into `out`, rather than as `u64`s out of the
+        // mapping: `Map` promises no particular alignment for the pointer it
+        // returns, so a `*const u64` built from it would be an unaligned read,
+        // while `out` is a `&mut [u64]` and is aligned by construction. D3D12
+        // wrote the results in this machine's own byte order, so the bytes are
+        // the values.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                mapped.cast::<u8>().add(begin),
+                out.as_mut_ptr().cast::<u8>(),
+                bytes,
+            );
+        }
+        // SAFETY: the matching `Unmap`. The written range is empty because this
+        // call wrote nothing.
+        unsafe {
+            resolve.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+        }
+        Ok(())
     }
 
     // --- synchronisation ---
@@ -3213,6 +3617,9 @@ impl Device for Dx12Device {
         for resource in entry.retained {
             state.retire.park(at, Retired::Resource { _raw: resource });
         }
+        for heap in entry.query_heaps {
+            state.retire.park(at, Retired::QueryHeap { _raw: heap });
+        }
         state.retire.park(
             at,
             Retired::Recording {
@@ -3284,6 +3691,13 @@ impl Device for Dx12Device {
                     .iter()
                     .cloned()
                     .map(|raw| Retired::Resource { _raw: raw }),
+            );
+            held.extend(
+                entry
+                    .query_heaps
+                    .iter()
+                    .cloned()
+                    .map(|raw| Retired::QueryHeap { _raw: raw }),
             );
             held.push(Retired::Recording {
                 _list: entry.list.clone(),
@@ -6091,6 +6505,14 @@ pub(crate) mod tests {
     /// `caps` is the adapter's caps: D3D12 enables nothing and disables nothing,
     /// so a device that reported less than its adapter would be lying about
     /// hardware it can use.
+    ///
+    /// **`timestamp_period_ns` is the one exception, and it is asserted rather
+    /// than excluded.** It is `1e9 / GetTimestampFrequency()`, which needs the
+    /// queue an adapter does not have, so `crate::adapter` leaves it at the
+    /// floor's `0.0` and `Dx12Device::open` fills it in. Comparing the limits
+    /// with that field normalised would let the field go missing entirely, so it
+    /// is checked on both sides by name: zero on the adapter, positive on the
+    /// device.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn d3d12_device_caps_match_the_adapter_they_came_from() {
@@ -6105,7 +6527,25 @@ pub(crate) mod tests {
             .open_device(&device_desc(adapter))
             .expect("a D3D12 device opens with no required features");
         assert_eq!(device.caps().features, info.caps.features);
-        assert_eq!(device.caps().limits, info.caps.limits);
+        assert!(
+            info.caps.features.contains(Features::TIMESTAMP_QUERY),
+            "the exception below only means anything while the flag is reported: {:?}",
+            info.caps.features
+        );
+        assert_eq!(
+            info.caps.limits.timestamp_period_ns, 0.0,
+            "an adapter has no queue to ask GetTimestampFrequency"
+        );
+        assert!(
+            device.caps().limits.timestamp_period_ns > 0.0,
+            "the device reports TIMESTAMP_QUERY and a period of {}, so every duration derived \
+             from a timestamp delta is zero",
+            device.caps().limits.timestamp_period_ns
+        );
+        // Every other limit is the adapter's verbatim.
+        let mut expected = info.caps.limits;
+        expected.timestamp_period_ns = device.caps().limits.timestamp_period_ns;
+        assert_eq!(device.caps().limits, expected);
     }
 
     /// A buffer of every memory location creates and destroys, and a destroyed
@@ -7116,16 +7556,6 @@ pub(crate) mod tests {
         let (_instance, device) = open_device();
 
         let refusals: Vec<(&str, HalError)> = vec![
-            (
-                "query sets",
-                device
-                    .create_query_set(&QuerySetDesc {
-                        label: None,
-                        kind: QueryKind::Timestamp,
-                        count: 1,
-                    })
-                    .expect_err("no query heaps yet"),
-            ),
             // The seam requires this refusal at *layout creation* rather than at
             // the `push_constants` call, and it is the one refusal in this list
             // that used to answer `InvalidDescriptor` — which would have sent a
@@ -7352,6 +7782,22 @@ pub(crate) mod tests {
                     )
                     .expect_err("that semaphore was never issued"),
             ),
+            (
+                "query sets",
+                device
+                    .create_query_set(&QuerySetDesc {
+                        label: None,
+                        kind: QueryKind::Timestamp,
+                        count: 0,
+                    })
+                    .expect_err("a set of no queries is not a query heap"),
+            ),
+            (
+                "query reads",
+                device
+                    .query_results(unissued(), 0, &mut [0u64; 1])
+                    .expect_err("that query set was never issued"),
+            ),
         ];
         assert!(!landed.is_empty(), "nothing to check");
         for (what, error) in &landed {
@@ -7405,6 +7851,19 @@ pub(crate) mod tests {
             ("indirect dispatches", |encoder| {
                 encoder.begin_compute_pass(&ComputePassDesc { label: None });
                 encoder.dispatch_indirect(unissued(), 0);
+            }),
+            // All three query verbs, because `reset_query_set` records no
+            // command at all: it must still resolve the handle, or the seam
+            // suite's "reset it through a submitted command buffer" check would
+            // pass against a set this device never issued.
+            ("query resets", |encoder| {
+                encoder.reset_query_set(unissued(), 0..1);
+            }),
+            ("timestamp writes", |encoder| {
+                encoder.write_timestamp(unissued(), 0);
+            }),
+            ("query resolves", |encoder| {
+                encoder.resolve_query_set(unissued(), 0..1, unissued(), 0);
             }),
         ];
         assert!(!recording.is_empty(), "nothing to check");
@@ -7625,12 +8084,13 @@ pub(crate) mod tests {
     /// never resolved" is both true and more useful than "the query slice is not
     /// here".
     ///
-    /// Asserted beside `create_query_set`, which refuses the other way, because
-    /// the claim is about the difference: a backend that answered `Unsupported`
-    /// everywhere would pass either assertion alone. `create_semaphore` used to
-    /// stand beside it and now *succeeds*, so it is here as the third answer —
-    /// a call that landed, checked here so the pair above cannot quietly become
-    /// a rule about semaphores.
+    /// Asserted beside `create_pipeline_layout`, which refuses the other way,
+    /// because the claim is about the difference: a backend that answered
+    /// `Unsupported` everywhere would pass either assertion alone.
+    /// `create_semaphore` and `create_query_set` both used to stand on the
+    /// `Unsupported` side and now *succeed*, so they are here as the third
+    /// answer — calls that landed, checked here so the pair above cannot quietly
+    /// become a rule about one call each.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_query_set_and_a_semaphore_handle_refuse_as_unresolvable_not_as_unimplemented() {
@@ -7660,19 +8120,43 @@ pub(crate) mod tests {
             "{error:?}"
         );
 
-        // The other side of the line, on the calls that create the very objects
-        // those handles would have named.
+        // The other side of the line: a slice that genuinely has not arrived
+        // answers `Unsupported` rather than blaming the caller's handle.
         let error = device
-            .create_query_set(&QuerySetDesc {
+            .create_pipeline_layout(&PipelineLayoutDesc {
                 label: None,
-                kind: QueryKind::Timestamp,
-                count: 1,
+                bind_group_layouts: &[],
+                push_constants: Some(crcbl_hal::PushConstantRange {
+                    stages: ShaderStages::ALL,
+                    offset: 0,
+                    size: 64,
+                }),
             })
-            .expect_err("no query heaps yet");
+            .expect_err("no root-constant slot is known");
         assert!(
             matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
             "{error:?}"
         );
+
+        // And the third answer, on the two calls that used to be on the
+        // `Unsupported` side: they create the object, and the handle dies with
+        // it rather than resolving to whatever takes its slot next.
+        let set = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("unresolvable-handle probe"),
+                kind: QueryKind::Timestamp,
+                count: 1,
+            })
+            .expect("every D3D12 device creates timestamp query heaps");
+        device.destroy_query_set(set);
+        let error = device
+            .query_results(set, 0, &mut results)
+            .expect_err("that query set was destroyed");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "query set"),
+            "{error:?}"
+        );
+
         let semaphore = device
             .create_semaphore(&SemaphoreDesc {
                 label: Some("unresolvable-handle probe"),
@@ -7763,6 +8247,308 @@ pub(crate) mod tests {
         );
         assert_eq!(poisoned, [POISON; 4], "a refused poll wrote to the output");
         device.destroy_buffer(readback);
+    }
+
+    // --- queries ---
+
+    /// Queries the timestamp tests write: one before the timed work, one after.
+    const TIMED_QUERIES: u32 = 2;
+
+    /// Bytes the copy between the two timestamps moves.
+    ///
+    /// Large enough that the copy occupies the queue for far longer than one
+    /// tick of any counter, so a second timestamp above the first is a fact
+    /// about the hardware rather than a race with the clock's granularity. The
+    /// seam suite times the same copy for the same reason.
+    const TIMED_COPY_BYTES: u64 = 4 << 20;
+
+    /// What a resolve destination holds before the resolve, so "never written"
+    /// stays distinguishable from "these really are the ticks".
+    const QUERY_POISON: u64 = 0x5A5A_5A5A_5A5A_5A5A;
+
+    /// **Both of the seam's read paths report the same two ticks, and the ticks
+    /// came from a clock.**
+    ///
+    /// The claim `Capability::TimestampQuery` makes here, driven end to end:
+    /// `EndQuery` writes a timestamp either side of a [`TIMED_COPY_BYTES`] copy,
+    /// [`Device::query_results`] reads them through its own resolve and
+    /// submission, and `resolve_query_set` reads the *same two queries* into a
+    /// buffer this test maps. What that second read must produce is not a
+    /// plausible pair but the pair already returned, so a backend where one path
+    /// reaches a different heap, range or stride cannot be green.
+    ///
+    /// The failures it cannot pass through: a `write_timestamp` accepted and
+    /// dropped reads back two zeros, a counter that is not running reads the
+    /// same value twice, and a resolve that wrote nothing leaves
+    /// [`QUERY_POISON`] behind. The period is asserted too, because it is the
+    /// other half of the claim — a period of zero turns every measured duration
+    /// into zero however long the frame took.
+    ///
+    /// **The resolve goes straight into a readback-heap buffer**, which is the
+    /// same assumption `Device::query_results` is built on: such a resource is
+    /// created in `D3D12_RESOURCE_STATE_COPY_DEST` and can never leave it, which
+    /// is exactly the state `ResolveQueryData` requires of a destination.
+    /// `wgpu-hal` does the same — a `MAP_READ | QUERY_RESOLVE` buffer there is a
+    /// readback-heap resource its `copy_query_results` resolves into with no
+    /// barrier — and `open_device` fails this test on any debug-layer message,
+    /// so a runtime that disagreed would say so rather than be assumed about.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn d3d12_timestamps_advance_and_both_read_paths_report_the_same_ticks() {
+        let (_instance, device) = open_device();
+        assert!(
+            device.caps().features.contains(Features::TIMESTAMP_QUERY),
+            "every D3D12 device takes a timestamp query heap: {:?}",
+            device.caps().features
+        );
+
+        let set = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("crcbl-dx12 timestamps"),
+                kind: QueryKind::Timestamp,
+                count: TIMED_QUERIES,
+            })
+            .expect("a timestamp query heap");
+        let source = device
+            .create_buffer(&BufferDesc {
+                label: Some("timed copy source"),
+                size: TIMED_COPY_BYTES,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a device-local buffer");
+        let sink = device
+            .create_buffer(&BufferDesc {
+                label: Some("timed copy sink"),
+                size: TIMED_COPY_BYTES,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a device-local buffer");
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[
+                    buffer_barrier(source, ResourceState::Undefined, ResourceState::TransferSrc),
+                    buffer_barrier(sink, ResourceState::Undefined, ResourceState::TransferDst),
+                ],
+                ..Barriers::default()
+            });
+            // Unconditional, as the seam asks: a no-op here and required on
+            // Vulkan, so the caller is never the special case.
+            encoder.reset_query_set(set, 0..TIMED_QUERIES);
+            encoder.write_timestamp(set, 0);
+            encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+                src: source,
+                src_offset: 0,
+                dst: sink,
+                dst_offset: 0,
+                size: TIMED_COPY_BYTES,
+            });
+            encoder.write_timestamp(set, 1);
+        });
+
+        let mut ticks = [0u64; TIMED_QUERIES as usize];
+        device
+            .query_results(set, 0, &mut ticks)
+            .expect("reading the range this set was created with");
+        let [start, end] = ticks;
+        assert!(
+            start != 0 || end != 0,
+            "both timestamps read back as zero, which is what a write_timestamp accepted and \
+             dropped produces"
+        );
+        assert!(
+            end > start,
+            "the timestamps around a {TIMED_COPY_BYTES}-byte copy came back as {start} then \
+             {end}; a clock that ran cannot report the second write at or before the first"
+        );
+        let period = device.caps().limits.timestamp_period_ns;
+        assert!(
+            period > 0.0,
+            "this device declares timestamp queries and reports {period} ns per tick, so every \
+             duration derived from the {} ticks it just measured is zero",
+            end - start
+        );
+        // The other half of the pair: the read above is only evidence beside a
+        // read that is refused, since `Ok` is what an implementation doing
+        // nothing answers to everything.
+        let mut past_the_end = [0u64; TIMED_QUERIES as usize + 1];
+        let error = device
+            .query_results(set, 0, &mut past_the_end)
+            .expect_err("one query past the end of the set");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        // The second read path, over the same two queries.
+        const BYTES: u64 = TIMED_QUERIES as u64 * 8;
+        let resolved = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-dx12 timestamp resolve"),
+                size: BYTES,
+                usage: BufferUsage::QUERY_RESOLVE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer");
+        let primer: Vec<u8> = core::iter::repeat_n(QUERY_POISON, TIMED_QUERIES as usize)
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        device
+            .write_buffer(resolved, 0, &primer)
+            .expect("a readback heap is writable from the CPU");
+        run(&device, |encoder| {
+            encoder.resolve_query_set(set, 0..TIMED_QUERIES, resolved, 0);
+        });
+        let words: Vec<u64> = read_back(&device, resolved, BYTES as usize)
+            .chunks_exact(8)
+            .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+            .collect();
+        assert_ne!(
+            words,
+            vec![QUERY_POISON; TIMED_QUERIES as usize],
+            "resolve_query_set left the destination untouched"
+        );
+        assert_eq!(
+            words.as_slice(),
+            ticks.as_slice(),
+            "resolve_query_set wrote {words:?} for the same two queries query_results had just \
+             read as {ticks:?}; one of the two paths is reaching a different heap, range or stride"
+        );
+
+        device.destroy_buffer(resolved);
+        device.destroy_buffer(sink);
+        device.destroy_buffer(source);
+        device.destroy_query_set(set);
+    }
+
+    /// **Every kind of query set is creatable, and the reads the seam's shape
+    /// cannot express are refused rather than half-answered.**
+    ///
+    /// Occlusion and statistics heaps are created and reset through a submitted
+    /// command buffer, which is what shows the handle reaches this crate's own
+    /// encoder — `reset_query_set` records no D3D12 command at all, so a set
+    /// this device never issued has nothing but the handle check to fail on.
+    ///
+    /// A read of a *statistics* set is [`HalError::Unsupported`]: `out` is one
+    /// `u64` per query while D3D12 resolves a whole
+    /// `D3D12_QUERY_DATA_PIPELINE_STATISTICS`, so there is no length that both
+    /// names a legal range and matches what the resolve wrote. Refusing is the
+    /// honest answer and returning the first counter would be the dishonest one;
+    /// `crate::query`'s `check_destination` is what stops the same mismatch
+    /// becoming a buffer overrun on the resolve path, and the encoder half of
+    /// that is asserted below.
+    ///
+    /// # No occlusion set is *read* here, and that is deliberate
+    ///
+    /// The seam has no begin/end verb, so no work this crate can record ever
+    /// reaches an occlusion pool — which makes every occlusion read a
+    /// `ResolveQueryData` over queries that were never ended, and D3D12 has a
+    /// debug-layer message for exactly that
+    /// (`D3D12_MESSAGE_ID_RESOLVE_QUERY_INVALID_QUERY_STATE`). Whether it fires
+    /// for a query that was never *begun* is not something this workspace can
+    /// settle, and `open_device` fails a test on any warning — so the successful
+    /// read that makes the refusal below mean something is asserted on a
+    /// **timestamp** set instead, in
+    /// [`d3d12_timestamps_advance_and_both_read_paths_report_the_same_ticks`],
+    /// whose queries really were written. The seam suite drives the occlusion
+    /// read itself on WARP.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn d3d12_query_sets_of_every_kind_create_and_refuse_the_reads_the_seam_cannot_shape() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        const COUNT: u32 = 2;
+
+        for kind in [QueryKind::Occlusion, QueryKind::PipelineStatistics] {
+            let set = device
+                .create_query_set(&QuerySetDesc {
+                    label: Some("crcbl-dx12 query set"),
+                    kind,
+                    count: COUNT,
+                })
+                .unwrap_or_else(|error| panic!("{kind:?}: {error:?}"));
+            run(&device, |encoder| encoder.reset_query_set(set, 0..COUNT));
+
+            // The range is checked before the kind is, so a read past the end of
+            // a statistics set says `InvalidDescriptor` too — which is the right
+            // order: the caller's range is a field it can correct, and the
+            // width mismatch is not.
+            let mut past_the_end = [0u64; COUNT as usize + 1];
+            let error = device
+                .query_results(set, 0, &mut past_the_end)
+                .expect_err("one query past the end of the set");
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{kind:?}: {error:?}"
+            );
+
+            if matches!(kind, QueryKind::PipelineStatistics) {
+                let mut inside = [0u64; COUNT as usize];
+                let error = device
+                    .query_results(set, 0, &mut inside)
+                    .expect_err("one u64 per query is not this pool's layout");
+                assert!(
+                    matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+                    "{error:?}"
+                );
+            }
+            device.destroy_query_set(set);
+        }
+
+        // The resolve path's two refusals, which are the ones D3D12 itself would
+        // not report: an offset it cannot take, and a destination sized at the
+        // seam's one `u64` per query for a set that resolves eleven.
+        let statistics = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("crcbl-dx12 statistics"),
+                kind: QueryKind::PipelineStatistics,
+                count: COUNT,
+            })
+            .expect("a statistics query heap");
+        let narrow = device
+            .create_buffer(&BufferDesc {
+                label: Some("a destination sized for timestamps"),
+                size: u64::from(COUNT) * 8,
+                usage: BufferUsage::QUERY_RESOLVE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer");
+        type Refused = (&'static str, u64);
+        let refusals: &[Refused] = &[
+            ("an unaligned destination offset", 4),
+            ("a destination sized for one u64 per query", 0),
+        ];
+        assert!(!refusals.is_empty(), "nothing to check");
+        for (what, dst_offset) in refusals {
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("crcbl-dx12 statistics resolve"),
+                queue,
+            });
+            encoder.resolve_query_set(statistics, 0..COUNT, narrow, *dst_offset);
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully, so D3D12 was handed it");
+            };
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: {error:?}"
+            );
+        }
+
+        // And a timestamp written into a set of another kind, which D3D12 would
+        // take and quietly fill with a number from a heap nobody asked about.
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-dx12 mismatched timestamp"),
+            queue,
+        });
+        encoder.write_timestamp(statistics, 0);
+        let Err(error) = encoder.finish() else {
+            panic!("a timestamp was written into a statistics set");
+        };
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        device.destroy_buffer(narrow);
+        device.destroy_query_set(statistics);
     }
 
     // --- the compute path ---

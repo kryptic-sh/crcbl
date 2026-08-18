@@ -1033,13 +1033,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::TimestampQuery,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "no query sets are built on this backend; the timestamp period only a queue can \
-              answer is the missing piece (the DX12 query slice)",
-    },
-    Divergence {
-        capability: Capability::TimestampQuery,
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::Unwritten,
         why: "this backend enables neither wgpu's TIMESTAMP_QUERY nor its statistics features, so \
@@ -1066,12 +1059,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::OcclusionQuery,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "no query sets are built on this backend; see the TimestampQuery entry",
-    },
-    Divergence {
-        capability: Capability::OcclusionQuery,
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::Unwritten,
         why: "no query sets are built on this backend; see the TimestampQuery entry",
@@ -1093,12 +1080,6 @@ pub const DIVERGENCES: &[Divergence] = &[
               be settled from here: MTLCommonCounterSetStatistic names the invocation counters, \
               but a device advertises the set through MTLDevice.counterSets and no Mac runs in \
               this workspace (the Metal query slice)",
-    },
-    Divergence {
-        capability: Capability::PipelineStatisticsQuery,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "no query sets are built on this backend; see the TimestampQuery entry",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
@@ -1749,21 +1730,6 @@ mod tests {
         ),
         (
             Capability::PushConstants,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::TimestampQuery,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::OcclusionQuery,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::PipelineStatisticsQuery,
             BackendKind::Dx12,
             DivergenceKind::Unwritten,
         ),

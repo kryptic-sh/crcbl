@@ -562,17 +562,37 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   named union and [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter)
 ///   opens rather than refusing.
 ///
+/// * [`Features::TIMESTAMP_QUERY`], [`Features::OCCLUSION_QUERY`] and
+///   [`Features::PIPELINE_STATISTICS_QUERY`] — **unconditional, and there is no
+///   query to make.** `CreateQueryHeap` accepts
+///   `D3D12_QUERY_HEAP_TYPE_TIMESTAMP`, `_OCCLUSION` and
+///   `_PIPELINE_STATISTICS` on every D3D12 device, and a `DIRECT` queue takes
+///   all three: the one query heap type that *is* conditional is
+///   `_COPY_QUEUE_TIMESTAMP`, gated on
+///   `D3D12_FEATURE_DATA_D3D12_OPTIONS3::CopyQueueTimestampQueriesSupported`,
+///   and this backend creates no copy queue to put one on. That is why the
+///   capability structures have no bit for the three that are here.
+///
+///   They waited for the calls rather than for a query, exactly as
+///   [`Features::COMPUTE`] did. `Device::create_query_set` creates the heap and
+///   the resolve destination behind it, `CommandEncoder::write_timestamp` and
+///   `resolve_query_set` record `EndQuery` and `ResolveQueryData`, and
+///   `Device::query_results` reads a set back.
+///
+///   **[`Limits::timestamp_period_ns`] is the half an adapter cannot answer**,
+///   because it is `1e9 / ID3D12CommandQueue::GetTimestampFrequency()` and there
+///   is no queue here — so [`limits_of`] leaves it at the floor and
+///   `Dx12Device::open` amends the caps once its queue exists. The flag is
+///   reported here all the same, and it has to be:
+///   [`DeviceDesc::required_features`](crcbl_hal::DeviceDesc::required_features)
+///   is checked against the **adapter**, so a flag that first appeared at device
+///   open could never be required by a caller.
+///
 /// # Absent, with the reason for each
 ///
 /// * [`Features::DEBUG_MARKERS`] — PIX events go through `WinPixEventRuntime`,
 ///   a library this workspace does not depend on, so this needs a decision
 ///   before it needs a slice.
-/// * [`Features::TIMESTAMP_QUERY`] and
-///   [`Features::PIPELINE_STATISTICS_QUERY`] — query heaps answer both, and
-///   reporting a timestamp query obliges a [`Limits::timestamp_period_ns`],
-///   which comes from `ID3D12CommandQueue::GetTimestampFrequency` — a call that
-///   needs a queue, which needs a device.
-/// * [`Features::OCCLUSION_QUERY`] — likewise a query heap.
 /// * [`Features::PUSH_CONSTANTS`] — root constants are the direct mapping and
 ///   `D3D12_MAX_ROOT_COST` is the budget, but the budget is shared with every
 ///   descriptor table in the same root signature, so the number is a
@@ -598,12 +618,13 @@ fn features_of(raw: &RawCaps) -> Features {
     if raw.block_compression {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
-    // No query for any of the eight: a GPU virtual address is not optional in
+    // No query for any of these: a GPU virtual address is not optional in
     // D3D12, anisotropic sampling is an architectural constant, compute is what
     // a DIRECT queue accepts by definition, the three indirect flags are
     // parameters and fields of `ExecuteIndirect` rather than capability bits,
-    // the frame-latency waitable object predates D3D12 itself, and `CreateFence`
-    // is on every D3D12 device there is. See above.
+    // the frame-latency waitable object predates D3D12 itself, `CreateFence` is
+    // on every D3D12 device there is, and so are the three query heap types a
+    // DIRECT queue takes. See above.
     out |= Features::BUFFER_DEVICE_ADDRESS
         | Features::SAMPLER_ANISOTROPY
         | Features::COMPUTE
@@ -611,7 +632,10 @@ fn features_of(raw: &RawCaps) -> Features {
         | Features::MULTI_DRAW_INDIRECT
         | Features::INDIRECT_FIRST_INSTANCE
         | Features::PRESENT_FEEDBACK
-        | Features::TIMELINE_SEMAPHORE;
+        | Features::TIMELINE_SEMAPHORE
+        | Features::TIMESTAMP_QUERY
+        | Features::OCCLUSION_QUERY
+        | Features::PIPELINE_STATISTICS_QUERY;
     out
 }
 
@@ -656,8 +680,13 @@ fn features_of(raw: &RawCaps) -> Features {
 /// * `max_sample_count` — `CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS)`
 ///   answers it **per format**, so it needs a format table. The floor is
 ///   WebGPU's downlevel guarantee and D3D12 clears it everywhere.
-/// * `timestamp_period_ns` — keyed off a feature this adapter does not report,
-///   so it stays at the floor's neutral value.
+/// * `timestamp_period_ns` — **the one field an adapter genuinely cannot
+///   answer.** It is `1e9 / ID3D12CommandQueue::GetTimestampFrequency()`, and
+///   there is no queue until a device exists, so it stays at the floor's neutral
+///   value here and `Dx12Device::open` amends the caps it opens with. That makes
+///   this the one limit on which an adapter and a device from it differ, which
+///   `d3d12_device_caps_match_the_adapter_they_came_from` asserts by name rather
+///   than leaving to be discovered.
 ///
 /// Two feature-keyed fields do move:
 ///
