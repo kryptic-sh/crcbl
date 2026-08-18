@@ -354,15 +354,28 @@ sample in sequence is `docs/plan/sample/05-viewer.md`**, a glTF model viewer:
 open a file, orbit it, inspect it. It is the asset pipeline's acceptance test
 and the editor viewport's warm-up act.
 
-**What it needs that does not exist yet**, sliced so each lands on its own:
+**What it needs**, sliced so each lands on its own — one of these turned out to
+be built already, which is why the list says what was checked and when:
 
-- **V-F1 — glTF reaches the renderer.** `crcbl_scene::gltf_import::import_gltf`
-  already produces a `GltfScene` (meshes, materials, nodes, instances), but its
-  only consumer in the workspace is `crcbl-cli`'s `lod_cmd.rs`; no app and not
-  `crcbl-render`. Nothing turns it into a `SceneDesc` the `ForwardRenderer`
-  draws, including the texture side (glTF images → `PageDesc` layers →
-  `GpuMaterial` rows). **This is the foundational slice** — the viewer is
-  impossible without it and every later sample that loads real assets wants it.
+- **V-F1 — glTF reaches the renderer. DONE, and this entry described it as
+  missing.** `crcbl_scene::gltf_render` exists and does the whole conversion:
+  `build_render_scene` runs `pack_page` (glTF images → `PageDesc` layers),
+  `material_rows` (rows carrying those layers), `resident_meshes` and
+  `place_instances`, handing back a `SceneDesc` plus its `InstanceDesc`s and a
+  list of what it skipped. Nineteen unit tests, and
+  `crates/crcbl/tests/gltf_e2e.rs` builds a `.glb` through the real `DirSource`,
+  converts it, hands it to `ForwardRenderer::with_scene` and draws — verified on
+  an RX 7900 XTX on 2026-08-19: _"an imported glTF drew its own texture on vk"_,
+  via `crates/crcbl/tests/run-gltf-e2e.sh`.
+
+  What the sample still needs from this area is narrower than a slice: the
+  converter has no _app_ consumer, since `gltf_e2e` is a test. That is V-F5's
+  job (opening a file) rather than a missing bridge.
+
+  Checked at the same time, and genuinely still open: **V-F2** — no orbit camera
+  type exists anywhere in the workspace — and **V-F4** — nothing in `crates/`
+  mentions hot reload.
+
 - **V-F2 — orbit camera controls.** Orbit, pan, zoom, frame-selected. The plan
   calls for writing it properly once here because the stage-8 editor reuses it,
   so it belongs in a crate rather than in the app.
