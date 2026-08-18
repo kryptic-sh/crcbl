@@ -155,13 +155,19 @@ failure.**
    through browser probe group AD — where `crcbl-wgpu`'s suite had been the only
    thing in the workspace attaching a resolve view to a real device.
 
-   **Two remain**, both in `crates/crcbl-wgpu/tests/wgpu_e2e.rs`: the only bind
-   group built with a `variable_count`, and the only pipeline layout with a real
-   push-constant range. Each has to be re-homed or given up **deliberately** —
-   the capabilities behind them are declared `Yes` by backends no test
-   exercises, so losing them leaves those claims resting on nothing. Note the
-   push-constant one wants the same committed shader artifact dx12 and Metal
-   both need, so it is one piece of work serving three purposes.
+   **Three are now closed.** The push-constant range came with the seam suite's
+   `exercise_push_constants`, which builds a layout with a real
+   `PushConstantRange` and drives it on every backend — the same piece of work
+   that unblocked dx12's and Metal's rows, which is why it was worth doing
+   properly rather than three times.
+
+   **One remains**, and it is tied to an open blocker rather than orphaned:
+   `crates/crcbl-wgpu/tests/wgpu_e2e.rs` holds the only bind group built with a
+   `variable_count` **against a real device**. `crcbl-webgpu`'s two uses are
+   stream-encoding tests with no device behind them. That is
+   `Capability::BindlessDescriptorArray`, which is still an open Metal row — so
+   closing that row and re-homing this exercise are the same task, and doing it
+   removes the last coverage `crcbl-wgpu`'s deletion would cost.
 
    **`naga` does NOT leave with it, and notes here said otherwise twice.**
    `crcbl-shaders` takes `naga` as its own **dev-dependency** (`version = "30"`,
