@@ -1830,6 +1830,33 @@ hypothetical. Worth noting that (1) has a free prerequisite: the deferral can
 land on its own as a pure refactor with no capability change at all, proven by
 the existing 66 Metal tests and 26 render tests continuing to pass.
 
+**Decided: (1), and the research is why rather than taste.**
+
+- **MoltenVK does not take the ICB route at all.** It implements
+  `vkCmdDrawIndirectCount` by reading the count back to the CPU and looping
+  `drawIndexedPrimitives`, which needs a CPU–GPU synchronisation to see a number
+  the GPU wrote. That is correct and simple and it stalls the frame, so it fails
+  the performance half of this project's bar. It is worth knowing the reference
+  Vulkan-on-Metal implementation gave up here — it is why nobody should read
+  Metal's silence on this as "there is an easy way we missed".
+- **A third option does not exist: the commands cannot be pre-encoded once.**
+  `MTLIndirectRenderCommand`'s draws take literal vertex and instance counts, so
+  an ICB encoded on the CPU cannot serve draws whose arguments the cull pass
+  writes into GPU memory each frame. A kernel has to write them, which is what
+  forces the ordering in the first place.
+- **(2) is disqualified by the hardware this targets.** Ending and reopening a
+  render encoder on a tiler stores every attachment out of tile memory and
+  reloads it — per call, and the seam makes one call per bucket per frame. On
+  Apple silicon that is the expensive operation, not a rounding error.
+
+**And one widely repeated claim is false, which our own measurement settles.**
+Several sources say fragment shaders cannot be used with indirect command
+buffers.
+`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`
+executed a full vertex-and-fragment pipeline through an ICB on CI and produced a
+canvas byte-identical to the direct draw. Had that been believed rather than
+measured, the whole approach would have been abandoned for a stall.
+
 **So the question is what bar the deletion clears.** Three honest positions:
 
 1. **Every row closed.** Requires a hardware macOS runner for four Metal rows,
