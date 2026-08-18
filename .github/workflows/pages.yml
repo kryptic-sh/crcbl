@@ -477,6 +477,122 @@ jobs:
           SITE_DIR="$(pwd -W)/target/site" ./web/run-probe-e2e.sh --headless
           --adapter swiftshader --expect-fail X,Y,Z,AA
 
+  # THE WebGPU PARITY GATE — the only thing anywhere that holds a browser's
+  # *pixels* against the goldens the native suites compare against.
+  #
+  # Everything else in this workflow reads text. The five demo steps assert log
+  # lines and watch a canvas change; the probe gate reads bytes back and checks
+  # their values, but against colours it computed itself, not against a
+  # committed picture. So "the browser draws the same frame `vk`/`mtl`/`dx12`
+  # draw" was a claim nothing made — and that gap is not hypothetical: the sRGB
+  # "everything renders too dark" defect shipped straight through it, because
+  # the goldens only ever covered the offscreen native path and the browser gate
+  # only ever read text.
+  #
+  # `web/run-render-harness-e2e.sh` closes it: it drives the same eleven
+  # backend-agnostic `Scene`s through `crcbl-webgpu` in a real browser, reads
+  # each frame back, and hands the bytes to `crcbl-golden` at
+  # `Tolerance::RASTERISER` — the same comparator and the same numbers
+  # `crcbl/tests/render_e2e.rs` uses. Nothing in JavaScript diffs a pixel.
+  #
+  # IT NEITHER `needs: build` NOR DOWNLOADS THE `site` ARTIFACT, and that is the
+  # one place it departs from the two probe jobs above. Those download `site` so
+  # every platform drives the identical bytes that ship — but `web/build.sh`
+  # does not build `apps/render-harness` at all, and the harness page is not part
+  # of the deployed site, so there are no shipped bytes here to reuse. It
+  # assembles its own wasm and builds the comparator natively, which is also why
+  # it holds its own `rust-cache` key: `build` caches a wasm-only target
+  # directory and this one needs a host build beside it. Independent of `build`,
+  # so it runs in parallel with it rather than behind it.
+  #
+  # NO Xvfb, unlike every other browser step in this file. The harness renders to
+  # an offscreen target and reads it back into wasm memory; there is no canvas
+  # anywhere in it, so none of the compositor machinery the demo and probe gates
+  # need applies. Headless Chromium plus SwiftShader is the whole environment.
+  #
+  # **`--expect-fail ssr,ui` IS A MEASUREMENT, NOT A TOLERANCE.** Nine of the
+  # eleven scenes match SwiftShader's output exactly within
+  # `Tolerance::RASTERISER`. Two do not, and reproduce to the digit across runs:
+  # `ssr` at 58 grossly-wrong pixels and ssim 0.988822, `ui` at 506 and ssim
+  # 0.983257. They are rasteriser differences rather than backend defects — the
+  # same `ssr` scene matches on real hardware with a max channel delta of 9 and
+  # zero gross pixels, and its diff is banding confined to the reflection
+  # ray-march and the horizon edges, so the geometry and the instancing that a
+  # real regression would break are right. A step reporting 9 of 11 as success
+  # would be worse than no step, so the two are excused *by name*: they still
+  # render, still compare, still print their numbers every run, and
+  # `web/tools/render-harness-verdict.mjs` fails this job the moment either one
+  # starts matching, or the moment anything else stops. Widening the tolerance
+  # instead would have quietly weakened all eleven.
+  #
+  # LINUX ONLY, DELIBERATELY. The expected-fail list is exact in both
+  # directions, so it can only be written for a platform whose per-scene outcome
+  # has been measured — and a guessed list fails the run either way, as a
+  # regression or as a stale entry. Only this one has been measured.
+  #
+  #   macOS    would drive a real Apple adapter, where the two SwiftShader
+  #            differences plausibly do not arise at all — which is exactly the
+  #            guess this mechanism refuses to encode. It needs one run to
+  #            record what the eleven scenes actually do there.
+  #   Windows  forces SwiftShader (`probe-windows` measured that a GPU-less
+  #            `windows-latest` exposes no WebGPU through D3D), so it would
+  #            likely fail the same two — still a guess. Note that
+  #            `probe-windows`'s four expected failures do NOT transfer here:
+  #            those are a canvas readback that never resolves and strands
+  #            everything queued behind it on the page's single queue, and this
+  #            harness never touches a canvas.
+  #
+  # `docs/backlog.md` is where enabling either belongs until someone runs it.
+  render-harness:
+    name: hold the browser's pixels against the goldens
+    runs-on: ubuntu-latest
+    # Longer than `build`'s: this one compiles `render-harness` twice, once to
+    # wasm and once for the host, and the host half pulls in the native backend.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: render-harness
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # Named, executed and printed before anything drives it, for the same
+      # reason `build` does it: a missing browser must fail here rather than
+      # turn the gate below into a step that skips and reports success.
+      - name: Check the browser gate's assumptions
+        run: |
+          set -euo pipefail
+          browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          if [ -z "$browser" ]; then
+            echo "::error::no Chrome or Chromium on this runner. The image is assumed to ship /usr/bin/google-chrome."
+            exit 1
+          fi
+          echo "browser: $browser ($("$browser" --version))"
+
+      - name: Compare every golden scene rendered in a browser
+        run: ./web/run-render-harness-e2e.sh --expect-fail ssr,ui
+
+      # The rendered frame, the golden and the diff, for every scene that did
+      # not match — including the two excused ones, whose numbers are the record
+      # the `--expect-fail` list is held to. None of the three can be
+      # reconstructed from the step log.
+      - name: Upload the golden diffs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: render-harness-golden-diff
+          path: target/golden-diff
+          if-no-files-found: warn
+          retention-days: 7
+
   deploy:
     name: deploy to GitHub Pages
     needs: build

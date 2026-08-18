@@ -20,6 +20,7 @@
 //
 // USAGE
 //   node web/tools/render-harness-e2e.mjs <site-dir> [--readback-dir <dir>]
+//                                                    [--result-json <path>]
 //
 //   <site-dir>       A directory with `harness/index.html` and the loader-plus-
 //                    output beside it; `web/run-render-harness-e2e.sh`
@@ -28,6 +29,14 @@
 //                    `<scene>.<width>x<height>.<order>.bin` — everything the
 //                    comparator needs to read the bytes, in the name. Defaults
 //                    to `<site-dir>/readback`.
+//   --result-json    Where to write this run's per-scene outcome as JSON.
+//                    `web/tools/render-harness-verdict.mjs` reads it beside the
+//                    comparator's table, because half of what makes a scene a
+//                    failure is only visible here: a scene that never rendered,
+//                    and a scene that rendered while the device was refusing
+//                    its commands. The exit code cannot carry that — it says
+//                    *that* something failed, never which scene — and the
+//                    expected-fail list is per scene.
 //
 // ENVIRONMENT
 //   CRCBL_CHROMIUM           Path to the Chromium/Chrome binary. Otherwise the
@@ -253,14 +262,20 @@ function printTable(scenes) {
 // Main
 // ---------------------------------------------------------------------------
 
-/** Parses argv into the site directory and where the readbacks go. */
+/** Parses argv into the site directory, where the readbacks go, and where the
+ * per-scene result is written. */
 function parseArgs(argv) {
   let site = null;
   let readbackDir = null;
+  let resultJson = null;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--readback-dir') {
       readbackDir = argv[i + 1];
       if (!readbackDir) fail('--readback-dir needs a directory');
+      i += 1;
+    } else if (argv[i] === '--result-json') {
+      resultJson = argv[i + 1];
+      if (!resultJson) fail('--result-json needs a path');
       i += 1;
     } else if (argv[i].startsWith('--')) {
       fail(`unknown option ${argv[i]}`);
@@ -271,7 +286,10 @@ function parseArgs(argv) {
     }
   }
   if (!site) {
-    fail('usage: render-harness-e2e.mjs <site-dir> [--readback-dir <dir>]');
+    fail(
+      'usage: render-harness-e2e.mjs <site-dir> [--readback-dir <dir>] ' +
+        '[--result-json <path>]'
+    );
   }
   const resolved = resolve(site);
   return {
@@ -279,6 +297,7 @@ function parseArgs(argv) {
     readbackDir: readbackDir
       ? resolve(readbackDir)
       : join(resolved, 'readback'),
+    resultJson: resultJson ? resolve(resultJson) : null,
   };
 }
 
@@ -313,7 +332,7 @@ async function writeReadback(page, dir, scene) {
 }
 
 async function main() {
-  const { site, readbackDir } = parseArgs(process.argv.slice(2));
+  const { site, readbackDir, resultJson } = parseArgs(process.argv.slice(2));
   if (!existsSync(join(site, 'harness', 'index.html'))) {
     fail(`${site}/harness/index.html not found — build the site first`);
   }
@@ -363,6 +382,17 @@ async function main() {
         scene.rendered = false;
         scene.fatal = scene.fatal ?? `readback not saved: ${error.message}`;
       }
+    }
+
+    // Written after the readback loop and before the table, so the file says
+    // exactly what the table says: the loop is where a scene whose pixels could
+    // not be saved has its `rendered` turned back off, and a JSON written before
+    // it would disagree with the run it is supposed to describe.
+    if (resultJson) {
+      writeFileSync(
+        resultJson,
+        `${JSON.stringify({ readbackDir, fatal: result.fatal ?? null, scenes }, null, 2)}\n`
+      );
     }
 
     printTable(scenes);
