@@ -700,10 +700,20 @@ fn features_of(raw: &RawCaps) -> Features {
 ///   count**. The byte range it implies depends on the view's element stride,
 ///   which no adapter query knows, so there is no honest byte figure to report
 ///   and the floor stands.
-/// * `max_bind_groups` — how many descriptor tables a root signature carries is
-///   a design decision this backend has not made; `D3D12_MAX_ROOT_COST` bounds
-///   the whole signature in DWORDs, not the number of bind groups. The
-///   pipeline-layout slice decides it.
+/// * `max_bind_groups` — **not a number D3D12 has.** `D3D12_MAX_ROOT_COST`
+///   bounds the whole signature in DWORDs, and what a set spends out of it
+///   depends on what the set holds: a descriptor table costs one, a root
+///   descriptor two, and a push-constant range one per 32-bit value. So four
+///   sets fit or they do not depending on their contents, and any fixed count
+///   reported here would be a promise `crcbl_dx12::root::place` can refuse.
+///   The floor is what can always be served whatever the sets hold, and an
+///   overrun is refused at `create_pipeline_layout` with the arithmetic on both
+///   sides rather than being pre-empted by a smaller limit that would also
+///   refuse layouts D3D12 accepts.
+///
+///   (This bullet used to say the pipeline-layout slice would decide it. That
+///   slice landed — `place` is what does the deciding, and it decides per
+///   layout rather than once.)
 /// * `max_sample_count` — `CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS)`
 ///   answers it **per format**, so it needs a format table. The floor is
 ///   WebGPU's downlevel guarantee and D3D12 clears it everywhere.
