@@ -57,10 +57,10 @@ why it has drifted.
 
 **The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
 below is built, so the count is now exact rather than approximate:
-`Capability::ALL` is **25** variants and `DIVERGENCES` holds **51** reviewed
-rows — dx12 10, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
-"28 declared `Features` bits and roughly 96 refusal sites", said the same thing
-less precisely and is superseded.)
+`Capability::ALL` is **25** variants and `DIVERGENCES` holds **48** reviewed
+rows — dx12 7, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing, "28
+declared `Features` bits and roughly 96 refusal sites", said the same thing less
+precisely and is superseded.)
 
 **Every row now carries a kind, and the goal has a number.** `Divergence` gained
 `DivergenceKind`: `ApiAbsence` (the API cannot express it — its reason must
@@ -74,8 +74,8 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Twenty-three blockers: dx12 10, Metal 9, WebGPU 4.** That is what stands
-between here and the deletion, and it can now be asked rather than re-derived.
+**Twenty blockers: dx12 7, Metal 9, WebGPU 4.** That is what stands between here
+and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
 recall — and two of them had been recorded in this file the wrong way round:
@@ -508,6 +508,14 @@ works — but nothing a caller records can ever write to those pools.
   **No `out` length satisfies both Vulkan and the seam's own
   `first_query + out.len() <= count` bound**, so a statistics pool cannot be
   read through this seam at all.
+
+  **Confirmed independently on D3D12**, which makes it a seam defect rather than
+  a Vulkan quirk: `D3D12_QUERY_DATA_PIPELINE_STATISTICS` is a fixed **88-byte**
+  struct with no selection, so `crcbl-dx12` refuses `query_results` for a
+  statistics set by name and says why. Two APIs, two different widths, neither
+  of them one `u64`. The fix is a result width the seam carries — which is what
+  the settled design above calls `QuerySetLayout::values_per_query`.
+
 - **`resolve_query_set` sets `WAIT` unconditionally**, so resolving a query that
   was reset and never written blocks for ever rather than returning. That is a
   hang a caller can reach without doing anything unusual, and the seam method
@@ -805,7 +813,7 @@ hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
 
 ### dx12's remaining blockers, ordered — and two reasons that were wrong
 
-dx12 owns 10 of the 23 parity blockers and none is an API absence. Planned
+dx12 owns 7 of the 20 parity blockers and none is an API absence. Planned
 2026-08-18 against the `windows` 0.62.2 bindings and `wgpu-hal`'s dx12 backend
 on disk. **Two of the divergence list's own stated reasons did not survive
 reading the code**, and both change what the work is:
@@ -838,13 +846,9 @@ need it.
 2. ~~Sync~~ — **landed**, four rows in one slice. It also implemented
    `ReadbackDesc::after`, whose refusal reason ("`create_semaphore` refuses")
    the same change made false.
-3. **Queries** (three rows, all flipping existing exercises). The one thing
-   `wgpu-hal` does not have to solve and this seam does: `query_results` is a
-   _device_ call, and D3D12 has no CPU-side read of a query heap — so a query
-   set must own a hidden resolve buffer and the call must submit and wait on its
-   own one-shot list. **A risk only CI can settle:** the exercise demands two
-   strictly increasing timestamps, and whether WARP's counter advances across a
-   small copy is a property of that runner.
+3. ~~Queries~~ — **landed.** The hidden-resolve-buffer shape it needed is in the
+   commit; a statistics set still refuses `query_results`, which is the seam
+   defect below rather than a backend gap.
 4. **MSAA resolve.** Small implementation, but the first slice needing a test
    written. It can avoid `NEEDS_PIPELINE` entirely: clear a multisampled
    attachment with `resolve: Some(view)`, then read the resolve target back — a
