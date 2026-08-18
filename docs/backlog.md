@@ -57,16 +57,16 @@ why it has drifted.
 
 **The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
 below is built, so the count is now exact rather than approximate:
-`Capability::ALL` is **25** variants and `DIVERGENCES` holds **57** reviewed
-rows — dx12 16, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
+`Capability::ALL` is **25** variants and `DIVERGENCES` holds **56** reviewed
+rows — dx12 15, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
 "28 declared `Features` bits and roughly 96 refusal sites", said the same thing
 less precisely and is superseded.)
 
 **Every row now carries a kind, and the goal has a number.** `Divergence` gained
 `DivergenceKind`: `ApiAbsence` (the API cannot express it — its reason must
 carry the evidence), `Unwritten`, `Declined`, and `Unclassified` for rows that
-cannot be settled without hardware nobody here has. Of the 57: **21
-`ApiAbsence`, 31 `Unwritten`, 3 `Declined`, 2 `Unclassified`.**
+cannot be settled without hardware nobody here has. Of the 56: **21
+`ApiAbsence`, 30 `Unwritten`, 3 `Declined`, 2 `Unclassified`.**
 
 `parity_blockers()` is the query — a row on vk, dx12, Metal or WebGPU whose kind
 is anything but `ApiAbsence` — and `crcbl-wgpu` is excluded **by construction**
@@ -74,7 +74,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Twenty-nine blockers: dx12 16, Metal 9, WebGPU 4.** That is what stands
+**Twenty-eight blockers: dx12 15, Metal 9, WebGPU 4.** That is what stands
 between here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -467,10 +467,6 @@ and `OcclusionQuery`/`PipelineStatisticsQuery` **creation-only**. The other 18
 are checked for declaration consistency and printed as unexercised on every run.
 In priority order:
 
-- **`ImageToImageCopy` is the cheapest remaining win.** It needs two owned
-  images and a readback rather than the fixture's swapchain-owned ones, and the
-  assertion is already written — WebGPU probe group V does exactly this shape in
-  the browser, just not natively.
 - **Three are bookkeeping, not work.** `TimelineSemaphore`, `BinarySemaphore`
   and `CpuTimelineWait` are already asserted directly by
   `a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it`; they
@@ -701,8 +697,6 @@ fails at a user's frame rather than in CI:
 - **`IndirectArgumentPaddedStride`** — claimed by vk, dx12 and Metal; every
   positive site uses the _tight_ stride, so the property that separates "draws
   indirectly" from "honours a stride" is proven nowhere.
-- **`ImageToImageCopy`** — driven on WebGPU by probe group V and on nothing
-  else; vk's and Metal's `Yes` are unverified.
 - **`UpdateBindGroup`** — driven on vk only; dx12's and Metal's are unverified.
 - **`BinarySemaphore`** on WebGPU — self-declared unverifiable in the backend
   itself: `acquire_next_frame` answers `None` for both, so nothing observes it.
@@ -781,7 +775,7 @@ hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
 
 ### dx12's remaining blockers, ordered — and two reasons that were wrong
 
-dx12 owns 16 of the 29 parity blockers and none is an API absence. Planned
+dx12 owns 15 of the 28 parity blockers and none is an API absence. Planned
 2026-08-18 against the `windows` 0.62.2 bindings and `wgpu-hal`'s dx12 backend
 on disk. **Two of the divergence list's own stated reasons did not survive
 reading the code**, and both change what the work is:
@@ -880,7 +874,7 @@ and a render-graph frame is passes end to end. That survives on every backend.
 **A middle position, named explicitly:** take the zero-buffer route for
 `BufferFillZero` — cheap, and it matches what the capability's own doc says the
 fill is _for_ — and leave the other two `Declined` with the reason corrected.
-That is 16 blockers to 15 for about thirty lines.
+That is 15 blockers to 14 for about thirty lines.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
