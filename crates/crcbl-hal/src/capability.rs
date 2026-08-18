@@ -870,13 +870,17 @@ pub const DIVERGENCES: &[Divergence] = &[
               drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup: — and \
               Slang emits them, but this backend builds no such pipeline (the Metal mesh slice)",
     },
-    // `crcbl-dx12` had a row here and it left the way a row is supposed to: the
-    // work landed. `crcbl_dx12::pipeline` packs the
-    // D3D12_PIPELINE_STATE_STREAM_DESC both stages need, the encoder records
-    // DispatchMesh and an ExecuteIndirect of DISPATCH_MESH, and
-    // `crcbl_dx12::adapter` reports MESH_SHADER and TASK_SHADER off
-    // D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier at SM6.6 — so both
-    // capabilities are device gates on that backend rather than refusals.
+    Divergence {
+        capability: Capability::MeshShading,
+        backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
+        why: "the calls exist — crcbl_dx12::pipeline packs the D3D12_PIPELINE_STATE_STREAM_DESC an \
+              amplification and mesh stage need, and the encoder records DispatchMesh and an \
+              ExecuteIndirect of DISPATCH_MESH — but crcbl_dx12::adapter does not report \
+              Features::MESH_SHADER, so the capability cannot answer Yes. Reporting it moves every \
+              D3D12 adapter onto GeometryPath::MeshShader and re-keys every golden image, which is \
+              its own change (the DX12 mesh reporting slice)",
+    },
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::Wgpu,
@@ -899,6 +903,14 @@ pub const DIVERGENCES: &[Divergence] = &[
         backend: BackendKind::Metal,
         kind: DivergenceKind::Unwritten,
         why: "no mesh pipeline to put an object stage in front of; see the MeshShading entry",
+    },
+    Divergence {
+        capability: Capability::TaskShaderStage,
+        backend: BackendKind::Dx12,
+        kind: DivergenceKind::Unwritten,
+        why: "MeshPipelineDesc::task reaches D3D12's amplification stage through the same \
+              subobject stream the mesh one does, and it is behind the same unreported flag; see \
+              the MeshShading entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,
@@ -1673,11 +1685,6 @@ mod tests {
     const REVIEWED_BLOCKERS: &[(Capability, BackendKind, DivergenceKind)] = &[
         // `crcbl-dx12` is the whole of its own list: D3D12 expresses every
         // capability here, and the three fills are the only rows anybody chose.
-        // Its two mesh rows left when `crcbl_dx12::adapter` began reporting
-        // MESH_SHADER and TASK_SHADER off
-        // D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier — the calls were
-        // already written, and the flag is what those capabilities' `gated` arms
-        // read.
         (
             Capability::BufferFillZero,
             BackendKind::Dx12,
@@ -1692,6 +1699,16 @@ mod tests {
             Capability::BufferFillWord,
             BackendKind::Dx12,
             DivergenceKind::Declined,
+        ),
+        (
+            Capability::MeshShading,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
+        ),
+        (
+            Capability::TaskShaderStage,
+            BackendKind::Dx12,
+            DivergenceKind::Unwritten,
         ),
         // Metal: the byte-wide fill is the API and is not here, and neither is
         // the occlusion query — that pool is a plain MTLBuffer and `crcbl-mtl`

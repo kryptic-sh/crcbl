@@ -2132,13 +2132,9 @@ fn the_ui_scene_draws_the_same_frame_on_every_geometry_path() {
 /// Both arms land on the same path, and the test says so rather than passing
 /// quietly: the arms are asserted to differ **exactly when the adapter reports
 /// the flag**, so "this backend has no mesh shaders" is a checked claim instead
-/// of a skip. `crcbl-wgpu` and `crcbl-mtl` report none — see each backend's
-/// `caps` — so on those two this is a self-comparison and the printed line is
-/// what says so. `crcbl-dx12` used to be the third: it reports both mesh-stage
-/// flags now, off
-/// `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` at SM6.6, so on WARP —
-/// which measures `TIER_1` — this is a real cross-path comparison and the
-/// byte-equality assertion below is what the D3D12 mesh path has to satisfy.
+/// of a skip. `crcbl-wgpu`, `crcbl-dx12` and `crcbl-mtl` all report none — see
+/// each backend's `caps` — so on those three this is a self-comparison and the
+/// printed line is what says so.
 fn draw_scene_on_every_geometry_path(
     scene: Scene,
     name: &str,

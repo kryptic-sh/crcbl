@@ -168,13 +168,8 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Nine blockers: dx12 3, Metal 6, WebGPU 0.** That is what stands between here
-and the deletion, and it can now be asked rather than re-derived. dx12's three
-are the buffer fills and nothing else — its two mesh rows left when
-`crcbl_dx12::adapter` began reporting `MESH_SHADER` and `TASK_SHADER`, and
-WebGPU's last row left with the pass-descriptor timestamps. Read
-`REVIEWED_BLOCKERS` for the current answer; this figure is quoted because the
-deletion decision turns on it.
+**Twelve blockers: dx12 5, Metal 6, WebGPU 1.** That is what stands between here
+and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
 recall — and two of them had been recorded in this file the wrong way round:
@@ -612,49 +607,72 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
-### The mesh seam exercise was written on vk and wgpu and nothing else
+### dx12 mesh shading: the calls exist, the flag does not
 
-`hal_seam_e2e.rs` now drives `Capability::MeshShading` and `TaskShaderStage`
-through `MeshFixture` — a mesh pipeline over `mesh_shader.slang`, a
-`draw_mesh_tasks(1, 1, 1)`, and for the task stage two frames whose difference
-is the amplification payload's tint. Coverage moved from 21 driven to 23 of 26
-on both backends that can be run here.
+`crcbl-dx12` now builds mesh pipelines and records both mesh draws — the
+subobject stream, `DispatchMesh`, and an `ExecuteIndirect` of `DISPATCH_MESH`.
+What is left is **reporting** `Features::MESH_SHADER` and `TASK_SHADER`, which
+is deliberately a separate change because it is not a one-line flag flip:
 
-**Two of the four arms have never executed.** vk answers `Worked` on this
-machine's RX 7900 XTX and wgpu answers `Refused`, both verified. What is
-unverified:
+- The read is `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` from
+  `crcbl_dx12::adapter`'s `features_of`. WARP measures `TIER_1`, so the software
+  adapter CI runs on does support it.
+- **The `FeatureQuery` impl for `D3D12_FEATURE_DATA_D3D12_OPTIONS7` is inside
+  `adapter.rs`'s `mod tests`**, while the four production impls sit above it. It
+  has to move up rather than be copied — a second impl of the trait for the same
+  type is a coherence error, so the compiler enforces this rather than it being
+  a preference.
+- Reporting the flag flips `GeometryPath::from_features` to
+  `GeometryPath::MeshShader` for **every** D3D12 adapter, and breaks the
+  `IndirectCount` assertion in `instance.rs`.
 
-- **dx12 is expected to `Worked` on WARP** — it has committed DXIL for all four
-  entry points, `create_mesh_pipeline` packs the stream, and its own
-  `a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible`
-  already draws the same shader with the same tint assertion. The one thing that
-  differs is the fixture: this one binds the vertex buffer with
-  `ShaderStages::MESH` (dx12's own test uses `ALL`, because at the time the
-  backend reported no `MESH_SHADER` and `check_supported` refused the bit).
-  `crcbl_dx12::conv::shader_visibility` does map that onto
-  `D3D12_SHADER_VISIBILITY_MESH` and a unit test pins the mapping, so the risk
-  is a root signature D3D12 rejects rather than a stage that goes missing — but
-  no device here has run it.
-- **Metal is expected to `Refused`** at `create_mesh_pipeline`'s `not_yet`.
-  `MeshFixture::open` builds no mesh module there — the device reports no
-  `MESH_SHADER`, so it gets the `triangle.slang` stand-in — which means Metal's
-  MSL mesh artifact is still never compiled by anything.
-- **WebGPU does not run this suite at all**; `crcbl-webgpu`'s parity story is
-  `probe.rs`, which holds `supports` against `DIVERGENCES` and drives no
-  exercise. Its `MeshShading` and `TaskShaderStage` rows are `ApiAbsence` and
-  are not blockers, so nothing is hidden — but "the browser backend refuses a
-  mesh pipeline" is asserted by reading its source, not by running it.
+  **There is no golden re-bless, and this entry said there was.** Checked: no
+  golden is keyed on `(GeometryPath, BindingModel, LightingPath)` or on any part
+  of it — `draw_scene_and_match_its_golden` takes the golden's name as a literal
+  argument, the 27 files under `crates/crcbl/tests/golden/` carry no path or
+  backend in their names, and nothing in `crcbl-golden` mentions `LightingPath`
+  at all. What reporting the flag actually does is make
+  `the_cube_scene_draws_the_same_frame_on_every_geometry_path` a _real_
+  cross-path comparison on dx12 instead of a self-comparison: that test opens
+  the device twice, once asking for the mesh-stage features and once with them
+  subtracted, and asserts the two frames are byte-identical on one adapter. It
+  already guards against the degenerate case — `best_path != lesser_path` must
+  equal whether the adapter offers mesh shading, because "a self-comparison that
+  reads as a cross-path one is worse than no test".
 
-### `mesh_shader.slang`'s header still says dx12 cannot build a mesh pipeline
+  So the requirement is that dx12's mesh path draw _exactly_ what its indirect
+  path draws, which is a test that must pass rather than an image to re-bless.
+  That makes this an ordinary slice, and the reason it did not ride along with
+  the implementation is narrower than recorded: it is a behaviour change to
+  every D3D12 adapter, and worth landing where it can be reverted on its own.
 
-The comment reads "Neither `crcbl-mtl` nor `crcbl-dx12` can create a mesh
-pipeline yet — both refuse it", which was true when the file was written and is
-now half false. It was left alone deliberately: `crcbl-shaders`' `build.rs`
-hash-checks `source_sha256` from `spirv/manifest.txt`, so editing a `.slang`
-comment fails the build until `tools/compile-shaders.sh` regenerates the
-manifest — which needs `slangc` and `dxc` and reblesses every artifact hash for
-a prose fix. Fold it into the next slice that recompiles that shader for a real
-reason.
+Retiring the `MeshShading` and `TaskShaderStage` dx12 divergences happens there
+and not before: a row leaves on `Support::Yes`, and that answer is gated on the
+flag. Their `why` strings now say the calls exist and the flag does not, rather
+than claiming no stream is built.
+
+Also still true after this work: `crates/crcbl/tests/hal_seam_e2e.rs` maps both
+capabilities to `Exercise::Unexercised(NEEDS_MESH_ARTIFACTS)`, so even a
+reporting dx12 would not be _driven_ until the seam suite grows a mesh exercise.
+
+**And the ordering is now forced rather than merely tidy.**
+`Capability::MeshShading` is defined as the pipeline being creatable and both
+draws recordable — not as the feature flag being reported. dx12 satisfies that
+definition today: it creates the pipeline, records `DispatchMesh` and the
+indirect form, and its own suite draws through both on WARP. It nevertheless
+answers `Support::No`, because reporting the flag re-keys the goldens. So the
+seam suite's rule — a backend declaring something unsupported must refuse it —
+is currently **unmet by dx12 and hidden only because the capability is
+unexercised**. Writing the mesh exercise before the reporting slice would
+therefore fail on dx12, and correctly. This is the same class CI twice caught as
+a backend performing what it denies; it is latent rather than live because
+nothing drives it.
+
+Two honest ways out, and the second is the one the sequence already assumes:
+report the flag and declare `Yes` (the slice above, with its golden re-bless),
+or redefine the capability in terms of the reported feature rather than the
+callable surface — which would weaken what it asserts for every backend to
+accommodate one, and is worth naming only to reject.
 
 ### The doc gate does not cover private items
 
@@ -5888,6 +5906,19 @@ green run over content that does not use the feature.
   it is a real bug and the driver version is the first thing to compare — **CI's
   lavapipe is as unpinned as its `spirv-val` was.**
 
+- **Nothing can bind a descriptor to the mesh stage yet.** `ShaderStages::MESH`
+  and `TASK` exist and map correctly, but no bind-group layout or push-constant
+  range names them, and no backend polices a layout naming a mesh stage on a
+  device without the capability. That is why the first mesh shader hardcodes its
+  three vertices instead of pulling them from a storage buffer the way
+  `triangle.slang` does — pulling needs mesh-stage visibility, which obliges
+  every backend to police the flag. **This is the next slice**, and it is the
+  prerequisite for a mesh shader that reads real geometry.
+
+  Note the flags are deliberately outside `ShaderStages::GRAPHICS` and `ALL`:
+  Vulkan refuses `MESH_BIT_EXT` in a layout on a device without `meshShader`, so
+  a composite carrying them would break every existing layout on most devices.
+
 - **Meshlets need a mesh asset system that does not exist.** §3.5 wants clusters
   with bounds and normal cones baked from a mesh; `crcbl-scene` is a stub and
   the only mesh in the tree is a hardcoded cube. The builder, the cluster
@@ -5899,12 +5930,10 @@ green run over content that does not use the feature.
   falsifies what any device can refuse instead — a mesh pipeline naming a
   fragment entry point as its mesh stage.
 
-- **Metal has the stages and the committed artifacts and loads neither.**
-  `msl/mesh_shader.metal` is built and validated; what is missing is
-  `MTLMeshRenderPipelineDescriptor`, so `crcbl_mtl::device`'s
-  `create_mesh_pipeline` refuses with `not_yet`. D3D12 was the other half of
-  this and is done — it packs the pipeline-state stream, records both draws, and
-  now reports the flag off `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier`.
+- **Metal and D3D12 have the stages and the committed artifacts, and neither
+  loads them.** `msl/mesh_shader.metal` and the `ms_6_6`/`as_6_6` DXIL are built
+  and validated; what is missing is `MTLMeshRenderPipelineDescriptor` and the
+  D3D12 pipeline-state stream. Both refuse the entry points by name today.
 
 ### Owed by the capability work (P7)
 

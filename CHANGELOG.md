@@ -673,41 +673,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   No `Device` entry point on this backend answers `Unsupported` any more.
 
-  **And it reports the flags.** `crcbl_dx12::adapter` reads
-  `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` beside the shader model
-  and reports `Features::MESH_SHADER` and `Features::TASK_SHADER` on any adapter
-  measuring `TIER_1` at SM6.6 — both halves are required, because the committed
-  DXIL is built at `dxil-model = 6_6` and a tier-only rule would promise a
-  pipeline the device could not load. One tier answers both flags because D3D12
-  has one bit for the pair; there is no separate amplification capability. WARP
-  measures `TIER_1`, so a D3D12 adapter now derives `GeometryPath::MeshShader`
-  where it derived `IndirectCount`, and
-  `the_cube_scene_draws_the_same_frame_on_every_geometry_path` becomes a real
-  cross-path comparison there instead of a self-comparison. The `MeshShading`
-  and `TaskShaderStage` divergences are gone with it, taking the parity blocker
-  set to nine.
-
-- **The agnostic seam suite drives mesh shading.** `crcbl/tests/hal_seam_e2e.rs`
-  exercises `Capability::MeshShading` and `Capability::TaskShaderStage`: a mesh
-  pipeline over `mesh_shader.slang` with no vertex stage, a
-  `draw_mesh_tasks(1, 1, 1)`, and — for the task stage — two frames whose only
-  difference is the amplification payload's tint, so the stage is observed
-  rather than assumed. Capability coverage goes from 21 driven of 26 to 23. It
-  was blocked on the reporting above rather than on an artifact: while
-  `crcbl-dx12` performed mesh shading and declared `Support::No`, the exercise
-  would have scored it as declaring unsupported something it performs, and
-  failed — correctly.
+  **The backend still reports no `Features::MESH_SHADER`**, so `GeometryPath` is
+  unchanged, every golden keeps its key, and a bind group reaching these stages
+  declares `ShaderStages::ALL` — `check_supported` refuses the mesh bit on an
+  adapter that reports no mesh support, and `ALL` maps to
+  `D3D12_SHADER_VISIBILITY_ALL`, which reaches both stages. Reporting the flag
+  is a separate change with a golden re-bless in it, and the `MeshShading` and
+  `TaskShaderStage` divergences stay until then — with reasons that now say the
+  calls exist and the flag does not, rather than claiming no stream is built.
 
 - **`crcbl-dx12` gained five capabilities it used to refuse**, taking it from
-  sixteen open parity divergences down towards the three buffer fills that are
-  all `crcbl_hal::DIVERGENCES` still lists it for. It copies image to image
-  (depth and stencil planes included — an image-to-image copy needs no placed
-  footprint, so the two obstacles that block the buffer path vanish), copies a
-  depth or stencil plane to and from a buffer, hands out timeline and binary
-  semaphores and waits on either from the CPU or the queue — including a queue
-  wait on a value nothing has signalled yet, which D3D12 permits and Metal
-  cannot — creates all three kinds of query heap, and resolves a multisampled
-  attachment after its pass.
+  sixteen open parity divergences to six. It copies image to image (depth and
+  stencil planes included — an image-to-image copy needs no placed footprint, so
+  the two obstacles that block the buffer path vanish), copies a depth or
+  stencil plane to and from a buffer, hands out timeline and binary semaphores
+  and waits on either from the CPU or the queue — including a queue wait on a
+  value nothing has signalled yet, which D3D12 permits and Metal cannot —
+  creates all three kinds of query heap, and resolves a multisampled attachment
+  after its pass.
 
   Two of those carry a caveat worth knowing. `Device::query_results` on a
   pipeline-statistics set is refused: the seam gives one `u64` per query and
