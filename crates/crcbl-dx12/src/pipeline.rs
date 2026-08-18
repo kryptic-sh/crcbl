@@ -71,22 +71,16 @@
 //! asks for, and 1.1 would add a `CheckFeatureSupport` call and a fallback path
 //! to buy static-descriptor optimisations nothing here measures.
 //!
-//! A push-constant range is refused, and at *layout creation*:
-//! [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) is not in
-//! this backend's caps — `crcbl_dx12::adapter` reports it nowhere — and
-//! `crcbl_hal::pipeline` requires a backend without it to fail there rather than
-//! dropping every `push_constants` call silently. D3D12 *has* the feature under
-//! the name root constants; what it does not have is a way for this backend to
-//! know which root parameter slot the committed artifacts put one at, which is
-//! the same gap `crcbl-mtl` names for `setVertexBytes:`.
+//! A **push-constant range is a root-constants parameter**, which D3D12 spells
+//! `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`: a `D3D12_ROOT_CONSTANTS` naming
+//! a shader register and a count of 32-bit values stored in the signature
+//! itself. [`crate::root`] decides its register, its word count and its place
+//! among the parameters — see that module on why the register is the one after
+//! every binding's, and on why the words come out of the same 64-DWORD budget
+//! the tables do.
 //!
-//! The refusal is [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported),
-//! through [`crate::instance::not_yet`] like every other slice this backend
-//! still owes. It answers
-//! [`Capability::PushConstants`](crcbl_hal::Capability::PushConstants) — no
-//! range of any size is acceptable — so a caller can match on the variant and
-//! reach for the seam's dynamic-offset uniform buffer instead of reading a
-//! descriptor error and looking for a field to fix.
+//! There is no `pDescriptorRanges` to keep alive for one, so unlike a table it
+//! owns no allocation: the register and the count *are* the parameter.
 //!
 //! # D3D12 keeps almost all of the pipeline in the object, and one thing outside
 //!
@@ -127,8 +121,9 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_DEPTH_WRITE_MASK_ZERO, D3D12_DESCRIPTOR_RANGE, D3D12_GRAPHICS_PIPELINE_STATE_DESC,
     D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED, D3D12_INPUT_LAYOUT_DESC, D3D12_LOGIC_OP_NOOP,
     D3D12_MAX_ROOT_COST, D3D12_PIPELINE_STATE_FLAG_NONE, D3D12_RASTERIZER_DESC,
-    D3D12_RENDER_TARGET_BLEND_DESC, D3D12_ROOT_DESCRIPTOR_TABLE, D3D12_ROOT_PARAMETER,
-    D3D12_ROOT_PARAMETER_0, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, D3D12_ROOT_SIGNATURE_DESC,
+    D3D12_RENDER_TARGET_BLEND_DESC, D3D12_ROOT_CONSTANTS, D3D12_ROOT_DESCRIPTOR_TABLE,
+    D3D12_ROOT_PARAMETER, D3D12_ROOT_PARAMETER_0, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+    D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, D3D12_ROOT_SIGNATURE_DESC,
     D3D12_ROOT_SIGNATURE_FLAG_NONE, D3D12SerializeRootSignature, ID3D12Device, ID3D12PipelineState,
     ID3D12RootSignature,
 };
@@ -138,7 +133,7 @@ use crate::binding::SetTables;
 use crate::conv;
 use crate::dxil::{Dxil, ShaderModuleEntry};
 use crate::handle::Owned;
-use crate::root::{self, SetPlacement, SlotKind};
+use crate::root::{self, RootConstants, SetPlacement, Slot, SlotKind};
 
 /// `crate::root` spells D3D12's root budget out because it compiles off Windows.
 /// This is the build that has the real constant, so this is where the two are
@@ -166,6 +161,11 @@ pub(crate) struct PipelineLayoutEntry {
     /// table of the wrong length, which D3D12 reads as arithmetic and never
     /// reports.
     pub(crate) layouts: Vec<crcbl_hal::BindGroupLayoutHandle>,
+    /// Where the root constants are and what range they cover, or `None` for a
+    /// layout that declared no push-constant range. This is what
+    /// [`push_constants`](crcbl_hal::CommandEncoder::push_constants) is checked
+    /// against — see [`root::write`].
+    pub(crate) push_constants: Option<root::Declared>,
 }
 
 /// A graphics pipeline: the state object, plus what D3D12 left on the encoder.
@@ -238,45 +238,36 @@ struct RootSignaturePlan {
     parameters: Vec<D3D12_ROOT_PARAMETER>,
     /// One entry per set, in set order.
     sets: Vec<SetPlacement>,
+    /// Where the root constants landed, if the layout declares a range.
+    push_constants: Option<root::Declared>,
     /// Kept alive for the duration of the serialise call; never read again.
     _ranges: Vec<Vec<D3D12_DESCRIPTOR_RANGE>>,
 }
 
-/// Builds a root signature from a pipeline layout's sets.
+/// Builds a root signature from a pipeline layout's sets and its push-constant
+/// range.
+///
+/// `push` is the range already planned by
+/// [`root::plan_push_constants`], because the shader register it takes comes
+/// from the same counter the sets' registers do and `crate::device` is where
+/// that counter lives.
 ///
 /// # Errors
 ///
-/// [`HalError::Unsupported`] for a push-constant range (see the module docs).
 /// [`HalError::InvalidDescriptor`] for more sets than
 /// [`Limits::max_bind_groups`](crcbl_hal::Limits::max_bind_groups), or a
 /// signature costing more root DWORDs than D3D12 holds — see
 /// [`root::place`] — and [`HalError::Backend`] when D3D12 refuses to serialise
 /// or create the signature, carrying the serialiser's own error blob, which is
 /// the only text that says *which* parameter it objected to.
-///
-/// The push-constant range is the one that is **not** an `InvalidDescriptor`,
-/// and the two above it are why the distinction is worth keeping: a set count or
-/// a DWORD budget is a number the caller can lower and retry, and no
-/// push-constant range of any size is acceptable here.
 pub(crate) fn layout(
     device: &ID3D12Device,
     desc: &PipelineLayoutDesc<'_>,
     sets: &[(crcbl_hal::BindGroupLayoutHandle, SetTables)],
+    push: Option<RootConstants>,
     owner: u64,
 ) -> Result<PipelineLayoutEntry, HalError> {
-    if desc.push_constants.is_some() {
-        // `Unsupported`, because this answers `Capability::PushConstants`
-        // rather than describing a malformed field: `crcbl_dx12::adapter`
-        // reports `Features::PUSH_CONSTANTS` on no device, so the variant is
-        // what lets a caller branch to the seam's dynamic-offset substitute.
-        // `crcbl-wgpu` refuses the same field the same way at the same point.
-        return Err(crate::instance::not_yet(
-            "a push-constant range, on a backend that reports Features::PUSH_CONSTANTS on no \
-             device: D3D12's root constants are the equivalent, and nothing here knows which root \
-             parameter slot the committed DXIL puts one at (the DX12 root-constant slice)",
-        ));
-    }
-    let plan = plan_root(sets)?;
+    let plan = plan_root(sets, push)?;
     let signature = D3D12_ROOT_SIGNATURE_DESC {
         NumParameters: u32::try_from(plan.parameters.len()).unwrap_or(u32::MAX),
         pParameters: plan.parameters.as_ptr(),
@@ -335,6 +326,7 @@ pub(crate) fn layout(
         raw,
         sets: plan.sets,
         layouts: sets.iter().map(|(handle, _)| *handle).collect(),
+        push_constants: plan.push_constants,
     })
 }
 
@@ -351,6 +343,7 @@ pub(crate) fn layout(
 /// budget. See [`root::place`].
 fn plan_root(
     sets: &[(crcbl_hal::BindGroupLayoutHandle, SetTables)],
+    push: Option<RootConstants>,
 ) -> Result<RootSignaturePlan, HalError> {
     let shapes: Vec<root::SetShape> = sets
         .iter()
@@ -363,18 +356,36 @@ fn plan_root(
             roots: u32::try_from(tables.roots.len()).unwrap_or(u32::MAX),
         })
         .collect();
-    let layout = root::place(&shapes)?;
+    let layout = root::place(&shapes, push)?;
 
     let mut parameters = Vec::with_capacity(layout.slots.len());
     let mut owned: Vec<Vec<D3D12_DESCRIPTOR_RANGE>> = Vec::new();
     for slot in &layout.slots {
+        let Slot::Set { set, kind } = *slot else {
+            let constants =
+                push.unwrap_or_else(|| unreachable!("a constants slot is placed with a range"));
+            parameters.push(D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                // As a root descriptor: the register and the count are the
+                // parameter, so there is nothing to keep alive past the call.
+                Anonymous: D3D12_ROOT_PARAMETER_0 {
+                    Constants: D3D12_ROOT_CONSTANTS {
+                        ShaderRegister: constants.register,
+                        RegisterSpace: 0,
+                        Num32BitValues: constants.words,
+                    },
+                },
+                ShaderVisibility: conv::shader_visibility(constants.stages),
+            });
+            continue;
+        };
         let tables = &sets
-            .get(slot.set)
+            .get(set)
             .unwrap_or_else(|| unreachable!("every slot names a set that was placed"))
             .1;
-        match slot.kind {
+        match kind {
             SlotKind::Views | SlotKind::Samplers => {
-                let ranges = if slot.kind == SlotKind::Views {
+                let ranges = if kind == SlotKind::Views {
                     &tables.views
                 } else {
                     &tables.samplers
@@ -421,6 +432,16 @@ fn plan_root(
     Ok(RootSignaturePlan {
         parameters,
         sets: layout.sets,
+        // Both halves come from the one `place` pass: the parameter index it
+        // assigned, and the range that index's parameter was sized from.
+        push_constants: layout
+            .push_constants
+            .zip(push)
+            .map(|(parameter, constants)| root::Declared {
+                parameter,
+                offset: constants.range.offset,
+                size: constants.range.size,
+            }),
         _ranges: owned,
     })
 }

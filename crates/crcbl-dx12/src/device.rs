@@ -1149,6 +1149,34 @@ impl DeviceInner {
         })
     }
 
+    /// Resolves one `push_constants` call against the pipeline layout it names.
+    ///
+    /// The layout lookup and the arithmetic are together here for the reason
+    /// [`bind_group`](Self::bind_group)'s are: the encoder resolves handles with
+    /// the device lock held and records without it, so everything that reads
+    /// device state happens before the call returns.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`] for the layout, plus every refusal
+    /// [`crate::root::write`] makes — a layout declaring no range, a write that
+    /// is not a whole number of 32-bit values, or one falling outside the range.
+    pub(crate) fn push_constants(
+        &self,
+        layout: PipelineLayoutHandle,
+        offset: u32,
+        data: &[u8],
+    ) -> Result<crate::root::Write, HalError> {
+        let state = self.state();
+        let entry = handle::lookup(
+            &state.pipeline_layouts,
+            "pipeline layout",
+            layout,
+            self.owner,
+        )?;
+        crate::root::write(entry.push_constants, offset, data)
+    }
+
     /// Files a finished command buffer and stamps its handle.
     pub(crate) fn register_command_buffer(&self, entry: CommandBufferEntry) -> CommandBufferHandle {
         let handle = self.state().command_buffers.insert(entry);
@@ -1998,9 +2026,16 @@ impl Device for Dx12Device {
                 "no mesh pipeline to put an amplification stage in front of (the DX12 mesh slice)",
             ),
             Capability::UpdateBindGroup => Support::Yes,
-            Capability::PushConstants => Support::No(
-                "D3D12's root constants are the equivalent, and nothing here knows which root \
-                 parameter slot the committed DXIL puts one at (the DX12 root-constant slice)",
+            // `create_pipeline_layout` builds a
+            // `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` parameter at the `b`
+            // register the committed DXIL puts the block at, and
+            // `CommandEncoder::push_constants` sets it through
+            // `SetGraphicsRoot32BitConstants` or its compute twin. Root
+            // constants are core D3D12, so the gate below never fires — it is
+            // the flag's own arm, not a device question.
+            Capability::PushConstants => gated(
+                Features::PUSH_CONSTANTS,
+                "this device reports no PUSH_CONSTANTS",
             ),
             Capability::BindlessDescriptorArray => gated(
                 Features::DESCRIPTOR_INDEXING,
@@ -3054,7 +3089,17 @@ impl Device for Dx12Device {
             )?;
             sets.push((*handle, binding::ranges(record, &mut registers)));
         }
-        let entry = pipeline::layout(&self.inner.raw, desc, &sets, self.inner.owner.id)?;
+        // **After the sets, and that is the whole rule.** HLSL has no push
+        // constants: the block is a `cbuffer` `dxc` numbers in the `b` file with
+        // every other constant buffer, and `crcbl-shaders` requires each source
+        // to declare it last — so its register is the one left once the
+        // bindings have taken theirs. See `crate::root`.
+        let push = crate::root::plan_push_constants(
+            desc.push_constants,
+            &mut registers,
+            &self.inner.caps,
+        )?;
+        let entry = pipeline::layout(&self.inner.raw, desc, &sets, push, self.inner.owner.id)?;
         if let Some(label) = desc.label {
             label_object(&entry.raw, label);
         }
@@ -7602,28 +7647,31 @@ pub(crate) mod tests {
     fn the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
 
-        let refusals: Vec<(&str, HalError)> = vec![
-            // The seam requires this refusal at *layout creation* rather than at
-            // the `push_constants` call, and it is the one refusal in this list
-            // that used to answer `InvalidDescriptor` — which would have sent a
-            // caller looking for a field to correct instead of at the
-            // dynamic-offset substitute `crcbl_hal::pipeline` names. The
-            // assertions below are what hold it to the variant.
-            (
-                "push-constant ranges",
-                device
-                    .create_pipeline_layout(&PipelineLayoutDesc {
-                        label: None,
-                        bind_group_layouts: &[],
-                        push_constants: Some(crcbl_hal::PushConstantRange {
-                            stages: ShaderStages::ALL,
-                            offset: 0,
-                            size: 64,
-                        }),
-                    })
-                    .expect_err("this backend reports Features::PUSH_CONSTANTS on no device"),
-            ),
-        ];
+        // The mesh path is what is left of this list: D3D12 has the stages and
+        // `crcbl-shaders` commits the DXIL, so the obstacle is the pipeline
+        // state stream nobody has written — which is why the refusal has to name
+        // the slice rather than the device.
+        let refusals: Vec<(&str, HalError)> = vec![(
+            "mesh pipelines",
+            device
+                .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
+                    label: None,
+                    layout: unissued(),
+                    task: None,
+                    mesh: ShaderEntry {
+                        module: unissued(),
+                        entry_point: "meshMain",
+                    },
+                    fragment: None,
+                    primitive: PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: MultisampleState::default(),
+                    color_targets: &[],
+                })
+                // Ahead of every handle, deliberately: the refusal is about the
+                // slice, so it must not depend on the descriptor resolving.
+                .expect_err("this backend builds no pipeline state stream"),
+        )];
         assert!(!refusals.is_empty(), "nothing to check");
         for (what, error) in &refusals {
             assert!(
@@ -8168,18 +8216,25 @@ pub(crate) mod tests {
         );
 
         // The other side of the line: a slice that genuinely has not arrived
-        // answers `Unsupported` rather than blaming the caller's handle.
+        // answers `Unsupported` rather than blaming the caller's handle — and it
+        // is handed nothing but unissued handles here, so a backend that
+        // resolved them first would answer `InvalidHandle` and fail this.
         let error = device
-            .create_pipeline_layout(&PipelineLayoutDesc {
+            .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
                 label: None,
-                bind_group_layouts: &[],
-                push_constants: Some(crcbl_hal::PushConstantRange {
-                    stages: ShaderStages::ALL,
-                    offset: 0,
-                    size: 64,
-                }),
+                layout: unissued(),
+                task: None,
+                mesh: ShaderEntry {
+                    module: unissued(),
+                    entry_point: "meshMain",
+                },
+                fragment: None,
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &[],
             })
-            .expect_err("no root-constant slot is known");
+            .expect_err("no pipeline state stream is built");
         assert!(
             matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
             "{error:?}"
@@ -9252,6 +9307,118 @@ pub(crate) mod tests {
 
         device.destroy_bind_group_layout(over);
         device.destroy_bind_group_layout(fits);
+    }
+
+    /// **D3D12 serialises the root-constants parameter this backend builds, and
+    /// refuses to be talked into one it has no room for.**
+    ///
+    /// `crcbl_dx12::root`'s own tests check the register, the word count and the
+    /// budget arithmetic on any host. This is the half that needs a device:
+    /// `D3D12SerializeRootSignature` is what says a `D3D12_ROOT_CONSTANTS` with
+    /// this `ShaderRegister` and `Num32BitValues` is a parameter at all, and it
+    /// reports a malformed one as a blob of text nothing else in this crate
+    /// would produce.
+    ///
+    /// The accepted arm is what stops this passing against a backend that
+    /// refused every range — which is exactly what it did before this slice. The
+    /// whole-budget arm is the one the reported limit makes reachable: the seam
+    /// has no way to say "shared with your bind groups", so a caller may ask for
+    /// all of `max_push_constant_size` and a table besides, and that has to be a
+    /// refusal by name rather than a serialiser error.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_root_constants_parameter_serialises_and_its_budget_is_shared() {
+        let (_instance, device) = open_device();
+        let limit = device.caps().limits.max_push_constant_size;
+        assert!(
+            device.caps().features.contains(Features::PUSH_CONSTANTS) && limit > 0,
+            "root constants are core D3D12, so every device must report them"
+        );
+
+        let range = |size| crcbl_hal::PushConstantRange {
+            stages: ShaderStages::COMPUTE,
+            offset: 0,
+            size,
+        };
+        let layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("root constants"),
+                bind_group_layouts: &[],
+                push_constants: Some(range(16)),
+            })
+            .expect("D3D12 serialises a 4-DWORD root-constants parameter");
+        device.destroy_pipeline_layout(layout);
+
+        // The whole signature, spent on constants and nothing else: the ceiling
+        // the adapter reports, which must be a signature D3D12 accepts or the
+        // number is wrong.
+        let layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("the whole root signature"),
+                bind_group_layouts: &[],
+                push_constants: Some(range(limit)),
+            })
+            .expect("max_push_constant_size must be a range D3D12 accepts");
+        device.destroy_pipeline_layout(layout);
+        still_alive(&device, "a root-constants signature");
+
+        // And one byte past it is refused by the limit, before any signature is
+        // serialised.
+        let error = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("past the budget"),
+                bind_group_layouts: &[],
+                push_constants: Some(range(limit + 4)),
+            })
+            .expect_err("four bytes more than the whole root signature");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("a range past the limit is not {error:?}");
+        };
+        assert!(text.contains("max_push_constant_size"), "{text}");
+
+        // A range that fits *alone* and not beside a bind group is the case only
+        // the shared budget catches, and it names the DWORDs on both sides.
+        let set = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("one table"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    kind: BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                }],
+            })
+            .expect("a one-binding layout");
+        let error = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("the whole budget and a table"),
+                bind_group_layouts: &[set],
+                push_constants: Some(range(limit)),
+            })
+            .expect_err("the table costs a DWORD the constants already spent");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("a signature that does not fit is not {error:?}");
+        };
+        assert!(text.contains("push-constant word(s)"), "{text}");
+        assert!(text.contains("holds 64"), "{text}");
+
+        // The same table with a range small enough to leave room for it does
+        // serialise, so the refusal above is the arithmetic rather than a
+        // blanket refusal of the combination.
+        let layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("a table and room for it"),
+                bind_group_layouts: &[set],
+                push_constants: Some(range(limit - 4)),
+            })
+            .expect("63 words and one table are exactly the budget");
+        device.destroy_pipeline_layout(layout);
+        device.destroy_bind_group_layout(set);
+        still_alive(&device, "a signature with a table and root constants");
     }
 
     /// Panics unless the device is still alive and the debug layer logged

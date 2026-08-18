@@ -588,16 +588,33 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   is checked against the **adapter**, so a flag that first appeared at device
 ///   open could never be required by a caller.
 ///
+/// * [`Features::PUSH_CONSTANTS`] — **unconditional, and there is no query to
+///   make.** Root constants are a root parameter type, not a capability:
+///   `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` is accepted by every root
+///   signature D3D12 serialises, which is why the capability structures have no
+///   bit for it.
+///
+///   It waited for the calls rather than for a query, exactly as
+///   [`Features::COMPUTE`] did. `Device::create_pipeline_layout` builds the
+///   parameter — at the `b` register `crcbl-shaders`' committed DXIL puts the
+///   block at, which `crcbl_dx12::root` derives rather than assumes — and
+///   `CommandEncoder::push_constants` sets it with
+///   `SetGraphicsRoot32BitConstants` or its compute twin.
+///
+///   **[`Limits::max_push_constant_size`] is the whole root signature**, and
+///   that is a ceiling rather than a promise: a root constant costs one of the
+///   64 DWORDs per 32-bit value, so a range using all of it leaves room for no
+///   descriptor table at all. `crcbl_dx12::root`'s `place` refuses that
+///   combination at pipeline-layout creation with the arithmetic in the
+///   message, which is the honest shape — a smaller figure here would refuse
+///   ranges D3D12 accepts, and the seam's limit has no way to say "shared with
+///   your bind groups".
+///
 /// # Absent, with the reason for each
 ///
 /// * [`Features::DEBUG_MARKERS`] — PIX events go through `WinPixEventRuntime`,
 ///   a library this workspace does not depend on, so this needs a decision
 ///   before it needs a slice.
-/// * [`Features::PUSH_CONSTANTS`] — root constants are the direct mapping and
-///   `D3D12_MAX_ROOT_COST` is the budget, but the budget is shared with every
-///   descriptor table in the same root signature, so the number is a
-///   consequence of the root-signature design and not an adapter fact. The
-///   pipeline-layout slice decides it.
 /// * [`Features::ASYNC_COMPUTE_QUEUE`] and [`Features::TRANSFER_QUEUE`] —
 ///   `D3D12_COMMAND_LIST_TYPE_COMPUTE` and `_COPY` are exactly these, and
 ///   `crcbl_hal::QueueKind` already records that as why it is not named
@@ -619,8 +636,9 @@ fn features_of(raw: &RawCaps) -> Features {
     // a DIRECT queue accepts by definition, the three indirect flags are
     // parameters and fields of `ExecuteIndirect` rather than capability bits,
     // the frame-latency waitable object predates D3D12 itself, `CreateFence` is
-    // on every D3D12 device there is, and so are the three query heap types a
-    // DIRECT queue takes. See above.
+    // on every D3D12 device there is, so are the three query heap types a
+    // DIRECT queue takes, and root constants are a root parameter type rather
+    // than a capability. See above.
     //
     // The three rasteriser flags are here because CI caught them missing: the
     // seam suite drew a wireframe and a primitive past the far plane on WARP,
@@ -640,6 +658,7 @@ fn features_of(raw: &RawCaps) -> Features {
         | Features::MULTI_DRAW_INDIRECT
         | Features::INDIRECT_FIRST_INSTANCE
         | Features::PRESENT_FEEDBACK
+        | Features::PUSH_CONSTANTS
         | Features::TIMELINE_SEMAPHORE
         | Features::TIMESTAMP_QUERY
         | Features::OCCLUSION_QUERY
@@ -696,7 +715,7 @@ fn features_of(raw: &RawCaps) -> Features {
 ///   `d3d12_device_caps_match_the_adapter_they_came_from` asserts by name rather
 ///   than leaving to be discovered.
 ///
-/// Two feature-keyed fields do move:
+/// The feature-keyed fields do move:
 ///
 /// * `max_bindless_descriptors` moves to
 ///   [`D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2`] deliberately:
@@ -713,6 +732,10 @@ fn features_of(raw: &RawCaps) -> Features {
 ///   `ExecuteIndirect`'s own `MaxCommandCount` parameter, a `UINT`. So the
 ///   API's ceiling is the type's, and a lower figure here would be this backend
 ///   refusing calls D3D12 accepts.
+/// * `max_push_constant_size` moves to
+///   [`root::MAX_PUSH_CONSTANT_BYTES`](crate::root::MAX_PUSH_CONSTANT_BYTES)
+///   now that [`Features::PUSH_CONSTANTS`] is — the whole root signature in
+///   bytes, for the reason given with the flag above.
 fn limits_of(features: Features) -> Limits {
     let floor = Limits::minimum();
     Limits {
@@ -739,6 +762,11 @@ fn limits_of(features: Features) -> Limits {
             u32::MAX
         } else {
             floor.max_draw_indirect_count
+        },
+        max_push_constant_size: if features.contains(Features::PUSH_CONSTANTS) {
+            crate::root::MAX_PUSH_CONSTANT_BYTES
+        } else {
+            floor.max_push_constant_size
         },
         max_compute_workgroup_size: [
             D3D12_CS_THREAD_GROUP_MAX_X,
@@ -970,6 +998,26 @@ mod tests {
             assert!(
                 features.contains(Features::BUFFER_DEVICE_ADDRESS),
                 "every D3D12 device has GPU virtual addresses: {raw:?}"
+            );
+            // Root constants are a root parameter type rather than a capability,
+            // so this holds for the lesser adapter as well as the tier-3 one —
+            // and the budget must move with the flag whichever way it is
+            // reported, which is the pairing `crcbl_dx12::instance`'s
+            // `reported_limits_come_from_d3d12_and_agree_with_the_features`
+            // asserts against a real device and this one asserts without one.
+            assert!(
+                features.contains(Features::PUSH_CONSTANTS),
+                "root constants are on every D3D12 device: {raw:?}"
+            );
+            assert_eq!(
+                limits.max_push_constant_size,
+                crate::root::MAX_PUSH_CONSTANT_BYTES,
+                "the reported budget is the whole root signature, which is what \
+                 crcbl_dx12::root::place spends it from: {raw:?}"
+            );
+            assert!(
+                limits.max_push_constant_size > floor.max_push_constant_size,
+                "a floor here would be this backend refusing ranges D3D12 takes: {raw:?}"
             );
         }
     }

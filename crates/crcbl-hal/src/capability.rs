@@ -927,13 +927,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::PushConstants,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "D3D12's root constants are the equivalent, and nothing here knows which root \
-              parameter slot the committed DXIL puts one at (the DX12 root-constant slice)",
-    },
-    Divergence {
-        capability: Capability::PushConstants,
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::Unwritten,
         why: "wgpu calls them immediates and gates them behind its own IMMEDIATES feature, which \
@@ -1697,11 +1690,6 @@ mod tests {
         ),
         (
             Capability::TaskShaderStage,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::PushConstants,
             BackendKind::Dx12,
             DivergenceKind::Unwritten,
         ),

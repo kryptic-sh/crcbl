@@ -46,6 +46,46 @@
 //!   exists to make the caller's, and it would be taken here without the caller
 //!   asking.
 //!
+//! # A push constant is a root-constants parameter, and it is in the same budget
+//!
+//! [`PushConstantRange`] is D3D12's `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`:
+//! a `D3D12_ROOT_CONSTANTS` naming a shader register and a count of 32-bit
+//! values that live **inside** the signature rather than being pointed at.
+//! Nothing is allocated, nothing is bound, and
+//! `SetGraphicsRoot32BitConstants`/`SetComputeRoot32BitConstants` write the
+//! values straight into the command list.
+//!
+//! What that costs is one DWORD per `u32` — [`ROOT_CONSTANT_COST`] — which
+//! makes it the one parameter whose cost is not fixed, and is the reason
+//! [`MAX_PUSH_CONSTANT_BYTES`] is `4 ×` [`MAX_ROOT_COST`]: a range using the
+//! whole budget leaves room for no table and no root descriptor at all. So the
+//! range is placed by [`place`] alongside everything else and refused by the
+//! same arithmetic, rather than being checked against a limit on its own —
+//! [`plan_push_constants`] bounds it against
+//! [`Limits::max_push_constant_size`], and the *combination* is what [`place`]
+//! answers.
+//!
+//! **The register is taken after every binding's**, and that is a fact about the
+//! committed artifacts rather than a choice here. HLSL has no push constants:
+//! Slang emits the block as an ordinary `cbuffer` and `dxc` numbers it in the
+//! `b` file with the rest, in declaration order — and `crcbl-shaders`'
+//! `declaration_order` lint requires every source to declare its push constant
+//! **last**, behind every numbered binding. So the block's register is the next
+//! free `b` once a pipeline layout's sets have taken theirs, which for
+//! `push_constant_probe.slang` — whose one binding is a UAV — is `b0`, the
+//! register that artifact was measured at.
+//!
+//! # The block starts at word zero, whatever the range's offset is
+//!
+//! A `cbuffer`'s first member is at byte 0 of the constant buffer and
+//! `D3D12_ROOT_CONSTANTS::Num32BitValues` counts from there, so the seam's byte
+//! offsets index the parameter directly: byte `4n` of the block is root constant
+//! word `n`, and a write at `offset` is `DestOffsetIn32BitValues = offset / 4`.
+//! A range that starts above zero therefore declares the words in front of it
+//! too — they are part of the same `cbuffer` — and pays for them, which is why
+//! [`plan_push_constants`] sizes the parameter from the range's **end** rather
+//! than from its size.
+//!
 //! # The mapping lives here because two sides have to agree on it
 //!
 //! `crate::pipeline` builds the `D3D12_ROOT_PARAMETER` array and
@@ -53,11 +93,15 @@
 //! order separately they will one day derive it differently, and the register
 //! numbering the compute slice got wrong is the same class of bug. So [`place`]
 //! answers **both** questions from one pass: [`RootLayout::slots`] is the
-//! parameter array's own order, and [`RootLayout::sets`] is what a bind reads.
+//! parameter array's own order, and [`RootLayout::sets`] and
+//! [`RootLayout::push_constants`] are what a bind and a
+//! [`push_constants`](crcbl_hal::CommandEncoder::push_constants) read.
 //! `crate::pipeline` iterates the first rather than rebuilding it, so the two
 //! cannot drift.
 
-use crcbl_hal::{HalError, Limits};
+use crcbl_hal::{
+    BackendKind, DeviceCaps, Features, HalError, Limits, PushConstantRange, ShaderStages,
+};
 
 use crate::dxil::{RegisterClass, Registers};
 
@@ -74,6 +118,28 @@ const TABLE_COST: u64 = 1;
 
 /// DWORDs one root descriptor costs: it carries a 64-bit GPU virtual address.
 const ROOT_DESCRIPTOR_COST: u64 = 2;
+
+/// DWORDs one 32-bit root constant costs: the value *is* the DWORD.
+const ROOT_CONSTANT_COST: u64 = 1;
+
+/// Bytes of push constants this backend reports as
+/// [`Limits::max_push_constant_size`].
+///
+/// The whole root signature, spent on root constants and nothing else: a
+/// `D3D12_ROOT_CONSTANTS` parameter costs [`ROOT_CONSTANT_COST`] DWORD per
+/// 32-bit value, so [`MAX_ROOT_COST`] DWORDs are this many bytes. That makes it
+/// a **ceiling and not a promise** — a layout asking for all of it and one
+/// descriptor table besides does not fit, and [`place`] is what says so, with
+/// the arithmetic in the message.
+///
+/// `crcbl_dx12::adapter` reports this figure and [`plan_push_constants`] checks
+/// against the reported one, so the number a caller reads and the number this
+/// module enforces are the same by construction.
+pub(crate) const MAX_PUSH_CONSTANT_BYTES: u32 = MAX_ROOT_COST * 4;
+
+/// Bytes per 32-bit root constant, which is what makes the seam's byte offsets
+/// and D3D12's word counts convertible.
+const BYTES_PER_WORD: u32 = 4;
 
 /// One binding, reduced to what register assignment needs of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +174,36 @@ impl SetShape {
     }
 }
 
+/// The root-constants parameter one [`PushConstantRange`] becomes.
+///
+/// Built by [`plan_push_constants`] while the pipeline layout's register counter
+/// is still in hand, because the `b` register this takes is the one after every
+/// binding's — see the module docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RootConstants {
+    /// `D3D12_ROOT_CONSTANTS::ShaderRegister`, in space 0 like every other
+    /// register this backend assigns.
+    pub(crate) register: u32,
+    /// `D3D12_ROOT_CONSTANTS::Num32BitValues`: the block from word zero to the
+    /// end of the declared range, because a `cbuffer`'s first member is at byte
+    /// zero whatever the range's offset is.
+    pub(crate) words: u32,
+    /// Stages the range named, which becomes the parameter's
+    /// `ShaderVisibility`.
+    pub(crate) stages: ShaderStages,
+    /// The range as the seam declared it, carried through so
+    /// `crate::pipeline` can hand [`Declared`] to the encoder without
+    /// re-deriving it.
+    pub(crate) range: PushConstantRange,
+}
+
+impl RootConstants {
+    /// What this parameter spends of the signature's budget.
+    fn cost(self) -> u64 {
+        u64::from(self.words) * ROOT_CONSTANT_COST
+    }
+}
+
 /// What one root parameter is: the set it belongs to, and the thing inside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SlotKind {
@@ -121,10 +217,16 @@ pub(crate) enum SlotKind {
 
 /// One root parameter, named by where it came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Slot {
-    /// Index of the set in the pipeline layout.
-    pub(crate) set: usize,
-    pub(crate) kind: SlotKind,
+pub(crate) enum Slot {
+    /// A parameter one of the pipeline layout's sets contributed.
+    Set {
+        /// Index of the set in the pipeline layout.
+        set: usize,
+        /// The thing inside the set.
+        kind: SlotKind,
+    },
+    /// The signature's single root-constants parameter, which belongs to no set.
+    PushConstants,
 }
 
 /// Where one set's root parameters landed.
@@ -147,6 +249,9 @@ pub(crate) struct RootLayout {
     pub(crate) slots: Vec<Slot>,
     /// One entry per set, in set order. This is what a bind reads.
     pub(crate) sets: Vec<SetPlacement>,
+    /// Root parameter index of the root-constants entry, if the layout declares
+    /// a push-constant range. This is what a `push_constants` call reads.
+    pub(crate) push_constants: Option<u32>,
 }
 
 /// Assigns each binding its HLSL register.
@@ -182,11 +287,16 @@ pub(crate) fn assign_registers(bindings: &[Binding], registers: &mut Registers) 
     assigned
 }
 
-/// Lays every set's root parameters out, in set order.
+/// Lays every set's root parameters out, in set order, and the root-constants
+/// parameter after them.
 ///
 /// Within a set the order is the view table, then the sampler table, then one
 /// root descriptor per dynamic binding ascending by binding number. Which order
 /// is arbitrary; that there is exactly *one* of it is not — see the module docs.
+///
+/// The push-constant parameter is **last**, which is not arbitrary: it means a
+/// set's parameter indices are the same whether or not the layout declares a
+/// range, so a signature growing one does not move every table a bind sets.
 ///
 /// # Errors
 ///
@@ -194,19 +304,25 @@ pub(crate) fn assign_registers(bindings: &[Binding], registers: &mut Registers) 
 /// [`MAX_ROOT_COST`] DWORDs, with the arithmetic in the message. This is the
 /// refusal a caller gets at `create_pipeline_layout`, rather than at the draw
 /// that would have bound nothing.
-pub(crate) fn place(sets: &[SetShape]) -> Result<RootLayout, HalError> {
-    let cost: u64 = sets.iter().copied().map(SetShape::cost).sum();
+pub(crate) fn place(
+    sets: &[SetShape],
+    push_constants: Option<RootConstants>,
+) -> Result<RootLayout, HalError> {
+    let constants = push_constants.map_or(0, RootConstants::cost);
+    let cost: u64 = sets.iter().copied().map(SetShape::cost).sum::<u64>() + constants;
     if cost > u64::from(MAX_ROOT_COST) {
         let tables: u64 = sets
             .iter()
             .map(|set| u64::from(set.views) + u64::from(set.samplers))
             .sum();
         let roots: u64 = sets.iter().map(|set| u64::from(set.roots)).sum();
+        let words = push_constants.map_or(0, |range| range.words);
         return Err(HalError::InvalidDescriptor(format!(
             "this pipeline layout costs {cost} root DWORD(s) and a D3D12 root signature holds \
-             {MAX_ROOT_COST}: {tables} descriptor table(s) at {TABLE_COST} each and {roots} \
-             dynamic binding(s) at {ROOT_DESCRIPTOR_COST} each, because a dynamic offset becomes \
-             a root CBV/SRV/UAV carrying a 64-bit address"
+             {MAX_ROOT_COST}: {tables} descriptor table(s) at {TABLE_COST} each, {roots} dynamic \
+             binding(s) at {ROOT_DESCRIPTOR_COST} each, because a dynamic offset becomes a root \
+             CBV/SRV/UAV carrying a 64-bit address, and {words} push-constant word(s) at \
+             {ROOT_CONSTANT_COST} each, because a root constant is stored in the signature itself"
         )));
     }
 
@@ -219,32 +335,116 @@ pub(crate) fn place(sets: &[SetShape]) -> Result<RootLayout, HalError> {
             (shape.samplers, SlotKind::Samplers, &mut placement.samplers),
         ] {
             if present {
-                *slot = Some(next(&mut slots, index, kind));
+                *slot = Some(next(&mut slots, Slot::Set { set: index, kind }));
             }
         }
         for root in 0..shape.roots as usize {
-            let parameter = next(&mut slots, index, SlotKind::Root(root));
+            let parameter = next(
+                &mut slots,
+                Slot::Set {
+                    set: index,
+                    kind: SlotKind::Root(root),
+                },
+            );
             placement.roots.push(parameter);
         }
         placements.push(placement);
     }
+    let push_constants = push_constants.map(|_| next(&mut slots, Slot::PushConstants));
     Ok(RootLayout {
         slots,
         sets: placements,
+        push_constants,
     })
 }
 
 /// Appends one root parameter and returns its index.
 ///
 /// The index is the position in `slots` and comes from nowhere else, which is
-/// what makes [`RootLayout`]'s two halves agree by construction. The cast is
-/// sound because [`place`] checked the budget first: every parameter costs at
-/// least one DWORD, so there are at most [`MAX_ROOT_COST`] of them.
-fn next(slots: &mut Vec<Slot>, set: usize, kind: SlotKind) -> u32 {
+/// what makes [`RootLayout`]'s halves agree by construction. The cast is sound
+/// because [`place`] checked the budget first: every parameter costs at least
+/// one DWORD, so there are at most [`MAX_ROOT_COST`] of them.
+fn next(slots: &mut Vec<Slot>, slot: Slot) -> u32 {
     let parameter = u32::try_from(slots.len())
         .unwrap_or_else(|_| unreachable!("the root budget bounds the parameter count"));
-    slots.push(Slot { set, kind });
+    slots.push(slot);
     parameter
+}
+
+/// Turns the seam's push-constant range into the root-constants parameter it
+/// becomes, taking its shader register from `registers`.
+///
+/// **Call this after every set has taken its registers**, because the `b`
+/// register a push-constant block lands on is the one after them — see the
+/// module docs on why that is a property of the committed artifacts rather than
+/// a choice.
+///
+/// The word count is derived from the range's **end**, not its size: the
+/// `cbuffer` `dxc` binds starts at byte zero, so a range at a non-zero offset
+/// declares the words in front of it as well.
+///
+/// # Errors
+///
+/// [`HalError::Unsupported`] when the device reports no
+/// [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS), or when
+/// the range names a shader stage the device does not have — the seam requires
+/// both at layout creation rather than at the write.
+///
+/// [`HalError::InvalidDescriptor`] for a range naming no stage, one whose offset
+/// or size is not a whole number of 32-bit values, and one ending past
+/// [`Limits::max_push_constant_size`]. A range that *fits* the limit and does not
+/// fit beside the layout's descriptor tables is [`place`]'s refusal rather than
+/// this one, because that is a property of the whole signature.
+pub(crate) fn plan_push_constants(
+    range: Option<PushConstantRange>,
+    registers: &mut Registers,
+    caps: &DeviceCaps,
+) -> Result<Option<RootConstants>, HalError> {
+    let Some(range) = range else {
+        return Ok(None);
+    };
+    if !caps.features.contains(Features::PUSH_CONSTANTS) {
+        // Loudly at layout creation, never by dropping the writes later — the
+        // obligation `crcbl_hal::pipeline` states on the range itself.
+        return Err(HalError::Unsupported {
+            backend: BackendKind::Dx12,
+            what: "push constants on a device without PUSH_CONSTANTS",
+        });
+    }
+    range
+        .stages
+        .check_supported(caps.features, BackendKind::Dx12)?;
+    if range.stages.is_empty() {
+        return Err(HalError::InvalidDescriptor(
+            "a push-constant range must name at least one stage, because a D3D12 root parameter \
+             carries a shader visibility and there is no value meaning none"
+                .to_string(),
+        ));
+    }
+    let end = range.offset.saturating_add(range.size);
+    if end > caps.limits.max_push_constant_size {
+        return Err(HalError::InvalidDescriptor(format!(
+            "push constant range ends at {end} but max_push_constant_size is {}",
+            caps.limits.max_push_constant_size
+        )));
+    }
+    if range.size == 0
+        || !range.size.is_multiple_of(BYTES_PER_WORD)
+        || !range.offset.is_multiple_of(BYTES_PER_WORD)
+    {
+        return Err(HalError::InvalidDescriptor(format!(
+            "push constant range {}..{end} must be a non-empty multiple of {BYTES_PER_WORD} bytes \
+             at a {BYTES_PER_WORD}-byte offset, because D3D12 root constants are counted in \
+             32-bit values",
+            range.offset
+        )));
+    }
+    Ok(Some(RootConstants {
+        register: registers.take(RegisterClass::Cbv, 1),
+        words: end / BYTES_PER_WORD,
+        stages: range.stages,
+        range,
+    }))
 }
 
 /// One dynamic binding of a group being bound: what its layout says, and what
@@ -354,6 +554,125 @@ fn alignment(uniform: bool, limits: &Limits) -> u64 {
     alignment.max(1)
 }
 
+/// The push-constant range a pipeline layout declared, as a `push_constants`
+/// call has to be checked against.
+///
+/// Kept on `crate::pipeline`'s layout entry rather than re-derived, because the
+/// root parameter index is the half nothing in D3D12 would report wrong: writing
+/// constants at a descriptor table's index sets four bytes over a table pointer
+/// and the draw reads whatever that address now is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Declared {
+    /// Root parameter index of the root-constants entry.
+    pub(crate) parameter: u32,
+    /// First byte of the block the range covers.
+    pub(crate) offset: u32,
+    /// Bytes the range covers, from [`offset`](Self::offset).
+    pub(crate) size: u32,
+}
+
+/// What one `push_constants` call sets, in `SetGraphicsRoot32BitConstants`
+/// terms.
+///
+/// The words are **copied** out of the caller's bytes rather than pointed at:
+/// `SetGraphicsRoot32BitConstants` takes a `*const c_void` it reads
+/// `Num32BitValues` 32-bit values through, and the seam's `data` is a `&[u8]`
+/// that need not be four-byte aligned. The array is stack-sized at the root
+/// budget, which [`write`] bounds the count against, so no call allocates.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Write {
+    /// Root parameter index to set the constants at.
+    pub(crate) parameter: u32,
+    /// `DestOffsetIn32BitValues`: where in the block the first word lands.
+    pub(crate) dest_word: u32,
+    /// The words, of which [`count`](Self::count) are the write's.
+    words: [u32; MAX_ROOT_COST as usize],
+    /// How many of `words` the caller supplied.
+    count: usize,
+}
+
+impl Write {
+    /// The words to set, in the order they were written.
+    pub(crate) fn words(&self) -> &[u32] {
+        &self.words[..self.count]
+    }
+}
+
+/// Turns one `push_constants` call into the root constants it sets.
+///
+/// The seam's `offset` is a byte offset **into the push-constant block**, which
+/// is the same space the range's own offset is in, so the destination word is
+/// `offset / 4` and needs no adjustment by the range's start — see the module
+/// docs on why the block always begins at word zero.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] for a layout that declares no range — the
+/// seam is explicit that this must fail rather than be dropped — for an offset
+/// or length that is not a whole number of 32-bit values, and for a write that
+/// falls outside the declared range. The last is the one D3D12 would not report:
+/// `SetGraphicsRoot32BitConstants` writing past the parameter's
+/// `Num32BitValues` is a debug-layer message on a machine that has the layer on,
+/// and nothing anywhere else.
+pub(crate) fn write(
+    declared: Option<Declared>,
+    offset: u32,
+    data: &[u8],
+) -> Result<Write, HalError> {
+    let Some(declared) = declared else {
+        return Err(HalError::InvalidDescriptor(format!(
+            "push_constants writes {} byte(s) at offset {offset} through a pipeline layout that \
+             declares no push-constant range",
+            data.len()
+        )));
+    };
+    let length = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    if !offset.is_multiple_of(BYTES_PER_WORD) || !length.is_multiple_of(BYTES_PER_WORD) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "push_constants writes {length} byte(s) at offset {offset}, and D3D12 root constants \
+             are 32-bit values: both must be multiples of {BYTES_PER_WORD}"
+        )));
+    }
+    let end = offset.saturating_add(length);
+    let declared_end = declared.offset.saturating_add(declared.size);
+    if offset < declared.offset || end > declared_end {
+        return Err(HalError::InvalidDescriptor(format!(
+            "push_constants writes {offset}..{end}, and the pipeline layout declares the range \
+             {}..{declared_end}",
+            declared.offset
+        )));
+    }
+    let count = data.len() / BYTES_PER_WORD as usize;
+    let mut words = [0u32; MAX_ROOT_COST as usize];
+    let Some(slots) = words.get_mut(..count) else {
+        // Unreachable through a layout this module planned — `place` bounds the
+        // whole signature at `MAX_ROOT_COST` DWORDs and one word costs one — but
+        // the array index is what would be out of bounds if it were not, so it is
+        // a refusal rather than an assumption.
+        return Err(HalError::InvalidDescriptor(format!(
+            "push_constants writes {count} 32-bit value(s), and a D3D12 root signature holds \
+             {MAX_ROOT_COST}"
+        )));
+    };
+    for (word, chunk) in slots
+        .iter_mut()
+        .zip(data.chunks_exact(BYTES_PER_WORD as usize))
+    {
+        // Native, not little-endian: the runtime copies these words into the
+        // constant buffer byte for byte, and the caller's bytes are already the
+        // block's own layout. Reinterpreting them natively is what puts the same
+        // bytes back; reading them as a little-endian *value* would byte-swap
+        // them on a big-endian host.
+        *word = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Ok(Write {
+        parameter: declared.parameter,
+        dest_word: offset / BYTES_PER_WORD,
+        words,
+        count,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +701,43 @@ mod tests {
             min_storage_buffer_offset_alignment: 16,
             ..Limits::minimum()
         }
+    }
+
+    /// What `crcbl_dx12::adapter` reports of a D3D12 device, in the two fields
+    /// [`plan_push_constants`] reads: root constants are core D3D12, and the
+    /// budget is the whole root signature.
+    fn caps() -> DeviceCaps {
+        DeviceCaps {
+            features: Features::PUSH_CONSTANTS,
+            limits: Limits {
+                max_push_constant_size: MAX_PUSH_CONSTANT_BYTES,
+                ..limits()
+            },
+        }
+    }
+
+    /// A range of `size` bytes at offset zero, visible to the compute stage —
+    /// the shape `push_constant_probe.slang` is driven with.
+    fn range(size: u32) -> PushConstantRange {
+        PushConstantRange {
+            stages: ShaderStages::COMPUTE,
+            offset: 0,
+            size,
+        }
+    }
+
+    /// The root-constants parameter a range plans to, or a panic naming the
+    /// refusal.
+    fn planned(range: PushConstantRange) -> RootConstants {
+        planned_with(range, &mut Registers::default())
+    }
+
+    /// As [`planned`], against a register counter some bindings have already
+    /// taken from.
+    fn planned_with(range: PushConstantRange, registers: &mut Registers) -> RootConstants {
+        plan_push_constants(Some(range), registers, &caps())
+            .expect("a range this device can express")
+            .expect("a range was asked for")
     }
 
     /// **A binding's register is its index among the bindings of its own class,
@@ -473,11 +829,12 @@ mod tests {
             shape(false, true, 1),
             shape(false, false, 3),
         ];
-        let layout = place(&sets).expect("well inside the budget");
+        let layout = place(&sets, Some(planned(range(16)))).expect("well inside the budget");
         assert_eq!(
             layout.slots.len(),
-            2 + 2 + 1 + 1 + 1 + 3,
-            "two tables and two roots, one table, one table and one root, three roots"
+            2 + 2 + 1 + 1 + 1 + 3 + 1,
+            "two tables and two roots, one table, one table and one root, three roots, and the \
+             root constants"
         );
         assert_eq!(layout.sets.len(), sets.len());
 
@@ -502,12 +859,19 @@ mod tests {
             {
                 assert_eq!(
                     layout.slots.get(parameter as usize),
-                    Some(&Slot { set: index, kind }),
+                    Some(&Slot::Set { set: index, kind }),
                     "set {index}'s {kind:?} says root parameter {parameter}"
                 );
                 checked += 1;
             }
         }
+        let constants = layout.push_constants.expect("a range was placed") as usize;
+        assert_eq!(
+            layout.slots.get(constants),
+            Some(&Slot::PushConstants),
+            "the layout says the root constants are at parameter {constants}"
+        );
+        checked += 1;
         assert_eq!(
             checked,
             layout.slots.len(),
@@ -515,12 +879,37 @@ mod tests {
         );
     }
 
+    /// **A range is placed after every set, so adding one moves no table.**
+    ///
+    /// The property the ordering rule exists for: `bind_group` and
+    /// `push_constants` are separate calls against one signature, and a layout
+    /// that shifted its tables when a range appeared would bind them at indices
+    /// the pipeline it was built for does not declare — which D3D12 reads as
+    /// arithmetic and never reports.
+    #[test]
+    fn a_push_constant_range_is_placed_after_every_set() {
+        let sets = [shape(true, true, 1), shape(true, false, 0)];
+        let bare = place(&sets, None).expect("two sets");
+        let with = place(&sets, Some(planned(range(8)))).expect("two sets and a range");
+        assert_eq!(bare.push_constants, None);
+        assert_eq!(
+            with.sets, bare.sets,
+            "a set's parameters must not move when a range is added"
+        );
+        assert_eq!(
+            with.push_constants,
+            Some(u32::try_from(bare.slots.len()).expect("four parameters")),
+            "the root constants take the parameter after the last set's"
+        );
+        assert_eq!(with.slots.len(), bare.slots.len() + 1);
+    }
+
     /// A set with nothing in it takes no root parameter, and the sets after it
     /// do not shift.
     #[test]
     fn an_empty_set_takes_no_root_parameter() {
-        let layout =
-            place(&[shape(false, false, 0), shape(true, false, 0)]).expect("one table in two sets");
+        let layout = place(&[shape(false, false, 0), shape(true, false, 0)], None)
+            .expect("one table in two sets");
         assert_eq!(layout.sets[0], SetPlacement::default());
         assert_eq!(layout.sets[1].views, Some(0));
         assert_eq!(layout.slots.len(), 1);
@@ -533,10 +922,11 @@ mod tests {
     /// DWORDs D3D12 gives, and one descriptor table beside them is one too many.
     #[test]
     fn a_layout_over_the_root_budget_is_refused_by_name() {
-        let exact = place(&[shape(false, false, 32)]).expect("32 root descriptors is exactly 64");
+        let exact =
+            place(&[shape(false, false, 32)], None).expect("32 root descriptors is exactly 64");
         assert_eq!(exact.slots.len(), 32);
 
-        let error = place(&[shape(true, false, 32)])
+        let error = place(&[shape(true, false, 32)], None)
             .expect_err("one more DWORD than a root signature holds");
         let HalError::InvalidDescriptor(text) = &error else {
             panic!("a signature that does not fit is not {error:?}");
@@ -549,11 +939,247 @@ mod tests {
         // Tables alone can overflow it too, which is the arm that has nothing to
         // do with this slice's own feature and still has to hold.
         let many = vec![shape(true, true, 0); 33];
-        assert!(place(&many).is_err(), "66 tables is over the budget");
+        assert!(place(&many, None).is_err(), "66 tables is over the budget");
         assert!(
-            place(&many[..32]).is_ok(),
+            place(&many[..32], None).is_ok(),
             "64 tables is exactly the budget"
         );
+    }
+
+    /// **A range that fits the limit on its own does not fit beside a table, and
+    /// the refusal says so in DWORDs.**
+    ///
+    /// This is the arm [`MAX_PUSH_CONSTANT_BYTES`] makes necessary: the reported
+    /// limit is the whole signature, so a caller asking for all of it has asked
+    /// for something no layout with a bind group can have. The alternative to
+    /// refusing here is `D3D12SerializeRootSignature` failing with a sentence
+    /// about parameter counts — or a smaller reported limit, which would refuse
+    /// a range D3D12 accepts.
+    #[test]
+    fn root_constants_are_spent_from_the_same_budget_as_the_tables() {
+        let whole = planned(range(MAX_PUSH_CONSTANT_BYTES));
+        assert_eq!(whole.words, MAX_ROOT_COST, "one DWORD per 32-bit value");
+        let alone = place(&[], Some(whole)).expect("the whole signature, spent on constants");
+        assert_eq!(alone.push_constants, Some(0));
+
+        let error = place(&[shape(true, false, 0)], Some(whole))
+            .expect_err("one descriptor table more than the signature holds");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("a signature that does not fit is not {error:?}");
+        };
+        assert!(text.contains("65 root DWORD(s)"), "{text}");
+        assert!(text.contains("64 push-constant word(s)"), "{text}");
+        assert!(text.contains("1 descriptor table(s)"), "{text}");
+
+        // And the boundary from the other side: 63 words leave exactly the one
+        // DWORD the table costs.
+        place(
+            &[shape(true, false, 0)],
+            Some(planned(range(MAX_PUSH_CONSTANT_BYTES - 4))),
+        )
+        .expect("63 words and one table are exactly 64 DWORDs");
+    }
+
+    /// **The block's register is the one after every binding's, because that is
+    /// where `dxc` puts it.**
+    ///
+    /// The assertion that matters is the second: a layout whose sets declare
+    /// constant buffers pushes the block along, and a root signature naming `b0`
+    /// there would collide with a binding the shader also reads at `b0`. The
+    /// first is `push_constant_probe.slang`'s own measured answer — one UAV
+    /// binding, so the block is `b0`.
+    #[test]
+    fn the_block_takes_the_b_register_after_every_bound_constant_buffer() {
+        let mut registers = Registers::default();
+        assert_eq!(
+            assign_registers(&[binding(0, RegisterClass::Uav)], &mut registers),
+            vec![0],
+            "the probe's one binding is a UAV and takes no b register"
+        );
+        assert_eq!(
+            planned_with(range(16), &mut registers).register,
+            0,
+            "cb0, which is where dxc -dumpbin found the probe's block"
+        );
+
+        let mut registers = Registers::default();
+        assign_registers(
+            &[
+                binding(0, RegisterClass::Cbv),
+                binding(1, RegisterClass::Cbv),
+            ],
+            &mut registers,
+        );
+        assert_eq!(
+            planned_with(range(16), &mut registers).register,
+            2,
+            "two bound constant buffers take b0 and b1, so the block is b2"
+        );
+    }
+
+    /// **A range at a non-zero offset declares the words in front of it.**
+    ///
+    /// The `cbuffer` starts at byte zero whatever the seam's range says, so the
+    /// parameter has to be sized from the range's end — a parameter sized from
+    /// `size` alone would be too short by the offset, and every write above it
+    /// would land past `Num32BitValues`.
+    #[test]
+    fn the_parameter_is_sized_from_the_ranges_end_and_not_its_size() {
+        assert_eq!(planned(range(16)).words, 4);
+        assert_eq!(
+            planned(PushConstantRange {
+                offset: 16,
+                ..range(16)
+            })
+            .words,
+            8,
+            "bytes 16..32 of a block are words 4..8 of a parameter that starts at word 0"
+        );
+    }
+
+    /// Every range D3D12 has no root-constants parameter for is refused by name,
+    /// at layout creation.
+    #[test]
+    fn a_range_d3d12_cannot_express_is_refused_by_name() {
+        let cases = [
+            ("multiple of 4", range(6)),
+            ("multiple of 4", range(0)),
+            (
+                "multiple of 4",
+                PushConstantRange {
+                    offset: 2,
+                    ..range(4)
+                },
+            ),
+            ("max_push_constant_size", range(MAX_PUSH_CONSTANT_BYTES + 4)),
+            ("at least one stage", {
+                PushConstantRange {
+                    stages: ShaderStages::empty(),
+                    ..range(4)
+                }
+            }),
+        ];
+        assert!(!cases.is_empty(), "nothing to check");
+        for (expected, range) in cases {
+            let error = plan_push_constants(Some(range), &mut Registers::default(), &caps())
+                .expect_err(expected);
+            let HalError::InvalidDescriptor(text) = &error else {
+                panic!("{expected}: {error:?}");
+            };
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+
+        // A device without the feature refuses at the same point and with the
+        // *other* variant, because that is the one a caller branches on to reach
+        // the seam's dynamic-offset substitute.
+        let error = plan_push_constants(
+            Some(range(16)),
+            &mut Registers::default(),
+            &DeviceCaps {
+                features: Features::empty(),
+                limits: limits(),
+            },
+        )
+        .expect_err("a device reporting no PUSH_CONSTANTS");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+            "{error:?}"
+        );
+
+        // And no range at all is not a refusal, which is every pipeline layout
+        // this backend built before this slice.
+        assert_eq!(
+            plan_push_constants(None, &mut Registers::default(), &caps()).expect("nothing to plan"),
+            None
+        );
+    }
+
+    /// **A `push_constants` call lands at the parameter, the word and the bytes
+    /// the caller asked for.**
+    ///
+    /// The words are the assertion that matters: they reach D3D12 as raw memory,
+    /// so a byte swap or a shifted destination is a shader reading plausible,
+    /// wrong constants — which is exactly what the seam suite's per-word pattern
+    /// exists to catch, and this is the half of it that runs off Windows.
+    #[test]
+    fn a_write_lands_at_the_parameter_and_word_the_range_puts_it_at() {
+        let declared = Declared {
+            parameter: 7,
+            offset: 0,
+            size: 16,
+        };
+        let first = write(Some(declared), 0, &0x1111_0001u32.to_ne_bytes())
+            .expect("one word inside the range");
+        assert_eq!(first.parameter, 7);
+        assert_eq!(first.dest_word, 0);
+        assert_eq!(first.words(), [0x1111_0001]);
+
+        // A write into the middle of the range starts at its own word, and only
+        // the words it supplied are set.
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&0xAAAA_0003u32.to_ne_bytes());
+        bytes[4..].copy_from_slice(&0xBBBB_0004u32.to_ne_bytes());
+        let middle = write(Some(declared), 8, &bytes).expect("the last two words");
+        assert_eq!(middle.dest_word, 2, "byte 8 of the block is word 2");
+        assert_eq!(middle.words(), [0xAAAA_0003, 0xBBBB_0004]);
+
+        // A range starting above zero indexes the same space: the destination
+        // word is the seam's offset, not the offset within the range.
+        let above = write(
+            Some(Declared {
+                offset: 16,
+                size: 16,
+                ..declared
+            }),
+            16,
+            &0x1234_5678u32.to_ne_bytes(),
+        )
+        .expect("the first word of a range at byte 16");
+        assert_eq!(above.dest_word, 4);
+    }
+
+    /// A write the root signature has no room for is refused by name, rather
+    /// than setting DWORDs the parameter does not declare.
+    #[test]
+    fn a_write_outside_the_declared_range_is_refused_by_name() {
+        let declared = Declared {
+            parameter: 0,
+            offset: 8,
+            size: 8,
+        };
+        let cases: Vec<(&str, Option<Declared>, u32, Vec<u8>)> = vec![
+            ("declares no push-constant range", None, 0, vec![0; 4]),
+            (
+                "multiples of 4",
+                Some(declared),
+                8,
+                // Six bytes is not a whole number of 32-bit values.
+                vec![0; 6],
+            ),
+            ("multiples of 4", Some(declared), 10, vec![0; 4]),
+            // Below the range, and past its end: both are writes to a word the
+            // parameter does not declare.
+            ("the range 8..16", Some(declared), 4, vec![0; 4]),
+            ("the range 8..16", Some(declared), 12, vec![0; 8]),
+        ];
+        assert!(!cases.is_empty(), "nothing to check");
+        for (expected, declared, offset, data) in cases {
+            let error = write(declared, offset, &data).expect_err(expected);
+            let HalError::InvalidDescriptor(text) = &error else {
+                panic!("{expected}: {error:?}");
+            };
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+
+        // A write filling the range exactly is accepted, so the bounds check
+        // above is on the ends rather than a blanket refusal.
+        let whole = write(Some(declared), 8, &[0u8; 8]).expect("8..16 is exactly the range");
+        assert_eq!(whole.words().len(), 2);
+
+        // An empty write sets nothing and is not an error — but it is still
+        // checked against the layout, which is what the first case above says.
+        let empty = write(Some(declared), 8, &[]).expect("nothing to set");
+        assert!(empty.words().is_empty());
     }
 
     /// A dynamic offset moves the address it is given, and the alignment the

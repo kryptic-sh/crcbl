@@ -45,8 +45,8 @@
 //! **Nothing in this crate is a stub that reports success** — a draw recorded
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
-//! the clear that no slice has written — buffer fills, mesh dispatch, a
-//! push-constant range at pipeline-layout creation — refuses with
+//! the clear that no slice has written — buffer fills, mesh dispatch — refuses
+//! with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
 //! yet" rather than "broken". A refusal that is *permanent* deliberately does
@@ -207,8 +207,14 @@
 //! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) arrived with
 //! `create_sampler`, [`COMPUTE`](crcbl_hal::Features::COMPUTE) arrived with
 //! `create_compute_pipeline` and `dispatch`, the three indirect flags
-//! arrived with the `ExecuteIndirect` draws — see `crcbl_dx12::draw` — and the
-//! three query flags arrived with `CreateQueryHeap` and the reads behind it.
+//! arrived with the `ExecuteIndirect` draws — see `crcbl_dx12::draw` — the
+//! three query flags arrived with `CreateQueryHeap` and the reads behind it, and
+//! [`PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) arrived with the
+//! `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` parameter
+//! `create_pipeline_layout` builds and the `SetGraphicsRoot32BitConstants`
+//! behind `CommandEncoder::push_constants` — see `crcbl_dx12::root` for the
+//! shader register that parameter takes, which is read off the committed DXIL
+//! rather than chosen here.
 //!
 //! **The query flags are also the one place an adapter and a device from it
 //! report different caps.**

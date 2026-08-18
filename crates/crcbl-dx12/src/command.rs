@@ -13,7 +13,7 @@
 //! `ResolveQueryData`. [`finish`](CommandEncoder::finish) closes the list and
 //! hands back a pooled [`CommandBufferHandle`] the device can submit.
 //!
-//! What still needs a slice — buffer fills, mesh dispatch, push constants —
+//! What still needs a slice — buffer fills, mesh dispatch —
 //! **fails the encoder** rather than
 //! recording nothing, so `finish` returns the refusal instead of a command
 //! buffer that submits and draws nothing. That is `crcbl-mtl`'s rule in its
@@ -1862,28 +1862,65 @@ impl CommandEncoder for Dx12CommandEncoder {
         }
     }
 
-    /// Fails the encoder, because no layout on this device can declare a range.
+    /// Sets root constants at the parameter the pipeline layout put them at.
     ///
-    /// Not [`not_yet`]: `create_pipeline_layout` refuses a
-    /// [`PushConstantRange`](crcbl_hal::PushConstantRange) outright — this
-    /// device does not report
-    /// [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) — so a
-    /// caller reaching here is holding a layout that does not exist, and "the
-    /// push-constant slice has not landed" would send it looking for a feature
-    /// rather than at the layout it built.
+    /// **The caller's `stages` are not consulted, and the layout's are not
+    /// re-applied either.** A `D3D12_ROOT_CONSTANTS` parameter carries its
+    /// `ShaderVisibility` in the *signature*, decided when the layout was
+    /// created; `SetGraphicsRoot32BitConstants` names a parameter index and
+    /// nothing about stages, so there is no per-write mask to honour and none to
+    /// get wrong. `crcbl-vk` passes the layout's mask rather than the caller's
+    /// for the mirror-image reason — `vkCmdPushConstants` demands the declared
+    /// one.
+    ///
+    /// **Which bind point it lands on is the open scope**, exactly as
+    /// [`bind_group`](Self::bind_group): a `DIRECT` command list carries a
+    /// graphics and a compute root signature, and constants set on the wrong one
+    /// leave the dispatch reading whatever the last draw put there.
     fn push_constants(
         &mut self,
         _stages: ShaderStages,
         offset: u32,
         data: &[u8],
-        _layout: PipelineLayoutHandle,
+        layout: PipelineLayoutHandle,
     ) {
-        self.fail(HalError::InvalidDescriptor(format!(
-            "{} byte(s) of push constants at offset {offset}, on a device that does not report \
-             Features::PUSH_CONSTANTS: create_pipeline_layout refuses a push-constant range, so \
-             no layout here declares one",
-            data.len()
-        )));
+        if self.list().is_none() {
+            return;
+        }
+        let write = match self.device.push_constants(layout, offset, data) {
+            Ok(write) => write,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let words = write.words();
+        if words.is_empty() {
+            // Nothing was asked for. The layout was still checked above, which
+            // is what keeps an empty write through a layout that declares no
+            // range a refusal rather than a quiet no-op.
+            return;
+        }
+        let compute = self.in_compute_pass;
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording. `words` is a live slice this
+        // encoder owns for the duration of the call and `count` is its own
+        // length, so the runtime reads `count` 32-bit values out of an
+        // allocation that holds at least that many. `parameter`,
+        // `DestOffsetIn32BitValues` and the count all come from
+        // `crate::root::write`, checked against the range `layout` declares —
+        // and the seam requires a caller to name the layout its bound pipeline
+        // was created with, which is the same obligation `bind_group` rests a
+        // table's parameter index on.
+        let count = u32::try_from(words.len()).unwrap_or(u32::MAX);
+        let source = words.as_ptr().cast();
+        unsafe {
+            if compute {
+                list.SetComputeRoot32BitConstants(write.parameter, count, source, write.dest_word);
+            } else {
+                list.SetGraphicsRoot32BitConstants(write.parameter, count, source, write.dest_word);
+            }
+        }
     }
 
     // --- draws ---
