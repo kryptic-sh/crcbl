@@ -3,6 +3,34 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The one device-loss ordering that does not hold
+
+`gpu-replay.js` now watches `GPUDevice.lost` and files the loss once, first,
+with its reason, and both comments in `#requestReadback` and `#loseDevice` point
+here for the case it cannot make clean.
+
+**The ordering that does hold.** The specification's "lose the device" resolves
+`lost` **before** completing the steps waiting on a loss, so a map rejection
+caused by a genuine loss arrives after `#loseDevice` has already filed the
+readback with the loss text, and the rejection handler leaves it alone. That is
+the path a real device failure takes.
+
+**The one that does not.** `GPUDevice.destroy()` does not follow that route: it
+cancels an outstanding map through the **buffer**, and Chromium was watched
+rejecting one with "Buffer was unmapped before mapping was resolved" a whole
+task _ahead_ of `lost`. `#loseDevice` re-files such an entry so the readback
+ends up carrying the loss either way — but the rejection was pushed to the
+**error queue** when it landed, and a queued error cannot be taken back. So on
+that single path a reader sees the browser's sentence before the loss.
+
+Closing it means either not filing a map rejection until a turn has passed, so a
+loss can still claim it — which delays every honest rejection to tidy one — or
+making the error queue support retraction, which is a wire-format change to
+`Reply::DeviceErrors` for a cosmetic ordering. Neither is obviously worth it,
+and the entry that matters (the readback's own failure reason) is already
+correct in both orderings. Recorded so the next reader does not mistake the
+ordering for an oversight.
+
 ### A lost device is reported as whatever call noticed it first
 
 **Reported from a real machine, 2026-08-18.** An NVIDIA GeForce MX550 laptop

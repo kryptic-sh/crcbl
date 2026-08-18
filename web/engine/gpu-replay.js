@@ -2697,6 +2697,26 @@ export class Replayer {
    */
   #device = null;
   /**
+   * What `GPUDevice.lost` settled with, or `null` while the device is alive.
+   *
+   * THE TERMINAL STATE OF THIS REPLAYER. `lost` settles once and means the
+   * device is gone — every buffer, texture, pipeline and encoder made on it is
+   * unusable, and nothing this replayer can do brings it back — so it is
+   * recorded here rather than pushed onto the error queue and carried on from.
+   * {@link Replayer#replay} reads it before every command and
+   * {@link Replayer#answerLost} is what a command gets instead of being run.
+   *
+   * `text` is the one sentence every one of those answers carries, composed
+   * once so that the loss reads identically wherever it surfaces — a command's
+   * reply, a readback's failure, the `take_error` queue. It is not truncated
+   * here: it is another runtime's prose like every `uncapturederror` message,
+   * so it is cut where those are cut, by `putMessage` in `gpu-reply.js`, to
+   * `tag::MAX_DEVICE_ERROR_BYTES` with the shared marker.
+   *
+   * @type {{ reason: string, message: string, text: string } | null}
+   */
+  #lost = null;
+  /**
    * The canvases a `CreateSurface` may name, by the key it names them with.
    *
    * `SurfaceTarget::Web` is "an integer key into the shell's JS-side canvas
@@ -3271,6 +3291,20 @@ export class Replayer {
   }
 
   /**
+   * What the device was lost with, or `null` while it is alive.
+   *
+   * The one way to see a loss that was **not** a failure: a device destroyed
+   * deliberately is recorded here and deliberately kept off the error queue, so
+   * {@link Replayer#pendingErrors} says nothing about it and only this does.
+   * `web/tools/gpu-replay.mjs` reads it to tell that case from a driver's.
+   *
+   * @returns {{ reason: string, message: string, text: string } | null}
+   */
+  get lost() {
+    return this.#lost;
+  }
+
+  /**
    * The encoded replies, header included, as a view over the writer's buffer.
    *
    * Hand it to `putReplyStream` in `gpu-transport.js`; call {@link clear} only
@@ -3314,6 +3348,16 @@ export class Replayer {
       // number must not produce a sequence outside the range it is typed as.
       const sequence = BigInt.asUintN(64, baseSequence + BigInt(i));
       const command = commands[i];
+      // THE TERMINAL STATE, CHECKED ONCE RATHER THAN IN EVERY HANDLER. A lost
+      // device serves nothing, so running the handler would only produce a
+      // second failure naming whichever call happened to touch the corpse —
+      // `createBuffer` reporting an allocation failure on a GPU with two spare
+      // gigabytes, a `mapAsync` reporting an `AbortError` — and leave whoever
+      // reads it looking for a cause in the wrong place.
+      if (this.#lost !== null) {
+        this.#answerLost(sequence, command);
+        continue;
+      }
       switch (command.name) {
         case 'EnumerateAdapters':
           this.#enumerateAdapters(sequence);
@@ -3605,11 +3649,18 @@ export class Replayer {
    * `GPUDevice` is an `EventTarget` in every implementation and a stub that is
    * not one should fail loudly rather than quietly stop reporting errors.
    *
-   * `GPUDevice.lost` is deliberately still not watched. It is a promise that
-   * settles once and means the device is gone rather than that a call failed,
-   * so what it wants is the seam's device-lost path, and there is none on this
-   * channel yet; adding it to this queue would report a dead device as one more
-   * error to log and carry on from.
+   * `GPUDevice.lost` IS WATCHED, AND NOT THROUGH THAT QUEUE. It is a promise
+   * that settles once and means the device is gone rather than that a call
+   * failed, so handing it to the error queue would report a dead device as one
+   * more error to log and carry on from — which is why it went unwatched while
+   * this channel had no device-lost path. It has one now: a `ReadbackFailed`
+   * becomes a `HalError::DeviceLost` on the far side, so a loss has somewhere to
+   * arrive that says what it is. {@link Replayer#loseDevice} is what the
+   * listener runs, and it makes the loss terminal rather than another entry in
+   * a log. Registered here, unguarded, for the `uncapturederror` listener's
+   * reason: `lost` is a promise on every `GPUDevice`, and a stub that has none
+   * should fail loudly rather than quietly stop watching for the one failure
+   * nothing else on this channel reports.
    *
    * @param {bigint} sequence
    * @param {{ adapter: number, label: string | null, requiredFeatures: bigint,
@@ -3682,6 +3733,10 @@ export class Replayer {
             `the device reported ${String(event.error?.message ?? event.error)}`
           );
         });
+        // Attached before the device is held, for the listener's reason: a
+        // device whose loss this replayer cannot hear about must be a failed
+        // request rather than a live device that will die silently.
+        device.lost.then((info) => this.#loseDevice(info));
         this.#device = device;
         this.#replies.device(sequence, halDeviceCapsFor(device));
         this.#queued = true;
@@ -6791,9 +6846,13 @@ export class Replayer {
    * request itself: a request before any device opened, a `Some` `after` (a
    * semaphore wait — WebGPU's `mapAsync` is exactly "everything submitted so
    * far", the `None` case, and it has no way to wait on a value), and an
-   * unresolvable buffer. A `mapAsync` that rejects — a device lost mid-map, a
-   * buffer destroyed before it resolved, a range the browser will not map — and
-   * a `getMappedRange` that throws after it resolved land there too.
+   * unresolvable buffer. A `mapAsync` that rejects — a buffer destroyed before
+   * it resolved, a range the browser will not map — and a `getMappedRange` that
+   * throws after it resolved land there too. A DEVICE LOST MID-MAP DOES NOT:
+   * it is one event for the whole replayer rather than this request's own
+   * failure, so {@link Replayer#loseDevice} files it on every entry in flight
+   * with the reason the loss composed, and the `AbortError` that then arrives
+   * here is left alone.
    *
    * BOTH DESTINATIONS, AND THEY ANSWER DIFFERENT QUESTIONS. The error queue is
    * what `Device::take_error` drains, which tells the engine its device is
@@ -6864,6 +6923,10 @@ export class Replayer {
         // is gone. Nobody can ask for the bytes either — the entry left the
         // table with the destroy.
         if (entry.abandoned) return;
+        // The device died while this was in flight: the entry is already filed
+        // `'failed'` with the loss, and a map that somehow resolved anyway is
+        // reading memory a dead device owns.
+        if (this.#lost !== null) return;
         // A fresh copy: `getMappedRange` is a view onto memory `unmap` reclaims,
         // so the bytes have to leave it before a destroy can.
         entry.bytes = new Uint8Array(
@@ -6882,6 +6945,17 @@ export class Replayer {
         // `Engine::acquire` takes any `take_error` message as a reason to stop
         // the frame loop.
         if (entry.abandoned) return;
+        // AND WHEN THE DEVICE DIED, THIS REJECTION IS THE DEATH ARRIVING
+        // THROUGH THIS CALL. WebGPU rejects an outstanding map with an
+        // `AbortError` when the device goes, and filing that is how a lost
+        // device got reported as "readback N could not be mapped: AbortError" —
+        // a sentence naming a call that was fine. {@link Replayer#loseDevice}
+        // has already filed this entry with the loss by then, so the rejection
+        // is left alone — "by then" being the specification's order for "lose
+        // the device", which resolves `lost` before it completes the steps that
+        // wait on a loss, and what a real browser was watched doing under a real
+        // loss. `docs/backlog.md` records the one ordering that does not hold.
+        if (this.#lost !== null) return;
         const reason = `${named} could not be mapped: ${String(error)}`;
         this.#deviceError(reason);
         entry.state = 'failed';
@@ -6987,9 +7061,10 @@ export class Replayer {
    * and not a check of the error. WebGPU rejects a map with an `AbortError` when
    * the device is lost too, and the specification's map-failure steps say so in
    * as many words: "this is the same error type produced by cancelling the map
-   * using `unmap()`". A device lost is not this queue's news anyway — see
-   * {@link Replayer#requestDevice} on why `GPUDevice.lost` is deliberately not
-   * watched here.
+   * using `unmap()`". A device lost is not told apart *here* either, and does
+   * not have to be: {@link Replayer#loseDevice} has already recorded it and
+   * failed this entry with the reason by the time such a rejection arrives, so
+   * the handler leaves on that rather than on this flag.
    *
    * THE SETTLED STATES NEED NO BRANCH. The same steps end "if `this.[[mapping]]`
    * is null, return", so unmapping a request whose map rejected — mapped nothing,
@@ -7381,6 +7456,170 @@ export class Replayer {
    */
   #deviceError(message) {
     this.#errors.push(message);
+  }
+
+  /**
+   * Records that `GPUDevice.lost` settled, and settles everything waiting on the
+   * device with it.
+   *
+   * **A LOSS IS NOT AN ERROR ON A WORKING DEVICE**, which is why this does not
+   * simply push a line and return. `lost` settles once and every object made on
+   * that device is unusable from then on, so the loss is written to
+   * {@link Replayer#lost} — the state {@link Replayer#replay} consults before
+   * every command — and the queue gets it once, as the *first* thing a reader
+   * sees, rather than once per call that then failed for a reason of its own.
+   *
+   * **A DELIBERATE DESTROY IS NOT A FAILURE AND IS NOT REPORTED AS ONE.**
+   * `GPUDeviceLostReason` is exactly `'destroyed'` and `'unknown'`, and the
+   * specification reaches `'destroyed'` down one path only — the page calling
+   * `GPUDevice.destroy()`. Nothing in this engine calls it: teardown is
+   * `demo.js`'s `pagehide` handler, which runs `shutdown()` and lets the page
+   * go, and the specification says a device merely collected never settles
+   * `lost` at all. So a `'destroyed'` loss is somebody tearing down on purpose,
+   * and putting it on the error queue would hand `Engine::acquire` a reason to
+   * report a failure on every ordinary page close. It is still terminal — a
+   * destroyed device serves nothing either — so it is recorded, and the
+   * commands and readbacks behind it are answered exactly as any other loss is.
+   *
+   * **THE READBACKS IN FLIGHT ARE FAILED HERE, WITH THE LOSS.** WebGPU rejects
+   * an outstanding `mapAsync` with an `AbortError` when the device goes, and
+   * that name says nothing about why; the reason the caller needs is this one.
+   *
+   * **AND SO ARE THE ONES A REJECTION HAS ALREADY CLAIMED, WHICH IS THE HALF
+   * THAT CANNOT BE LEFT TO ORDERING.** The specification's "lose the device"
+   * resolves `lost` before it completes "any outstanding steps that are waiting
+   * until device becomes lost", so a rejection *caused by the loss* arrives
+   * after this and {@link Replayer#requestReadback}'s handler leaves it alone.
+   * `GPUDevice.destroy()` does not follow that route: it cancels an outstanding
+   * map through the *buffer*, and Chromium was watched rejecting one with
+   * "Buffer was unmapped before mapping was resolved" a whole task ahead of
+   * `lost`. So `rejected` — set by that handler, and true only of a reason a map
+   * rejection wrote — is re-filed here too, and the entry ends up saying the
+   * same thing whichever of the two the browser settled first.
+   *
+   * A rejection this replaces was pushed to the error queue when it landed and
+   * cannot be taken back, so on that one path the queue reads the browser's
+   * sentence before this one. `docs/backlog.md` carries what closing that would
+   * take.
+   *
+   * @param {{ reason?: string, message?: string }} info The `GPUDeviceLostInfo`
+   *   the promise resolved with.
+   */
+  #loseDevice(info) {
+    // `lost` settles once, so a second call is a stub or a browser repeating
+    // itself; the first loss is the one that explains the rest either way.
+    if (this.#lost !== null) return;
+    const reason = String(info?.reason ?? 'unknown');
+    const message = String(info?.message ?? '');
+    this.#lost = {
+      reason,
+      message,
+      text: `the device was lost: ${reason}: ${message}`,
+    };
+    if (reason !== 'destroyed') this.#deviceError(this.#lost.text);
+    for (const [, entry] of this.#readbacks.entries()) {
+      if (entry.state !== 'mapping' && !entry.rejected) continue;
+      entry.state = 'failed';
+      entry.reason = this.#lost.text;
+      entry.rejected = false;
+    }
+  }
+
+  /**
+   * Answers one command against a device that is gone.
+   *
+   * **THE SAME SENTENCE EVERY TIME.** Every reply this queues carries
+   * {@link Replayer#lost}'s `text`, so a caller draining a frame's answers reads
+   * one cause rather than a different downstream symptom per call. The loss
+   * itself reached the error queue once, in {@link Replayer#loseDevice}, and is
+   * not pushed again here: identical repeats would fill
+   * {@link MAX_PENDING_ERRORS} and then be counted as dropped, which reads as a
+   * flood of errors rather than the single event it was.
+   *
+   * **ONLY THE COMMANDS THAT OWE A REPLY APPEAR BELOW.** A `CreateBuffer` or a
+   * `Draw` answers nothing on a healthy device either — its failures go to the
+   * error queue, which already holds the loss — so there is nothing for it to
+   * say here. The ones named are the ones a sequence is registered against on
+   * the far side, and leaving any of them unanswered would strand that sequence
+   * for ever, which is the one outcome worse than a failure.
+   *
+   * A name this replayer does not know is dropped rather than refused, unlike
+   * {@link Replayer#replay}'s `default`: the opcode check exists to stop a
+   * stream being executed wrongly, and past a loss nothing is executed at all.
+   *
+   * @param {bigint} sequence
+   * @param {{ name: string }} command
+   */
+  #answerLost(sequence, command) {
+    const reason = this.#lost.text;
+    switch (command.name) {
+      case 'EnumerateAdapters':
+        // The adapter may well still be there — but a replayer that granted one
+        // would then be asked to open a device on it, and this one is holding a
+        // corpse. `NoAdapter` is the honest answer with the loss as its reason.
+        this.#noAdapter(sequence, reason);
+        break;
+      case 'RequestDevice':
+        this.#replies.deviceFailed(
+          sequence,
+          reason.slice(0, MAX_REASON_CHARS),
+          0n
+        );
+        this.#queued = true;
+        break;
+      case 'SurfaceCaps':
+        this.#replies.surfaceCapsFailed(
+          sequence,
+          reason.slice(0, MAX_REASON_CHARS),
+          SURFACE_CAPS_FAILURE.BACKEND
+        );
+        this.#queued = true;
+        break;
+      case 'RequestReadback':
+        // Filed rather than ignored, for {@link Replayer#failReadback}'s
+        // reason: a request that recorded nothing leaves the poll below looking
+        // at an absent handle. The reason is not pushed to the error queue —
+        // the loss that caused it is already there.
+        this.#readbacks.insert(command.readback, {
+          buffer: null,
+          offset: 0,
+          size: 0,
+          state: 'failed',
+          bytes: null,
+          reason,
+          abandoned: false,
+        });
+        break;
+      case 'PollReadback':
+        // The ordinary poll, because it already answers from the state the loss
+        // left: `'failed'` with this reason for anything that was in flight or
+        // has been asked for since. A readback that had already been copied out
+        // still answers `Ready` with its bytes — they are in JS memory and a
+        // dead device does not unmake them.
+        this.#pollReadback(sequence, command);
+        break;
+      case 'QueryResults':
+        // An empty value list, which is what a query read that cannot be served
+        // answers — see {@link Replayer#failQueryResults}. The reason goes
+        // nowhere new: this command's reason channel is the error queue, and the
+        // loss is already the first thing in it.
+        this.#replies.queryResults(
+          sequence,
+          command.set,
+          command.firstQuery,
+          []
+        );
+        this.#queued = true;
+        break;
+      case 'TakeError':
+        // The one command that must still run: it is how the loss crosses to
+        // wasm at all, and on a deliberate destroy it is how the far side hears
+        // the queue is empty and nothing is wrong.
+        this.#takeErrorCommand(sequence);
+        break;
+      default:
+        break;
+    }
   }
 
   /**

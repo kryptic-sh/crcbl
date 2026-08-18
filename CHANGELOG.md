@@ -1749,6 +1749,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A lost GPU device was reported as whatever call happened to notice it.** A
+  device dying mid-frame surfaced as
+  `readback N could not be mapped: AbortError: … is lost` — a sentence naming a
+  readback that was fine, with the actual cause buried in the browser's tail
+  text — and every later call added its own downstream error. `gpu-replay.js`
+  now watches `GPUDevice.lost`, records the reason and message the promise
+  carries, and reports `the device was lost: <reason>: <message>` **once**, as
+  the first thing a reader sees. Every command afterwards is answered with that
+  same sentence rather than a symptom of its own, and readbacks in flight — plus
+  any a rejection has already claimed — are failed with it, so no raw
+  `AbortError` reaches the caller.
+
+  A device destroyed on purpose is not reported as a failure: `'destroyed'` is
+  reachable only through `GPUDevice.destroy()`, which this engine never calls,
+  so it is recorded as terminal without putting an error on the queue and an
+  ordinary page close stays silent.
+
 - **`crcbl-mtl` refused timestamp and pipeline-statistics query sets with a
   reason that was untrue on any Mac but the CI one.** The message said an
   `MTLCounterSampleBuffer`'s descriptor must name one of

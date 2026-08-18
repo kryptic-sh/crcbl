@@ -1159,6 +1159,8 @@ function stubDevice(
     refuseQuerySets,
   } = {}
 ) {
+  /** @type {(info: { reason: string, message: string }) => void} */
+  let resolveLost;
   const device = {
     features: new Set(features),
     limits: deviceLimits(),
@@ -1220,6 +1222,28 @@ function stubDevice(
       for (const [type, listener] of device.listeners) {
         if (type === 'uncapturederror') listener({ error: { message } });
       }
+    },
+    /**
+     * `GPUDevice.lost`, which every device has and which stays pending for the
+     * life of a healthy one.
+     *
+     * Not optional here for `addEventListener`'s reason: a device that cannot
+     * be lost would let a replayer that stopped watching for the one failure
+     * nothing else reports pass this file.
+     */
+    lost: new Promise((resolve) => {
+      resolveLost = resolve;
+    }),
+    /**
+     * Kills the device the way a browser does: by resolving `lost` with a
+     * `GPUDeviceLostInfo`.
+     *
+     * @param {string} reason A `GPUDeviceLostReason` — `'unknown'` or
+     *   `'destroyed'`.
+     * @param {string} message The implementation-defined half.
+     */
+    lose(reason, message) {
+      resolveLost({ reason, message });
     },
     /**
      * @type {Array<{ buffer: object, offset: number, data: Uint8Array }>} Every
@@ -3693,10 +3717,13 @@ async function main() {
     );
   }
   {
-    // **A `mapAsync` that rejects.** A device lost mid-map, a buffer destroyed
-    // before the map resolved, a range the browser will not map: WebGPU reports
-    // all three by rejecting the promise, so this one rejection stands for the
-    // set. What must reach wasm is that the readback is over.
+    // **A `mapAsync` that rejects.** A buffer destroyed before the map
+    // resolved, a range the browser will not map: WebGPU reports both by
+    // rejecting the promise, so this one rejection stands for the set. What must
+    // reach wasm is that the readback is over. (A device lost mid-map rejects
+    // here too and is *not* filed here — it has a section of its own further
+    // down, because it is one event for the whole replayer rather than this
+    // request's own failure.)
     const { replayer } = await readyWithDevice();
     replayer.replay(frameOf(readbackBuffer, 55n));
     const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
@@ -3821,6 +3848,168 @@ async function main() {
       decodeOneReply(replayer.replies),
       { tag: 'DeviceErrors', sequence: 75n, messages: [] },
       'a map that resolved into a destroy is silent too, rather than a range that threw'
+    );
+  }
+  {
+    // **THE DEVICE DYING UNDER AN IN-FLIGHT READBACK.** An MX550 laptop
+    // reported two messages on consecutive loads of the deployed demos —
+    // `vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY` while
+    // creating a kilobyte-sized buffer on a GPU with 1.9 GB free, and
+    // `mapAsync … [Device "lumen"] is lost` — and neither was about memory or
+    // about mapping. They were one device dying, reported through whichever
+    // call touched it next, because `GPUDevice.lost` was not watched at all.
+    //
+    // So what is asserted here is that the loss is what arrives: recorded once,
+    // named with the browser's own reason and message, and answered identically
+    // by everything that comes after it.
+    const message = 'Device lost: the GPU process crashed';
+    const lost = `the device was lost: unknown: ${message}`;
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(readbackBuffer, 76n));
+    const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
+    buffer.mapDefers = true;
+    replayer.replay(frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 77n));
+    device.lose('unknown', message);
+    await settle();
+    checkEqual(
+      replayer.lost,
+      { reason: 'unknown', message, text: lost },
+      'the loss is recorded with the reason and the message the browser gave'
+    );
+    // The rejection the loss causes, arriving after it — which is the order the
+    // specification's "lose the device" gives, resolving `lost` before it
+    // completes the steps waiting on the loss. The words are Chromium's.
+    buffer.settleMap(
+      new DOMException(
+        "Failed to execute 'mapAsync' on 'GPUBuffer': [Device \"lumen\"] is lost.",
+        'AbortError'
+      )
+    );
+    await settle();
+    replayer.clear();
+    replayer.replay(frameOf(pollFor(MAPPED), 78n));
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'ReadbackFailed' && answered.reason === lost,
+      `a readback in flight when the device died fails with the loss, not the AbortError (${shown(answered)})`
+    );
+    replayer.clear();
+    replayer.replay(frameOf({ name: 'TakeError' }, 79n));
+    checkEqual(
+      decodeOneReply(replayer.replies),
+      { tag: 'DeviceErrors', sequence: 79n, messages: [lost] },
+      'and the queue carries the loss once, rather than a map that could not be mapped'
+    );
+    // A command after the loss touches nothing: the device is a corpse, and
+    // asking it for a buffer is how a page ends up reading an allocation
+    // failure on a GPU with two spare gigabytes.
+    replayer.clear();
+    replayer.replay(frameOf(deviceLocalBuffer, 80n));
+    check(
+      device.created.length === 1,
+      `a later create is not put to the dead device (${device.created.length} asked for)`
+    );
+    // …and the commands that owe a reply still answer, with the same sentence.
+    // An unanswered sequence is registered on the far side for ever.
+    replayer.clear();
+    replayer.replay(frameOf(FROM_FIXTURE.surfaceCaps, 81n));
+    const caps = decodeOneReply(replayer.replies);
+    check(
+      caps?.tag === 'SurfaceCapsFailed' &&
+        caps.cause === 0x00 &&
+        caps.reason === lost,
+      `a capability query after the loss is refused with it (${shown(caps)})`
+    );
+    replayer.clear();
+    replayer.replay(frameOf(FROM_FIXTURE.requestDevice, 82n));
+    await settle();
+    const reopened = decodeOneReply(replayer.replies);
+    check(
+      reopened?.tag === 'DeviceFailed' && reopened.reason === lost,
+      `and so is a second device request (${shown(reopened)})`
+    );
+  }
+  {
+    // **A DEVICE DESTROYED ON PURPOSE IS NOT A FAILURE.** `GPUDeviceLostReason`
+    // is exactly `'unknown'` and `'destroyed'`, and only `GPUDevice.destroy()`
+    // produces the second — so a `'destroyed'` loss is somebody tearing down,
+    // which on this page is `demo.js`'s `pagehide`. Reporting it would put an
+    // error on the queue `Engine::acquire` stops the frame loop over, on every
+    // ordinary page close.
+    //
+    // It is still terminal: a destroyed device serves no readback either.
+    const message = 'Device was destroyed.';
+    const lost = `the device was lost: destroyed: ${message}`;
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(readbackBuffer, 83n));
+    const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
+    buffer.mapDefers = true;
+    replayer.replay(frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 84n));
+    device.lose('destroyed', message);
+    await settle();
+    checkEqual(
+      replayer.lost,
+      { reason: 'destroyed', message, text: lost },
+      'a deliberate destroy is recorded like any other loss'
+    );
+    replayer.clear();
+    replayer.replay(frameOf({ name: 'TakeError' }, 85n));
+    checkEqual(
+      decodeOneReply(replayer.replies),
+      { tag: 'DeviceErrors', sequence: 85n, messages: [] },
+      'and reaches wasm as no error at all'
+    );
+    const gate = replayer.takeError();
+    check(
+      gate === null,
+      `nor does it reach the gate's own cursor (${JSON.stringify(gate)})`
+    );
+    replayer.clear();
+    replayer.replay(frameOf(pollFor(MAPPED), 86n));
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'ReadbackFailed' && answered.reason === lost,
+      `and the readback it was holding is still settled rather than left polling (${shown(answered)})`
+    );
+  }
+  {
+    // **A REJECTION AND THE LOSS IN ONE TURN OF THE EVENT LOOP**, rejected
+    // first. The map is settled and only then is the device lost, with nothing
+    // awaited in between, because a browser losing a device does both inside
+    // one turn and the replayer must not depend on which it did first. The
+    // words are the ones Chromium was watched rejecting with when a
+    // `GPUDevice.destroy()` landed on an outstanding map: it cancels through
+    // the *buffer* rather than through the loss, so the rejection says nothing
+    // about a device at all.
+    const message = 'Device was destroyed.';
+    const lost = `the device was lost: unknown: ${message}`;
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(readbackBuffer, 87n));
+    const buffer = replayer.buffers.get(deviceLocalBuffer.buffer);
+    buffer.mapDefers = true;
+    replayer.replay(frameOf(readbackOf(deviceLocalBuffer.buffer, 16n), 88n));
+    buffer.settleMap(
+      new DOMException(
+        "Failed to execute 'mapAsync' on 'GPUBuffer': " +
+          'Buffer was unmapped before mapping was resolved.',
+        'AbortError'
+      )
+    );
+    device.lose('unknown', message);
+    await settle();
+    replayer.clear();
+    replayer.replay(frameOf(pollFor(MAPPED), 89n));
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'ReadbackFailed' && answered.reason === lost,
+      `a map rejected in the same turn as the loss is answered with the loss (${shown(answered)})`
+    );
+    replayer.clear();
+    replayer.replay(frameOf({ name: 'TakeError' }, 90n));
+    checkEqual(
+      decodeOneReply(replayer.replies),
+      { tag: 'DeviceErrors', sequence: 90n, messages: [lost] },
+      'and the queue carries the loss alone, not the unmap it looked like'
     );
   }
   {

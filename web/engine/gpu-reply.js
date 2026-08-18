@@ -886,9 +886,11 @@ export class ReplyWriter {
    * `RequestDevice` that never produced a device. An `uncapturederror` on a
    * device that is open and working is a different event with a different home —
    * `Device::take_error`, and {@link ReplyWriter#deviceErrors}, which answers a
-   * command that asks rather than a command that failed. (`GPUDevice.lost` is
-   * watched by neither: it means the device is gone rather than that a call
-   * failed, and this seam has no device-lost path.)
+   * command that asks rather than a command that failed. (`GPUDevice.lost` is a
+   * third thing again — the device gone rather than a call that failed — and it
+   * leaves through whichever of these a later command asks for, carrying the one
+   * reason the loss composed. `gpu-replay.js`'s `loseDevice` is where that is
+   * argued.)
    *
    * @param {bigint} sequence
    * @param {string} reason
