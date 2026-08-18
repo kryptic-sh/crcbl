@@ -1908,10 +1908,20 @@ impl Device for MetalDevice {
     ///   `MTLCounterSamplingPoint` and answers separately for each — the query
     ///   would not exist if every device answered yes. The seam's
     ///   [`write_timestamp`](crcbl_hal::CommandEncoder::write_timestamp) is a
-    ///   free-standing command legal anywhere outside a pass, and the only
-    ///   sampling point Metal guarantees is a *stage* boundary declared in a
-    ///   pass descriptor **before the pass is created** — which is not
-    ///   somewhere the seam's call can reach.
+    ///   free-standing command legal anywhere outside a pass, and the weakest
+    ///   thing a device can offer is a *stage* boundary declared in a pass
+    ///   descriptor **before the pass is created**.
+    ///
+    ///   That last sentence used to end "which is not somewhere the seam's call
+    ///   can reach", and **that was asserted rather than checked.** Reading the
+    ///   callers says otherwise: `crcbl_hal::null`'s recorder puts
+    ///   `WriteTimestamp` through the same `need_outside` check copies and
+    ///   barriers get, so the seam forbids the call *inside* a pass, and the one
+    ///   caller obeys it — `crcbl_render::timing`'s `pass_begin` and `pass_end`
+    ///   are called by `crcbl_render::graph` immediately before
+    ///   `begin_render_pass` and immediately after `end_render_pass`. A
+    ///   stage-boundary sample is therefore where the seam's timestamps already
+    ///   are, and how much narrowing this costs is open rather than settled.
     /// * **A half-built version would be worse than none.** Sampling only where
     ///   the device happens to support a blit or dispatch boundary gives a
     ///   profiler HUD that silently reports timings on some Macs and zeroes on

@@ -133,10 +133,27 @@ crcbl-shaders = { workspace = true }
 #   it upstream, so it is not optional. `crcbl_mtl::swapchain` argues there why
 #   a present is a command buffer rather than `MTLDrawable::present`.
 #
-# `MTLCounters` is deliberately **absent**: query sets still refuse, and
-# `crcbl_mtl::device`'s `create_query_set` says why. So is `MTLVertexDescriptor`
-# — this engine has no vertex input state at all, by design, and enabling it
-# would advertise a path `crcbl_hal::pipeline` deliberately does not have.
+# `MTLCounters` was deliberately absent until the counter probe, and it is
+# **present now for a measurement rather than for a feature**. Query sets still
+# refuse — `crcbl_mtl::device`'s `create_query_set` says why, and nothing this
+# crate ships creates an `MTLCounterSampleBuffer`. What needs the feature is
+# `crcbl_mtl::adapter`'s
+# `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`:
+# `MTLDevice::counterSets` is `cfg`-gated on `MTLCounters` upstream, and the
+# `MTLCommonCounterSetTimestamp` / `…StageUtilization` / `…Statistic` names it
+# compares each set against live in the same module. `supportsCounterSampling:`
+# and `MTLCounterSamplingPoint` are **not** gated on it — both are declared in
+# `MTLDevice` — so it is the counter-set half alone that this buys.
+#
+# It adds no package to `Cargo.lock`. The feature's whole dependency list is
+# `objc2-foundation` features (`NSArray`, `NSData`, `NSError`, `NSObject`,
+# `NSRange`, `NSString`), of which only `NSData` and `NSObject` are new here and
+# neither pulls a crate — `NSData` wants `bitflags`, which `NSArray` already
+# switched on.
+#
+# `MTLVertexDescriptor` stays absent — this engine has no vertex input state at
+# all, by design, and enabling it would advertise a path `crcbl_hal::pipeline`
+# deliberately does not have.
 #
 # A slice that needs more adds it here.
 #
@@ -204,6 +221,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLCommandQueue",
   "MTLComputeCommandEncoder",
   "MTLComputePipeline",
+  "MTLCounters",
   "MTLDepthStencil",
   "MTLDevice",
   "MTLDrawable",

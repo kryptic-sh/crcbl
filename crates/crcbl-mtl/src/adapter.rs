@@ -254,7 +254,10 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   report: the GPU clock is correlated to the host's through
 ///   `sampleTimestamps:gpuTimestamp:` at sample time. A fabricated period is
 ///   exactly the number this workspace refuses to write down, so the feature
-///   waits for the slice that can measure it.
+///   waits for the slice that can measure it — and this module's
+///   `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
+///   is that measurement, printing the period alongside every
+///   `supportsCounterSampling:` answer rather than asserting either.
 /// * [`Features::ASYNC_COMPUTE_QUEUE`] and [`Features::TRANSFER_QUEUE`] —
 ///   Metal has one `MTLCommandQueue` type and no queue families at all, which
 ///   `crcbl_hal::QueueKind` already records as the reason it is not named
@@ -376,4 +379,261 @@ fn to_u32(value: NSUInteger) -> u32 {
 /// Saturating `NSUInteger` → `u64`. See `to_u32`.
 fn to_u64(value: NSUInteger) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ptr::NonNull;
+    use std::time::{Duration, Instant};
+
+    use objc2_metal::{
+        MTLCommonCounterSetStageUtilization, MTLCommonCounterSetStatistic,
+        MTLCommonCounterSetTimestamp, MTLCounter, MTLCounterSamplingPoint, MTLCounterSet,
+        MTLTimestamp,
+    };
+
+    use super::*;
+
+    /// How far apart the two `sampleTimestamps:gpuTimestamp:` calls are.
+    ///
+    /// Tens of milliseconds is the whole requirement: long enough that the ratio
+    /// of the two deltas is not dominated by the cost of the two message sends,
+    /// short enough to be invisible next to a suite that opens a Metal device
+    /// per test.
+    const CORRELATION_SLEEP: Duration = Duration::from_millis(50);
+
+    /// Every `MTLCounterSamplingPoint` value, in declaration order.
+    ///
+    /// `MTLCounterSamplingPoint` is an `NSUInteger` newtype carrying associated
+    /// constants rather than a Rust enum, so no `match` can be made exhaustive
+    /// over it and nothing but reading `objc2_metal`'s declaration says this
+    /// list is complete. What *is* checked below is that the five entries are
+    /// pairwise distinct — a duplicated constant here would print one point
+    /// twice and silently never ask about another.
+    const SAMPLING_POINTS: [(&str, MTLCounterSamplingPoint); 5] = [
+        ("AtStageBoundary", MTLCounterSamplingPoint::AtStageBoundary),
+        ("AtDrawBoundary", MTLCounterSamplingPoint::AtDrawBoundary),
+        (
+            "AtDispatchBoundary",
+            MTLCounterSamplingPoint::AtDispatchBoundary,
+        ),
+        (
+            "AtTileDispatchBoundary",
+            MTLCounterSamplingPoint::AtTileDispatchBoundary,
+        ),
+        ("AtBlitBoundary", MTLCounterSamplingPoint::AtBlitBoundary),
+    ];
+
+    /// One `sampleTimestamps:gpuTimestamp:` call, as the pair it writes.
+    fn sample_timestamps(device: &ProtocolObject<dyn MTLDevice>) -> (MTLTimestamp, MTLTimestamp) {
+        let mut cpu: MTLTimestamp = 0;
+        let mut gpu: MTLTimestamp = 0;
+        // SAFETY: the selector's only obligation is that both arguments are
+        // valid pointers to writable `MTLTimestamp` storage, which is why
+        // `objc2-metal` declares it `unsafe` at all. Both point at locals that
+        // outlive the call and are borrowed nowhere else.
+        unsafe {
+            device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu), NonNull::from(&mut gpu));
+        }
+        (cpu, gpu)
+    }
+
+    /// **The measurement that settles the two `DivergenceKind::Unclassified`
+    /// rows this backend carries** —
+    /// [`Capability::TimestampQuery`](crcbl_hal::Capability::TimestampQuery) and
+    /// [`PipelineStatisticsQuery`](crcbl_hal::Capability::PipelineStatisticsQuery),
+    /// which `crcbl_hal::DIVERGENCES` classifies as unsettled rather than
+    /// unwritten because both answers come from a *device* at run time and no
+    /// Mac runs in the workspace that wrote them.
+    ///
+    /// It creates nothing, submits nothing and asserts almost nothing. **It
+    /// prints**, and the CI log is the artifact. It is here rather than in
+    /// `device.rs` because everything it asks is an adapter-level read, which is
+    /// this module's whole subject — including the paragraph in `features_of`
+    /// that says Metal has no fixed tick period to report.
+    ///
+    /// # What each answer settles
+    ///
+    /// **`supportsCounterSampling:`.** A device that answers yes at a point the
+    /// seam can reach turns the `TimestampQuery` row from `Unclassified` into
+    /// `Unwritten`: the work becomes known, and it is
+    /// `MTLCounterSampleBufferDescriptor` plus the encoders'
+    /// `sampleCountersInBuffer:atSampleIndex:withBarrier:`.
+    ///
+    /// A device that answers yes only at `AtStageBoundary` is still very
+    /// probably enough, and that is worth stating precisely because it looks
+    /// like a narrowing and may not be one. Metal's stage-boundary sampling is
+    /// requested through a pass descriptor's `sampleBufferAttachments`, so it
+    /// samples where an encoder opens and closes — and **every**
+    /// [`write_timestamp`](crcbl_hal::CommandEncoder::write_timestamp) call in
+    /// this repository is already outside every pass. The seam's scope rules
+    /// require it (`crcbl_hal::null`'s recorder routes `WriteTimestamp` through
+    /// its `need_outside` check, which is the same check copies and barriers
+    /// get), and the one caller obeys it: `crcbl_render::timing`'s `pass_begin`
+    /// and `pass_end` are called by `crcbl_render::graph` immediately before
+    /// `begin_render_pass` and immediately after `end_render_pass`. So a
+    /// backend-opened encoder at a stage boundary is a legal place to put the
+    /// timestamp the seam asked for, and the narrowing may cost nothing. If the
+    /// device answers yes *nowhere*, the honest outcome is narrowing the
+    /// capability rather than implementing it.
+    ///
+    /// **`counterSets`.** The `PipelineStatisticsQuery` row turns on whether
+    /// this device advertises `MTLCommonCounterSetStatistic` at all, and on
+    /// which counters that set actually contains — Apple documents an
+    /// implementation as free to omit some of a common set's counters, so the
+    /// per-set counter list is printed rather than the set name alone. No set,
+    /// and the row stays open with its reason changed from "unknown" to "this
+    /// device cannot, and CI has only this device".
+    ///
+    /// **`sampleTimestamps:gpuTimestamp:`.** Two calls across a sleep give the
+    /// GPU tick period this backend currently declines to report, and the
+    /// measurement is why it can stop declining. `wgpu-hal` 30.0.0's
+    /// `src/metal/adapter.rs` picks `83.333` when the device name starts with
+    /// `Intel` and `1.0` otherwise, and its own comment calls that "the
+    /// dangerous but easy thing"; nothing here has to guess. The wall clock is
+    /// printed beside the CPU delta so the reader can see for themselves
+    /// whether Metal's CPU timestamp really is in nanoseconds before dividing by
+    /// it.
+    ///
+    /// **`supportsFamily:`.** Free with the rest, and the precondition the Metal
+    /// mesh slice starts from. `wgpu-hal`'s same file derives its `mesh_shaders`
+    /// as `family_check && (Metal3 || Apple7 || Mac2) && !is_virtual` — the
+    /// three families are *alternatives*, not conjuncts, and the fourth term is
+    /// the device's own name containing "virtual", which is exactly what CI's
+    /// `Apple Paravirtual device` does. All four terms are printed.
+    ///
+    /// # What it fails on
+    ///
+    /// A measurement test that silently prints nothing is a green light wired to
+    /// nothing, so the two ways this could reach the end having asked no device
+    /// anything are assertions: an empty device name, and a CPU timestamp that
+    /// did not move across the sleep. A device that honestly reports no counter
+    /// sampling and no counter sets is a *result* and passes.
+    ///
+    /// The third assertion is a contradiction rather than an absence: a device
+    /// that says yes to some sampling point while exposing no counter set could
+    /// not have an `MTLCounterSampleBuffer` created on it at all, because
+    /// `MTLCounterSampleBufferDescriptor` takes a counter set.
+    ///
+    /// nextest captures a passing test's stdout, so read this with
+    /// `--success-output immediate`, which is what `tests/run-mtl-e2e.sh`
+    /// passes.
+    #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation() {
+        let (_validated, device) = crate::device::tests::open_device();
+        let raw = &*device.inner.raw;
+
+        let name = raw.name().to_string();
+        assert!(
+            !name.is_empty(),
+            "MTLDevice::name came back empty, so this test never reached a device"
+        );
+        println!("crcbl-mtl counters: device={name:?} {}", driver_string());
+
+        for (label, family) in [
+            ("Metal3", MTLGPUFamily::Metal3),
+            ("Apple7", MTLGPUFamily::Apple7),
+            ("Mac2", MTLGPUFamily::Mac2),
+        ] {
+            println!(
+                "crcbl-mtl counters: supportsFamily {label} = {}",
+                raw.supportsFamily(family)
+            );
+        }
+        println!(
+            "crcbl-mtl counters: name contains \"virtual\" = {}",
+            name.to_lowercase().contains("virtual")
+        );
+
+        let mut seen: Vec<MTLCounterSamplingPoint> = Vec::new();
+        let mut any_sampling = false;
+        for (label, point) in SAMPLING_POINTS {
+            assert!(
+                !seen.contains(&point),
+                "SAMPLING_POINTS lists {label} twice, so one of Metal's five points is \
+                 never asked about"
+            );
+            seen.push(point);
+            let supported = raw.supportsCounterSampling(point);
+            any_sampling |= supported;
+            println!("crcbl-mtl counters: supportsCounterSampling {label} = {supported}");
+        }
+
+        // `counterSets` is the half that needs the `MTLCounters` feature; the
+        // manifest says so where it turns it on.
+        let sets = raw.counterSets();
+        let names: Vec<String> = sets
+            .iter()
+            .flat_map(|sets| sets.iter())
+            .map(|set| {
+                let set_name = set.name().to_string();
+                let counters: Vec<String> = set
+                    .counters()
+                    .iter()
+                    .map(|counter| counter.name().to_string())
+                    .collect();
+                println!("crcbl-mtl counters: counterSet {set_name:?} counters={counters:?}");
+                set_name
+            })
+            .collect();
+        println!("crcbl-mtl counters: counterSets = {}", names.len());
+
+        // SAFETY: each is an `NSString` constant exported by Metal.framework,
+        // which `objc2-metal` links unconditionally and which is loaded — the
+        // device above came out of it. Reading it is `unsafe` only because it is
+        // an `extern` static, and it is never written.
+        let common = unsafe {
+            [
+                ("timestamp", MTLCommonCounterSetTimestamp),
+                ("stage utilization", MTLCommonCounterSetStageUtilization),
+                ("statistic", MTLCommonCounterSetStatistic),
+            ]
+        };
+        for (label, constant) in common {
+            let wanted = constant.to_string();
+            println!(
+                "crcbl-mtl counters: common set {label} ({wanted:?}) present = {}",
+                names.contains(&wanted)
+            );
+        }
+
+        assert!(
+            !any_sampling || !names.is_empty(),
+            "this device reports counter sampling at some point and then exposes no counter \
+             set at all, so no MTLCounterSampleBufferDescriptor could name one — the two \
+             answers contradict each other"
+        );
+
+        let wall = Instant::now();
+        let (cpu_first, gpu_first) = sample_timestamps(raw);
+        std::thread::sleep(CORRELATION_SLEEP);
+        let (cpu_last, gpu_last) = sample_timestamps(raw);
+        let wall_ns = wall.elapsed().as_nanos();
+        let cpu_delta = cpu_last.saturating_sub(cpu_first);
+        let gpu_delta = gpu_last.saturating_sub(gpu_first);
+        println!(
+            "crcbl-mtl counters: sampleTimestamps over {:?} wall_ns={wall_ns} \
+             cpu_delta={cpu_delta} gpu_delta={gpu_delta}",
+            CORRELATION_SLEEP
+        );
+        assert!(
+            cpu_delta > 0,
+            "the CPU timestamp did not move across a {CORRELATION_SLEEP:?} sleep, so \
+             sampleTimestamps:gpuTimestamp: wrote nothing and no correlation was measured"
+        );
+        if gpu_delta > 0 {
+            println!(
+                "crcbl-mtl counters: timestamp_period_ns = {} by the wall clock, {} by \
+                 Metal's cpu timestamp",
+                wall_ns as f64 / gpu_delta as f64,
+                cpu_delta as f64 / gpu_delta as f64
+            );
+        } else {
+            println!(
+                "crcbl-mtl counters: the GPU timestamp did not advance, so this device \
+                 reports no derivable tick period"
+            );
+        }
+    }
 }
