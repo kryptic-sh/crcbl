@@ -1115,6 +1115,43 @@ both features — but the raster exercises made it **reachable where it was not
 before**, so it is a live hazard on a poorer device rather than a theoretical
 one.
 
+### MEASURED — CI's Metal device can serve neither query, and no mesh
+
+The counter probe ran. `Apple Paravirtual device`, macOS 26.5.2, and the answers
+settle three open questions at once:
+
+```
+supportsFamily Metal3 = false   Apple7 = false   Mac2 = true
+name contains "virtual" = true
+supportsCounterSampling  AtStageBoundary=false  AtDrawBoundary=true
+                         AtDispatchBoundary=true  AtTileDispatchBoundary=false
+                         AtBlitBoundary=true
+counterSets = 0
+common set timestamp / stage utilization / statistic  present = false
+```
+
+**Both `Unclassified` rows are settled, and not in the direction the plan
+hoped.** The device reports sampling at three points and then exposes **zero
+counter sets**, so no `MTLCounterSampleBufferDescriptor` can name one and
+neither a timestamp nor a statistics sample buffer can be built here at all.
+`TimestampQuery` and `PipelineStatisticsQuery` on Metal are therefore
+**implementable but unprovable on this CI** — the reason changes from "nobody
+has looked" to "this device cannot, and CI has only this device". They are no
+longer guesses, which is what `Unclassified` was for.
+
+**The mesh precondition is settled too, and it is a no.** `wgpu-hal`'s gate is
+`family_check && (Metal3 || Apple7 || Mac2) && !is_virtual`. This runner is
+`Mac2` but its name contains "virtual", so mesh pipelines are excluded by that
+formula regardless of the family. **Metal's `MeshShading` and `TaskShaderStage`
+cannot be proved by this CI**, however the backend is written.
+
+**What this means for the goal**, and it needs a decision rather than more work:
+four of Metal's nine blockers — two query rows and two mesh rows — are now known
+to be unprovable on the only Metal machine this project has. The options are a
+hardware macOS runner, an explicit "implemented but unproven here" state that a
+reviewer accepts once, or leaving them open indefinitely. Closing them on a
+device that cannot execute them is not among the options.
+
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
 They were declined for a reason that turns out to be wrong (above), and they now
