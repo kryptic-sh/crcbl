@@ -122,6 +122,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{DVec3, Vec3};
 
+use crate::bounds::{max_lanes_d, min_lanes_d};
 use crate::meshlet::{MeshletBuild, MeshletError, build_meshlets};
 use crate::simplify::{SimplifyError, simplify_with_locked_edges, undirected};
 
@@ -229,8 +230,13 @@ fn enclosing(parts: &[GroupBounds]) -> GroupBounds {
             f64::from(part.center[1]),
             f64::from(part.center[2]),
         );
-        low = low.min(center - f64::from(part.radius));
-        high = high.max(center + f64::from(part.radius));
+        // Not `DVec3::min`/`DVec3::max`: a `NaN` centre arriving from a
+        // cluster would replace the accumulator outright and the next part
+        // would replace the `NaN`, silently dropping every part before it.
+        // That also breaks the order-independence this function claims. See
+        // `crate::bounds`.
+        low = min_lanes_d(low, center - f64::from(part.radius));
+        high = max_lanes_d(high, center + f64::from(part.radius));
     }
 
     let center = ((low + high) * 0.5).as_vec3().to_array();

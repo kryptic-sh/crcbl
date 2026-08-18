@@ -1996,6 +1996,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A `NaN` vertex moved a meshlet cluster's bounding sphere off its geometry.**
+  `crcbl_scene::meshlet::cluster_bounds` folded the cluster's centre with glam's
+  `Vec3::min`/`Vec3::max`, which discard the accumulator on a `NaN` — while the
+  radius beside it folds with `f32::max`, which skips one honestly. The result
+  was a plausible radius around a displaced centre, and that sphere is what
+  `crcbl_render::cull`'s cluster test uses, so a cluster could be culled while
+  on screen. `crcbl_scene::cluster_dag::enclosing` folded group spheres the same
+  way and lost the order-independence its docs claim. Both now go through a new
+  crate-private `bounds` module.
+
+  Nothing validates a `POSITION` accessor for finiteness — `gltf_check` never
+  reads a float's value and `build_meshlets` lists only a partial triangle and
+  an out-of-range index — so an imported document reaches this directly.
+
 - **`Aabb::from_points` could return a finite box that did not contain its own
   points.** The fold used `Vec3::min`/`Vec3::max`, which glam writes as a bare
   `if self.x < rhs.x { self.x } else { rhs.x }`. Every comparison against `NaN`

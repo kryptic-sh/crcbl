@@ -88,6 +88,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crcbl_shaders::meshlet::MeshClusters;
 use glam::Vec3;
 
+use crate::bounds::{max_lanes, min_lanes};
 use crate::simplify::undirected;
 
 pub use crcbl_shaders::meshlet::{
@@ -656,8 +657,11 @@ fn cluster_bounds(positions: &[[f32; 3]], vertices: &[u32], corners: &[u8]) -> C
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
     for &index in vertices {
-        min = min.min(position(index));
-        max = max.max(position(index));
+        // Not `Vec3::min`/`Vec3::max`: a `NaN` position would replace the whole
+        // accumulator and leave a finite sphere off its geometry. See
+        // `crate::bounds`.
+        min = min_lanes(min, position(index));
+        max = max_lanes(max, position(index));
     }
     let center = (min + max) * 0.5;
     let radius = vertices
@@ -1230,6 +1234,67 @@ pub(crate) mod tests {
             "clusters inside a quarter of the mesh: {radii:?}"
         );
         assert_eq!(sorted(decoded(&build)), sorted(triangles_of(&indices)));
+    }
+
+    /// **A `NaN` position does not move a cluster's sphere off its geometry.**
+    ///
+    /// `POSITION` accessors are not checked for finiteness anywhere: `gltf_check`
+    /// never looks at a float's value, and `build_meshlets`' own preconditions
+    /// are a partial triangle and an out-of-range index. So a downloaded
+    /// document with one bad vertex reaches [`cluster_bounds`] directly.
+    ///
+    /// What that used to do is the point. The centre was folded with glam's
+    /// `Vec3::min`/`Vec3::max`, which are a bare `<`/`>` per lane; a comparison
+    /// against `NaN` is false, so the fold took the incoming point and threw the
+    /// accumulator away, and the next finite vertex threw the `NaN` away in
+    /// turn. The extent gathered before the bad vertex was gone and the result
+    /// came back *finite*. The radius fold beside it uses `f32::max`, which
+    /// skips `NaN` honestly — so the cluster got a plausible radius around a
+    /// displaced centre, and `crcbl_render::cull`'s `cluster_visible` tests that
+    /// sphere. A sphere that does not contain its cluster culls geometry that is
+    /// on screen.
+    ///
+    /// The assertion is containment rather than an expected centre, because
+    /// containment is the property the cull depends on and it stays true however
+    /// the builder orders its vertices.
+    #[test]
+    fn a_nan_vertex_leaves_each_cluster_sphere_around_its_finite_geometry() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [f32::NAN, 0.0, 0.0],
+            [10.0, 10.0, 0.0],
+        ];
+        let indices = [0, 1, 2, 0, 2, 3, 1, 4, 2];
+
+        let build = build_meshlets(&positions, &indices).unwrap();
+        assert!(
+            !build.clusters().is_empty(),
+            "the fixture has to produce a cluster for this to assert anything"
+        );
+
+        for (index, cluster) in build.clusters().iter().enumerate() {
+            let center = Vec3::from(cluster.bounds.center);
+            assert!(
+                center.is_finite(),
+                "cluster {index} centre is {center:?}, so the NaN reached the centre itself"
+            );
+            for corner in cluster_triangles(&build, index).into_iter().flatten() {
+                let position = Vec3::from(positions[corner as usize]);
+                if !position.is_finite() {
+                    continue;
+                }
+                let distance = center.distance(position);
+                assert!(
+                    distance <= cluster.bounds.radius + 1e-3,
+                    "cluster {index} claims centre {center:?} radius {}, which leaves its own \
+                     vertex {corner} at {position:?} outside by {}",
+                    cluster.bounds.radius,
+                    distance - cluster.bounds.radius
+                );
+            }
+        }
     }
 
     /// **A cluster takes a second connected component whole or not at all.**
