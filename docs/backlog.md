@@ -593,6 +593,25 @@ Also still true after this work: `crates/crcbl/tests/hal_seam_e2e.rs` maps both
 capabilities to `Exercise::Unexercised(NEEDS_MESH_ARTIFACTS)`, so even a
 reporting dx12 would not be _driven_ until the seam suite grows a mesh exercise.
 
+**And the ordering is now forced rather than merely tidy.**
+`Capability::MeshShading` is defined as the pipeline being creatable and both
+draws recordable — not as the feature flag being reported. dx12 satisfies that
+definition today: it creates the pipeline, records `DispatchMesh` and the
+indirect form, and its own suite draws through both on WARP. It nevertheless
+answers `Support::No`, because reporting the flag re-keys the goldens. So the
+seam suite's rule — a backend declaring something unsupported must refuse it —
+is currently **unmet by dx12 and hidden only because the capability is
+unexercised**. Writing the mesh exercise before the reporting slice would
+therefore fail on dx12, and correctly. This is the same class CI twice caught as
+a backend performing what it denies; it is latent rather than live because
+nothing drives it.
+
+Two honest ways out, and the second is the one the sequence already assumes:
+report the flag and declare `Yes` (the slice above, with its golden re-bless),
+or redefine the capability in terms of the reported feature rather than the
+callable surface — which would weaken what it asserts for every backend to
+accommodate one, and is worth naming only to reject.
+
 ### The doc gate does not cover private items
 
 CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding

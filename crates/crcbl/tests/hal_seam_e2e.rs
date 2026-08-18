@@ -5946,8 +5946,14 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
          texture at a grazing angle and a second one to compare against; the committed raster \
          artifact this suite drives — triangle.slang — samples nothing, and creating a sampler \
          and getting a handle back asserts that a handle came back and nothing about anisotropy";
-    const NEEDS_MESH_ARTIFACTS: &str = "needs committed mesh/task shader artifacts per backend; only crcbl-vk can run one today, \
-         so an exercise would assert nothing on four of the five";
+    const NEEDS_MESH_ARTIFACTS: &str = "needs committed mesh/task shader artifacts per backend, which crcbl-vk and crcbl-dx12 \
+         have and crcbl-mtl and crcbl-webgpu do not. But the obstacle is no longer only the \
+         artifacts: crcbl-dx12 creates the pipeline and records both draws — it is drawn on WARP \
+         by its own suite — while still declaring Support::No, because it does not report \
+         Features::MESH_SHADER. This capability is defined as the pipeline being creatable and \
+         the draws recordable, so an exercise here would score dx12 as declaring unsupported \
+         something it performs, and fail. Adding it therefore waits on the DX12 mesh reporting \
+         slice rather than on an artifact";
     const NEEDS_TWO_SUBMISSIONS: &str = "needs a submission whose wait can outlive the test if the backend hangs rather than \
          refuses, so driving it wants a timeout the seam's wait_semaphores only offers in \
          nanoseconds and a backend that blocks in submit would deadlock this suite";
