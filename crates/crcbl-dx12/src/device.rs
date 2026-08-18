@@ -5942,11 +5942,19 @@ pub(crate) mod tests {
             "ExecuteIndirect takes a count buffer on every D3D12 device; adapter caps report {:?}",
             caps.features
         );
-        assert_eq!(
-            caps.geometry_path(),
-            crcbl_hal::GeometryPath::IndirectCount,
-            "DRAW_INDIRECT_COUNT is what selects this path, and it is reported"
-        );
+        // **The derived path is deliberately not asserted here.** This test used
+        // to require `GeometryPath::IndirectCount` on the grounds that
+        // "DRAW_INDIRECT_COUNT is what selects this path" — true only while this
+        // backend reported no mesh stage. `GeometryPath::from_features` prefers
+        // `MeshShader` wherever `Features::MESH_SHADER` is present, which WARP
+        // now reports, so that assertion failed on a device where every claim
+        // this test actually makes still holds.
+        //
+        // What this test is about is that an indexed indirect-count draw reads
+        // its count from GPU memory, which the feature above is the precondition
+        // for and which no geometry path changes. The derivation itself is
+        // asserted once, in `crate::instance`, where it is the subject rather
+        // than the backdrop.
         assert!(
             caps.limits.max_draw_indirect_count > 1,
             "a reported DRAW_INDIRECT_COUNT with a ceiling of one draw is not the feature"
