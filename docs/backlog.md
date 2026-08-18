@@ -1568,21 +1568,28 @@ the two counter-sampled query rows — which is the concrete content behind opti
 (2) in "what bar the deletion clears": every row either closed or _measured_
 unprovable, with `Support::NotOnThisDevice` already able to say so.
 
-### crcbl-mtl does not build with `mtl-e2e` off
+### DECISION — should the `mtl-e2e`-off build be a CI gate?
 
-`cargo clippy -p crcbl-mtl --all-targets --target aarch64-apple-darwin -- -D warnings`,
-with no `--all-features`, fails on
-`unused imports: Barriers, ImageBarrier, ResourceState` in `crcbl_mtl::device`'s
-test module — they are used only by `draw_canvas_over`, which is
-`#[cfg(feature = "mtl-e2e")]`, while the `use` naming them is not.
+The break itself is fixed: `Barriers`, `ImageBarrier` and `ResourceState` are
+used only by `draw_canvas_over`, which is `#[cfg(feature = "mtl-e2e")]`, so
+their `use` is now gated the same way — beside the one that already gates
+`CompareOp`, `DepthBias`, `DepthStencilAttachment` and `Viewport`. Both
+configurations now pass:
+`cargo clippy -p crcbl-mtl --all-targets --target aarch64-apple-darwin` with and
+without `--all-features`.
 
-**Pre-existing and reproduced on a clean worktree of `HEAD`**, so it is not the
-ICB slice's. **No CI job runs it**: every `cargo clippy` in `ci.yml` passes
-`--all-features`, which is why the configuration has never been gated. The fix
-is one `#[cfg(feature = "mtl-e2e")] use crcbl_hal::{…};` line beside the one
-that already gates `CompareOp`, `DepthBias`, `DepthStencilAttachment` and
-`Viewport`; the decision it needs is whether the feature-off build should be a
-gate at all, since making it one costs a matrix entry on a macOS runner.
+**What is still open is whether anything stops it happening again.** No CI job
+builds `crcbl-mtl` with the feature off — every `cargo clippy` in `ci.yml`
+passes `--all-features` — so this broke silently and was found by an agent
+running a narrower command by hand. It is the configuration a developer gets by
+default.
+
+The trade-off: gating it costs a matrix entry on a macOS runner (the slowest and
+scarcest), for a class of defect that is compile-only, always a one-line fix,
+and never reaches a user. The same hole exists for `crcbl-dx12` on Windows and
+was not checked. Cheaper middle ground: add `--no-default-features` /
+feature-off builds to the _Linux_ clippy job for the crates that build there,
+and accept that the two platform backends keep the hole.
 
 ### A measurement test must not read a truthful zero as a broken apparatus
 

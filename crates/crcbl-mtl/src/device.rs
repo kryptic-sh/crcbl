@@ -2730,12 +2730,18 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     use crcbl_hal::{
-        Barriers, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState,
-        DepthStencilState, Extent3d, ImageAspect, ImageBarrier, ImageSubresourceLayers,
-        ImageSubresourceRange, ImageUsage, ImageViewType, Instance, LoadOp, MultisampleState,
-        Offset3d, PrimitiveState, Rect2d, RenderPassDesc, ResourceState, SemaphoreSignal,
-        ShaderEntry, StoreOp,
+        BufferCopy, BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState,
+        DepthStencilState, Extent3d, ImageAspect, ImageSubresourceLayers, ImageSubresourceRange,
+        ImageUsage, ImageViewType, Instance, LoadOp, MultisampleState, Offset3d, PrimitiveState,
+        Rect2d, RenderPassDesc, SemaphoreSignal, ShaderEntry, StoreOp,
     };
+    // Only `draw_canvas_over` transitions an image, and it draws — so these
+    // three follow the hardware suite exactly as the four below do. Ungated,
+    // they made `cargo clippy -p crcbl-mtl` without `--all-features` fail on
+    // three unused imports, in a configuration no CI job runs and every
+    // developer can.
+    #[cfg(feature = "mtl-e2e")]
+    use crcbl_hal::{Barriers, ImageBarrier, ResourceState};
     use objc2_metal::MTLHazardTrackingMode;
 
     use crate::instance::tests::{desc as device_desc, open as open_instance};
