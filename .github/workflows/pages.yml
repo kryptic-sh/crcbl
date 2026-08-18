@@ -305,6 +305,150 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # THE SAME SEAM GATE, ON THE OTHER TWO PLATFORMS.
+  #
+  # `build` runs every browser step above on `ubuntu-latest`, so until these two
+  # jobs existed "the WebGPU backend works in a browser" meant "on Linux, under
+  # SwiftShader". These run the **probe gate only** — `web/run-probe-e2e.sh`,
+  # which drives `crcbl-webgpu`'s command stream verb by verb — and not the five
+  # demo steps: measured on a real run, the probe costs about 2 seconds of
+  # browser time against the demos' 2m38s, and it is the gate that reads bytes
+  # back and compares their values rather than watching a canvas change.
+  #
+  # NEITHER OF THEM BUILDS THE SITE. `web/build.sh` needs python3 and a wasm
+  # toolchain, and a second and third build would be three different artifacts
+  # under test; both download the `site` artifact `build` uploaded, so all three
+  # platforms drive the identical bytes that ship.
+  #
+  # Separate jobs rather than a matrix on `build`: a matrix would rebuild the
+  # site three times over and its three uploads would collide on one artifact
+  # name.
+  #
+  # **`continue-on-error` COMES OFF ONCE EACH HAS BEEN GREEN THREE RUNS.** It is
+  # here because neither platform's browser gate has ever run: an unproven gate
+  # that blocks the Pages deploy is worse than no gate, and one that silently
+  # never fails is worse still, so this is a state with an exit condition and not
+  # a setting. Whoever reads three green runs off the job history deletes the
+  # line — and the deploy job below still does not need these, so removing it
+  # makes them a red check on the run rather than a block on publishing.
+  probe-macos:
+    name: probe the seam on macOS
+    needs: build
+    # **Never `macos-14`.** All three hosted images report an
+    # `Apple Paravirtual device`, and only some of them have one that executes:
+    # `macos-14`'s `MTLCreateSystemDefaultDevice()` returns nil, while `15` and
+    # `26` both run shaders. `ci.yml`'s `mtl-e2e` job carries the measurement
+    # and the run it came from, and `docs/backlog.md` the per-image output.
+    # Pinned to `15` rather than `macos-latest` so the image this gate is proven
+    # on does not change under it while it is still unproven.
+    runs-on: macos-15
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: target/site
+
+      # A missing browser must not be mistaken for a failing gate, so it is
+      # named, executed and printed before anything drives it.
+      - name: Check the browser gate's assumptions
+        run: |
+          set -euo pipefail
+          chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          if [ ! -x "$chrome" ]; then
+            echo "::error::no Google Chrome at $chrome. The macOS image is assumed to ship it."
+            exit 1
+          fi
+          echo "browser: $chrome ($("$chrome" --version))"
+          echo "CRCBL_CHROMIUM=$chrome" >> "$GITHUB_ENV"
+
+      # Headless, and that is the whole difference from the Linux run. A
+      # headless Chrome can read a WebGPU canvas back on macOS and cannot on
+      # Linux or Windows — the reason `build` brings up an Xvfb and the reason
+      # the Windows job below runs headed. There is no Xvfb here to bring up
+      # anyway: it is an X server and macOS has none.
+      #
+      # The adapter mode resolves to `hardware` on its own: `auto` is
+      # SwiftShader on Linux only, because Chrome's Dawn has no Vulkan backend
+      # on macOS and so has no software adapter to fall back to.
+      # `web/tools/probe-e2e.mjs` carries the table.
+      - name: Gate crcbl-webgpu's seam on a standalone probe page
+        run: ./web/run-probe-e2e.sh --headless
+
+  probe-windows:
+    name: probe the seam on Windows
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      # THE PAIRING THAT READS AS A CONTRADICTION AND IS NOT. `--headless` below
+      # tells **the script** not to go looking for an Xvfb Windows cannot have;
+      # this tells **the driver** not to pass `--headless=new`. A Windows runner
+      # has its own desktop session, and the canvas needs it: headless there
+      # renders the frame but never gets it to a compositor that can hand the
+      # pixels back.
+      CRCBL_WEB_E2E_HEADED: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: target/site
+
+      # Chrome's own installer records where it put itself under `App Paths`,
+      # and that is where the runner image's install script reads it from too —
+      # so this asks the registry rather than hardcoding a Program Files path
+      # that the image is free to change.
+      - name: Check the browser gate's assumptions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $keys = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe'
+          )
+          $chrome = $null
+          foreach ($key in $keys) {
+            $value = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).'(default)'
+            if ($value -and (Test-Path -LiteralPath $value)) { $chrome = $value; break }
+          }
+          if (-not $chrome) {
+            $chrome = Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+          }
+          if (-not (Test-Path -LiteralPath $chrome)) {
+            Write-Output "::error::no Chrome in the registry under App Paths, and none at $chrome. The Windows image is assumed to ship it."
+            exit 1
+          }
+          # `chrome.exe --version` writes nothing to a console on Windows — it is
+          # a GUI-subsystem binary — so the version comes off the file itself.
+          $version = (Get-Item -LiteralPath $chrome).VersionInfo.ProductVersion
+          Write-Output "browser: $chrome ($version)"
+          "CRCBL_CHROMIUM=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # `shell: bash` is Git Bash, which the runner ships. `pwd -W` is what makes
+      # the path it hands the driver a Windows one: everything under this shell
+      # sees `/d/a/crcbl/...`, and Node is a native Windows binary that would
+      # resolve that against the current drive root and find no site there.
+      #
+      # The adapter mode resolves to `hardware`, and **must not be forced to
+      # swiftshader here**: that moves Dawn to SwiftShader while Chromium's
+      # shared-image device stays on D3D11, and a canvas handed between two
+      # devices comes back as uninitialised memory with
+      # `ReadPixels: Source shared image is not accessible` behind it —
+      # `docs/backlog.md` records the mismatch from Chrome 151.
+      - name: Gate crcbl-webgpu's seam on a standalone probe page
+        shell: bash
+        run: SITE_DIR="$(pwd -W)/target/site" ./web/run-probe-e2e.sh --headless
+
   deploy:
     name: deploy to GitHub Pages
     needs: build

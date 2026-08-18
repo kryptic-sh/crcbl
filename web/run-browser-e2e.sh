@@ -102,10 +102,18 @@
 #                                       machine with no GPU reports; this pair
 #                                       lifts the refusal and asks for
 #                                       Chromium's bundled software Vulkan
-#     --enable-features=Vulkan          the hardware mode: without them the GPU
-#       --use-angle=vulkan                process falls back to ANGLE
-#                                       SwiftShader GL and `chrome://gpu` still
-#                                       says `webgpu: unavailable_software`
+#     --enable-features=Vulkan          the hardware mode **on Linux**: without
+#       --use-angle=vulkan                them the GPU process falls back to
+#                                       ANGLE SwiftShader GL and `chrome://gpu`
+#                                       still says
+#                                       `webgpu: unavailable_software`. macOS
+#                                       and Windows want their own graphics API
+#                                       here — `--use-angle=metal` and
+#                                       `--use-angle=d3d11`; Chrome's Dawn has
+#                                       no Vulkan backend on macOS at all, so
+#                                       this pair asks it there for an adapter
+#                                       that cannot exist. The branch is in
+#                                       `web/tools/browser-launch.mjs`
 #     --enable-features=Vulkan          the software mode's other half: the
 #       --use-vulkan=swiftshader          device Chromium hands canvases around
 #                                       on has to be the same one WebGPU renders
@@ -304,7 +312,10 @@ set -e
 # CI sets `CARGO_TERM_COLOR: always`, and a coloured pipeline has broken this
 # repository's test-count guards before, so strip escapes before matching. This
 # harness does not colour its own output, but a browser or a Node warning might.
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"${OUTPUT}.plain"
+# `$'\033'` and not `\x1b`: `\x` is a GNU sed extension, and BSD sed reads that
+# pattern as a literal `x1b[…` — it matches nothing and strips nothing, silently.
+# `web/run-probe-e2e.sh` carries the same line for the same reason.
+sed -E $'s/\033\\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"${OUTPUT}.plain"
 
 # The guard the other harnesses have, spelled the same way: a run that checked
 # nothing must not be able to report success. The driver exits non-zero on its

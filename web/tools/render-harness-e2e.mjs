@@ -51,12 +51,12 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import { browserFlags, findBrowser, stopBrowser } from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
 const LAUNCH_TIMEOUT_MS = 30_000;
@@ -75,61 +75,16 @@ function pause(ms) {
 // Browser launch
 // ---------------------------------------------------------------------------
 
-function findBrowser() {
-  if (process.env.CRCBL_CHROMIUM) return process.env.CRCBL_CHROMIUM;
-  const names = [
-    'google-chrome',
-    'google-chrome-stable',
-    'chromium',
-    'chromium-browser',
-  ];
-  for (const name of names) {
-    // `spawnSync('command -v', …)` would be a shell; probe PATH directly.
-    for (const dir of (process.env.PATH ?? '').split(':')) {
-      if (dir && existsSync(join(dir, name))) return join(dir, name);
-    }
-  }
-  return fail(
-    `no browser found. Set CRCBL_CHROMIUM, or install one of: ${names.join(', ')}`
-  );
-}
-
-function browserFlags(profile) {
-  const flags = [
-    ...(process.env.CRCBL_WEB_E2E_HEADED === '1' ? [] : ['--headless=new']),
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profile}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-dev-shm-usage',
-    '--disable-background-networking',
-    '--disable-component-update',
-    '--disable-extensions',
-    '--mute-audio',
-    // Point both WebGPU (Dawn) and the Vulkan backend at SwiftShader, and lift
-    // Chrome's refusal to expose WebGPU when the GPU is software-only. The same
-    // set `web/tools/browser-e2e.mjs` documents at length; a CI runner has no
-    // GPU, so this is the box it lands in.
-    '--enable-unsafe-webgpu',
-    '--use-webgpu-adapter=swiftshader',
-    '--enable-features=Vulkan',
-    '--use-vulkan=swiftshader',
-  ];
-  if (
-    process.env.CRCBL_CHROMIUM_NO_SANDBOX === '1' ||
-    process.getuid?.() === 0
-  ) {
-    flags.push('--no-sandbox');
-  }
-  const extra = (process.env.CRCBL_CHROMIUM_FLAGS ?? '')
-    .split(' ')
-    .filter(Boolean);
-  return [...flags, ...extra];
-}
+// `findBrowser`, the flag builder and the kill are in
+// `web/tools/browser-launch.mjs`, shared with the two gates beside this one.
+// **`swiftshader` is pinned rather than left to resolve**: this harness renders
+// offscreen and compares every scene against a golden image, so it is asking a
+// specific rasteriser for pixels a comparator will hold to a tolerance, and
+// which device produced them is not a detail to leave to the machine.
 
 async function launch(binary) {
   const profile = mkdtempSync(join(tmpdir(), 'crcbl-harness-e2e-'));
-  const flags = browserFlags(profile);
+  const flags = browserFlags({ profile, mode: 'swiftshader' });
   const child = spawn(binary, [...flags, 'about:blank'], {
     stdio: ['ignore', 'ignore', 'pipe'],
     detached: true,
@@ -153,12 +108,7 @@ async function launch(binary) {
     flags,
     endpoint: '',
     stop() {
-      try {
-        process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        // Already gone, which is what this wanted.
-      }
-      rmSync(profile, { recursive: true, force: true });
+      stopBrowser(child, profile);
     },
   };
 
@@ -373,7 +323,7 @@ async function main() {
   mkdirSync(readbackDir, { recursive: true });
 
   const server = await serve(site, { host: '127.0.0.1' });
-  const browser = await launch(findBrowser());
+  const browser = await launch(findBrowser(fail));
   let page;
   try {
     page = await openPage(browser);

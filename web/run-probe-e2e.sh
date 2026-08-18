@@ -42,12 +42,36 @@
 #     browser inside Xvfb. A headless run on such a machine therefore fails
 #     loudly rather than quietly skipping, which is the point.
 #
+# THE OTHER TWO PLATFORMS, and why `--headless` means something different on each.
+# Xvfb is an X server, so it exists on neither.
+#
+#   macOS    `--headless` is the whole answer: a headless Chrome there can read a
+#            WebGPU canvas back, and `macos-15` runners have a real Metal device
+#            (an Apple Paravirtual one). `macos-14` must not be used — its
+#            `MTLCreateSystemDefaultDevice()` returns nil, which `ci.yml`
+#            records.
+#   Windows  `--headless` *plus* `CRCBL_WEB_E2E_HEADED=1`, which reads as a
+#            contradiction and is not: the flag tells **this script** not to go
+#            looking for an Xvfb it cannot have, and the variable tells the
+#            **driver** not to pass `--headless=new`. A Windows runner has its
+#            own desktop session, and it needs it — a headless Chrome there
+#            renders the canvas but never gets it to a compositor that can hand
+#            the pixels back, the same phenomenon as the Linux row above.
+#
 # ENVIRONMENT
 #   SITE_DIR                   Where the built site is. Default `target/site`.
 #   CRCBL_CHROMIUM             Path to the browser binary.
-#   CRCBL_CHROMIUM_FLAGS       Extra flags, space separated. How a machine with a
-#                              real GPU points the run at it.
+#   CRCBL_WEB_E2E_ADAPTER      `auto` (default), `hardware` or `swiftshader`;
+#                              `--adapter <mode>` is the same switch. `auto`
+#                              resolves by platform — SwiftShader on Linux, the
+#                              real device on macOS and Windows, both of which
+#                              have no SwiftShader path that works. The reasoning
+#                              is in `web/tools/probe-e2e.mjs`.
+#   CRCBL_CHROMIUM_FLAGS       Extra flags, space separated. It only appends, so
+#                              it cannot turn a GPU flag off; the adapter switch
+#                              above is what picks between the sets.
 #   CRCBL_CHROMIUM_NO_SANDBOX  `1` adds --no-sandbox.
+#   CRCBL_WEB_E2E_HEADED       `1` drops `--headless=new` from the browser.
 #   CRCBL_WEB_E2E_TIMEOUT_MS   How long each poll is given. SwiftShader is slow.
 #   CRCBL_WEB_E2E_SCREEN       Xvfb geometry. Default 1280x800x24.
 set -euo pipefail
@@ -195,6 +219,12 @@ if [ "$HEADLESS" = "0" ]; then
     export DISPLAY=":${DISPLAY_NUM}"
     export CRCBL_WEB_E2E_HEADED=1
     echo "crcbl probe e2e: display up at ${DISPLAY} (Xvfb pid ${XVFB_PID})"
+elif [ "${CRCBL_WEB_E2E_HEADED:-0}" = "1" ]; then
+    # The Windows shape: no Xvfb to bring up, and no `--headless=new` either,
+    # because the runner's own desktop session is what the canvas reaches a
+    # compositor through. Said out loud rather than left implicit — "no display"
+    # would be the wrong sentence and the wrong thing to debug from.
+    echo "crcbl probe e2e: no Xvfb; CRCBL_WEB_E2E_HEADED=1, so the browser runs on this session's desktop"
 else
     echo "crcbl probe e2e: no display; the browser runs --headless=new"
 fi
@@ -206,7 +236,12 @@ set -e
 
 # CI sets `CARGO_TERM_COLOR: always`, and a coloured pipeline has broken this
 # repository's test-count guards before, so strip escapes before matching.
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" > "${OUTPUT}.plain"
+#
+# The escape is spelled `$'\033'` and not `\x1b`, because `\x` is a GNU sed
+# extension: BSD sed reads that pattern as a literal `x1b[…`, matches nothing,
+# and strips nothing — silently, and only on macOS, where this gate now runs.
+# `$'…'` is bash's own escape, so the byte reaches both seds already expanded.
+sed -E $'s/\033\\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" > "${OUTPUT}.plain"
 
 # The guard every harness here has: a run that checked nothing must not be able
 # to report success. The driver exits non-zero on its own in that case; this is

@@ -72,13 +72,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { browserFlags, findBrowser, stopBrowser } from './browser-launch.mjs';
 import { ISOLATION_HEADERS, MIME, serve } from './serve.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -687,137 +687,13 @@ const CONTROL_ROUTES = {
 // The browser
 // ---------------------------------------------------------------------------
 
-/**
- * The first browser binary on this machine that could drive WebGPU.
- *
- * Named rather than guessed at call time, so a miss says what was looked for.
- * `google-chrome` comes first because that is what GitHub's Ubuntu images ship
- * as a real binary; a `chromium` that is a snap wrapper cannot see a
- * `--user-data-dir` under `/tmp`, which is a miserable failure to debug from a
- * CI log.
- */
-function findBrowser() {
-  const explicit = process.env.CRCBL_CHROMIUM;
-  if (explicit) {
-    if (!existsSync(explicit))
-      fail(`CRCBL_CHROMIUM=${explicit} does not exist`);
-    return explicit;
-  }
-  const candidates = [
-    'google-chrome',
-    'google-chrome-stable',
-    'chromium',
-    'chromium-browser',
-  ];
-  for (const name of candidates) {
-    for (const dir of (process.env.PATH ?? '').split(':')) {
-      if (dir && existsSync(join(dir, name))) return join(dir, name);
-    }
-  }
-  return fail(
-    `no browser found. Tried ${candidates.join(', ')} on PATH.\n` +
-      '  Set CRCBL_CHROMIUM to a Chromium or Chrome binary with WebGPU support.'
-  );
-}
-
-/**
- * The flags, and why each one is here.
- *
- * Every one of these was measured rather than copied — on Chromium 150 first,
- * and the SwiftShader set again on 151. Without the WebGPU pair for the chosen
- * mode, `navigator.gpu.requestAdapter()` resolves to `null` in headless and the
- * demo stops at its own "this browser has no WebGPU" banner.
- */
-function browserFlags(profile, mode) {
-  const flags = [
-    // Modern headless. The old one is a separate browser with no GPU stack at
-    // all, so WebGPU is simply absent there. `CRCBL_WEB_E2E_HEADED=1` drops it
-    // for a run inside Xvfb, which is worth trying when a machine's headless
-    // compositor refuses to hand canvas pixels back.
-    ...(process.env.CRCBL_WEB_E2E_HEADED === '1' ? [] : ['--headless=new']),
-    // Port 0 and read it back from the profile, rather than picking a number
-    // and hoping. Two runs on one machine must not collide.
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profile}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    // Chrome's default /dev/shm is small in containers and the renderer dies
-    // with an unhelpful crash when it fills.
-    '--disable-dev-shm-usage',
-    // Nothing here needs the network beyond localhost, and the component
-    // updater's failures are noise in the log this harness prints on failure.
-    '--disable-background-networking',
-    '--disable-component-update',
-    '--disable-extensions',
-    // The canvas is sized by CSS against the viewport, so a fixed window makes
-    // the pixel counts below mean the same thing on every machine.
-    '--window-size=1024,768',
-    // THIS GATE BOOTS REAL GAMES AND PRESSES REAL KEYS, so it plays their cues
-    // out of the machine's speakers — a launched ball, a broken brick, once per
-    // demo per run. Nothing in this driver asserts anything about audio, so
-    // muting the output costs no coverage; the `AudioContext` and the worklet
-    // still run, which is what `smoke.mjs` and the shim's own checks care
-    // about. It is muted here rather than in the engine because the noise is a
-    // property of running the harness, not of the build under test.
-    '--mute-audio',
-  ];
-
-  if (mode === 'hardware') {
-    // Without these two the GPU process falls back to ANGLE's SwiftShader GL
-    // and `chrome://gpu` reports `webgpu: unavailable_software`; with them it
-    // reports `webgpu: enabled` and the adapter is the real device.
-    flags.push('--enable-features=Vulkan', '--use-angle=vulkan');
-  } else {
-    // `--use-webgpu-adapter=swiftshader` alone is not enough: Chrome refuses
-    // WebGPU when the GPU feature status is `unavailable_software`, which is
-    // exactly what a headless run without a display reports.
-    // `--enable-unsafe-webgpu` is what lifts that refusal.
-    //
-    // The other two point the *shared image* device at SwiftShader too, and on
-    // Chrome 151 they are what makes this mode work at all. A canvas is handed
-    // between two devices — Dawn renders into it, and the compositor reads it
-    // back out for `toDataURL` — and those two have to be the same Vulkan
-    // implementation. `--use-webgpu-adapter=swiftshader` moves only Dawn; the
-    // shared-image device stays on whatever the machine has, and Chrome then
-    // fails to hand the texture across:
-    //
-    //   AssociateMailbox: Accessing an uncleared texture requires passing a
-    //   usage that supports lazy clearing
-    //   GPUDevice: [Invalid Texture] is invalid … While validating
-    //   CopyTextureForBrowser
-    //
-    // The canvas snapshot is uninitialised memory after that — largely
-    // zero-alpha, which is what makes it read as transparent black. Measured on
-    // Chromium 151, and neither flag is enough on its own: with only the
-    // feature, `chrome://gpu` still names the machine's own GL driver.
-    flags.push(
-      '--enable-unsafe-webgpu',
-      '--use-webgpu-adapter=swiftshader',
-      '--enable-features=Vulkan',
-      '--use-vulkan=swiftshader'
-    );
-  }
-
-  // Chrome's sandbox needs user namespaces, which a root-in-container CI job
-  // usually cannot have. Opt in on the condition rather than always: a
-  // sandboxed browser is the configuration a visitor runs.
-  if (
-    process.env.CRCBL_CHROMIUM_NO_SANDBOX === '1' ||
-    process.getuid?.() === 0
-  ) {
-    flags.push('--no-sandbox');
-  }
-
-  // An escape hatch for the machine this was not written on. Chromium's GPU
-  // flags are the part of this harness most likely to need one more switch on a
-  // runner nobody here has, and the alternative to an escape hatch is a patched
-  // copy of this file. Printed with the rest of the command line, so a run that
-  // used one says so.
-  const extra = (process.env.CRCBL_CHROMIUM_FLAGS ?? '')
-    .split(' ')
-    .filter(Boolean);
-  return [...flags, ...extra];
-}
+// `findBrowser`, the flag builder and the kill are all in
+// `web/tools/browser-launch.mjs`: the three gates in this directory need the
+// same browser started the same way, and every platform-specific thing about
+// doing that — where the binary lives, which flags name the real device, how to
+// take a process tree down — is decided there once. What stays here is the part
+// this gate alone owns: the window size its pixel counts depend on, and the
+// adapter mode its readback control picks.
 
 /**
  * Starts the browser and returns its DevTools endpoint.
@@ -829,7 +705,13 @@ function browserFlags(profile, mode) {
  */
 async function launch(binary, mode) {
   const profile = mkdtempSync(join(tmpdir(), 'crcbl-web-e2e-'));
-  const flags = browserFlags(profile, mode);
+  // The canvas is sized by CSS against the viewport, so a fixed window makes
+  // this gate's pixel counts mean the same thing on every machine.
+  const flags = browserFlags({
+    profile,
+    mode,
+    extra: ['--window-size=1024,768'],
+  });
   const child = spawn(binary, [...flags, 'about:blank'], {
     stdio: ['ignore', 'ignore', 'pipe'],
     // Its own process group, so `stop` can kill the whole tree. Chromium is
@@ -871,16 +753,7 @@ async function launch(binary, mode) {
     endpoint: '',
     stop() {
       running.delete(browser);
-      try {
-        // Negative pid: the process *group* created by `detached`. `SIGKILL`
-        // rather than `SIGTERM` because there is nothing to save — the profile
-        // is thrown away on the next line — and a Chromium that ignores the
-        // polite signal is exactly the one worth being rude to.
-        process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        // Already gone, which is the outcome this wanted.
-      }
-      rmSync(profile, { recursive: true, force: true });
+      stopBrowser(child, profile);
     },
   };
   running.add(browser);
@@ -1257,7 +1130,7 @@ function group(name) {
 mkdirSync(OUT, { recursive: true });
 
 const site = await serve(SITE, { routes: CONTROL_ROUTES });
-const binary = findBrowser();
+const binary = findBrowser(fail);
 
 /** Everything the page logged, in order, so a failure can print it. */
 const consoleLines = [];

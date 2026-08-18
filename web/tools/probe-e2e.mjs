@@ -41,14 +41,20 @@
 //
 // ENVIRONMENT
 //   SITE_DIR                     Where the built site is. Default `target/site`.
-//   CRCBL_CHROMIUM               Path to the browser. Otherwise the usual four
-//                                names are tried on PATH.
+//   CRCBL_CHROMIUM               Path to the browser. Otherwise this platform's
+//                                names are tried on PATH and its usual install
+//                                locations after that.
+//   CRCBL_WEB_E2E_ADAPTER        `auto` (default), `hardware` or `swiftshader`.
+//                                Also `--adapter`. What `auto` resolves to is
+//                                below.
 //   CRCBL_CHROMIUM_FLAGS         Extra flags, space-separated. The escape hatch
-//                                for a machine with a real GPU, and how the
-//                                SwiftShader defaults below are overridden.
+//                                for a runner nobody here has; it only ever
+//                                appends, so the adapter switch is what picks
+//                                between the GPU flag sets.
 //   CRCBL_CHROMIUM_NO_SANDBOX=1  Add --no-sandbox (also added automatically as
 //                                root, whose user namespaces a sandbox needs).
-//   CRCBL_WEB_E2E_HEADED=1       Drop --headless=new, for a run inside Xvfb.
+//   CRCBL_WEB_E2E_HEADED=1       Drop --headless=new, for a run inside Xvfb or
+//                                on a Windows runner's own desktop session.
 //   CRCBL_WEB_E2E_TIMEOUT_MS     How long each poll is given. SwiftShader is
 //                                slow, and the readback groups map buffers.
 //
@@ -58,11 +64,12 @@
 // print nothing and succeed.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { browserFlags, findBrowser, stopBrowser } from './browser-launch.mjs';
 import { runProbeGroups } from './probe-groups.mjs';
 import { serve } from './serve.mjs';
 
@@ -116,6 +123,35 @@ const TIMEOUT_MS = Number(
   args.timeout ?? process.env.CRCBL_WEB_E2E_TIMEOUT_MS ?? 90_000
 );
 
+/**
+ * Which WebGPU adapter Chromium is told to use.
+ *
+ * `web/tools/browser-e2e.mjs` takes the same three values and resolves `auto` by
+ * *trying* both modes and keeping whichever one's readback control passes. This
+ * gate cannot: it reads every byte back into wasm memory rather than off a
+ * canvas, so it has no control frame to judge a mode by, and a page that has to
+ * be reloaded under a second adapter would re-enumerate the whole seam. So
+ * `auto` here is resolved by platform, once, from what each one can actually
+ * serve:
+ *
+ *   Linux    swiftshader — a CI runner has no GPU, and this is the one mode
+ *            whose Dawn and shared-image devices can both be moved to the same
+ *            software Vulkan. It is what this gate has always used.
+ *   macOS    hardware — Chrome's Dawn has no Vulkan backend there at all, so
+ *            SwiftShader is not a fallback; `macos-15` runners expose an Apple
+ *            Paravirtual Metal device.
+ *   Windows  hardware — SwiftShader moves Dawn while the shared-image device
+ *            stays on D3D11, and `docs/backlog.md` records what that mismatch
+ *            does. See `web/tools/browser-launch.mjs`.
+ */
+const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
+const MODE =
+  ADAPTER === 'auto'
+    ? process.platform === 'linux'
+      ? 'swiftshader'
+      : 'hardware'
+    : ADAPTER;
+
 if (!existsSync(join(SITE, 'probe', 'index.html'))) {
   fail(`no probe page at ${SITE}/probe/index.html — run web/build.sh first`);
 }
@@ -124,6 +160,9 @@ if (!Number.isFinite(TIMEOUT_MS) || TIMEOUT_MS <= 0) {
     `--timeout must be a positive number of milliseconds, got ${TIMEOUT_MS}`
   );
 }
+if (!['auto', 'hardware', 'swiftshader'].includes(ADAPTER)) {
+  fail(`--adapter must be auto, hardware or swiftshader, got "${ADAPTER}"`);
+}
 
 const pause = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
@@ -131,82 +170,11 @@ const pause = (ms) => new Promise((ok) => setTimeout(ok, ms));
 // The browser
 // ---------------------------------------------------------------------------
 
-/**
- * The first browser binary on this machine that could drive WebGPU.
- *
- * `google-chrome` first because that is what GitHub's Ubuntu images ship as a
- * real binary; a `chromium` that is a snap wrapper cannot see a
- * `--user-data-dir` under `/tmp`, which is a miserable failure to debug from a
- * CI log.
- */
-function findBrowser() {
-  const explicit = process.env.CRCBL_CHROMIUM;
-  if (explicit) {
-    if (!existsSync(explicit))
-      fail(`CRCBL_CHROMIUM=${explicit} does not exist`);
-    return explicit;
-  }
-  const names = [
-    'google-chrome',
-    'google-chrome-stable',
-    'chromium',
-    'chromium-browser',
-  ];
-  for (const name of names) {
-    for (const dir of (process.env.PATH ?? '').split(':')) {
-      if (dir && existsSync(join(dir, name))) return join(dir, name);
-    }
-  }
-  return fail(
-    `no browser found. Tried ${names.join(', ')} on PATH.\n` +
-      '  Set CRCBL_CHROMIUM to a Chromium or Chrome binary with WebGPU support.'
-  );
-}
-
-/**
- * The flags, and why each one is here.
- *
- * The GPU set points both WebGPU (Dawn) and the Vulkan backend at SwiftShader
- * and lifts Chrome's refusal to expose WebGPU when the GPU feature status is
- * `unavailable_software` — the box a CI runner with no GPU lands in, and the
- * same set `web/tools/render-harness-e2e.mjs` uses for the same reason.
- * `CRCBL_CHROMIUM_FLAGS` comes last and is how a machine with a real GPU points
- * the run at it instead.
- */
-function browserFlags(profile) {
-  const flags = [
-    ...(process.env.CRCBL_WEB_E2E_HEADED === '1' ? [] : ['--headless=new']),
-    // Port 0 and read it back from the profile, rather than picking a number
-    // and hoping. Two runs on one machine must not collide.
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profile}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    // Chrome's default /dev/shm is small in containers and the renderer dies
-    // with an unhelpful crash when it fills.
-    '--disable-dev-shm-usage',
-    '--disable-background-networking',
-    '--disable-component-update',
-    '--disable-extensions',
-    '--mute-audio',
-    '--enable-unsafe-webgpu',
-    '--use-webgpu-adapter=swiftshader',
-    '--enable-features=Vulkan',
-    '--use-vulkan=swiftshader',
-  ];
-  // Chrome's sandbox needs user namespaces, which a root-in-container CI job
-  // usually cannot have. Opt in on the condition rather than always.
-  if (
-    process.env.CRCBL_CHROMIUM_NO_SANDBOX === '1' ||
-    process.getuid?.() === 0
-  ) {
-    flags.push('--no-sandbox');
-  }
-  const extra = (process.env.CRCBL_CHROMIUM_FLAGS ?? '')
-    .split(' ')
-    .filter(Boolean);
-  return [...flags, ...extra];
-}
+// `findBrowser`, the flag builder and the kill are all in
+// `web/tools/browser-launch.mjs`. The three browser gates in this directory need
+// the same browser started the same way, and every platform-specific thing about
+// doing that — where the binary lives, which flags name the real device, how to
+// take a process tree down — is decided there once rather than three times.
 
 /**
  * Starts the browser and returns its DevTools endpoint.
@@ -218,7 +186,7 @@ function browserFlags(profile) {
  */
 async function launch(binary) {
   const profile = mkdtempSync(join(tmpdir(), 'crcbl-probe-e2e-'));
-  const flags = browserFlags(profile);
+  const flags = browserFlags({ profile, mode: MODE });
   const child = spawn(binary, [...flags, 'about:blank'], {
     stdio: ['ignore', 'ignore', 'pipe'],
     // Its own process group, so `stop` can kill the whole tree: Chromium is
@@ -251,12 +219,7 @@ async function launch(binary) {
     endpoint: '',
     stop() {
       running.delete(browser);
-      try {
-        process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        // Already gone, which is the outcome this wanted.
-      }
-      rmSync(profile, { recursive: true, force: true });
+      stopBrowser(child, profile);
     },
   };
   running.add(browser);
@@ -436,7 +399,7 @@ function group(name) {
 // ---------------------------------------------------------------------------
 
 const site = await serve(SITE, { host: '127.0.0.1' });
-const binary = findBrowser();
+const binary = findBrowser(fail);
 
 /**
  * Everything the page logged, in order.
@@ -459,6 +422,13 @@ let exitCode = 1;
 try {
   console.log(`probe e2e: browser ${binary}`);
   console.log(`probe e2e: serving ${SITE} at ${site.origin}`);
+  // Named on its own line, and with what `auto` resolved to rather than the word
+  // `auto`: on a red run from a platform nobody here has, which adapter the
+  // browser was actually asked for is the first thing to know.
+  console.log(
+    `probe e2e: adapter mode "${MODE}"` +
+      `${ADAPTER === 'auto' ? ` (auto on ${process.platform})` : ''}`
+  );
 
   browser = await launch(binary);
   console.log(
