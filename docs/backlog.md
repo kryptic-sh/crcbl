@@ -306,13 +306,14 @@ one and asserting a colour per quadrant. What a real file can still hit:
 
 ### Run the WebGPU browser gates on Windows and macOS, not just Linux
 
-**Every WebGPU browser test in the repository runs in one job**, `pages/build`
-on `ubuntu-latest`: the five demo gates, the seam probe groups and the golden
-parity harness. The browser backend is now what the samples ship on, so its
-entire browser-side evidence comes from a single OS and a single Chromium build.
-Windows and macOS runners already exist in `ci.yml` (`win32-e2e`, `dx12-e2e`,
-`vk-e2e-windows` on `windows-latest`; `mtl-e2e` on `macos-latest`) and none of
-them runs any of this.
+~~Every WebGPU browser test in the repository runs in one job~~ — **the probe
+now runs on three platforms.** What is still true, and is the live half:,
+`pages/build` on `ubuntu-latest`: the five demo gates, the seam probe groups and
+the golden parity harness. The browser backend is now what the samples ship on,
+so its entire browser-side evidence comes from a single OS and a single Chromium
+build. Windows and macOS runners already exist in `ci.yml` (`win32-e2e`,
+`dx12-e2e`, `vk-e2e-windows` on `windows-latest`; `mtl-e2e` on `macos-latest`)
+and none of them runs any of this.
 
 That matters because the parts most likely to differ per platform are exactly
 the parts a browser owns: which adapter Dawn picks, what
@@ -727,10 +728,8 @@ run them all.
 did not cause the failure — the probe page loaded and asked for an adapter — but
 nobody has looked at why the digest disagrees on that runner and not on macOS.
 
-`pages.yml` now runs the seam probe on `macos-15` (headless, real Metal) and
-`windows-latest` (headed, on the runner's desktop), both `continue-on-error`.
-**Nothing about either has been executed** — this machine is Linux, and Linux is
-green at 57/57 with the shared launcher in place.
+`pages.yml` runs the seam probe on `macos-15` (headless, against real Metal) and
+`windows-latest` (headless, SwiftShader, with four groups expected to fail).
 
 **Both jobs now gate.** macOS came off `continue-on-error` after three green
 runs at 57/57. Windows came off once it was taught its four expected failures,
@@ -762,10 +761,10 @@ hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
 
 ### dx12's remaining blockers, ordered — and two reasons that were wrong
 
-dx12 owns 6 of the 18 parity blockers and none is an API absence. Planned
-2026-08-18 against the `windows` 0.62.2 bindings and `wgpu-hal`'s dx12 backend
-on disk. **Two of the divergence list's own stated reasons did not survive
-reading the code**, and both change what the work is:
+dx12's remaining rows are none of them API absences — its own `supports` comment
+says so. Planned 2026-08-18 against the `windows` 0.62.2 bindings and
+`wgpu-hal`'s dx12 backend on disk. **Two of the divergence list's own stated
+reasons did not survive reading the code**, and both change what the work is:
 
 - **The shader-visible descriptor heap already exists.** The three `Declined`
   fill rows say the obstacle is a heap `crcbl_dx12::descriptor` does not create.
@@ -950,7 +949,7 @@ untidy.
 supersedes — macos-26 executes correctly and the hang was
 `setDepthStencilState:nil`.
 
-### WebGPU's three blockers, ordered — and an ordering landmine
+### WebGPU's two blockers, ordered — and an ordering landmine
 
 Planned 2026-08-18 against the normative WebGPU IDL, `web-sys 0.3.104`'s
 generated bindings and `wgpu-core 30.0.0`. **Every slice here is verifiable on
@@ -1280,12 +1279,11 @@ closed" is not reachable with the hardware this project has.**
 
 Sorting the remaining rows by what actually stands in the way:
 
-**Ordinary work — 10 rows** (8, plus dx12's two mesh rows once the probe settled
-them; see below). dx12's `PushConstants` (now unblocked: the committed shader
-exists and its DXIL slot is measured at `b0`), Metal's `PushConstants`,
-`DrawIndirectCount`, `BindlessDescriptorArray`, `OcclusionQuery` and
-`TimelineWaitBeforeSignal`, WebGPU's `StorageImageBinding` and `TimestampQuery`.
-These need slices, and the slices are planned.
+**Ordinary work.** Everything not named below — dx12's two mesh rows (now known
+provable, see the probe result above), Metal's remaining rows other than the
+four measured unprovable, and WebGPU's two. Both `PushConstants` rows have since
+closed, which is why this reads as a description rather than a count: the number
+moves every slice and the snapshot test is where it lives.
 
 **Measured unprovable on the only hardware available — 4 rows.** Metal's
 `TimestampQuery` and `PipelineStatisticsQuery`: CI's device reports three
@@ -1328,9 +1326,9 @@ and it is the last thing standing between here and goal 3.
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
 They were declined for a reason that turns out to be wrong (above), and they now
-count as three of the 29 blockers. `exercise_fill` already drives all three on
-WARP with distinct values and poison priming, so **the evidence is free and only
-the work is optional** — an unusual combination.
+count among the blockers. `exercise_fill` already drives all three on WARP with
+distinct values and poison priming, so **the evidence is free and only the work
+is optional** — an unusual combination.
 
 Three routes, and they differ in what they cost:
 
@@ -1355,7 +1353,7 @@ and a render-graph frame is passes end to end. That survives on every backend.
 **A middle position, named explicitly:** take the zero-buffer route for
 `BufferFillZero` — cheap, and it matches what the capability's own doc says the
 fill is _for_ — and leave the other two `Declined` with the reason corrected.
-That is 14 blockers to 13 for about thirty lines.
+That is one blocker fewer for about thirty lines.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
