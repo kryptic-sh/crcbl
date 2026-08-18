@@ -994,12 +994,16 @@ pub const DIVERGENCES: &[Divergence] = &[
         kind: DivergenceKind::Unclassified,
         why: "the occlusion kind is built here and this one is not, because the two need different \
               Metal objects: a visibility-result buffer is a plain MTLBuffer, while a timestamp \
-              needs an MTLCounterSampleBuffer whose descriptor must name one of \
-              MTLDevice.counterSets — and the Mac CI runs this backend on advertises none. Which \
-              kind of divergence that is stays unsettled: whether a timestamp can be taken where \
-              the seam's write_timestamp puts it also depends on which MTLCounterSamplingPoint \
-              values supportsCounterSampling: answers for, which is per device (the Metal query \
-              slice)",
+              needs an MTLCounterSampleBuffer. crcbl_mtl::create_query_set refuses on the query \
+              kind alone and never reads MTLDevice.counterSets, so the refusal is the same on \
+              every Mac, and the reason it is the same is the one adapter::features_of gives for \
+              withholding the flag: reporting it obliges a Limits::timestamp_period_ns, and Metal \
+              correlates the GPU clock to the host at sample time rather than ticking at a fixed \
+              period. The Mac CI runs this backend on advertises no counterSets either, so it \
+              cannot measure the period it would need. Which kind of divergence that is stays \
+              unsettled: whether a timestamp can be taken where the seam's write_timestamp puts \
+              it also depends on which MTLCounterSamplingPoint values supportsCounterSampling: \
+              answers for, which is per device (the Metal query slice)",
     },
     Divergence {
         capability: Capability::TimestampQuery,
@@ -1033,10 +1037,11 @@ pub const DIVERGENCES: &[Divergence] = &[
         kind: DivergenceKind::Unclassified,
         why: "the occlusion kind is built here and this one is not, for the reason the \
               TimestampQuery entry gives: it needs an MTLCounterSampleBuffer rather than a plain \
-              buffer. MTLCommonCounterSetStatistic names the invocation counters, but a device \
-              advertises the set through MTLDevice.counterSets and the Mac CI runs this backend on \
-              advertises none — and a MTLCounterResultStatistic is eight u64s besides, which the \
-              seam's one-u64-per-query read has no shape for (the Metal query slice)",
+              buffer, and the refusal is unconditional on every Mac rather than a property of the \
+              one CI runs on. MTLCommonCounterSetStatistic names the invocation counters, but a \
+              device advertises the set through MTLDevice.counterSets and the Mac CI runs this \
+              backend on advertises none — and a MTLCounterResultStatistic is eight u64s besides, \
+              which the seam's one-u64-per-query read has no shape for (the Metal query slice)",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
