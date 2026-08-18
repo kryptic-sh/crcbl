@@ -10606,33 +10606,34 @@ the browser gate. What stands between that and `crcbl::backend` accepting
   polls a few times and gives up.
 - **The feature intersection**, which has its own entry below.
 
-### The browser golden gate runs in no job, and cannot be green yet
+### The browser golden gate is wired, and two scenes are excused by name
 
-`web/run-render-harness-e2e.sh` drives `apps/render-harness` through a real
-browser and compares eleven scenes against the goldens — the only thing in the
-tree that checks the browser's _pixels_ against a reference rather than its log
-lines, and therefore the only thing that would have caught the sRGB bug, which
-went through exactly that gap.
+`web/run-render-harness-e2e.sh` now runs in `pages.yml` on Linux, with
+`--expect-fail ssr,ui`. It is the only check in the tree comparing the browser's
+_pixels_ against the same references the native suites use — the gap the sRGB
+bug went through, since the goldens covered the offscreen path that already
+worked and the browser gate read only text.
 
-**It appears in no workflow**, and wiring it is not the one-line step it looks
-like. I ran it: **9 of 11**, with `ssr` and `ui` failing — reproducing the
-numbers already recorded further down this file to three decimal places (`ssr`
-58 gross pixels and ssim 0.988822; `ui` 506 pixels and ssim 0.983257). So the
-comparison is stable and the two failures are real, not flaky.
+**The two exclusions are not a suppression.** A listed scene that starts
+_passing_ fails the run and says the list is stale, so the moment a driver
+update or a fix makes either match, CI forces the list to be updated. Both print
+their full numbers on every green run: `ssr` 58 gross pixels and ssim 0.988822,
+`ui` 506 and ssim 0.983257.
 
-**They are SwiftShader differences rather than backend defects.** `ssr` matches
-on real hardware with max channel delta 9 and zero gross pixels, and its diff is
-banding confined to the reflection ray-march and the horizon edges — geometry
-and instancing are right. `ui` is 7 distinct colours with a max delta of 166,
-which is a different shape and wants its own look.
+**What is still owed, and it is a measurement rather than a decision:**
 
-**So this gate is blocked on the same decision those two scenes are**: widen the
-tolerance for them, record them as known software-rasteriser differences, or run
-the gate with an expected-failure list the way the Windows probe does — that
-mechanism now exists and fails when a listed scene starts passing, which is what
-keeps such a list from rotting. Until one of those is chosen, the gate can only
-ever claim 9 of 11, and a CI step that reports 9 of 11 as success is worse than
-no step.
+- **macOS and Windows need one run each to write their lists from.** The
+  mechanism is exact in both directions, so a guessed list fails either as a
+  regression or as a stale entry — correct behaviour, but not a way to learn.
+  Note the Windows probe's four expected failures do **not** transfer: those are
+  a canvas readback stranding the queue behind it, and this harness never
+  touches a canvas.
+- **`ui` has never been checked on real hardware.** `ssr` is known to match
+  there with zero gross pixels, which is what makes it a rasteriser difference.
+  `ui`'s diff is confined to the translucent panel fill and glyph edges with
+  layout and text placement identical — consistent with a blend or coverage
+  rounding difference, but that is an inference, not a measurement. Running the
+  harness against the hardware adapter would settle it.
 
 ### REVERSED IN FACT — the probe was going to be deleted and became the gate
 
