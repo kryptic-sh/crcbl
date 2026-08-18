@@ -990,12 +990,14 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::TimestampQuery,
         backend: BackendKind::Metal,
         kind: DivergenceKind::Unclassified,
-        why: "no query sets are built on this backend, and which kind of divergence that is cannot \
-              be settled from here: MTLCounterSampleBuffer and \
-              sampleCountersInBuffer:atSampleIndex:withBarrier: exist, but whether a timestamp can \
-              be taken at an arbitrary point depends on which MTLCounterSamplingPoint values a \
-              device reports from supportsCounterSampling:, and no Mac runs in this workspace (the \
-              Metal query slice)",
+        why: "the occlusion kind is built here and this one is not, because the two need different \
+              Metal objects: a visibility-result buffer is a plain MTLBuffer, while a timestamp \
+              needs an MTLCounterSampleBuffer whose descriptor must name one of \
+              MTLDevice.counterSets — and the Mac CI runs this backend on advertises none. Which \
+              kind of divergence that is stays unsettled: whether a timestamp can be taken where \
+              the seam's write_timestamp puts it also depends on which MTLCounterSamplingPoint \
+              values supportsCounterSampling: answers for, which is per device (the Metal query \
+              slice)",
     },
     Divergence {
         capability: Capability::TimestampQuery,
@@ -1019,15 +1021,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::OcclusionQuery,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::Unwritten,
-        why: "no query sets are built on this backend; \
-              MTLRenderPassDescriptor.visibilityResultBuffer and setVisibilityResultMode:offset: \
-              are core Metal and unconditional, so this one is owed rather than absent (the Metal \
-              query slice)",
-    },
-    Divergence {
-        capability: Capability::OcclusionQuery,
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::Unwritten,
         why: "no query sets are built on this backend; see the TimestampQuery entry",
@@ -1036,10 +1029,12 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::PipelineStatisticsQuery,
         backend: BackendKind::Metal,
         kind: DivergenceKind::Unclassified,
-        why: "no query sets are built on this backend, and which kind of divergence that is cannot \
-              be settled from here: MTLCommonCounterSetStatistic names the invocation counters, \
-              but a device advertises the set through MTLDevice.counterSets and no Mac runs in \
-              this workspace (the Metal query slice)",
+        why: "the occlusion kind is built here and this one is not, for the reason the \
+              TimestampQuery entry gives: it needs an MTLCounterSampleBuffer rather than a plain \
+              buffer. MTLCommonCounterSetStatistic names the invocation counters, but a device \
+              advertises the set through MTLDevice.counterSets and the Mac CI runs this backend on \
+              advertises none — and a MTLCounterResultStatistic is eight u64s besides, which the \
+              seam's one-u64-per-query read has no shape for (the Metal query slice)",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
@@ -1683,9 +1678,11 @@ mod tests {
             BackendKind::Dx12,
             DivergenceKind::Unwritten,
         ),
-        // Metal: the byte-wide fill is the API and is not here. The two
-        // counter-sampled query rows are unclassified because settling them
-        // needs a Mac.
+        // Metal: the byte-wide fill is the API and is not here, and neither is
+        // the occlusion query — that pool is a plain MTLBuffer and `crcbl-mtl`
+        // builds it. The two counter-sampled query rows are unclassified because
+        // settling them needs a Mac that advertises a counter set, which the one
+        // in CI does not.
         (
             Capability::DrawIndirectCount,
             BackendKind::Metal,
@@ -1710,11 +1707,6 @@ mod tests {
             Capability::TimestampQuery,
             BackendKind::Metal,
             DivergenceKind::Unclassified,
-        ),
-        (
-            Capability::OcclusionQuery,
-            BackendKind::Metal,
-            DivergenceKind::Unwritten,
         ),
         (
             Capability::PipelineStatisticsQuery,

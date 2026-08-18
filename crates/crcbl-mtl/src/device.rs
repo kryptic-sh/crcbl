@@ -42,7 +42,7 @@ use crcbl_hal::{
     ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming, Features, Format,
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageType,
     ImageViewDesc, ImageViewHandle, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle,
-    PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
+    PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
     ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
     SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support,
     SurfaceError, SwapchainDesc, SwapchainHandle,
@@ -68,6 +68,28 @@ use crate::instance::{AdapterRecord, InstanceInner, next_owner_id};
 /// [`Limits::max_sampler_anisotropy`](crcbl_hal::Limits::max_sampler_anisotropy)
 /// reports it unconditionally.
 pub(crate) const MAX_SAMPLER_ANISOTROPY: f32 = 16.0;
+
+/// Why a [`QueryKind::Timestamp`](crcbl_hal::QueryKind::Timestamp) or
+/// [`QueryKind::PipelineStatistics`](crcbl_hal::QueryKind::PipelineStatistics)
+/// set is refused.
+///
+/// One constant because [`Device::supports`] and [`Device::create_query_set`]
+/// must not drift: the declaration and the refusal are the same claim, and this
+/// crate has had them disagree before.
+///
+/// **Both kinds need an `MTLCounterSampleBuffer`, and the occlusion kind does
+/// not** — see `crate::query` — which is the whole of why one of the three is
+/// served and two are not. An `MTLCounterSampleBufferDescriptor` must name a set
+/// from `MTLDevice::counterSets`, and the paravirtual GPU this backend's CI runs
+/// on reports **zero** of them while answering `supportsCounterSampling:` yes at
+/// three boundaries; `crate::adapter`'s
+/// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
+/// is the probe that printed it. So the obstacle is a device's, and it is
+/// unsettled rather than absent: another Mac may well advertise the sets.
+const NO_COUNTER_SAMPLED_SET: &str = "a timestamp or pipeline-statistics query set needs an \
+     MTLCounterSampleBuffer, whose descriptor must name one of MTLDevice::counterSets — and the \
+     device this backend's CI runs on advertises none, so neither pool can be built there. The \
+     occlusion kind is a plain MTLBuffer and is served (the Metal query slice)";
 
 /// Anything the object tables hold, so one lookup helper serves them all.
 pub(crate) trait Owned {
@@ -244,6 +266,22 @@ struct ReadbackEntry {
     wait: ReadbackWait,
 }
 
+/// An occlusion query set: the `MTLBuffer` a render pass counts into, and how
+/// many queries it holds.
+///
+/// There is no kind field because there is only one kind — [`Device::create_query_set`]
+/// refuses the two counter-sampled kinds, and `crate::query` says why Metal's
+/// occlusion pool is a plain buffer while they are not. The count is kept
+/// because Metal has no way to answer it: the object is `count * RESULT_BYTES`
+/// bytes of ordinary memory, so dividing its `length()` back down would be
+/// re-deriving the descriptor rather than reading it.
+#[derive(Debug)]
+struct QuerySetEntry {
+    owner: u64,
+    raw: Retained<ProtocolObject<dyn MTLBuffer>>,
+    count: u32,
+}
+
 owned!(
     BufferEntry,
     ImageEntry,
@@ -252,6 +290,7 @@ owned!(
     CommandBufferEntry,
     SemaphoreEntry,
     ReadbackEntry,
+    QuerySetEntry,
 );
 
 /// A semaphore resolved to what a GPU-side wait needs: the event, and the value
@@ -268,6 +307,7 @@ pub(crate) struct DeviceState {
     pub(crate) command_buffers: Pool<CommandBufferEntry>,
     semaphores: Pool<SemaphoreEntry>,
     readbacks: Pool<ReadbackEntry>,
+    query_sets: Pool<QuerySetEntry>,
     /// The pipeline slice's four tables; `crcbl_mtl::pipeline` owns their
     /// entries and every call that touches them.
     pub(crate) shader_modules: Pool<crate::pipeline::ShaderModuleEntry>,
@@ -969,6 +1009,22 @@ impl DeviceInner {
         })
     }
 
+    /// The visibility-result buffer a query-set handle names, with the number of
+    /// queries in it.
+    ///
+    /// The count comes back because every caller is bounds-checking a range
+    /// against it, and it is the set's own count rather than the buffer's
+    /// `length()`: those agree today and only one of them is the descriptor the
+    /// caller asked for.
+    pub(crate) fn query_set_raw(
+        &self,
+        handle: QuerySetHandle,
+    ) -> Result<(Retained<ProtocolObject<dyn MTLBuffer>>, u32), HalError> {
+        let state = self.state();
+        let entry = lookup(&state.query_sets, "query set", handle, self)?;
+        Ok((entry.raw.clone(), entry.count))
+    }
+
     /// The `MTLTexture` an image-view handle names, and the format it
     /// reinterprets its image as.
     pub(crate) fn view_raw(
@@ -1017,12 +1073,14 @@ impl Device for MetalDevice {
     ///
     /// * **Metal has not got it.** The byte-wide buffer fill is the API, not
     ///   this crate, and no slice will change it.
-    /// * **This crate has not built it.** Mesh pipelines, occlusion queries and
-    ///   the indirect command buffer behind a GPU-side draw count all exist in
-    ///   Metal and are owed here; the reason names the slice that owes them.
-    /// * **Nobody here can tell.** The counter-sampled queries depend on what a
-    ///   device answers to `supportsCounterSampling:` and `counterSets`, and no
-    ///   Mac runs in this workspace, so the reason says so instead of guessing.
+    /// * **This crate has not built it.** Mesh pipelines and the indirect
+    ///   command buffer behind a GPU-side draw count both exist in Metal and are
+    ///   owed here; the reason names the slice that owes them.
+    /// * **No device here can do it, and another might.** The counter-sampled
+    ///   queries depend on what a device answers to `supportsCounterSampling:`
+    ///   and `counterSets`, and the only Mac this backend runs on advertises no
+    ///   counter set at all — so the reason names the measurement rather than
+    ///   claiming Metal cannot.
     ///
     /// Exhaustive with no wildcard arm, and `deny`-ed as such: a capability
     /// added to the enum must be answered here.
@@ -1101,26 +1159,28 @@ impl Device for MetalDevice {
                 Features::SAMPLER_ANISOTROPY,
                 "this device reports no SAMPLER_ANISOTROPY",
             ),
-            // `create_query_set` is not built at all, so all three refuse —
-            // but for two different reasons, and the split is the honest part.
-            // Occlusion is plain unfinished work: `visibilityResultBuffer` and
-            // `setVisibilityResultMode:offset:` are core Metal and answer on
-            // every device.
-            Capability::OcclusionQuery => Support::No(
-                "no query sets are built on this backend; MTLRenderPassDescriptor's \
-                 visibilityResultBuffer and setVisibilityResultMode:offset: are core Metal, so \
-                 this one is owed rather than absent (the Metal query slice)",
+            // **This claims what the capability defines and no more.**
+            // `Capability::OcclusionQuery` is "a QueryKind::Occlusion query set"
+            // — `crcbl_hal::CommandEncoder` has no begin/end query verb, so
+            // nothing a caller records through this seam can ever write one, and
+            // the same is true of the Vulkan and WebGPU backends' `Yes`. What is
+            // claimed is that `create_query_set` builds a visibility-result
+            // buffer of the size asked for, that `reset_query_set` and
+            // `resolve_query_set` reach it, and that `query_results` reads it
+            // back. `visibilityResultBuffer` is a property of every
+            // `MTLRenderPassDescriptor`, so `crate::adapter` reports the flag
+            // unconditionally and the gate below never fires — it is the flag's
+            // own arm, not a device question, exactly as `PushConstants` above.
+            Capability::OcclusionQuery => gated(
+                Features::OCCLUSION_QUERY,
+                "this device reports no OCCLUSION_QUERY",
             ),
-            // The counter-sampled two cannot even be classified from here:
-            // whether a device can sample at the boundary the seam needs, and
-            // whether it advertises the statistic counter set at all, are
-            // answers only a Mac gives.
-            Capability::TimestampQuery | Capability::PipelineStatisticsQuery => Support::No(
-                "no query sets are built on this backend, and whether Metal could serve the seam's \
-                 shape is unsettled: supportsCounterSampling: answers per sampling point and \
-                 counterSets is per device, and no Mac runs in the workspace that wrote this (the \
-                 Metal query slice)",
-            ),
+            // The counter-sampled two are the ones a visibility-result buffer
+            // cannot serve: both want an `MTLCounterSampleBuffer`, which is
+            // built from a set this device advertises.
+            Capability::TimestampQuery | Capability::PipelineStatisticsQuery => {
+                Support::No(NO_COUNTER_SAMPLED_SET)
+            }
             // `MTLSharedEvent` is the seam's timeline almost verbatim.
             Capability::TimelineSemaphore | Capability::CpuTimelineWait => gated(
                 Features::TIMELINE_SEMAPHORE,
@@ -1886,7 +1946,7 @@ impl Device for MetalDevice {
         &self,
         _desc: &crcbl_hal::MeshPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        Err(crate::MetalInstance::not_yet(
+        Err(not_yet(
             "mesh pipelines: Metal has the object/mesh stages and Slang emits them, but this \
              backend builds no MTLMeshRenderPipelineDescriptor (the Metal mesh slice)",
         ))
@@ -1909,12 +1969,38 @@ impl Device for MetalDevice {
 
     // --- queries ---
 
-    /// Still refused, and the reason is Metal's rather than this slice's.
+    /// Creates an **occlusion** query set, and refuses the other two kinds by
+    /// name.
+    ///
+    /// An occlusion pool on Metal is a plain `MTLBuffer` — the one a render pass
+    /// names through `MTLRenderPassDescriptor::visibilityResultBuffer` — so it
+    /// is allocated here at `crate::query`'s stride and nothing about it asks the
+    /// device a question. `HostReadback` is what makes it CPU-readable, which is
+    /// what [`Device::query_results`] reads it through.
+    ///
+    /// **This builds the pool and no way to write it, deliberately.**
+    /// [`Capability::OcclusionQuery`] is defined as "a
+    /// [`QueryKind::Occlusion`](crcbl_hal::QueryKind::Occlusion) query set" and
+    /// nothing more, because [`crcbl_hal::CommandEncoder`] has no begin/end query
+    /// verb: `setVisibilityResultMode:offset:` has no seam call to be reached
+    /// from, so no work a caller records can ever count into this buffer. That is
+    /// what `crcbl-vk`'s and `crcbl-webgpu`'s `Support::Yes` mean too.
+    /// `crate::query` records which `MTLVisibilityResultMode` the slice that adds
+    /// the verb should pass, and why it is not the one `wgpu-hal` picks.
+    ///
+    /// # The two refusals, and why they are Metal's rather than this slice's
     ///
     /// MTL3 owns the blit encoder, which is what a Vulkan-shaped query set
     /// resolves through, so this looked like the slice that would land
-    /// `MTLCounterSampleBuffer`. It is not, and the obstacle is in the headers:
+    /// `MTLCounterSampleBuffer` as well. It is not, and there are two obstacles:
     ///
+    /// * **A sample buffer must name a counter set, and this device has none.**
+    ///   `MTLCounterSampleBufferDescriptor::setCounterSet:` takes one of
+    ///   `MTLDevice::counterSets`, and the paravirtual GPU this backend's CI runs
+    ///   on reports zero of them — measured by `crate::adapter`'s counter probe,
+    ///   which prints the list. `NO_COUNTER_SAMPLED_SET` in this module carries
+    ///   the sentence, so this refusal and [`Device::supports`]'s declaration
+    ///   cannot drift.
     /// * **Metal samples counters at *boundaries*, and which boundaries exist is
     ///   a per-device question.** `MTLDevice::supportsCounterSampling:` takes an
     ///   `MTLCounterSamplingPoint` and answers separately for each — the query
@@ -1934,34 +2020,108 @@ impl Device for MetalDevice {
     ///   `begin_render_pass` and immediately after `end_render_pass`. A
     ///   stage-boundary sample is therefore where the seam's timestamps already
     ///   are, and how much narrowing this costs is open rather than settled.
-    /// * **A half-built version would be worse than none.** Sampling only where
-    ///   the device happens to support a blit or dispatch boundary gives a
-    ///   profiler HUD that silently reports timings on some Macs and zeroes on
-    ///   others, which is the "not implemented arriving as passed" failure this
-    ///   workspace treats as a defect.
     ///
-    /// So [`Features::TIMESTAMP_QUERY`] stays absent — with it,
+    /// A half-built version would be worse than none: sampling only where the
+    /// device happens to support a blit or dispatch boundary gives a profiler HUD
+    /// that silently reports timings on some Macs and zeroes on others, which is
+    /// the "not implemented arriving as passed" failure this workspace treats as
+    /// a defect. So [`Features::TIMESTAMP_QUERY`] stays absent — with it,
     /// [`Limits::timestamp_period_ns`](crcbl_hal::Limits::timestamp_period_ns),
-    /// which Metal has no fixed answer for either — and this refuses by name.
-    /// The slice that takes it on has to decide where a timestamp is *allowed*
-    /// to be written, which is a seam question rather than a backend one.
-    fn create_query_set(&self, _desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
-        Err(not_yet("query sets (the Metal query slice)"))
+    /// which Metal has no fixed answer for either.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::Unsupported`] for the two counter-sampled kinds,
+    /// [`HalError::InvalidDescriptor`] for a set of no queries, and
+    /// [`HalError::OutOfDeviceMemory`] if the allocation fails.
+    fn create_query_set(&self, desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
+        match desc.kind {
+            QueryKind::Occlusion => {}
+            QueryKind::Timestamp | QueryKind::PipelineStatistics => {
+                return Err(unsupported(NO_COUNTER_SAMPLED_SET));
+            }
+        }
+        let bytes = crate::query::buffer_bytes(desc.count)?;
+        let Some(raw) = self.inner.raw.newBufferWithLength_options(
+            to_ns(bytes),
+            conv::resource_options(MemoryLocation::HostReadback),
+        ) else {
+            // As `create_buffer`: nil is the allocation failing, and it is the
+            // one failure the seam has a name for here.
+            return Err(HalError::OutOfDeviceMemory);
+        };
+        if let Some(label) = desc.label {
+            raw.setLabel(Some(&NSString::from_str(label)));
+        }
+        let handle = self.state().query_sets.insert(QuerySetEntry {
+            owner: self.inner.id,
+            raw,
+            count: desc.count,
+        });
+        Ok(self.stamp(handle))
     }
 
-    fn destroy_query_set(&self, _set: QuerySetHandle) {}
+    /// Releases the visibility-result buffer.
+    ///
+    /// No deletion queue, for the reason this module's docs give for every other
+    /// `destroy_*`: an `MTLCommandBuffer` retains the resources its encoders
+    /// name, so releasing the last reference to a buffer a submitted
+    /// [`reset_query_set`](crcbl_hal::CommandEncoder::reset_query_set) is still
+    /// filling frees it after that command buffer completes rather than during.
+    fn destroy_query_set(&self, set: QuerySetHandle) {
+        let mut state = self.state();
+        take_owned(&mut state.query_sets, set, &*self.inner);
+    }
 
+    /// Reads visibility counts straight out of the pool's buffer.
+    ///
+    /// The seam's "directly, without a resolve-to-buffer round trip" is free
+    /// here: the pool *is* the destination, it is `Shared` storage with a
+    /// `contents` pointer, and there is nothing to resolve. `crcbl-dx12` has to
+    /// submit a command list inside this call for the same read, because an
+    /// `ID3D12QueryHeap` cannot be mapped.
+    ///
+    /// **A caller still has to have waited.** Metal makes a `Shared` allocation
+    /// coherent at command-buffer boundaries, so a read taken while the command
+    /// buffer that filled the pool is still running sees whatever was there
+    /// before — the same rule `Device::request_readback` is built around, and the
+    /// reason it exists rather than this call blocking.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`] for a set this
+    /// device did not create, and [`HalError::InvalidDescriptor`] for a range
+    /// that exceeds the set.
     fn query_results(
         &self,
         set: QuerySetHandle,
-        _first_query: u32,
-        _out: &mut [u64],
+        first_query: u32,
+        out: &mut [u64],
     ) -> Result<(), HalError> {
-        // The seam says a device without `TIMESTAMP_QUERY` returns zeros rather
-        // than failing, so the profiler HUD degrades instead of breaking — but
-        // that applies to a query set that exists. None can, so the handle
-        // cannot resolve, and `InvalidHandle` is the honest answer.
-        Err(HalError::invalid_handle("query set", set))
+        let state = self.state();
+        let entry = lookup(&state.query_sets, "query set", set, &*self.inner)?;
+        crate::query::check_range(entry.count, first_query, out.len() as u64)?;
+        if out.is_empty() {
+            return Ok(());
+        }
+        let offset = crate::query::span_bytes(u64::from(first_query));
+        let contents = entry.raw.contents();
+        // SAFETY: `contents` points at the `buffer_bytes(entry.count)` bytes of
+        // a `Shared` allocation this device made for this set, and `check_range`
+        // has just bounded `first_query + out.len()` by `entry.count` — so the
+        // source span is inside the allocation. The two regions cannot overlap:
+        // `out` is a caller-owned slice and the source is the buffer's own
+        // storage. The pointer does not escape this block, and the device lock is
+        // held for the whole copy. The copy is byte-wise, so neither end needs an
+        // alignment `contents` does not promise.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                contents.as_ptr().cast::<u8>().add(offset as usize),
+                out.as_mut_ptr().cast::<u8>(),
+                size_of_val(out),
+            );
+        }
+        Ok(())
     }
 
     // --- synchronisation ---
@@ -4983,29 +5143,43 @@ using namespace metal;\n\
     /// them can be half-implemented without this saying so.
     ///
     /// **The binding and dispatch slices emptied most of this list**, and what
-    /// is left is the two things that are not "a slice nobody has written":
-    /// query sets, whose obstacle is `supportsCounterSampling:` answering per
-    /// sampling point, and the indirect-count draws, whose obstacle is named in
-    /// `crcbl_mtl::command`'s `indirect_count`. The calls that stopped refusing
-    /// are asserted in `the_binding_slice_replaced_refusals_with_real_errors`
-    /// and in `crates/crcbl/tests/hal_seam_e2e.rs`'s
-    /// `a_compute_dispatch_writes_the_values_it_was_asked_for` rather than
-    /// merely dropped from here.
+    /// is left is the two things that are not "a slice nobody has written": the
+    /// two **counter-sampled** query kinds, whose obstacle is a device that
+    /// advertises no counter set, and the indirect-count draws, whose obstacle is
+    /// named in `crcbl_mtl::command`'s `indirect_count`. The occlusion kind is
+    /// not among them any more — `Device::create_query_set` builds it, and
+    /// `crates/crcbl/tests/hal_seam_e2e.rs`'s `exercise_query_set_creation` is
+    /// what drives it. The calls that stopped refusing are asserted in
+    /// `the_binding_slice_replaced_refusals_with_real_errors` and in that same
+    /// suite's `a_compute_dispatch_writes_the_values_it_was_asked_for` rather
+    /// than merely dropped from here.
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
 
-        let refusals: Vec<(&str, HalError)> = vec![(
-            "query sets",
-            device
-                .create_query_set(&QuerySetDesc {
-                    label: None,
-                    kind: crcbl_hal::QueryKind::Timestamp,
-                    count: 1,
-                })
-                .expect_err("no counter sampling yet"),
-        )];
+        let refusals: Vec<(&str, HalError)> = vec![
+            (
+                "timestamp query sets",
+                device
+                    .create_query_set(&QuerySetDesc {
+                        label: None,
+                        kind: QueryKind::Timestamp,
+                        count: 1,
+                    })
+                    .expect_err("no counter sample buffer yet"),
+            ),
+            (
+                "pipeline-statistics query sets",
+                device
+                    .create_query_set(&QuerySetDesc {
+                        label: None,
+                        kind: QueryKind::PipelineStatistics,
+                        count: 1,
+                    })
+                    .expect_err("no counter sample buffer yet"),
+            ),
+        ];
         assert!(!refusals.is_empty(), "nothing to check");
         for (what, error) in &refusals {
             assert!(

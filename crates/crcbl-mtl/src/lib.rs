@@ -364,6 +364,13 @@ mod pipeline;
 // `cargo test` on any host runs the present-wait assertions.
 #[cfg(any(target_os = "macos", test))]
 mod present;
+// The fourth, and for the reason the other three give: where a query lands in a
+// visibility-result buffer and how far a read of one may reach are `u64`
+// arithmetic, and Metal reports neither an out-of-range read nor an overrunning
+// resolve — it raises and the process dies — so `cargo test` on any host runs
+// the bounds.
+#[cfg(any(target_os = "macos", test))]
+mod query;
 // The second, and for the same reason: what a device does that Metal answers no
 // query for is decided in plain Rust, so `cargo test` on any host runs it.
 #[cfg(any(target_os = "macos", test))]

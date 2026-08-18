@@ -228,13 +228,19 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   from a device whose name says it is virtual, and `crcbl_mtl::quirk` carries
 ///   what was measured, on what, and why Metal offers nothing better to key on.
 ///   Every other device reports it exactly as before.
+/// * [`Features::OCCLUSION_QUERY`] — `visibilityResultBuffer` is a property of
+///   every `MTLRenderPassDescriptor` and `setVisibilityResultMode:offset:` a
+///   selector on every `MTLRenderCommandEncoder`, neither behind a query nor a
+///   version gate, and the pool they name is a plain `MTLBuffer` rather than
+///   anything built from `counterSets`. It is reported because
+///   `Device::create_query_set` now builds that pool, `reset_query_set` and
+///   `resolve_query_set` reach it and `Device::query_results` reads it — the
+///   same standard the four above were held to. What the flag does *not* promise
+///   is a way to count into one: the seam has no begin/end query verb on any
+///   backend, which `crcbl_mtl::query` and `Device::create_query_set` both say.
 ///
 /// # Absent, with the reason for each
 ///
-/// * [`Features::OCCLUSION_QUERY`] — `visibilityResultBuffer` is a property of
-///   the *render pass descriptor* and needs somewhere to put the results, which
-///   is a query set; `create_query_set` refuses, so this would be a promise
-///   about a call this backend cannot make.
 /// * [`Features::DESCRIPTOR_INDEXING`] — **removed by the binding slice, and
 ///   this is the entry worth reading before changing anything here.**
 ///   `argumentBuffersSupport` does report `MTLArgumentBuffersTier::Tier2` on
@@ -303,6 +309,10 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     out |= Features::DEPTH_BIAS_CLAMP;
     out |= Features::POLYGON_MODE_LINE;
     out |= Features::PRESENT_FEEDBACK;
+    // Likewise unconditional: an occlusion pool is a plain `MTLBuffer` and both
+    // selectors that name one are core Metal, so there is nothing to ask. The
+    // doc comment above says which calls back it.
+    out |= Features::OCCLUSION_QUERY;
     // Likewise no query: every Metal device takes an indirect buffer on a draw
     // and reads `baseInstance` out of it, and the binding slice's `indirect`
     // loop is the call that makes both true of this backend.

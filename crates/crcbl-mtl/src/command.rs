@@ -338,6 +338,27 @@ impl MetalCommandEncoder {
         Some(encoder)
     }
 
+    /// Whether a command the seam places *between* passes may be recorded here,
+    /// recording the failure if it may not.
+    ///
+    /// [`Self::blit`] refuses the same case, and this exists so the two query
+    /// commands say which call was refused rather than borrowing the copy's
+    /// sentence. The rule is the seam's rather than Metal's —
+    /// `crcbl_hal::null`'s recorder puts `ResetQuerySet` and `ResolveQuerySet`
+    /// through the same `need_outside` check copies and barriers get — but Metal
+    /// is where it bites: opening a blit encoder inside a pass ends that pass's
+    /// own encoder, taking its pipeline state and argument tables with it.
+    fn outside_a_pass(&mut self, what: &'static str) -> bool {
+        if self.in_render_pass || self.in_compute_pass {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} inside a pass: the seam records it between passes, and serving it here \
+                 would end the pass's own encoder"
+            )));
+            return false;
+        }
+        true
+    }
+
     /// Resolves a buffer handle, recording the failure if it does not.
     fn buffer(&mut self, handle: BufferHandle) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
         let resolved = self.device.buffer_raw(handle);
@@ -1535,32 +1556,132 @@ impl CommandEncoder for MetalCommandEncoder {
 
     // --- queries ---
 
-    /// A no-op with nothing to reset.
+    /// Zeroes the range, which is what a reset means for a buffer.
     ///
-    /// The seam documents this as "required on Vulkan before every write; a
-    /// no-op on backends that reset implicitly", and no query set can exist on
-    /// this backend — `create_query_set` refuses — so there is no handle a
-    /// caller could pass that names anything. Failing here would turn a call the
-    /// seam asks every caller to make unconditionally into an error.
-    fn reset_query_set(&mut self, _set: QuerySetHandle, _range: Range<u32>) {}
+    /// Metal has no `vkCmdResetQueryPool`: an occlusion pool here is a plain
+    /// `MTLBuffer` (`crate::query` says why), and a fresh allocation's contents
+    /// are not promised to be anything. So "reset so it can be written again" is
+    /// a `fillBuffer:range:value:` of zero — the same call
+    /// [`fill_buffer`](CommandEncoder::fill_buffer) makes — and it is what puts a
+    /// defined value under every [`Device::query_results`](crcbl_hal::Device::query_results)
+    /// of a query nothing has counted into. Zero is the right one: it is what a
+    /// query that passed no samples reports.
+    ///
+    /// Recorded outside a pass, like every other command that needs the blit
+    /// encoder; `crcbl_hal::null`'s recorder puts `ResetQuerySet` through the
+    /// same `need_outside` check, so that is the seam's rule rather than Metal's.
+    fn reset_query_set(&mut self, set: QuerySetHandle, range: Range<u32>) {
+        if !self.ok() {
+            return;
+        }
+        let (raw, count) = match self.device.query_set_raw(set) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        if range.end > count {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "reset_query_set range {}..{} exceeds the set's {count} queries",
+                range.start, range.end
+            )));
+            return;
+        }
+        if range.start >= range.end {
+            return;
+        }
+        if !self.outside_a_pass("reset_query_set") {
+            return;
+        }
+        let Some(encoder) = self.blit() else {
+            return;
+        };
+        let queries = u64::from(range.end - range.start);
+        encoder.fillBuffer_range_value(
+            &raw,
+            NSRange::new(
+                to_ns(crate::query::span_bytes(u64::from(range.start))),
+                to_ns(crate::query::span_bytes(queries)),
+            ),
+            0,
+        );
+    }
 
     fn write_timestamp(&mut self, _set: QuerySetHandle, _index: u32) {
         // Accepted and dropped, which is exactly what the seam prescribes for a
         // device without `Features::TIMESTAMP_QUERY` — and this device reports
-        // it absent. See `Device::create_query_set` for why.
+        // it absent. The only sets that exist here are occlusion pools, which a
+        // timestamp has nothing to write into anyway; see
+        // `Device::create_query_set` for why the timestamp kind is refused at
+        // creation rather than here.
     }
 
+    /// Copies the counts into a caller's buffer, which on Metal is an ordinary
+    /// blit.
+    ///
+    /// There is no `ResolveQueryData` to call and no stride to negotiate: the
+    /// pool is already one `u64` per query, which is the layout the seam's two
+    /// read paths assume, so this is `copyFromBuffer:…:size:` at
+    /// `crate::query`'s offsets. Both ends are bounds-checked here because Metal
+    /// checks neither and an overrun raises rather than failing.
     fn resolve_query_set(
         &mut self,
         set: QuerySetHandle,
-        _range: Range<u32>,
-        _dst: BufferHandle,
-        _dst_offset: u64,
+        range: Range<u32>,
+        dst: BufferHandle,
+        dst_offset: u64,
     ) {
-        // Unlike the two above, this one *writes* somewhere: silently leaving
-        // `dst` untouched would hand a caller a buffer of stale bytes it
-        // believes are timings.
-        self.fail(HalError::invalid_handle("query set", set));
+        if !self.ok() {
+            return;
+        }
+        let (raw, count) = match self.device.query_set_raw(set) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let Some(destination) = self.buffer(dst) else {
+            return;
+        };
+        if range.end > count {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "resolve_query_set range {}..{} exceeds the set's {count} queries",
+                range.start, range.end
+            )));
+            return;
+        }
+        let queries = u64::from(range.end.saturating_sub(range.start));
+        if let Err(error) =
+            crate::query::check_destination(dst_offset, queries, destination.length() as u64)
+        {
+            self.fail(error);
+            return;
+        }
+        if queries == 0 {
+            return;
+        }
+        if !self.outside_a_pass("resolve_query_set") {
+            return;
+        }
+        let Some(encoder) = self.blit() else {
+            return;
+        };
+        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
+        // offset nor size. The source span was bounded by the set's own query
+        // count and the destination span by the destination's own `length()`
+        // immediately above, and both objects are kept alive by the `Retained`
+        // held across the call.
+        unsafe {
+            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                &raw,
+                to_ns(crate::query::span_bytes(u64::from(range.start))),
+                &destination,
+                to_ns(dst_offset),
+                to_ns(crate::query::span_bytes(queries)),
+            );
+        }
     }
 
     // --- finish ---
