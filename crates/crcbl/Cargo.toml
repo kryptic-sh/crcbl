@@ -29,6 +29,14 @@ crcbl-ui = { workspace = true }
 # The simulation half, added so a sample can stop naming them. Every one is a
 # crate the four games already depended on by path; none of them depends on
 # this crate, so the re-export introduces no cycle.
+#
+# `crcbl-assets` was a dev-dependency here — `tests/gltf_e2e.rs` needed a real
+# `DirSource` — while `crcbl::scene::import_gltf` takes a `&dyn AssetSource`
+# from it. That made the one entry point into the asset pipeline uncallable
+# through the umbrella: a caller could name the function and could not name its
+# argument. `apps/viewer` is what found it, which is what `apps/bare`'s docs say
+# a sample is for.
+crcbl-assets = { workspace = true }
 crcbl-audio = { workspace = true }
 crcbl-client = { workspace = true }
 crcbl-ecs = { workspace = true }
@@ -140,11 +148,8 @@ crcbl-golden = { workspace = true }
 # A dev-dependency because no shipped `crcbl` binary references the greybox pack.
 crcbl-greybox = { workspace = true }
 # `tests/gltf_e2e.rs` builds a `.glb` and imports it through the real
-# `DirSource`, so it needs a real directory to put it in and the asset seam it
-# reads through. The same pair `crcbl-scene`'s own fixtures use, and for the same
-# reason: the key rule a document's own uris have to satisfy is the production
-# one rather than one written for a mock.
-crcbl-assets = { workspace = true }
+# `DirSource`, so it needs a real directory to put it in. The asset seam itself
+# is an ordinary dependency above — see there.
 tempfile = "3"
 # That suite's texture is a PNG it encodes rather than a blob it vendors, on
 # `crcbl-scene`'s `gltf_fixture` argument: a checked-in binary is a fixture

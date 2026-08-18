@@ -3,6 +3,104 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### What `apps/viewer` still owes sample 05
+
+`apps/viewer` is `docs/plan/sample/05-viewer.md`'s **milestone 1 minus the
+grid**: a path argument, the load through `crcbl::assets::DirSource`, the
+conversion, frame-on-load, orbit/pan/zoom/`F`, and one directional light. Every
+module's docs name its own omission; this is the list in one place.
+
+- **The grid floor.** The one part of milestone 1 that is missing.
+  `build_render_scene` sizes a `SceneDesc`'s pools for the document alone, and a
+  grid is a second resident mesh plus a second material row — so it is an edit
+  to how `crate::model` assembles the scene (append a `MeshDesc` and a
+  `GpuMaterial`, widen `Capacities`), not a pass to add in `crate::gpu`.
+  `crcbl-greybox` already has plane primitives sized in metres, so the geometry
+  need not be written; the open question is whether the grid is a mesh at all or
+  a screen-space shader, which is what every other engine ends up doing to keep
+  the lines a constant width at any zoom.
+- **Milestone 2 in whole** — the mesh/material/texture panels, the wireframe and
+  normals views, the exposure slider. All of them are a `UiRenderer` pass this
+  application does not have; see the entry below on the loop.
+- **Rule 4's debug panel**, for the same reason, which is the one omission that
+  is a rule rather than a milestone. `--debug-overlay` and `--no-debug-overlay`
+  therefore parse and reach nothing; `crate::args::USAGE` says so in as many
+  words rather than printing a flag that silently does nothing.
+- **Milestone 3, hot reload** (V-F4) and the **browser drop target** (the other
+  half of V-F5). The drop target needs an `AssetSource` over a file a browser
+  handed the page, which stage 10 owns.
+
+### The hosted loop drops the wheel and every non-primary pointer button
+
+`crcbl::engine::Loop` folds a pump into `Pending` and hands a game
+`PointerUpdate { at, pressed, released }`. `Pending::observe` matches
+`PointerButton::Left` only, and `ShellEvent::Wheel` falls into its `_` arm and
+reaches no `HostedGame` hook at all — verified by reading `engine.rs`'s
+`observe` and by grepping `apps/` for `ShellEvent::Wheel`, which matches
+nothing.
+
+That is fine for the five games and it is why `apps/viewer` writes its own loop:
+a model viewer with no wheel zoom and no second drag button is not a model
+viewer. The cost is stated in `apps/viewer/src/app.rs` — no menu, no pause, no
+debug overlay, because those are the loop's.
+
+**The alternative, if a second tool ever wants the same thing:** widen the
+hosted seam rather than copy the loop again — a
+`wheel_event(ScrollDelta, Modifiers)` hook and a `button` field on
+`PointerUpdate`, both with defaults so no existing sample changes. It was not
+done here because it is a change to a shared trait with six implementors on
+behalf of one caller, and one caller is not yet evidence about the shape. A
+second is.
+
+### `apps/viewer` runs in no CI job, because CI has no `.glb`
+
+Every other sample has a `Run <name> headless against lavapipe` step in
+`ci.yml`. The viewer cannot have one as written: it takes a required model path,
+and there is no glTF document in the repository to point it at — deliberately,
+since `crcbl-scene`'s `gltf_fixture` and `crates/crcbl/tests/gltf_e2e.rs` both
+argue that a checked-in binary is a fixture nobody reviewing a change can read.
+
+The crate's own tests do run the whole loop (`apps/viewer/src/app.rs`'s
+`a_headless_run_draws_the_document_and_stops`), on `GpuBackend::Null` over a
+`.glb` they assemble in `apps/viewer/src/fixture.rs` — so the path is covered on
+every `cargo test`, and **no viewer frame has ever reached a real driver in
+CI**. Locally it has: run by hand on an RX 7900 XTX, headless and windowed.
+
+Closing it wants a way to produce a `.glb` at CI time. The options are a
+`crcbl-cli` subcommand that writes one (useful beyond CI, and the only one that
+does not add a second fixture builder), a `#[ignore]`d integration test in
+`apps/viewer/tests/` with a `run-viewer-e2e.sh` on `apps/lumen`'s golden
+pattern, or making `crcbl-scene`'s `gltf_fixture` public.
+
+### The viewer frames the document's geometry, not the geometry it draws
+
+`apps/viewer`'s `model::world_bounds` unions one `Aabb` per glTF primitive,
+pushed through its instance's composed transform. Those are the primitives the
+**document** declares, and `build_render_scene` may skip some of them — so a
+document with a skipped primitive is framed a little wide.
+
+It errs in the safe direction (wider, never tighter) and every skip is printed,
+so this is a refinement rather than a defect. Fixing it needs `RenderScene` to
+say which `(mesh, primitive)` each of its `instances` came from, or to carry
+per-instance bounds; neither exists, and adding one to `crcbl-scene` for a
+cosmetic framing difference was not worth it here.
+
+### `Aabb::from_points` absorbs a lone `NaN`, and nothing says so
+
+`crcbl_render::cull::Aabb::from_points` folds points with `Vec3::min`/`max`,
+which are `f32::min`/`f32::max` per lane — and those return the _other_ operand
+when one side is `NaN`. So a single `NaN` coordinate among finite ones vanishes
+and the box that comes out is the finite one, while an infinity propagates.
+Found while writing `apps/viewer`'s non-finite guard: the first fixture used a
+`NaN` corner and the guard did not fire.
+
+Neither behaviour is wrong for culling, which is what the type is for, and the
+absorbing one is arguably the friendlier default. It is written down because it
+is surprising, because `from_points`' docs argue carefully about `None` versus
+an infinite sentinel and say nothing about this, and because the next caller to
+use it as a validity check — as the viewer nearly did — will get a pass on a
+document with a `NaN` in it. A doc sentence on `from_points` would close it.
+
 ### The one device-loss ordering that does not hold
 
 `gpu-replay.js` now watches `GPUDevice.lost` and files the loss once, first,

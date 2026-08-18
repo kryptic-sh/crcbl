@@ -69,6 +69,18 @@
 //! phase (`crcbl-render` at P1, `crcbl-ecs` / `crcbl-net` at P2, …); nothing
 //! here is expected to be removed.
 
+/// [`crcbl-assets`](crcbl_assets): the IO seam — [`AssetSource`], the
+/// [`DirSource`] over a directory, and the registry above them.
+///
+/// Not optional and not behind `scene`, because it is what *any* content
+/// reaches this engine through. It is also the argument `scene::import_gltf`
+/// takes: without this line a caller outside the workspace could name that
+/// function and not the `&dyn AssetSource` it wants, which is a public entry
+/// point nothing could call.
+///
+/// [`AssetSource`]: crcbl_assets::AssetSource
+/// [`DirSource`]: crcbl_assets::DirSource
+pub use crcbl_assets as assets;
 /// [`crcbl-audio`](crcbl_audio): the mixer, the sound bank, the output stream
 /// and the spatial cue grammar.
 pub use crcbl_audio as audio;

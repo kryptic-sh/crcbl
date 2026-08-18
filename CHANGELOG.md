@@ -676,6 +676,39 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/viewer`** — `viewer <MODEL>` opens a `.gltf` or `.glb`, frames the
+  camera on it, turns it under the mouse and draws it under a single directional
+  light. `docs/plan/sample/05-viewer.md`'s milestone 1 without the grid floor;
+  `docs/backlog.md` lists what the sample still owes.
+
+  The file's own directory becomes the asset root and its file name the key, so
+  a `.gltf` resolves the `.bin` and the textures beside it. **Nothing it can be
+  pointed at panics**: a missing file, a truncated container, a name the asset
+  seam refuses, a directory, a document with no geometry and a document whose
+  bounds are not finite are each a sentence on stderr naming the file and what
+  to do, and exit code 1. Everything `build_render_scene` could not honour is
+  **printed** as well as logged, because the conversion's warnings go through
+  `CRCBL_LOG`, which under its default filter a user never sees.
+
+  Controls are `three.js`-shaped, which is what a user arriving from a browser
+  model viewer already has in their hands: left drag orbits with the model
+  following the pointer, middle or right drag pans, the wheel zooms, `F` frames
+  the model again. Drag deltas come from `ShellEvent::PointerMotion`'s
+  `raw_delta` where the backend has one and from differenced `abs` positions
+  where it does not, so the browser backend drags too.
+
+  It **writes its own loop** rather than hosting on `crcbl::engine::Loop`: that
+  loop reduces a pump to `PointerUpdate`'s primary button and delivers
+  `ShellEvent::Wheel` to nothing, and a viewer needs both. The consequence is
+  that this sample has no menu, no pause and no debug overlay — see
+  `docs/backlog.md`.
+
+- **`crcbl::assets`** re-exports `crcbl-assets`, so `AssetSource`, `DirSource`
+  and the registry are reachable from a crate that names only `crcbl`. It was a
+  dev-dependency of the umbrella while `crcbl::scene::import_gltf` took a
+  `&dyn AssetSource` from it, which made that entry point one a caller could
+  name and not call.
+
 - **`crcbl_render::OrbitCamera`** — the orbit, pan, zoom and frame-selected
   controls the model viewer and the stage-8 editor viewport both need, in
   `crcbl-render` rather than in an app. It takes **deltas, never keys**: nothing

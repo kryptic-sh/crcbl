@@ -1,0 +1,42 @@
+[package]
+name = "viewer"
+description = "Viewer — a glTF model viewer, and the asset pipeline's acceptance test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with one front end**, where every other sample has two. The web
+# half of `docs/plan/sample/05-viewer.md`'s V-F5 is the drop target, and a drop
+# target needs a browser file the asset seam can read — `crcbl_store::web` owns
+# that and stage 10 owns it landing. So this milestone is the native half, and
+# the lib exists for the reason `apps/hud`'s does anyway: an integration test
+# and a unit test can only reach a loop through a linkable artifact.
+#
+# The lib is not called `viewer`: a lib and a bin of the same name in one
+# package write the same file, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_viewer"
+
+[[bin]]
+name = "viewer"
+path = "src/main.rs"
+
+# One engine dependency, like every other sample, with the `scene` feature on —
+# this sample is what that feature is for. `crcbl::scene::import_gltf` reads the
+# document and `crcbl::scene::gltf_render::build_render_scene` turns it into
+# what `ForwardRenderer::with_scene` makes resident; the asset seam both sides
+# name is `crcbl::assets`.
+[dependencies]
+crcbl = { workspace = true, features = ["scene"] }
+
+# The tests write a `.glb` to a real directory and open it through the real
+# `DirSource`, for the reason `crates/crcbl/tests/gltf_e2e.rs` gives: the key
+# rule a document has to satisfy is the production one, and a mock source would
+# not apply it.
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
