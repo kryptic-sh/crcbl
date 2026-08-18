@@ -926,6 +926,18 @@ Three of those flags change what the renderer _builds_: `MESH_SHADER` and
 8. **`MeshShading` + `TaskShaderStage`** — last, splits in four, and re-keys
    Metal's goldens twice. The MSL is already committed and `xcrun metal` already
    compiles it in CI.
+
+   **A measurement in flight may rule this out on CI entirely.** `wgpu-hal`'s
+   mesh gate is not the three-family AND this plan first recorded — it is
+   `family_check && (Metal3 || Apple7 || Mac2) && !is_virtual`, where
+   `is_virtual` is the device name containing "virtual". CI's runner reports
+   **`Apple Paravirtual device`**, so by that formula mesh pipelines are off the
+   table on this runner whatever the families answer. The counter probe prints
+   all four terms, so the next Metal CI run settles it. If it holds, the honest
+   outcome is that Metal's mesh rows cannot be proved by this CI at all and need
+   either a hardware runner or an explicit "unproven here" state — not a
+   retirement.
+
 9. **`BindlessDescriptorArray`** — last or `Declined`. The blocker is in
    `crcbl-shaders`, not `crcbl-mtl`, and closing it reopens the backend's
    barrier model.
