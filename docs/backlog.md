@@ -1115,6 +1115,47 @@ both features — but the raster exercises made it **reachable where it was not
 before**, so it is a live hazard on a poorer device rather than a theoretical
 one.
 
+### Metal declares DepthClamp and changes nothing — measuring which reason
+
+`main` is red on one arm: the seam suite's new `exercise_depth_clamp` draws a
+triangle past the far plane with **no depth attachment**, and Metal accepts the
+call and discards it. It passes on vk, wgpu and WARP.
+
+**Two explanations were eliminated by reading rather than guessing.**
+`setDepthClipMode:` has exactly one call site, in `bind_graphics_pipeline`; its
+value comes from the only `RasterState` construction; the binding's `Clip = 0` /
+`Clamp = 1` matches Apple's header, so it is not inverted; and nothing between
+the bind and the draw touches clip state. So the backend is not defeating it.
+
+**And "Metal does not clamp" is refuted by third parties.** Dawn maps
+`unclippedDepth` to `MTLDepthClipMode::Clamp`; the WebGPU CTS's
+`depth_clip_clamp` covers this exact geometry — a vertex beyond the far plane at
+`w = 1` — and Dawn's expectations file carries **no** entry for any
+`apple-apple-m1/m2/m3` tag, though those tags are used elsewhere in it. A gpuweb
+issue has a maintainer's repro drawing a point at `z = 5.0` under `Clamp` on
+Metal.
+
+**What is left is a corner nobody tests:** the CTS always has a depth attachment
+and this exercise has none, and Apple documents the mode per-_fragment_ ("clamp
+fragments outside the near or far planes"), which is weaker than Vulkan's
+per-primitive clip. A device-specific quirk is also still live — this runner is
+paravirtual, and it has already been measured exposing zero counter sets.
+
+**A probe now separates them**, printed before its controls so a control failure
+cannot take the answer down: the same triangle six ways — two Z values, both
+clip modes, with and without an always-pass non-writing `D32Float` attachment.
+
+- Both false → the device ignores `Clamp`, and **there is no honest gate to
+  reach for**: Metal has no query for depth clip mode, and `wgpu-hal`'s two
+  gates are the baseline macOS feature set and "is this macOS", neither of which
+  can answer false here. The choice would be a measured virtual-device quirk in
+  `features_of` — the precedent `wgpu-hal` itself sets with `!is_virtual` for
+  mesh — or a `DIVERGENCES` row, which would be a lie about real hardware.
+- Without an attachment false, with one true → **the exercise is wrong**, and
+  needs a depth attachment that exists without deciding anything. Note vk and
+  D3D12 both rasterise it without one, so that is a Metal-driven widening rather
+  than a correction.
+
 ### MEASURED — CI's Metal device can serve neither query, and no mesh
 
 The counter probe ran. `Apple Paravirtual device`, macOS 26.5.2, and the answers
