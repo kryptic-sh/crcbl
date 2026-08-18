@@ -10938,7 +10938,7 @@ measured against — a caller sets lights per frame — and no test drives its
 overflow; and no non-default `Capacities` value has ever reached a real device,
 since every end-to-end run is still `scene::demo()`.
 
-### Coverage gap: a description that is not `scene::demo()` has never reached a device
+### Coverage gap: no device has drawn a description with two DAGs
 
 Half closed. `forward`'s
 `a_second_dag_reaches_its_own_groups_and_not_the_first_s` builds a five-mesh
@@ -10953,15 +10953,23 @@ the concatenated `level_groups` — the `first_group` offset handed to
 one. Both halves were shown red by dropping the offset and by suppressing the
 concatenation.
 
-**What is still not covered is a real device.** Every golden and every
-`run-render-e2e.sh` / `run-vk-e2e.sh` run is still `scene::demo()`, so no frame
-has ever been drawn from a description with two DAGs, a fifth mesh, or
-non-default `Capacities` — and the null backend cannot tell a right frame from a
-wrong one. Closing it means an end-to-end test that builds such a description
-and reads something back: the cluster-selection buffer through
-`ForwardRenderer::cluster_selection` is the observable that already exists, and
-asserting both DAGs' runs have clusters chosen in them needs no new golden
-image. Not done here to keep the slice to the API move.
+**A real device now draws one non-`demo` description, and this entry said none
+did.** `crates/crcbl/tests/gltf_e2e.rs` imports a `.glb` through the real
+`DirSource`, converts it with `crcbl_scene::gltf_render::build_render_scene`,
+hands the result to `ForwardRenderer::with_scene` and draws — verified on an RX
+7900 XTX on 2026-08-19 via `crates/crcbl/tests/run-gltf-e2e.sh`: _"an imported
+glTF drew its own texture on vk"_. So "every run is still `scene::demo()`" is no
+longer true, and anyone closing the rest of this gap has a working precedent to
+copy rather than a blank page.
+
+**What that test does not cover is the shape this entry is really about.** Its
+document is a single textured quad — one mesh, one primitive, one material — so
+it exercises none of **two DAGs, a fifth mesh, or non-default `Capacities`**,
+and the null backend cannot tell a right frame from a wrong one. Closing that
+still means an end-to-end test building such a description and reading something
+back: `ForwardRenderer::cluster_selection` is the observable that already
+exists, and asserting both DAGs' runs have clusters chosen in them needs no new
+golden image.
 
 The cook slice added one description that is not `scene::demo()` and does reach
 a device object: `crcbl`'s
