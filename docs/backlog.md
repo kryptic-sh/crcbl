@@ -3,6 +3,33 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### lumen's free-cam arrow keys turn the wrong way
+
+**Reported from the deployed web demo, 2026-08-18.** In free-cam mode the left
+arrow turns the camera right and the right arrow turns it left.
+
+**Diagnosed by reading, and the same file gets the neighbouring case right.**
+`apps/lumen/src/camera.rs` measures yaw from `-Z`
+(`forward.x.atan2(-forward.z)`) and derives `ahead = (sin_yaw, 0, -cos_yaw)`, so
+an increasing yaw swings the view toward `+X`. `+X` is the right-hand direction
+here, which the strafe confirms independently: `aside = (cos_yaw, 0, sin_yaw)`
+is `+X` at zero yaw and is driven by `axis(held.right, held.left)` — positive
+argument first is _right_, and strafing is not reported as inverted.
+
+The turn uses the opposite order: `axis(held.turn_left, held.turn_right)`, whose
+positive argument is _left_. `axis(a, b)` is `f32::from(a) - f32::from(b)`, so
+holding the left arrow adds to yaw and turns the camera right.
+
+**The fix is the argument order**, `axis(held.turn_right, held.turn_left)`,
+which also makes the turn read the same way round as the strafe two lines below
+it. Negating `TURN` would work and would leave the two lines disagreeing.
+
+**Why it shipped:** `camera.rs` has five tests and none of them covers turn
+direction — no test name mentions yaw or turning. A fix needs one that would
+have failed, asserting the sign of the yaw change for a held arrow rather than
+only that the camera moved. `FreeCamera::advance` is pure given `dt` and the
+held set, so this needs no GPU and belongs in that module's own tests.
+
 ### The one device-loss ordering that does not hold
 
 `gpu-replay.js` now watches `GPUDevice.lost` and files the loss once, first,
