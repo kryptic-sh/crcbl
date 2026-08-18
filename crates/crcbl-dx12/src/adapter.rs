@@ -882,9 +882,21 @@ pub(crate) fn describe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Only the tests need the tier *below* the one the rule requires — the
-    /// backend itself only ever compares against tier 3.
-    use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_BINDING_TIER_2;
+    /// [`D3D12_RESOURCE_BINDING_TIER_2`] is only needed by the tests — the
+    /// backend itself only ever compares against tier 3. Everything else here is
+    /// the mesh probe's, and named where that test says what each answer
+    /// settles.
+    use windows::Win32::Graphics::Direct3D12::{
+        D3D12_FEATURE_D3D12_OPTIONS3, D3D12_FEATURE_D3D12_OPTIONS7,
+        D3D12_FEATURE_DATA_D3D12_OPTIONS3, D3D12_FEATURE_DATA_D3D12_OPTIONS7,
+        D3D12_MESH_SHADER_TIER, D3D12_MESH_SHADER_TIER_1, D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
+        D3D12_RESOURCE_BINDING_TIER_2, D3D12_SAMPLER_FEEDBACK_TIER,
+        D3D12_SAMPLER_FEEDBACK_TIER_0_9, D3D12_SAMPLER_FEEDBACK_TIER_1_0,
+        D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED,
+    };
+
+    use crate::device::tests::open_device;
+    use crate::instance::tests::pinned_adapter;
 
     /// The nibble decoding really is the encoding the constants use.
     ///
@@ -1155,6 +1167,261 @@ mod tests {
             device_type_of(&discrete),
             DeviceType::Discrete,
             "{discrete:?}"
+        );
+    }
+
+    /// The prefix every line the mesh probe prints carries, so one `grep` over a
+    /// CI log pulls the whole measurement out of a suite that prints a great
+    /// deal else.
+    const MESH_PROBE: &str = "crcbl-dx12 mesh";
+
+    // The two feature ids the probe below adds, each paired with the struct
+    // D3D12 fills in for it. They live here rather than beside the production
+    // pairings because nothing above the probe asks either question: this
+    // backend reports no mesh shading, and its timestamp queries are the graphics
+    // and compute queues' rather than the copy queue's. The pairing is an `impl`
+    // rather than a hand-written feature id at the call site for the reason
+    // `FeatureQuery` exists at all — `CheckFeatureSupport` takes a void pointer,
+    // and a mismatched pair is a struct filled in with another feature's fields.
+    impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS7 {
+        const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS7;
+    }
+
+    impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS3 {
+        const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS3;
+    }
+
+    /// A [`D3D12_MESH_SHADER_TIER`] as the name D3D12 gives it.
+    ///
+    /// The bindings name every tier D3D12 had when this crate's `windows` pin
+    /// was cut. A value they do not name is a newer runtime rather than an
+    /// error, so it is reported as unnamed instead of being claimed as one of
+    /// the named ones — and the raw number is printed beside every one of these
+    /// anyway.
+    fn mesh_shader_tier_name(tier: D3D12_MESH_SHADER_TIER) -> &'static str {
+        if tier == D3D12_MESH_SHADER_TIER_NOT_SUPPORTED {
+            "NOT_SUPPORTED"
+        } else if tier == D3D12_MESH_SHADER_TIER_1 {
+            "TIER_1"
+        } else {
+            "a tier this windows binding does not name"
+        }
+    }
+
+    /// A [`D3D12_SAMPLER_FEEDBACK_TIER`] as the name D3D12 gives it, on the same
+    /// terms as [`mesh_shader_tier_name`].
+    fn sampler_feedback_tier_name(tier: D3D12_SAMPLER_FEEDBACK_TIER) -> &'static str {
+        if tier == D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED {
+            "NOT_SUPPORTED"
+        } else if tier == D3D12_SAMPLER_FEEDBACK_TIER_0_9 {
+            "TIER_0_9"
+        } else if tier == D3D12_SAMPLER_FEEDBACK_TIER_1_0 {
+            "TIER_1_0"
+        } else {
+            "a tier this windows binding does not name"
+        }
+    }
+
+    /// **The measurement that decides whether this backend's two mesh rows can
+    /// ever be _proved_ here** —
+    /// [`Capability::MeshShading`](crcbl_hal::Capability::MeshShading) and
+    /// [`TaskShaderStage`](crcbl_hal::Capability::TaskShaderStage), which
+    /// `crcbl_hal::DIVERGENCES` records for [`BackendKind::Dx12`] as
+    /// [`DivergenceKind::Unwritten`](crcbl_hal::DivergenceKind::Unwritten).
+    ///
+    /// # Why the rows are not what they look like
+    ///
+    /// `Unwritten` reads as "somebody types the mesh pipeline and the rows go
+    /// away", and for this backend that is not established. **This crate has
+    /// never asked D3D12 whether it has a mesh shader tier**: [`features_of`]
+    /// reports neither [`Features::MESH_SHADER`] nor
+    /// [`Features::TASK_SHADER`], and nothing in this crate names
+    /// [`D3D12_FEATURE_D3D12_OPTIONS7`] outside this test. So "no mesh shading
+    /// on D3D12" is true **by construction rather than by measurement**, and
+    /// nobody knows what this crate's CI adapter would answer.
+    ///
+    /// That matters because both capabilities are gated —
+    /// `Capability::gating_feature` maps them onto those two flags — and a gated
+    /// capability whose flag is clear is *skipped* by the parity report rather
+    /// than checked. A slice that implemented the pipelines and deleted the rows
+    /// could therefore leave a green report standing over evidence nobody has.
+    ///
+    /// It creates nothing, submits nothing and asserts one thing: that the
+    /// queries ran. It **prints**, and the CI log is the artifact — the same
+    /// shape as `crcbl-mtl`'s
+    /// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`,
+    /// which puts that backend's two unsettled rows' answers into its own log.
+    ///
+    /// # What each answer settles
+    ///
+    /// **`MeshShaderTier` together with the shader model.** Neither half is
+    /// enough on its own, exactly as [`RawCaps::dynamic_resources`] needs both a
+    /// tier and a model:
+    ///
+    /// * `TIER_1` **and** at least [`D3D_SHADER_MODEL_6_6`] — the two rows are
+    ///   ordinary `Unwritten` work, provable on this CI, and the mesh slice is
+    ///   worth planning.
+    /// * `NOT_SUPPORTED` — the rows can be implemented and **never proved
+    ///   here**, because CI has this adapter and no other. That turns the
+    ///   deletion question from "finish the work" into "accept an unproven state
+    ///   or buy a runner", which is a decision rather than a task.
+    /// * A tier with a model below 6.6 — the committed DXIL cannot load whatever
+    ///   the hardware can do, because `crcbl-shaders`' manifest ships
+    ///   `dxil-model = 6_6`. Different problem, different fix.
+    ///
+    /// **`SamplerFeedbackTier`** comes back in the same struct and costs nothing
+    /// extra, so it is printed rather than discarded.
+    ///
+    /// **`ResourceBindingTier`** and
+    /// **`CopyQueueTimestampQueriesSupported`** are each assumed elsewhere in
+    /// this crate — the first by `RawCaps::dynamic_resources`, the second by
+    /// there being no copy-queue timestamp path at all — and each is one cheap
+    /// call. A log that carries them is a log the next question can be answered
+    /// from without another CI round trip.
+    ///
+    /// # What it fails on, and what it does not
+    ///
+    /// **A zero is data.** A device honestly answering
+    /// `MeshShaderTier = NOT_SUPPORTED` is a *result* and passes; that is the
+    /// whole point of running this. `crcbl-mtl`'s probe learnt this the
+    /// expensive way, asserting twice on values a truthful device reported as
+    /// zero and reddening the board both times.
+    ///
+    /// The one thing asserted is that the questions were **asked**: a refused
+    /// [`check_feature`] is the *runtime* saying it has never heard of the
+    /// query, not the device saying no, and those are opposite readings of this
+    /// log. A run that printed nothing but refusals is a zero-checks pass in a
+    /// new costume. Every refusal is collected rather than returned on, so one
+    /// run names all of them — this suite costs a whole CI round trip per
+    /// question, which is why `tests/run-dx12-e2e.sh` passes `--no-fail-fast`.
+    ///
+    /// The falsifying edit is swapping the two [`FeatureQuery`] ids above.
+    /// D3D12 checks the payload size against the feature id and the two structs
+    /// are different widths, so both queries are refused and the assertion fires
+    /// naming them.
+    ///
+    /// nextest captures a passing test's stdout, so read this with
+    /// `--success-output immediate`, which is what `tests/run-dx12-e2e.sh`
+    /// passes.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_device_answers_whether_it_has_a_mesh_shader_tier_and_a_model_to_load_one() {
+        let (instance, device) = open_device();
+        let adapter = pinned_adapter(&instance);
+        let record = instance
+            .records()
+            .iter()
+            .find(|record| record.info.id == adapter)
+            .expect("the pin resolved against this same enumeration");
+        // Attribution first: every number below is about this adapter and no
+        // other, and a reader of the log has no other way to know which. The
+        // software flag is `is_software`'s answer rather than
+        // `DXGI_ADAPTER_FLAG_SOFTWARE`, which is clear on the very rasteriser CI
+        // pins.
+        println!(
+            "{MESH_PROBE}: adapter {:?} type={:?} software={} vendor={:#06x} device={:#06x} \
+             driver={:?}",
+            record.info.name,
+            record.info.device_type,
+            record.raw.software,
+            record.info.vendor_id,
+            record.info.device_id,
+            record.info.driver,
+        );
+
+        let raw = device.raw();
+        let mut refused: Vec<&str> = Vec::new();
+
+        // The whole point of the test.
+        let options7 = check_feature(raw, D3D12_FEATURE_DATA_D3D12_OPTIONS7::default());
+        match options7 {
+            Some(answer) => {
+                println!(
+                    "{MESH_PROBE}: MeshShaderTier = {} ({})",
+                    answer.MeshShaderTier.0,
+                    mesh_shader_tier_name(answer.MeshShaderTier)
+                );
+                println!(
+                    "{MESH_PROBE}: SamplerFeedbackTier = {} ({})",
+                    answer.SamplerFeedbackTier.0,
+                    sampler_feedback_tier_name(answer.SamplerFeedbackTier)
+                );
+            }
+            None => refused.push("D3D12_FEATURE_D3D12_OPTIONS7"),
+        }
+
+        // Asked at 6.6 rather than read: this query is **in/out**, and the
+        // number that matters is not the device's ceiling but whether it reaches
+        // the model the committed DXIL was built at. The runtime lowers the
+        // value it is given, so an answer below what was asked is the device's
+        // own limit.
+        let negotiated = check_feature(
+            raw,
+            D3D12_FEATURE_DATA_SHADER_MODEL {
+                HighestShaderModel: D3D_SHADER_MODEL_6_6,
+            },
+        );
+        match negotiated {
+            Some(answer) => println!(
+                "{MESH_PROBE}: SHADER_MODEL asked {} -> {}",
+                shader_model_name(D3D_SHADER_MODEL_6_6),
+                shader_model_name(answer.HighestShaderModel),
+            ),
+            None => refused.push("D3D12_FEATURE_SHADER_MODEL at 6.6"),
+        }
+        // Beside it, `highest_shader_model`'s descending probe, which still
+        // answers on a runtime too old to be asked about 6.6 at all — so the log
+        // carries this device's real ceiling even on the run where the line
+        // above is a refusal.
+        println!(
+            "{MESH_PROBE}: highest shader model by descending probe = {}",
+            shader_model_name(highest_shader_model(raw))
+        );
+
+        match check_feature(raw, D3D12_FEATURE_DATA_D3D12_OPTIONS::default()) {
+            Some(answer) => println!(
+                "{MESH_PROBE}: ResourceBindingTier = {}",
+                answer.ResourceBindingTier.0
+            ),
+            None => refused.push("D3D12_FEATURE_D3D12_OPTIONS"),
+        }
+
+        match check_feature(raw, D3D12_FEATURE_DATA_D3D12_OPTIONS3::default()) {
+            Some(answer) => println!(
+                "{MESH_PROBE}: CopyQueueTimestampQueriesSupported = {}",
+                answer.CopyQueueTimestampQueriesSupported.as_bool()
+            ),
+            None => refused.push("D3D12_FEATURE_D3D12_OPTIONS3"),
+        }
+
+        // The conclusion, so the log carries it rather than only the inputs it
+        // was drawn from. A refused query counts as the answer that keeps this
+        // backend where it already is, which is the direction a capability must
+        // fail in — and the assertion below is what says the reading was refused
+        // rather than measured.
+        let tier = options7.map_or(D3D12_MESH_SHADER_TIER_NOT_SUPPORTED, |answer| {
+            answer.MeshShaderTier
+        });
+        let model = negotiated.map_or(D3D_SHADER_MODEL_NONE, |answer| answer.HighestShaderModel);
+        let verdict = if tier.0 < D3D12_MESH_SHADER_TIER_1.0 {
+            "no mesh tier here — MeshShading and TaskShaderStage can be implemented on this \
+             backend and never proved on this device"
+        } else if model.0 < D3D_SHADER_MODEL_6_6.0 {
+            "a mesh tier with no shader model to load the committed DXIL — crcbl-shaders ships \
+             dxil-model = 6_6, so this device could not run it whatever its hardware can do"
+        } else {
+            "MeshShading and TaskShaderStage are ordinary Unwritten work and are provable on \
+             this device"
+        };
+        println!("{MESH_PROBE}: verdict — {verdict}");
+
+        assert!(
+            refused.is_empty(),
+            "the measurement did not happen: D3D12 refused {refused:?} on {:?}. A refusal is this \
+             Windows runtime saying it has never heard of the query, not the device answering no, \
+             and the two are opposite readings of the log above. A tier reported as NOT_SUPPORTED \
+             is a result and passes; this is a run that asked nothing.",
+            record.info.name,
         );
     }
 }
