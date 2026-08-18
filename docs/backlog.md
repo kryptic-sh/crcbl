@@ -74,7 +74,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Seventeen blockers: dx12 6, Metal 9, WebGPU 2.** That is what stands between
+**Sixteen blockers: dx12 5, Metal 9, WebGPU 2.** That is what stands between
 here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -1220,9 +1220,11 @@ emit a WGSL artifact for this source, and naga refuses it for a missing binding
 decoration. So the validation sweep is not weakened — a shader declaring no wgsl
 target contributes nothing to it, and one that declares it again is caught.
 
-**What this unblocks:** dx12's and Metal's `PushConstants` rows, and the
-re-homing of `crcbl-wgpu`'s push-constant-range exercise, which is one of the
-two coverage losses still standing between here and that crate's deletion.
+**What this unblocked:** dx12's `PushConstants` row is closed; Metal's still
+stands, and its slice is smaller than planned because the block lands behind the
+bound buffer rather than ahead of it. Plus the re-homing of `crcbl-wgpu`'s
+push-constant-range exercise, which is one of the two coverage losses still
+standing between here and that crate's deletion.
 
 ### A divergent index into a push-constant block reads lane 0 on RADV
 
@@ -1327,7 +1329,7 @@ the pending case this capability is defined around is driven by nothing at all.
 ### DECISION NEEDED — what "parity holds" has to mean before `crcbl-wgpu` goes
 
 The stated order is: reach parity, then delete `crcbl-wgpu`. Goal 2 is done and
-gated. Parity is at **17 blockers**, down from 29, and the composition now
+gated. Parity is at **16 blockers**, down from 29, and the composition now
 matters more than the number — because **a strict reading of "all blockers
 closed" is not reachable with the hardware this project has.**
 
