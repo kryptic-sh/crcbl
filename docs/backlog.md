@@ -817,6 +817,39 @@ it has, so the renderer never exercises the path in anger and the seam suite is
 the only thing that does. Not a defect — recorded so the closed coverage gap is
 not read as the engine having started using push constants.
 
+### `TimestampQuery` is driven on render passes only
+
+Both `timestamp_writes: Some(..)` sites in `crates/crcbl/tests/hal_seam_e2e.rs`
+are `begin_render_pass` — the timed pass and the coincident-index refusal. Since
+timestamps moved into the pass descriptor they live on **both** `RenderPassDesc`
+and `ComputePassDesc`, so the capability's surface spans two paths and the
+exercise walks one. Same signature as the push-constant gap that was closed
+today: a capability covering two pipeline types, driven through one.
+
+**Scoped before recording, because it is narrower than that one was:**
+
+- **vk and dx12 share the path.** Both funnel through `open_pass_timestamps(..)`
+  from either pass — `crcbl-vk/src/command.rs` and `crcbl-dx12/src/command.rs`
+  each call it from `begin_render_pass` and `begin_compute_pass` — so a
+  render-pass test does cover the compute arm on those two.
+- **Metal is unaffected.** `refuse_timestamps` refuses on every Mac, so it
+  declares `No` and refuses both kinds.
+- **WebGPU has two encodings.** `crcbl-webgpu`'s `writer.rs` carries a separate
+  `begin_compute_pass` with its own pair of queries over the wire, decoded
+  separately in `web/engine/gpu-replay.js`. A defect in that encoding, its
+  decode, or its `GPUComputePassDescriptor.timestampWrites` construction is
+  invisible today.
+
+So it is one backend's untested path rather than four. Closing it is small — a
+timed compute pass beside the timed render pass in `exercise_timestamp_query`,
+asserting the same "two ticks, ordered, non-zero" claim — and `compute_probe` is
+already the shader every compute exercise uses, so it needs no artifact.
+
+**Worth generalising:** "the capability spans two pipeline types, the exercise
+walks one" has now produced two real findings in a day. It is worth checking
+deliberately whenever a capability's definition mentions neither _graphics_ nor
+_compute_.
+
 ### The doc gate does not cover private items
 
 CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding
