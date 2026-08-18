@@ -69,8 +69,8 @@ use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
     DrawIndirectCount, GraphicsPipelineHandle, HalError, ImageCopy, ImageSubresourceLayers,
-    ImageType, IndexFormat, PipelineLayoutHandle, QuerySetHandle, Rect2d, RenderPassDesc,
-    ShaderStages, Viewport,
+    ImageType, IndexFormat, PassTimestampWrites, PipelineLayoutHandle, QuerySetHandle, Rect2d,
+    RenderPassDesc, ShaderStages, Viewport,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -284,6 +284,29 @@ impl MetalCommandEncoder {
             crcbl_core::log::error!("crcbl-mtl: command recording failed: {error}");
             self.failed = Some(error);
         }
+    }
+
+    /// Refuses a pass that asked for timestamps, and says whether it did.
+    ///
+    /// **A refusal rather than an accepted no-op**, because there is no set
+    /// these could name that a timestamp could go in: this backend reports no
+    /// [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) and
+    /// `Device::create_query_set` refuses the timestamp kind on every Mac, so
+    /// the handle is either dead or an occlusion pool. Dropping it silently
+    /// would leave the caller reading zeros out of a pool nothing wrote and
+    /// reporting them as timings, which is the shape the whole capability model
+    /// exists to prevent. `crcbl_render::PassTimers` never reaches here: it
+    /// gates on the feature bit and builds nothing without it.
+    fn refuse_timestamps(
+        &mut self,
+        what: &'static str,
+        writes: Option<PassTimestampWrites>,
+    ) -> bool {
+        if writes.is_none() {
+            return false;
+        }
+        self.fail(crate::device::timestamp_writes_unsupported(what));
+        true
     }
 
     /// Closes whatever encoder is open, leaving the command buffer ready to
@@ -810,6 +833,9 @@ impl CommandEncoder for MetalCommandEncoder {
             self.fail(HalError::InvalidDescriptor(
                 "begin_render_pass inside a render pass; passes do not nest".to_string(),
             ));
+            return;
+        }
+        if self.refuse_timestamps("begin_render_pass", desc.timestamp_writes) {
             return;
         }
         if desc.color_attachments.is_empty() && desc.depth_stencil_attachment.is_none() {
@@ -1419,6 +1445,9 @@ impl CommandEncoder for MetalCommandEncoder {
             ));
             return;
         }
+        if self.refuse_timestamps("begin_compute_pass", desc.timestamp_writes) {
+            return;
+        }
         // Metal raises on a second encoder, so the copy encoder a preceding
         // upload left open goes first — which is also this backend's barrier.
         self.close_open();
@@ -1606,15 +1635,6 @@ impl CommandEncoder for MetalCommandEncoder {
             ),
             0,
         );
-    }
-
-    fn write_timestamp(&mut self, _set: QuerySetHandle, _index: u32) {
-        // Accepted and dropped, which is exactly what the seam prescribes for a
-        // device without `Features::TIMESTAMP_QUERY` — and this device reports
-        // it absent. The only sets that exist here are occlusion pools, which a
-        // timestamp has nothing to write into anyway; see
-        // `Device::create_query_set` for why the timestamp kind is refused at
-        // creation rather than here.
     }
 
     /// Copies the counts into a caller's buffer, which on Metal is an ordinary

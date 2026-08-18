@@ -113,6 +113,14 @@ const NO_COUNTER_SAMPLED_SET: &str = "a timestamp or pipeline-statistics query s
      (the Metal timestamp slice). The GPU this backend's CI runs on additionally advertises no \
      MTLDevice::counterSets. The occlusion kind is a plain MTLBuffer and is served";
 
+/// The refusal a pass carrying [`PassTimestampWrites`](crcbl_hal::PassTimestampWrites)
+/// gets, carrying [`NO_COUNTER_SAMPLED_SET`] so the pass, the set creation and
+/// the [`Device::supports`] declaration are all one claim.
+pub(crate) fn timestamp_writes_unsupported(what: &'static str) -> HalError {
+    crcbl_core::log::debug!("crcbl-mtl: {what} asked for pass timestamps");
+    unsupported(NO_COUNTER_SAMPLED_SET)
+}
+
 /// Anything the object tables hold, so one lookup helper serves them all.
 pub(crate) trait Owned {
     /// Id of the device that created it, per `crcbl-hal`'s obligation 3.
@@ -2031,22 +2039,18 @@ impl Device for MetalDevice {
     /// * **Metal samples counters at *boundaries*, and which boundaries exist is
     ///   a per-device question.** `MTLDevice::supportsCounterSampling:` takes an
     ///   `MTLCounterSamplingPoint` and answers separately for each — the query
-    ///   would not exist if every device answered yes. The seam's
-    ///   [`write_timestamp`](crcbl_hal::CommandEncoder::write_timestamp) is a
-    ///   free-standing command legal anywhere outside a pass, and the weakest
-    ///   thing a device can offer is a *stage* boundary declared in a pass
-    ///   descriptor **before the pass is created**.
+    ///   would not exist if every device answered yes. The weakest thing a
+    ///   device can offer is a *stage* boundary declared in a pass descriptor
+    ///   **before the pass is created**, which is
+    ///   `MTLRenderPassDescriptor::sampleBufferAttachments`.
     ///
-    ///   That last sentence used to end "which is not somewhere the seam's call
-    ///   can reach", and **that was asserted rather than checked.** Reading the
-    ///   callers says otherwise: `crcbl_hal::null`'s recorder puts
-    ///   `WriteTimestamp` through the same `need_outside` check copies and
-    ///   barriers get, so the seam forbids the call *inside* a pass, and the one
-    ///   caller obeys it — `crcbl_render::timing`'s `pass_begin` and `pass_end`
-    ///   are called by `crcbl_render::graph` immediately before
-    ///   `begin_render_pass` and immediately after `end_render_pass`. A
-    ///   stage-boundary sample is therefore where the seam's timestamps already
-    ///   are, and how much narrowing this costs is open rather than settled.
+    ///   That obstacle is no longer about the seam. The seam asks for exactly
+    ///   two samples, at the boundaries of a pass, named in the pass descriptor
+    ///   — [`PassTimestampWrites`](crcbl_hal::PassTimestampWrites) — because
+    ///   WebGPU's `timestampWrites` is the same shape and Metal's is the reason
+    ///   both were narrowed to it. So a stage-boundary sample is precisely where
+    ///   the seam's timestamps go, and what is left open here is the counter set
+    ///   and the period, not the placement.
     ///
     /// A half-built version would be worse than none: sampling only where the
     /// device happens to support a blit or dispatch boundary gives a profiler HUD
@@ -3169,6 +3173,7 @@ pub(crate) mod tests {
                 }],
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(TARGET.width, TARGET.height),
+                timestamp_writes: None,
             });
             encoder.end_render_pass();
         }
@@ -3925,6 +3930,7 @@ pub(crate) mod tests {
             }],
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(TARGET.width, TARGET.height),
+            timestamp_writes: None,
         });
         encoder.bind_graphics_pipeline(bound_pipeline);
         encoder.bind_group(0, group, &[], bound_layout);
@@ -5444,6 +5450,7 @@ using namespace metal;\n\
         let mut empty = encoder_of();
         empty.begin_compute_pass(&crcbl_hal::ComputePassDesc {
             label: Some("empty compute pass"),
+            timestamp_writes: None,
         });
         empty.end_compute_pass();
         let commands = empty.finish().expect("an empty compute pass records");
@@ -5465,7 +5472,10 @@ using namespace metal;\n\
                 "a dispatch with no pipeline bound",
                 "no compute pipeline bound",
                 |encoder| {
-                    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+                    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+                        label: None,
+                        timestamp_writes: None,
+                    });
                     encoder.dispatch(1, 1, 1);
                     encoder.end_compute_pass();
                 },
@@ -5474,7 +5484,10 @@ using namespace metal;\n\
                 "an indirect dispatch with no pipeline bound",
                 "no compute pipeline bound",
                 |encoder| {
-                    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+                    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+                        label: None,
+                        timestamp_writes: None,
+                    });
                     encoder.dispatch_indirect(Handle::from_bits(1 << 32).expect("generation 1"), 0);
                     encoder.end_compute_pass();
                 },
@@ -5512,7 +5525,10 @@ using namespace metal;\n\
             .create_buffer(&buffer(16, MemoryLocation::HostUpload))
             .expect("a small host buffer");
         let mut copying = encoder_of();
-        copying.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+        copying.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+            label: None,
+            timestamp_writes: None,
+        });
         copying.fill_buffer(scratch, 0, 4, 0);
         copying.end_compute_pass();
         let error = copying
@@ -5525,7 +5541,10 @@ using namespace metal;\n\
         // failure is about the handle, which is only reachable because the
         // encoder exists to bind onto.
         let mut stale = encoder_of();
-        stale.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+        stale.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+            label: None,
+            timestamp_writes: None,
+        });
         stale.bind_compute_pipeline(unissued);
         stale.end_compute_pass();
         let error = stale.finish().expect_err("no device issued that pipeline");
@@ -5608,6 +5627,7 @@ using namespace metal;\n\
                 }],
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(TARGET.width, TARGET.height),
+                timestamp_writes: None,
             });
             encoder.bind_graphics_pipeline(pipeline);
             paint(encoder.as_mut());
@@ -6098,6 +6118,7 @@ using namespace metal;\n\
                 clear: ClearValue::default(),
             }),
             render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
+            timestamp_writes: None,
         });
         encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
         encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));

@@ -175,6 +175,8 @@ pub enum Command {
         depth_stencil_attachment: Option<DepthStencilAttachment>,
         /// Region rendered.
         render_area: Rect2d,
+        /// Timestamps bracketing the pass, if the caller asked for them.
+        timestamp_writes: Option<crate::PassTimestampWrites>,
     },
     /// [`end_render_pass`](crate::CommandEncoder::end_render_pass).
     EndRenderPass,
@@ -256,6 +258,8 @@ pub enum Command {
     BeginComputePass {
         /// Pass label, if the caller gave one.
         label: Option<String>,
+        /// Timestamps bracketing the pass, if the caller asked for them.
+        timestamp_writes: Option<crate::PassTimestampWrites>,
     },
     /// [`end_compute_pass`](crate::CommandEncoder::end_compute_pass).
     EndComputePass,
@@ -283,13 +287,6 @@ pub enum Command {
         set: QuerySetHandle,
         /// Query range.
         range: Range<u32>,
-    },
-    /// [`write_timestamp`](crate::CommandEncoder::write_timestamp).
-    WriteTimestamp {
-        /// Query set.
-        set: QuerySetHandle,
-        /// Query index.
-        index: u32,
     },
     /// [`resolve_query_set`](crate::CommandEncoder::resolve_query_set).
     ResolveQuerySet {
@@ -346,7 +343,6 @@ impl Command {
             Self::Dispatch { .. } => "Dispatch",
             Self::DispatchIndirect { .. } => "DispatchIndirect",
             Self::ResetQuerySet { .. } => "ResetQuerySet",
-            Self::WriteTimestamp { .. } => "WriteTimestamp",
             Self::ResolveQuerySet { .. } => "ResolveQuerySet",
         }
     }
@@ -358,7 +354,7 @@ impl Command {
     pub fn opens_pass(&self) -> Option<(&'static str, Option<&str>)> {
         match self {
             Self::BeginRenderPass { label, .. } => Some(("render", label.as_deref())),
-            Self::BeginComputePass { label } => Some(("compute", label.as_deref())),
+            Self::BeginComputePass { label, .. } => Some(("compute", label.as_deref())),
             _ => None,
         }
     }
@@ -523,6 +519,30 @@ pub enum ValidationError {
         kind: ObjectKind,
         /// Packed handle bits.
         bits: u64,
+    },
+    /// A pass asked for both of its timestamps in the same query.
+    ///
+    /// WebGPU requires `beginningOfPassWriteIndex` and `endOfPassWriteIndex` to
+    /// differ, and a pass that wrote both ends into one query would report the
+    /// second over the first on every other backend — so the pair measures
+    /// nothing wherever it is accepted. See
+    /// [`PassTimestampWrites`](crate::PassTimestampWrites).
+    #[error("`{command}` writes both of its timestamps into query {index}")]
+    CoincidentTimestamps {
+        /// Command name, from [`Command::name`].
+        command: &'static str,
+        /// The query both writes named.
+        index: u32,
+    },
+    /// A pass's timestamp write named a query past the end of its set.
+    #[error("`{command}` writes a timestamp into query {index} of a {count}-query set")]
+    TimestampOutOfRange {
+        /// Command name, from [`Command::name`].
+        command: &'static str,
+        /// The query the pass named.
+        index: u32,
+        /// How many queries the set holds.
+        count: u32,
     },
     /// A command referenced a handle that was never created or has been
     /// destroyed.
@@ -1081,7 +1101,10 @@ mod tests {
             state.insert_owned(ObjectKind::CommandBuffer, 1, None, Detail::None);
         state.events.push(Event::Command {
             command_buffer: cb,
-            command: Command::BeginComputePass { label: None },
+            command: Command::BeginComputePass {
+                label: None,
+                timestamp_writes: None,
+            },
         });
         state.events.push(Event::Command {
             command_buffer: cb,
@@ -1090,6 +1113,7 @@ mod tests {
                 color_attachments: Vec::new(),
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(1, 1),
+                timestamp_writes: None,
             },
         });
         let recorder = Recorder {
@@ -1222,6 +1246,7 @@ mod tests {
                 color_attachments: Vec::new(),
                 depth_stencil_attachment: None,
                 render_area: Rect2d::from_size(1, 1),
+                timestamp_writes: None,
             },
             Command::EndRenderPass,
             Command::SetViewport(Viewport::default()),
@@ -1258,7 +1283,14 @@ mod tests {
             Command::DrawIndexedIndirectCount(indirect_count),
             Command::DrawMeshTasks { x: 1, y: 1, z: 1 },
             Command::DrawMeshTasksIndirect(indirect),
-            Command::BeginComputePass { label: None },
+            Command::BeginComputePass {
+                label: None,
+                timestamp_writes: Some(crate::PassTimestampWrites {
+                    set: handle(),
+                    beginning_of_pass: 0,
+                    end_of_pass: 1,
+                }),
+            },
             Command::EndComputePass,
             Command::BindComputePipeline(handle()),
             Command::Dispatch { x: 1, y: 1, z: 1 },
@@ -1269,10 +1301,6 @@ mod tests {
             Command::ResetQuerySet {
                 set: handle(),
                 range: 0..1,
-            },
-            Command::WriteTimestamp {
-                set: handle(),
-                index: 0,
             },
             Command::ResolveQuerySet {
                 set: handle(),
@@ -1316,7 +1344,6 @@ mod tests {
                 | Command::Dispatch { .. }
                 | Command::DispatchIndirect { .. }
                 | Command::ResetQuerySet { .. }
-                | Command::WriteTimestamp { .. }
                 | Command::ResolveQuerySet { .. } => {}
             }
         }

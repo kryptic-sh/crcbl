@@ -599,6 +599,7 @@ impl CullProbe {
 
         encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
             label: Some("cull"),
+            timestamp_writes: None,
         });
         encoder.bind_compute_pipeline(self.pipeline);
         encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);

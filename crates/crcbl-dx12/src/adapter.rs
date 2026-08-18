@@ -575,8 +575,9 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///
 ///   They waited for the calls rather than for a query, exactly as
 ///   [`Features::COMPUTE`] did. `Device::create_query_set` creates the heap and
-///   the resolve destination behind it, `CommandEncoder::write_timestamp` and
-///   `resolve_query_set` record `EndQuery` and `ResolveQueryData`, and
+///   the resolve destination behind it, `RenderPassDesc::timestamp_writes` and
+///   `CommandEncoder::resolve_query_set` record `EndQuery` and
+///   `ResolveQueryData`, and
 ///   `Device::query_results` reads a set back.
 ///
 ///   **[`Limits::timestamp_period_ns`] is the half an adapter cannot answer**,

@@ -83,7 +83,15 @@ fn out_of_range_query_commands_fail_recording_not_the_driver() {
         label: Some("vk e2e out-of-range timestamp"),
         queue: headless.queue,
     });
-    timestamp.write_timestamp(set, 4);
+    timestamp.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+        label: None,
+        timestamp_writes: Some(crcbl_hal::PassTimestampWrites {
+            set,
+            beginning_of_pass: 3,
+            end_of_pass: 4,
+        }),
+    });
+    timestamp.end_compute_pass();
     let error = timestamp
         .finish()
         .expect_err("an out-of-range timestamp index must fail recording, not the driver");
@@ -101,8 +109,16 @@ fn out_of_range_query_commands_fail_recording_not_the_driver() {
         queue: headless.queue,
     });
     encoder.reset_query_set(set, 0..4);
-    for index in 0..4 {
-        encoder.write_timestamp(set, index);
+    for pair in 0..2 {
+        encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+            label: None,
+            timestamp_writes: Some(crcbl_hal::PassTimestampWrites {
+                set,
+                beginning_of_pass: pair * 2,
+                end_of_pass: pair * 2 + 1,
+            }),
+        });
+        encoder.end_compute_pass();
     }
     encoder.resolve_query_set(set, 0..4, dst, 0);
     let commands = encoder.finish().expect("in-range query recording succeeds");
@@ -151,6 +167,7 @@ fn a_failed_recording_finishes_with_an_error_rather_than_hanging() {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+        timestamp_writes: None,
     });
     // Leave the pass deliberately open so `finish` returns the error
     // rather than a command buffer.

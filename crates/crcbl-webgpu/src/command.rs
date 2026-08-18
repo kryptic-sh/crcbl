@@ -24,10 +24,10 @@ use crcbl_hal::{
     DepthStencilAttachment, DepthStencilState, Extent3d, Features, FilterMode, Format,
     GraphicsPipelineHandle, ImageBarrier, ImageCopy, ImageHandle, ImageSubresourceLayers,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, IndexFormat,
-    MemoryLocation, MultisampleState, Offset3d, PipelineLayoutHandle, PresentMode, PrimitiveState,
-    PushConstantRange, QueryKind, QuerySetHandle, QueueHandle, ReadbackHandle, Rect2d,
-    SamplerAddressMode, SamplerHandle, SemaphoreHandle, SemaphoreSignal, SemaphoreWait,
-    ShaderModuleHandle, ShaderStages, SurfaceHandle, SwapchainHandle, Viewport,
+    MemoryLocation, MultisampleState, Offset3d, PassTimestampWrites, PipelineLayoutHandle,
+    PresentMode, PrimitiveState, PushConstantRange, QueryKind, QuerySetHandle, QueueHandle,
+    ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle, SemaphoreHandle, SemaphoreSignal,
+    SemaphoreWait, ShaderModuleHandle, ShaderStages, SurfaceHandle, SwapchainHandle, Viewport,
 };
 
 /// A command decoded out of a stream buffer.
@@ -540,14 +540,13 @@ pub enum Command {
     /// same one: it names a handle and a descriptor. See
     /// [`CREATE_QUERY_SET_TAG`](crate::tag::CREATE_QUERY_SET_TAG).
     ///
-    /// **Only [`QueryKind::Occlusion`] ever
-    /// reaches a browser through this backend.** `GPUQueryType` is exactly
-    /// `'occlusion'` and `'timestamp'`, and the timestamp one is refused at the
-    /// seam before it is encoded — WebGPU takes timestamps only through a pass's
-    /// `timestampWrites`, so a set this backend created could never be written.
-    /// The other two kinds are still carried on the wire so that a fold between
-    /// them is a decode failure rather than the wrong pool, and the replayer
-    /// refuses each by name.
+    /// **Two of the three kinds reach a browser through this backend.**
+    /// `GPUQueryType` is exactly `'occlusion'` and `'timestamp'`; the timestamp
+    /// one crosses only on a device that opened with the browser's
+    /// `'timestamp-query'` feature, which the seam checks before encoding. The
+    /// statistics kind is still carried on the wire so that a fold between the
+    /// three is a decode failure rather than the wrong pool, and the replayer
+    /// refuses it by name.
     CreateQuerySet {
         /// Id the replayer stores the new object at.
         set: QuerySetHandle,
@@ -721,6 +720,15 @@ pub enum Command {
         depth_stencil_attachment: Option<DepthStencilAttachment>,
         /// Region rendered.
         render_area: Rect2d,
+        /// The two queries this pass is bracketed by, if it is timed.
+        ///
+        /// **The whole of WebGPU's own timestamp shape**, and the reason the
+        /// seam has no free-standing timestamp verb: this becomes
+        /// `GPURenderPassDescriptor.timestampWrites`, whose `querySet`,
+        /// `beginningOfPassWriteIndex` and `endOfPassWriteIndex` are these three
+        /// fields. A presence byte carries the `Option`, as everywhere else on
+        /// this wire.
+        timestamp_writes: Option<PassTimestampWrites>,
     },
     /// [`bind_graphics_pipeline`](crcbl_hal::CommandEncoder::bind_graphics_pipeline).
     BindGraphicsPipeline {
@@ -883,13 +891,18 @@ pub enum Command {
     },
     /// [`begin_compute_pass`](crcbl_hal::CommandEncoder::begin_compute_pass).
     ///
-    /// The whole of [`ComputePassDesc`](crcbl_hal::ComputePassDesc), which is
-    /// **only a label** — compute has no attachments, so the pass exists to name
-    /// a timestamp boundary and nothing more. On the implicit-current encoder,
-    /// exactly as [`BeginRenderPass`](Self::BeginRenderPass) is.
+    /// The whole of [`ComputePassDesc`](crcbl_hal::ComputePassDesc), which is a
+    /// label and a timestamp pair — compute has no attachments, so naming a
+    /// timestamp boundary is most of what the pass is for. On the
+    /// implicit-current encoder, exactly as
+    /// [`BeginRenderPass`](Self::BeginRenderPass) is.
     BeginComputePass {
         /// Pass label, if the caller gave one.
         label: Option<String>,
+        /// The two queries this pass is bracketed by, if it is timed; see
+        /// [`BeginRenderPass`](Self::BeginRenderPass). It becomes
+        /// `GPUComputePassDescriptor.timestampWrites`.
+        timestamp_writes: Option<PassTimestampWrites>,
     },
     /// [`bind_compute_pipeline`](crcbl_hal::CommandEncoder::bind_compute_pipeline).
     BindComputePipeline {

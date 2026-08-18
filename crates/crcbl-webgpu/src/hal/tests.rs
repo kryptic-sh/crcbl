@@ -15,8 +15,8 @@ use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
     CompositeAlpha, Device, DeviceCaps, DeviceDesc, DeviceType, Features, Format, HalError,
-    Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QuerySetHandle, QueueKind,
-    ReadbackDesc, ReadbackState, SubmitInfo, SurfaceCaps,
+    Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc,
+    ReadbackState, SubmitInfo, SurfaceCaps,
 };
 
 use crate::ReplyWriter;
@@ -789,16 +789,16 @@ fn finish_fails_loudly_after_recording_an_unwired_op() {
         .expect("the graphics queue");
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
 
-    // `write_timestamp` has no stream command yet; recording it must make finish
-    // refuse rather than replay a command buffer missing the write.
-    let set = QuerySetHandle::from_bits(1 << 32).expect("generation 1 is not zero");
-    encoder.write_timestamp(set, 0);
+    // `draw_mesh_tasks` has no stream command and never will — WebGPU has no
+    // mesh stage — so recording it must make finish refuse rather than replay a
+    // command buffer missing the draw.
+    encoder.draw_mesh_tasks(1, 1, 1);
     let Err(HalError::Unsupported { what, .. }) = encoder.finish() else {
         panic!("finish must refuse a recorded unwired op");
     };
     assert!(
-        what.contains("write_timestamp"),
-        "the error names the op: {what}"
+        what.contains("mesh"),
+        "the error names what is missing: {what}"
     );
 }
 
@@ -905,7 +905,10 @@ fn dispatch_indirect_encodes_rather_than_refusing_at_finish() {
     let args: BufferHandle = Handle::from_bits((7 << 32) | 5).expect("a real handle");
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
 
-    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+        label: None,
+        timestamp_writes: None,
+    });
     encoder.dispatch_indirect(args, 256);
     encoder.end_compute_pass();
     encoder
@@ -962,77 +965,80 @@ fn needed_but_unwired_device_methods_refuse_loudly() {
 
 // ── the query spine ────────────────────────────────────────────────────────
 
-/// **The timestamp kind must stay refused, and this is the guard on the whole
-/// demo site.**
+/// **The timestamp kind is gated on the browser's feature, and this is the
+/// guard on the whole demo site.**
 ///
 /// `crcbl-render`'s `PassTimers::new` decides whether to time a frame from
 /// [`Features::TIMESTAMP_QUERY`] on the device's caps and from
-/// `create_query_set` succeeding — nothing else. This backend reports that flag
-/// whenever the browser does, because the engine asks for it optionally and
-/// `timestamp-query` is a real `GPUFeatureName`, so `create_query_set` is the
-/// only thing standing between a browser with timestamps and a
-/// `write_timestamp` in every frame — which
-/// [`finish`](crcbl_hal::CommandEncoder::finish) refuses a whole command buffer
-/// over.
+/// `create_query_set` succeeding — nothing else. Both must answer the same
+/// question: a set handed out on a device that opened without
+/// `'timestamp-query'` would put a `timestampWrites` into every frame that the
+/// browser then refuses pass by pass, and one refused on a device that *has* the
+/// feature would leave the profiler blank for no reason.
 ///
-/// **What turns it red.** `create_query_set` accepting `Timestamp`. The caps
-/// here carry the flag deliberately, so this is the arrangement the failure
-/// would actually happen in rather than one where the device could not have
-/// asked.
+/// **What turns it red.** `create_query_set` refusing `Timestamp` on the
+/// device that carries the flag, accepting it on the one that does not, or
+/// either arrangement disagreeing with what `supports` declares. The statistics
+/// kind is refused on both, because `GPUQueryType` has no such member.
 #[test]
-fn a_timestamp_set_is_refused_even_on_a_device_that_reports_the_feature() {
-    use crcbl_hal::{QueryKind, QuerySetDesc};
+fn a_timestamp_set_follows_the_feature_the_device_opened_with() {
+    use crcbl_hal::{Capability, QueryKind, QuerySetDesc, Support};
 
-    let channel = SharedChannel::new();
-    let device = WebGpuDevice::new(
-        channel.clone(),
-        DeviceCaps {
-            features: Features::COMPUTE | Features::TIMESTAMP_QUERY,
-            limits: crcbl_hal::Limits::minimum(),
-        },
-        HandlePool::new(),
-    );
-    assert!(
-        device.caps().features.contains(Features::TIMESTAMP_QUERY),
-        "this test is only meaningful on a device that reports the feature"
-    );
+    for features in [
+        Features::COMPUTE | Features::TIMESTAMP_QUERY,
+        Features::COMPUTE,
+    ] {
+        let timestamps = features.contains(Features::TIMESTAMP_QUERY);
+        let channel = SharedChannel::new();
+        let device = WebGpuDevice::new(
+            channel.clone(),
+            DeviceCaps {
+                features,
+                limits: crcbl_hal::Limits::minimum(),
+            },
+            HandlePool::new(),
+        );
 
-    let refused = device.create_query_set(&QuerySetDesc {
-        label: Some("graph pass timers"),
-        kind: QueryKind::Timestamp,
-        count: 2,
-    });
-    assert!(
-        matches!(
-            refused,
-            Err(HalError::Unsupported {
-                backend: BackendKind::WebGpu,
-                ..
-            })
-        ),
-        "a timestamp set must be refused however capable the device is: {refused:?}"
-    );
-    assert!(
-        matches!(
-            device.create_query_set(&QuerySetDesc {
-                label: None,
-                kind: QueryKind::PipelineStatistics,
-                count: 2,
-            }),
-            Err(HalError::Unsupported { .. })
-        ),
-        "GPUQueryType has no statistics member"
-    );
-    // And nothing was put on the stream by either refusal: a command encoded for
-    // a set the caller never got back would create a pool nothing releases.
-    let commands = channel
-        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
-        .expect("the channel is not borrowed")
-        .expect("the writer's own bytes decode");
-    assert!(
-        commands.is_empty(),
-        "a refused create_query_set encodes nothing: {commands:?}"
-    );
+        let created = device.create_query_set(&QuerySetDesc {
+            label: Some("graph pass timers"),
+            kind: QueryKind::Timestamp,
+            count: 2,
+        });
+        assert_eq!(
+            created.is_ok(),
+            timestamps,
+            "a timestamp set follows the feature and nothing else: {created:?}"
+        );
+        assert_eq!(
+            matches!(device.supports(Capability::TimestampQuery), Support::Yes),
+            timestamps,
+            "the declaration and the refusal are one answer"
+        );
+        assert!(
+            matches!(
+                device.create_query_set(&QuerySetDesc {
+                    label: None,
+                    kind: QueryKind::PipelineStatistics,
+                    count: 2,
+                }),
+                Err(HalError::Unsupported { .. })
+            ),
+            "GPUQueryType has no statistics member"
+        );
+
+        // Nothing reached the stream for the refusals: a command encoded for a
+        // set the caller never got back would create a pool nothing releases.
+        // The accepted one encodes exactly its own creation.
+        let commands = channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode");
+        assert_eq!(
+            commands.len(),
+            usize::from(timestamps),
+            "only the accepted set encodes: {commands:?}"
+        );
+    }
 }
 
 /// **An occlusion set is created, recorded against, read and released — the
@@ -1068,7 +1074,7 @@ fn the_occlusion_query_spine_reaches_the_stream() {
     encoder.resolve_query_set(set, 2..5, dst, 256);
     encoder
         .finish()
-        .expect("every query verb but write_timestamp is wired, so finish succeeds");
+        .expect("every query verb is wired, so finish succeeds");
     device.destroy_query_set(set);
 
     let commands = channel

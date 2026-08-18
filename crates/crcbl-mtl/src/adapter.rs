@@ -499,22 +499,16 @@ mod tests {
     /// `MTLCounterSampleBufferDescriptor` plus the encoders'
     /// `sampleCountersInBuffer:atSampleIndex:withBarrier:`.
     ///
-    /// A device that answers yes only at `AtStageBoundary` is still very
-    /// probably enough, and that is worth stating precisely because it looks
-    /// like a narrowing and may not be one. Metal's stage-boundary sampling is
-    /// requested through a pass descriptor's `sampleBufferAttachments`, so it
-    /// samples where an encoder opens and closes — and **every**
-    /// [`write_timestamp`](crcbl_hal::CommandEncoder::write_timestamp) call in
-    /// this repository is already outside every pass. The seam's scope rules
-    /// require it (`crcbl_hal::null`'s recorder routes `WriteTimestamp` through
-    /// its `need_outside` check, which is the same check copies and barriers
-    /// get), and the one caller obeys it: `crcbl_render::timing`'s `pass_begin`
-    /// and `pass_end` are called by `crcbl_render::graph` immediately before
-    /// `begin_render_pass` and immediately after `end_render_pass`. So a
-    /// backend-opened encoder at a stage boundary is a legal place to put the
-    /// timestamp the seam asked for, and the narrowing may cost nothing. If the
-    /// device answers yes *nowhere*, the honest outcome is narrowing the
-    /// capability rather than implementing it.
+    /// A device that answers yes only at `AtStageBoundary` is **enough**, and
+    /// that is worth stating precisely because it looks like a narrowing and is
+    /// not one. Metal's stage-boundary sampling is requested through a pass
+    /// descriptor's `sampleBufferAttachments`, so it samples where an encoder
+    /// opens and closes — and that is the only place the seam asks for a
+    /// timestamp at all: the two queries are named by
+    /// [`PassTimestampWrites`](crcbl_hal::PassTimestampWrites) on
+    /// `RenderPassDesc`/`ComputePassDesc`, and there is no free-standing write
+    /// left to place anywhere else. If the device answers yes *nowhere*, the
+    /// honest outcome is narrowing the capability rather than implementing it.
     ///
     /// **`counterSets`.** The `PipelineStatisticsQuery` row turns on whether
     /// this device advertises `MTLCommonCounterSetStatistic` at all, and on

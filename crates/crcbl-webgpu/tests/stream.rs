@@ -15,10 +15,11 @@ use crcbl_hal::{
     CommandEncoderDesc, CompareOp, ComputePipelineDesc, CullMode, DepthBias, DepthStencilState,
     DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
     ImageAspect, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewDesc, ImageViewType, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc,
-    PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, ReadbackDesc, SampleType,
-    SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StencilFaceState, StencilOp, StencilState, SubmitInfo,
+    ImageViewDesc, ImageViewType, MemoryLocation, MultisampleState, Offset3d, PassTimestampWrites,
+    PipelineLayoutDesc, PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange,
+    ReadbackDesc, SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp, StencilState,
+    SubmitInfo,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -1367,6 +1368,100 @@ fn a_binding_resource_code_no_variant_claims_is_refused_rather_than_folded_into_
                 code: code.into(),
             }),
             "code {code:#04x}"
+        );
+    }
+}
+
+/// **A timed pass is not an untimed one**, and the two query indices do not
+/// swap.
+///
+/// The trap this guards is the one the whole reshape exists for: a pass whose
+/// `timestampWrites` were dropped on the wire replays as a pass that runs and
+/// measures nothing, and a profiler then reads two zeros out of a set nobody
+/// wrote and reports them as a duration. Both pass commands carry the field, so
+/// both are checked here — a copy-paste that encoded it on one and not the other
+/// would leave every compute pass untimed with nothing else noticing.
+///
+/// The indices go over in declaration order, and they are asserted apart:
+/// `beginning_of_pass` and `end_of_pass` are two `u32` in a row, so a
+/// transposition is invisible to any test that used the same number twice.
+#[test]
+fn a_timed_pass_is_distinguishable_from_an_untimed_one_on_both_pass_commands() {
+    let writes = PassTimestampWrites {
+        set: handle(41, 42),
+        beginning_of_pass: 6,
+        end_of_pass: 19,
+    };
+    let render = |timestamp_writes| {
+        let mut stream = StreamWriter::new();
+        stream.begin_render_pass(&crcbl_hal::RenderPassDesc {
+            label: None,
+            color_attachments: &[],
+            depth_stencil_attachment: None,
+            render_area: crcbl_hal::Rect2d::from_size(4, 4),
+            timestamp_writes,
+        });
+        stream
+    };
+    let compute = |timestamp_writes| {
+        let mut stream = StreamWriter::new();
+        stream.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+            label: None,
+            timestamp_writes,
+        });
+        stream
+    };
+
+    for (what, build) in [
+        ("BeginRenderPass", &render as &dyn Fn(_) -> StreamWriter),
+        ("BeginComputePass", &compute),
+    ] {
+        let absent = build(None);
+        let present = build(Some(writes));
+        assert_ne!(absent.bytes(), present.bytes(), "{what}");
+        // The set and the two indices, and nothing else: an absent field is the
+        // presence byte alone.
+        assert_eq!(
+            absent.bytes().len() + 8 + 4 + 4,
+            present.bytes().len(),
+            "{what}"
+        );
+
+        let absent = decode_stream(absent.bytes()).expect("a stream this crate wrote decodes");
+        let present = decode_stream(present.bytes()).expect("a stream this crate wrote decodes");
+        let read = |command: &Command| match command {
+            Command::BeginRenderPass {
+                timestamp_writes, ..
+            }
+            | Command::BeginComputePass {
+                timestamp_writes, ..
+            } => *timestamp_writes,
+            other => panic!("{what}: expected a pass, got {other:?}"),
+        };
+        assert_eq!(read(&absent[0]), None, "{what}");
+        assert_eq!(read(&present[0]), Some(writes), "{what}");
+        // Not merely `Some`: the two indices arrive the way round they were
+        // written, which is what a report of a negative duration would be.
+        let Some(back) = read(&present[0]) else {
+            unreachable!("just asserted Some")
+        };
+        assert_eq!(back.beginning_of_pass, 6, "{what}");
+        assert_eq!(back.end_of_pass, 19, "{what}");
+
+        // A byte that is neither presence value is refused rather than read as
+        // truthy. The presence byte is the last byte of an untimed pass's body.
+        let mut wire = build(None).bytes().to_vec();
+        let presence_at = wire.len() - 1;
+        wire[presence_at] = 2;
+        let field = if what == "BeginRenderPass" {
+            "RenderPassDesc::timestamp_writes"
+        } else {
+            "ComputePassDesc::timestamp_writes"
+        };
+        assert_eq!(
+            decode_stream(&wire),
+            Err(DecodeError::InvalidEnum { field, code: 2 }),
+            "{what}"
         );
     }
 }

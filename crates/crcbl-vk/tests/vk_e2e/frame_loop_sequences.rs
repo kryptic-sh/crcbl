@@ -112,6 +112,7 @@ fn a_read_only_depth_pass_uses_the_read_only_layout() {
             clear: ClearValue::default(),
         }),
         render_area: Rect2d::from_size(EXTENT.0, EXTENT.1),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
 
@@ -147,6 +148,7 @@ fn a_read_only_depth_pass_uses_the_read_only_layout() {
             clear: ClearValue::default(),
         }),
         render_area: Rect2d::from_size(EXTENT.0, EXTENT.1),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
 
@@ -405,6 +407,7 @@ fn a_reconfigure_between_acquire_and_present_is_survivable() {
             }],
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(1, 1),
+            timestamp_writes: None,
         });
         encoder.end_render_pass();
         let error = encoder

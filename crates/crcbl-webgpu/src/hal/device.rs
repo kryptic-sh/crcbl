@@ -228,25 +228,21 @@ impl ErrorQueue {
     }
 }
 
-/// WebGPU's answer for [`Capability::TimestampQuery`], shared by
-/// [`WebGpuDevice::create_query_set`]'s refusal and the device's declaration so
-/// the two cannot drift.
+/// Why a [`QueryKind::Timestamp`] set is refused on a device that has no
+/// `'timestamp-query'`, shared by [`WebGpuDevice::create_query_set`]'s refusal
+/// and the device's declaration so the two cannot drift.
 ///
-/// **The one refusal in this slice that is load-bearing rather than
-/// descriptive.** `crcbl-render`'s `PassTimers::new` gates on the device
-/// reporting [`Features::TIMESTAMP_QUERY`] — which this backend does report,
-/// because the engine asks for it optionally and `timestamp-query` is a real
-/// `GPUFeatureName` — and then creates a set. If that succeeded, every frame
-/// would record `reset_query_set` and `write_timestamp`, and
-/// [`finish`](CommandEncoder::finish) refuses a whole command buffer that
-/// reached an unwired op. So the refusal here is what keeps the demos rendering,
-/// and it is a refusal by name rather than an absence.
-pub(super) const NO_TIMESTAMP_SET: &str = "WebGPU takes timestamps only through a render or compute pass's timestampWrites, and the \
-     seam's write_timestamp is an arbitrary point in the command stream — so a timestamp set this \
-     backend created could never be written";
+/// **The refusal is load-bearing rather than descriptive.** `crcbl-render`'s
+/// `PassTimers::new` gates on the device reporting
+/// [`Features::TIMESTAMP_QUERY`] and then creates a set; a set handed out
+/// without the feature would put `timestampWrites` into every frame of every
+/// demo, and the browser would refuse each pass. Gating both on the same flag is
+/// what makes "the timers are off" and "the set cannot be created" one answer.
+pub(super) const NO_TIMESTAMP_FEATURE: &str = "a GPUQuerySet of type 'timestamp' needs the browser's 'timestamp-query' feature, and this \
+     device opened without it";
 
 /// WebGPU's answer for [`Capability::PipelineStatisticsQuery`], shared for
-/// [`NO_TIMESTAMP_SET`]'s reason.
+/// [`NO_TIMESTAMP_FEATURE`]'s reason.
 pub(super) const NO_STATISTICS_SET: &str = "GPUQueryType is exactly 'occlusion' and 'timestamp', so there is no pipeline-statistics query \
      set for WebGPU to create";
 
@@ -308,9 +304,9 @@ pub struct WebGpuDevice {
     /// The seam documents [`HalError::InvalidDescriptor`] for a
     /// [`query_results`](Device::query_results) range that exceeds the set, and
     /// that is decidable here rather than a frame away: the browser is not
-    /// needed to know how big a set this device asked for. Every entry is an
-    /// occlusion set — [`create_query_set`](Device::create_query_set) refuses
-    /// the other two kinds — so no kind is stored beside the count.
+    /// needed to know how big a set this device asked for. The kind is not
+    /// stored beside the count because nothing here asks it: both kinds this
+    /// backend creates read back as one `u64` per query.
     query_sets: Mutex<HashMap<u64, u32>>,
     /// One [`QueryReadQueue`] per set a read has been asked of, keyed by handle
     /// bits.
@@ -527,7 +523,21 @@ impl Device for WebGpuDevice {
                 Features::SAMPLER_ANISOTROPY,
                 "this device reports no SAMPLER_ANISOTROPY",
             ),
-            Capability::TimestampQuery => Support::No(NO_TIMESTAMP_SET),
+            // **A device question, not a constant.** `'timestamp-query'` is a
+            // real `GPUFeatureName` and a browser may not have it, so this is
+            // the flag the device actually opened with — the same gate
+            // `create_query_set` applies, so a `Yes` here and a set that would
+            // be refused cannot both happen. What the `Yes` claims is the whole
+            // of the capability: a `GPUQuerySet` of type `'timestamp'`, the two
+            // queries a pass names through
+            // `GPURenderPassDescriptor.timestampWrites`, and `query_results`
+            // reading them back. Probe group AF is what holds it to a value —
+            // the native seam suite is a native binary and cannot open this
+            // backend.
+            Capability::TimestampQuery => gated(
+                Features::TIMESTAMP_QUERY,
+                "this device reports no TIMESTAMP_QUERY, so the browser has no 'timestamp-query'                  feature and no GPUQuerySet of that type could be created",
+            ),
             // **And this claims exactly what the capability defines and no
             // more.** `Capability::OcclusionQuery` is "a QueryKind::Occlusion
             // query set" — `crcbl_hal::CommandEncoder` has no begin/end query
@@ -885,37 +895,38 @@ impl Device for WebGpuDevice {
 
     // --- queries ---
 
-    /// Creates an **occlusion** query set, and refuses the other two kinds by
-    /// name.
+    /// Creates an **occlusion** or **timestamp** query set, and refuses the
+    /// statistics kind by name.
     ///
-    /// `GPUQuerySet` is core WebGPU for `'occlusion'`: no `GPUFeatureName` gates
-    /// it, so every device this backend can open serves it. The two refusals
-    /// carry `NO_TIMESTAMP_SET` and `NO_STATISTICS_SET`, the same sentences
-    /// [`supports`](Device::supports) declares, so a refusal and a declaration
-    /// cannot drift.
+    /// `GPUQueryType` is exactly `'occlusion'` and `'timestamp'`. The first
+    /// needs no `GPUFeatureName`, so every device this backend can open serves
+    /// it; the second needs `'timestamp-query'`, which is why it is gated on the
+    /// flag this device actually opened with. Both refusals carry the same
+    /// sentences [`supports`](Device::supports) declares —
+    /// `NO_TIMESTAMP_FEATURE` and `NO_STATISTICS_SET` — so a refusal and a
+    /// declaration cannot drift.
     ///
-    /// **Refusing the timestamp kind is what keeps a frame recordable.** See
-    /// `NO_TIMESTAMP_SET` for the chain: this backend reports
-    /// [`Features::TIMESTAMP_QUERY`] when the browser does, and
-    /// `crcbl-render`'s `PassTimers` builds itself on that flag alone — so an
-    /// accepted timestamp set would put a `write_timestamp` into every frame,
-    /// and [`finish`](CommandEncoder::finish) refuses the whole command buffer
-    /// over one.
+    /// **The gate is what keeps a frame recordable.** `crcbl-render`'s
+    /// `PassTimers` builds itself on [`Features::TIMESTAMP_QUERY`] alone, so a
+    /// set handed out on a device without it would put `timestampWrites` into
+    /// every frame that the browser would then refuse pass by pass.
     ///
     /// # Errors
     ///
-    /// [`HalError::Unsupported`] for [`QueryKind::Timestamp`] and
-    /// [`QueryKind::PipelineStatistics`], and
+    /// [`HalError::Unsupported`] for [`QueryKind::PipelineStatistics`] and for
+    /// [`QueryKind::Timestamp`] without the feature, and
     /// [`HalError::InvalidDescriptor`] for a set of no queries — WebGPU's
     /// `GPUQuerySetDescriptor.count` has a minimum of one, and a zero-length set
     /// accepted here would be a handle whose every read is out of range.
     fn create_query_set(&self, desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
         match desc.kind {
             QueryKind::Timestamp => {
-                return Err(HalError::Unsupported {
-                    backend: BackendKind::WebGpu,
-                    what: NO_TIMESTAMP_SET,
-                });
+                if !self.caps.features.contains(Features::TIMESTAMP_QUERY) {
+                    return Err(HalError::Unsupported {
+                        backend: BackendKind::WebGpu,
+                        what: NO_TIMESTAMP_FEATURE,
+                    });
+                }
             }
             QueryKind::PipelineStatistics => {
                 return Err(HalError::Unsupported {

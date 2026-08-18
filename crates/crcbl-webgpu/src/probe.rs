@@ -116,6 +116,11 @@
 //! | [`__crcbl_web_gpu_probe_occlusion_values_state`](shim::__crcbl_web_gpu_probe_occlusion_values_state) | `() -> i32` | Drain, and answer one of the `OCCLUSION_VALUES_*` codes — where the **direct read** has got to. |
 //! | [`__crcbl_web_gpu_probe_occlusion_values_ptr`](shim::__crcbl_web_gpu_probe_occlusion_values_ptr) | `() -> i32` | Where that read's values start, one little-endian `u64` per query. |
 //! | [`__crcbl_web_gpu_probe_occlusion_values_len`](shim::__crcbl_web_gpu_probe_occlusion_values_len) | `() -> i32` | How many bytes there are. **Zero is a failed read**, not an empty success. |
+//! | [`__crcbl_web_gpu_probe_timestamp_supported`](shim::__crcbl_web_gpu_probe_timestamp_supported) | `() -> i32` | Whether the opened device has the browser's `timestamp-query`, as `1` or `0`. Read this before asking. |
+//! | [`__crcbl_web_gpu_probe_timestamp`](shim::__crcbl_web_gpu_probe_timestamp) | `() -> i32` | Encode a compute pass whose descriptor names two timestamp queries, submit it, and ask for both values. |
+//! | [`__crcbl_web_gpu_probe_timestamp_state`](shim::__crcbl_web_gpu_probe_timestamp_state) | `() -> i32` | Drain, and answer one of the `TIMESTAMP_*` codes. |
+//! | [`__crcbl_web_gpu_probe_timestamp_ptr`](shim::__crcbl_web_gpu_probe_timestamp_ptr) | `() -> i32` | Where the two ticks start, as little-endian `u64`. |
+//! | [`__crcbl_web_gpu_probe_timestamp_len`](shim::__crcbl_web_gpu_probe_timestamp_len) | `() -> i32` | How many bytes there are. **Zero is a failed read**, and two zero values are a pass nothing timed. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -142,15 +147,24 @@
 //! # The device this asks for, and why it asks for so little
 //!
 //! [`probe_device_desc`] requires [`Features::COMPUTE`](crcbl_hal::Features::COMPUTE)
-//! — core WebGPU, so every browser can satisfy it — and asks for **nothing
-//! optional**. That is not timidity: it is what makes the answer checkable. A
-//! device opened with no optional features and no requested limits is the
-//! specification's own default, so the page can open a second one for itself
-//! and compare, and the result differs from the *adapter's* capabilities on any
-//! machine whose adapter reports more than the floor. A request that asked for
-//! everything the adapter had would produce a device whose capabilities equal
-//! the adapter's, and a backend that reported the adapter's record for its
-//! device would then pass.
+//! — core WebGPU, so every browser can satisfy it — and asks for **one optional
+//! feature and no more**. The parsimony is not timidity: it is what makes the
+//! answer checkable. A device opened with nearly nothing is one the page can
+//! open a second time for itself and compare against, and its capabilities
+//! differ from the *adapter's* on any machine whose adapter reports more than
+//! what was asked for. A request that asked for everything the adapter had would
+//! produce a device whose capabilities equal the adapter's, and a backend that
+//! reported the adapter's record for its device would then pass.
+//!
+//! The one exception is
+//! [`TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY), and it is asked
+//! for because without it there is nothing to observe: a `GPUQuerySet` of type
+//! `'timestamp'` needs the browser's `timestamp-query`, so a device that did not
+//! ask could not create one and group AF would have no claim to hold. It is
+//! *optional* rather than required, so a browser without it still opens a device
+//! and the probe reports [`TIMESTAMP_UNSUPPORTED`] with a reason rather than
+//! failing to start. `web/tools/probe-groups.mjs` opens its reference device
+//! with the same request, so the two are compared like for like.
 //!
 //! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) is
 //! deliberately *not* what this uses: it requires
@@ -377,9 +391,9 @@ use crcbl_hal::{
     GraphicsPipelineHandle, ImageAspect, ImageCopy, ImageDesc, ImageHandle, ImageSubresourceLayers,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
     IndexFormat, LoadOp, MemoryLocation, MultisampleState, Offset3d, ParityVerdict,
-    PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PresentInfo, PresentMode,
-    PrimitiveState, PrimitiveTopology, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle,
-    ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, ResourceState, SampleType,
+    PassTimestampWrites, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PresentInfo,
+    PresentMode, PrimitiveState, PrimitiveTopology, QueryKind, QuerySetDesc, QuerySetHandle,
+    QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, ResourceState, SampleType,
     SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
     ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle,
     SwapchainDesc, SwapchainHandle, divergence, parity_verdict,
@@ -762,6 +776,37 @@ pub const OCCLUSION_VALUES_WAITING: u32 = 1;
 /// — see [`Command::QueryResults`](crate::Command::QueryResults).
 pub const OCCLUSION_VALUES_READY: u32 = 2;
 
+/// Nothing has asked for a pass's timestamps, or there is no channel to ask
+/// through.
+pub const TIMESTAMP_UNASKED: u32 = 0;
+/// The setup frame — a two-query timestamp set, an encoder that resets it and
+/// opens a compute pass naming both queries in its descriptor, the submit, and
+/// the [`query_results`](crate::StreamWriter::query_results) ask that reads them
+/// — is on the stream, and its [`Reply::QueryResults`] has not arrived.
+///
+/// **No poll, for [`OCCLUSION_VALUES_WAITING`]'s reason**: the replayer answers
+/// when its own map settles.
+pub const TIMESTAMP_WAITING: u32 = 1;
+/// The values are in. [`shim::__crcbl_web_gpu_probe_timestamp_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_timestamp_len`] carry them — two little-endian
+/// `u64`, the tick the pass opened at and the tick it closed at.
+///
+/// **An empty list means the read failed**, exactly as it does for
+/// [`OCCLUSION_VALUES_READY`], and **two zeros mean the pass was accepted and
+/// not timed**: an unwritten query resolves to zero by specification, so a
+/// browser that took the descriptor and wrote nothing reads back as zeros. That
+/// is the outcome this whole capability was refused over until the seam's
+/// timestamps moved into the pass descriptor, so it is the outcome group AF
+/// asserts against.
+pub const TIMESTAMP_READY: u32 = 2;
+/// The **device** opened without the browser's `timestamp-query` feature, so
+/// nothing was encoded: no `GPUQuerySet` of type `'timestamp'` could exist, and
+/// a frame that made an occlusion set instead would pass while proving nothing.
+/// [`MSAA_UNSUPPORTED`]'s shape, and
+/// [`shim::__crcbl_web_gpu_probe_timestamp_supported`] is what the device
+/// reported.
+pub const TIMESTAMP_UNSUPPORTED: u32 = 3;
+
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
 pub const PARITY_UNASKED: u32 = 0;
@@ -894,16 +939,17 @@ pub const fn probe_readback_copy() -> BufferImageCopy {
 /// The descriptor [`shim::__crcbl_web_gpu_probe_device`] asks with.
 ///
 /// Requires only [`Features::COMPUTE`], which core WebGPU grants with no
-/// `GPUFeatureName` behind it, and asks for nothing optional — see the [module
-/// docs](self#the-device-this-asks-for-and-why-it-asks-for-so-little) for why
-/// the emptiness is the point rather than a placeholder.
+/// `GPUFeatureName` behind it, and asks for exactly one optional feature — see
+/// the [module docs](self#the-device-this-asks-for-and-why-it-asks-for-so-little)
+/// for why the parsimony is the point rather than a placeholder, and why
+/// [`Features::TIMESTAMP_QUERY`] is the exception.
 #[must_use]
 pub const fn probe_device_desc(adapter: AdapterId) -> DeviceDesc<'static> {
     DeviceDesc {
         label: Some("crcbl-webgpu probe"),
         adapter,
         required_features: Features::COMPUTE,
-        optional_features: Features::empty(),
+        optional_features: Features::TIMESTAMP_QUERY,
         compatible_surface: None,
     }
 }
@@ -4363,6 +4409,75 @@ pub const PROBE_OCCLUSION_COMMAND_BUFFER: CommandBufferHandle =
         None => panic!("generation 11 is not zero"),
     };
 
+/// Queries the timestamp probe's set holds: one for each boundary of one pass.
+///
+/// Two, because that is what a pass takes and what the seam's
+/// [`PassTimestampWrites`] names. A larger set would leave unwritten queries
+/// beside the written ones, and "unwritten resolves to zero" is precisely the
+/// value this probe reads a failure as — so every query in this set is one the
+/// pass was asked to write.
+pub const PROBE_TIMESTAMP_QUERIES: u32 = 2;
+
+/// The timestamp set the probe creates, times a pass with, and reads. `12 << 32`.
+pub const PROBE_TIMESTAMP_SET: QuerySetHandle = match QuerySetHandle::from_bits(12 << 32) {
+    Some(set) => set,
+    None => panic!("generation 12 is not zero"),
+};
+
+/// The set's descriptor: [`QueryKind::Timestamp`], the kind that needs the
+/// browser's `timestamp-query` feature, at [`PROBE_TIMESTAMP_QUERIES`] queries.
+#[must_use]
+pub const fn probe_timestamp_set_desc() -> QuerySetDesc<'static> {
+    QuerySetDesc {
+        label: Some("crcbl-webgpu timestamp set"),
+        kind: QueryKind::Timestamp,
+        count: PROBE_TIMESTAMP_QUERIES,
+    }
+}
+
+/// The two queries the timed pass names, in its descriptor.
+///
+/// **The whole of what this probe is about.** WebGPU takes a timestamp nowhere
+/// else, which is why the seam has no free-standing write left; these three
+/// fields become `GPUComputePassDescriptor.timestampWrites`' `querySet`,
+/// `beginningOfPassWriteIndex` and `endOfPassWriteIndex`.
+#[must_use]
+pub const fn probe_timestamp_writes() -> PassTimestampWrites {
+    PassTimestampWrites {
+        set: PROBE_TIMESTAMP_SET,
+        beginning_of_pass: 0,
+        end_of_pass: 1,
+    }
+}
+
+/// The pass the two timestamps bracket.
+///
+/// **Empty on purpose**: a compute pass with no pipeline and no dispatch is a
+/// legal WebGPU pass, and what this probe is measuring is whether the browser
+/// writes the two queries at all — not how long anything took. A pass with work
+/// in it would need a pipeline, a layout and a shader, none of which the claim
+/// needs, and the timings a browser reports are quantised anyway.
+#[must_use]
+pub const fn probe_timestamp_pass_desc() -> ComputePassDesc<'static> {
+    ComputePassDesc {
+        label: Some("crcbl-webgpu timed pass"),
+        timestamp_writes: Some(probe_timestamp_writes()),
+    }
+}
+
+/// The queue the timestamp probe names in its command encoder. `12 << 32`.
+pub const PROBE_TIMESTAMP_QUEUE: QueueHandle = match QueueHandle::from_bits(12 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 12 is not zero"),
+};
+
+/// The command buffer the timestamp probe finishes its encoder into. `12 << 32`.
+pub const PROBE_TIMESTAMP_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(12 << 32) {
+        Some(buffer) => buffer,
+        None => panic!("generation 12 is not zero"),
+    };
+
 /// The in-flight readback the occlusion probe requests and polls. `11 << 32`.
 pub const PROBE_OCCLUSION_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(11 << 32) {
     Some(readback) => readback,
@@ -5320,6 +5435,73 @@ impl OcclusionValuesProbe {
     }
 }
 
+/// A pass's two timestamps: the [`query_results`](crate::StreamWriter::query_results)
+/// ask that reads them and the [`Reply::QueryResults`] that answers it.
+///
+/// [`OcclusionValuesProbe`]'s shape — one ask, no poll, no pending state — on a
+/// [`QueryKind::Timestamp`] set. What differs is what the answer means: an
+/// occlusion query nothing began legitimately resolves to zero, and a
+/// **timestamp** query that resolves to zero is a query the browser never wrote.
+/// So this probe's failure and its success are told apart by the values
+/// themselves, which is the whole reason `Capability::TimestampQuery` was
+/// refused on this backend until the seam's timestamps moved into the pass
+/// descriptor: a set that could never be written is a handle a profiler would
+/// fill with zeros and report as timings.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the values.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum TimestampProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The device opened without `timestamp-query`, so nothing was encoded.
+    Unsupported,
+    /// The ask is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`QueryResults`](crate::Command::QueryResults), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The values are in — **empty if the replayer could not serve the read**,
+    /// and **two zeros if it served a pass nothing timed**.
+    Ready {
+        /// Two little-endian `u64`: the opening tick, then the closing one.
+        bytes: Vec<u8>,
+    },
+}
+
+impl TimestampProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`OcclusionValuesProbe::absorb`]'s logic on this probe's
+    /// sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        if let Reply::QueryResults { values, .. } = reply {
+            *self = Self::Ready {
+                bytes: values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            };
+            return true;
+        }
+        false
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -5450,6 +5632,9 @@ struct Probe {
     /// It has no reason of its own: a decode error is one channel's, and
     /// [`occlusion_reason`](Self::occlusion_reason) is where it is reported.
     occlusion_values: OcclusionValuesProbe,
+    /// A pass's two timestamps — see [`TimestampProbe`]. No reason of its own,
+    /// for [`occlusion_values`](Self::occlusion_values)'s reason.
+    timestamp: TimestampProbe,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -5490,6 +5675,7 @@ impl Probe {
             occlusion: OcclusionProbe::Unasked,
             occlusion_reason: String::new(),
             occlusion_values: OcclusionValuesProbe::Unasked,
+            timestamp: TimestampProbe::Unasked,
             parity: ParityReport::new(),
         }
     }
@@ -5917,6 +6103,7 @@ impl Probe {
                 self.msaa.absorb(&replies);
                 self.occlusion.absorb(&replies);
                 self.occlusion_values.absorb(&replies);
+                self.timestamp.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -6063,6 +6250,7 @@ impl Probe {
                     color_attachments: &attachments,
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                    timestamp_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_readback_copy());
@@ -6195,6 +6383,7 @@ impl Probe {
                     color_attachments: &attachments,
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                    timestamp_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_DRAW_PIPELINE);
                 stream.draw(0..3, 0..1);
@@ -6325,6 +6514,7 @@ impl Probe {
                     color_attachments: &attachments,
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                    timestamp_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_present_copy());
@@ -6461,6 +6651,7 @@ impl Probe {
                     color_attachments: &attachments,
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                    timestamp_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_reconfigure_copy());
@@ -6613,6 +6804,7 @@ impl Probe {
                     color_attachments: &attachments,
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_READBACK_SIZE, PROBE_READBACK_SIZE),
+                    timestamp_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_INDIRECT_PIPELINE);
                 stream.bind_index_buffer(PROBE_INDIRECT_INDEX_BUFFER, 0, IndexFormat::Uint16);
@@ -6719,6 +6911,7 @@ impl Probe {
                     color_attachments: &[],
                     depth_stencil_attachment: Some(probe_depth_attachment()),
                     render_area: Rect2d::from_size(PROBE_DEPTH_SIZE, PROBE_DEPTH_SIZE),
+                    timestamp_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_depth_copy());
@@ -6837,6 +7030,7 @@ impl Probe {
                     color_attachments: &attachments,
                     depth_stencil_attachment: Some(probe_stencil_attachment()),
                     render_area: Rect2d::from_size(PROBE_STENCIL_SIZE, PROBE_STENCIL_SIZE),
+                    timestamp_writes: None,
                 });
                 stream.bind_graphics_pipeline(PROBE_STENCIL_PIPELINE);
                 stream.set_stencil_reference(PROBE_STENCIL_CLEARED);
@@ -6982,6 +7176,7 @@ impl Probe {
                     color_attachments: &attachments,
                     depth_stencil_attachment: None,
                     render_area: Rect2d::from_size(PROBE_MSAA_WIDTH, PROBE_MSAA_HEIGHT),
+                    timestamp_writes: None,
                 });
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_msaa_copy());
@@ -7211,6 +7406,92 @@ impl Probe {
         }
     }
 
+    /// Whether the device this page opened has the browser's `timestamp-query`.
+    ///
+    /// [`msaa_samples`](Self::msaa_samples)' shape: a number the *device*
+    /// reported, so a probe that could not run says why rather than being
+    /// silently skipped.
+    fn timestamp_supported(&mut self) -> bool {
+        self.opened()
+            .is_some_and(|caps| caps.features.contains(Features::TIMESTAMP_QUERY))
+    }
+
+    /// Encode one timed pass and the read of the two queries it names.
+    ///
+    /// A two-query [`QueryKind::Timestamp`] set, an encoder that resets it, a
+    /// compute pass whose descriptor names both queries, the submit, and an
+    /// **awaited** [`query_results`](crate::StreamWriter::query_results) — the
+    /// same awaited path the occlusion values take, and for the same reason: a
+    /// `GPUQuerySet` has no accessor, so the replayer serves the read with a
+    /// resolve, a copy and a map of its own.
+    ///
+    /// Answers `false` and encodes nothing on a device without the feature,
+    /// leaving [`TimestampProbe::Unsupported`]: a set of another kind would let
+    /// this pass while proving nothing about timestamps.
+    fn request_timestamp(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        if !self.timestamp_supported() {
+            self.timestamp = TimestampProbe::Unsupported;
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_query_set(PROBE_TIMESTAMP_SET, &probe_timestamp_set_desc());
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu timestamp encoder"),
+                    queue: PROBE_TIMESTAMP_QUEUE,
+                });
+                // Unconditional, as the seam asks of every caller: a documented
+                // no-op on WebGPU and required on Vulkan.
+                stream.reset_query_set(PROBE_TIMESTAMP_SET, 0..PROBE_TIMESTAMP_QUERIES);
+                stream.begin_compute_pass(&probe_timestamp_pass_desc());
+                stream.end_compute_pass();
+                stream.finish(PROBE_TIMESTAMP_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_TIMESTAMP_COMMAND_BUFFER]))
+            })
+            .is_some();
+        if !encoded {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        if let Some(sequence) = channel.encode_awaited(|stream| {
+            stream.query_results(PROBE_TIMESTAMP_SET, 0, PROBE_TIMESTAMP_QUERIES)
+        }) {
+            self.timestamp = TimestampProbe::Waiting { sequence };
+        }
+        true
+    }
+
+    /// Drain, absorb, and report where the timed pass's read has got to.
+    ///
+    /// Shares [`drain`](Self::drain) with every other probe, which is the
+    /// module's rule: one drain per frame, dispatched to every waiter.
+    fn timestamp_state(&mut self) -> u32 {
+        let _ = self.drain();
+        match &self.timestamp {
+            TimestampProbe::Unasked => TIMESTAMP_UNASKED,
+            TimestampProbe::Unsupported => TIMESTAMP_UNSUPPORTED,
+            TimestampProbe::Waiting { .. } => TIMESTAMP_WAITING,
+            TimestampProbe::Ready { .. } => TIMESTAMP_READY,
+        }
+    }
+
+    /// The two ticks the timed pass reported, as little-endian bytes, or an
+    /// empty slice if it has not answered.
+    fn timestamp_bytes(&self) -> &[u8] {
+        match &self.timestamp {
+            TimestampProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
     /// Walk a real [`WebGpuDevice`]'s whole
     /// [`supports`](crcbl_hal::Device::supports) matrix and hold every answer
     /// against [`DIVERGENCES`](crcbl_hal::DIVERGENCES), in every direction
@@ -7249,9 +7530,12 @@ impl Probe {
     ///
     /// # What this device can and cannot settle
     ///
-    /// [`probe_device_desc`] asks for **nothing optional**, so the capabilities
-    /// whose answers come from [`Support::granted`](crcbl_hal::Support::granted)
-    /// are [`UnprovableHere`](ParityVerdict::UnprovableHere) on this page: the
+    /// [`probe_device_desc`] asks for **one optional feature**, so the
+    /// capabilities whose answers come from
+    /// [`Support::granted`](crcbl_hal::Support::granted) are
+    /// [`UnprovableHere`](ParityVerdict::UnprovableHere) on this page — with the
+    /// one exception of `TimestampQuery` on a browser that has
+    /// `timestamp-query`, which this device does ask for. Everywhere else the
     /// device withheld the gate, and a run that cannot answer is not a pass.
     /// [`held`](ParityReport::held) is the count that *was* settled, beside
     /// [`checked`](ParityReport::checked), so a report cannot look complete by
@@ -7408,6 +7692,7 @@ impl Probe {
                 });
                 stream.begin_compute_pass(&ComputePassDesc {
                     label: Some("crcbl-webgpu dispatch pass"),
+                    timestamp_writes: None,
                 });
                 stream.bind_compute_pipeline(PROBE_DISPATCH_PIPELINE);
                 stream.bind_group(
@@ -7547,6 +7832,7 @@ impl Probe {
                 });
                 stream.begin_compute_pass(&ComputePassDesc {
                     label: Some("crcbl-webgpu copychain pass"),
+                    timestamp_writes: None,
                 });
                 stream.bind_compute_pipeline(PROBE_COPYCHAIN_PIPELINE);
                 stream.bind_group(
@@ -7680,6 +7966,7 @@ impl Probe {
                 });
                 stream.begin_compute_pass(&ComputePassDesc {
                     label: Some("crcbl-webgpu fill pass"),
+                    timestamp_writes: None,
                 });
                 stream.bind_compute_pipeline(PROBE_FILL_PIPELINE);
                 stream.bind_group(0, PROBE_FILL_BIND_GROUP, &[], PROBE_FILL_PIPELINE_LAYOUT);
@@ -9220,6 +9507,70 @@ pub mod shim {
         })
     }
 
+    /// Whether the opened device has the browser's `timestamp-query` feature,
+    /// as `1` or `0`; `0` if no device has opened.
+    ///
+    /// **Read before `__crcbl_web_gpu_probe_timestamp`, and the reason the
+    /// timestamp probe has a flag of its own** —
+    /// [`__crcbl_web_gpu_probe_msaa_samples`]'s job: it is what says whether a
+    /// [`super::TIMESTAMP_UNSUPPORTED`] is a device that cannot serve a
+    /// timestamp set or a request that never happened.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_timestamp_supported() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.timestamp_supported()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Encode the timed-pass frame — the two-query timestamp set, the reset, a
+    /// compute pass naming both queries in its descriptor, the submit, and the
+    /// read of the two queries.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// device has no `timestamp-query`, the probe is re-entered, or another
+    /// channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_timestamp() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_timestamp()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `TIMESTAMP_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_timestamp_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.timestamp_state(),
+            Err(_) => super::TIMESTAMP_UNASKED,
+        })
+    }
+
+    /// Where the two ticks start, once
+    /// [`__crcbl_web_gpu_probe_timestamp_state`] answers
+    /// [`super::TIMESTAMP_READY`]. Null while it has not; the pointer is stable
+    /// until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_timestamp_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.timestamp_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_timestamp_ptr`] points at —
+    /// sixteen once the read is answered, and **zero when the replayer could not
+    /// serve it**, which is the only way [`Reply::QueryResults`](crate::Reply)
+    /// says so.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_timestamp_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.timestamp_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -9378,6 +9729,9 @@ mod tests {
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
         __crcbl_web_gpu_probe_text_len, __crcbl_web_gpu_probe_text_ptr,
+        __crcbl_web_gpu_probe_timestamp, __crcbl_web_gpu_probe_timestamp_len,
+        __crcbl_web_gpu_probe_timestamp_ptr, __crcbl_web_gpu_probe_timestamp_state,
+        __crcbl_web_gpu_probe_timestamp_supported,
     };
     use super::*;
     use crate::web::shim::{
@@ -9618,7 +9972,7 @@ mod tests {
                 adapter: AdapterId(0),
                 label: Some("crcbl-webgpu probe".into()),
                 required_features: Features::COMPUTE,
-                optional_features: Features::empty(),
+                optional_features: Features::TIMESTAMP_QUERY,
                 compatible_surface: None,
             }]
         );
@@ -12652,6 +13006,122 @@ mod tests {
             __crcbl_web_gpu_probe_occlusion_values_state(),
             OCCLUSION_VALUES_WAITING
         );
+    }
+
+    /// **A device without `timestamp-query` encodes nothing at all**, and says
+    /// which of the two reasons that was.
+    ///
+    /// The distinction the export exists for: a probe that quietly did nothing
+    /// and a browser that cannot serve one read the same from outside, so the
+    /// supported flag is what the gate reads to tell "this browser has no
+    /// timestamps" from "the request never happened". A set of another kind
+    /// encoded here instead would let the whole group pass while proving nothing
+    /// about timestamps.
+    #[test]
+    fn a_timestamp_request_without_the_feature_encodes_nothing_and_says_why() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_timestamp_supported(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_timestamp(), 0);
+        assert!(take_frame().is_empty(), "a refused request encodes nothing");
+        assert_eq!(
+            __crcbl_web_gpu_probe_timestamp_state(),
+            TIMESTAMP_UNSUPPORTED
+        );
+        assert_eq!(__crcbl_web_gpu_probe_timestamp_len(), 0);
+    }
+
+    /// **The timed frame is a pass that names both of its queries, and the read
+    /// that follows it** — the whole of `Capability::TimestampQuery` on this
+    /// backend, as a command stream.
+    ///
+    /// The set, the encoder, the reset the seam requires of every caller, the
+    /// pass carrying its [`PassTimestampWrites`], the finish, the submit and the
+    /// direct read. The pass command is asserted whole rather than by name: a
+    /// `BeginComputePass` that arrived with `timestamp_writes: None` would give
+    /// the same command names and replay as a pass that runs and measures
+    /// nothing, which is the outcome this capability was refused over.
+    #[test]
+    fn the_timestamp_export_encodes_a_pass_that_names_both_its_queries() {
+        grant(&granted("has timestamps"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.device(
+            1,
+            &DeviceCaps {
+                features: Features::COMPUTE | Features::TIMESTAMP_QUERY,
+                ..device_caps()
+            },
+        );
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+
+        assert_eq!(__crcbl_web_gpu_probe_timestamp_supported(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_timestamp(), 1);
+        let frame = take_frame();
+        let names: Vec<&str> = frame.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateQuerySet",
+                "CreateCommandEncoder",
+                "ResetQuerySet",
+                "BeginComputePass",
+                "EndComputePass",
+                "Finish",
+                "Submit",
+                "QueryResults",
+            ],
+        );
+        assert_eq!(
+            frame[0],
+            Command::CreateQuerySet {
+                set: PROBE_TIMESTAMP_SET,
+                label: Some("crcbl-webgpu timestamp set".into()),
+                kind: QueryKind::Timestamp,
+                count: PROBE_TIMESTAMP_QUERIES,
+            }
+        );
+        assert_eq!(
+            frame[3],
+            Command::BeginComputePass {
+                label: Some("crcbl-webgpu timed pass".into()),
+                timestamp_writes: Some(PassTimestampWrites {
+                    set: PROBE_TIMESTAMP_SET,
+                    beginning_of_pass: 0,
+                    end_of_pass: 1,
+                }),
+            }
+        );
+        assert_eq!(
+            frame[7],
+            Command::QueryResults {
+                set: PROBE_TIMESTAMP_SET,
+                first_query: 0,
+                query_count: PROBE_TIMESTAMP_QUERIES,
+            }
+        );
+        assert_eq!(__crcbl_web_gpu_probe_timestamp_state(), TIMESTAMP_WAITING);
+
+        // And the answer reaches the bytes exports, in the order it was sent:
+        // the opening tick first, the closing one second.
+        let mut replies = ReplyWriter::new();
+        // Sequence 9: the enumeration spent 0 and the device request 1, then
+        // the seven commands of the frame above, so the awaited read is ninth.
+        replies.query_results(9, PROBE_TIMESTAMP_SET, 0, &[41, 99]);
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_timestamp_state(), TIMESTAMP_READY);
+        assert_eq!(__crcbl_web_gpu_probe_timestamp_len(), 16);
+        let ptr = __crcbl_web_gpu_probe_timestamp_ptr();
+        assert!(!ptr.is_null());
+        // SAFETY: the length above is the probe's own, and nothing has called
+        // back into wasm since it was read.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, 16) };
+        let ticks: Vec<u64> = bytes
+            .chunks_exact(8)
+            .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+            .collect();
+        assert_eq!(ticks, vec![41, 99]);
     }
 
     /// **The sentinel covers the whole destination**, so a resolve that reached

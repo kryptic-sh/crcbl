@@ -573,13 +573,19 @@ export async function runProbeGroups({
   );
 
   // **What the page can see for itself.** A device opened here, in this browser,
-  // with the descriptor the probe uses — no optional features, and every limit
-  // the adapter reports, which is what `requiredLimitsFor` asks for — is the
-  // same device WebGPU gives the replayer, so its own `features` and `limits`
-  // are what wasm's numbers are held to. Asked of the browser rather than of
-  // anything of ours, which is what makes it evidence. The descriptor is
-  // written out here rather than imported from the engine: a reference device
-  // opened by the code under test would agree with it whatever it asked for.
+  // with the descriptor the probe uses — `timestamp-query` where the adapter has
+  // it and nothing else optional, and every limit the adapter reports, which is
+  // what `requiredLimitsFor` asks for — is the same device WebGPU gives the
+  // replayer, so its own `features` and `limits` are what wasm's numbers are held
+  // to. Asked of the browser rather than of anything of ours, which is what makes
+  // it evidence. The descriptor is written out here rather than imported from the
+  // engine: a reference device opened by the code under test would agree with it
+  // whatever it asked for.
+  //
+  // `timestamp-query` is in the request because `probe_device_desc` asks for it
+  // — group AF has nothing to observe without a `'timestamp'` query set, and
+  // that needs the feature. Optional on both sides: a browser without it opens a
+  // device here and there, and the two still match.
   const liveDevice = await evaluate(
     page,
     `(async () => {
@@ -591,7 +597,10 @@ export async function runProbeGroups({
          requiredLimits[key] = value;
        }
      }
-     const device = await adapter.requestDevice({ requiredLimits });
+     const requiredFeatures = adapter.features.has('timestamp-query')
+       ? ['timestamp-query']
+       : [];
+     const device = await adapter.requestDevice({ requiredLimits, requiredFeatures });
      return {
        features: [...device.features].sort(),
        maxTextureDimension2D: device.limits.maxTextureDimension2D,
@@ -2933,6 +2942,137 @@ export async function runProbeGroups({
             `${occlusion.values?.zero ?? 0} zero, ${occlusion.values?.other ?? 0} something else; ` +
             `first wrong at byte ${occlusion.values?.firstWrong ?? -1}` +
             `${occlusion.error ? ` — ${occlusion.error}` : ''}`
+  );
+
+  // **THE TIMESTAMP GATE, AND THE ONLY EXERCISE `Capability::TimestampQuery` HAS
+  // ON THIS BACKEND.** Group AE's standing exactly: the native seam suite's
+  // `exercise_timestamp_query` holds the other backends to the same declaration
+  // and cannot open this one, so without this group the `Support::Yes` is a
+  // sentence nothing tests.
+  //
+  // WHAT IT IS ABOUT. This capability was refused on this backend until the seam
+  // moved its timestamps into the pass descriptor, and the reason is worth
+  // restating because it is what the checks below are shaped around: WebGPU
+  // takes a timestamp **only** through a render or compute pass's
+  // `timestampWrites`, and the seam used to have a free-standing
+  // `write_timestamp` naming an arbitrary point in the command stream. A set
+  // created for a verb that could never reach the browser is a handle a profiler
+  // would fill with zeros and report as timings. So the failure this group has
+  // to be able to see is not an error — it is **two zeros**.
+  //
+  // WHAT IT DOES: wasm records a two-query `'timestamp'` set, the seam's reset,
+  // an empty compute pass whose descriptor names both queries, a submit, and a
+  // `query_results` ask that reads them. The pass is empty on purpose — what is
+  // being observed is whether the browser writes the two queries at all, not how
+  // long anything took, and a pass with work in it would need a pipeline and a
+  // shader the claim does not.
+  //
+  // WHAT THE VALUES MEAN. An unwritten query resolves to zero by specification,
+  // so:
+  //
+  //   two non-zero ticks     the browser honoured `timestampWrites`. The pass.
+  //   two zeros              the descriptor was taken and neither query written
+  //                          — the outcome the refusal existed to prevent.
+  //   no values at all       the replayer could not serve the read, which is the
+  //                          only thing an empty `QueryResults` reply can mean.
+  //
+  // **THE ORDERING IS ASSERTED AND THE DURATION IS NOT.** `end >= start` is the
+  // one relationship a clock obeys whatever it counts. A *strict* inequality is
+  // not asserted here although the native suite asserts one: Chromium quantises
+  // timestamp-query results (to 100 µs at the time of writing) unless started
+  // with `--disable-dawn-features=timestamp_quantization`, so an empty pass can
+  // legitimately open and close inside one quantum and report the same tick
+  // twice. The native suite times a pass that clears a megabyte on hardware that
+  // does not quantise, and asserts the strict form there.
+  //
+  // WHERE IT BELONGS IN THE RUN: beside AE and **before X**, for AE's reason —
+  // the read is a `mapAsync` of the replayer's own making, so behind X's stuck
+  // canvas readback it would be stranded, and it is not in any platform's
+  // `--expect-fail` list.
+  group('AF — a pass is timed through its own descriptor');
+
+  const timestampStart = await evaluate(
+    page,
+    `(async () => {
+     const { startTimestampProbe, timestampSupported } =
+       await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     // Supported first: it is what tells a browser that cannot serve a
+     // timestamp set from a request that never happened.
+     const supported = timestampSupported({ exports });
+     return { supported, started: startTimestampProbe({ exports }) };
+   })()`
+  );
+  const timestamp = timestampStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readTimestampProbe, TIMESTAMP } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readTimestampProbe({ exports, memory: exports.memory });
+           if (r.state !== TIMESTAMP.READY) return null;
+           // Read the two ticks here rather than shipping the bytes out: a
+           // BigInt does not survive the DevTools JSON round trip, so they
+           // cross as decimal strings and as the two facts asserted on.
+           const view = new DataView(r.bytes.buffer, r.bytes.byteOffset,
+                                     r.bytes.byteLength);
+           const ticks = [];
+           for (let at = 0; at + 8 <= r.bytes.byteLength; at += 8) {
+             ticks.push(view.getBigUint64(at, true));
+           }
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.byteLength,
+             ticks: ticks.map(String),
+             bothNonZero: ticks.length === 2 && ticks.every((t) => t !== 0n),
+             ordered: ticks.length === 2 && ticks[1] >= ticks[0],
+             delta: ticks.length === 2 ? String(ticks[1] - ticks[0]) : null,
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+  check(
+    'AF',
+    "wasm encoded the timed frame — a 'timestamp' query set, the reset, and a compute pass naming both of its queries",
+    timestampStart?.started === true,
+    timestampStart?.started
+      ? 'the timed pass and the read of its two queries are on the stream'
+      : timestampStart?.supported === false
+        ? "this browser opened a device without 'timestamp-query', so no GPUQuerySet of that " +
+          'type could exist — the capability is declared NotOnThisDevice here and there is ' +
+          'nothing this page can hold it to'
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'AF',
+    'the browser wrote both queries the pass named — two ticks, and neither of them the zero an unwritten query resolves to',
+    timestamp?.done === true && timestamp.len === 16 && timestamp.bothNonZero,
+    timestamp?.done !== true
+      ? `no answer in ${TIMEOUT_MS} ms — the replayer's own map never resolved or the reply never reached wasm`
+      : timestamp.len === 0
+        ? `state ${timestamp.state} with no values, which is the only way a QueryResults reply says the read could not be served${timestamp.error ? ` — ${timestamp.error}` : ''}`
+        : timestamp.bothNonZero
+          ? `${timestamp.ticks[0]} then ${timestamp.ticks[1]}`
+          : `the pass reported ${JSON.stringify(timestamp.ticks)} — a zero is a query nothing wrote, ` +
+            'which is a pass whose timestampWrites were accepted and dropped' +
+            `${timestamp.error ? ` — ${timestamp.error}` : ''}`
+  );
+  check(
+    'AF',
+    'and the closing tick is not before the opening one, so the two came from a clock',
+    timestamp?.done === true && timestamp.ordered,
+    timestamp?.done !== true
+      ? 'no ticks to order'
+      : timestamp.ordered
+        ? `${timestamp.delta} ns between the two boundaries of an empty pass` +
+          ' (a browser reports nanoseconds, quantised)'
+        : `the pass opened at ${timestamp.ticks?.[0]} and closed at ${timestamp.ticks?.[1]}, ` +
+          'which is a clock running backwards or two queries read in the wrong order'
   );
 
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**

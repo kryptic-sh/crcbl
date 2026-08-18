@@ -42,8 +42,8 @@ use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
     DrawIndirectCount, GraphicsPipelineHandle, HalError, ImageCopy, IndexFormat,
-    PipelineLayoutHandle, QuerySetHandle, Rect2d, RenderPassDesc, ResourceState, ShaderStages,
-    Viewport,
+    PassTimestampWrites, PipelineLayoutHandle, QueryKind, QuerySetHandle, Rect2d, RenderPassDesc,
+    ResourceState, ShaderStages, Viewport,
 };
 
 use crcbl_core::Handle;
@@ -77,6 +77,13 @@ pub(crate) struct VkCommandEncoder {
     render_pass_label: bool,
     /// The same, for the open compute pass.
     compute_pass_label: bool,
+    /// The pool and query the open pass's closing timestamp goes into, from
+    /// [`PassTimestampWrites::end_of_pass`]. Vulkan takes a timestamp anywhere,
+    /// so the seam's two pass boundaries are two ordinary
+    /// `vkCmdWriteTimestamp2` calls — the descriptor is what says where they
+    /// belong, and this is what carries the second one from the pass's opening
+    /// to its close.
+    pass_end_timestamp: Option<(vk::QueryPool, u32)>,
     /// Raw device objects the recorded commands use; handed to the device at
     /// `finish` so a submission can keep destroyed-but-referenced objects parked
     /// in the deletion queue until it completes.
@@ -104,6 +111,7 @@ impl VkCommandEncoder {
             label_depth: 0,
             render_pass_label: false,
             compute_pass_label: false,
+            pass_end_timestamp: None,
             references: Vec::new(),
         };
         if let Err(error) = encoder.begin(desc) {
@@ -175,6 +183,85 @@ impl VkCommandEncoder {
     fn use_object(&mut self, raw: u64) {
         if !self.references.contains(&raw) {
             self.references.push(raw);
+        }
+    }
+
+    /// Opens a pass's timestamps: writes the first and remembers the second.
+    ///
+    /// Called by `begin_render_pass`/`begin_compute_pass` **before** the scope
+    /// opens, so the sample lands where the seam says the pass begins.
+    /// `vkCmdWriteTimestamp2` is legal in either scope, so the placement is a
+    /// choice rather than a constraint, and outside is the one that matches the
+    /// other three backends.
+    fn open_pass_timestamps(&mut self, what: &'static str, writes: Option<PassTimestampWrites>) {
+        self.pass_end_timestamp = None;
+        let Some(writes) = writes else { return };
+        if !self.ok() {
+            return;
+        }
+        let state = self.device.state();
+        let Ok((raw, kind, count)) = self.device.query_set_raw(&state, writes.set) else {
+            drop(state);
+            self.fail(HalError::invalid_handle("query set", writes.set));
+            return;
+        };
+        drop(state);
+        if kind != QueryKind::Timestamp {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} names a {kind:?} query set for its timestamps; a timestamp is written \
+                 into a QueryKind::Timestamp set"
+            )));
+            return;
+        }
+        if writes.beginning_of_pass == writes.end_of_pass {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} writes both of its timestamps into query {}; the two must be distinct \
+                 queries or the pass measures nothing",
+                writes.beginning_of_pass
+            )));
+            return;
+        }
+        for index in [writes.beginning_of_pass, writes.end_of_pass] {
+            if index >= count {
+                self.fail(HalError::InvalidDescriptor(format!(
+                    "{what} writes a timestamp into query {index} of a {count}-query set"
+                )));
+                return;
+            }
+        }
+        self.use_object(raw.as_raw());
+        // SAFETY: `self.raw` is recording, `raw` is a live timestamp pool whose
+        // query was bounds-checked against its count, and the query has been
+        // reset — `reset_query_set` is unconditional at the seam.
+        unsafe {
+            self.device.raw.cmd_write_timestamp2(
+                self.raw,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                raw,
+                writes.beginning_of_pass,
+            );
+        }
+        self.pass_end_timestamp = Some((raw, writes.end_of_pass));
+    }
+
+    /// Writes the closing half of [`open_pass_timestamps`](Self::open_pass_timestamps),
+    /// after the scope has closed. A no-op for an untimed pass.
+    fn close_pass_timestamps(&mut self) {
+        let Some((raw, index)) = self.pass_end_timestamp.take() else {
+            return;
+        };
+        if !self.ok() {
+            return;
+        }
+        // SAFETY: as for the opening write — the pool and the index were both
+        // checked there, and the pool is retained in `references`.
+        unsafe {
+            self.device.raw.cmd_write_timestamp2(
+                self.raw,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                raw,
+                index,
+            );
         }
     }
 }
@@ -701,6 +788,7 @@ impl CommandEncoder for VkCommandEncoder {
             self.begin_debug_label(label);
             self.render_pass_label = true;
         }
+        self.open_pass_timestamps("begin_render_pass", desc.timestamp_writes);
         // SAFETY: `self.raw` is recording outside any pass, every view is live,
         // and the attachments are in the layouts the graph transitioned them to
         // — which the seam makes the caller's responsibility explicitly.
@@ -717,6 +805,7 @@ impl CommandEncoder for VkCommandEncoder {
         // SAFETY: `self.raw` is recording inside a rendering scope.
         unsafe { self.device.raw.cmd_end_rendering(self.raw) };
         self.in_render_pass = false;
+        self.close_pass_timestamps();
         if core::mem::take(&mut self.render_pass_label) {
             self.end_debug_label();
         }
@@ -1123,6 +1212,7 @@ impl CommandEncoder for VkCommandEncoder {
             self.begin_debug_label(label);
             self.compute_pass_label = true;
         }
+        self.open_pass_timestamps("begin_compute_pass", desc.timestamp_writes);
         self.in_compute_pass = true;
     }
 
@@ -1130,8 +1220,10 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.in_compute_pass {
             return;
         }
-        // A compute pass has no Vulkan scope to close, only a label.
+        // A compute pass has no Vulkan scope to close, only a label and
+        // whatever timestamp the descriptor asked for.
         self.in_compute_pass = false;
+        self.close_pass_timestamps();
         if core::mem::take(&mut self.compute_pass_label) {
             self.end_debug_label();
         }
@@ -1205,40 +1297,6 @@ impl CommandEncoder for VkCommandEncoder {
             self.device
                 .raw
                 .cmd_reset_query_pool(self.raw, raw, range.start, range.len() as u32);
-        }
-    }
-
-    fn write_timestamp(&mut self, set: QuerySetHandle, index: u32) {
-        if !self.ok() {
-            return;
-        }
-        let state = self.device.state();
-        let Ok((raw, _, count)) = self.device.query_set_raw(&state, set) else {
-            drop(state);
-            // Accepted and dropped without the feature — but a *bad handle* is
-            // still a bug worth reporting.
-            self.fail(HalError::invalid_handle("query set", set));
-            return;
-        };
-        if index >= count {
-            drop(state);
-            self.fail(HalError::InvalidDescriptor(format!(
-                "query index {index} exceeds the set's {count} queries"
-            )));
-            return;
-        }
-        drop(state);
-        self.use_object(raw.as_raw());
-        // SAFETY: `self.raw` is recording, `raw` is a live timestamp pool
-        // whose query `index` was bounds-checked against its count, and the
-        // query has been reset.
-        unsafe {
-            self.device.raw.cmd_write_timestamp2(
-                self.raw,
-                vk::PipelineStageFlags2::ALL_COMMANDS,
-                raw,
-                index,
-            );
         }
     }
 

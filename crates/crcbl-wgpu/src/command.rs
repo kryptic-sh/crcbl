@@ -446,6 +446,12 @@ impl CommandEncoder for WgpuCommandEncoder {
     }
 
     fn begin_render_pass(&mut self, desc: &hal::RenderPassDesc<'_>) {
+        // A timestamp set cannot exist on this backend — `create_query_set`
+        // refuses every kind — so a pass naming one names a stale handle, which
+        // is the same failure `reset_query_set` reports below.
+        if let Some(writes) = desc.timestamp_writes {
+            return self.fail(HalError::invalid_handle("query set", writes.set));
+        }
         // Resolve all attachment views from pools before building descriptor.
         let color_views: Vec<wgpu::TextureView> = match desc
             .color_attachments
@@ -758,6 +764,9 @@ impl CommandEncoder for WgpuCommandEncoder {
     }
 
     fn begin_compute_pass(&mut self, desc: &hal::ComputePassDesc<'_>) {
+        if let Some(writes) = desc.timestamp_writes {
+            return self.fail(HalError::invalid_handle("query set", writes.set));
+        }
         let wgpu_desc = wgpu::ComputePassDescriptor {
             label: desc.label,
             timestamp_writes: None,
@@ -808,11 +817,6 @@ impl CommandEncoder for WgpuCommandEncoder {
     // is therefore a stale handle, which the seam says is the caller's bug.
     fn reset_query_set(&mut self, set: hal::QuerySetHandle, _r: std::ops::Range<u32>) {
         self.fail(HalError::invalid_handle("query set", set));
-    }
-    fn write_timestamp(&mut self, _set: hal::QuerySetHandle, _index: u32) {
-        // Accepted and dropped: the seam says a device without
-        // `Features::TIMESTAMP_QUERY` degrades rather than breaks, and this
-        // backend never reports it.
     }
     fn resolve_query_set(
         &mut self,

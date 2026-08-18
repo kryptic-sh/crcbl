@@ -135,6 +135,7 @@ fn a_vulkan_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
     let commands = encoder.finish().expect("recording succeeded");

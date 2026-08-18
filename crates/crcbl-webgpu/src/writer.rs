@@ -10,11 +10,12 @@ use crcbl_hal::{
     ComputePipelineDesc, ComputePipelineHandle, DepthStencilAttachment, DepthStencilState,
     DeviceDesc, Extent3d, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageBarrier, ImageCopy,
     ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc,
-    ImageViewHandle, IndexFormat, MultisampleState, Offset3d, PipelineLayoutDesc,
-    PipelineLayoutHandle, PresentInfo, PrimitiveState, QuerySetDesc, QuerySetHandle, QueueTransfer,
-    ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
-    SemaphoreSignal, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
-    StencilFaceState, SubmitInfo, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
+    ImageViewHandle, IndexFormat, MultisampleState, Offset3d, PassTimestampWrites,
+    PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, PrimitiveState, QuerySetDesc,
+    QuerySetHandle, QueueTransfer, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc,
+    SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle, SwapchainDesc,
+    SwapchainHandle, Viewport,
 };
 
 use crate::bytes::ByteWriter;
@@ -225,6 +226,23 @@ impl ByteWriter {
         self.put_u32(entry.binding);
         self.put_u32(entry.array_index);
         self.put_binding_resource(entry.resource);
+    }
+
+    /// The optional [`PassTimestampWrites`] a pass descriptor ends with.
+    ///
+    /// A presence byte then, when present, the set and the two query indices —
+    /// the convention every other optional non-handle field on this wire uses.
+    /// Shared by both pass commands so the two cannot encode it differently.
+    fn put_timestamp_writes(&mut self, writes: Option<PassTimestampWrites>) {
+        match writes {
+            None => self.put_u8(tag::ABSENT),
+            Some(writes) => {
+                self.put_u8(tag::PRESENT);
+                self.put_handle(writes.set);
+                self.put_u32(writes.beginning_of_pass);
+                self.put_u32(writes.end_of_pass);
+            }
+        }
     }
 
     fn put_depth_stencil_attachment(&mut self, attachment: &DepthStencilAttachment) {
@@ -1139,6 +1157,7 @@ impl StreamWriter {
             }
         }
         self.bytes.put_rect(desc.render_area);
+        self.bytes.put_timestamp_writes(desc.timestamp_writes);
         sequence
     }
 
@@ -1266,11 +1285,12 @@ impl StreamWriter {
 
     /// [`begin_compute_pass`](crcbl_hal::CommandEncoder::begin_compute_pass).
     ///
-    /// The whole of [`ComputePassDesc`], which is only a label — compute has no
-    /// attachments.
+    /// The whole of [`ComputePassDesc`], which is a label and the two queries
+    /// the pass is bracketed by — compute has no attachments.
     pub fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) -> u64 {
         let sequence = self.push_tag(tag::BEGIN_COMPUTE_PASS_TAG);
         self.bytes.put_opt_str(desc.label);
+        self.bytes.put_timestamp_writes(desc.timestamp_writes);
         sequence
     }
 

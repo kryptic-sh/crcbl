@@ -97,10 +97,10 @@ use crate::{
     DisplayTiming, DrawIndirect, DrawIndirectCount, Features, Format, GraphicsPipelineDesc,
     GraphicsPipelineHandle, HalError, ImageCopy, ImageDesc, ImageHandle, ImageType, ImageUsage,
     ImageViewDesc, ImageViewHandle, IndexFormat, Instance, Limits, MemoryLocation,
-    MeshPipelineDesc, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
-    PresentMode, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
-    ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
-    SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
+    MeshPipelineDesc, PassTimestampWrites, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle,
+    PresentInfo, PresentMode, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind,
+    ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, SamplerDesc,
+    SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
     ShaderModuleHandle, ShaderSources, ShaderStages, SubmitInfo, Support, SurfaceCaps,
     SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
 };
@@ -2188,6 +2188,43 @@ impl NullEncoder {
         }
     }
 
+    /// Checks a pass's [`PassTimestampWrites`], if it has any: the set must be
+    /// this device's and live, the two indices must differ, and both must be
+    /// queries the set actually holds.
+    ///
+    /// The seam has no free-standing timestamp call left to check, so this is
+    /// where the graph's unit suite catches a mis-aimed timestamp without a GPU.
+    fn need_timestamps(&self, command: &'static str, writes: Option<PassTimestampWrites>) {
+        let Some(writes) = writes else { return };
+        self.need_live(command, ObjectKind::QuerySet, writes.set.to_bits());
+        if writes.beginning_of_pass == writes.end_of_pass {
+            self.fail(ValidationError::CoincidentTimestamps {
+                command,
+                index: writes.beginning_of_pass,
+            });
+        }
+        let state = self.recorder.lock();
+        let Some(object) = state.get(ObjectKind::QuerySet, writes.set.to_bits()) else {
+            // A dead or foreign handle, already reported by `need_live` above.
+            return;
+        };
+        let Detail::QuerySet { count } = &object.detail else {
+            unreachable!("a query set handle always carries query set detail");
+        };
+        let count = *count;
+        for index in [writes.beginning_of_pass, writes.end_of_pass] {
+            if index >= count {
+                drop(state);
+                self.fail(ValidationError::TimestampOutOfRange {
+                    command,
+                    index,
+                    count,
+                });
+                return;
+            }
+        }
+    }
+
     /// Requires a handle to still resolve *and* to belong to this device.
     fn need_live(&self, command: &'static str, kind: ObjectKind, bits: u64) {
         let state = self.recorder.lock();
@@ -2305,11 +2342,13 @@ impl CommandEncoder for NullEncoder {
                 attachment.view.to_bits(),
             );
         }
+        self.need_timestamps("BeginRenderPass", desc.timestamp_writes);
         self.record(Command::BeginRenderPass {
             label: desc.label.map(ToOwned::to_owned),
             color_attachments: desc.color_attachments.to_vec(),
             depth_stencil_attachment: desc.depth_stencil_attachment,
             render_area: desc.render_area,
+            timestamp_writes: desc.timestamp_writes,
         });
     }
 
@@ -2465,8 +2504,10 @@ impl CommandEncoder for NullEncoder {
     }
 
     fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {
+        self.need_timestamps("BeginComputePass", desc.timestamp_writes);
         self.record(Command::BeginComputePass {
             label: desc.label.map(ToOwned::to_owned),
+            timestamp_writes: desc.timestamp_writes,
         });
     }
 
@@ -2499,12 +2540,6 @@ impl CommandEncoder for NullEncoder {
         self.need_outside("ResetQuerySet");
         self.need_live("ResetQuerySet", ObjectKind::QuerySet, set.to_bits());
         self.record(Command::ResetQuerySet { set, range });
-    }
-
-    fn write_timestamp(&mut self, set: QuerySetHandle, index: u32) {
-        self.need_outside("WriteTimestamp");
-        self.need_live("WriteTimestamp", ObjectKind::QuerySet, set.to_bits());
-        self.record(Command::WriteTimestamp { set, index });
     }
 
     fn resolve_query_set(

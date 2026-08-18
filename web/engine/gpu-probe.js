@@ -288,6 +288,27 @@ export const OCCLUSION_VALUES = Object.freeze({
 });
 
 /**
+ * The `TIMESTAMP_*` codes `__crcbl_web_gpu_probe_timestamp_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * {@link OCCLUSION_VALUES}' shape — one ask, no poll — on a `'timestamp'` query
+ * set, plus an `UNSUPPORTED` for a browser that opened without
+ * `timestamp-query`, which is a device that could not create such a set at all.
+ *
+ * **`READY` with no values is a failed read**, and **`READY` with two zeros is a
+ * pass nothing timed**: an unwritten query resolves to zero by specification, so
+ * a browser that took the pass descriptor and wrote neither query reads back as
+ * zeros. That is exactly the outcome this backend refused timestamp sets over
+ * until the seam's timestamps moved into the pass descriptor.
+ */
+export const TIMESTAMP = Object.freeze({
+  UNASKED: 0,
+  WAITING: 1,
+  READY: 2,
+  UNSUPPORTED: 3,
+});
+
+/**
  * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1702,6 +1723,80 @@ export function readOcclusionValues({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: occlusionValuesStateName(state), bytes };
+}
+
+/**
+ * The same helper again, for the timed pass's four codes.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function timestampStateName(state) {
+  const found = Object.entries(TIMESTAMP).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Whether the device this page opened has the browser's `timestamp-query`.
+ *
+ * **Read before {@link startTimestampProbe}**, and the reason the probe has a
+ * flag of its own: it is what tells a browser that cannot serve timestamps from
+ * a request that never happened, so an `UNSUPPORTED` is a stated fact about this
+ * browser rather than a silent skip.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean}
+ */
+export function timestampSupported({ exports }) {
+  return exports.__crcbl_web_gpu_probe_timestamp_supported() === 1;
+}
+
+/**
+ * Ask wasm to submit a compute pass whose descriptor names two timestamp
+ * queries, and to read both of them back.
+ *
+ * **The only gate anywhere that puts a `'timestamp'` `GPUQuerySet` on this
+ * backend's wire, and the only one that reads a `timestampWrites` back as
+ * values.** WebGPU takes a timestamp nowhere but a pass descriptor, which is why
+ * the seam has no free-standing write left; the pass is empty because what is
+ * being observed is whether the browser writes the two queries at all.
+ *
+ * Its answer is *data* and it needs a **device**, so `false` before one has
+ * opened is ordering rather than failure — and `false` on a browser without
+ * `timestamp-query` is that browser's answer, which {@link timestampSupported}
+ * is how the caller tells apart.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the timed frame.
+ */
+export function startTimestampProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_timestamp() === 1;
+}
+
+/**
+ * Read where the timed pass's read has got to, and its two ticks once it is
+ * `READY`.
+ *
+ * {@link readOcclusionValues}' shape, and the values are handed over as bytes
+ * for its reason: a `BigUint64Array` view needs its offset aligned and nothing
+ * about a wasm allocation promises one.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readTimestampProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_timestamp_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_timestamp_ptr();
+  const len = exports.__crcbl_web_gpu_probe_timestamp_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: timestampStateName(state), bytes };
 }
 
 /**

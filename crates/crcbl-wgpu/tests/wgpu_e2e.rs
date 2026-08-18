@@ -251,6 +251,7 @@ impl Headless {
             }],
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+            timestamp_writes: None,
         });
         encoder.end_render_pass();
         let commands = encoder.finish().expect("recording succeeded");
@@ -375,6 +376,7 @@ fn reusing_an_offscreen_wgpu_ring_image_is_ordered_against_the_frame_that_had_it
             }],
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(frame.extent.0, frame.extent.1),
+            timestamp_writes: None,
         });
         encoder.end_render_pass();
     };
@@ -892,6 +894,7 @@ fn an_msaa_pass_resolves_into_its_resolve_target() {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(EXTENT.0, EXTENT.1),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
     encoder.pipeline_barrier(&Barriers {
@@ -1017,6 +1020,7 @@ fn a_stale_resolve_handle_is_refused_rather_than_dropped() {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(EXTENT.0, EXTENT.1),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
     let error = encoder
@@ -1094,6 +1098,7 @@ fn a_padded_indirect_draw_stride_is_refused_at_finish() {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(EXTENT.0, EXTENT.1),
+        timestamp_writes: None,
     });
     // 32 bytes between arguments is twice the tightly packed 16 wgpu reads.
     encoder.draw_indirect(&DrawIndirect {
@@ -1516,6 +1521,7 @@ fn a_wgpu_indexed_draw_reads_the_index_buffer_it_was_bound() {
             }],
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(SQUARE, SQUARE),
+            timestamp_writes: None,
         });
         encoder.set_viewport(&Viewport::from_size(SQUARE, SQUARE));
         encoder.set_scissor(&Rect2d::from_size(SQUARE, SQUARE));
@@ -1683,6 +1689,7 @@ fn a_wgpu_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
     let commands = encoder.finish().expect("recording succeeded");
@@ -2066,6 +2073,7 @@ fn a_wgpu_shader_reads_the_array_element_the_bind_group_put_in_each_slot() {
             }],
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(1, 1),
+            timestamp_writes: None,
         });
         encoder.end_render_pass();
     }
@@ -2085,6 +2093,7 @@ fn a_wgpu_shader_reads_the_array_element_the_bind_group_put_in_each_slot() {
     });
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("wgpu e2e array read"),
+        timestamp_writes: None,
     });
     encoder.bind_compute_pipeline(pipeline);
     encoder.bind_group(0, group, &[], pipeline_layout);

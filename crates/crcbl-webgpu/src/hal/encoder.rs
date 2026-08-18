@@ -3,9 +3,8 @@
 //! # The honesty mechanism for unit-returning ops
 //!
 //! A recording method that has a [`StreamWriter`](crate::StreamWriter) command
-//! encodes it. One that does not — the count-buffer and mesh draws, and
-//! [`write_timestamp`](CommandEncoder::write_timestamp) — returns `()` and
-//! cannot report an error inline. Silently dropping it would let a scene that
+//! encodes it. One that does not — the count-buffer and mesh draws — returns
+//! `()` and cannot report an error inline. Silently dropping it would let a scene that
 //! hits it replay a command buffer missing the op and render **subtly wrong**,
 //! which is the worst outcome the seam has.
 //!
@@ -312,17 +311,6 @@ impl CommandEncoder for WebGpuCommandEncoder {
         // See `Command::ResetQuerySet`.
         self.channel
             .with(|c| c.encode(|stream| stream.reset_query_set(set, range)));
-    }
-
-    fn write_timestamp(&mut self, _set: QuerySetHandle, _index: u32) {
-        // The one query verb that stays unwired, and not for want of a slice:
-        // WebGPU takes timestamps only at pass boundaries, through a render or
-        // compute pass's `timestampWrites`, and this call names an arbitrary
-        // point in the command stream. `create_query_set` refuses
-        // `QueryKind::Timestamp` for the same reason and with the same sentence,
-        // so no live handle can reach here at all — this is the second lock on a
-        // door, not the first.
-        self.record_unsupported(super::device::NO_TIMESTAMP_SET);
     }
 
     fn resolve_query_set(

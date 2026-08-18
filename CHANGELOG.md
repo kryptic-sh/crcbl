@@ -16,6 +16,62 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`CommandEncoder::write_timestamp` is gone; a pass takes its timestamps in
+  its descriptor.** `RenderPassDesc` and `ComputePassDesc` gained
+  `timestamp_writes: Option<PassTimestampWrites>`, naming a query set and the
+  two distinct indices written at the beginning and end of the pass. The old
+  verb named an arbitrary point in the command stream, which only Vulkan and
+  D3D12 can express: WebGPU takes timestamps solely through a pass descriptor's
+  `timestampWrites`, and Metal samples only at stage boundaries. A seam verb two
+  of four backends cannot honour is the defect, so the seam now describes the
+  intersection — and describes it as a _shape_, since "only call this at a pass
+  boundary" is a rule a caller can break and a descriptor field is not.
+
+  With it, `crcbl-webgpu` serves timestamp query sets and **the browser backend
+  reaches zero divergences** — `REVIEWED_BLOCKERS` no longer names it at all.
+  The stream format carries the new field, so
+  `crcbl_webgpu::tag::STREAM_VERSION` is now 2.
+
+  Two consequences for callers of `crcbl-render`'s `PassTimers`, both real: a
+  pass's reported cost is now the pass alone rather than the pass plus the
+  barriers the graph inserted ahead of it, and a `PassKind::Copy` gets no row at
+  all rather than one reading 0.000 ms — a copy cannot sit inside a pass, so
+  there is nothing to bracket.
+
+- **`CommandEncoder::write_timestamp` is gone; a pass names its two timestamps
+  in its own descriptor.** `RenderPassDesc` and `ComputePassDesc` gained a
+  `timestamp_writes: Option<PassTimestampWrites>`, holding the query set and the
+  two query indices written when the pass opens and closes.
+
+  The old verb named an arbitrary point in the command stream, which only half
+  the backends can express: Vulkan's `vkCmdWriteTimestamp2` and D3D12's
+  `EndQuery` take one anywhere, Metal samples only where an encoder opens and
+  closes, and WebGPU takes one **only** through
+  `GPURenderPassDescriptor.timestampWrites`. The pass boundary is the portable
+  intersection, and putting it in the descriptor makes it a shape a caller
+  cannot misuse rather than a rule to remember — there is no call left to record
+  in the wrong place. The two indices must be distinct queries of the set, which
+  WebGPU requires outright and every backend now refuses by name.
+
+  **This closes `Capability::TimestampQuery` for `crcbl-webgpu`, and with it the
+  last WebGPU divergence.** `create_query_set` now serves `QueryKind::Timestamp`
+  on a device that opened with the browser's `timestamp-query`, the two pass
+  commands carry the field over the wire, and the replayer builds
+  `timestampWrites` from it. `crcbl-webgpu` diverges from nothing: every
+  remaining refusal is WebGPU itself refusing.
+
+  Callers: `crcbl-render`'s `PassTimers` names its queries in the descriptor the
+  render graph builds, so a pass's reported cost is now the pass alone rather
+  than the pass plus the barriers the graph inserted for it — and a
+  `PassKind::Copy`, which opens no scope, gets **no row in the report** rather
+  than a row reading 0.000 ms. `crcbl-mtl` and `crcbl-wgpu` refuse a pass that
+  asks for timestamps by name, neither backend having a set one could be written
+  into.
+
+  The WebGPU command stream's `tag::STREAM_VERSION` is `2`: a trailing field on
+  an existing command is a changed record, which an older `gpu-stream.js` would
+  decode as something else.
+
 - **`crcbl_hal::Device` gained a required `signal_semaphore` method: the CPU can
   now advance a timeline.** The seam could read a timeline (`semaphore_value`)
   and block on one (`wait_semaphores`) and had no way to move one, so a wait for

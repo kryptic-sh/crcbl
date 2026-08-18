@@ -169,14 +169,15 @@ import {
 // absence is not read as a browser that declined; and which WebGPU features are
 // dropped, so that nobody looks for their effect on the far side.
 //
-// IT REPORTS WHAT THE BROWSER SAID, NOT WHAT `crcbl-webgpu` CAN EXECUTE. There
-// is no `create_query_set` command yet, so a page on a browser with
-// `timestamp-query` sends `TIMESTAMP_QUERY` while nothing in the stream could
-// serve it. That is right while there is no device — the channel's job is to
-// carry the browser's answer intact — and it stops being right the day an
-// `impl Instance` exists, because a capability on the seam is a promise about
-// what a caller may *ask for*. That impl must intersect this set with what the
-// stream can encode; `crates/crcbl-webgpu/src/instance.rs` says so too.
+// IT REPORTS WHAT THE BROWSER SAID, NOT WHAT `crcbl-webgpu` CAN EXECUTE. The
+// channel's job is to carry the browser's answer intact; a capability on the
+// seam is a promise about what a caller may *ask for*, so an `impl Instance`
+// must intersect this set with what the stream can encode.
+// `crates/crcbl-webgpu/src/instance.rs` says so too. `TIMESTAMP_QUERY` used to
+// be the standing example of a bit the stream could not serve, and is no longer
+// one: `CreateQuerySet` takes the timestamp kind and both pass commands carry
+// `timestampWrites`, so a browser that reports `timestamp-query` gets a bit that
+// means something.
 
 /**
  * `crcbl_hal::Features` bits that core WebGPU grants unconditionally.
@@ -5823,7 +5824,65 @@ export class Replayer {
           : {}),
       };
     }
+    const timestampWrites = this.#resolveTimestampWrites(
+      named,
+      command.timestampWrites
+    );
+    if (timestampWrites === undefined) return;
+    if (timestampWrites !== null) descriptor.timestampWrites = timestampWrites;
     this.#currentPass = this.#currentEncoder.beginRenderPass(descriptor);
+  }
+
+  /**
+   * Resolves a pass's `timestampWrites` into the GPU object WebGPU wants, or
+   * `null` when the pass is untimed.
+   *
+   * Returns `undefined` for a pair this replayer refuses, having already put the
+   * reason on the error queue — the caller must abandon the pass, because
+   * beginning it without the writes would produce a pass that runs and measures
+   * nothing, and a profiler would read the unwritten queries back as a frame
+   * that took no time. That is the failure the seam moved timestamps into the
+   * pass descriptor to prevent, so it must not be reintroduced here.
+   *
+   * The two indices must be distinct and inside the set — both are WebGPU's own
+   * validation, refused by name here so the diagnosis is this command rather
+   * than a device error attributed to nothing a frame later.
+   *
+   * @param {string} named
+   * @param {{ set: { index: number, generation: number },
+   *           beginningOfPass: number, endOfPass: number } | null | undefined} writes
+   * @returns {GPUComputePassTimestampWrites | null | undefined}
+   */
+  #resolveTimestampWrites(named, writes) {
+    if (!writes) return null;
+    const entry = this.#querySets.get(writes.set);
+    if (entry === undefined) {
+      this.#deviceError(
+        `${named} takes its timestamps in query set ` +
+          `${writes.set.index}.${writes.set.generation}, which this replayer holds no live set under`
+      );
+      return undefined;
+    }
+    if (writes.beginningOfPass === writes.endOfPass) {
+      this.#deviceError(
+        `${named} writes both of its timestamps into query ${writes.beginningOfPass}; WebGPU ` +
+          'requires beginningOfPassWriteIndex and endOfPassWriteIndex to be distinct'
+      );
+      return undefined;
+    }
+    for (const index of [writes.beginningOfPass, writes.endOfPass]) {
+      if (index >= entry.count) {
+        this.#deviceError(
+          `${named} writes a timestamp into query ${index} of a ${entry.count}-query set`
+        );
+        return undefined;
+      }
+    }
+    return {
+      querySet: entry.set,
+      beginningOfPassWriteIndex: writes.beginningOfPass,
+      endOfPassWriteIndex: writes.endOfPass,
+    };
   }
 
   /**
@@ -6200,7 +6259,9 @@ export class Replayer {
    * `null` so a later `EndComputePass` is itself a named malformed-stream error.
    *
    * @param {bigint} sequence
-   * @param {{ label: string | null }} command
+   * @param {{ label: string | null,
+   *           timestampWrites?: { set: { index: number, generation: number },
+   *                               beginningOfPass: number, endOfPass: number } | null }} command
    */
   #beginComputePass(sequence, command) {
     if (!this.#currentEncoder) {
@@ -6210,6 +6271,12 @@ export class Replayer {
       return;
     }
     const descriptor = command.label === null ? {} : { label: command.label };
+    const timestampWrites = this.#resolveTimestampWrites(
+      `compute pass (command ${sequence})`,
+      command.timestampWrites
+    );
+    if (timestampWrites === undefined) return;
+    if (timestampWrites !== null) descriptor.timestampWrites = timestampWrites;
     this.#currentComputePass =
       this.#currentEncoder.beginComputePass(descriptor);
   }
@@ -7101,17 +7168,15 @@ export class Replayer {
    * to the error queue — with one refusal of its own beside the usual three.
    *
    * **`GPUQueryType` IS EXACTLY `'occlusion'` AND `'timestamp'`**, so a
-   * `PipelineStatistics` set has nothing to become and is refused by name. A
-   * `Timestamp` one is refused too, and that refusal is this replayer agreeing
-   * with the seam rather than duplicating it: `create_query_set` on the Rust side
-   * refuses the kind before it is encoded, because WebGPU takes timestamps only
-   * through a pass's `timestampWrites` and the seam's `write_timestamp` names an
-   * arbitrary point in the command stream. A set that reached here would be one
-   * nothing could ever write, and its resolve would read as a frame that took no
-   * time.
+   * `PipelineStatistics` set has nothing to become and is refused by name.
    *
    * `'occlusion'` needs no `GPUFeatureName`, so nothing here consults the
-   * device's features: every device this replayer opens serves it.
+   * device's features for it: every device this replayer opens serves it.
+   * `'timestamp'` needs `'timestamp-query'`, and `createQuerySet` on a device
+   * without it throws — refused by name here instead, so the reason names the
+   * command rather than arriving as an uncaught validation error a frame later.
+   * The seam refuses the same set on the same flag before it is encoded, so this
+   * is the two halves agreeing rather than one of them deciding.
    *
    * @param {bigint} sequence
    * @param {{ set: { index: number, generation: number }, label: string | null,
@@ -7123,14 +7188,20 @@ export class Replayer {
       this.#deviceError(`${named} was created before any device opened`);
       return;
     }
-    if (command.kind !== 'Occlusion') {
+    if (command.kind !== 'Occlusion' && command.kind !== 'Timestamp') {
       this.#deviceError(
-        `${named} asks for a ${command.kind} query set, and ` +
-          (command.kind === 'Timestamp'
-            ? "WebGPU writes timestamps only through a pass's timestampWrites, so a set created " +
-              'here could never be written'
-            : "GPUQueryType is exactly 'occlusion' and 'timestamp', so there is no such set to " +
-              'create')
+        `${named} asks for a ${command.kind} query set, and GPUQueryType is exactly ` +
+          "'occlusion' and 'timestamp', so there is no such set to create"
+      );
+      return;
+    }
+    if (
+      command.kind === 'Timestamp' &&
+      !this.#device.features?.has('timestamp-query')
+    ) {
+      this.#deviceError(
+        `${named} asks for a timestamp query set, and this device opened without the ` +
+          "'timestamp-query' feature"
       );
       return;
     }
@@ -7138,7 +7209,7 @@ export class Replayer {
     try {
       set = this.#device.createQuerySet({
         ...(command.label === null ? {} : { label: command.label }),
-        type: 'occlusion',
+        type: command.kind === 'Timestamp' ? 'timestamp' : 'occlusion',
         count: command.count,
       });
     } catch (error) {

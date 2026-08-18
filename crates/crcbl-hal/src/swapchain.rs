@@ -670,6 +670,7 @@ mod tests {
             }],
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(frame.extent.0, frame.extent.1),
+            timestamp_writes: None,
         });
         encoder.end_render_pass();
         let commands = encoder.finish().expect("recording succeeded");

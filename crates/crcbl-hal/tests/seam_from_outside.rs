@@ -310,6 +310,7 @@ fn render(frame: &Frame) {
             clear: ClearValue::default(),
         }),
         render_area: Rect2d::from_size(WIDTH, HEIGHT),
+        timestamp_writes: None,
     });
     encoder.set_viewport(&Viewport::from_size(WIDTH, HEIGHT));
     encoder.set_scissor(&Rect2d::from_size(WIDTH, HEIGHT));

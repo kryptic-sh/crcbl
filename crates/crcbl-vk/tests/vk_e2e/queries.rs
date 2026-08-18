@@ -14,7 +14,10 @@
 
 use crate::harness::Headless;
 use crate::mesh::{MESH_EXTENT, mesh_camera, place_cube};
-use crcbl_hal::{CommandEncoderDesc, Features, PresentInfo, QueryKind, QuerySetDesc, SubmitInfo};
+use crcbl_hal::{
+    CommandEncoderDesc, ComputePassDesc, Features, PassTimestampWrites, PresentInfo, QueryKind,
+    QuerySetDesc, SubmitInfo,
+};
 
 /// How many timers it takes to see every pass a forward frame records.
 ///
@@ -56,8 +59,19 @@ fn timestamps_either_work_or_are_refused_cleanly() {
         queue: headless.queue,
     });
     encoder.reset_query_set(set, 0..2);
-    encoder.write_timestamp(set, 0);
-    encoder.write_timestamp(set, 1);
+    // A pass, because the seam has no other place a timestamp can go: the two
+    // queries are named by the descriptor and `crcbl-vk` writes them either
+    // side of the scope. A compute pass opens no Vulkan object, so this is the
+    // smallest thing that can carry a pair.
+    encoder.begin_compute_pass(&ComputePassDesc {
+        label: Some("timed"),
+        timestamp_writes: Some(PassTimestampWrites {
+            set,
+            beginning_of_pass: 0,
+            end_of_pass: 1,
+        }),
+    });
+    encoder.end_compute_pass();
     let commands = encoder.finish().expect("recording succeeded");
     device
         .submit(headless.queue, &SubmitInfo::new(&[commands]))
@@ -180,10 +194,11 @@ fn per_pass_gpu_timers_report_real_numbers() {
             expected.push("light-cluster");
         }
     }
-    // And the culling-statistics copy, which the graph schedules like any other
-    // pass and the timers therefore bracket like any other pass — a copy is a
-    // cost in the frame, and one that never appeared in the report would be a
-    // cost nothing could see.
+    // The culling-statistics copy is **not** here, and its absence is the
+    // report's shape rather than an omission: the seam takes a timestamp only
+    // where a pass opens and closes, and a `PassKind::Copy` opens no scope at
+    // all. `PassTimers` gives it no query pair and no row, rather than a row
+    // reading 0.000 ms that a reader would take for a measurement.
     expected.extend([
         "shadow",
         "depth-prepass",
@@ -193,7 +208,6 @@ fn per_pass_gpu_timers_report_real_numbers() {
         "ssr",
         "ssr-blur",
         "tonemap",
-        "cull-stats-readback",
     ]);
     assert_eq!(
         timings

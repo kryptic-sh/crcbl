@@ -1759,6 +1759,7 @@ mod tests {
             }],
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(16, 16),
+            timestamp_writes: None,
         });
         paint(encoder.as_mut());
         encoder.end_render_pass();

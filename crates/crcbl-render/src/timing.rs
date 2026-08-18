@@ -19,15 +19,21 @@
 //!
 //! No fence, no wait, no `wait_idle`: the latency *is* the synchronisation.
 //!
-//! # Timestamps sit outside the passes they measure
+//! # Timestamps are the pass's own boundaries, and a copy pass has none
 //!
-//! `crcbl-hal`'s encoder scope rules put query writes "only **outside** any pass
-//! — Vulkan forbids them inside dynamic rendering". So a pass's span runs from
-//! before its barriers to after its `end_render_pass`, which means the number
-//! reported for a pass **includes the transitions the graph inserted for it**.
-//! That is the more useful number anyway: a pass whose barriers cost more than
-//! its draws is a real finding, and one that hid its barriers in a neighbour's
-//! bucket would not surface it.
+//! The seam has no free-standing timestamp: two queries are named by the pass
+//! descriptor itself, as [`PassTimestampWrites`], and the backend takes them
+//! where the pass opens and closes. So the number reported for a pass is the
+//! pass alone, and the barriers the graph inserted around it are attributed to
+//! nothing. That is a narrower number than the one this reported before — the
+//! seam used to bracket each pass from before its barriers to after its close —
+//! and it is the only one every backend can produce, because Metal samples at
+//! stage boundaries and WebGPU only through `timestampWrites`.
+//!
+//! It also means a [`PassKind::Copy`](crate::graph::PassKind) pass is not
+//! timed at all: it opens no scope, so there is no boundary to sample at. Such a
+//! pass gets no query pair and **no row in the report**, rather than a row
+//! reading 0.000 ms that a reader would take for a measurement.
 //!
 //! # How many passes a ring slot holds
 //!
@@ -50,16 +56,18 @@
 //! A device without [`Features::TIMESTAMP_QUERY`] cannot create a timestamp set.
 //! [`PassTimers::new`] reports that as `None`, the graph runs with no timers at
 //! all, and the report is empty. The seam says the same thing about
-//! [`write_timestamp`](crcbl_hal::CommandEncoder::write_timestamp) — "accepted
-//! and dropped" — because topic 10's browsers are where this actually happens.
+//! [`PassTimestampWrites`] — accepted and dropped — because topic 10's browsers
+//! are where this actually happens.
 
 use core::fmt::Write as _;
 
-use crcbl_hal::{CommandEncoder, Device, Features, QueryKind, QuerySetDesc, QuerySetHandle};
+use crcbl_hal::{
+    CommandEncoder, Device, Features, PassTimestampWrites, QueryKind, QuerySetDesc, QuerySetHandle,
+};
 use crcbl_ui::debug::{DebugModule, DebugSection};
 
 use crate::forward::ForwardRenderer;
-use crate::graph::CompiledPass;
+use crate::graph::{CompiledPass, PassKind};
 use crate::menu::MenuRenderer;
 use crate::sprite_pass::SpriteRenderer;
 use crate::ui_pass::UiRenderer;
@@ -208,6 +216,11 @@ struct Slot {
 pub struct PassTimers {
     slots: Vec<Slot>,
     current: usize,
+    /// Which query pair each pass of the frame being recorded was given, indexed
+    /// by its position in the frame. `None` for a pass that is not timed. Built
+    /// by [`PassTimers::begin_frame`] and read by
+    /// [`PassTimers::pass_writes`] as the graph walks the same list.
+    pairs: Vec<Option<u32>>,
     capacity: u32,
     period_ns: f32,
     frames: u64,
@@ -280,6 +293,7 @@ impl PassTimers {
         Some(Self {
             slots,
             current: 0,
+            pairs: Vec::new(),
             capacity: max_passes,
             period_ns,
             frames: 0,
@@ -318,46 +332,56 @@ impl PassTimers {
         // frame that has completed, so reading it neither stalls nor lies.
         self.resolve(device);
 
-        let used = passes.len().min(self.capacity as usize);
-        if passes.len() > used && !self.warned {
+        // A copy pass opens no scope, so it has no boundary a backend could
+        // sample at and gets no query pair. Everything below counts *timed*
+        // passes for that reason, including the warning.
+        let timeable = passes
+            .iter()
+            .filter(|pass| pass.kind() != PassKind::Copy)
+            .count();
+        let used = timeable.min(self.capacity as usize);
+        if timeable > used && !self.warned {
             self.warned = true;
             crcbl_core::log::warn!(
-                "graph: {} passes but timers hold {}; the last {} are untimed (said once)",
-                passes.len(),
+                "graph: {timeable} timed passes but timers hold {}; the last {} are untimed (said \
+                 once)",
                 self.capacity,
-                passes.len() - used
+                timeable - used
             );
         }
         let slot = &mut self.slots[self.current];
         slot.labels.clear();
-        slot.labels.extend(
-            passes
-                .iter()
-                .take(used)
-                .map(|pass| pass.label().to_string()),
-        );
+        self.pairs.clear();
+        for pass in passes {
+            let pair = if pass.kind() == PassKind::Copy {
+                None
+            } else {
+                let next = u32::try_from(slot.labels.len()).unwrap_or(u32::MAX);
+                (next < self.capacity).then(|| {
+                    slot.labels.push(pass.label().to_string());
+                    next
+                })
+            };
+            self.pairs.push(pair);
+        }
         slot.frame = self.frames;
         // Vulkan requires a reset before every write; the seam makes callers
         // always do it so the Vulkan path is never the special case.
         encoder.reset_query_set(slot.set, 0..self.capacity.saturating_mul(2));
     }
 
-    /// Writes the timestamp that opens pass `index`.
-    pub(crate) fn pass_begin(&self, encoder: &mut dyn CommandEncoder, index: usize) {
-        if let Ok(index) = u32::try_from(index)
-            && index < self.capacity
-        {
-            encoder.write_timestamp(self.slots[self.current].set, index * 2);
-        }
-    }
-
-    /// Writes the timestamp that closes pass `index`.
-    pub(crate) fn pass_end(&self, encoder: &mut dyn CommandEncoder, index: usize) {
-        if let Ok(index) = u32::try_from(index)
-            && index < self.capacity
-        {
-            encoder.write_timestamp(self.slots[self.current].set, index * 2 + 1);
-        }
+    /// The two queries pass `index` of this frame is bracketed by, or `None`
+    /// when it is not timed — a copy pass, or one past the ring's capacity.
+    ///
+    /// **What the graph puts in the pass descriptor.** There is no call to
+    /// record: the backend takes both samples where the pass opens and closes.
+    pub(crate) fn pass_writes(&self, index: usize) -> Option<PassTimestampWrites> {
+        let pair = *self.pairs.get(index)?;
+        pair.map(|pair| PassTimestampWrites {
+            set: self.slots[self.current].set,
+            beginning_of_pass: pair * 2,
+            end_of_pass: pair * 2 + 1,
+        })
     }
 
     fn resolve(&mut self, device: &dyn Device) {

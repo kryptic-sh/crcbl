@@ -876,6 +876,7 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
         color_attachments: &[],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(16, 16),
+        timestamp_writes: None,
     });
     // The same `bind_graphics_pipeline` a raster pipeline uses: the seam gives
     // both kinds one handle type, so there is no second bind to get wrong.
@@ -1693,6 +1694,7 @@ fn scope_violations_are_recorded() {
     // A pass left open at finish.
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("cull"),
+        timestamp_writes: None,
     });
     // A copy inside a pass.
     encoder.fill_buffer(
@@ -1771,9 +1773,11 @@ fn nested_passes_are_rejected() {
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("outer"),
+        timestamp_writes: None,
     });
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("inner"),
+        timestamp_writes: None,
     });
     encoder.end_compute_pass();
     let _ = encoder.finish().expect("finish");
@@ -1968,7 +1972,6 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         queue,
     });
     encoder.reset_query_set(timers, 0..4);
-    encoder.write_timestamp(timers, 0);
     encoder.fill_buffer(draw_count, 0, 4, 0);
     encoder.pipeline_barrier(&Barriers {
         buffers: &[crate::BufferBarrier::new(
@@ -1982,6 +1985,11 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
 
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("cull"),
+        timestamp_writes: Some(crate::PassTimestampWrites {
+            set: timers,
+            beginning_of_pass: 0,
+            end_of_pass: 1,
+        }),
     });
     encoder.bind_compute_pipeline(cull);
     encoder.bind_group(0, bind_group, &[], pipeline_layout);
@@ -2009,7 +2017,6 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         )],
         global: false,
     });
-    encoder.write_timestamp(timers, 1);
 
     encoder.begin_render_pass(&RenderPassDesc {
         label: Some("opaque"),
@@ -2030,6 +2037,11 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
             clear: ClearValue::default(),
         }),
         render_area: Rect2d::from_size(1920, 1080),
+        timestamp_writes: Some(crate::PassTimestampWrites {
+            set: timers,
+            beginning_of_pass: 2,
+            end_of_pass: 3,
+        }),
     });
     encoder.set_viewport(&Viewport::from_size(1920, 1080));
     encoder.set_scissor(&Rect2d::from_size(1920, 1080));
@@ -2045,7 +2057,6 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         stride: 20,
     });
     encoder.end_render_pass();
-    encoder.write_timestamp(timers, 2);
 
     let command_buffer = encoder.finish().expect("finish");
     device
@@ -2057,7 +2068,6 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         recorder.command_names(),
         vec![
             "ResetQuerySet",
-            "WriteTimestamp",
             "FillBuffer",
             "Barrier",
             "BeginComputePass",
@@ -2066,7 +2076,6 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
             "Dispatch",
             "EndComputePass",
             "Barrier",
-            "WriteTimestamp",
             "BeginRenderPass",
             "SetViewport",
             "SetScissor",
@@ -2075,7 +2084,6 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
             "BindIndexBuffer",
             "DrawIndexedIndirectCount",
             "EndRenderPass",
-            "WriteTimestamp",
         ]
     );
     assert_eq!(
@@ -2136,6 +2144,102 @@ fn timestamp_queries_read_back_zeros_without_failing() {
         device.query_results(timers, 0, &mut results).is_err(),
         "a destroyed query set must not resolve"
     );
+}
+
+/// **A pass's timestamp pair is checked here, because there is nowhere else
+/// left to check it without a GPU.**
+///
+/// The seam has no free-standing timestamp call: the two queries are named by
+/// the pass descriptor, so a mis-aimed pair is a malformed *descriptor* and this
+/// recorder is what the render graph's unit suite catches it with. Both rules
+/// are WebGPU's own — `beginningOfPassWriteIndex` and `endOfPassWriteIndex` must
+/// differ, and both must be queries the set holds — and both would otherwise
+/// surface as a browser validation error a frame away from the pass that caused
+/// it, or on Vulkan as a pass whose two writes landed in one query and measured
+/// nothing.
+///
+/// Recorded and carried past rather than failing the encoder, which is this
+/// recorder's rule for every rule violation: one run reports the whole frame's
+/// worth.
+#[test]
+fn a_passs_timestamp_pair_is_checked_against_the_set_it_names() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
+    let timers = device
+        .create_query_set(&QuerySetDesc {
+            label: Some("timers"),
+            kind: QueryKind::Timestamp,
+            count: 4,
+        })
+        .expect("the gpu-driven preset has timestamp queries");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("mis-aimed timestamps"),
+        queue,
+    });
+    // Both ends into one query: a pass that measures nothing.
+    encoder.begin_compute_pass(&ComputePassDesc {
+        label: Some("coincident"),
+        timestamp_writes: Some(crate::PassTimestampWrites {
+            set: timers,
+            beginning_of_pass: 2,
+            end_of_pass: 2,
+        }),
+    });
+    encoder.end_compute_pass();
+    // And one past the end of the set.
+    encoder.begin_compute_pass(&ComputePassDesc {
+        label: Some("out of range"),
+        timestamp_writes: Some(crate::PassTimestampWrites {
+            set: timers,
+            beginning_of_pass: 0,
+            end_of_pass: 4,
+        }),
+    });
+    encoder.end_compute_pass();
+    // A legal pair records nothing, or the two above would pass against a
+    // recorder that complained about every pair it saw.
+    encoder.begin_compute_pass(&ComputePassDesc {
+        label: Some("legal"),
+        timestamp_writes: Some(crate::PassTimestampWrites {
+            set: timers,
+            beginning_of_pass: 0,
+            end_of_pass: 1,
+        }),
+    });
+    encoder.end_compute_pass();
+    encoder.finish().expect("a rule violation is not a failure");
+
+    let errors = recorder.validation_errors();
+    assert_eq!(
+        errors.len(),
+        2,
+        "exactly the two mis-aimed pairs, and nothing for the legal one: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            ValidationError::CoincidentTimestamps {
+                command: "BeginComputePass",
+                index: 2,
+            }
+        )),
+        "{errors:?}"
+    );
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            ValidationError::TimestampOutOfRange {
+                command: "BeginComputePass",
+                index: 4,
+                count: 4,
+            }
+        )),
+        "{errors:?}"
+    );
+
+    device.destroy_query_set(timers);
 }
 
 #[test]

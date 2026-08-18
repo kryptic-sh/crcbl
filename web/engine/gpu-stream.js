@@ -57,8 +57,17 @@ const STREAM_MAGIC = new Uint8Array([
   0x43, 0x52, 0x43, 0x42, 0x4c, 0x47, 0x50, 0x55,
 ]); // "CRCBLGPU"
 
-/** `tag::STREAM_VERSION`. */
-const STREAM_VERSION = 1;
+/**
+ * `tag::STREAM_VERSION`.
+ *
+ * `2` since both pass commands grew a trailing `timestampWrites`. That is a
+ * *changed record* rather than a new tag: an older decoder would read the new
+ * presence byte as the next command's tag and carry on, decoding a stream that
+ * still parses and means something else — which is the one defect a version
+ * word exists to catch, and the reason this half and `crcbl-webgpu`'s
+ * `tag::STREAM_VERSION` move together in one commit.
+ */
+const STREAM_VERSION = 2;
 
 // ── Caps ─────────────────────────────────────────────────────────────────────
 
@@ -975,6 +984,27 @@ class ByteReader {
       stages: this.readFlags('PushConstantRange::stages', SHADER_STAGES),
       offset: this.readU32(),
       size: this.readU32(),
+    };
+  }
+
+  /**
+   * A presence byte, then a `crcbl_hal::PassTimestampWrites` if there is one.
+   *
+   * The trailing field of both pass descriptors, and the only way a timestamp
+   * reaches this backend: it becomes `GPURenderPassDescriptor.timestampWrites`
+   * unchanged, `querySet`/`beginningOfPassWriteIndex`/`endOfPassWriteIndex` for
+   * `set`/`beginning_of_pass`/`end_of_pass`. Shared by both arms so the two
+   * cannot decode it differently.
+   *
+   * @param {string} field
+   * @returns {{ set: bigint, beginningOfPass: number, endOfPass: number } | null}
+   */
+  readTimestampWrites(field) {
+    if (!this.readPresent(field)) return null;
+    return {
+      set: this.readHandle('PassTimestampWrites::set'),
+      beginningOfPass: this.readU32(),
+      endOfPass: this.readU32(),
     };
   }
 
@@ -2060,12 +2090,16 @@ function decodeCommand(r) {
       )
         ? r.readDepthStencilAttachment()
         : null;
+      const renderArea = r.readRect();
       return {
         name: 'BeginRenderPass',
         label,
         colorAttachments,
         depthStencilAttachment,
-        renderArea: r.readRect(),
+        renderArea,
+        timestampWrites: r.readTimestampWrites(
+          'RenderPassDesc::timestamp_writes'
+        ),
       };
     }
     case BIND_GRAPHICS_PIPELINE_TAG:
@@ -2148,12 +2182,18 @@ function decodeCommand(r) {
         name: 'Finish',
         commandBuffer: r.readHandle('Finish::command_buffer'),
       };
-    case BEGIN_COMPUTE_PASS_TAG:
-      // `ComputePassDesc` is only a label — compute has no attachments.
+    case BEGIN_COMPUTE_PASS_TAG: {
+      // `ComputePassDesc` is a label and the pass's two timestamps — compute
+      // has no attachments.
+      const label = r.readOptString('ComputePassDesc::label');
       return {
         name: 'BeginComputePass',
-        label: r.readOptString('ComputePassDesc::label'),
+        label,
+        timestampWrites: r.readTimestampWrites(
+          'ComputePassDesc::timestamp_writes'
+        ),
       };
+    }
     case BIND_COMPUTE_PIPELINE_TAG:
       return {
         name: 'BindComputePipeline',

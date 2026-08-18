@@ -232,7 +232,7 @@ pub use command::{
     Barriers, BufferBarrier, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment,
     CommandBuffer, CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePassDesc,
     DepthStencilAttachment, DrawIndirect, DrawIndirectCount, ImageBarrier, ImageCopy, LoadOp,
-    QueueTransfer, RenderPassDesc, ResourceState, StoreOp, depth,
+    PassTimestampWrites, QueueTransfer, RenderPassDesc, ResourceState, StoreOp, depth,
 };
 pub use device::{
     Device, DeviceDesc, DeviceRequestState, Instance, PendingDevice, Queue, QueueHandle, QueueKind,

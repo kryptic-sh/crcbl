@@ -356,6 +356,7 @@ fn render_mesh_shader(
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(width, height),
+        timestamp_writes: None,
     });
     encoder.set_viewport(&crcbl_hal::Viewport::from_size(width, height));
     encoder.set_scissor(&Rect2d::from_size(width, height));

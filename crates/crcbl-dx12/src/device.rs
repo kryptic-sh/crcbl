@@ -2080,8 +2080,9 @@ impl Device for Dx12Device {
             // — but the answer is still read off this device's own caps, for the
             // reason the semaphore arms below give. `Device::create_query_set`
             // builds the heap and the readback buffer a result comes back
-            // through, `CommandEncoder::write_timestamp` and `resolve_query_set`
-            // record `EndQuery` and `ResolveQueryData`, and
+            // through, `RenderPassDesc::timestamp_writes` and
+            // `CommandEncoder::resolve_query_set` record `EndQuery` and
+            // `ResolveQueryData`, and
             // `Device::query_results` submits a resolve of its own and reads it.
             Capability::TimestampQuery => gated(
                 Features::TIMESTAMP_QUERY,
@@ -4670,6 +4671,7 @@ pub(crate) mod tests {
                 color_attachments: core::slice::from_ref(&self.attachment),
                 depth_stencil_attachment: None,
                 render_area: self.area,
+                timestamp_writes: None,
             }
         }
     }
@@ -8340,15 +8342,24 @@ pub(crate) mod tests {
             // error rather than a handle one — which would pass this test
             // without ever reaching the code it is about.
             ("compute pipelines", |encoder| {
-                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: None,
+                    timestamp_writes: None,
+                });
                 encoder.bind_compute_pipeline(unissued());
             }),
             ("dispatches", |encoder| {
-                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: None,
+                    timestamp_writes: None,
+                });
                 encoder.dispatch(1, 1, 1);
             }),
             ("indirect dispatches", |encoder| {
-                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: None,
+                    timestamp_writes: None,
+                });
                 encoder.dispatch_indirect(unissued(), 0);
             }),
             // All three query verbs, because `reset_query_set` records no
@@ -8358,8 +8369,16 @@ pub(crate) mod tests {
             ("query resets", |encoder| {
                 encoder.reset_query_set(unissued(), 0..1);
             }),
-            ("timestamp writes", |encoder| {
-                encoder.write_timestamp(unissued(), 0);
+            ("pass timestamps", |encoder| {
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: None,
+                    timestamp_writes: Some(crcbl_hal::PassTimestampWrites {
+                        set: unissued(),
+                        beginning_of_pass: 0,
+                        end_of_pass: 1,
+                    }),
+                });
+                encoder.end_compute_pass();
             }),
             ("query resolves", |encoder| {
                 encoder.resolve_query_set(unissued(), 0..1, unissued(), 0);
@@ -8782,14 +8801,6 @@ pub(crate) mod tests {
     /// Queries the timestamp tests write: one before the timed work, one after.
     const TIMED_QUERIES: u32 = 2;
 
-    /// Bytes the copy between the two timestamps moves.
-    ///
-    /// Large enough that the copy occupies the queue for far longer than one
-    /// tick of any counter, so a second timestamp above the first is a fact
-    /// about the hardware rather than a race with the clock's granularity. The
-    /// seam suite times the same copy for the same reason.
-    const TIMED_COPY_BYTES: u64 = 4 << 20;
-
     /// What a resolve destination holds before the resolve, so "never written"
     /// stays distinguishable from "these really are the ticks".
     const QUERY_POISON: u64 = 0x5A5A_5A5A_5A5A_5A5A;
@@ -8798,15 +8809,16 @@ pub(crate) mod tests {
     /// came from a clock.**
     ///
     /// The claim `Capability::TimestampQuery` makes here, driven end to end:
-    /// `EndQuery` writes a timestamp either side of a [`TIMED_COPY_BYTES`] copy,
+    /// `EndQuery` writes a timestamp at each boundary of a compute pass that
+    /// really dispatches,
     /// [`Device::query_results`] reads them through its own resolve and
     /// submission, and `resolve_query_set` reads the *same two queries* into a
     /// buffer this test maps. What that second read must produce is not a
     /// plausible pair but the pair already returned, so a backend where one path
     /// reaches a different heap, range or stride cannot be green.
     ///
-    /// The failures it cannot pass through: a `write_timestamp` accepted and
-    /// dropped reads back two zeros, a counter that is not running reads the
+    /// The failures it cannot pass through: a pass whose `timestamp_writes`
+    /// were accepted and dropped reads back two zeros, a counter that is not running reads the
     /// same value twice, and a resolve that wrote nothing leaves
     /// [`QUERY_POISON`] behind. The period is asserted too, because it is the
     /// other half of the claim — a period of zero turns every measured duration
@@ -8837,44 +8849,25 @@ pub(crate) mod tests {
                 count: TIMED_QUERIES,
             })
             .expect("a timestamp query heap");
-        let source = device
-            .create_buffer(&BufferDesc {
-                label: Some("timed copy source"),
-                size: TIMED_COPY_BYTES,
-                usage: BufferUsage::TRANSFER_SRC,
-                memory: MemoryLocation::DeviceLocal,
-            })
-            .expect("a device-local buffer");
-        let sink = device
-            .create_buffer(&BufferDesc {
-                label: Some("timed copy sink"),
-                size: TIMED_COPY_BYTES,
-                usage: BufferUsage::TRANSFER_DST,
-                memory: MemoryLocation::DeviceLocal,
-            })
-            .expect("a device-local buffer");
-
-        run(&device, |encoder| {
-            encoder.pipeline_barrier(&Barriers {
-                buffers: &[
-                    buffer_barrier(source, ResourceState::Undefined, ResourceState::TransferSrc),
-                    buffer_barrier(sink, ResourceState::Undefined, ResourceState::TransferDst),
-                ],
-                ..Barriers::default()
-            });
-            // Unconditional, as the seam asks: a no-op here and required on
-            // Vulkan, so the caller is never the special case.
-            encoder.reset_query_set(set, 0..TIMED_QUERIES);
-            encoder.write_timestamp(set, 0);
-            encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
-                src: source,
-                src_offset: 0,
-                dst: sink,
-                dst_offset: 0,
-                size: TIMED_COPY_BYTES,
-            });
-            encoder.write_timestamp(set, 1);
-        });
+        // The timed work is the probe's own dispatch, because the seam times a
+        // *pass* and nothing else: a copy is only legal outside one, so the
+        // 4 MiB copy this used to bracket has no boundary to be measured at.
+        // The probe's `run` records the reset beside the descriptor.
+        let probe = ComputeProbe::new(&device);
+        let values = probe.run(
+            &device,
+            Some(crcbl_hal::PassTimestampWrites {
+                set,
+                beginning_of_pass: 0,
+                end_of_pass: 1,
+            }),
+            |encoder| encoder.dispatch(PROBE_GROUPS, 1, 1),
+        );
+        assert_probe(
+            &values,
+            &probe_expected(PROBE_ELEMENTS),
+            "the timed pass really dispatched",
+        );
 
         let mut ticks = [0u64; TIMED_QUERIES as usize];
         device
@@ -8883,13 +8876,13 @@ pub(crate) mod tests {
         let [start, end] = ticks;
         assert!(
             start != 0 || end != 0,
-            "both timestamps read back as zero, which is what a write_timestamp accepted and \
-             dropped produces"
+            "both timestamps read back as zero, which is what a pass whose timestampWrites were \
+             accepted and dropped produces"
         );
         assert!(
             end > start,
-            "the timestamps around a {TIMED_COPY_BYTES}-byte copy came back as {start} then \
-             {end}; a clock that ran cannot report the second write at or before the first"
+            "the timestamps bracketing the dispatched compute pass came back as {start} then \
+             {end}; a clock that ran cannot report the closing write at or before the opening one"
         );
         let period = device.caps().limits.timestamp_period_ns;
         assert!(
@@ -8943,8 +8936,7 @@ pub(crate) mod tests {
         );
 
         device.destroy_buffer(resolved);
-        device.destroy_buffer(sink);
-        device.destroy_buffer(source);
+        probe.destroy(&device);
         device.destroy_query_set(set);
     }
 
@@ -9069,7 +9061,15 @@ pub(crate) mod tests {
             label: Some("crcbl-dx12 mismatched timestamp"),
             queue,
         });
-        encoder.write_timestamp(statistics, 0);
+        encoder.begin_compute_pass(&ComputePassDesc {
+            label: None,
+            timestamp_writes: Some(crcbl_hal::PassTimestampWrites {
+                set: statistics,
+                beginning_of_pass: 0,
+                end_of_pass: 1,
+            }),
+        });
+        encoder.end_compute_pass();
         let Err(error) = encoder.finish() else {
             panic!("a timestamp was written into a statistics set");
         };
@@ -9464,9 +9464,17 @@ pub(crate) mod tests {
         /// indirect tests, so both go through the same barriers and the same
         /// readback — and a difference in the result is a difference in the
         /// dispatch.
+        ///
+        /// `timestamps` brackets that compute pass. It is a parameter rather
+        /// than something the timestamp test records for itself because the
+        /// seam has no free-standing timestamp left: the two queries are named
+        /// by the pass descriptor, and this method owns the descriptor. The
+        /// reset the seam requires of every caller goes in beside it, outside
+        /// the pass where the seam puts it.
         fn run(
             &self,
             device: &Dx12Device,
+            timestamps: Option<crcbl_hal::PassTimestampWrites>,
             record: impl FnOnce(&mut dyn CommandEncoder),
         ) -> Vec<u32> {
             run(device, |encoder| {
@@ -9497,8 +9505,14 @@ pub(crate) mod tests {
                     ..Barriers::default()
                 });
 
+                if let Some(writes) = timestamps {
+                    let first = writes.beginning_of_pass.min(writes.end_of_pass);
+                    let last = writes.beginning_of_pass.max(writes.end_of_pass);
+                    encoder.reset_query_set(writes.set, first..last + 1);
+                }
                 encoder.begin_compute_pass(&ComputePassDesc {
                     label: Some("compute probe"),
+                    timestamp_writes: timestamps,
                 });
                 encoder.bind_compute_pipeline(self.pipeline);
                 // Inside the pass, because the open scope is the only signal the
@@ -9638,7 +9652,7 @@ pub(crate) mod tests {
 
         // Offset zero: the first block, which says every element.
         probe.dynamic_offsets = vec![0];
-        let whole = probe.run(&device, |encoder| {
+        let whole = probe.run(&device, None, |encoder| {
             encoder.dispatch(PROBE_GROUPS, 1, 1);
         });
         assert_probe(&whole, &probe_expected(PROBE_ELEMENTS), "at offset 0");
@@ -9646,7 +9660,7 @@ pub(crate) mod tests {
         // The same everything, one number apart: the second block, which says
         // half the elements and one more.
         probe.dynamic_offsets = vec![PROBE_PARAMS_STRIDE];
-        let half = probe.run(&device, |encoder| {
+        let half = probe.run(&device, None, |encoder| {
             encoder.dispatch(PROBE_GROUPS, 1, 1);
         });
         assert_probe(
@@ -10118,7 +10132,10 @@ pub(crate) mod tests {
             })
             .expect("an eight-byte buffer");
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
-        encoder.begin_compute_pass(&ComputePassDesc { label: None });
+        encoder.begin_compute_pass(&ComputePassDesc {
+            label: None,
+            timestamp_writes: None,
+        });
         encoder.bind_compute_pipeline(probe.pipeline);
         encoder.dispatch_indirect(short, 0);
         encoder.end_compute_pass();
@@ -10162,23 +10179,38 @@ pub(crate) mod tests {
                 },
             ),
             ("no compute pipeline bound", "dispatch", |encoder| {
-                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: None,
+                    timestamp_writes: None,
+                });
                 encoder.dispatch(1, 1, 1);
             }),
             (
                 "no compute pipeline bound",
                 "dispatch_indirect",
                 |encoder| {
-                    encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                    encoder.begin_compute_pass(&ComputePassDesc {
+                        label: None,
+                        timestamp_writes: None,
+                    });
                     encoder.dispatch_indirect(unissued(), 0);
                 },
             ),
             ("do not nest", "a nested compute pass", |encoder| {
-                encoder.begin_compute_pass(&ComputePassDesc { label: None });
-                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: None,
+                    timestamp_writes: None,
+                });
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: None,
+                    timestamp_writes: None,
+                });
             }),
             ("compute pass still open", "an unclosed pass", |encoder| {
-                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: None,
+                    timestamp_writes: None,
+                });
             }),
         ];
         assert!(!cases.is_empty(), "nothing to check");
@@ -10203,6 +10235,7 @@ pub(crate) mod tests {
         });
         good.begin_compute_pass(&ComputePassDesc {
             label: Some("empty"),
+            timestamp_writes: None,
         });
         good.end_compute_pass();
         let commands = good.finish().expect("an empty compute pass records");

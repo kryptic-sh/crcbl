@@ -20,11 +20,12 @@ use crcbl_hal::{
     DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
     ImageAspect, ImageBarrier, ImageCopy, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
     ImageType, ImageUsage, ImageViewDesc, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
-    MultisampleState, Offset3d, PipelineLayoutDesc, PolygonMode, PresentInfo, PresentMode,
-    PrimitiveState, PrimitiveTopology, PushConstantRange, QueryKind, QuerySetDesc, QueueTransfer,
-    ReadbackDesc, Rect2d, RenderPassDesc, ResourceState, SampleType, SamplerAddressMode,
-    SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry, ShaderModuleDesc, ShaderStages,
-    StencilFaceState, StencilOp, StencilState, StoreOp, SubmitInfo, SwapchainDesc, Viewport, depth,
+    MultisampleState, Offset3d, PassTimestampWrites, PipelineLayoutDesc, PolygonMode, PresentInfo,
+    PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QueryKind, QuerySetDesc,
+    QueueTransfer, ReadbackDesc, Rect2d, RenderPassDesc, ResourceState, SampleType,
+    SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp, SubmitInfo, SwapchainDesc,
+    Viewport, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -994,6 +995,11 @@ pub fn every_command() -> Vec<Command> {
                 width: 1920,
                 height: 1080,
             },
+            timestamp_writes: Some(PassTimestampWrites {
+                set: handle(226, 227),
+                beginning_of_pass: 4,
+                end_of_pass: 11,
+            }),
         },
         // The empty-and-absent twin of the pass above.
         Command::BeginRenderPass {
@@ -1001,6 +1007,7 @@ pub fn every_command() -> Vec<Command> {
             color_attachments: Vec::new(),
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(2, 3),
+            timestamp_writes: None,
         },
         Command::BindGraphicsPipeline {
             pipeline: handle(31, 32),
@@ -1097,6 +1104,11 @@ pub fn every_command() -> Vec<Command> {
         // transposition among x/y/z is visible.
         Command::BeginComputePass {
             label: Some("cull".into()),
+            timestamp_writes: Some(PassTimestampWrites {
+                set: handle(228, 229),
+                beginning_of_pass: 13,
+                end_of_pass: 2,
+            }),
         },
         Command::BindComputePipeline {
             pipeline: handle(174, 175),
@@ -1145,7 +1157,10 @@ pub fn every_command() -> Vec<Command> {
         },
         // The unlabelled twin of the pass above: `None` and `Some(_)` are
         // different values.
-        Command::BeginComputePass { label: None },
+        Command::BeginComputePass {
+            label: None,
+            timestamp_writes: None,
+        },
         // The copy that carries a dispatch's storage-buffer output to a host
         // buffer. Distinct source and destination handles, and its two offsets and
         // the size are three different values so a transposition among the copy's
@@ -1720,11 +1735,13 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             color_attachments,
             depth_stencil_attachment,
             render_area,
+            timestamp_writes,
         } => stream.begin_render_pass(&RenderPassDesc {
             label: label.as_deref(),
             color_attachments,
             depth_stencil_attachment: *depth_stencil_attachment,
             render_area: *render_area,
+            timestamp_writes: *timestamp_writes,
         }),
         Command::BindGraphicsPipeline { pipeline } => stream.bind_graphics_pipeline(*pipeline),
         Command::BindGroup {
@@ -1768,8 +1785,12 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             draw_count,
             stride,
         } => stream.draw_indexed_indirect(*buffer, *offset, *draw_count, *stride),
-        Command::BeginComputePass { label } => stream.begin_compute_pass(&ComputePassDesc {
+        Command::BeginComputePass {
+            label,
+            timestamp_writes,
+        } => stream.begin_compute_pass(&ComputePassDesc {
             label: label.as_deref(),
+            timestamp_writes: *timestamp_writes,
         }),
         Command::BindComputePipeline { pipeline } => stream.bind_compute_pipeline(*pipeline),
         Command::Dispatch { x, y, z } => stream.dispatch(*x, *y, *z),

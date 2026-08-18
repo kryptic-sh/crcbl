@@ -708,6 +708,7 @@ fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
     let commands = encoder.finish().expect("recording succeeded");
@@ -922,6 +923,7 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
     encoder.pipeline_barrier(&Barriers {
@@ -1414,6 +1416,7 @@ impl ComputeProbe {
 
         encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
             label: Some("compute probe"),
+            timestamp_writes: None,
         });
         encoder.bind_compute_pipeline(self.pipeline);
         // Inside the pass, because the open scope is the only signal the seam
@@ -3287,6 +3290,7 @@ fn exercise_msaa_resolve(headless: &Headless) -> Exercise {
         }],
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(MSAA_RESOLVE_WIDTH, MSAA_RESOLVE_HEIGHT),
+        timestamp_writes: None,
     });
     encoder.end_render_pass();
     encoder.pipeline_barrier(&Barriers {
@@ -4081,6 +4085,7 @@ impl Raster {
                 },
             }),
             render_area: Rect2d::from_size(RASTER_WIDTH, RASTER_HEIGHT),
+            timestamp_writes: None,
         });
         encoder.set_viewport(&crcbl::hal::Viewport::from_size(
             RASTER_WIDTH,
@@ -4876,6 +4881,7 @@ fn push_constant_dispatch(
 
     encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
         label: Some("push constant probe"),
+        timestamp_writes: None,
     });
     record(encoder.as_mut());
     encoder.end_compute_pass();
@@ -5154,6 +5160,7 @@ fn update_bind_group_dispatch(
 
     encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
         label: Some("update bind group probe"),
+        timestamp_writes: None,
     });
     record(encoder.as_mut());
     encoder.end_compute_pass();
@@ -5695,14 +5702,21 @@ const TIMESTAMP_QUERIES: u32 = 2;
 /// into its destination.
 const QUERY_RESULT_BYTES: u64 = size_of::<u64>() as u64;
 
-/// Bytes the copy between the two timestamps moves.
+/// Side of the square attachment the timed render pass clears.
 ///
-/// Large enough that the copy occupies the queue for far longer than one tick
-/// of any device's counter, so a second timestamp greater than the first is a
-/// fact about the hardware rather than a race with the clock's granularity.
-/// Nothing ever reads these bytes: the copy is here for the time it takes, not
-/// for the data it moves.
-const TIMED_COPY_BYTES: u64 = 4 << 20;
+/// The seam times a **pass** and nothing else, so the work between the two
+/// timestamps has to be work a pass can do. A clear is the one such workload
+/// that needs no pipeline, no shader and no vertex data, which is what makes it
+/// the same workload on every backend — and at this size it writes
+/// [`TIMED_CLEAR_BYTES`], far more than a device's counter granularity, so a
+/// second timestamp above the first is a fact about the hardware rather than a
+/// race with the clock. Nothing ever reads these texels: the clear is here for
+/// the time it takes.
+const TIMED_CLEAR_EXTENT: u32 = 1024;
+
+/// Bytes [`TIMED_CLEAR_EXTENT`] of [`Format::Rgba8Unorm`] covers.
+const TIMED_CLEAR_BYTES: u64 =
+    TIMED_CLEAR_EXTENT as u64 * TIMED_CLEAR_EXTENT as u64 * size_of::<u32>() as u64;
 
 /// How many queries the creation-only exercise asks a set to hold.
 ///
@@ -5715,8 +5729,9 @@ const CREATED_QUERIES: u32 = 2;
 ///
 /// # What is asserted, and why a backend that does nothing cannot pass it
 ///
-/// Two timestamps are written around a [`TIMED_COPY_BYTES`] copy, and the
-/// second must be **strictly greater** than the first. That is the one
+/// A render pass clears a [`TIMED_CLEAR_EXTENT`]-square attachment with a
+/// [`PassTimestampWrites`] naming both of its boundaries, and the closing
+/// timestamp must be **strictly greater** than the opening one. That is the one
 /// relationship every API's timestamps obey without knowing the device:
 /// Vulkan's `vkCmdWriteTimestamp2` and D3D12's `EndQuery` both record a raw
 /// tick whose scale is `VkPhysicalDeviceLimits::timestampPeriod` or
@@ -5726,13 +5741,17 @@ const CREATED_QUERIES: u32 = 2;
 /// property. A magic number would be a different assertion on every device;
 /// this is the same assertion on all of them.
 ///
-/// Three failures it cannot be green through. A `write_timestamp` accepted and
+/// Three failures it cannot be green through. Timestamp writes accepted and
 /// dropped — which the seam explicitly permits on a device *without*
 /// [`Features::TIMESTAMP_QUERY`], and which is therefore exactly what a wrong
-/// `Support::Yes` looks like — reads back two zeros. A counter that is not
+/// `Support::Yes` looks like — read back two zeros. A counter that is not
 /// running reads back the same value twice. A resolve that writes nothing
 /// leaves [`QUERY_POISON`] in the destination. None of the three satisfies
 /// `end > start` against a written destination.
+///
+/// **The clear is what makes the strict inequality safe.** An empty pass is two
+/// adjacent writes, which a device with a coarse counter is entitled to report
+/// as the same tick; a pass that writes [`TIMED_CLEAR_BYTES`] is not.
 ///
 /// The period is checked too, because it is half the claim: a backend
 /// reporting `timestamp_period_ns` of zero turns every delta into zero
@@ -5745,7 +5764,7 @@ const CREATED_QUERIES: u32 = 2;
 /// afterwards, because a resolve *waits* for availability — `crcbl-vk` issues
 /// `vkCmdCopyQueryPoolResults` with `VK_QUERY_RESULT_WAIT_BIT` — and a query
 /// that was reset and never written never becomes available. Reading the
-/// non-blocking path first means a backend whose `write_timestamp` is a silent
+/// non-blocking path first means a backend whose pass timestamps are a silent
 /// no-op fails this exercise rather than hanging the suite inside it.
 fn exercise_timestamp_query(headless: &Headless) -> Exercise {
     let device = headless.device.as_ref();
@@ -5758,52 +5777,64 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
         Err(error) => return Exercise::Refused(error),
     };
 
-    let source = device
-        .create_buffer(&BufferDesc {
-            label: Some("timed copy source"),
-            size: TIMED_COPY_BYTES,
-            usage: BufferUsage::TRANSFER_SRC,
-            memory: MemoryLocation::DeviceLocal,
+    let target = device
+        .create_image(&ImageDesc {
+            label: Some("timed clear target"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(TIMED_CLEAR_EXTENT, TIMED_CLEAR_EXTENT),
+            format: RASTER_FORMAT,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::COLOR_ATTACHMENT,
         })
-        .expect("a device-local buffer");
-    let sink = device
-        .create_buffer(&BufferDesc {
-            label: Some("timed copy sink"),
-            size: TIMED_COPY_BYTES,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::DeviceLocal,
+        .expect("a colour attachment");
+    let view = device
+        .create_image_view(&ImageViewDesc {
+            label: Some("timed clear view"),
+            image: target,
+            view_type: ImageViewType::D2,
+            format: RASTER_FORMAT,
+            range: ImageSubresourceRange::all(RASTER_FORMAT),
         })
-        .expect("a device-local buffer");
+        .expect("a view of a colour attachment");
 
-    let barrier = |buffer, from, to| crcbl::hal::BufferBarrier {
-        buffer,
-        from,
-        to,
-        queue_transfer: None,
-    };
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some("timestamp exercise"),
         queue: headless.queue,
     });
     encoder.pipeline_barrier(&Barriers {
-        buffers: &[
-            barrier(source, ResourceState::Undefined, ResourceState::TransferSrc),
-            barrier(sink, ResourceState::Undefined, ResourceState::TransferDst),
-        ],
+        images: &[ImageBarrier::new(
+            target,
+            ImageSubresourceRange::all(RASTER_FORMAT),
+            ResourceState::Undefined,
+            ResourceState::ColorAttachment,
+        )],
         ..Barriers::default()
     });
     // Always reset before writing: Vulkan requires it and every other backend
     // accepts it, which is why the seam has callers do it unconditionally.
     encoder.reset_query_set(set, 0..TIMESTAMP_QUERIES);
-    encoder.write_timestamp(set, 0);
-    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
-        src: source,
-        src_offset: 0,
-        dst: sink,
-        dst_offset: 0,
-        size: TIMED_COPY_BYTES,
+    // The timed work, and the only shape the seam can time: a pass. Nothing is
+    // drawn — the clear is the workload — so this needs no pipeline and is the
+    // same measurement on a backend that has no shader compiled.
+    encoder.begin_render_pass(&crcbl::hal::RenderPassDesc {
+        label: Some("timed clear"),
+        color_attachments: &[ColorAttachment {
+            view,
+            resolve: None,
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color([0.25, 0.5, 0.75, 1.0]),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(TIMED_CLEAR_EXTENT, TIMED_CLEAR_EXTENT),
+        timestamp_writes: Some(crcbl::hal::PassTimestampWrites {
+            set,
+            beginning_of_pass: 0,
+            end_of_pass: 1,
+        }),
     });
-    encoder.write_timestamp(set, 1);
+    encoder.end_render_pass();
 
     let outcome = match encoder.finish() {
         Err(error) => Exercise::Refused(error),
@@ -5826,10 +5857,10 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
             } else {
                 assert!(
                     end > start,
-                    "the timestamps around a {TIMED_COPY_BYTES}-byte copy came back as \
-                     {start} then {end}. A clock that ran cannot report the second write at or \
-                     before the first, so either the writes did not land where they were asked \
-                     to or the counter behind them is not moving."
+                    "the timestamps bracketing a pass that cleared {TIMED_CLEAR_BYTES} bytes \
+                     came back as {start} then {end}. A clock that ran cannot report the closing \
+                     write at or before the opening one, so either the writes did not land where \
+                     they were asked to or the counter behind them is not moving."
                 );
                 let period = f64::from(device.caps().limits.timestamp_period_ns);
                 assert!(
@@ -5840,18 +5871,57 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
                     end - start
                 );
                 eprintln!(
-                    "crcbl hal seam e2e: the timed copy took {ticks_elapsed} ticks, {micros:.3} \
+                    "crcbl hal seam e2e: the timed clear took {ticks_elapsed} ticks, {micros:.3} \
                      µs at {period} ns/tick",
                     ticks_elapsed = end - start,
                     micros = (end - start) as f64 * period / 1_000.0,
                 );
+                // The refusal that keeps the pair meaningful, on a backend that
+                // has just shown it takes the pair at all. A pass writing both
+                // ends into one query measures nothing anywhere — WebGPU
+                // requires the two to be distinct outright — and every backend
+                // implements the check, but until now only `crcbl-hal`'s null
+                // backend asserted it: vk's could be deleted with all seventeen
+                // of these tests green.
+                let mut coincident = device.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("timestamps into one query"),
+                    queue: headless.queue,
+                });
+                coincident.reset_query_set(set, 0..TIMESTAMP_QUERIES);
+                coincident.begin_render_pass(&crcbl::hal::RenderPassDesc {
+                    label: Some("both ends into query 0"),
+                    color_attachments: &[ColorAttachment {
+                        view,
+                        resolve: None,
+                        load: LoadOp::Clear,
+                        store: StoreOp::Store,
+                        clear: ClearValue::color([0.25, 0.5, 0.75, 1.0]),
+                    }],
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(TIMED_CLEAR_EXTENT, TIMED_CLEAR_EXTENT),
+                    timestamp_writes: Some(crcbl::hal::PassTimestampWrites {
+                        set,
+                        beginning_of_pass: 0,
+                        end_of_pass: 0,
+                    }),
+                });
+                coincident.end_render_pass();
+                let refusal = coincident.finish();
+                assert!(
+                    matches!(refusal, Err(HalError::InvalidDescriptor(_))),
+                    "a pass writing both timestamps into one query must be refused as \
+                     InvalidDescriptor — the indices are numbers the caller can correct, and a \
+                     pass that measures nothing is worse than one that refuses: {:?}",
+                    refusal.map(|_| "recorded successfully")
+                );
+
                 exercise_timestamp_resolve(headless, set, ticks)
             }
         }
     };
 
-    device.destroy_buffer(sink);
-    device.destroy_buffer(source);
+    device.destroy_image_view(view);
+    device.destroy_image(target);
     device.destroy_query_set(set);
     outcome
 }
@@ -6010,7 +6080,8 @@ fn exercise_timestamp_resolve(
 /// `setVisibilityResultMode:offset:` on a render encoder, WebGPU's
 /// `beginOcclusionQuery` inside a render pass with an `occlusionQuerySet`
 /// attached. **[`crcbl::hal::CommandEncoder`] has no such verb** — its query
-/// vocabulary is `reset_query_set`, `write_timestamp` and `resolve_query_set` —
+/// vocabulary is `reset_query_set`, `resolve_query_set` and the pass
+/// descriptor's `timestamp_writes` —
 /// so no work this suite can record ever reaches these pools, and there is no
 /// number to be plausible about. Asserting on a resolve of them would be
 /// asserting on queries that were never begun: the value is whatever "not

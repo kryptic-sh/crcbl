@@ -969,6 +969,14 @@ const EXPECTED = [
       clear: { color: [1, 2, 3, 4], depth: 1, stencil: 9 },
     },
     renderArea: { x: -3, y: -5, width: 1920, height: 1080 },
+    // `GPURenderPassDescriptor.timestampWrites`, the only way a timestamp
+    // reaches this backend. The two indices differ so a transposition among
+    // them is visible here rather than as a negative duration in a HUD.
+    timestampWrites: {
+      set: handle(226, 227),
+      beginningOfPass: 4,
+      endOfPass: 11,
+    },
   },
   {
     name: 'BeginRenderPass',
@@ -976,6 +984,7 @@ const EXPECTED = [
     colorAttachments: [],
     depthStencilAttachment: null,
     renderArea: { x: 0, y: 0, width: 2, height: 3 },
+    timestampWrites: null,
   },
   { name: 'BindGraphicsPipeline', pipeline: handle(31, 32) },
   {
@@ -1068,7 +1077,15 @@ const EXPECTED = [
   // The compute-pass commands. `BeginComputePass` is a label only — compute has
   // no attachments — with its `None` twin below; the dispatch's three counts are
   // distinct so a transposition among x/y/z is visible.
-  { name: 'BeginComputePass', label: 'cull' },
+  {
+    name: 'BeginComputePass',
+    label: 'cull',
+    timestampWrites: {
+      set: handle(228, 229),
+      beginningOfPass: 13,
+      endOfPass: 2,
+    },
+  },
   { name: 'BindComputePipeline', pipeline: handle(174, 175) },
   { name: 'Dispatch', x: 1000, y: 2000, z: 3000 },
   // The indirect dispatch: one buffer and one `BigInt` offset, with no count and
@@ -1108,7 +1125,7 @@ const EXPECTED = [
     firstQuery: 19,
     queryCount: 23,
   },
-  { name: 'BeginComputePass', label: null },
+  { name: 'BeginComputePass', label: null, timestampWrites: null },
   // The copy that carries a dispatch's storage-buffer output to a host buffer.
   // Distinct source and destination, and its two offsets and the size are three
   // different `BigInt`s so a transposition among the `u64` fields is visible.
@@ -2351,12 +2368,14 @@ async function main() {
     { kind: 'BadMagic' },
     'a buffer that is not a command stream is refused by its magic'
   );
-  // The version is a `u16` at offset 8, so its low byte alone says 2. The two
+  // The version is a `u16` at offset 8, so its low byte alone says 1 — the
+  // version this format spoke before both pass commands grew a
+  // `timestampWrites`, and exactly the buffer an older wasm would send. The two
   // halves ship as separate artifacts and are cached independently, which is
   // what makes this reachable at all.
   checkRefused(
-    withByte(fixture, 8, 2),
-    { kind: 'UnsupportedVersion', found: 2, expected: 1 },
+    withByte(fixture, 8, 1),
+    { kind: 'UnsupportedVersion', found: 1, expected: 2 },
     'a stream from a build that speaks another version is refused'
   );
 

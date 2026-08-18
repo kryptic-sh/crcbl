@@ -87,24 +87,25 @@ use crcbl_hal::{
     CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePassDesc,
     ComputePipelineHandle, DrawIndirect, DrawIndirectCount, Extent3d, Format,
     GraphicsPipelineHandle, HalError, ImageAspect, ImageCopy, ImageHandle, ImageSubresourceLayers,
-    ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d, PipelineLayoutHandle, QueryKind,
-    QuerySetHandle, QueueTransfer, Rect2d, RenderPassDesc, ShaderStages, Viewport,
+    ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d, PassTimestampWrites,
+    PipelineLayoutHandle, QueryKind, QuerySetHandle, QueueTransfer, Rect2d, RenderPassDesc,
+    ShaderStages, Viewport,
 };
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_BOX, D3D12_CLEAR_FLAG_DEPTH, D3D12_CLEAR_FLAG_STENCIL, D3D12_CLEAR_FLAGS,
     D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_INDEX_BUFFER_VIEW, D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
-    D3D12_RESOURCE_BARRIER, D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-    D3D12_RESOURCE_BARRIER_FLAG_NONE, D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-    D3D12_RESOURCE_BARRIER_TYPE_UAV, D3D12_RESOURCE_STATE_RENDER_TARGET,
-    D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATES,
-    D3D12_RESOURCE_TRANSITION_BARRIER, D3D12_RESOURCE_UAV_BARRIER, D3D12_ROOT_PARAMETER_TYPE_CBV,
-    D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION,
-    D3D12_TEXTURE_COPY_LOCATION_0, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-    D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT,
-    D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT, ID3D12CommandAllocator,
-    ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12GraphicsCommandList6, ID3D12QueryHeap,
-    ID3D12Resource,
+    D3D12_QUERY_TYPE, D3D12_RESOURCE_BARRIER, D3D12_RESOURCE_BARRIER_0,
+    D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_BARRIER_FLAG_NONE,
+    D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, D3D12_RESOURCE_BARRIER_TYPE_UAV,
+    D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_DEST,
+    D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATES, D3D12_RESOURCE_TRANSITION_BARRIER,
+    D3D12_RESOURCE_UAV_BARRIER, D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV,
+    D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION, D3D12_TEXTURE_COPY_LOCATION_0,
+    D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+    D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT,
+    ID3D12CommandAllocator, ID3D12CommandSignature, ID3D12GraphicsCommandList,
+    ID3D12GraphicsCommandList6, ID3D12QueryHeap, ID3D12Resource,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::core::Interface;
@@ -282,6 +283,12 @@ pub(crate) struct Dx12CommandEncoder {
     /// [`end_render_pass`](CommandEncoder::end_render_pass) as it records them.
     /// See [`PendingResolve`].
     resolves: Vec<PendingResolve>,
+    /// The heap, query type and index the open pass's closing timestamp goes
+    /// into, from [`PassTimestampWrites::end_of_pass`]. D3D12 takes a timestamp
+    /// anywhere — `EndQuery` with no `BeginQuery` — so the seam's two pass
+    /// boundaries are two ordinary calls, and this carries the second one from
+    /// the pass's opening to its close.
+    pass_end_timestamp: Option<(ID3D12QueryHeap, D3D12_QUERY_TYPE, u32)>,
 }
 
 impl core::fmt::Debug for Dx12CommandEncoder {
@@ -316,6 +323,7 @@ impl Dx12CommandEncoder {
             in_render_pass: false,
             in_compute_pass: false,
             resolves: Vec::new(),
+            pass_end_timestamp: None,
         };
         // The queue check comes first and is the one failure here that is a
         // caller bug rather than a driver refusal — a queue from another device
@@ -406,6 +414,80 @@ impl Dx12CommandEncoder {
                 self.fail(error);
                 None
             }
+        }
+    }
+
+    /// Opens a pass's timestamps: writes the first and remembers the second.
+    ///
+    /// `EndQuery` with no `BeginQuery` is how D3D12 spells a timestamp — a
+    /// timestamp is the one query type that is an *instant* rather than an
+    /// interval, so `D3D12_QUERY_TYPE_TIMESTAMP` is ended without ever being
+    /// begun, and `wgpu-hal`'s dx12 backend records exactly this call. The seam
+    /// names the two boundaries in the pass descriptor, so both calls sit
+    /// outside the pass: one here, before the scope opens, and one in the
+    /// matching `end_*_pass`.
+    ///
+    /// **A set of another kind fails the encoder rather than being written.**
+    /// `EndQuery` with a mismatched type is a debug-layer error and silence in a
+    /// release runtime, and the value a later read produced would be a number
+    /// from a pool nobody wrote — which is worse than a refusal a caller can
+    /// see.
+    fn open_pass_timestamps(&mut self, what: &'static str, writes: Option<PassTimestampWrites>) {
+        self.pass_end_timestamp = None;
+        let Some(writes) = writes else { return };
+        if self.list().is_none() {
+            return;
+        }
+        let Some(resolved) = self.query_set(writes.set) else {
+            return;
+        };
+        if !matches!(resolved.kind, QueryKind::Timestamp) {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} names a {:?} query set for its timestamps; a timestamp is written into a \
+                 QueryKind::Timestamp set and D3D12 would end a query of the wrong type in it",
+                resolved.kind
+            )));
+            return;
+        }
+        if writes.beginning_of_pass == writes.end_of_pass {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} writes both of its timestamps into query {}; the two must be distinct \
+                 queries or the pass measures nothing",
+                writes.beginning_of_pass
+            )));
+            return;
+        }
+        for index in [writes.beginning_of_pass, writes.end_of_pass] {
+            // One query, so the seam's own bound is the whole check.
+            if let Err(error) = query::check_range(resolved.count, index, 1) {
+                self.fail(error);
+                return;
+            }
+        }
+        let heap = resolved.raw.clone();
+        let query_type = resolved.query_type;
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, `heap` is a live query heap this
+        // device created and this encoder retained in `query_set` above, the
+        // type is the one the heap was created for, and the index was
+        // bounds-checked against the heap's own query count.
+        unsafe {
+            list.EndQuery(&heap, query_type, writes.beginning_of_pass);
+        }
+        self.pass_end_timestamp = Some((heap, query_type, writes.end_of_pass));
+    }
+
+    /// Writes the closing half of [`open_pass_timestamps`](Self::open_pass_timestamps),
+    /// after the scope has closed. A no-op for an untimed pass.
+    fn close_pass_timestamps(&mut self) {
+        let Some((heap, query_type, index)) = self.pass_end_timestamp.take() else {
+            return;
+        };
+        let Some(list) = self.list() else { return };
+        // SAFETY: as for the opening write — heap, type and index were all
+        // checked there, and the heap is retained in `query_heaps`.
+        unsafe {
+            list.EndQuery(&heap, query_type, index);
         }
     }
 
@@ -1654,6 +1736,7 @@ impl CommandEncoder for Dx12CommandEncoder {
             list.RSSetViewports(&[viewport]);
             list.RSSetScissorRects(&[area]);
         }
+        self.open_pass_timestamps("begin_render_pass", desc.timestamp_writes);
         self.in_render_pass = true;
     }
 
@@ -1674,6 +1757,7 @@ impl CommandEncoder for Dx12CommandEncoder {
         // After the unbind, so that nothing is transitioning a subresource the
         // output merger still holds a descriptor for.
         self.record_resolves();
+        self.close_pass_timestamps();
     }
 
     /// Sets the viewport, one to one.
@@ -2090,7 +2174,7 @@ impl CommandEncoder for Dx12CommandEncoder {
     /// D3D12 has no compute encoder to create — a `DIRECT` list takes both — so
     /// the only thing a compute pass is here is the bookkeeping that makes
     /// nesting an error. Every command that would go inside one refuses.
-    fn begin_compute_pass(&mut self, _desc: &ComputePassDesc<'_>) {
+    fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {
         if self.list().is_none() {
             return;
         }
@@ -2100,6 +2184,7 @@ impl CommandEncoder for Dx12CommandEncoder {
             ));
             return;
         }
+        self.open_pass_timestamps("begin_compute_pass", desc.timestamp_writes);
         self.in_compute_pass = true;
     }
 
@@ -2112,6 +2197,7 @@ impl CommandEncoder for Dx12CommandEncoder {
     fn end_compute_pass(&mut self) {
         self.in_compute_pass = false;
         self.compute = None;
+        self.close_pass_timestamps();
     }
 
     /// Binds a compute pipeline state object and its root signature.
@@ -2262,46 +2348,6 @@ impl CommandEncoder for Dx12CommandEncoder {
             u64::from(range.end.saturating_sub(range.start)),
         ) {
             self.fail(error);
-        }
-    }
-
-    /// `EndQuery` with no `BeginQuery`, which is how D3D12 spells a timestamp.
-    ///
-    /// A timestamp is the one query type that is an *instant* rather than an
-    /// interval, so `D3D12_QUERY_TYPE_TIMESTAMP` is ended without ever being
-    /// begun — `wgpu-hal`'s dx12 `write_timestamp` records exactly this call.
-    ///
-    /// **A set of another kind fails the encoder rather than being written.**
-    /// `EndQuery` with a mismatched type is a debug-layer error and silence in a
-    /// release runtime, and the value a later read produced would be a number
-    /// from a pool nobody wrote — which is worse than a refusal a caller can see.
-    fn write_timestamp(&mut self, set: QuerySetHandle, index: u32) {
-        if self.list().is_none() || !self.outside_a_pass("write_timestamp") {
-            return;
-        }
-        let Some(resolved) = self.query_set(set) else {
-            return;
-        };
-        if !matches!(resolved.kind, QueryKind::Timestamp) {
-            self.fail(HalError::InvalidDescriptor(format!(
-                "write_timestamp names a {:?} query set; a timestamp is written into a \
-                 QueryKind::Timestamp set and D3D12 would end a query of the wrong type in it",
-                resolved.kind
-            )));
-            return;
-        }
-        // One query, so the seam's own bound is the whole check.
-        if let Err(error) = query::check_range(resolved.count, index, 1) {
-            self.fail(error);
-            return;
-        }
-        let Some(list) = self.list() else { return };
-        // SAFETY: `list` is live and recording, `resolved.raw` is a live query
-        // heap this device created and this encoder retained above, the type is
-        // the one the heap was created for, and `index` was bounds-checked
-        // against the heap's own query count.
-        unsafe {
-            list.EndQuery(&resolved.raw, resolved.query_type, index);
         }
     }
 

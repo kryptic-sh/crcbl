@@ -1086,11 +1086,13 @@ impl<'a> CompiledGraph<'a> {
     /// Records the whole frame into `encoder`.
     ///
     /// Realises the transients out of `pool`, then for each pass in order:
-    /// writes a start timestamp, emits its barrier batch as one call, opens the
-    /// pass, sets a full-target viewport and scissor, runs the body, closes the
-    /// pass and writes an end timestamp — except a [`PassKind::Copy`], whose
+    /// emits its barrier batch as one call, opens the pass — naming the two
+    /// queries `timers` gave it, which the backend samples where the pass opens
+    /// and closes — sets a full-target viewport and scissor, runs the body and
+    /// closes the pass. A [`PassKind::Copy`] is the exception twice over: its
     /// body runs with no scope open at all, because that is the only place the
-    /// seam permits a copy. Finally emits the barriers that return
+    /// seam permits a copy, and having no scope it has no boundary to time.
+    /// Finally emits the barriers that return
     /// imported resources to their required states, and tells `pool` what this
     /// frame left each physical transient in — which is what the *next* frame's
     /// first barrier uses as its source scope.
@@ -1128,10 +1130,13 @@ impl<'a> CompiledGraph<'a> {
         }
 
         for (index, pass) in passes.into_iter().enumerate() {
-            if let Some(timers) = timers.as_deref_mut() {
-                timers.pass_begin(encoder, index);
-            }
             emit(encoder, &images, &realised, &pass.barriers);
+            // The pass's own boundaries, not a call around it: the seam takes a
+            // timestamp only where a pass opens and closes, so the barriers just
+            // emitted are outside what this pass will report.
+            let timestamp_writes = timers
+                .as_deref()
+                .and_then(|timers| timers.pass_writes(index));
 
             match pass.kind {
                 PassKind::Render => {
@@ -1141,6 +1146,7 @@ impl<'a> CompiledGraph<'a> {
                         color_attachments: &colors,
                         depth_stencil_attachment: depth_stencil,
                         render_area: pass.render_area,
+                        timestamp_writes,
                     });
                     // Dynamic state, set by the graph rather than by every pass
                     // body: a pipeline that baked a viewport in would have to be
@@ -1156,6 +1162,7 @@ impl<'a> CompiledGraph<'a> {
                 PassKind::Compute => {
                     encoder.begin_compute_pass(&ComputePassDesc {
                         label: Some(&pass.label),
+                        timestamp_writes,
                     });
                 }
                 // Nothing is opened: a copy is only legal outside every scope.
@@ -1181,9 +1188,6 @@ impl<'a> CompiledGraph<'a> {
             // acquires. Outside the pass scope, because the seam only allows
             // barriers there.
             emit(encoder, &images, &realised, &pass.release_barriers);
-            if let Some(timers) = timers.as_deref_mut() {
-                timers.pass_end(encoder, index);
-            }
         }
 
         emit(encoder, &images, &realised, &final_barriers);

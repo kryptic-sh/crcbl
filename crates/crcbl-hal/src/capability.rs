@@ -384,7 +384,7 @@ capabilities! {
     // --- queries ---
 
     /// A [`QueryKind::Timestamp`](crate::QueryKind::Timestamp) query set, the
-    /// [`write_timestamp`](crate::CommandEncoder::write_timestamp) that fills it
+    /// [`PassTimestampWrites`](crate::PassTimestampWrites) that fill it
     /// and the [`query_results`](crate::Device::query_results) that read it.
     TimestampQuery,
 
@@ -1021,9 +1021,12 @@ pub const DIVERGENCES: &[Divergence] = &[
               correlates the GPU clock to the host at sample time rather than ticking at a fixed \
               period. The Mac CI runs this backend on advertises no counterSets either, so it \
               cannot measure the period it would need. Which kind of divergence that is stays \
-              unsettled: whether a timestamp can be taken where the seam's write_timestamp puts \
-              it also depends on which MTLCounterSamplingPoint values supportsCounterSampling: \
-              answers for, which is per device (the Metal query slice)",
+              unsettled, though the seam's verb is no longer part of what leaves it unsettled: \
+              PassTimestampWrites asks only for a sample where an encoder opens and closes, \
+              which is what Metal's sampleBufferAttachments express, so the open questions are \
+              the counter set and the period rather than where the sample would go — \
+              adapter.rs's counter-sampling probe is what answers them, per device (the Metal \
+              query slice)",
     },
     Divergence {
         capability: Capability::TimestampQuery,
@@ -1032,19 +1035,15 @@ pub const DIVERGENCES: &[Divergence] = &[
         why: "this backend enables neither wgpu's TIMESTAMP_QUERY nor its statistics features, so \
               no query set can be created even on an adapter that has them",
     },
-    Divergence {
-        capability: Capability::TimestampQuery,
-        backend: BackendKind::WebGpu,
-        kind: DivergenceKind::Unwritten,
-        why: "a timestamp query set is creatable — GPUQueryType has 'timestamp' — and \
-              create_query_set refuses it all the same, because no encoder carries a \
-              writeTimestamp: WebGPU takes timestamps only through a render or compute pass's \
-              timestampWrites, and the seam's write_timestamp names an arbitrary point in the \
-              command stream. A set that could never be written is a handle a profiler would fill \
-              with zeros and report as timings, so the refusal is the honest answer and the work \
-              is narrowing the seam's verb to pass boundaries. The rest of the query spine is \
-              built: the occlusion row retired with it",
-    },
+    // The WebGPU TimestampQuery row that used to sit here is gone, and it left
+    // the way `StorageImageBinding`'s did: the gap was the seam's own verb. It
+    // had a free-standing `write_timestamp` naming an arbitrary point in the
+    // command stream, which WebGPU has no expression for at all, so
+    // `create_query_set` refused a timestamp set rather than hand out a handle a
+    // profiler would fill with zeros. `PassTimestampWrites` is
+    // `GPURenderPassDescriptor.timestampWrites`' own shape, so the browser
+    // backend passes it straight through and answers `Support::Yes`. `crcbl-webgpu`
+    // now diverges from nothing.
     Divergence {
         capability: Capability::OcclusionQuery,
         backend: BackendKind::Wgpu,
@@ -1746,16 +1745,14 @@ mod tests {
             BackendKind::Metal,
             DivergenceKind::Unclassified,
         ),
-        // The browser's one. Everything else `crcbl-webgpu` refuses is WebGPU
-        // itself refusing, which is why this is the short list and not the long
-        // one. `StorageImageBinding` was the second and left when
-        // `BindingKind::StorageImage` grew its `view_type` and `format`: the
-        // work landed, which is one of the three ways a row is allowed to go.
-        (
-            Capability::TimestampQuery,
-            BackendKind::WebGpu,
-            DivergenceKind::Unwritten,
-        ),
+        // `crcbl-webgpu` is not on this list at all, and that is the point:
+        // everything WebGPU refuses is WebGPU itself refusing, which is an
+        // `ApiAbsence` and not a blocker. The browser backend had two rows and
+        // both left the way a row is supposed to — the work landed.
+        // `StorageImageBinding` went when `BindingKind::StorageImage` grew its
+        // `view_type` and `format`; `TimestampQuery` went when the seam's
+        // free-standing `write_timestamp` became `PassTimestampWrites` on the
+        // pass descriptor, which is `timestampWrites`' own shape.
     ];
 
     /// The one that makes the goal checkable: what

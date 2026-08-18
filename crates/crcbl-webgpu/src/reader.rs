@@ -24,9 +24,10 @@ use crcbl_hal::{
     CullMode, DepthBias, DepthStencilAttachment, DepthStencilState, Extent3d, FilterMode, Format,
     FrontFace, ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageSubresourceRange,
     ImageType, ImageUsage, ImageViewType, IndexFormat, LoadOp, MultisampleState, Offset3d,
-    PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QueueTransfer,
-    Rect2d, ResourceState, SampleType, SamplerAddressMode, SemaphoreSignal, SemaphoreWait,
-    ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp, Viewport,
+    PassTimestampWrites, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology,
+    PushConstantRange, QueueTransfer, Rect2d, ResourceState, SampleType, SamplerAddressMode,
+    SemaphoreSignal, SemaphoreWait, ShaderStages, StencilFaceState, StencilOp, StencilState,
+    StoreOp, Viewport,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -190,6 +191,28 @@ impl ByteReader<'_> {
             stages,
             offset,
             size,
+        }))
+    }
+
+    /// The optional [`PassTimestampWrites`] both pass descriptors end with.
+    ///
+    /// A presence byte, then the set and the two query indices. Shared by both
+    /// arms so a decode that read one of them differently is impossible rather
+    /// than merely unlikely.
+    fn read_timestamp_writes(
+        &mut self,
+        field: &'static str,
+    ) -> Result<Option<PassTimestampWrites>, DecodeError> {
+        if !self.read_present(field)? {
+            return Ok(None);
+        }
+        let set = self.read_handle("PassTimestampWrites::set")?;
+        let beginning_of_pass = self.read_u32()?;
+        let end_of_pass = self.read_u32()?;
+        Ok(Some(PassTimestampWrites {
+            set,
+            beginning_of_pass,
+            end_of_pass,
         }))
     }
 
@@ -1107,11 +1130,14 @@ impl<'a> StreamReader<'a> {
                         None
                     };
                 let render_area = r.read_rect()?;
+                let timestamp_writes =
+                    r.read_timestamp_writes("RenderPassDesc::timestamp_writes")?;
                 Ok(Command::BeginRenderPass {
                     label,
                     color_attachments,
                     depth_stencil_attachment,
                     render_area,
+                    timestamp_writes,
                 })
             }
             tag::BIND_GRAPHICS_PIPELINE_TAG => Ok(Command::BindGraphicsPipeline {
@@ -1242,7 +1268,12 @@ impl<'a> StreamReader<'a> {
             }
             tag::BEGIN_COMPUTE_PASS_TAG => {
                 let label = r.read_opt_string("ComputePassDesc::label")?;
-                Ok(Command::BeginComputePass { label })
+                let timestamp_writes =
+                    r.read_timestamp_writes("ComputePassDesc::timestamp_writes")?;
+                Ok(Command::BeginComputePass {
+                    label,
+                    timestamp_writes,
+                })
             }
             tag::BIND_COMPUTE_PIPELINE_TAG => Ok(Command::BindComputePipeline {
                 pipeline: r.read_handle("BindComputePipeline::pipeline")?,

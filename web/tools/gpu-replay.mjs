@@ -6765,6 +6765,119 @@ async function main() {
     return device.createdEncoders.at(-1).pass;
   };
 
+  // ---- a pass's timestamps reach the descriptor, or the pass does not open --
+  //
+  // **THE WHOLE OF `Capability::TimestampQuery` ON THIS BACKEND.** WebGPU takes
+  // a timestamp only through a pass's `timestampWrites`, which is why the seam
+  // has no free-standing write left; so if this replayer dropped the field, a
+  // timed frame would replay as a frame that runs and measures nothing, and the
+  // profiler would read two unwritten queries back as zeros and report them as a
+  // duration. That is precisely the outcome the refusal this slice removed used
+  // to prevent, so the field reaching the descriptor is checked here rather than
+  // assumed — and a pair this replayer cannot honour abandons the pass rather
+  // than opening an untimed one.
+  {
+    const timedSet = {
+      name: 'CreateQuerySet',
+      set: handle(92, 1),
+      label: 'timers',
+      kind: 'Timestamp',
+      count: 4,
+    };
+    const timed = (writes) => ({ ...openPass, timestampWrites: writes });
+    const timedCompute = (writes) => ({
+      name: 'BeginComputePass',
+      label: null,
+      timestampWrites: writes,
+    });
+    const good = { set: handle(92, 1), beginningOfPass: 1, endOfPass: 3 };
+
+    {
+      const { replayer, device } = await readyWithDevice({
+        device: stubDevice(['timestamp-query']),
+      });
+      replayer.replay(frameOf(timedSet, 599n));
+      const querySet = replayer.querySets.get(timedSet.set).set;
+      replayer.replay(frameOf(encoderCommand, 600n));
+      replayer.replay(frameOf(timed(good), 601n));
+      replayer.replay(frameOf({ name: 'EndRenderPass' }, 602n));
+      replayer.replay(frameOf(timedCompute(good), 603n));
+      const encoder = device.createdEncoders.at(-1);
+      check(
+        encoder.beganPasses.length === 1 &&
+          encoder.beganPasses[0].timestampWrites?.querySet === querySet &&
+          encoder.beganPasses[0].timestampWrites.beginningOfPassWriteIndex ===
+            1 &&
+          encoder.beganPasses[0].timestampWrites.endOfPassWriteIndex === 3,
+        'a timed render pass carries the resolved query set and both indices, the way round they were sent'
+      );
+      check(
+        encoder.beganComputePasses.length === 1 &&
+          encoder.beganComputePasses[0].timestampWrites?.querySet ===
+            querySet &&
+          encoder.beganComputePasses[0].timestampWrites
+            .beginningOfPassWriteIndex === 1 &&
+          encoder.beganComputePasses[0].timestampWrites.endOfPassWriteIndex ===
+            3,
+        'and so does a timed compute pass'
+      );
+      check(
+        replayer.pendingErrors === 0,
+        'a timed pass on a device with the feature leaves the error queue empty'
+      );
+    }
+    {
+      // An untimed pass names no `timestampWrites` at all rather than a null
+      // one: WebGPU refuses a descriptor whose member is present and not a
+      // dictionary, so "absent" and "empty" are not the same thing here.
+      const { replayer, device } = await readyWithDevice();
+      openedPass(replayer, device);
+      const encoder = device.createdEncoders.at(-1);
+      check(
+        !('timestampWrites' in encoder.beganPasses[0]),
+        'an untimed pass omits the member rather than passing null'
+      );
+    }
+    {
+      // The three pairs this replayer refuses, each by name and each leaving no
+      // pass open — a pass that opened untimed would be the silent-zero outcome
+      // this whole field exists to prevent.
+      const refusals = [
+        [
+          { set: handle(93, 1), beginningOfPass: 0, endOfPass: 1 },
+          'no live set',
+          'live set',
+        ],
+        [
+          { set: handle(92, 1), beginningOfPass: 2, endOfPass: 2 },
+          'the same query twice',
+          'distinct',
+        ],
+        [
+          { set: handle(92, 1), beginningOfPass: 0, endOfPass: 9 },
+          'a query past the end',
+          '4-query set',
+        ],
+      ];
+      for (const [writes, what, expected] of refusals) {
+        const { replayer, device } = await readyWithDevice({
+          device: stubDevice(['timestamp-query']),
+        });
+        replayer.replay(frameOf(timedSet, 599n));
+        replayer.replay(frameOf(encoderCommand, 600n));
+        replayer.replay(frameOf(timed(writes), 601n));
+        const error = replayer.takeError();
+        const encoder = device.createdEncoders.at(-1);
+        check(
+          error !== null &&
+            error.includes(expected) &&
+            encoder.beganPasses.length === 0,
+          `${what} is refused by name and opens no pass (${String(error)})`
+        );
+      }
+    }
+  }
+
   // ---- a depth-stencil attachment describes only the planes its view has ---
   //
   // **THE COST OF GETTING THIS WRONG IS THE WHOLE FRAME**, which is why it has
@@ -7121,12 +7234,12 @@ async function main() {
     );
   }
   {
-    // **A Timestamp set is refused by name and nothing is created.** This is the
-    // replayer agreeing with the seam, not duplicating it: `create_query_set` on
-    // the Rust side refuses the kind before it is encoded, because WebGPU writes
-    // timestamps only at a pass's `timestampWrites`. A set that got through here
-    // would be one nothing could ever write, and its resolve would read back as
-    // a frame that took no time.
+    // **A Timestamp set follows the browser's own feature, and the statistics
+    // kind is refused whatever the device has.** `GPUQueryType` has no
+    // statistics member at all; `'timestamp'` needs `'timestamp-query'`, and
+    // `createQuerySet` on a device without it throws — so it is refused by name
+    // here instead, which puts the diagnosis on this command rather than on an
+    // uncaught validation error a frame later.
     const { replayer, device } = await readyWithDevice();
     replayer.replay(frameOf({ ...querySetCommand, kind: 'Timestamp' }, 610n));
     replayer.replay(
@@ -7139,12 +7252,33 @@ async function main() {
     const second = replayer.takeError();
     check(
       first !== null &&
-        first.includes('Timestamp') &&
+        first.includes('timestamp-query') &&
         second !== null &&
         second.includes('PipelineStatistics') &&
         device.createdQuerySets.length === 0 &&
         replayer.querySets.get(querySetCommand.set) === undefined,
-      `neither kind WebGPU cannot serve reaches createQuerySet (${JSON.stringify([first, second])})`
+      `a timestamp set without the feature and a statistics set are both refused (${JSON.stringify([first, second])})`
+    );
+  }
+  {
+    // **And the same Timestamp set is created, as `type: 'timestamp'`, on a
+    // device that opened with the feature.** Without this the refusal above
+    // would pass just as well against a replayer that refused the kind
+    // unconditionally, which is what it used to do — and the whole browser half
+    // of `Capability::TimestampQuery` is that it no longer does.
+    const { replayer, device } = await readyWithDevice({
+      device: stubDevice(['timestamp-query']),
+    });
+    replayer.replay(frameOf({ ...querySetCommand, kind: 'Timestamp' }, 610n));
+    checkEqual(
+      device.createdQuerySets,
+      [{ label: 'visibility', type: 'timestamp', count: 4 }],
+      'a timestamp set on a device that has the feature is created as timestamp'
+    );
+    check(
+      replayer.pendingErrors === 0 &&
+        replayer.querySets.get(querySetCommand.set) !== undefined,
+      'and is filed under its handle with no error'
     );
   }
   {

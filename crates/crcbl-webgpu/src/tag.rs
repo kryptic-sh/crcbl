@@ -47,7 +47,14 @@ use crate::reply::SurfaceCapsFailure;
 pub const STREAM_MAGIC: &[u8; 8] = b"CRCBLGPU";
 
 /// Current stream format version.
-pub const STREAM_VERSION: u16 = 1;
+///
+/// `2` since both pass commands grew a trailing `timestamp_writes` — see
+/// [`REPLY_VERSION`] for the rule this follows. That edit is a **changed
+/// record**, the kind a decoder cannot notice: an older `gpu-stream.js` reads
+/// the new presence byte as the next command's tag and carries on, decoding a
+/// stream that still parses and means something else. A new tag would not have
+/// moved this word.
+pub const STREAM_VERSION: u16 = 2;
 
 /// Bytes before the first command: [`STREAM_MAGIC`], [`STREAM_VERSION`], and the
 /// sequence number of the first command in the buffer.

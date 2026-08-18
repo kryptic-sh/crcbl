@@ -12,9 +12,10 @@
 //! [`Features::TIMESTAMP_QUERY`](crate::Features::TIMESTAMP_QUERY) is optional
 //! because WebGPU's timestamp support is browser-dependent (topic 10's risk
 //! list). A backend without it must accept
-//! [`write_timestamp`](crate::CommandEncoder::write_timestamp) as a no-op and
-//! return zeros from [`Device::query_results`](crate::Device::query_results) —
-//! the HUD shows blanks, the frame still renders.
+//! [`PassTimestampWrites`](crate::PassTimestampWrites) on a pass descriptor as a
+//! no-op and return zeros from
+//! [`Device::query_results`](crate::Device::query_results) — the HUD shows
+//! blanks, the frame still renders.
 //!
 //! # There are no unit tests in this module
 //!
@@ -39,8 +40,8 @@ pub type QuerySetHandle = Handle<QuerySet>;
 /// What a query set measures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QueryKind {
-    /// A GPU clock tick, written by
-    /// [`write_timestamp`](crate::CommandEncoder::write_timestamp). Convert
+    /// A GPU clock tick, written at a pass boundary named by
+    /// [`PassTimestampWrites`](crate::PassTimestampWrites). Convert
     /// deltas to nanoseconds with
     /// [`Limits::timestamp_period_ns`](crate::Limits::timestamp_period_ns).
     Timestamp,

@@ -222,6 +222,43 @@ pub struct DepthStencilAttachment {
     pub clear: ClearValue,
 }
 
+/// The two timestamps that bracket a pass — **the seam's only timestamp verb**.
+///
+/// A timestamp is named by the pass it brackets rather than by a point in the
+/// command stream, because a point in the command stream is not something every
+/// API can express. Vulkan's `vkCmdWriteTimestamp2` and D3D12's `EndQuery` on a
+/// timestamp heap take one anywhere; Metal samples only where a device's
+/// `MTLCounterSamplingPoint` values allow, which is stage boundaries; and
+/// WebGPU takes them *only* through `GPURenderPassDescriptor.timestampWrites`
+/// and `GPUComputePassDescriptor.timestampWrites`, whose
+/// `beginningOfPassWriteIndex`/`endOfPassWriteIndex` this struct is. Half the
+/// backends cannot honour an arbitrary point at all, so the pass boundary is the
+/// intersection — and putting it in the descriptor makes it a *shape* rather
+/// than a rule a caller has to remember, because there is no free-standing call
+/// left to record in the wrong place.
+///
+/// Consequently a pass is the smallest thing this seam can time. A copy or a
+/// barrier is not inside one, so what a profiler attributes to a pass is the
+/// pass alone, and the transitions the caller emitted around it are attributed
+/// to nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PassTimestampWrites {
+    /// Set the two queries are written into. Must hold
+    /// [`QueryKind::Timestamp`](crate::QueryKind::Timestamp) queries; a backend
+    /// fails the encoder rather than writing a timestamp into a pool of another
+    /// kind.
+    pub set: QuerySetHandle,
+    /// Query written when the pass begins.
+    pub beginning_of_pass: u32,
+    /// Query written when the pass ends.
+    ///
+    /// **Distinct from [`beginning_of_pass`](Self::beginning_of_pass)**: WebGPU
+    /// requires the two indices to differ, and a pass that wrote both ends into
+    /// one query would report the second over the first on every other backend,
+    /// so a backend refuses the pair rather than measuring nothing.
+    pub end_of_pass: u32,
+}
+
 /// A render pass, in dynamic-rendering form: attachments are named inline and
 /// there is no `RenderPass` or `Framebuffer` object to keep compatible.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -236,6 +273,9 @@ pub struct RenderPassDesc<'a> {
     pub depth_stencil_attachment: Option<DepthStencilAttachment>,
     /// Region rendered. Usually the full attachment size.
     pub render_area: Rect2d,
+    /// Timestamps bracketing this pass, if it is being timed. See
+    /// [`PassTimestampWrites`].
+    pub timestamp_writes: Option<PassTimestampWrites>,
 }
 
 /// A compute pass.
@@ -247,6 +287,9 @@ pub struct RenderPassDesc<'a> {
 pub struct ComputePassDesc<'a> {
     /// Pass name; see [`RenderPassDesc::label`].
     pub label: Option<&'a str>,
+    /// Timestamps bracketing this pass; see
+    /// [`RenderPassDesc::timestamp_writes`].
+    pub timestamp_writes: Option<PassTimestampWrites>,
 }
 
 // --- barriers --------------------------------------------------------------
@@ -561,9 +604,11 @@ pub struct DrawIndirectCount {
 /// * [`dispatch`](CommandEncoder::dispatch) and
 ///   [`bind_compute_pipeline`](CommandEncoder::bind_compute_pipeline) are legal
 ///   only inside a compute pass.
-/// * Copies, barriers and query writes are legal only **outside** any pass —
-///   Vulkan forbids them inside dynamic rendering, and the render graph places
-///   them between passes anyway.
+/// * Copies, barriers and query resets/resolves are legal only **outside** any
+///   pass — Vulkan forbids them inside dynamic rendering, and the render graph
+///   places them between passes anyway. Timestamps are the exception that
+///   proves the rule: they are not a call at all, but
+///   [`PassTimestampWrites`] on the pass descriptor.
 /// * Passes do not nest.
 ///
 /// A backend may assume these hold. [`crate::null`] checks them and records a
@@ -798,14 +843,11 @@ pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Required on Vulkan before every write; a no-op on backends that reset
     /// implicitly. Callers always call it, so the Vulkan path is never the
     /// special case.
-    fn reset_query_set(&mut self, set: QuerySetHandle, range: Range<u32>);
-
-    /// Writes a timestamp at this point in the command stream.
     ///
-    /// Accepted and dropped when
-    /// [`Features::TIMESTAMP_QUERY`](crate::Features::TIMESTAMP_QUERY) is
-    /// absent.
-    fn write_timestamp(&mut self, set: QuerySetHandle, index: u32);
+    /// **What is written between a reset and a resolve is
+    /// [`RenderPassDesc::timestamp_writes`]**, not a call of its own: see
+    /// [`PassTimestampWrites`] for why the seam has no free-standing timestamp.
+    fn reset_query_set(&mut self, set: QuerySetHandle, range: Range<u32>);
 
     /// Copies query results into a buffer.
     fn resolve_query_set(

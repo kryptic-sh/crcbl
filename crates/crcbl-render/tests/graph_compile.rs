@@ -1114,10 +1114,16 @@ fn the_graph_opens_the_pass_and_sets_the_dynamic_state() {
     pool.destroy(harness.device.as_ref());
 }
 
-/// Per-pass GPU timers bracket each pass **outside** its scope, which is where
-/// the seam's rules put query writes.
+/// Per-pass GPU timers name their two queries **in the pass descriptor**, which
+/// is the only place the seam takes a timestamp.
+///
+/// The observable is the pair each pass carries, not merely that something was
+/// recorded: a graph that handed every pass the same pair would record the same
+/// command names and report one pass's duration for all of them. So the pairs
+/// are read back off the recorded stream and asserted to be consecutive and
+/// disjoint, in pass order.
 #[test]
-fn timers_bracket_every_pass_outside_its_scope() {
+fn timers_name_their_two_queries_in_each_passs_descriptor() {
     let harness = Harness::open();
     let mut pool = TransientPool::new();
     let mut timers = crcbl_render::PassTimers::new(harness.device.as_ref(), 2, 8)
@@ -1151,21 +1157,40 @@ fn timers_bracket_every_pass_outside_its_scope() {
         names,
         vec![
             "ResetQuerySet",
-            "WriteTimestamp",
             "Barrier",
             "BeginRenderPass",
             "SetViewport",
             "SetScissor",
             "EndRenderPass",
-            "WriteTimestamp",
-            "WriteTimestamp",
             "Barrier",
             "BeginComputePass",
             "EndComputePass",
-            "WriteTimestamp",
         ],
-        "timestamps must sit outside the passes they measure — the seam forbids \
-         query writes inside a pass"
+        "the reset is the only query command left: a timestamp is a field on the \
+         pass descriptor, not a call around it"
+    );
+    let pairs: Vec<(u32, u32)> = harness
+        .recorder
+        .commands()
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::BeginRenderPass {
+                timestamp_writes, ..
+            }
+            | Command::BeginComputePass {
+                timestamp_writes, ..
+            } => Some(timestamp_writes),
+            _ => None,
+        })
+        .map(|writes| {
+            let writes = writes.expect("every pass of this frame is timed");
+            (writes.beginning_of_pass, writes.end_of_pass)
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![(0, 1), (2, 3)],
+        "each pass gets its own consecutive pair, in the order the graph runs them"
     );
     // Which the null backend agrees with, or it would have recorded a violation.
     harness.recorder.assert_valid();

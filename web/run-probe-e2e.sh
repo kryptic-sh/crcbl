@@ -11,7 +11,7 @@
 # zero checks ran** — `docs/plan/12-testing.md` names a silently-skipped e2e job
 # as a known trap and this is the guard against it.
 #
-# WHAT THIS IS THE ONLY GATE FOR. Groups G through AE in
+# WHAT THIS IS THE ONLY GATE FOR. Groups G through AF in
 # `web/tools/probe-groups.mjs` drive `crcbl-webgpu`'s command stream directly
 # rather than through the engine: the wasm→JS→wasm round trip and the device it
 # opens, a surface, the capability query held against what `navigator.gpu` tells
@@ -287,7 +287,7 @@ if [ -z "$LETTERS" ]; then
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;
@@ -511,6 +511,21 @@ DEPTH_TRIP="$(grep -F 'the depth plane came back from the browser as the cleared
 if [ -z "$DEPTH_TRIP" ]; then
     echo "crcbl probe e2e: the driver never read a depth plane back from a real device;" >&2
     echo "                 crcbl-webgpu declares Capability::DepthImageCopy and nothing tried it" >&2
+    exit 1
+fi
+
+# And the two ticks a pass reported, which is group AF and is the only exercise
+# `Capability::TimestampQuery` has on this backend anywhere. It is worth its own
+# line because of what a wrong answer looks like: not an error but two zeros —
+# a pass whose `timestampWrites` the browser took and never wrote, read back by a
+# profiler as a frame that cost nothing. This backend refused timestamp query
+# sets outright until the seam's timestamps moved into the pass descriptor,
+# precisely so that a handle nothing could write never existed; this is what
+# holds the new answer to a value.
+TIMESTAMP_TRIP="$(grep -F 'the browser wrote both queries the pass named' "${OUTPUT}.plain" || true)"
+if [ -z "$TIMESTAMP_TRIP" ]; then
+    echo "crcbl probe e2e: the driver never read a timed pass's two queries back;" >&2
+    echo "                 crcbl-webgpu declares Capability::TimestampQuery and nothing tried it" >&2
     exit 1
 fi
 

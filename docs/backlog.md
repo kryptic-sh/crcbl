@@ -181,12 +181,14 @@ execution range from GPU memory — it has no `countBuffer:` draw, but the count
 is expressible and only the encoding is missing, so that row is `Unwritten` and
 the backend's "(the Metal ICB slice)" was right where this list was wrong.
 
-**The two `Unclassified` rows are Metal's counter-sampled queries.** Whether the
-seam's arbitrary-point `write_timestamp` is reachable depends on which
-`MTLCounterSamplingPoint` values a device reports, and whether
-`MTLCommonCounterSetStatistic` exists depends on that device's `counterSets`.
-Both need a Mac. They block parity deliberately: a guess would have read exactly
-like a checked classification, and "nobody has looked" is not "done".
+**The two `Unclassified` rows are Metal's counter-sampled queries.** Whether a
+device samples at all depends on which `MTLCounterSamplingPoint` values it
+reports, and whether `MTLCommonCounterSetStatistic` exists depends on that
+device's `counterSets`. (The seam's half of this is settled: it asks for a
+sample only where an encoder opens and closes, which is what
+`sampleBufferAttachments` express.) Both need a Mac. They block parity
+deliberately: a guess would have read exactly like a checked classification, and
+"nobody has looked" is not "done".
 
 **Why `Features` cannot be the mechanism on its own.** It is `bitflags`, and a
 bitflag has no exhaustiveness: a backend that never sets a new bit compiles
@@ -694,10 +696,10 @@ itself. The declarations are honest — they claim only that `create_query_set`
 works — but nothing a caller records can ever write to those pools.
 
 - **There is no begin/end query verb.** `crcbl::hal::CommandEncoder`'s entire
-  query vocabulary is `reset_query_set`, `write_timestamp` and
-  `resolve_query_set`. Every API scopes occlusion and statistics with a
-  begin/end pair around a draw — `vkCmdBeginQuery`, D3D12 `BeginQuery`, Metal
-  `setVisibilityResultMode:`, WebGPU `beginOcclusionQuery` — and the seam
+  query vocabulary is `reset_query_set`, `resolve_query_set` and the pass
+  descriptor's `timestamp_writes`. Every API scopes occlusion and statistics
+  with a begin/end pair around a draw — `vkCmdBeginQuery`, D3D12 `BeginQuery`,
+  Metal `setVisibilityResultMode:`, WebGPU `beginOcclusionQuery` — and the seam
   exposes none of them. So an `OcclusionQuery: Yes` means "a set can be
   created", and nothing more.
 - **`query_results` and `resolve_query_set` assume one `u64` per query, which is
@@ -1096,16 +1098,14 @@ untidy.
    because WGSL cannot carry one. The obstacle is a missing test artifact — and
    it is the _same_ artifact dx12 needs, so build it once.
 
-2. **`TimestampQuery`: stated as unknowable, and the unknown is the wrong one.**
-   The row turns on whether a timestamp can be taken at an arbitrary point, and
-   `create_query_set` says a stage boundary "is not somewhere the seam's call
-   can reach". But **every `write_timestamp` in this repository is outside every
-   pass** — the render graph writes before `begin_*_pass` and after
-   `end_*_pass`, and the seam exercise writes between a barrier and a copy.
-   Outside a pass the backend may open its own encoder, so the boundary is
-   reachable, and `wgpu-hal` ships exactly that route. `Unclassified` is still
-   the right kind — whether _this device_ samples at all needs a Mac — but the
-   dependency named is wrong.
+2. **`TimestampQuery`: the dependency it named is gone, and the row is not.**
+   The row used to turn on whether a timestamp could be taken at an arbitrary
+   point. The seam no longer asks for one: `PassTimestampWrites` names two
+   queries in the pass descriptor and the backend samples where the pass opens
+   and closes, which is exactly what `MTLRenderPassDescriptor`'s
+   `sampleBufferAttachments` express. `Unclassified` is still the right kind —
+   whether _this device_ advertises a counter set, and what its clock's period
+   is, both need a Mac — but the placement question is settled.
 3. **Mesh and task: the rows say the work is in the backend; part of it is in
    the seam.** `MeshPipelineDesc` carries no object- or mesh-stage threadgroup
    sizes, and `drawMeshThreadgroups:` requires both. That is the identical gap
@@ -1133,48 +1133,70 @@ untidy.
 supersedes — macos-26 executes correctly and the hang was
 `setDepthStencilState:nil`.
 
-### WebGPU's two blockers, ordered — and an ordering landmine
+### WebGPU has no blockers left
 
-Planned 2026-08-18 against the normative WebGPU IDL, `web-sys 0.3.104`'s
-generated bindings and `wgpu-core 30.0.0`. **Every slice here is verifiable on
-this machine in a real browser**, which is unusual for this project.
+Planned 2026-08-18 and closed the same day. `crcbl-webgpu`'s `TimestampQuery`
+row is gone, `StorageImageBinding`'s went before it, and `parity_blockers()` now
+names only `crcbl-dx12` and `crcbl-mtl`: every remaining WebGPU refusal is
+WebGPU itself refusing, which is an `ApiAbsence` and not a blocker.
 
-**The landmine first, because getting it wrong reddens all three browser gates
-at once.** The moment `create_query_set` accepts `QueryKind::Timestamp`,
-`PassTimers::new` stops returning `None` and the engine starts calling
-`reset_query_set` and `write_timestamp` **every frame**. Both currently
-`record_unsupported`, and this backend's `finish()` then refuses the _whole
-command buffer_ — so every demo frame would fail to record. Today the only thing
-standing between the engine and that failure is `create_query_set` refusing.
-**The query-spine slice must keep refusing `QueryKind::Timestamp` explicitly
-until the timestamp slice lands.**
+**The landmine this section warned about did not go off, and it is worth
+recording why**, because the shape recurs. The warning was that the moment
+`create_query_set` accepts `QueryKind::Timestamp`, `PassTimers::new` stops
+returning `None` and the engine records query verbs every frame — and a verb
+that `record_unsupported`s takes down the whole command buffer at `finish()`.
+What kept it shut was gating **both** on one flag: `create_query_set` refuses
+the timestamp kind on a device that opened without the browser's
+`timestamp-query`, and `PassTimers::new` gates on the same
+`Features::TIMESTAMP_QUERY`. A browser without the feature therefore builds no
+timers and records no query verbs; one with it records verbs that are all wired.
+The demo gate ran green with the hud demo creating a timestamp set and timing
+every pass.
 
-**The order:**
+### What the pass-boundary timestamp slice left open
 
-1. ~~`SetStencilReference`~~ — **landed**, proved by browser probe group AC.
-2. **The query spine, and `OcclusionQuery`.** `FAMILY_QUERY` has held eight
-   empty tag slots since the format was designed; this fills them. It goes
-   second because `OcclusionQuery`'s gating feature is reported on **every**
-   device this backend can open — `occlusionQuerySet` is core WebGPU and only
-   _timestamp_ queries need a feature — so the spine lands beneath a proof no
-   browser can dodge. **The answer half already exists and is fixture-pinned**:
-   `Reply::QueryResults`, its tag, its JS writer and both fixture halves are all
-   built.
-3. **`WriteTimestamp` and `TimestampQuery`.** Needs a feature the browser may
-   not have and a change to the probe's device descriptor, and is much cheaper
-   once the spine exists.
+Written 2026-08-18, when `PassTimestampWrites` replaced
+`CommandEncoder::write_timestamp`.
 
-`StorageImageBinding` used to be a fourth entry here and has landed:
-`BindingKind::StorageImage` grew a `view_type` and a `format`, so the work was
-in the **seam** rather than in this backend and it touched every backend crate.
-
-**A recommended extra slice that no row requires:** a browser-side parity
-report. The probe **never constructs a `WebGpuDevice`** — it imports the writer
-and the replayer and nothing from `crate::hal` — so nothing anywhere compares a
-`supports()` answer against a behaviour on this backend. Every row deletion here
-rests on a probe group rather than on the declaration having moved with it. If
-it turns out cheap it belongs _first_, because it would turn each subsequent
-deletion from a claim into a failing check.
+- **A copy pass is no longer timed, and nothing replaces it.** `PassKind::Copy`
+  opens no scope, so it has no boundary for a backend to sample at and
+  `PassTimers` gives it no query pair and no row. In a forward frame that is
+  `cull-stats-readback`, whose cost now appears nowhere. Timing it would need a
+  verb the seam does not have — Vulkan and D3D12 could take a timestamp either
+  side of the copy, Metal and WebGPU could not — so the options are to leave it
+  untimed (what happened), to give the graph a `PassKind::Copy`-only timing path
+  that only two backends implement, or to make the copy a compute pass. Nobody
+  has asked for it; recorded so the missing row is a decision rather than a
+  surprise.
+- **The report is the pass alone, where it used to include the pass's
+  barriers.** `PassTimers` used to bracket each pass from before its barrier
+  batch to after its close, and the module doc argued that was the more useful
+  number. It is no longer available: a pass boundary is a pass boundary. What a
+  profiler now cannot see is a pass whose transitions cost more than its draws.
+- **`crcbl-mtl` and `crcbl-wgpu` refuse a pass carrying timestamps rather than
+  accepting and dropping it.** Neither can create a timestamp set, so any set
+  such a pass could name is dead or of another kind, and the seam's
+  degrade-rather-than-break rule is discharged one level up: `PassTimers::new`
+  gates on `Features::TIMESTAMP_QUERY` and builds nothing on either backend, so
+  the refusal is unreachable from the engine. If a caller ever hand-rolls a
+  timed pass without checking the flag, it will get a loud `HalError` rather
+  than silent zeros — which is the intended direction, but it is a behaviour
+  change from "accepted and dropped" and is written down here rather than only
+  in the code.
+- **The browser gate asserts `end >= start` and not `end > start`.** Chromium
+  quantises timestamp-query results (100 µs at the time of writing) unless
+  started with `--disable-dawn-features=timestamp_quantization`, so probe group
+  AF's empty pass can legitimately open and close inside one quantum. The native
+  suite times a pass that clears a megabyte and asserts the strict form there.
+  Adding the flag to `web/tools/browser-launch.mjs` would let group AF assert
+  the strict form too; it was not added because it changes every browser gate's
+  launch for one check's benefit, and was not measured.
+- **`crcbl-dx12`'s and `crcbl-mtl`'s halves are type-checked and not run.** Both
+  were cross-compiled with `-D warnings` for `x86_64-pc-windows-msvc` and
+  `aarch64-apple-darwin`; neither backend's e2e suite runs on this machine. The
+  D3D12 timestamp test was rewritten to time a compute pass that dispatches
+  rather than a buffer copy, because a copy cannot be inside a pass — that
+  rewrite has never executed.
 
 ### Three WebGPU divergence reasons that are wrong
 
@@ -1189,21 +1211,18 @@ entry, `BindingKind::StorageImage` has no way to say "reads _and_ writes".
    per draw at `offset + i * stride`, so any stride is honoured, padded
    included. `Support::Yes` is the correct declaration. It is `ApiAbsence` so it
    is not in the 27, but it costs one probe check to make honest.
-2. **`TimestampQuery` says the seam's "arbitrary-point" write must narrow. There
-   is no arbitrary-point write to narrow.** The seam's scope rules already
-   require query writes **outside** any pass, the null backend enforces it, and
-   the render graph obeys it structurally. So the replayer may legally open its
-   own empty compute pass carrying `timestampWrites` — no pipeline, no dispatch
-   — which is the WebGPU equivalent of the backend-opened encoder Metal needs.
-   **Implement, do not narrow.**
 
-**And a live feature leak both files predicted and neither closed:**
-`crcbl-webgpu` reports `Features::TIMESTAMP_QUERY` from the browser's own
-feature set and then refuses `create_query_set`. Both the Rust and JS halves
-wrote down that this must stop once an `impl Instance` existed. It exists.
-**Close it by implementing, not by masking the bit** — masking would make the
-gate permanently clear and manufacture, on the one WebGPU row that does not have
-it, exactly the unprovable-by-construction shape Metal has on eight.
+The `TimestampQuery` entry that used to sit here — "there is no arbitrary-point
+write to narrow, implement rather than narrow" — was half right and the half it
+got wrong is the interesting half. It reasoned that because every
+`write_timestamp` in the repository already sat outside a pass, the replayer
+could open an empty compute pass carrying `timestampWrites` around each one.
+That would have worked and it would have been a _convention_ holding it up:
+nothing stopped a caller putting a write somewhere the replayer could not wrap.
+The seam took the other route and moved the two writes into the pass descriptor,
+which is `timestampWrites`' own shape, so the replayer passes it straight
+through and there is no free-standing call left to place wrongly. The feature
+leak the same section named is closed the way it asked — by implementing.
 
 **What has no browser-side evidence at all**, and matters because after
 `crcbl-wgpu` is deleted these are claims resting on nothing: `DepthClamp` —
@@ -4866,9 +4885,12 @@ backends must then be re-verified.
   which is a race rather than an assertion, so it is not attempted. Stated as a
   gap.
 - **Query sets stay refused**, deliberately and with the argument in
-  `create_query_set`'s docs: Metal answers `supportsCounterSampling:` per
-  sampling point, which the seam's free-standing `write_timestamp` cannot reach.
+  `create_query_set`'s docs: this backend builds no `MTLCounterSampleBuffer` on
+  any device, the CI Mac advertises no `counterSets`, and reporting the feature
+  would oblige a `timestamp_period_ns` Metal has no fixed answer for.
   Half-building it would give real timings on some Macs and zeroes on others.
+  The seam's own half is no longer an obstacle — `PassTimestampWrites` asks for
+  a sample only at a pass boundary, which is where Metal samples.
 - **`device.rs` is 4057 lines and should be split** — the pools, the resource
   create/destroy pairs, submission and readback are separable responsibilities.
   Wants to be a move-only change so a reviewer can see it is only a move.

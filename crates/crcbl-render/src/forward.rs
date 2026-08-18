@@ -8281,7 +8281,8 @@ mod tests {
         );
     }
 
-    /// **Every pass the frame records gets a row in the report.**
+    /// **Every pass the frame records gets a row in the report, except the ones
+    /// that open no scope.**
     ///
     /// The observable the bound exists for: the samples' hand-picked capacity
     /// timed the first eight passes of a fourteen-pass frame and reported eight
@@ -8289,6 +8290,12 @@ mod tests {
     /// [`MAX_TIMED_PASSES`](crate::MAX_TIMED_PASSES), the report names every
     /// pass the graph compiled, in order — so a bound one short of the frame
     /// makes this list short too.
+    ///
+    /// A [`PassKind::Copy`](crate::graph::PassKind::Copy) is filtered out of the
+    /// expectation rather than expected to be missing by accident. The seam
+    /// takes a timestamp only where a pass opens and closes and a copy opens
+    /// nothing, so `PassTimers` gives it no query pair and no row — a row
+    /// reading 0.000 ms would be a measurement nobody made.
     #[test]
     fn every_pass_of_the_frame_gets_a_timing_row() {
         let recorder = Recorder::new();
@@ -8338,6 +8345,7 @@ mod tests {
                 compiled_labels = compiled
                     .passes()
                     .iter()
+                    .filter(|pass| pass.kind() != crate::graph::PassKind::Copy)
                     .map(|pass| pass.label().to_string())
                     .collect();
             }
@@ -8360,8 +8368,8 @@ mod tests {
         assert_eq!(
             reported,
             compiled_labels,
-            "the report must name every pass the frame compiled, in order — {} of {} \
-             timed with a capacity of {}",
+            "the report must name every pass the frame compiled that opens a scope, in order \
+             — {} of {} timed with a capacity of {}",
             reported.len(),
             compiled_labels.len(),
             timers.capacity()
