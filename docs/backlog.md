@@ -1280,6 +1280,14 @@ well as the software path. `CRCBL_GPU=vk` with no `CRCBL_ADAPTER` is the
 hardware run; `CRCBL_ADAPTER=cpu` is what CI sees. **Both, and the difference
 between them is the interesting part.**
 
+**The risk is bounded, and that was measured rather than assumed.** All five
+golden suites — render 26, draw-gen 12, forward 13, sprite 12, mesh 9, 72 tests
+— were run on both the hardware adapter and the software path and pass
+identically. So the goldens are not adapter-sensitive within
+`Tolerance::RASTERISER`, and the lane-0 defect was specific to a shader path
+rather than a general property of the software-only board. What the gap
+threatens is _new_ shader and driver-state work, not the existing picture.
+
 The alternative — a self-hosted runner with a real GPU — would close it properly
 and is the same class of decision as the hardware macOS runner the Metal rows
 want. Worth pricing the two together if either is ever taken.
