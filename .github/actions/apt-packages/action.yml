@@ -35,6 +35,15 @@ runs:
         # Unquoted on purpose: the input is a space-separated list and apt
         # takes them as separate arguments.
         # shellcheck disable=SC2086
+        # The first attempt skips `update`: the runner image ships populated
+        # package lists, and `update` and the package mirror are separate
+        # endpoints that fail separately. When only the index is unreachable
+        # this succeeds outright instead of waiting out a timeout for a refresh
+        # nothing needed.
+        if timeout 240 sudo apt-get install -y --no-install-recommends $PACKAGES; then
+          exit 0
+        fi
+        echo "install against the image's package lists failed; refreshing them"
         for attempt in 1 2 3; do
           if timeout 120 sudo apt-get update \
             && timeout 240 sudo apt-get install -y --no-install-recommends $PACKAGES; then
