@@ -1855,6 +1855,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **lumen's free-fly camera turned the wrong way.** The left arrow turned the
+  view right and the right arrow turned it left. Yaw is measured from `-Z` and
+  rises toward `+X`, which is the right-hand side — so
+  `axis(turn_left, turn_right)`, whose positive argument is the _left_ key,
+  added to yaw for the left arrow. The arguments are now the other way round,
+  matching the strafe two lines below, which had the same shape and the correct
+  order. The turn axis now has a sign test of its own; the pitch axis beside it
+  always had one, which is how yaw came to be the untested half.
+
 - **A lost GPU device was reported as whatever call happened to notice it.** A
   device dying mid-frame surfaced as
   `readback N could not be mapped: AbortError: … is lost` — a sentence naming a

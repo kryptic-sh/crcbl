@@ -150,7 +150,15 @@ impl Flyer {
     /// Advances by `dt` seconds of held input.
     pub fn advance(&mut self, dt: f32) {
         let axis = |positive: bool, negative: bool| f32::from(positive) - f32::from(negative);
-        let turn = axis(self.held.turn_left, self.held.turn_right) * TURN * dt;
+        // **`turn_right` first, and that order is the bug this had.** Yaw is
+        // measured from `-Z` and `ahead` is `(sin_yaw, 0, -cos_yaw)`, so a
+        // *rising* yaw swings the view toward `+X` — which is right, as `aside`
+        // below asserts by being `cross(ahead, up)` and being driven by
+        // `axis(right, left)`. Naming `turn_left` first therefore added to yaw
+        // for the left arrow and turned the camera the other way, which reached
+        // a user. Both lines now read the same way round: positive argument is
+        // the `+X` side.
+        let turn = axis(self.held.turn_right, self.held.turn_left) * TURN * dt;
         let tilt = axis(self.held.look_up, self.held.look_down) * TURN * dt;
         self.yaw += turn;
         self.pitch = (self.pitch + tilt).clamp(-PITCH_LIMIT, PITCH_LIMIT);
@@ -294,6 +302,54 @@ mod tests {
             );
             let level = Vec3::new(forward.x, 0.0, forward.z).length();
             assert!(level > 0.01, "{key:?} left no horizontal component at all");
+        }
+    }
+
+    /// **The arrow that says right turns right**, which shipped inverted.
+    ///
+    /// The pitch axis beside this one has had
+    /// [`the_pitch_stops_short_of_straight_up_and_straight_down`] asserting its
+    /// *sign* since it was written; yaw had nothing, so
+    /// `axis(turn_left, turn_right)` — whose positive argument is the left key —
+    /// added to a yaw that rises toward `+X` and reached a user turning the
+    /// camera the wrong way.
+    ///
+    /// The claim is made against the camera's **own** starting basis rather than
+    /// against a world axis, so it holds at every yaw and needs no arithmetic
+    /// about where `room::fixed_camera` happens to look: after turning right the
+    /// new forward leans toward the old *right* vector, and after turning left,
+    /// away from it. A test comparing `yaw` would pass on a camera that stored
+    /// the angle correctly and built its basis backwards.
+    #[test]
+    fn the_turn_arrows_swing_the_view_toward_the_side_they_name() {
+        for (key, sign) in [(KeyCode::ArrowRight, 1.0f32), (KeyCode::ArrowLeft, -1.0)] {
+            let mut flyer = Flyer::at(&room::fixed_camera());
+            let before = flyer.camera(room::fixed_camera().projection);
+            let start = (before.target - before.eye).normalize();
+            // `cross(forward, up)` is the right-hand side in this engine's
+            // right-handed, `+Y` up, `-Z` forward world — the same vector
+            // `Flyer::advance` calls `aside` and strafes along.
+            let right = start.cross(Vec3::Y).normalize();
+
+            flyer.key(key, true);
+            // A tenth of a radian or so: far enough that the sign is not
+            // floating-point noise, short enough that the view cannot swing past
+            // the perpendicular and make a wrong sign read as a right one.
+            flyer.advance(0.05);
+
+            let after = flyer.camera(room::fixed_camera().projection);
+            let turned = (after.target - after.eye).normalize();
+            let leaned = turned.dot(right);
+            assert!(
+                leaned * sign > 0.01,
+                "{key:?} moved the view {leaned} of the way toward the camera's own right \
+                 vector {right:?}, and the sign says it turned the other way"
+            );
+            assert!(
+                turned.dot(start) > 0.99,
+                "{key:?} swung {turned:?} from {start:?} in one step, which is too far for the \
+                 sign above to mean what it says"
+            );
         }
     }
 
