@@ -57,8 +57,8 @@ why it has drifted.
 
 **The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
 below is built, so the count is now exact rather than approximate:
-`Capability::ALL` is **25** variants and `DIVERGENCES` holds **46** reviewed
-rows — dx12 6, WebGPU 17, wgpu 13, Metal 10, Vulkan 0. (The earlier framing, "28
+`Capability::ALL` is **25** variants and `DIVERGENCES` holds **45** reviewed
+rows — dx12 6, WebGPU 16, wgpu 13, Metal 10, Vulkan 0. (The earlier framing, "28
 declared `Features` bits and roughly 96 refusal sites", said the same thing less
 precisely and is superseded.)
 
@@ -74,7 +74,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Eighteen blockers: dx12 6, Metal 9, WebGPU 3.** That is what stands between
+**Seventeen blockers: dx12 6, Metal 9, WebGPU 2.** That is what stands between
 here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -1224,10 +1224,31 @@ target contributes nothing to it, and one that declares it again is caught.
 re-homing of `crcbl-wgpu`'s push-constant-range exercise, which is one of the
 two coverage losses still standing between here and that crate's deletion.
 
+### A divergent index into a push-constant block reads lane 0 on RADV
+
+Found by the seam suite's new push-constant exercise, and worth remembering
+because of the shape rather than the bug. The probe shader read
+`constants.values[index]` with `index` from the dispatch ID. That is valid
+SPIR-V — `spirv-val --target-env vulkan1.3` is clean — and it reads correctly on
+llvmpipe. On real hardware it is wrong: NIR defines a `load_push_constant`
+offset as dynamically uniform, so ACO scalarises a divergent one, RADV emits
+`v_readfirstlane_b32` on the byte offset, and every invocation reads the block
+at lane 0's index. All four words came back holding `values[0]`, on a discrete
+Navi31 and an integrated Raphael alike.
+
+**CI's Vulkan arm is lavapipe, which gets it right.** So this would have been
+green on every runner and wrong on every AMD card — the asymmetry is the part
+worth carrying forward, not the fix. A local hardware run is not a nicety here;
+it is the only thing that sees this class of defect.
+
+Fixed by naming each component through a `switch` rather than indexing, which
+keeps the `uint4` layout and makes each invocation's offset a compile-time
+constant.
+
 ### DECISION NEEDED — what "parity holds" has to mean before `crcbl-wgpu` goes
 
 The stated order is: reach parity, then delete `crcbl-wgpu`. Goal 2 is done and
-gated. Parity is at **18 blockers**, down from 29, and the composition now
+gated. Parity is at **17 blockers**, down from 29, and the composition now
 matters more than the number — because **a strict reading of "all blockers
 closed" is not reachable with the hardware this project has.**
 
