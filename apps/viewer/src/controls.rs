@@ -5,7 +5,7 @@
 //! left drag            ─▶ orbit   (the model follows the pointer)
 //! middle / right drag  ─▶ pan
 //! wheel                ─▶ zoom
-//! F                    ─▶ frame the model again
+//! F                    ─▶ frame the model again   (crate::app, not here)
 //! ```
 //!
 //! [`OrbitCamera`] fixes the geometry and deliberately names no key, no button
@@ -15,6 +15,30 @@
 //! `OrbitControls` or a browser model viewer already has in their hands: the
 //! primary button turns the object, the other two slide it, the wheel moves in
 //! and out.
+//!
+//! # The engine's input, not the shell's
+//!
+//! Every method below takes what [`crcbl::engine::HostedGame`] hands a game —
+//! [`PointerUpdate`], a [`PointerButton`] edge, a [`ScrollDelta`] — rather than a
+//! raw `ShellEvent`. That is the whole of this milestone's engine change: the
+//! hosted loop used to fold away every button but the primary one and drop the
+//! wheel entirely, so a viewer could not be hosted at all and this file matched
+//! on shell events inside a loop of its own.
+//!
+//! Three things moved out of here and into the loop as a result, and none of
+//! them is gone:
+//!
+//! * **The last-position bookkeeping.** [`PointerUpdate::motion`] is the
+//!   unaccelerated delta where the backend has one and the difference of
+//!   successive positions where it does not; `crcbl::engine::Pending` carries
+//!   the position across frames and drops it when the pointer leaves, which is
+//!   what stops walking out of one edge and back in at another from arriving as
+//!   one enormous drag.
+//! * **Focus loss.** The loop releases every held key and every held pointer
+//!   button when the window goes away, so the release that no platform sends
+//!   arrives here as an ordinary one and a drag cannot survive an alt-tab.
+//! * **`F`.** Framing needs the model's bounds and the window's aspect, neither
+//!   of which is input, so it lives in [`crate::app`] beside them.
 //!
 //! # The model follows the pointer, so both drag deltas are negated
 //!
@@ -31,24 +55,11 @@
 //! mapping produced, never against the delta it passed in — a mapping that
 //! negates twice and a mapping that negates neither agree about the sign of a
 //! stored number and disagree about where the eye ends up.
-//!
-//! # Deltas come from `raw_delta` where there is one, and from `abs` where there
-//! is not
-//!
-//! [`ShellEvent::PointerMotion`] carries both and documents that a camera must
-//! prefer the unaccelerated one, because differencing absolute positions stops
-//! working when the cursor reaches the edge of the display. That is exactly
-//! right for a drag that can run off the window, so `raw_delta` is used
-//! wherever the backend has one — and where it has none
-//! ([`ShellCaps::RAW_POINTER_MOTION`](crcbl::shell::ShellCaps::RAW_POINTER_MOTION)
-//! is absent, which is what the browser backend reports) the difference of
-//! successive `abs` positions is the only signal there is, so it is used rather
-//! than the drag silently doing nothing.
 
-use crcbl::core::input::{ButtonState, KeyCode, PointerButton, ScrollDelta};
+use crcbl::core::input::{PointerButton, ScrollDelta};
+use crcbl::engine::PointerUpdate;
 use crcbl::math::Vec2;
 use crcbl::render::OrbitCamera;
-use crcbl::shell::ShellEvent;
 
 /// How far a drag across the window's full height turns the camera, in radians.
 ///
@@ -90,40 +101,21 @@ enum Drag {
     Pan,
 }
 
-/// What the input asked the application for, beyond moving the camera.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Request {
-    /// Nothing but what has already been applied to the camera.
-    Nothing,
-    /// Fit the model in the view again — the `F` key.
-    ///
-    /// Not applied here because framing needs the model's bounds and the
-    /// window's aspect, neither of which is input.
-    Reframe,
-}
-
-/// The pointer's state between events: which drag is running, and where the
-/// cursor was.
+/// Which drag is running, and nothing else.
+///
+/// One field, where this used to carry the last pointer position too — see the
+/// [module docs](self) for where that went.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Controls {
     /// The drag in progress, or `None` when no button is down.
     drag: Option<Drag>,
-    /// Where the pointer was last seen, in window pixels.
-    ///
-    /// Only used on a backend with no relative motion — see the [module
-    /// docs](self) — and cleared whenever the pointer leaves, so that walking
-    /// out of one edge and back in at another is not one enormous drag.
-    last_abs: Option<Vec2>,
 }
 
 impl Controls {
     /// Nothing held, nothing dragging.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            drag: None,
-            last_abs: None,
-        }
+        Self { drag: None }
     }
 
     /// Whether a drag is in progress.
@@ -132,92 +124,57 @@ impl Controls {
         self.drag.is_some()
     }
 
-    /// Folds one shell event into `camera`, and says what else it asked for.
+    /// The primary button's edges and the pointer's movement.
     ///
     /// `extent` is the window's size in pixels; the height is what both drag
     /// gestures are measured against, so the same movement of the hand does the
     /// same thing whatever size the window is.
-    pub fn apply(
+    ///
+    /// **The press is taken before the motion**, because that is the order the
+    /// hand made them: a batch that both starts a drag and moves must apply its
+    /// movement, or the first frame of every drag is dropped. The loop dispatches
+    /// [`button`](Self::button) before this for the same reason.
+    pub fn pointer(
         &mut self,
-        event: &ShellEvent,
+        pointer: PointerUpdate,
         extent: (u32, u32),
         camera: &mut OrbitCamera,
-    ) -> Request {
-        match event {
-            ShellEvent::Button { button, state, .. } => {
-                self.button(*button, *state);
-            }
-            ShellEvent::PointerMotion { abs, raw_delta, .. } => {
-                let moved = self.motion(*abs, *raw_delta);
-                if let Some(moved) = moved {
-                    self.drag(moved, extent, camera);
-                }
-            }
-            // A pointer that has left has no position, so the next one it
-            // reports is not a movement from the last one.
-            ShellEvent::PointerFocus { entered: false, .. } => self.last_abs = None,
-            // Focus loss is the release no platform sends. Without this a drag
-            // survives an alt-tab and resumes from wherever the pointer comes
-            // back, which is a model that leaps when the window is clicked on.
-            ShellEvent::Focus { focused: false, .. } => {
-                self.drag = None;
-                self.last_abs = None;
-            }
-            ShellEvent::Wheel { delta, .. } => camera.zoom(detents(*delta) * ZOOM_PER_DETENT),
-            ShellEvent::Key {
-                key_code: Some(KeyCode::KeyF),
-                state: ButtonState::Pressed,
-                repeat: false,
-                ..
-            } => return Request::Reframe,
-            _ => {}
+    ) {
+        if pointer.pressed {
+            self.drag = Some(Drag::Orbit);
         }
-        Request::Nothing
-    }
-
-    /// Starts or ends a drag.
-    fn button(&mut self, button: PointerButton, state: ButtonState) {
-        let drag = match button {
-            PointerButton::Left => Some(Drag::Orbit),
-            PointerButton::Middle | PointerButton::Right => Some(Drag::Pan),
-            _ => None,
-        };
-        let Some(drag) = drag else { return };
-        match state {
-            ButtonState::Pressed => self.drag = Some(drag),
-            // Only the button that started the drag ends it, so releasing the
-            // wheel click mid-orbit does not stop the orbit.
-            ButtonState::Released if self.drag == Some(drag) => self.drag = None,
-            ButtonState::Released => {}
+        // Only the button that started the drag ends it, so releasing the
+        // primary button mid-pan does not stop the pan.
+        if pointer.released && self.drag == Some(Drag::Orbit) {
+            self.drag = None;
+        }
+        if let Some(moved) = pointer.motion {
+            self.apply_drag(moved, extent, camera);
         }
     }
 
-    /// How far the pointer moved, in window pixels, or `None` when this event
-    /// carries no usable movement.
-    fn motion(
-        &mut self,
-        abs: Option<crcbl::shell::PhysicalPoint>,
-        raw: Option<(f64, f64)>,
-    ) -> Option<Vec2> {
-        let here = abs.map(|point| Vec2::new(point.x as f32, point.y as f32));
-        // Remembered whenever there is a position to remember, and left alone
-        // when there is not: `PointerMode::Locked` reports no `abs` at all, and
-        // forgetting the last one there would make the first unlocked motion a
-        // jump from wherever the pointer used to be.
-        let previous = match here {
-            Some(here) => self.last_abs.replace(here),
-            None => None,
-        };
-        // The unaccelerated delta wherever the backend has one, whether or not
-        // an absolute position came with it.
-        if let Some((dx, dy)) = raw {
-            return Some(Vec2::new(dx as f32, dy as f32));
+    /// A non-primary button's edge: the pan drag's press and release.
+    pub fn button(&mut self, button: PointerButton, pressed: bool) {
+        // `Left` never arrives here — the loop delivers the primary button as
+        // `PointerUpdate`'s two edges, because it is the one a menu arbitrates —
+        // and the thumb buttons are not bound to anything.
+        if !matches!(button, PointerButton::Middle | PointerButton::Right) {
+            return;
         }
-        Some(here? - previous?)
+        if pressed {
+            self.drag = Some(Drag::Pan);
+        } else if self.drag == Some(Drag::Pan) {
+            self.drag = None;
+        }
+    }
+
+    /// One scroll: in and out along the view direction.
+    pub fn wheel(delta: ScrollDelta, camera: &mut OrbitCamera) {
+        camera.zoom(detents(delta) * ZOOM_PER_DETENT);
     }
 
     /// Applies `moved` pixels of pointer movement to whichever drag is running.
-    fn drag(&self, moved: Vec2, extent: (u32, u32), camera: &mut OrbitCamera) {
+    fn apply_drag(&self, moved: Vec2, extent: (u32, u32), camera: &mut OrbitCamera) {
         let Some(drag) = self.drag else { return };
         // A window can report a zero height while minimised, and dividing by it
         // would hand `OrbitCamera` an infinity, which it asserts against.
@@ -256,95 +213,78 @@ mod tests {
     use super::*;
     use crcbl::math::Vec3;
     use crcbl::render::{Camera, Projection};
-    use crcbl::shell::{
-        HeadlessShell, LogicalSize, PhysicalPoint, Shell, ShellCaps, WindowDesc, WindowId,
-    };
 
     /// The window every gesture below is played into.
     const EXTENT: (u32, u32) = (800, 600);
 
-    /// A scripted session: a real [`HeadlessShell`] producing real
-    /// [`ShellEvent`]s, folded into a real [`OrbitCamera`].
+    /// A scripted session: the updates the engine's loop hands a hosted game,
+    /// folded into a real [`OrbitCamera`].
     ///
-    /// The events are the backend's rather than struct literals written here,
-    /// which is the whole point — a mapping tested against events this file
-    /// invented is a mapping tested against this file's idea of the shell.
+    /// The gestures reach the *loop* in `crate::app`'s tests, which is what says
+    /// the wiring exists; this checks what the mapping does with them.
     struct Script {
-        shell: HeadlessShell,
-        window: WindowId,
         controls: Controls,
         camera: OrbitCamera,
-        at: PhysicalPoint,
     }
 
     impl Script {
-        /// A session on a shell reporting `caps`.
-        fn on(caps: ShellCaps) -> Self {
-            let mut shell = HeadlessShell::new().with_caps(caps);
-            let window = shell
-                .create_window(&WindowDesc {
-                    title: "controls",
-                    app_id: "sh.kryptic.crcbl.viewer.tests",
-                    size: LogicalSize::new(EXTENT.0 as f64, EXTENT.1 as f64),
-                    ..WindowDesc::default()
-                })
-                .expect("the headless shell always makes a window");
+        fn new() -> Self {
             Self {
-                shell,
-                window,
                 controls: Controls::new(),
                 camera: OrbitCamera::new(Vec3::ZERO, 4.0, Projection::default()),
-                at: PhysicalPoint::ORIGIN,
             }
         }
 
-        /// The ordinary case: a desktop backend with unaccelerated motion.
-        fn new() -> Self {
-            Self::on(ShellCaps::DESKTOP)
-        }
-
-        /// Drains everything queued into the mapping, and hands back what the
-        /// last event asked for.
-        fn pump(&mut self) -> Request {
-            let (controls, camera) = (&mut self.controls, &mut self.camera);
-            let mut request = Request::Nothing;
-            self.shell.pump(&mut |event| {
-                request = controls.apply(&event, EXTENT, camera);
-            });
-            request
-        }
-
         fn press(&mut self, button: PointerButton) -> &mut Self {
-            self.shell
-                .button(self.window, button, ButtonState::Pressed, Some(self.at))
-                .expect("the window is live");
-            self.pump();
+            match button {
+                PointerButton::Left => self.controls.pointer(
+                    PointerUpdate {
+                        pressed: true,
+                        ..PointerUpdate::default()
+                    },
+                    EXTENT,
+                    &mut self.camera,
+                ),
+                other => self.controls.button(other, true),
+            }
             self
         }
 
         fn release(&mut self, button: PointerButton) -> &mut Self {
-            self.shell
-                .button(self.window, button, ButtonState::Released, Some(self.at))
-                .expect("the window is live");
-            self.pump();
+            match button {
+                PointerButton::Left => self.controls.pointer(
+                    PointerUpdate {
+                        released: true,
+                        ..PointerUpdate::default()
+                    },
+                    EXTENT,
+                    &mut self.camera,
+                ),
+                other => self.controls.button(other, false),
+            }
             self
         }
 
         /// Moves the pointer by `(dx, dy)` window pixels.
-        fn moved(&mut self, dx: f64, dy: f64) -> &mut Self {
-            self.at = PhysicalPoint::new(self.at.x + dx, self.at.y + dy);
-            self.shell
-                .move_pointer(self.window, self.at, (dx, dy))
-                .expect("the window is live");
-            self.pump();
+        fn moved(&mut self, dx: f32, dy: f32) -> &mut Self {
+            self.moved_in(EXTENT, dx, dy)
+        }
+
+        /// The same, in a window of some other size.
+        fn moved_in(&mut self, extent: (u32, u32), dx: f32, dy: f32) -> &mut Self {
+            self.controls.pointer(
+                PointerUpdate {
+                    motion: Some(Vec2::new(dx, dy)),
+                    ..PointerUpdate::default()
+                },
+                extent,
+                &mut self.camera,
+            );
             self
         }
 
         fn wheel(&mut self, lines: f32) -> &mut Self {
-            self.shell
-                .scroll(self.window, ScrollDelta::Lines { x: 0.0, y: lines }, None)
-                .expect("the window is live");
-            self.pump();
+            Controls::wheel(ScrollDelta::Lines { x: 0.0, y: lines }, &mut self.camera);
             self
         }
 
@@ -480,110 +420,47 @@ mod tests {
         assert_eq!(script.camera(), before, "the drag was released");
     }
 
-    /// **Losing focus ends the drag**, because the release is one no platform
-    /// will send. Without it the model leaps the next time the window is
-    /// clicked on.
+    /// **A drag started with one button is not ended by another**, which is
+    /// what lets a hand rest on the wheel click through an orbit.
     #[test]
-    fn losing_focus_ends_a_drag_in_progress() {
+    fn only_the_button_that_started_a_drag_ends_it() {
         let mut script = Script::new();
         script.press(PointerButton::Left);
-        assert!(script.controls.is_dragging());
+        script.release(PointerButton::Middle);
+        assert!(script.controls.is_dragging(), "the orbit was cancelled");
 
-        script
-            .shell
-            .set_focus(script.window, false)
-            .expect("the window is live");
-        script.pump();
+        let before = script.camera();
+        script.moved(40.0, 0.0);
+        assert_ne!(script.camera(), before, "the orbit stopped following");
+
+        script.release(PointerButton::Left);
         assert!(!script.controls.is_dragging());
-
-        let before = script.camera();
-        script.moved(80.0, 0.0);
-        assert_eq!(script.camera(), before);
     }
 
-    /// **A backend with no relative motion still orbits.**
+    /// **The release the loop synthesises after a focus loss ends the drag.**
     ///
-    /// The browser is that backend, and `ShellCaps` is how it says so. The
-    /// first absolute position establishes where the pointer is and moves
-    /// nothing — there is no previous one to difference against — and the
-    /// second is a drag.
+    /// This used to be a `ShellEvent::Focus` arm here; it is the engine's now —
+    /// see the [module docs](self) — and what arrives is an ordinary release. A
+    /// drag that survived it would resume from wherever the pointer came back,
+    /// which is a model that leaps when the window is clicked on.
     #[test]
-    fn a_backend_with_only_absolute_positions_still_drags() {
-        let mut script = Script::on(ShellCaps::DESKTOP - ShellCaps::RAW_POINTER_MOTION);
-        script.press(PointerButton::Left);
+    fn the_loops_synthesised_release_ends_a_drag_in_progress() {
+        for button in [
+            PointerButton::Left,
+            PointerButton::Middle,
+            PointerButton::Right,
+        ] {
+            let mut script = Script::new();
+            script.press(button);
+            assert!(script.controls.is_dragging());
 
-        let before = script.camera();
-        script.moved(60.0, 0.0);
-        assert_eq!(
-            script.camera(),
-            before,
-            "the first position is where the pointer is, not how far it went",
-        );
+            script.release(button);
+            assert!(!script.controls.is_dragging(), "{button:?} kept dragging");
 
-        script.moved(60.0, 0.0);
-        let leaned = (script.camera().eye - before.eye)
-            .normalize()
-            .dot(right_of(&before));
-        assert!(
-            leaned < -0.9,
-            "the differenced drag turned the wrong way: {leaned}",
-        );
-    }
-
-    /// A pointer that leaves and comes back somewhere else is not one huge drag
-    /// across the window. Only the differencing path can get this wrong, so it
-    /// is the one the case is played on.
-    #[test]
-    fn a_pointer_that_leaves_and_returns_does_not_jump_the_model() {
-        let mut script = Script::on(ShellCaps::DESKTOP - ShellCaps::RAW_POINTER_MOTION);
-        script.press(PointerButton::Left).moved(700.0, 300.0);
-        script.moved(10.0, 0.0);
-
-        script
-            .shell
-            .set_pointer_focus(script.window, false, None)
-            .expect("the window is live");
-        script.pump();
-
-        let before = script.camera();
-        script.at = PhysicalPoint::new(10.0, 300.0);
-        script
-            .shell
-            .move_pointer(script.window, script.at, (0.0, 0.0))
-            .expect("the window is live");
-        script.pump();
-        assert_eq!(
-            script.camera(),
-            before,
-            "re-entering the window is not a 700-pixel drag",
-        );
-    }
-
-    /// `F` asks for a re-frame once per press, and nothing else does.
-    #[test]
-    fn f_asks_for_a_reframe_and_a_repeat_does_not() {
-        let mut script = Script::new();
-        script
-            .shell
-            .key_press(script.window, KeyCode::KeyF)
-            .expect("the window is live");
-        assert_eq!(script.pump(), Request::Reframe);
-
-        script
-            .shell
-            .key_repeat(script.window, KeyCode::KeyF)
-            .expect("the window is live");
-        assert_eq!(
-            script.pump(),
-            Request::Nothing,
-            "a held key must not re-frame every repeat",
-        );
-
-        script
-            .shell
-            .key_press(script.window, KeyCode::KeyG)
-            .expect("the window is live");
-        assert_eq!(script.pump(), Request::Nothing);
+            let before = script.camera();
+            script.moved(80.0, 0.0);
+            assert_eq!(script.camera(), before);
+        }
     }
 
     /// A minimised window reports a zero height, and dividing a drag by it
@@ -595,15 +472,7 @@ mod tests {
         script.press(PointerButton::Left);
         let before = script.camera();
 
-        script.at = PhysicalPoint::new(30.0, 30.0);
-        script
-            .shell
-            .move_pointer(script.window, script.at, (30.0, 30.0))
-            .expect("the window is live");
-        let (controls, camera) = (&mut script.controls, &mut script.camera);
-        script.shell.pump(&mut |event| {
-            controls.apply(&event, (0, 0), camera);
-        });
+        script.moved_in((0, 0), 30.0, 30.0);
         assert_eq!(script.camera(), before);
     }
 

@@ -20,37 +20,64 @@ module's docs name its own omission; this is the list in one place.
   a screen-space shader, which is what every other engine ends up doing to keep
   the lines a constant width at any zoom.
 - **Milestone 2 in whole** — the mesh/material/texture panels, the wireframe and
-  normals views, the exposure slider. All of them are a `UiRenderer` pass this
-  application does not have; see the entry below on the loop.
-- **Rule 4's debug panel**, for the same reason, which is the one omission that
-  is a rule rather than a milestone. `--debug-overlay` and `--no-debug-overlay`
-  therefore parse and reach nothing; `crate::args::USAGE` says so in as many
-  words rather than printing a flag that silently does nothing.
+  normals views, the exposure slider. `crate::gpu` has a `UiRenderer` pass now,
+  so the blocker is no longer the pass: it is that none of those listings has
+  been written, and the wireframe and normals views are renderer modes
+  `crcbl-render` does not expose.
 - **Milestone 3, hot reload** (V-F4) and the **browser drop target** (the other
   half of V-F5). The drop target needs an `AssetSource` over a file a browser
   handed the page, which stage 10 owns.
+- **`--tick-hz` sets a clock that steps an empty `Viewer::tick`.** The viewer is
+  the sanctioned client-only sample and simulates nothing, so the flag paces
+  ticks nobody uses. `crate::args::USAGE` says so. Removing it would mean a
+  sample-specific `Common` parser, which is a worse trade than a flag that
+  honestly does nothing.
 
-### The hosted loop drops the wheel and every non-primary pointer button
+### The hosted seam carries no modifiers
 
-`crcbl::engine::Loop` folds a pump into `Pending` and hands a game
-`PointerUpdate { at, pressed, released }`. `Pending::observe` matches
-`PointerButton::Left` only, and `ShellEvent::Wheel` falls into its `_` arm and
-reaches no `HostedGame` hook at all — verified by reading `engine.rs`'s
-`observe` and by grepping `apps/` for `ShellEvent::Wheel`, which matches
-nothing.
+`HostedGame::key_event`, `button_event` and `wheel_event` all hand over the key
+or button and an edge, and no `Modifiers`. `ShellEvent::Wheel`'s own docs call
+its modifiers load-bearing — "Ctrl+wheel is zoom nearly everywhere" — and
+`ShellEvent::Key` and `ShellEvent::Button` carry them too, so the fold in
+`Pending::observe` is where they are dropped.
 
-That is fine for the five games and it is why `apps/viewer` writes its own loop:
-a model viewer with no wheel zoom and no second drag button is not a model
-viewer. The cost is stated in `apps/viewer/src/app.rs` — no menu, no pause, no
-debug overlay, because those are the loop's.
+Nothing in `apps/` binds a modifier today, which is why the field was not added
+to one hook on its own: a `wheel_event` that carried them beside a `key_event`
+that did not would be an inconsistency with nothing exercising it. The change to
+make when a caller arrives is all three at once, and the open question is
+whether it belongs on the hooks or on a `Loop::modifiers()` the game reads —
+held state is what a binding actually wants, and an edge-carried copy of it goes
+stale between events.
 
-**The alternative, if a second tool ever wants the same thing:** widen the
-hosted seam rather than copy the loop again — a
-`wheel_event(ScrollDelta, Modifiers)` hook and a `button` field on
-`PointerUpdate`, both with defaults so no existing sample changes. It was not
-done here because it is a change to a shared trait with six implementors on
-behalf of one caller, and one caller is not yet evidence about the shape. A
-second is.
+### A press and the motion in the same batch cannot be ordered
+
+`Loop::frame_body` collapses a pump to one `PointerUpdate` and dispatches
+`button_event` and `wheel_event` before it, so a press and the movement that
+follows it inside one frame are applied in that order. The reverse — moving,
+then pressing, inside the same batch — is applied as though the press came
+first, which credits up to one frame of hover to the drag.
+
+Sub-frame, and inherent to collapsing the pointer at all: the same trade
+`pointer_pressed` already made before this. Fixing it means a per-event pointer
+stream beside the collapsed one, which is a second seam for a defect nobody has
+reported. Noted because `apps/viewer` is the first caller where it is observable
+at all — a game's paddle does not care, a turntable in principle could.
+
+### `apps/lumen` still has no mouse look, now for one reason instead of two
+
+`crcbl::engine::PointerUpdate` carries `motion` — the unaccelerated delta — as
+of the `apps/viewer` migration, so the objection `apps/lumen/src/camera.rs` used
+to state (a look driven by differencing clamped, accelerated positions stops
+turning at the edge of the display) no longer holds. What is left is the cursor:
+nothing in `apps/lumen` calls `Shell::set_pointer_mode`, so a look would drag a
+visible pointer out of the window and click on whatever is behind it.
+
+The pieces exist — `PointerMode::Locked`, `ShellCaps::POINTER_LOCK` and
+`ShellCaps::has_mouselook` — and the loop has no vocabulary for asking: a hosted
+game cannot reach the shell, and there is no `HostedGame` hook or `LoopConfig`
+field that says "grab the pointer while the menu is down". That is the design
+question, not the shell work. Its docs referenced this entry before it existed;
+it exists now.
 
 ### `apps/viewer` runs in no CI job, because CI has no `.glb`
 

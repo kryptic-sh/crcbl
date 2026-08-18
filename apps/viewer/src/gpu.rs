@@ -1,21 +1,24 @@
-//! The device, the swapchain and the one pass this milestone draws.
+//! The device, the swapchain and the three passes this milestone draws.
 //!
 //! Everything that is not this application's — opening a backend, choosing an
 //! adapter that can present, the swapchain, the frames-in-flight ring, resize
 //! and teardown — lives in [`crcbl::engine::GpuContext`], the same join every
 //! sample's `gpu.rs` uses.
 //!
-//! # One pass, and what is deliberately not beside it
+//! # The document, the menu and the panel — and what is deliberately not beside
+//! them
 //!
 //! `docs/plan/sample/05-viewer.md`'s milestone 1 is "load + orbit + grid", and
 //! this is the load-and-orbit half. There is **no grid floor** — a grid is a
 //! second resident mesh and a second material row in a
 //! [`SceneDesc`](crcbl::render::scene::SceneDesc) the glTF
 //! conversion sized for the document alone, so it is a change to how the scene
-//! is assembled rather than a pass to add here. There is no menu pass and no UI
-//! pass, so no debug overlay: `apps/hud` and `apps/sandbox` get theirs from
-//! [`crcbl::engine::Loop`], and this application owns its loop (see
-//! [`crate::app`]). Both are in `docs/backlog.md`.
+//! is assembled rather than a pass to add here; it is in `docs/backlog.md`.
+//!
+//! The menu and UI passes are here because this sample is hosted by
+//! [`crcbl::engine::Loop`] now and the loop draws through them — see
+//! [`crate::app`]. Nothing of the viewer's own goes through the UI pass: it has
+//! no HUD, and rule 4's debug panel is the engine's.
 //!
 //! # The key light rides with the camera
 //!
@@ -31,8 +34,17 @@ use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptio
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
-use crcbl::render::{TransientPool, scene::InstanceDesc};
+use crcbl::render::{
+    MAX_TIMED_PASSES, MenuRenderer, PassTimers, TransientPool, UiRenderer, scene::InstanceDesc,
+};
 use crcbl::shell::{Shell, WindowId};
+use crcbl::ui::draw_list::DrawList;
+use crcbl::ui::menu::{Menu, MenuLayout};
+use crcbl::ui::text::FontAtlas;
+
+/// How many frames the swapchain keeps in flight, which is what the pass timers
+/// have to be sized for.
+const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 
 /// How far behind the eye the key light sits, relative to how far above and
 /// aside — see [`key_light`]. The three together are a direction, so only their
@@ -68,10 +80,32 @@ pub struct Gpu {
     /// recorded. The light is derived from it — see [`key_light`] — so there is
     /// no second field that could disagree with it.
     camera: Camera,
+    /// UI compositing, for the debug overlay.
+    ///
+    /// The viewer has no HUD and is not getting one — it draws the user's
+    /// document and nothing of its own on top. It has a UI pass because
+    /// `docs/plan/sample/00-samples-overview.md` rule 4 applies to it too, and
+    /// while this application owned its loop it could not honour that at all:
+    /// `--debug-overlay` parsed and reached nothing. See [`crate::app`].
+    ui: UiRenderer,
+    /// The menu pass: its own sheets, its own screen-space camera, and a pass
+    /// that declares nothing on a frame with no menu on it.
+    menu: MenuRenderer,
+    atlas: FontAtlas,
+    draw_list: DrawList,
+    /// `None` on a device without timestamp queries — the debug panel's GPU
+    /// section degrades, the frame does not.
+    timers: Option<PassTimers>,
     /// Whether the graph dump has been logged since the graph last changed
     /// shape. Once per shape rather than once per frame, because a dump every
     /// frame is a log nobody reads.
     dumped: bool,
+    /// The last frame's graph dump, kept only for this crate's own tests: it is
+    /// how a test sees whether the UI pass was in the frame at all. `add_pass`
+    /// declares nothing when the draw list is empty, so the pass's presence in
+    /// this string *is* "the overlay reached the GPU".
+    #[cfg(test)]
+    last_dump: String,
 }
 
 /// What both this application's bring-up and any future polled one ask for.
@@ -126,12 +160,44 @@ impl Gpu {
             }
         }
 
+        // Unwound by hand for the reason the instance loop above is: `Gpu` has
+        // no `Drop`, so a `?` here would leak every pipeline and buffer the
+        // renderers before it have made.
+        let ui = match UiRenderer::new(ctx.device(), ctx.queue(), format) {
+            Ok(ui) => ui,
+            Err(error) => {
+                renderer.destroy(ctx.device());
+                ctx.destroy()?;
+                return Err(GpuError::Hal(error));
+            }
+        };
+        let menu = match MenuRenderer::new(ctx.device(), ctx.queue(), format) {
+            Ok(menu) => menu,
+            Err(error) => {
+                ui.destroy(ctx.device());
+                renderer.destroy(ctx.device());
+                ctx.destroy()?;
+                return Err(GpuError::Hal(error));
+            }
+        };
+        let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
+        if timers.is_none() {
+            crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
+        }
+
         Ok(Self {
             ctx,
             renderer,
             pool: TransientPool::new(),
             camera: Camera::default(),
+            ui,
+            menu,
+            atlas: FontAtlas::built_in(),
+            draw_list: DrawList::new(),
+            timers,
             dumped: false,
+            #[cfg(test)]
+            last_dump: String::new(),
         })
     }
 
@@ -144,6 +210,64 @@ impl Gpu {
     /// Where the next frame is drawn from.
     pub const fn set_camera(&mut self, camera: Camera) {
         self.camera = camera;
+    }
+
+    /// The glyph atlas the UI pass renders text from.
+    ///
+    /// The menu lays itself out with it and the debug overlay measures its own
+    /// panel with it, and both must use the *same* atlas the pass draws with or
+    /// the background rect is the wrong size for the text inside it.
+    #[must_use]
+    pub const fn atlas(&self) -> &FontAtlas {
+        &self.atlas
+    }
+
+    /// Takes this frame's menu, or `None` on a frame that shows none.
+    ///
+    /// CPU only — the upload happens inside [`Gpu::frame`], at the extent the
+    /// swapchain was actually acquired at.
+    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
+        self.menu.set_menu(menu);
+    }
+
+    /// Takes this frame's UI geometry, handing the previous frame's allocation
+    /// back so the loop can refill it instead of building a new one.
+    pub fn take_draw_list(&mut self, list: &mut DrawList) {
+        std::mem::swap(&mut self.draw_list, list);
+    }
+
+    /// The most recent frame whose per-pass GPU timings have landed.
+    ///
+    /// `None` on a device with no timestamp queries, and empty for the first few
+    /// frames — the report is deliberately frames latent; see
+    /// [`crcbl::render::PassTimers`].
+    #[must_use]
+    pub fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
+        self.timers.as_ref().map(PassTimers::latest)
+    }
+
+    /// What the last [`Gpu::frame`] recorded: draws, instances and triangles,
+    /// summed over the three renderers this bundle holds.
+    #[must_use]
+    pub fn counters(&self) -> crcbl::render::FrameCounters {
+        self.renderer
+            .counters()
+            .plus(self.menu.counters())
+            .plus(self.ui.counters())
+    }
+
+    /// The UI geometry this frame handed over, for this crate's own tests.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn draw_list(&self) -> &DrawList {
+        &self.draw_list
+    }
+
+    /// The last frame's render-graph dump, for this crate's own tests.
+    #[cfg(test)]
+    #[must_use]
+    pub fn last_dump(&self) -> &str {
+        &self.last_dump
     }
 
     /// Records, submits and presents one frame.
@@ -164,6 +288,14 @@ impl Gpu {
         let light = key_light(&self.camera);
         self.renderer
             .begin_frame(self.ctx.device(), &self.camera, &light, extent)?;
+        self.menu
+            .begin_frame(self.ctx.device(), extent)
+            .map_err(GpuError::Hal)?;
+        // Upload this frame's UI geometry: the debug overlay, and only that —
+        // the viewer has no HUD of its own.
+        self.ui
+            .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
+            .map_err(GpuError::Hal)?;
 
         let format = self.ctx.format();
         let compiled = {
@@ -173,9 +305,22 @@ impl Gpu {
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
             let _hdr = self.renderer.add_passes(&mut graph, target, extent);
+            // **Between the scene and the text, and that order is the whole
+            // join.** The menu's scrim dims what is already in the target, so it
+            // has to come after the tonemap; the panel is opaque and the labels
+            // are UI-pass text, so it has to come before the UI or the frame
+            // paints over its own words.
+            self.menu.add_pass(&mut graph, target);
+            // Composited on top of the tonemapped scene, so the overlay is
+            // readable over whatever the document drew.
+            self.ui.add_pass(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
 
+        #[cfg(test)]
+        {
+            self.last_dump = compiled.dump();
+        }
         // "The graph must be able to explain itself" — §2.4's debug-tools
         // principle.
         if !self.dumped {
@@ -190,7 +335,12 @@ impl Gpu {
                 label: Some("viewer frame"),
                 queue: self.ctx.queue(),
             });
-        compiled.execute(self.ctx.device(), &mut self.pool, encoder.as_mut(), None)?;
+        compiled.execute(
+            self.ctx.device(),
+            &mut self.pool,
+            encoder.as_mut(),
+            self.timers.as_mut(),
+        )?;
         let command_buffer = encoder.finish()?;
 
         let outcome = self.ctx.submit_and_present(&acquired, command_buffer)?;
@@ -221,11 +371,20 @@ impl Gpu {
     /// [`GpuError`] if waiting for outstanding work failed.
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
+        self.ui.destroy(self.ctx.device());
+        self.menu.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
+        if let Some(timers) = self.timers.as_mut() {
+            timers.destroy(self.ctx.device());
+        }
         self.renderer.destroy(self.ctx.device());
         self.ctx.destroy()
     }
 }
+
+// The nine forwards `crcbl::engine` calls this bundle through. Every one of
+// them is a method above; the macro is what stops a sample forgetting one.
+crcbl::impl_game_gpu!(Gpu);
 
 /// The key light for a frame drawn from `camera`.
 ///

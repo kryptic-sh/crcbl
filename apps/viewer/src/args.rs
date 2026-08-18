@@ -58,6 +58,10 @@ CONTROLS:
     middle/right drag    Pan
     wheel                Zoom
     F                    Frame the model again
+    ESC                  Open the menu — the only way to reach the two below
+                         without a keyboard
+    F11                  Fullscreen
+    F3                   Debug panel
 
 OPTIONS:
     --headless           Run without a window (for CI / determinism tests)
@@ -85,10 +89,9 @@ OPTIONS:
                          debug build, hidden in a release build'
     -h, --help           Print this help
 
-This milestone simulates nothing and draws no UI, so --tick-hz sets a clock
-nothing reads and the two --debug-overlay flags reach no panel. Both are in
-docs/backlog.md; the shared block is printed whole rather than edited, so that
-what it says about a flag is what the engine says about it.";
+This milestone simulates nothing, so --tick-hz sets a clock that steps an empty
+tick; it is in docs/backlog.md. The shared block is printed whole rather than
+edited, so that what it says about a flag is what the engine says about it.";
 
 /// What the command line asked for.
 pub type Invocation = crcbl::args::Invocation<Options>;

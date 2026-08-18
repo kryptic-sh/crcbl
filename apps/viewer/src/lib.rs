@@ -25,11 +25,11 @@
 //!   [`build_render_scene`](crcbl::scene::gltf_render::build_render_scene) sized
 //!   for the document alone, so it is a change to how the scene is assembled and
 //!   not a pass to add — see [`gpu`].
-//! * **No panels and no debug overlay.** Milestone 2's mesh, material and
-//!   texture listings are a UI pass this application has none of, and so is
-//!   rule 4's panel; [`app`] says why owning the loop costs them both.
-//! * **No exposure slider**, which is the same UI pass and a renderer control
-//!   this milestone does not reach for.
+//! * **No mesh, material or texture panels.** Milestone 2's listings are the
+//!   viewer's own UI, and there is none: [`gpu`] has a UI pass and everything
+//!   that goes through it — the menu and rule 4's debug panel — is the engine's.
+//! * **No exposure slider**, which is the same UI and a renderer control this
+//!   milestone does not reach for.
 //! * **No hot reload.** Milestone 3, and the whole of the artist loop the
 //!   sample doc's V-F4 describes.
 //! * **No drop target.** V-F5 is "path argument natively, drop target in the
@@ -62,6 +62,7 @@ pub mod app;
 pub mod args;
 pub mod controls;
 pub mod gpu;
+pub mod menu;
 pub mod model;
 
 /// The `.glb` documents this crate's own tests open.
@@ -71,7 +72,8 @@ pub mod model;
 #[cfg(test)]
 mod fixture;
 
-pub use app::{Summary, Viewer, ViewerError, run};
+pub use app::{Loop, Summary, Viewer, ViewerError, run, start, with_shell};
 pub use args::{DEFAULT_TICK_HZ, Invocation, Options, USAGE, parse};
-pub use controls::{Controls, Request};
+pub use controls::Controls;
+pub use menu::{MenuKind, Menus};
 pub use model::{LoadError, Model, load, world_bounds};

@@ -15,11 +15,16 @@
 //!
 //! # Keyboard only, and that is a decision
 //!
-//! No pointer look. `crcbl-shell` has no pointer *grab* — the loop's own
-//! `PointerUpdate` reports positions inside the window, so a mouse-look camera
-//! would stop turning the moment the cursor reached the edge of the frame, which
-//! is worse than not offering it. The arrow keys turn instead, and
-//! `docs/backlog.md` carries the grab as the thing that would change this.
+//! No pointer look, and the reason has moved. It used to be that the loop's own
+//! `PointerUpdate` carried a position and nothing else, so a mouse-look camera
+//! would have had to difference clamped, accelerated positions and would stop
+//! turning the moment the cursor reached the edge of the frame. It carries
+//! `motion` now — the unaccelerated delta, added so `apps/viewer` could be
+//! hosted — so that objection is gone and what is left is the cursor itself:
+//! nothing here asks for `PointerMode::Locked`, so a look would drag the visible
+//! pointer out of the window and onto whatever is behind it. The arrow keys turn
+//! instead, and `docs/backlog.md` carries the grab as the thing that would
+//! change this.
 
 use crcbl::core::input::KeyCode;
 use crcbl::math::Vec3;

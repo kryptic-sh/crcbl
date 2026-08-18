@@ -693,15 +693,43 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Controls are `three.js`-shaped, which is what a user arriving from a browser
   model viewer already has in their hands: left drag orbits with the model
   following the pointer, middle or right drag pans, the wheel zooms, `F` frames
-  the model again. Drag deltas come from `ShellEvent::PointerMotion`'s
-  `raw_delta` where the backend has one and from differenced `abs` positions
-  where it does not, so the browser backend drags too.
+  the model again. Drag deltas are `PointerUpdate::motion` — the unaccelerated
+  `raw_delta` where the backend has one and differenced `abs` positions where it
+  does not — so the browser backend drags too.
 
-  It **writes its own loop** rather than hosting on `crcbl::engine::Loop`: that
-  loop reduces a pump to `PointerUpdate`'s primary button and delivers
-  `ShellEvent::Wheel` to nothing, and a viewer needs both. The consequence is
-  that this sample has no menu, no pause and no debug overlay — see
-  `docs/backlog.md`.
+  It is **hosted by `crcbl::engine::Loop`** like every other sample, so `ESC`
+  opens a panel, `F11` goes fullscreen and `F3` shows the debug overlay with the
+  document's instance and skip counts on it. That took widening the loop's input
+  — see the entry below.
+
+- **`crcbl::engine::Loop` delivers the whole pointer, so a tool application can
+  be hosted.** It used to fold a pump down to a position and the primary
+  button's two edges: `Pending::observe` matched `PointerButton::Left` alone and
+  `ShellEvent::Wheel` fell into its catch-all, so a hosted game could not be
+  given a wheel or a second drag button at all. Three additions close that:
+  - **`HostedGame::wheel_event(ScrollDelta)`** — one call per scroll the shell
+    reported, never summed. `ScrollDelta` keeps detents and pixels apart on
+    purpose and leaves the conversion to the application, so an engine that
+    added a batch up would be choosing that policy for every caller.
+  - **`HostedGame::button_event(PointerButton, bool)`** — every button that is
+    not the primary one, once per edge, shaped like `key_event` because for a
+    hosted game that is what a right-click is. The primary button is still
+    `PointerUpdate`'s two edges, because it is the one a menu arbitrates. A
+    button held when the window loses focus is **released** here, the way a held
+    key is.
+  - **`PointerUpdate::motion`** — how far the pointer travelled this frame, in
+    framebuffer pixels: the unaccelerated `raw_delta` where the backend reports
+    one and the difference of successive positions where it does not. It is not
+    the difference of `PointerUpdate::at`, which is clamped at the edge of the
+    display, carries pointer acceleration, and does not exist at all under
+    `PointerMode::Locked` — a frame under a lock now reports `at: None` with a
+    `motion` and is delivered.
+
+  Both new methods default to doing nothing, like `pointer_event` and
+  `touch_event`: nothing reads a value back out of them, so an unoverridden one
+  is a game with no wheel binding rather than a check that passed by doing
+  nothing. No existing sample changed. `apps/viewer` is the caller they were
+  added for, and its migration onto the loop is what says they are enough.
 
 - **`crcbl::assets`** re-exports `crcbl-assets`, so `AssetSource`, `DirSource`
   and the registry are reachable from a crate that names only `crcbl`. It was a

@@ -1922,22 +1922,31 @@ impl Clock {
 /// # What it folds, and what it leaves
 ///
 /// Everything the *loop* acts on rather than the game: the window's own
-/// business, the pointer, focus loss, and the three keys below that are the
-/// engine's. Whatever is left — the game's keys — the caller matches on itself,
-/// which is why [`observe`](Self::observe) reports whether it took the event.
+/// business, the whole of the pointer, focus loss, and the three keys below that
+/// are the engine's. Whatever is left — the game's keys — the caller matches on
+/// itself, which is why [`observe`](Self::observe) reports whether it took the
+/// event.
+///
+/// "The whole of the pointer" is meant literally, and it did not used to be:
+/// every button but the primary one and every scroll fell through to the caller,
+/// so a hosted game could not be given them at all. They are folded here now —
+/// [`buttons`](Self::buttons), [`scrolls`](Self::scrolls) and
+/// [`motion`](Self::motion) — which is what lets a tool application take the
+/// engine's frame instead of writing one.
 ///
 /// The pointer half was byte-for-byte identical in all four samples before it
 /// moved here, and it is not trivial code: it carries the last position across
 /// frames because motion and buttons arrive as separate events and a click
 /// carries a position only on some backends.
 ///
-/// # Not `Copy`, because of [`touches`](Self::touches)
+/// # Not `Copy`, because of the three lists
 ///
-/// The pointer collapses to a position and two flags — a batch with five moves
-/// in it has moved the pointer once. Contacts do not: two fingers are two
-/// independent gestures, and a batch that lands one finger and lifts another has
-/// two facts in it that no fixed set of fields can hold. So the batch keeps the
-/// list, and the type is `Clone` rather than `Copy`.
+/// The pointer's position collapses to one value and its primary button to two
+/// flags — a batch with five moves in it has moved the pointer once. Contacts,
+/// non-primary buttons and scrolls do not: two fingers are two independent
+/// gestures, and a batch that lands one finger and lifts another has two facts
+/// in it that no fixed set of fields can hold. So the batch keeps lists, and the
+/// type is `Clone` rather than `Copy`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pending {
     /// Events observed, of every kind.
@@ -1961,6 +1970,30 @@ pub struct Pending {
     /// Starts at whatever [`Pending::carrying`] was given, because a batch with
     /// no motion event in it has not moved the pointer.
     pub pointer: Option<glam::Vec2>,
+    /// How far the pointer travelled during this batch, in framebuffer pixels,
+    /// Y down — or `None` on a batch it did not move.
+    ///
+    /// **Not the difference of [`pointer`](Self::pointer) across the frame**,
+    /// and the distinction is the whole reason the field exists.
+    /// [`ShellEvent::PointerMotion`] carries an unaccelerated `raw_delta`
+    /// wherever the backend has one, and its own documentation says a camera
+    /// must use it: an absolute position is clamped at the edge of the display
+    /// and has pointer acceleration already applied, so a look or an orbit
+    /// driven by differencing positions stops working exactly when the cursor
+    /// runs out of screen. Under
+    /// [`PointerMode::Locked`](crcbl_shell::PointerMode::Locked) there is no
+    /// absolute position at all and this is the only signal there is.
+    ///
+    /// Where the backend reports no `raw_delta` — the browser's, which does not
+    /// set
+    /// [`RAW_POINTER_MOTION`](crcbl_shell::ShellCaps::RAW_POINTER_MOTION) —
+    /// successive positions are differenced instead, because a drag that
+    /// silently did nothing there would be worse than an accelerated one.
+    ///
+    /// **Summed over the batch, not per event**, which is the one place this
+    /// differs from [`scrolls`](Self::scrolls): two motions in a frame are one
+    /// movement of the hand, and pixels in one space add.
+    pub motion: Option<glam::Vec2>,
     /// The primary pointer button went down during this batch.
     pub pointer_pressed: bool,
     /// …and came up.
@@ -1982,6 +2015,28 @@ pub struct Pending {
     /// Empty on every backend but the web one today: contacts arrive only where
     /// [`ShellCaps::TOUCH`](crcbl_shell::ShellCaps::TOUCH) is set.
     pub touches: Vec<TouchContact>,
+    /// Every **non-primary** pointer button edge this batch carried, in the
+    /// order the shell reported them, `true` for a press.
+    ///
+    /// The primary button is not here: it is
+    /// [`pointer_pressed`](Self::pointer_pressed) and
+    /// [`pointer_released`](Self::pointer_released), because it is the one a
+    /// menu arbitrates and a menu needs the button as a *level* it can re-read
+    /// against this frame's layout. Nothing arbitrates the others, so they are
+    /// delivered whole — which also means a middle click faster than a frame
+    /// keeps both of its edges instead of collapsing into one flag.
+    pub buttons: Vec<(crcbl_core::input::PointerButton, bool)>,
+    /// Every scroll this batch carried, in the order the shell reported them.
+    ///
+    /// **Never merged**, and not because merging would be hard.
+    /// [`ScrollDelta`](crcbl_core::input::ScrollDelta) deliberately keeps
+    /// detents and pixels apart and says the conversion between them is the
+    /// application's policy — one wheel notch is a browser's 53 pixels here and
+    /// something else elsewhere — so an engine that summed a batch would have
+    /// to pick that number on every application's behalf. Appended for the same
+    /// reason [`touches`](Self::touches) is: the loop has nothing to say about
+    /// what is in here.
+    pub scrolls: Vec<crcbl_core::input::ScrollDelta>,
     /// [`DEBUG_OVERLAY_KEY`] was pressed, and it was a real press.
     pub toggle_debug_overlay: bool,
     /// [`PAUSE_KEY`] was pressed.
@@ -2056,10 +2111,27 @@ impl Pending {
             ShellEvent::CloseRequested { .. } => self.close_requested = true,
             ShellEvent::WindowDestroyed { .. } => self.destroyed = true,
             ShellEvent::Focus { focused: false, .. } => self.focus_lost = true,
-            ShellEvent::PointerMotion {
-                abs: Some(point), ..
-            } => {
-                self.pointer = position(Some(*point));
+            ShellEvent::PointerMotion { abs, raw_delta, .. } => {
+                let here = position(*abs);
+                // The unaccelerated delta wherever the backend has one, and the
+                // difference of successive positions where it does not — see
+                // [`Pending::motion`]. `previous` is read before `pointer` is
+                // moved, and a batch that starts with no position (the pointer
+                // was outside the window, or this is the first event of the run)
+                // has nothing to difference against and reports no movement,
+                // which is what stops walking out of one edge and back in at
+                // another from arriving as one enormous drag.
+                let previous = self.pointer;
+                if here.is_some() {
+                    self.pointer = here;
+                }
+                let moved = match *raw_delta {
+                    Some((dx, dy)) => Some(glam::Vec2::new(dx as f32, dy as f32)),
+                    None => here.zip(previous).map(|(here, before)| here - before),
+                };
+                if let Some(moved) = moved {
+                    *self.motion.get_or_insert(glam::Vec2::ZERO) += moved;
+                }
             }
             // A pointer that left the window is not hovering anything, and must
             // not leave the last button it crossed lit up.
@@ -2071,7 +2143,7 @@ impl Pending {
                 self.pointer = if *entered { position(*at) } else { None };
             }
             ShellEvent::Button {
-                button: crcbl_core::input::PointerButton::Left,
+                button,
                 state,
                 position: at,
                 ..
@@ -2079,12 +2151,21 @@ impl Pending {
                 if let Some(point) = position(*at) {
                     self.pointer = Some(point);
                 }
-                if matches!(state, crcbl_shell::ButtonState::Pressed) {
-                    self.pointer_pressed = true;
+                let pressed = matches!(state, crcbl_shell::ButtonState::Pressed);
+                // The primary button collapses to the two flags a menu reads as
+                // a level; every other one is appended. See
+                // [`buttons`](Self::buttons).
+                if *button == crcbl_core::input::PointerButton::Left {
+                    if pressed {
+                        self.pointer_pressed = true;
+                    } else {
+                        self.pointer_released = true;
+                    }
                 } else {
-                    self.pointer_released = true;
+                    self.buttons.push((*button, pressed));
                 }
             }
+            ShellEvent::Wheel { delta, .. } => self.scrolls.push(*delta),
             // Appended, never merged: see `touches`. A contact's own id is what
             // tells two fingers apart, so nothing here has to guess which
             // finger a position belongs to — which is the whole point of the
@@ -2570,6 +2651,29 @@ pub struct PointerUpdate {
     /// it already had. [`crcbl_input::Binding::PointerPosition`] holds the last
     /// position for exactly this reason.
     pub at: Option<glam::Vec2>,
+    /// How far the pointer travelled this frame, in **framebuffer pixels**, Y
+    /// down — or `None` on a frame it did not move.
+    ///
+    /// # Pixels, in a struct whose other position is normalised
+    ///
+    /// [`at`](Self::at) is resolution-independent because a *place* on the
+    /// surface is; a *distance the hand moved* is not. Normalising it would
+    /// divide X by the width and Y by the height, so the same diagonal flick
+    /// would come out at two different angles depending on the window's aspect,
+    /// and every consumer would immediately multiply the aspect back in. The
+    /// shell reports it in pixels ([`ShellEvent::PointerMotion`]'s `raw_delta`),
+    /// [`TouchUpdate::pixels`] hands a contact back in the same space, and a
+    /// gesture measured against the window's height is what every DCC
+    /// application means by "a drag across the viewport".
+    ///
+    /// # It is not the difference of `at`, and must not be replaced by one
+    ///
+    /// See [`Pending::motion`]: an absolute position is clamped at the edge of
+    /// the display and carries pointer acceleration, and under
+    /// [`PointerMode::Locked`](crcbl_shell::PointerMode::Locked) there is none
+    /// at all. A frame under a lock therefore reports `at: None` and a `motion`
+    /// — and is delivered, which is why the loop dispatches on this field too.
+    pub motion: Option<glam::Vec2>,
     /// The primary button went down this frame, over no menu.
     pub pressed: bool,
     /// …and came up.
@@ -3772,6 +3876,56 @@ pub trait HostedGame: Sized {
         let _ = pointer;
     }
 
+    /// A pointer button that is **not** the primary one, once per edge the
+    /// shell reported — `true` for a press.
+    ///
+    /// Shaped like [`key_event`](Self::key_event) rather than like
+    /// [`pointer_event`](Self::pointer_event), because for a hosted game that is
+    /// what these are: a right-click is a binding, not a place. The position is
+    /// the pointer's and arrives through `pointer_event` on the same frame.
+    ///
+    /// **The primary button is not delivered here.** It is the one a menu
+    /// arbitrates — a press over a panel fires the widget under it and never
+    /// reaches the game — and that arbitration is expressed as
+    /// [`PointerUpdate::pressed`] and [`released`](PointerUpdate::released). The
+    /// others no menu claims, so they arrive whether or not a panel is on
+    /// screen; an application that wants a panel to be modal to them has to say
+    /// so itself.
+    ///
+    /// **A button held when the window loses focus is released here**, the way
+    /// [`key_event`](Self::key_event)'s keys are and for the same reason: no
+    /// platform sends that edge, and a drag that survived an alt-tab would
+    /// resume from wherever the pointer came back.
+    ///
+    /// The empty default is the honest answer for the games played with one
+    /// button, in the same way [`pointer_event`](Self::pointer_event)'s is:
+    /// nothing is verified by this method and nothing reads a value back out of
+    /// it, so a game that never overrides it is a game with nothing bound to the
+    /// wheel click — a complete statement, not a skipped check.
+    fn button_event(&mut self, button: crcbl_core::input::PointerButton, pressed: bool) {
+        let _ = (button, pressed);
+    }
+
+    /// One scroll, once per event the shell reported.
+    ///
+    /// **Not summed over the frame**, unlike [`PointerUpdate::motion`].
+    /// [`ScrollDelta`](crcbl_core::input::ScrollDelta) keeps detents and pixels
+    /// apart on purpose and leaves the conversion between them to the
+    /// application, so an engine that added a batch up would be choosing that
+    /// policy for every caller. See [`Pending::scrolls`].
+    ///
+    /// Delivered whether or not a menu is on screen, for the reason
+    /// [`button_event`](Self::button_event) is: nothing in the loop's own UI
+    /// scrolls, so there is nothing for it to arbitrate against.
+    ///
+    /// The empty default carries the same argument as
+    /// [`button_event`](Self::button_event)'s — most games have no wheel binding
+    /// at all, and saying so by not overriding this is a statement about the
+    /// game rather than a check that passes by doing nothing.
+    fn wheel_event(&mut self, delta: crcbl_core::input::ScrollDelta) {
+        let _ = delta;
+    }
+
     /// One finger, once per event the shell reported — see [`TouchUpdate`].
     ///
     /// Called for **every** contact, including the primary one that also arrives
@@ -3966,6 +4120,16 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// Keys forwarded to the game as pressed and not yet released, so focus
     /// loss can release them — see [`lose_focus`].
     held_keys: Vec<crcbl_core::input::KeyCode>,
+    /// Non-primary pointer buttons forwarded to the game as pressed and not yet
+    /// released, so focus loss can release them.
+    ///
+    /// [`Self::held_keys`] for the wheel click and the context button, and it
+    /// exists for exactly the one repair: no platform sends the release for a
+    /// button that was down when the window went away, and a viewer whose pan
+    /// drag survived an alt-tab would jump the model the next time the pointer
+    /// came back. The primary button's half of this is
+    /// [`Self::pointer_in_game`].
+    held_buttons: Vec<crcbl_core::input::PointerButton>,
     /// Whether the game was told the pointer button is down and not yet told it
     /// came up.
     ///
@@ -4070,6 +4234,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
             paused: false,
             held_keys: Vec::new(),
+            held_buttons: Vec::new(),
             pointer_in_game: false,
             menu_owns_press: false,
             live_contacts: Vec::new(),
@@ -4238,6 +4403,26 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             });
         }
 
+        // **The buttons and the wheel before the pointer**, so a press and the
+        // movement that follows it inside one batch arrive in the order the hand
+        // made them: a pan that started this frame must see this frame's motion,
+        // or the first sixteen milliseconds of every drag are dropped. Neither
+        // is offered to the menu first, because a menu claims neither — see
+        // [`HostedGame::button_event`].
+        for (button, pressed) in std::mem::take(&mut pending.buttons) {
+            if pressed {
+                if !self.held_buttons.contains(&button) {
+                    self.held_buttons.push(button);
+                }
+            } else {
+                self.held_buttons.retain(|held| *held != button);
+            }
+            self.game.button_event(button, pressed);
+        }
+        for delta in std::mem::take(&mut pending.scrolls) {
+            self.game.wheel_event(delta);
+        }
+
         // What is left of the pointer once the menu and the game's own controls
         // have had it. `showing` is
         // last frame's menu for the same reason the keyboard's claim is: the
@@ -4253,10 +4438,17 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             .then_some(pending.pointer)
             .flatten()
             .map(|point| normalised(point, self.gpu.extent()));
-        if pressed || released || at.is_some() {
+        // Delivered whether or not a menu is on screen, exactly as `at` is: a
+        // place is not a command and neither is a movement, and a camera that
+        // stopped following the hand while a panel was up would be a camera the
+        // user cannot line up before dismissing it. What a menu claims is the
+        // *press*, three lines above.
+        let motion = pending.motion;
+        if pressed || released || at.is_some() || motion.is_some() {
             self.pointer_in_game = (self.pointer_in_game || pressed) && !released;
             self.game.pointer_event(PointerUpdate {
                 at,
+                motion,
                 pressed,
                 released,
             });
@@ -4287,9 +4479,16 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 self.pointer_in_game = false;
                 self.game.pointer_event(PointerUpdate {
                     at: None,
+                    motion: None,
                     pressed: false,
                     released: true,
                 });
+            }
+            // And the same for every non-primary button that was down. A pan
+            // drag left running across an alt-tab resumes from wherever the
+            // pointer comes back, which is a model that leaps.
+            for button in std::mem::take(&mut self.held_buttons) {
+                self.game.button_event(button, false);
             }
             // A finger that was pressing a panel is holding a press nobody will
             // finish, and the menu's is the same obligation: dropped rather than
@@ -6051,6 +6250,147 @@ mod tests {
         let mut moved = Pending::carrying(last);
         drain(&mut shell, &mut moved);
         assert_eq!(moved.pointer, Some(glam::Vec2::new(7.0, 9.0)));
+    }
+
+    /// **The unaccelerated delta is what a batch reports, not the difference of
+    /// the positions.**
+    ///
+    /// Written so the two answers cannot agree: the shell is handed a `raw_delta`
+    /// that is deliberately not the step between the two absolute positions, so
+    /// a fold that differenced `abs` — the thing
+    /// [`ShellEvent::PointerMotion`] tells a camera never to do — would report
+    /// the other number.
+    #[test]
+    fn a_batch_reports_the_unaccelerated_delta_and_not_the_positions_step() {
+        let (mut shell, window) = shell();
+        let point = |x: f64, y: f64| crcbl_shell::PhysicalPoint { x, y };
+        for (at, raw) in [
+            (point(100.0, 100.0), (4.0, -1.0)),
+            (point(140.0, 90.0), (6.0, -3.0)),
+        ] {
+            shell
+                .move_pointer(window, at, raw)
+                .expect("the window is live");
+        }
+
+        let mut pending = Pending::carrying(Some(glam::Vec2::new(10.0, 10.0)));
+        let verdicts = drain(&mut shell, &mut pending);
+        assert!(
+            verdicts.iter().all(|verdict| *verdict == Handled::Loop),
+            "motion was handed to the game raw: {verdicts:?}",
+        );
+        assert_eq!(
+            pending.motion,
+            Some(glam::Vec2::new(10.0, -4.0)),
+            "the two raw deltas must sum; the positions' step is (130, 80)",
+        );
+        assert_eq!(pending.pointer, Some(glam::Vec2::new(140.0, 90.0)));
+    }
+
+    /// **A backend with no relative motion still reports a movement**, from the
+    /// difference of successive positions — and a pointer that left the window
+    /// and came back somewhere else is not one enormous drag across it.
+    ///
+    /// The browser is that backend: it does not set
+    /// [`ShellCaps::RAW_POINTER_MOTION`](crcbl_shell::ShellCaps::RAW_POINTER_MOTION),
+    /// and a fold that only ever read `raw_delta` would leave every drag there
+    /// silently doing nothing.
+    #[test]
+    fn a_backend_with_no_raw_motion_differences_positions_and_forgets_on_leave() {
+        let mut shell = crcbl_shell::HeadlessShell::new().with_caps(
+            crcbl_shell::ShellCaps::DESKTOP - crcbl_shell::ShellCaps::RAW_POINTER_MOTION,
+        );
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let point = |x: f64, y: f64| crcbl_shell::PhysicalPoint { x, y };
+
+        // The first position of a run establishes where the pointer is; only the
+        // second is a movement.
+        shell
+            .move_pointer(window, point(200.0, 50.0), (999.0, 999.0))
+            .expect("the window is live");
+        shell
+            .move_pointer(window, point(230.0, 70.0), (999.0, 999.0))
+            .expect("the window is live");
+        let mut pending = Pending::default();
+        drain(&mut shell, &mut pending);
+        assert_eq!(
+            pending.motion,
+            Some(glam::Vec2::new(30.0, 20.0)),
+            "the raw delta this backend does not have must not be invented",
+        );
+
+        // Out of one edge and back in at another. The leave drops the position,
+        // so the first motion afterwards has nothing to difference against.
+        shell
+            .set_pointer_focus(window, false, None)
+            .expect("the window is live");
+        shell
+            .move_pointer(window, point(10.0, 400.0), (999.0, 999.0))
+            .expect("the window is live");
+        let mut returned = Pending::carrying(pending.pointer);
+        drain(&mut shell, &mut returned);
+        assert_eq!(
+            returned.motion, None,
+            "re-entering the window arrived as a drag across it",
+        );
+    }
+
+    /// **Every non-primary button and every scroll survives the fold, in order
+    /// and unmerged.**
+    ///
+    /// Both used to fall through `observe`'s `_` arm, so a hosted game could not
+    /// be told about them at all. The primary button still collapses to the two
+    /// flags a menu reads as a level, and that is asserted here too — a fold that
+    /// appended all five would have moved the menu's arbitration out from under
+    /// it.
+    #[test]
+    fn the_wheel_and_the_non_primary_buttons_survive_the_fold() {
+        use crcbl_core::input::{PointerButton, ScrollDelta};
+        let (mut shell, window) = shell();
+        let at = Some(crcbl_shell::PhysicalPoint { x: 5.0, y: 6.0 });
+        for (button, state) in [
+            (PointerButton::Middle, crcbl_shell::ButtonState::Pressed),
+            (PointerButton::Right, crcbl_shell::ButtonState::Pressed),
+            (PointerButton::Left, crcbl_shell::ButtonState::Pressed),
+            (PointerButton::Middle, crcbl_shell::ButtonState::Released),
+        ] {
+            shell
+                .button(window, button, state, at)
+                .expect("the window is live");
+        }
+        for delta in [
+            ScrollDelta::Lines { x: 0.0, y: 1.0 },
+            ScrollDelta::Pixels { x: 0.0, y: 53.0 },
+        ] {
+            shell.scroll(window, delta, at).expect("the window is live");
+        }
+
+        let mut pending = Pending::default();
+        let verdicts = drain(&mut shell, &mut pending);
+        assert!(
+            verdicts.iter().all(|verdict| *verdict == Handled::Loop),
+            "a button or a scroll was handed to the game raw: {verdicts:?}",
+        );
+        assert_eq!(
+            pending.buttons,
+            vec![
+                (PointerButton::Middle, true),
+                (PointerButton::Right, true),
+                (PointerButton::Middle, false),
+            ],
+            "the primary button belongs to the flags, and the rest to the list",
+        );
+        assert!(pending.pointer_pressed && !pending.pointer_released);
+        assert_eq!(
+            pending.scrolls,
+            vec![
+                ScrollDelta::Lines { x: 0.0, y: 1.0 },
+                ScrollDelta::Pixels { x: 0.0, y: 53.0 },
+            ],
+            "detents and pixels must not be collapsed into one number here",
+        );
     }
 
     /// **Two contacts arrive as two, and moving one moves only that one.**
@@ -8180,6 +8520,12 @@ mod tests {
         keys: Vec<(crcbl_core::input::KeyCode, bool)>,
         /// Every contact the loop forwarded, in order.
         touches: Vec<TouchUpdate>,
+        /// Every pointer update the loop forwarded, in order.
+        pointers: Vec<PointerUpdate>,
+        /// Every non-primary button edge the loop forwarded, in order.
+        buttons: Vec<(crcbl_core::input::PointerButton, bool)>,
+        /// Every scroll the loop forwarded, in order.
+        scrolls: Vec<crcbl_core::input::ScrollDelta>,
         /// What each `draw` was told about its frame.
         draws: Vec<FrameInfo>,
         /// Whether the ball has been served.
@@ -8237,6 +8583,18 @@ mod tests {
 
         fn touch_event(&mut self, touch: TouchUpdate) {
             self.touches.push(touch);
+        }
+
+        fn pointer_event(&mut self, pointer: PointerUpdate) {
+            self.pointers.push(pointer);
+        }
+
+        fn button_event(&mut self, button: crcbl_core::input::PointerButton, pressed: bool) {
+            self.buttons.push((button, pressed));
+        }
+
+        fn wheel_event(&mut self, delta: crcbl_core::input::ScrollDelta) {
+            self.scrolls.push(delta);
         }
 
         /// Asserts rather than ignores: the loop promises never to ask about an
@@ -8840,6 +9198,84 @@ mod tests {
             "a paused frame stopped presenting",
         );
         assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+    }
+
+    /// **The wheel, the second drag button and the pointer's movement all reach
+    /// the hosted game.**
+    ///
+    /// The three facts a tool application needs and the loop used to drop, which
+    /// is why `apps/viewer` wrote a frame of its own. This is the *dispatch*
+    /// half — `the_wheel_and_the_non_primary_buttons_survive_the_fold` is the
+    /// fold's — and it is what goes red if either hook stops being called from
+    /// `frame_body`.
+    #[test]
+    fn a_tool_applications_wheel_button_and_motion_all_reach_the_game() {
+        use crcbl_core::input::{PointerButton, ScrollDelta};
+        let mut engine = hosted(None);
+        let window = engine.window();
+        engine.frame().expect("the fake never fails");
+
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Middle,
+                crcbl_shell::ButtonState::Pressed,
+                Some(crcbl_shell::PhysicalPoint { x: 20.0, y: 30.0 }),
+            )
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .move_pointer(
+                window,
+                crcbl_shell::PhysicalPoint { x: 60.0, y: 30.0 },
+                (40.0, 0.0),
+            )
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .scroll(window, ScrollDelta::Lines { x: 0.0, y: 2.0 }, None)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+
+        assert_eq!(
+            engine.game().buttons,
+            vec![(PointerButton::Middle, true)],
+            "the wheel click reached nothing",
+        );
+        assert_eq!(
+            engine.game().scrolls,
+            vec![ScrollDelta::Lines { x: 0.0, y: 2.0 }],
+            "the scroll reached nothing",
+        );
+        let moved = engine
+            .game()
+            .pointers
+            .last()
+            .expect("the pointer moved, so an update went out");
+        assert_eq!(
+            moved.motion,
+            Some(glam::Vec2::new(40.0, 0.0)),
+            "the movement reached the game as {:?}",
+            moved.motion,
+        );
+
+        // **The button held across a focus loss is released**, which is the edge
+        // no platform sends and the loop owes — the same debt it discharges for
+        // a held key.
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.game().buttons,
+            vec![
+                (PointerButton::Middle, true),
+                (PointerButton::Middle, false)
+            ],
+            "a pan drag survived the alt-tab",
+        );
     }
 
     /// **A press made before a panel opened does not fire that panel's

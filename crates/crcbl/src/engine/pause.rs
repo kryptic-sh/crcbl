@@ -273,7 +273,7 @@ mod tests {
         PointerUpdate {
             at: Some(at_pixels(FIRST, TouchPhase::Moved, at).at),
             pressed: true,
-            released: false,
+            ..PointerUpdate::default()
         }
     }
 
@@ -389,7 +389,7 @@ mod tests {
         assert!(pause.takes_pointer(PointerUpdate {
             at: None,
             pressed: true,
-            released: false,
+            ..PointerUpdate::default()
         }));
 
         // A panel is the menu's screen, so the pointer over it is the menu's.
