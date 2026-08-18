@@ -1115,46 +1115,43 @@ both features — but the raster exercises made it **reachable where it was not
 before**, so it is a live hazard on a poorer device rather than a theoretical
 one.
 
-### Metal declares DepthClamp and changes nothing — measuring which reason
+### MEASURED — CI's Metal device ignores depth clamping, and there is no gate
 
-`main` is red on one arm: the seam suite's new `exercise_depth_clamp` draws a
-triangle past the far plane with **no depth attachment**, and Metal accepts the
-call and discards it. It passes on vk, wgpu and WARP.
+The probe ran and the answer is unambiguous:
 
-**Two explanations were eliminated by reading rather than guessing.**
-`setDepthClipMode:` has exactly one call site, in `bind_graphics_pipeline`; its
-value comes from the only `RasterState` construction; the binding's `Clip = 0` /
-`Clamp = 1` matches Apple's header, so it is not inverted; and nothing between
-the bind and the draw touches clip state. So the backend is not defeating it.
+```
+Clamp at z=1.5, no depth attachment,           drew = false
+Clamp at z=1.5, D32Float depth attachment,     drew = false
+this device ignores MTLDepthClipMode::Clamp entirely
+```
 
-**And "Metal does not clamp" is refuted by third parties.** Dawn maps
-`unclippedDepth` to `MTLDepthClipMode::Clamp`; the WebGPU CTS's
-`depth_clip_clamp` covers this exact geometry — a vertex beyond the far plane at
-`w = 1` — and Dawn's expectations file carries **no** entry for any
-`apple-apple-m1/m2/m3` tag, though those tags are used elsewhere in it. A gpuweb
-issue has a maintainer's repro drawing a point at `z = 5.0` under `Clamp` on
-Metal.
+All four controls passed — a triangle inside the volume drew, and one past the
+far plane under `Clip` did not, both with and without an attachment — so the
+fixture is sound and the "needs a depth attachment" explanation is **dead**. The
+seam's exercise is right, and vk, wgpu and WARP all rasterise it.
 
-**What is left is a corner nobody tests:** the CTS always has a depth attachment
-and this exercise has none, and Apple documents the mode per-_fragment_ ("clamp
-fragments outside the near or far planes"), which is weaker than Vulkan's
-per-primitive clip. A device-specific quirk is also still live — this runner is
-paravirtual, and it has already been measured exposing zero counter sets.
+**This is the paravirtual device, not Metal.** Dawn maps `unclippedDepth` to
+`MTLDepthClipMode::Clamp`, the WebGPU CTS covers this exact geometry, and Dawn's
+expectations carry no Apple Silicon entry for it — so real Metal honours it and
+only this runner does not. Same device that reports three counter sampling
+points with zero counter sets.
 
-**A probe now separates them**, printed before its controls so a control failure
-cannot take the answer down: the same triangle six ways — two Z values, both
-clip modes, with and without an always-pass non-writing `D32Float` attachment.
+**The problem is that there is no honest gate to hang it on.** Metal has no
+query for depth clip mode. `wgpu-hal`'s two gates are `macOS_GPUFamily1_v1` —
+the _baseline_ macOS feature set, value 10000, which every macOS device answers
+yes to — and "is this macOS". Neither can come back false here.
 
-- Both false → the device ignores `Clamp`, and **there is no honest gate to
-  reach for**: Metal has no query for depth clip mode, and `wgpu-hal`'s two
-  gates are the baseline macOS feature set and "is this macOS", neither of which
-  can answer false here. The choice would be a measured virtual-device quirk in
-  `features_of` — the precedent `wgpu-hal` itself sets with `!is_virtual` for
-  mesh — or a `DIVERGENCES` row, which would be a lie about real hardware.
-- Without an attachment false, with one true → **the exercise is wrong**, and
-  needs a depth attachment that exists without deciding anything. Note vk and
-  D3D12 both rasterise it without one, so that is a Metal-driven widening rather
-  than a correction.
+**Decided: withhold `Features::DEPTH_CLAMP` when the device reports itself
+virtual**, which is precedent `wgpu-hal` sets itself with `!is_virtual` for mesh
+shaders, and which `crcbl-mtl`'s adapter already measures and prints. Then
+`Support::granted` answers `NotOnThisDevice`, the parity report says _unprovable
+here_ rather than green, and no `DIVERGENCES` row lies about real hardware.
+
+**It needs a second half to be correct, and this is the part worth not
+forgetting:** withholding the flag is only honest if the backend then _refuses_
+a pipeline that asks for depth clamping. "Declared unsupported must refuse with
+the documented error" is half the parity contract, and a backend that withholds
+a feature and then silently sets the mode anyway has just moved the lie.
 
 ### MEASURED — CI's Metal device can serve neither query, and no mesh
 
