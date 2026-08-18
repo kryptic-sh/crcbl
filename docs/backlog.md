@@ -1524,32 +1524,17 @@ encoder `draw_indirect_count` is called inside was opened. `crcbl-mtl` encodes
 straight through. That restructuring is the whole of the work, and it is now
 known to be verifiable on the runner we have.
 
-**One caveat worth carrying, because it is not proof of execution.** Every ICB
-reported `size` equal to its `maxCommandCount` — one byte per command. That is
-implausibly small for real command storage, so this paravirtual device is
-plausibly reporting a nominal size or allocating lazily. Creation succeeding is
-evidence the API path is open; it is **not** evidence that
-`executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` will run those
-commands correctly.
-
-**The test that closes it is written and has never run.** `crcbl_mtl::device`'s
-`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`
-encodes `ink_msl`'s triangle into a one-command ICB from the CPU
-(`indirectRenderCommandAtIndex:`), executes it with
-`executeCommandsInBuffer:withRange:` inside a hand-encoded render pass, and
-compares the readback texel for texel against the same pipeline drawn directly
-on the render encoder. It is `#[ignore]`d and `mtl-e2e`-gated like every other
-draw, so only `mtl e2e (macos-latest)` can answer it — nothing on Linux runs
-Metal, and `cargo clippy --target aarch64-apple-darwin` only type-checks it
-(that much _is_ verified: a deliberate type error inside the test reddened that
-target and the restore was confirmed with `cmp`). Enabling `objc2-metal`'s
-`MTLIndirectCommandEncoder` feature for it moved no line of `Cargo.lock`; the
-feature's upstream dependency list is empty.
-
-Until that job runs, the caveat stands as written. If it comes back red with the
-centre at `CLEAR_TEXEL`, the answer is "this device allocates ICBs it will not
-execute", and the `DrawIndirectCount` row's reason becomes "unverifiable on the
-hardware this project has" rather than "unwritten".
+**The one-byte-per-command caveat is closed by measurement.** Every ICB reported
+`size` equal to its `maxCommandCount` — one byte per command, implausible for
+real command storage — so creation succeeding was never evidence that
+`executeCommandsInBuffer:` would run anything. `crcbl_mtl::device`'s
+`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints` now
+settles it: it encodes `ink_msl`'s triangle into a one-command ICB from the CPU,
+executes it with `executeCommandsInBuffer:withRange:`, and compares the readback
+against the same pipeline drawn directly on the encoder. **It passed on
+`mtl e2e (macos-latest)` on 2026-08-18** — 66 of 66 — so this device executes an
+ICB draw and produces a byte-identical canvas. The nominal `size` is a reporting
+quirk, not a hollow allocation.
 
 ### crcbl-mtl does not build with `mtl-e2e` off
 
