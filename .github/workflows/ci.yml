@@ -1185,6 +1185,26 @@ jobs:
         run: >-
           cargo run --locked --quiet --package horde -- --headless --frames 60
           --backend vk
+      # **The viewer is driven through its tests, not its binary, and that is
+      # deliberate.** Every step above runs a sample's executable headless; the
+      # viewer's needs a `.glb` on disk, and glTF fixtures in this workspace are
+      # built in code rather than vendored — `crcbl-scene`'s `gltf_fixture`
+      # explains why, and both it and the viewer's copy are `#[cfg(test)]`. Its
+      # tests already assemble a document and drive import → convert → frame →
+      # draw → debug panel, so pointing them at lavapipe reaches a driver
+      # without checking a binary blob into the tree or widening a test-only
+      # module to suit CI.
+      #
+      # `CRCBL_GPU` is what selects it. An unparseable name panics rather than
+      # falling back, so this step cannot quietly become a second `Null` run —
+      # the trap `hal_seam_e2e`'s backend pin exists for.
+      - name: Run the viewer's suite against lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+        run: cargo test --locked --quiet --package viewer
       # The UI system's own fixture, and the only sample whose frame is a clear
       # plus `ui-composite` and nothing else — no sprite pass at all. That makes
       # it the one step here that would catch a UI-pass validation error with no

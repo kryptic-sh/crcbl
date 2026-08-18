@@ -593,6 +593,33 @@ mod tests {
     ///
     /// The directory has to outlive the run, so it is returned beside the
     /// options rather than dropped at the end of this function — a `TempDir`
+    /// Which backend this crate's tests drive, `Null` unless `CRCBL_GPU` names
+    /// another.
+    ///
+    /// **So a viewer frame can reach a real driver.** Every other sample gets a
+    /// lavapipe run in CI; this one has none, because the samples' CI steps run
+    /// the *binary* headless and the viewer's binary needs a `.glb` on disk that
+    /// the repo does not carry — fixtures here are built in code rather than
+    /// vendored, deliberately, so a diff shows what changed. These tests already
+    /// build one and drive the whole path, so pointing them at a driver is the
+    /// cheaper route to the same coverage.
+    ///
+    /// **An unparseable name is a panic, not a fallback.** `hal_seam_e2e`'s
+    /// `assert_backend_matches_the_pin` exists for this: a run that quietly
+    /// substitutes `Null` is a green result that is evidence about a backend
+    /// nobody named, which is worse than no run.
+    fn test_backend() -> GpuBackend {
+        match std::env::var("CRCBL_GPU") {
+            Err(_) => GpuBackend::Null,
+            Ok(name) => GpuBackend::from_name(&name).unwrap_or_else(|| {
+                panic!(
+                    "CRCBL_GPU names {name:?}, which is not a backend — refusing to fall back to \
+                     Null and report a pass about a backend nobody asked for"
+                )
+            }),
+        }
+    }
+
     /// deletes its tree when it goes.
     fn model_at(document: &[u8], frames: u64) -> (tempfile::TempDir, Options) {
         let dir = tempfile::tempdir().expect("a temporary directory");
@@ -601,7 +628,7 @@ mod tests {
         let mut common = Common::new(crate::args::DEFAULT_TICK_HZ);
         common.headless = true;
         common.frames = Some(frames);
-        common.backend = Some(GpuBackend::Null);
+        common.backend = Some(test_backend());
         (
             dir,
             Options {

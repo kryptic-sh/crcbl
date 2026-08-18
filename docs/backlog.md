@@ -79,25 +79,26 @@ field that says "grab the pointer while the menu is down". That is the design
 question, not the shell work. Its docs referenced this entry before it existed;
 it exists now.
 
-### `apps/viewer` runs in no CI job, because CI has no `.glb`
+### A viewer frame now reaches a driver in CI, through the tests
 
-Every other sample has a `Run <name> headless against lavapipe` step in
-`ci.yml`. The viewer cannot have one as written: it takes a required model path,
-and there is no glTF document in the repository to point it at — deliberately,
-since `crcbl-scene`'s `gltf_fixture` and `crates/crcbl/tests/gltf_e2e.rs` both
-argue that a checked-in binary is a fixture nobody reviewing a change can read.
+Closed, and by none of the three options this entry proposed — no `crcbl-cli`
+subcommand, no `#[ignore]`d integration test with its own runner, no widening of
+`gltf_fixture`. The crate's tests already assemble a `.glb` and drive import →
+convert → frame → draw → debug panel; they just hardcoded `GpuBackend::Null`.
+They now take it from `CRCBL_GPU`, and `ci.yml` runs
+`cargo test --package viewer` with `CRCBL_GPU=vk` against lavapipe beside the
+other samples' steps.
 
-The crate's own tests do run the whole loop (`apps/viewer/src/app.rs`'s
-`a_headless_run_draws_the_document_and_stops`), on `GpuBackend::Null` over a
-`.glb` they assemble in `apps/viewer/src/fixture.rs` — so the path is covered on
-every `cargo test`, and **no viewer frame has ever reached a real driver in
-CI**. Locally it has: run by hand on an RX 7900 XTX, headless and windowed.
+**An unparseable `CRCBL_GPU` panics rather than falling back to `Null`.** That
+is the whole reason this is trustworthy: a step that quietly substituted the
+null backend would be a green CI job that is evidence about a backend nobody
+named — the trap `hal_seam_e2e`'s backend pin exists for. Red-checked with
+`CRCBL_GPU=nonsense`.
 
-Closing it wants a way to produce a `.glb` at CI time. The options are a
-`crcbl-cli` subcommand that writes one (useful beyond CI, and the only one that
-does not add a second fixture builder), a `#[ignore]`d integration test in
-`apps/viewer/tests/` with a `run-viewer-e2e.sh` on `apps/lumen`'s golden
-pattern, or making `crcbl-scene`'s `gltf_fixture` public.
+What is still true: the viewer's _binary_ has no CI step, because it takes a
+required model path and the repository carries no glTF document by choice. If
+one is ever wanted — for a windowed or golden run — a `crcbl-cli` subcommand
+that writes a document is still the option that adds no second fixture builder.
 
 ### The viewer frames the document's geometry, not the geometry it draws
 
