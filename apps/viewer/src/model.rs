@@ -95,9 +95,8 @@ pub enum LoadError {
     /// The box around the document's geometry is not finite.
     ///
     /// Refused rather than drawn, because the camera cannot be framed on it.
-    /// Raised for an infinity by the box itself and for a `NaN` by
-    /// [`has_non_finite_position`], which is a separate pass for a reason
-    /// [`world_bounds`] gives.
+    /// Raised for an infinity by the box itself and for a `NaN` by a separate
+    /// scan over the positions, for the reason [`world_bounds`] gives.
     NonFiniteGeometry(PathBuf),
 }
 
