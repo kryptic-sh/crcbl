@@ -8531,6 +8531,15 @@ pub(crate) mod tests {
     /// `Unsupported` side and now *succeed*, so they are here as the third
     /// answer — calls that landed, checked here so the pair above cannot quietly
     /// become a rule about one call each.
+    ///
+    /// **The `Unsupported` half of that contrast is no longer a `Device` call.**
+    /// `create_mesh_pipeline` was the last one and the mesh slice took it: it now
+    /// resolves its descriptor, so it is asserted below as a *handle* diagnosis
+    /// like the two above. What still answers `Unsupported` is the encoder's
+    /// buffer fill, and
+    /// [`the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves`]
+    /// is where that is checked — which is the test that has to move if the fill
+    /// ever lands.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_query_set_and_a_semaphore_handle_refuse_as_unresolvable_not_as_unimplemented() {
@@ -8560,10 +8569,16 @@ pub(crate) mod tests {
             "{error:?}"
         );
 
-        // The other side of the line: a slice that genuinely has not arrived
-        // answers `Unsupported` rather than blaming the caller's handle — and it
-        // is handed nothing but unissued handles here, so a backend that
-        // resolved them first would answer `InvalidHandle` and fail this.
+        // **This block used to assert the opposite, and the mesh slice is why it
+        // changed.** It read `create_mesh_pipeline` as the unarrived-slice side
+        // of the contrast — `Unsupported` rather than blaming the caller's
+        // handle — and said in as many words that "a backend that resolved them
+        // first would answer `InvalidHandle` and fail this". That is now the
+        // correct answer rather than a failure: the call packs a real pipeline
+        // state stream, so it diagnoses its descriptor, and the layout is the
+        // first handle it resolves. Asserting the kind rather than only the
+        // variant is what keeps this a statement about *which* handle was looked
+        // at first, so a reordering has to be a deliberate edit here.
         let error = device
             .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
                 label: None,
@@ -8579,11 +8594,18 @@ pub(crate) mod tests {
                 multisample: MultisampleState::default(),
                 color_targets: &[],
             })
-            .expect_err("no pipeline state stream is built");
+            .expect_err("every handle in that descriptor was unissued");
         assert!(
-            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "pipeline layout"),
             "{error:?}"
         );
+
+        // The `Unsupported` side of the contrast still exists, but no `Device`
+        // entry point carries it any more — it moved to the encoder, where
+        // `Dx12CommandEncoder::fill_buffer` refuses before touching its handle.
+        // `the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves`
+        // owns that assertion, and this comment is the pointer that stops the
+        // pair being read as "this backend answers `InvalidHandle` to everything".
 
         // And the third answer, on the two calls that used to be on the
         // `Unsupported` side: they create the object, and the handle dies with
