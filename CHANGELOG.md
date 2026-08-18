@@ -29,14 +29,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the backend's, and `Support::granted` — which every device-gated arm in every
   backend already goes through — is the only thing that produces it.
 
-  `Capability::DepthImageCopy` is the one to know about if you read a depth
-  image back: every backend but `crcbl-dx12` performs it, and `crcbl-dx12` is
-  the only entry `crcbl_hal::DIVERGENCES` carries for it — a D3D12 depth format
-  is two planes and a sampled one is typeless, so the copy needs a plane slice
-  and a fully typed footprint `BufferImageCopy` has no field for. It refuses
-  with `HalError::Unsupported` rather than the `HalError::InvalidDescriptor` it
-  used to answer, so a caller branching on the variant to pick a fallback sees
-  it.
+  `Capability::DepthImageCopy` is now answered `Support::Yes` by every backend,
+  `crcbl-dx12` included — see below for what that took. The one pair still
+  refused there is `D24UnormS8Uint`'s depth plane, and by name: no fully typed
+  single-plane DXGI format has 24-bit unorm elements, which is the same absence
+  WebGPU has and which `wgpu-hal` encodes as `None` for the same pair.
 
   On WebGPU — and on `wgpu`, which enforces the same table — the capability is
   narrowed by the API rather than by the backend, and the refusal is per format
@@ -543,6 +540,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **`crcbl-dx12` gained five capabilities it used to refuse**, taking it from
+  sixteen open parity divergences to six. It copies image to image (depth and
+  stencil planes included — an image-to-image copy needs no placed footprint, so
+  the two obstacles that block the buffer path vanish), copies a depth or
+  stencil plane to and from a buffer, hands out timeline and binary semaphores
+  and waits on either from the CPU or the queue — including a queue wait on a
+  value nothing has signalled yet, which D3D12 permits and Metal cannot —
+  creates all three kinds of query heap, and resolves a multisampled attachment
+  after its pass.
+
+  Two of those carry a caveat worth knowing. `Device::query_results` on a
+  pipeline-statistics set is refused: the seam gives one `u64` per query and
+  D3D12 resolves a fixed 88-byte struct, which is a seam defect rather than a
+  backend one — Vulkan's statistics pools are 24 bytes for the same reason. And
+  a copy between a colour format and its sRGB partner is refused although D3D12
+  would take it, because the seam's `Format` has no typeless-family relation and
+  a silent reinterpretation is worse than a loud refusal.
+
+- **`crcbl-webgpu` streams `set_stencil_reference`.** It used to record the call
+  as unsupported, which made `finish()` refuse the whole command buffer rather
+  than the frame merely coming out wrong.
+
+- **`crcbl_shaders::push_constant_probe`** — the first committed shader in this
+  workspace that declares a push-constant block, emitted for SPIR-V, MSL and
+  DXIL. There is no WGSL target because WGSL has no push constants, which is
+  also why `ui.slang`'s block became a bound uniform buffer. The module
+  publishes the workgroup size, the word count and the block size, because a
+  backend with only a module and an entry point can guess none of them.
 
 - **A reviewed parity contract between the backends: `crcbl_hal::DIVERGENCES`.**
   Every capability a backend knowingly lacks on every device it can open is a
