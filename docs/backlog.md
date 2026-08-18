@@ -746,7 +746,7 @@ degrade path is dead and the test should simply require the feature.
 `hardware` resolved automatically on darwin, **57/57 over groups `G…AA`**. So
 headless Chrome really does close the WebGPU canvas readback gap on macOS, and
 that is the first proof of `crcbl-webgpu` on Metal-backed Dawn. Take
-`continue-on-error` off after two more green runs.
+`continue-on-error` off, having served three green runs.
 
 **Windows has no WebGPU adapter in the default mode.** The job found Chrome
 151.0.7922.109 exactly where the registry said, resolved `hardware` on win32,
@@ -775,9 +775,10 @@ nobody has looked at why the digest disagrees on that runner and not on macOS.
 **Nothing about either has been executed** — this machine is Linux, and Linux is
 green at 57/57 with the shared launcher in place.
 
-**Take `continue-on-error` off each job after three green runs**, and not
-before: an unproven gate blocking the Pages deploy is worse than no gate, and
-one that silently never fails is worse still.
+**Both jobs now gate.** macOS came off `continue-on-error` after three green
+runs at 57/57. Windows came off once it was taught its four expected failures,
+and passes at 53/57 with them excused — and a listed group that _passes_ fails
+the run as stale, so the list cannot rot into a blanket suppression.
 
 **What the first runs answer**, and the line to read for each:
 
@@ -856,11 +857,12 @@ need it.
    whose provability is unknown: `crcbl-dx12` never calls `CheckFeatureSupport`
    for `OPTIONS7`, so it reports no mesh support **by construction rather than
    by measurement**. Worse, it would be _silently_ unprovable — `MeshShading` is
-   feature-gated, so with the flag clear the parity report stays green over a
-   row deleted on nobody's evidence. And reporting the flag flips `GeometryPath`
-   to `MeshShader`, which re-keys every dx12 golden in four suites. Split it:
-   probe-and-log first, then the PSO stream with the flag still withheld, then
-   the flag and the re-bless only once a mesh frame has actually been drawn.
+   feature-gated — though a retirement now requires the backend to answer
+   `Support::Yes`, so the row cannot be deleted on nobody's evidence any more.
+   And reporting the flag flips `GeometryPath` to `MeshShader`, which re-keys
+   every dx12 golden in four suites. Split it: probe-and-log first, then the PSO
+   stream with the flag still withheld, then the flag and the re-bless only once
+   a mesh frame has actually been drawn.
 
 **Every slice must delete its rows from both `DIVERGENCES` and
 `REVIEWED_BLOCKERS`** or the snapshot test fails — that is the mechanism working
