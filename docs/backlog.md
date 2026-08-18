@@ -10606,14 +10606,52 @@ the browser gate. What stands between that and `crcbl::backend` accepting
   polls a few times and gives up.
 - **The feature intersection**, which has its own entry below.
 
-### The probe is temporary and should be deleted, not grown
+### The browser golden gate exists and runs in no job
 
-`crates/crcbl-webgpu/src/probe.rs`, its `__crcbl_web_gpu_probe_*` exports and
-`web/engine/gpu-probe.js` exist so the round trip is observable from a page
-before a backend exists. The probe refuses when anything else has installed a
-channel. **Delete all three when the backend installs its own** — a second way
-to drive the stream is the sort of thing that survives by accident and then has
-to be kept working.
+`web/run-render-harness-e2e.sh` drives `apps/render-harness` through a real
+browser and compares eleven scenes against the goldens — the only thing in the
+tree that checks the browser's _pixels_ against a reference rather than its log
+lines. **It appears in no workflow.** `grep render-harness .github/workflows/`
+returns nothing.
+
+It was blocked once, for a stated reason that has since dissolved: SwiftShader's
+per-stage storage-buffer ceiling refused nine of the eleven scenes, because the
+draw-generation pass bound fourteen storage buffers in one compute stage. That
+pass now binds eight, guarded by a check naming WebGPU's guaranteed floor, and
+the eleven scenes were measured matching.
+
+**So this is a one-line CI step, not a blocked decision** — and it closes the
+gap the sRGB bug went through, which is that the golden harness renders
+offscreen while the browser gate reads only text. Whoever picks it up should
+check whether it wants the same `--expect-fail` treatment the Windows probe has,
+since it reads bytes back and would strand behind a stuck canvas readback the
+same way.
+
+### REVERSED IN FACT — the probe was going to be deleted and became the gate
+
+This entry used to say: `crcbl-webgpu`'s probe, its `__crcbl_web_gpu_probe_*`
+exports and `web/engine/gpu-probe.js` exist only so the round trip is observable
+before a backend exists, and **delete all three when the backend installs its
+own** — because a second way to drive the stream survives by accident and then
+has to be kept working.
+
+**The opposite happened, and deliberately.** The probe page now carries 25
+groups (`G` through `AE`), runs in three CI jobs across Linux, macOS and
+Windows, and is the **only** gate on this backend's seam — the native suite is a
+native binary and cannot reach a browser at all. Group AB opens a real
+`WebGpuDevice` and holds its whole `supports()` matrix against `DIVERGENCES`,
+which is the browser counterpart of the native parity report and the only thing
+checking those declarations anywhere.
+
+**So the original reasoning was right about the risk and wrong about the
+remedy.** A second way to drive the stream did survive — and it turned out to be
+the one that could reach the platforms the engine actually ships on. The demo
+gates assert log lines and HUD text; the probe asserts bytes.
+
+**What is still true from the old entry**, and worth keeping: the probe refuses
+when anything else has installed a channel, so the two ways of driving the
+stream cannot both be live at once. That is what has kept it from being a second
+maintenance burden rather than a second gate.
 
 ### One command is answered exactly once
 
