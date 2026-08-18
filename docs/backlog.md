@@ -1245,6 +1245,45 @@ Fixed by naming each component through a `switch` rather than indexing, which
 keeps the `uint4` layout and makes each invocation's offset a compile-time
 constant.
 
+### No GPU job in CI runs on real hardware, and one defect has already proved it matters
+
+Enumerated from the workflows on 2026-08-18, every adapter every GPU job opens:
+
+| job                          | backend    | adapter                               |
+| ---------------------------- | ---------- | ------------------------------------- |
+| `vk-e2e`                     | vk         | **lavapipe** (`CRCBL_VK_ICD` pins it) |
+| `wgpu-e2e`                   | wgpu       | **lavapipe**                          |
+| `cross-backend-e2e`          | vk vs wgpu | **lavapipe** both sides               |
+| `dx12-e2e`                   | dx12       | **WARP** (`CRCBL_ADAPTER=cpu`)        |
+| `mtl-e2e`                    | mtl        | **Apple Paravirtual device**          |
+| Pages probe (Linux, Windows) | webgpu     | **SwiftShader**                       |
+| Pages probe (macOS)          | webgpu     | Apple Paravirtual, through Metal      |
+
+**There is no real GPU anywhere in it.** Every golden, every seam exercise and
+every capability claim is verified against a software rasteriser or a
+paravirtual device. That is a deliberate and reasonable choice — hosted runners
+have no GPUs — but it decides what "verified" means here, and it is not what a
+reader assumes when a suite is green.
+
+**It is not theoretical.** The push-constant exercise landed green on every CI
+arm and was wrong on every AMD card: a divergent index into a push-constant
+block reads lane 0 on RADV and reads correctly on lavapipe. The only thing that
+caught it was running the suite on this workstation's discrete card. Metal's
+`DepthClamp` is the same shape from the other side — the paravirtual device
+ignores a mode real Metal honours, so CI was _failing_ on something no user
+would hit.
+
+**What follows, and it is a working practice rather than a fix:** a slice
+touching shader behaviour, driver-visible state or anything a compiler can
+scalarise is not verified until it has run on this machine's hardware adapter as
+well as the software path. `CRCBL_GPU=vk` with no `CRCBL_ADAPTER` is the
+hardware run; `CRCBL_ADAPTER=cpu` is what CI sees. **Both, and the difference
+between them is the interesting part.**
+
+The alternative — a self-hosted runner with a real GPU — would close it properly
+and is the same class of decision as the hardware macOS runner the Metal rows
+want. Worth pricing the two together if either is ever taken.
+
 ### DECISION NEEDED — what "parity holds" has to mean before `crcbl-wgpu` goes
 
 The stated order is: reach parity, then delete `crcbl-wgpu`. Goal 2 is done and
