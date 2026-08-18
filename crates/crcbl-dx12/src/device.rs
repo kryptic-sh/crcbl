@@ -976,13 +976,20 @@ impl DeviceInner {
     /// The command signature one indirect layout and stride is executed
     /// through, created on first use.
     ///
-    /// **A command signature holding only `DISPATCH`, `DRAW` or `DRAW_INDEXED`
-    /// takes no root signature.** `CreateCommandSignature`'s second argument is
-    /// required only when the argument layout writes root arguments — a
-    /// constant, a root CBV, a vertex or index buffer view — and none of these
-    /// three writes any, so one object is valid against every pipeline this
-    /// device has. That is what makes the cache key `(kind, stride)` rather than
-    /// the pipeline.
+    /// **A command signature holding only `DISPATCH`, `DRAW`, `DRAW_INDEXED` or
+    /// `DISPATCH_MESH` takes no root signature.**
+    /// `CreateCommandSignature`'s second argument is required only when the
+    /// argument layout writes root arguments — a constant, a root CBV, a vertex
+    /// or index buffer view — and none of these four writes any, so one object
+    /// is valid against every pipeline this device has. That is what makes the
+    /// cache key `(kind, stride)` rather than the pipeline.
+    ///
+    /// `DISPATCH_MESH` is named here because it arrived after this sentence did
+    /// and the rule reaches it unchanged: it is the mesh stage's thread-group
+    /// counts and nothing else, so it writes no root argument either. Passing a
+    /// root signature for a layout that needs none is an error D3D12 rejects,
+    /// which is why this is a claim about the argument kinds rather than a
+    /// habit.
     ///
     /// # Errors
     ///

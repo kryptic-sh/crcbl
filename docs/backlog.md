@@ -637,9 +637,29 @@ bind groups, and its dispatch sizes — none of which the probe exercises.
 Untested hypotheses, in the order worth trying: a `DispatchMesh` group count
 past what TIER_1 permits (the per-dimension ceiling is a spec limit, and
 `crcbl-render` derives its counts from cluster counts rather than clamping); a
-payload larger than the amplification-stage limit; a root-signature or
-descriptor mismatch WARP enforces where RADV does not. None has been checked —
-this needs a Windows machine, which nothing here has.
+payload larger than the amplification-stage limit. Confirming either needs a
+Windows machine, which nothing here has.
+
+**Two hypotheses have been eliminated by reading, so nobody spends a Windows
+session on them:**
+
+- **The indirect argument size is right.** `IndirectKind::DispatchMesh` reports
+  12 bytes, which is `D3D12_DISPATCH_MESH_ARGUMENTS`' three `u32`s exactly. A
+  wrong stride here would have produced garbage thread-group counts, which is
+  the most obvious route to a removal.
+- **The resource states are right, and deliberately asymmetric.** On the mesh
+  path `crcbl-render`'s forward pass declares `draws.args_id` as a **shader
+  read** and `draws.counts_id` as `ResourceState::IndirectArgument`, while the
+  lesser path declares both as `IndirectArgument`. That looks like a bug and is
+  not: the mesh path reads the draw arguments as shader data and executes its
+  thread-group extents out of the _counts_ buffer, which is what
+  `draw_mesh_tasks_indirect` is handed (`args: draws.counts`). The two live in
+  different buffers precisely because a resource holds one state per pass, and
+  the code says so where it splits them.
+
+Also checked: the command signature passes no root signature, which is correct
+for a `DISPATCH_MESH`-only layout — that argument kind writes no root argument,
+so D3D12 requires null there.
 
 **The next attempt should name the operation rather than the `HRESULT`.**
 `crcbl_dx12::dred` now forces DRED auto-breadcrumbs on before the first device
