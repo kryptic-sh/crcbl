@@ -2593,6 +2593,170 @@ export async function runProbeGroups({
           `${stencil.error ? ` — ${stencil.error}` : ''}`
   );
 
+  // **THE MSAA-RESOLVE GATE, AND THE ONLY EXERCISE
+  // `Capability::MsaaResolveAttachment` HAS ON THIS BACKEND.** The native seam
+  // suite that holds the other four backends to that declaration
+  // (`exercise_msaa_resolve` in `crates/crcbl/tests/hal_seam_e2e.rs`) is a native
+  // binary and cannot open this one, so without this group the `Support::Yes` is a
+  // sentence nothing tests. Until it landed, every `ColorAttachment` this backend
+  // built anywhere carried `resolve: None` and the replayer's resolve arm was
+  // reached only by `web/tools/gpu-replay.mjs`, which has no GPU at all.
+  //
+  // WHAT IT DOES: wasm records a 4×-multisampled `Rgba8Unorm` target and a
+  // single-sampled one of the same size, a `write_buffer` and a buffer→image copy
+  // that PRIME the single-sampled one with a poison colour, and a render pass with
+  // **no draws and no pipeline** — its only content is a clear of the multisampled
+  // target, and its one attachment names the primed target in
+  // `ColorAttachment::resolve`. A clear needs no pipeline, and a resolve is an
+  // end-of-pass operation over whatever the samples hold, which is why this gate
+  // costs no shader. The page loop replays it and the 1024 bytes that come back
+  // say whether the resolve ran.
+  //
+  // **THE OBSERVABLE IS A VALUE, NOT A SURVIVED CALL**, which is what the prime is
+  // for: a resolve view that is dropped raises no error — the pass runs, the copy
+  // runs, the readback resolves — so a fresh target's undefined contents would
+  // decide the verdict by luck. Primed, the three readings mean three things and
+  // only one is a pass:
+  //
+  //   the clear    the resolve reached the target. The only pass.
+  //   the poison   the resolve was accepted and never performed. That is the bug
+  //                that shipped in `crcbl-wgpu` once, where every attachment was
+  //                built with `resolve_target: None` — no error, a wrong picture.
+  //   anything     the resolve wrote and wrote the wrong thing, or the copy read
+  //   else         the wrong subresource.
+  //
+  // The two colours are not a channel permutation of each other and their alphas
+  // differ, so no swap on the way out can turn one reading into another, and every
+  // colour channel is a mid-tone away from the 0 and 255 an untouched or saturated
+  // one reads as.
+  //
+  // **THE SAMPLE COUNT IS ASKED OF THE DEVICE, NOT ASSUMED.** wasm compares the
+  // `max_sample_count` the opened device reported against the count it wants and
+  // encodes nothing if the device is below it, so the first check below fails
+  // naming the number the device gave rather than passing on a single-sampled
+  // target that would prove nothing. On every browser today that number is 4:
+  // WebGPU specifies `sampleCount` to be exactly 1 or 4 and has no limit to read a
+  // larger one from, so `MAX_SAMPLE_COUNT` in `web/engine/gpu-replay.js` is the
+  // specification's constant rather than a hardware query — which is precisely why
+  // the check has to say what came back instead of assuming what it will be.
+  //
+  // WHERE IT BELONGS IN THE RUN: **before X**, group AC's reason exactly. X, Y, Z
+  // and AA are expected to fail on Windows because the page has one `GPUDevice`
+  // and therefore one queue, and X's stuck canvas readback strands every
+  // `mapAsync` queued after it. This group reads bytes back, so behind X it would
+  // be stranded too — and it is not in that platform's `--expect-fail` list, so it
+  // would turn the Windows job red. Ahead of X it resolves like AC does, and it
+  // makes X no worse: what strands the canvas groups is their own present, not the
+  // number of submits before them. Its letter is the next free one rather than its
+  // position, because renumbering X onwards would rewrite an `--expect-fail` list
+  // that records a measurement.
+  group(
+    'AD — a multisampled clear resolves into the single-sampled target it named'
+  );
+
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_MSAA_*`, spelled out here rather
+  // than imported, as every expected value in this file is.
+  const PROBE_MSAA_SAMPLES = 4;
+  const PROBE_MSAA_TEXELS = 64 * 4;
+  const PROBE_MSAA_CLEAR_BYTES = [75, 160, 115, 255];
+  const PROBE_MSAA_POISON_BYTES = [165, 60, 210, 17];
+
+  const msaaStart = await evaluate(
+    page,
+    `(async () => {
+     const { startMsaaProbe, msaaSampleCount } =
+       await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     // The count first: once the request is refused it is the only thing that
+     // says why, and reading it afterwards would read the same number anyway.
+     const samples = msaaSampleCount({ exports });
+     return { samples, started: startMsaaProbe({ exports }) };
+   })()`
+  );
+  // Poll across frames exactly as group AC does.
+  const msaa = msaaStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readMsaaProbe, pollMsaaProbe, MSAA } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readMsaaProbe({ exports, memory: exports.memory });
+           if (r.state === MSAA.UNDECODABLE || r.state === MSAA.UNSUPPORTED) {
+             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           }
+           if (r.state !== MSAA.READY) {
+             pollMsaaProbe({ exports });
+             return null;
+           }
+           // Ready: classify every texel here rather than shipping 256 of them
+           // out. Which of the two colours came back is the whole verdict, so the
+           // counts are what crosses — a run that resolved part of the target is a
+           // different failure from one that resolved none of it, and the message
+           // has to be able to say which.
+           const want = ${JSON.stringify(PROBE_MSAA_CLEAR_BYTES)};
+           const poison = ${JSON.stringify(PROBE_MSAA_POISON_BYTES)};
+           const same = (at, colour) =>
+             r.bytes[at] === colour[0] &&
+             r.bytes[at + 1] === colour[1] &&
+             r.bytes[at + 2] === colour[2] &&
+             r.bytes[at + 3] === colour[3];
+           let clearCount = 0;
+           let poisonCount = 0;
+           let otherCount = 0;
+           let firstWrong = -1;
+           for (let at = 0; at + 3 < r.bytes.length; at += 4) {
+             if (same(at, want)) clearCount += 1;
+             else {
+               if (firstWrong < 0) firstWrong = at;
+               if (same(at, poison)) poisonCount += 1;
+               else otherCount += 1;
+             }
+           }
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.length,
+             clearCount,
+             poisonCount,
+             otherCount,
+             firstWrong,
+             sample: [...r.bytes.slice(0, 8)],
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+  check(
+    'AD',
+    'the device serves a multisampled colour target, and wasm encoded the resolve frame — two targets, the prime, a clear-only pass naming the resolve view, the copy, the request',
+    msaaStart?.started === true,
+    msaaStart?.started
+      ? `max_sample_count ${msaaStart.samples}, and the clear-and-resolve frame is on the stream`
+      : `wasm would not encode it — the device reported max_sample_count ${msaaStart?.samples ?? 'nothing'}, ` +
+          `and this probe resolves a ${PROBE_MSAA_SAMPLES}× target; or no device has opened, or another channel is installed. ` +
+          'A resolve declared supported on a device with no multisampled target to resolve from is the finding, not an excuse'
+  );
+  check(
+    'AD',
+    'the multisampled clear reached the single-sampled target it resolved into — every texel is the clear, none is the poison it was primed with',
+    msaa?.done === true &&
+      msaa.len === PROBE_MSAA_TEXELS * 4 &&
+      msaa.clearCount === PROBE_MSAA_TEXELS,
+    msaa?.done !== true
+      ? `no msaa readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : msaa.clearCount === PROBE_MSAA_TEXELS
+        ? `${msaa.len} bytes, every texel [${PROBE_MSAA_CLEAR_BYTES.join(', ')}] — the resolve overwrote the [${PROBE_MSAA_POISON_BYTES.join(', ')}] prime`
+        : `state ${msaa.state}, ${msaa.len ?? 0} bytes: ` +
+          `${msaa.clearCount} the clear, ${msaa.poisonCount} still the poison ` +
+          '(the resolve view was accepted and never performed), ' +
+          `${msaa.otherCount} some other colour; first wrong at byte ${msaa.firstWrong} ` +
+          `(sample ${JSON.stringify(msaa.sample)})` +
+          `${msaa.error ? ` — ${msaa.error}` : ''}`
+  );
+
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**
   // Every gate above rendered into a texture this replayer created; this one
   // renders into the frame a *canvas* handed back. wasm records a surface on the

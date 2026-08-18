@@ -220,6 +220,33 @@ export const STENCIL = Object.freeze({
 });
 
 /**
+ * The `MSAA_*` codes `__crcbl_web_gpu_probe_msaa_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The MSAA probe is a readback at heart — its setup frame ends in the same
+ * `request_readback` — so its codes mirror {@link READBACK} with one addition.
+ * `READY` carries the `Rgba8Unorm` texels of a single-sampled target a
+ * multisampled pass resolved into, and whether they are the clear or the poison
+ * the target was primed with is the whole evidence that the resolve ran: the one
+ * claim no native suite can make about this backend.
+ *
+ * `UNSUPPORTED` is the addition, and the reason this probe has a sample-count
+ * export beside it: the device reported a `max_sample_count` below the one the
+ * probe resolves, so there was no multisampled target to resolve from and
+ * nothing was encoded. Read `__crcbl_web_gpu_probe_msaa_samples` to say what it
+ * reported.
+ */
+export const MSAA = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+  UNSUPPORTED: 6,
+});
+
+/**
  * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1432,6 +1459,93 @@ export function readStencilProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: stencilStateName(state), bytes };
+}
+
+/**
+ * The same state-name helper again, for the MSAA codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function msaaStateName(state) {
+  const found = Object.entries(MSAA).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * What the opened device reported as its `max_sample_count`.
+ *
+ * Read this *before* {@link startMsaaProbe}, and read it again when the state is
+ * `UNSUPPORTED`: it is what tells "this device cannot make a multisampled
+ * target" from "nothing asked it to". `0` before a device opens.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {number}
+ */
+export function msaaSampleCount({ exports }) {
+  return exports.__crcbl_web_gpu_probe_msaa_samples() >>> 0;
+}
+
+/**
+ * Ask wasm to clear a multisampled target and resolve it into a single-sampled
+ * one, and start reading that one back on the device it opened.
+ *
+ * The only gate anywhere that puts a resolve view on this backend's wire. The
+ * pass has **no draws** — a resolve is an end-of-pass operation over whatever the
+ * samples hold, and a clear puts a known value in all of them — and the resolve
+ * target is primed with a poison colour first, so a resolve that was accepted and
+ * dropped comes back distinguishable from one that ran. {@link pollMsaaProbe}
+ * drives the poll and {@link readMsaaProbe} reads the bytes when they land.
+ *
+ * Its answer is *data* and it needs a **device**, so `false` before one has
+ * opened is ordering rather than failure — wait for {@link readDeviceProbe} to
+ * say `OPENED`. `false` also means the device reported too few samples, which
+ * {@link msaaSampleCount} and a state of `UNSUPPORTED` are what distinguish.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame.
+ */
+export function startMsaaProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_msaa() === 1;
+}
+
+/**
+ * Poll the MSAA readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered, the bytes are already
+ * in, or the device could not serve the sample count, so the gate can call it
+ * every frame. See `__crcbl_web_gpu_probe_msaa_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollMsaaProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_msaa_poll() === 1;
+}
+
+/**
+ * Read where the MSAA readback has got to, and its bytes once it is `READY`.
+ *
+ * {@link readDrawProbe}'s resolving sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readMsaaProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_msaa_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_msaa_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_msaa_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: msaaStateName(state), bytes };
 }
 
 /**

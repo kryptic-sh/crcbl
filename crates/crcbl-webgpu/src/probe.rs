@@ -102,6 +102,12 @@
 //! | [`__crcbl_web_gpu_probe_stencil_state`](shim::__crcbl_web_gpu_probe_stencil_state) | `() -> i32` | Drain, and answer one of the `STENCIL_*` codes. |
 //! | [`__crcbl_web_gpu_probe_stencil_bytes_ptr`](shim::__crcbl_web_gpu_probe_stencil_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_stencil_state`](shim::__crcbl_web_gpu_probe_stencil_state) answers [`STENCIL_READY`]. |
 //! | [`__crcbl_web_gpu_probe_stencil_bytes_len`](shim::__crcbl_web_gpu_probe_stencil_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the stencil probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_msaa_samples`](shim::__crcbl_web_gpu_probe_msaa_samples) | `() -> i32` | The opened device's [`Limits::max_sample_count`](crcbl_hal::Limits::max_sample_count) — what [`__crcbl_web_gpu_probe_msaa`](shim::__crcbl_web_gpu_probe_msaa) decides on. `0` if no device has opened. |
+//! | [`__crcbl_web_gpu_probe_msaa`](shim::__crcbl_web_gpu_probe_msaa) | `() -> i32` | Encode one frame — a [`PROBE_MSAA_SAMPLES`]-sample colour target and a single-sampled one, a buffer→image prime filling the second with [`PROBE_MSAA_POISON_BYTES`], a pass with **no draws** that clears the first to [`PROBE_MSAA_CLEAR_BYTES`] and names the second in [`ColorAttachment::resolve`], the copy, and a `request_readback` against [`PROBE_MSAA_READBACK`]. `1`, or `0` if no device has opened, the device reports fewer than [`PROBE_MSAA_SAMPLES`] samples, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_msaa_poll`](shim::__crcbl_web_gpu_probe_msaa_poll) | `() -> i32` | Poll the resolve's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_msaa_state`](shim::__crcbl_web_gpu_probe_msaa_state) | `() -> i32` | Drain, and answer one of the `MSAA_*` codes. |
+//! | [`__crcbl_web_gpu_probe_msaa_bytes_ptr`](shim::__crcbl_web_gpu_probe_msaa_bytes_ptr) | `() -> i32` | Where the resolved texels start, once [`__crcbl_web_gpu_probe_msaa_state`](shim::__crcbl_web_gpu_probe_msaa_state) answers [`MSAA_READY`]. |
+//! | [`__crcbl_web_gpu_probe_msaa_bytes_len`](shim::__crcbl_web_gpu_probe_msaa_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the MSAA probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -666,6 +672,41 @@ pub const STENCIL_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`DRAW_UNDECODABLE`]'s twin.
 pub const STENCIL_UNDECODABLE: u32 = 5;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const MSAA_UNASKED: u32 = 0;
+/// The setup frame — a [`PROBE_MSAA_SAMPLES`]-sample colour target and a
+/// single-sampled one, the prime that fills the second with
+/// [`PROBE_MSAA_POISON_BYTES`], a pass whose only content is a clear of the
+/// multisampled target and which names the single-sampled view in
+/// [`ColorAttachment::resolve`], the copy, the submit and the request — is on the
+/// stream, and no poll has been issued.
+pub const MSAA_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const MSAA_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const MSAA_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_msaa_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_msaa_bytes_len`] carry them — the resolve
+/// target's `Rgba8Unorm` texels, every one [`PROBE_MSAA_CLEAR_BYTES`] if the
+/// multisampled clear was resolved into it.
+pub const MSAA_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`DRAW_UNDECODABLE`]'s twin.
+pub const MSAA_UNDECODABLE: u32 = 5;
+/// The **device** reported a
+/// [`max_sample_count`](crcbl_hal::Limits::max_sample_count) below
+/// [`PROBE_MSAA_SAMPLES`], so nothing was encoded: there is no multisampled
+/// colour target for a resolve to resolve from, and a frame that made a
+/// single-sampled one instead would pass while proving nothing.
+/// [`shim::__crcbl_web_gpu_probe_msaa_samples`] is what the device reported.
+///
+/// The one code here with no [`STENCIL_UNASKED`] counterpart, because it is the
+/// one probe whose fixture the device can refuse to supply.
+pub const MSAA_UNSUPPORTED: u32 = 6;
 
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
@@ -3768,6 +3809,340 @@ pub const fn probe_stencil_pipeline_desc() -> GraphicsPipelineDesc<'static> {
     }
 }
 
+// The MSAA-resolve probe (group AD): the one gate that shows a MULTISAMPLED PASS
+// RESOLVING into the single-sampled view it named. Every handle it names is
+// `10 << 32` — a generation past the stencil probe's `9 << 32` — so its seven live
+// resources never land in another probe's slot in the shared page. It creates two
+// images, two views and two buffers, which the three types that carry two here
+// distinguish by index.
+//
+// It is here because `Capability::MsaaResolveAttachment` is declared supported on
+// this backend and no native test can witness that: the seam suite
+// (`exercise_msaa_resolve` in `crates/crcbl/tests/hal_seam_e2e.rs`) is a native
+// binary and this backend runs in a browser. Until this probe, every
+// `ColorAttachment` this crate built anywhere carried `resolve: None`, so nothing
+// on this backend had ever put a resolve view on the wire.
+//
+// **A CLEAR NEEDS NO PIPELINE**, which is why this probe compiles no shader at
+// all — `exercise_msaa_resolve`'s reasoning exactly. A resolve is an *end-of-pass*
+// operation over whatever the samples hold, and `LoadOp::Clear` puts a known value
+// in every one of them without a draw. So the pass has no contents: it clears the
+// multisampled target, names the single-sampled view in
+// `ColorAttachment::resolve`, and ends.
+//
+// **THE OBSERVABLE IS A VALUE, NOT A SURVIVED CALL.** A frame whose resolve view
+// was dropped raises no error anywhere — the pass runs, the copy runs, the
+// readback resolves, and only the texels differ. So the resolve target is PRIMED
+// with `PROBE_MSAA_POISON_BYTES` through a buffer→image copy first, and the poison
+// surviving is the one reading that means the resolve was accepted and never
+// performed. That is not a hypothetical: it is the bug that shipped in
+// `crcbl-wgpu` once, where every colour attachment was built with
+// `resolve_target: None` — no error, no log, a wrong picture.
+
+/// How many samples the colour target this probe resolves *from* carries.
+///
+/// **Asked of the device, not assumed.** `Probe::request_msaa` compares this
+/// against the `max_sample_count` the opened device reported and encodes nothing
+/// if the device is below it, so a browser that cannot serve a 4× target leaves
+/// the group unexercised rather than passing on a target it never made. What the
+/// browser reports comes from `MAX_SAMPLE_COUNT` in `web/engine/gpu-replay.js`,
+/// which is the specification's fixed "exactly 1 or 4" rather than a hardware
+/// query — WebGPU has no limit to read a larger count from.
+pub const PROBE_MSAA_SAMPLES: u32 = 4;
+
+/// Texels across both of the probe's targets.
+///
+/// [`PROBE_READBACK_SIZE`]'s figure and its reason: a tightly packed
+/// [`Format::Rgba8Unorm`] row this wide is exactly 256 bytes, which is the row
+/// pitch `copyBufferToTexture` and `copyTextureToBuffer` both require. Every other
+/// probe here picks its width the same way.
+pub const PROBE_MSAA_WIDTH: u32 = PROBE_READBACK_SIZE;
+
+/// Texels down both of them.
+///
+/// **More than one row**, `MSAA_RESOLVE_HEIGHT`'s reason in the native exercise:
+/// a resolve that wrote only the first row of the target, or a copy that read only
+/// the first row of the buffer, fails here instead of passing.
+pub const PROBE_MSAA_HEIGHT: u32 = 4;
+
+/// How many bytes one whole copy of the resolve target is.
+pub const PROBE_MSAA_BYTES: u64 = (PROBE_MSAA_WIDTH as u64) * (PROBE_MSAA_HEIGHT as u64) * 4;
+
+/// The colour the multisampled attachment is cleared to, as the bytes an
+/// `Rgba8Unorm` texel holds. **The one reading that means the resolve happened.**
+///
+/// Three distinct mid-tone channels — away from the `0` and `255` an untouched or
+/// saturated one reads as — and no permutation of [`PROBE_MSAA_POISON_BYTES`], so
+/// a path that swapped `r` and `b` on the way out cannot turn one reading into the
+/// other.
+///
+/// [`Format::Rgba8Unorm`] rather than its `-srgb` counterpart, which is what lets
+/// this be an exact byte comparison like every other group here: the byte a
+/// channel lands on is the byte [`probe_msaa_clear_value`] put in, with no
+/// transfer function and no rounding to argue about. The native exercise resolves
+/// an sRGB target instead and compares against computed levels within a
+/// tolerance; group X is where an sRGB encode is what this backend is held to.
+pub const PROBE_MSAA_CLEAR_BYTES: [u8; 4] = [75, 160, 115, 255];
+
+/// What every byte of the resolve target holds **before** the pass, put there by
+/// a buffer→image copy.
+///
+/// **The reading that means the resolve was accepted and dropped.** A fresh
+/// texture's contents are undefined on this seam, so without this a backend that
+/// never resolved and one that did would be told apart only by luck.
+///
+/// Its alpha differs from [`PROBE_MSAA_CLEAR_BYTES`]' too, so "the resolve wrote
+/// the colour channels and left alpha alone" is a fourth distinguishable outcome
+/// rather than a pass.
+pub const PROBE_MSAA_POISON_BYTES: [u8; 4] = [165, 60, 210, 17];
+
+/// The bytes the prime buffer is filled with — [`PROBE_MSAA_POISON_BYTES`]
+/// repeated over the whole of the resolve target.
+///
+/// Built rather than spelled out, because [`PROBE_MSAA_BYTES`] of literals is not
+/// something a reader can check by eye.
+#[must_use]
+pub const fn probe_msaa_prime_bytes() -> [u8; PROBE_MSAA_BYTES as usize] {
+    let mut bytes = [0u8; PROBE_MSAA_BYTES as usize];
+    let mut at = 0;
+    while at < bytes.len() {
+        bytes[at] = PROBE_MSAA_POISON_BYTES[at % PROBE_MSAA_POISON_BYTES.len()];
+        at += 1;
+    }
+    bytes
+}
+
+/// The queue the MSAA probe names in its command encoder. `10 << 32`.
+pub const PROBE_MSAA_QUEUE: QueueHandle = match QueueHandle::from_bits(10 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 10 is not zero"),
+};
+
+/// The command buffer the MSAA probe finishes its encoder into. `10 << 32`.
+pub const PROBE_MSAA_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(10 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 10 is not zero"),
+    };
+
+/// The in-flight readback the MSAA probe requests and polls. `10 << 32`.
+pub const PROBE_MSAA_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(10 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 10 is not zero"),
+};
+
+/// The multisampled colour target the pass clears and resolves **from**.
+/// `10 << 32`, index `0`.
+pub const PROBE_MSAA_IMAGE: ImageHandle = match ImageHandle::from_bits(10 << 32) {
+    Some(image) => image,
+    None => panic!("generation 10 is not zero"),
+};
+
+/// The multisampled target's descriptor.
+///
+/// **[`ImageUsage::COLOR_ATTACHMENT`] alone.** Nothing copies this image and
+/// nothing samples it — a multisampled transfer source is a usage WebGPU does not
+/// have at all, and the whole point is that the single-sampled target beside it is
+/// what leaves the device.
+#[must_use]
+pub const fn probe_msaa_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu msaa source image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_MSAA_WIDTH, PROBE_MSAA_HEIGHT),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: PROBE_MSAA_SAMPLES,
+        usage: ImageUsage::COLOR_ATTACHMENT,
+    }
+}
+
+/// The single-sampled target the pass resolves **into**. `10 << 32`, index `1`.
+pub const PROBE_MSAA_RESOLVE_IMAGE: ImageHandle = match ImageHandle::from_bits((10 << 32) | 1) {
+    Some(image) => image,
+    None => panic!("generation 10 is not zero"),
+};
+
+/// The resolve target's descriptor.
+///
+/// All three usages are load-bearing and each names one step of the exercise:
+/// [`ImageUsage::TRANSFER_DST`] for the prime that writes the poison,
+/// [`ImageUsage::COLOR_ATTACHMENT`] because a WebGPU `resolveTarget` is an
+/// attachment, and [`ImageUsage::TRANSFER_SRC`] for the copy that reads it back.
+#[must_use]
+pub const fn probe_msaa_resolve_image_desc() -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu msaa resolve image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_MSAA_WIDTH, PROBE_MSAA_HEIGHT),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::COLOR_ATTACHMENT
+            .union(ImageUsage::TRANSFER_SRC)
+            .union(ImageUsage::TRANSFER_DST),
+    }
+}
+
+/// The view of the multisampled target the pass renders through. `10 << 32`,
+/// index `0`.
+pub const PROBE_MSAA_IMAGE_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(10 << 32) {
+    Some(view) => view,
+    None => panic!("generation 10 is not zero"),
+};
+
+/// The view of [`probe_msaa_image_desc`]'s image the pass attaches.
+///
+/// **[`ImageViewType::D2`] of a multisampled image, which nothing in this crate
+/// had ever asked for.** [`ImageViewType`] has one D2 spelling and no multisampled
+/// one, so a backend has to read the sample count off the image it is viewing;
+/// WebGPU agrees, and `'2d'` is the only view dimension it permits of a
+/// multisampled texture.
+pub const PROBE_MSAA_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu msaa source view"),
+    image: PROBE_MSAA_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The view the pass names in [`ColorAttachment::resolve`]. `10 << 32`, index `1`.
+pub const PROBE_MSAA_RESOLVE_VIEW: ImageViewHandle =
+    match ImageViewHandle::from_bits((10 << 32) | 1) {
+        Some(view) => view,
+        None => panic!("generation 10 is not zero"),
+    };
+
+/// The view of [`probe_msaa_resolve_image_desc`]'s image the resolve writes.
+pub const PROBE_MSAA_RESOLVE_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu msaa resolve view"),
+    image: PROBE_MSAA_RESOLVE_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The buffer `write_buffer` fills with the poison and the prime copies out of.
+/// `10 << 32`, index `0`.
+pub const PROBE_MSAA_PRIME_BUFFER: BufferHandle = match BufferHandle::from_bits(10 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 10 is not zero"),
+};
+
+/// The prime buffer — [`BufferUsage::TRANSFER_DST`] so `queue.writeBuffer` can
+/// fill it and [`BufferUsage::TRANSFER_SRC`] so the copy can read it, on the
+/// device rather than host-visible because nothing maps it.
+#[must_use]
+pub const fn probe_msaa_prime_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu msaa prime buffer"),
+        size: PROBE_MSAA_BYTES,
+        usage: BufferUsage::TRANSFER_SRC.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The buffer the resolved texels are copied into and read back from.
+/// `10 << 32`, index `1`.
+pub const PROBE_MSAA_BUFFER: BufferHandle = match BufferHandle::from_bits((10 << 32) | 1) {
+    Some(buffer) => buffer,
+    None => panic!("generation 10 is not zero"),
+};
+
+/// The readback buffer — the shape every readback probe here uses, at this
+/// probe's size.
+///
+/// Its own buffer rather than the prime's, because WebGPU lets `MAP_READ` combine
+/// with `COPY_DST` and nothing else: one buffer cannot both be copied out of and
+/// mapped.
+#[must_use]
+pub const fn probe_msaa_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu msaa buffer"),
+        size: PROBE_MSAA_BYTES,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The clear the MSAA pass loads its multisampled attachment with —
+/// [`PROBE_MSAA_CLEAR_BYTES`] as the floats a clear value carries, and
+/// [`ClearValue`]'s own defaults in the slots a colour-only pass does not use.
+#[must_use]
+pub const fn probe_msaa_clear_value() -> ClearValue {
+    ClearValue {
+        color: [
+            unorm8(PROBE_MSAA_CLEAR_BYTES[0]),
+            unorm8(PROBE_MSAA_CLEAR_BYTES[1]),
+            unorm8(PROBE_MSAA_CLEAR_BYTES[2]),
+            unorm8(PROBE_MSAA_CLEAR_BYTES[3]),
+        ],
+        depth: 0.0,
+        stencil: 0,
+    }
+}
+
+/// The colour attachment that is the whole of the pass: the multisampled view
+/// cleared, and the single-sampled view named as its
+/// [`resolve`](ColorAttachment::resolve).
+///
+/// [`StoreOp::Store`] rather than [`StoreOp::Discard`], which WebGPU would also
+/// accept beside a resolve: storing keeps "the samples were written" and "the
+/// resolve ran" as two separate things the frame did, so a discard cannot be the
+/// reason the target is empty.
+#[must_use]
+pub const fn probe_msaa_color_attachment() -> ColorAttachment {
+    ColorAttachment {
+        view: PROBE_MSAA_IMAGE_VIEW,
+        resolve: Some(PROBE_MSAA_RESOLVE_VIEW),
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: probe_msaa_clear_value(),
+    }
+}
+
+/// The buffer→image copy that primes the resolve target with the poison, before
+/// the pass that is supposed to overwrite all of it.
+#[must_use]
+pub const fn probe_msaa_prime_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_MSAA_PRIME_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_MSAA_RESOLVE_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_MSAA_WIDTH, PROBE_MSAA_HEIGHT),
+    }
+}
+
+/// The image→buffer copy that moves the resolved texels out — the same copy the
+/// other way round, off the same image.
+#[must_use]
+pub const fn probe_msaa_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_MSAA_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_MSAA_RESOLVE_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_MSAA_WIDTH, PROBE_MSAA_HEIGHT),
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -4521,6 +4896,71 @@ impl StencilProbe {
     }
 }
 
+/// One MSAA-resolve exercise, from the frame that set it up to the bytes that
+/// came back.
+///
+/// [`DrawProbe`]'s state machine on the MSAA probe's handle, with one variant the
+/// others have no use for: [`Unsupported`](Self::Unsupported), which is the device
+/// declining to supply the fixture rather than the exercise failing.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum MsaaProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — one `Rgba8Unorm` texel per four, every one
+        /// [`PROBE_MSAA_CLEAR_BYTES`] if the resolve reached the target.
+        bytes: Vec<u8>,
+    },
+    /// The device reported a
+    /// [`max_sample_count`](crcbl_hal::Limits::max_sample_count) below
+    /// [`PROBE_MSAA_SAMPLES`], so nothing was encoded and nothing will be.
+    Unsupported,
+}
+
+impl MsaaProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`DrawProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -4639,6 +5079,10 @@ struct Probe {
     /// A decode error the stencil drain hit, for [`STENCIL_UNDECODABLE`]. Its own
     /// string for [`reason`](Self::reason)'s reason.
     stencil_reason: String,
+    msaa: MsaaProbe,
+    /// A decode error the MSAA drain hit, for [`MSAA_UNDECODABLE`]. Its own
+    /// string for [`reason`](Self::reason)'s reason.
+    msaa_reason: String,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -4674,6 +5118,8 @@ impl Probe {
             depth_reason: String::new(),
             stencil: StencilProbe::Unasked,
             stencil_reason: String::new(),
+            msaa: MsaaProbe::Unasked,
+            msaa_reason: String::new(),
             parity: ParityReport::new(),
         }
     }
@@ -5098,6 +5544,7 @@ impl Probe {
                 self.indirect.absorb(&replies);
                 self.depth.absorb(&replies);
                 self.stencil.absorb(&replies);
+                self.msaa.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -6089,6 +6536,145 @@ impl Probe {
     fn stencil_bytes(&self) -> &[u8] {
         match &self.stencil {
             StencilProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// What the opened device reported as its
+    /// [`max_sample_count`](crcbl_hal::Limits::max_sample_count), or `0` if no
+    /// device has opened.
+    ///
+    /// The number [`request_msaa`](Self::request_msaa) decides on, exported so a
+    /// gate that finds [`MSAA_UNSUPPORTED`] can say what the device actually
+    /// reported instead of guessing why.
+    fn msaa_samples(&self) -> u32 {
+        self.opened().map_or(0, |caps| caps.limits.max_sample_count)
+    }
+
+    /// Encode the MSAA setup frame: a multisampled colour target and a
+    /// single-sampled one, the prime that fills the second with the poison, a pass
+    /// whose only content is a clear of the first **and which names the second in
+    /// [`ColorAttachment::resolve`]**, and the copy of the second out to the buffer
+    /// that is read back.
+    ///
+    /// **One frame, no pipeline, no reply** — the pass has no draws at all, for
+    /// the reason the section comment above [`PROBE_MSAA_SAMPLES`] gives: a
+    /// resolve is an end-of-pass operation over whatever the samples hold, and a
+    /// clear puts a known value in every one of them.
+    ///
+    /// `false` on three counts, and the third is not a failure:
+    ///
+    /// * no device has opened — [`request_readback`](Self::request_readback)'s
+    ///   ordering rule, since every command here is a device method;
+    /// * the channel had no room, or another channel is installed;
+    /// * **the device reported a `max_sample_count` below
+    ///   [`PROBE_MSAA_SAMPLES`]**, which leaves the probe
+    ///   [`MSAA_UNSUPPORTED`] and encodes nothing. There is no multisampled
+    ///   target for a resolve to resolve from on such a device, and a frame that
+    ///   quietly made a single-sampled one instead would pass while proving
+    ///   nothing at all.
+    fn request_msaa(&mut self) -> bool {
+        let Some(caps) = self.opened() else {
+            return false;
+        };
+        if caps.limits.max_sample_count < PROBE_MSAA_SAMPLES {
+            self.msaa = MsaaProbe::Unsupported;
+            self.msaa_reason.clear();
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(PROBE_MSAA_IMAGE, &probe_msaa_image_desc());
+                stream.create_image_view(PROBE_MSAA_IMAGE_VIEW, &PROBE_MSAA_VIEW_DESC);
+                stream.create_image(PROBE_MSAA_RESOLVE_IMAGE, &probe_msaa_resolve_image_desc());
+                stream.create_image_view(PROBE_MSAA_RESOLVE_VIEW, &PROBE_MSAA_RESOLVE_VIEW_DESC);
+                stream.create_buffer(PROBE_MSAA_PRIME_BUFFER, &probe_msaa_prime_buffer_desc());
+                stream.create_buffer(PROBE_MSAA_BUFFER, &probe_msaa_buffer_desc());
+                stream.write_buffer(PROBE_MSAA_PRIME_BUFFER, 0, &probe_msaa_prime_bytes());
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu msaa encoder"),
+                    queue: PROBE_MSAA_QUEUE,
+                });
+                // The prime, and it is inside the encoder rather than a queue
+                // write for the ordering: `copy_buffer_to_image` and the pass that
+                // overwrites what it wrote are commands of the same encoder, so
+                // the poison is in the target before the resolve and cannot race
+                // it.
+                stream.copy_buffer_to_image(&probe_msaa_prime_copy());
+                let attachments = [probe_msaa_color_attachment()];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu msaa resolve pass"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(PROBE_MSAA_WIDTH, PROBE_MSAA_HEIGHT),
+                });
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_msaa_copy());
+                stream.finish(PROBE_MSAA_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_MSAA_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_MSAA_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu msaa readback"),
+                        buffer: PROBE_MSAA_BUFFER,
+                        offset: 0,
+                        size: probe_msaa_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.msaa = MsaaProbe::Requested;
+            self.msaa_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// MSAA readback and register its wait, unless it is already waiting, ready
+    /// or unsupported — [`poll_draw`](Self::poll_draw)'s protocol on the MSAA
+    /// handle.
+    fn poll_msaa(&mut self) -> bool {
+        if !matches!(self.msaa, MsaaProbe::Requested | MsaaProbe::Pending) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_MSAA_READBACK))
+        else {
+            return false;
+        };
+        self.msaa = MsaaProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the MSAA readback has got to.
+    fn msaa_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.msaa_reason = error.to_string();
+            return MSAA_UNDECODABLE;
+        }
+        match &self.msaa {
+            MsaaProbe::Unasked => MSAA_UNASKED,
+            MsaaProbe::Requested => MSAA_REQUESTED,
+            MsaaProbe::Waiting { .. } => MSAA_WAITING,
+            MsaaProbe::Pending => MSAA_PENDING,
+            MsaaProbe::Ready { .. } => MSAA_READY,
+            MsaaProbe::Unsupported => MSAA_UNSUPPORTED,
+        }
+    }
+
+    /// The bytes the MSAA readback came back with, or an empty slice if it has
+    /// not.
+    fn msaa_bytes(&self) -> &[u8] {
+        match &self.msaa {
+            MsaaProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -7940,6 +8526,77 @@ pub mod shim {
         })
     }
 
+    /// What the opened device reported as its
+    /// [`max_sample_count`](crcbl_hal::Limits::max_sample_count), or `0` if no
+    /// device has opened.
+    ///
+    /// **Read before `__crcbl_web_gpu_probe_msaa`, and the reason the MSAA probe
+    /// has a number of its own**: it is what says whether a
+    /// [`super::MSAA_UNSUPPORTED`] is a device that cannot serve
+    /// [`super::PROBE_MSAA_SAMPLES`] or a request that never happened.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_msaa_samples() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.msaa_samples(),
+            Err(_) => 0,
+        })
+    }
+
+    /// Encode the MSAA setup frame — the two targets, the prime, a pass that
+    /// clears the multisampled one and resolves into the single-sampled one, the
+    /// copy and the readback request.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// device reported a sample count below [`super::PROBE_MSAA_SAMPLES`], the
+    /// probe is re-entered, or another channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_msaa() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_msaa()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the MSAA readback once. `1` when a poll is on the stream, `0` when
+    /// there is nothing to poll for.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_msaa_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_msaa()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `MSAA_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_msaa_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.msaa_state(),
+            Err(_) => super::MSAA_UNASKED,
+        })
+    }
+
+    /// Where the resolve target's texels start, once
+    /// [`__crcbl_web_gpu_probe_msaa_state`] answers [`super::MSAA_READY`]. Null
+    /// while it has not; the pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_msaa_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.msaa_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_msaa_bytes_ptr`] points at — the
+    /// MSAA readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_msaa_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.msaa_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -8071,7 +8728,10 @@ mod tests {
         __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_indirect,
         __crcbl_web_gpu_probe_indirect_bytes_len, __crcbl_web_gpu_probe_indirect_bytes_ptr,
         __crcbl_web_gpu_probe_indirect_poll, __crcbl_web_gpu_probe_indirect_state,
-        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_parity,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_msaa,
+        __crcbl_web_gpu_probe_msaa_bytes_len, __crcbl_web_gpu_probe_msaa_bytes_ptr,
+        __crcbl_web_gpu_probe_msaa_poll, __crcbl_web_gpu_probe_msaa_samples,
+        __crcbl_web_gpu_probe_msaa_state, __crcbl_web_gpu_probe_parity,
         __crcbl_web_gpu_probe_parity_checked, __crcbl_web_gpu_probe_parity_failures_len,
         __crcbl_web_gpu_probe_parity_failures_ptr, __crcbl_web_gpu_probe_parity_held,
         __crcbl_web_gpu_probe_parity_report_len, __crcbl_web_gpu_probe_parity_report_ptr,
@@ -11254,6 +11914,306 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_stencil_state(), STENCIL_READY);
         assert_eq!(stencil_bytes(), masked);
         assert_eq!(&stencil_bytes()[..4], PROBE_STENCIL_FIRST_BYTES);
+    }
+
+    /// The MSAA probe's bytes, read the way JS reads them.
+    fn msaa_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_msaa_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_msaa_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the MSAA probe answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::msaa` bytes, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// **The clear and the poison are not a channel permutation of each other**,
+    /// so a path that swapped `r` and `b` on the way out cannot turn "the resolve
+    /// was dropped" into "the resolve ran". Each colour channel is a mid-tone,
+    /// away from the `0` and `255` an untouched or saturated one reads as, and the
+    /// two alphas differ so a resolve that left alpha alone is its own reading.
+    #[test]
+    fn the_msaa_clear_and_poison_survive_a_channel_swap() {
+        let sorted = |bytes: [u8; 4]| {
+            let mut channels = bytes;
+            channels.sort_unstable();
+            channels
+        };
+        assert_ne!(
+            sorted(PROBE_MSAA_CLEAR_BYTES),
+            sorted(PROBE_MSAA_POISON_BYTES)
+        );
+        assert_ne!(PROBE_MSAA_CLEAR_BYTES[3], PROBE_MSAA_POISON_BYTES[3]);
+        for bytes in [PROBE_MSAA_CLEAR_BYTES, PROBE_MSAA_POISON_BYTES] {
+            let [r, g, b, _] = bytes;
+            assert!(
+                r != g && g != b && r != b,
+                "the three colour channels differ: {bytes:?}"
+            );
+            for channel in [r, g, b] {
+                assert!(
+                    channel > 0 && channel < 255,
+                    "every colour channel is a mid-tone: {bytes:?}"
+                );
+            }
+        }
+        // And every channel is far enough from its counterpart that a resolve
+        // which wrote one channel and dropped another is visible rather than
+        // arguable.
+        for (clear, poison) in PROBE_MSAA_CLEAR_BYTES
+            .iter()
+            .zip(PROBE_MSAA_POISON_BYTES.iter())
+        {
+            assert!(
+                clear.abs_diff(*poison) > 16,
+                "{clear} and {poison} are too close to tell apart"
+            );
+        }
+    }
+
+    /// The clear value the pass carries is the bytes the gate asserts, through
+    /// the one conversion between them.
+    #[test]
+    fn the_msaa_clear_is_the_colour_the_gate_asserts() {
+        let clear = probe_msaa_clear_value();
+        for (channel, byte) in clear.color.iter().zip(PROBE_MSAA_CLEAR_BYTES) {
+            let encoded = (channel * 255.0).round() as u8;
+            assert_eq!(encoded, byte, "the clear encodes to the asserted bytes");
+        }
+    }
+
+    /// The prime covers the **whole** resolve target with the poison, in the
+    /// channel order the readback compares in. A prime that covered less would
+    /// leave the uncovered part undefined, and an undefined byte that happened to
+    /// equal the clear reads as a resolve that ran.
+    #[test]
+    fn the_msaa_prime_is_the_poison_over_the_whole_target() {
+        let prime = probe_msaa_prime_bytes();
+        assert_eq!(prime.len() as u64, PROBE_MSAA_BYTES);
+        assert_eq!(prime.len() as u64, probe_msaa_prime_buffer_desc().size);
+        assert_eq!(prime.len() as u64, probe_msaa_buffer_desc().size);
+        for texel in prime.chunks_exact(4) {
+            assert_eq!(texel, PROBE_MSAA_POISON_BYTES);
+        }
+    }
+
+    /// **A row of the copy is a multiple of 256 bytes, and there is more than one
+    /// of them.** The first is what `copyBufferToTexture` and
+    /// `copyTextureToBuffer` both require of a tightly packed copy; the second is
+    /// what makes a resolve that wrote only row zero fail here.
+    #[test]
+    fn the_msaa_copy_rows_are_aligned_and_there_is_more_than_one() {
+        assert_eq!((PROBE_MSAA_WIDTH as usize) * 4 % 256, 0);
+        const { assert!(PROBE_MSAA_HEIGHT > 1) };
+        assert_eq!(
+            PROBE_MSAA_BYTES,
+            u64::from(PROBE_MSAA_WIDTH) * u64::from(PROBE_MSAA_HEIGHT) * 4
+        );
+    }
+
+    /// **Every MSAA handle is generation ten**, a generation past the stencil
+    /// probe's `9 << 32` and every probe before it: the two images, their two
+    /// views, the two buffers, the command buffer, the queue and the readback are
+    /// all live at once and none may land in another probe's slot in the shared
+    /// page.
+    #[test]
+    fn the_msaa_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_MSAA_IMAGE.to_bits(),
+            PROBE_MSAA_RESOLVE_IMAGE.to_bits(),
+            PROBE_MSAA_IMAGE_VIEW.to_bits(),
+            PROBE_MSAA_RESOLVE_VIEW.to_bits(),
+            PROBE_MSAA_PRIME_BUFFER.to_bits(),
+            PROBE_MSAA_BUFFER.to_bits(),
+            PROBE_MSAA_COMMAND_BUFFER.to_bits(),
+            PROBE_MSAA_QUEUE.to_bits(),
+            PROBE_MSAA_READBACK.to_bits(),
+        ] {
+            assert_eq!(bits >> 32, 10, "every MSAA handle is generation ten");
+        }
+        // The pairs that share a generation are kept apart by their indices.
+        assert_ne!(
+            PROBE_MSAA_IMAGE.to_bits(),
+            PROBE_MSAA_RESOLVE_IMAGE.to_bits()
+        );
+        assert_ne!(
+            PROBE_MSAA_IMAGE_VIEW.to_bits(),
+            PROBE_MSAA_RESOLVE_VIEW.to_bits()
+        );
+        assert_ne!(
+            PROBE_MSAA_PRIME_BUFFER.to_bits(),
+            PROBE_MSAA_BUFFER.to_bits()
+        );
+        // A generation clear of the stencil probe (`9 << 32`), the nearest
+        // neighbour.
+        assert_ne!(PROBE_MSAA_IMAGE.to_bits(), PROBE_STENCIL_IMAGE.to_bits());
+    }
+
+    /// **The multisampled target is the only multisampled thing, and the resolve
+    /// target is the only one anything copies.** Both halves are what make the
+    /// readback mean something: a single-sampled source would make the resolve a
+    /// no-op the gate could not see, and a multisampled destination is a transfer
+    /// source WebGPU has no usage bit for.
+    #[test]
+    fn the_msaa_source_is_multisampled_and_only_the_resolve_target_is_copied() {
+        let source = probe_msaa_image_desc();
+        let target = probe_msaa_resolve_image_desc();
+        assert_eq!(source.samples, PROBE_MSAA_SAMPLES);
+        const { assert!(PROBE_MSAA_SAMPLES > 1) };
+        assert_eq!(source.usage, ImageUsage::COLOR_ATTACHMENT);
+        assert_eq!(target.samples, 1);
+        assert!(target.usage.contains(ImageUsage::COLOR_ATTACHMENT));
+        assert!(target.usage.contains(ImageUsage::TRANSFER_DST));
+        assert!(target.usage.contains(ImageUsage::TRANSFER_SRC));
+        assert_eq!(source.extent, target.extent);
+        assert_eq!(source.format, target.format);
+        // Both copies name the resolve target, never the multisampled source.
+        assert_eq!(probe_msaa_prime_copy().image, PROBE_MSAA_RESOLVE_IMAGE);
+        assert_eq!(probe_msaa_copy().image, PROBE_MSAA_RESOLVE_IMAGE);
+    }
+
+    /// The MSAA half: **one export, a whole frame** whose pass has no draws at
+    /// all and whose one attachment names the primed target as its resolve.
+    #[test]
+    fn the_msaa_export_encodes_a_clear_that_resolves_into_the_primed_target() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_msaa(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateBuffer",
+                "WriteBuffer",
+                "CreateCommandEncoder",
+                "CopyBufferToImage",
+                "BeginRenderPass",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the prime lands before the pass, and the pass has no contents"
+        );
+        // The whole claim of the probe: the pass's one attachment is the
+        // multisampled view, and it names the single-sampled one as its resolve.
+        let pass = commands
+            .iter()
+            .find_map(|command| match command {
+                Command::BeginRenderPass {
+                    color_attachments, ..
+                } => Some(color_attachments.clone()),
+                _ => None,
+            })
+            .expect("the frame begins a render pass");
+        assert_eq!(pass, vec![probe_msaa_color_attachment()]);
+        assert_eq!(pass[0].view, PROBE_MSAA_IMAGE_VIEW);
+        assert_eq!(pass[0].resolve, Some(PROBE_MSAA_RESOLVE_VIEW));
+        // And the prime really carries the poison, rather than an empty write
+        // that would leave the target undefined.
+        let written = commands
+            .iter()
+            .find_map(|command| match command {
+                Command::WriteBuffer { buffer, data, .. } => Some((*buffer, data.clone())),
+                _ => None,
+            })
+            .expect("the frame writes the prime buffer");
+        assert_eq!(written.0, PROBE_MSAA_PRIME_BUFFER);
+        assert_eq!(written.1, probe_msaa_prime_bytes());
+    }
+
+    /// An MSAA request before a device opens is refused and encodes nothing.
+    #[test]
+    fn an_msaa_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_msaa(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_msaa_state(), MSAA_UNASKED);
+        assert_eq!(__crcbl_web_gpu_probe_msaa_samples(), 0);
+    }
+
+    /// **A device below [`PROBE_MSAA_SAMPLES`] leaves the group unexercised, not
+    /// passed.** Nothing goes on the stream, the state says why, and the sample
+    /// count the device reported is readable — so the gate can name the number
+    /// rather than guess at the reason.
+    #[test]
+    fn a_device_below_the_probes_sample_count_encodes_nothing_and_says_what_it_reported() {
+        grant(&granted("one sample only"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.device(
+            1,
+            &DeviceCaps {
+                features: Features::COMPUTE,
+                limits: Limits {
+                    max_sample_count: 1,
+                    ..device_caps().limits
+                },
+            },
+        );
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+
+        assert_eq!(__crcbl_web_gpu_probe_msaa_samples(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_msaa(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_msaa_state(), MSAA_UNSUPPORTED);
+        // And there is nothing to poll for either, so a gate that polls blindly
+        // cannot put a command on the stream for a frame that was never encoded.
+        assert_eq!(__crcbl_web_gpu_probe_msaa_poll(), 0);
+        assert_eq!(
+            take_frame(),
+            vec![],
+            "an unsupported device leaves the stream empty"
+        );
+    }
+
+    /// The whole MSAA exchange through the exports alone: request, poll, and a
+    /// `ReadbackReady` carrying the clear colour for every texel, which reaches
+    /// the bytes exports. A `cargo test` has no `navigator.gpu`, so the replayer
+    /// is stood in for by a `ReplyWriter` — which is why this proves the state
+    /// machine and the browser gate proves the value.
+    #[test]
+    fn the_msaa_readback_reaches_the_bytes_exports_as_the_clear_colour() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_msaa_samples(), PROBE_MSAA_SAMPLES);
+        assert_eq!(__crcbl_web_gpu_probe_msaa(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(__crcbl_web_gpu_probe_msaa_state(), MSAA_REQUESTED);
+
+        assert_eq!(__crcbl_web_gpu_probe_msaa_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_msaa_state(), MSAA_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_MSAA_READBACK,
+            }]
+        );
+
+        let mut resolved = Vec::new();
+        while (resolved.len() as u64) < PROBE_MSAA_BYTES {
+            resolved.extend_from_slice(&PROBE_MSAA_CLEAR_BYTES);
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_MSAA_READBACK, &resolved);
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_msaa_state(), MSAA_READY);
+        assert_eq!(msaa_bytes(), resolved);
+        assert_eq!(&msaa_bytes()[..4], PROBE_MSAA_CLEAR_BYTES);
     }
 
     /// The probe must not take a channel from an engine that has one, because
