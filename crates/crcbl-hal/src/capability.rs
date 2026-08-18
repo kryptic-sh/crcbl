@@ -27,8 +27,10 @@
 //!
 //! An `enum` with no wildcard arm inverts that. Adding a variant here is a
 //! compile error in **every** backend that has not said what it does about it,
-//! and the answer it is forced to give is one of exactly two things:
-//! [`Support::Yes`], or [`Support::No`] with a reason a human wrote.
+//! and the answer it is forced to give names *whose* answer it is:
+//! [`Support::Yes`], [`Support::No`] with a reason a human wrote, or
+//! [`Support::NotOnThisDevice`] — which only [`Support::granted`] hands out, and
+//! which says the refusal came from the device rather than from the backend.
 //!
 //! # Prior art, and why this shape
 //!
@@ -82,11 +84,33 @@
 //! # The parity record
 //!
 //! [`DIVERGENCES`] is the reviewed list of every (capability, backend) pair that
-//! is knowingly absent, and [`is_parity_gap`] is the rule that reads it. It is
+//! is knowingly absent, and [`parity_verdict`] is the rule that reads it. It is
 //! the difference between divergence somebody decided and divergence that
 //! happened: a backend that starts refusing something new fails the parity test
 //! until the pair is added with a reason, and a backend that starts supporting
 //! something on the list fails until the pair is removed.
+//!
+//! # Why a refusal has to say whose it is
+//!
+//! The rule needs one more thing to be sound, and it is the reason
+//! [`Support::NotOnThisDevice`] exists. "This device reports no `MESH_SHADER`"
+//! and "this backend never wrote the mesh path" are both a refusal, and the
+//! parity record must excuse the first and demand a row for the second — so the
+//! rule used to guess which it was, by asking whether the *device* reported the
+//! capability's [`gating_feature`](Capability::gating_feature).
+//!
+//! That guess made every gated row **unprovable**: on a device reporting the
+//! flag clear, a pair was excused whether or not [`DIVERGENCES`] named it, so
+//! deleting the row changed nothing anybody could observe and the capability
+//! became one nobody claimed and nothing checked. Eight of `crcbl-mtl`'s nine
+//! rows were that shape.
+//!
+//! A refusal now carries whose it is instead of having it inferred, and it costs
+//! no backend a line to say so: [`Support::granted`] is the one constructor a
+//! device gate is ever expressed through, so every gated arm in every backend
+//! already routes through it. What a backend writes by hand is
+//! [`Support::No`] — its own refusal, which [`parity_verdict`] demands a row for
+//! on **every** device, including one that happens to withhold the flag.
 //!
 //! A reason alone cannot say **what is left**, though — "Metal's blit fill takes
 //! a byte, not a word" and "this backend has not written the code yet" are the
@@ -423,12 +447,19 @@ impl Capability {
     /// The [`Features`] bit a caller consults before asking for this, if there
     /// is one.
     ///
-    /// **What makes the parity rule fair.** A backend refusing something on a
-    /// device that reports the gating flag clear has not diverged from anything
-    /// — the device is simply lesser, which is exactly what
-    /// [`Features`] already models and logs as a downgrade. A backend refusing
-    /// it on a device that *does* report the flag has diverged, and
-    /// [`is_parity_gap`] is that distinction.
+    /// **What makes the parity rule fair.** A backend that refuses because the
+    /// device reports this flag clear has not diverged from anything — the
+    /// device is simply lesser, which is exactly what [`Features`] already
+    /// models and logs as a downgrade.
+    ///
+    /// It is the *claim* to be in that position that this flag settles.
+    /// [`Support::granted`] is what puts a backend there, and
+    /// [`parity_verdict`] checks the claim against the device before excusing
+    /// it: a [`Support::NotOnThisDevice`] for a capability with no gate, or on a
+    /// device that reports the gate, is
+    /// [`ParityVerdict::FalseDeviceGate`]. What the flag no longer does is
+    /// excuse a refusal the backend made on its own account, which is how the
+    /// rule used to retire [`DIVERGENCES`] rows without anybody deciding to.
     ///
     /// `None` means no flag governs it, so every refusal is the backend's own.
     /// That is the majority here, and it is the measurement this module was
@@ -476,10 +507,15 @@ impl fmt::Display for Capability {
 
 /// Whether a backend performs a [`Capability`], and why not when it does not.
 ///
-/// Two arms and no third: "maybe", "partially" and "not yet" are all
-/// [`No`](Self::No) with a reason saying which, because a caller can do nothing
-/// different with a third answer and every one that existed would be a branch
-/// nobody tests.
+/// Three arms, and the third is not a third *degree* of support: "maybe",
+/// "partially" and "not yet" are all [`No`](Self::No) with a reason saying
+/// which, because a caller can do nothing different with a shade of no. What
+/// [`NotOnThisDevice`](Self::NotOnThisDevice) adds is **whose** no it is, which
+/// is a different axis and one a caller can act on — a refusal the device
+/// caused may be answered by opening a better adapter, and a refusal the backend
+/// caused never is.
+///
+/// It is also what makes the parity record checkable; see the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Support {
     /// The backend performs it **exactly as the seam documents it**, on this
@@ -491,18 +527,40 @@ pub enum Support {
     /// failure.
     Yes,
 
-    /// The backend refuses, for the reason given.
+    /// **The backend** refuses, for the reason given, and would refuse on any
+    /// device.
     ///
     /// The reason is written for whoever reads the failure, so it names the
-    /// obstacle — the API call that does not exist, the feature bit the device
-    /// reported clear, the slice that has not landed — rather than restating the
-    /// capability. `&'static str`, so asking costs no allocation.
+    /// obstacle — the API call that does not exist, the slice that has not
+    /// landed — rather than restating the capability. `&'static str`, so asking
+    /// costs no allocation.
+    ///
+    /// Every one of these needs a [`DIVERGENCES`] row, on every device. A
+    /// backend reaching for this arm when the device is what withheld the
+    /// capability has not cheated the rule so much as opted into a stricter one.
     No(&'static str),
+
+    /// **The device** withheld the capability's
+    /// [`gating_feature`](Capability::gating_feature), so the backend never got
+    /// to say whether it has it.
+    ///
+    /// Handed out by [`granted`](Self::granted) and nowhere else in this
+    /// workspace, because that is the one place a device gate is read. The
+    /// distinction is not cosmetic: a lesser device is what [`Features`] already
+    /// models and logs as a downgrade at device creation, and holding a software
+    /// rasteriser to a mesh-shader capability would fail the parity suite for a
+    /// reason nobody can fix.
+    ///
+    /// So this arm is *excused* by [`parity_verdict`] — which is exactly why it
+    /// is checked rather than taken on trust: a backend claiming it for an
+    /// ungated capability, or on a device that did report the flag, is
+    /// [`ParityVerdict::FalseDeviceGate`] and fails.
+    NotOnThisDevice(&'static str),
 }
 
 impl Support {
     /// [`Yes`](Self::Yes) when `features` holds `feature`, otherwise
-    /// [`No`](Self::No) with `why`.
+    /// [`NotOnThisDevice`](Self::NotOnThisDevice) with `why`.
     ///
     /// The shape most arms of a backend's `match` have, written once here
     /// because five backends were otherwise going to spell the same `if` five
@@ -510,15 +568,20 @@ impl Support {
     /// in this file a reviewer cannot see, so the flag belongs at the call site
     /// with nothing else beside it.
     ///
-    /// `why` stays the caller's: a device that reports a flag clear and a
-    /// backend that never reports it at all are different sentences, and the
-    /// reader of a parity failure needs to know which.
+    /// **Being the only source of [`NotOnThisDevice`](Self::NotOnThisDevice) is
+    /// what the parity rule rests on.** A backend does not have to know that:
+    /// the arms it already routes through here are precisely the arms whose
+    /// refusal belongs to the device, so the classification costs no backend a
+    /// line and cannot be forgotten by one.
+    ///
+    /// `why` stays the caller's: which flag, and what the device would need to
+    /// report, is the sentence the reader of a parity report needs.
     #[must_use]
     pub const fn granted(features: Features, feature: Features, why: &'static str) -> Self {
         if features.contains(feature) {
             Self::Yes
         } else {
-            Self::No(why)
+            Self::NotOnThisDevice(why)
         }
     }
 
@@ -529,11 +592,14 @@ impl Support {
     }
 
     /// The refusal reason, or `None` when supported.
+    ///
+    /// Both refusals answer, because a caller printing "why not" wants the
+    /// sentence whichever of them it was.
     #[must_use]
     pub const fn reason(self) -> Option<&'static str> {
         match self {
             Self::Yes => None,
-            Self::No(why) => Some(why),
+            Self::No(why) | Self::NotOnThisDevice(why) => Some(why),
         }
     }
 }
@@ -543,6 +609,7 @@ impl fmt::Display for Support {
         match self {
             Self::Yes => f.write_str("supported"),
             Self::No(why) => write!(f, "unsupported: {why}"),
+            Self::NotOnThisDevice(why) => write!(f, "unsupported on this device: {why}"),
         }
     }
 }
@@ -678,9 +745,11 @@ pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immut
 /// rows that are somebody's work from the rows no work can touch;
 /// [`parity_blockers`] is the query that reads it.
 ///
-/// A refusal that is merely *this device's* — the gating
-/// [`Features`] flag is clear — is not listed and is not a gap; see
-/// [`is_parity_gap`].
+/// A refusal that is merely *this device's* — the backend answered
+/// [`Support::NotOnThisDevice`] because the gating [`Features`] flag is clear —
+/// is not listed and is not a gap; see [`parity_verdict`]. A backend's own
+/// refusal needs a row here whatever the device reports, which is what stops a
+/// row being retired by a device that could not have proved anything either way.
 ///
 /// Entries are grouped by capability. [`BackendKind::Null`] never appears: it
 /// records rather than executes, so it is not part of the parity model — see
@@ -1121,41 +1190,118 @@ pub fn divergence(capability: Capability, backend: BackendKind) -> Option<&'stat
         .find(|entry| entry.capability == capability && entry.backend == backend)
 }
 
-/// Whether a refusal is a **parity gap** — a divergence that has not been
-/// written down.
+/// What the parity record has to say about one capability on one running
+/// device — the outcome [`parity_verdict`] answers with.
+///
+/// Five outcomes rather than a `bool`, because "not a gap" used to cover two
+/// unlike things: a divergence somebody reviewed, and a pair this device could
+/// not settle either way. Folding them made a retirement free — see
+/// [`UnprovableHere`](Self::UnprovableHere).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParityVerdict {
+    /// The backend performs it here. Nothing is owed, and a [`DIVERGENCES`] row
+    /// for the pair would be stale.
+    Supported,
+
+    /// The backend refuses and [`DIVERGENCES`] says why. The reviewed case, and
+    /// the entry is carried so a report can print the sentence.
+    Reviewed(&'static Divergence),
+
+    /// The device withheld the gating [`Features`] flag, so this run learned
+    /// **nothing** about the backend — neither that it has the capability nor
+    /// that it lacks it.
+    ///
+    /// Not a failure: the device is lesser, which `Features` already models and
+    /// logs as a downgrade at creation, and there is no work anybody could do to
+    /// make a software rasteriser grow a mesh stage.
+    ///
+    /// It is reported by name all the same, because "unprovable here" is a
+    /// coverage gap and used to be indistinguishable from a clean pass. That
+    /// indistinguishability is the whole defect this enum was split to fix: a
+    /// gated pair reached it whether or not [`DIVERGENCES`] named the pair, so a
+    /// row could be deleted and no run anywhere would notice.
+    UnprovableHere(Features),
+
+    /// **The backend's own refusal, with nobody's name on it.** The gap.
+    ///
+    /// [`Support::No`] means this backend would refuse on every device, so no
+    /// device's [`Features`] excuse it: either a row was never written, or one
+    /// was retired without the backend having learnt to do the thing.
+    Unreviewed,
+
+    /// The backend answered [`Support::NotOnThisDevice`] and the device did not
+    /// withhold anything — the capability has no
+    /// [`gating_feature`](Capability::gating_feature), or it has one and this
+    /// device reports it.
+    ///
+    /// A gap, and a louder one than [`Unreviewed`](Self::Unreviewed): the
+    /// excused arm is the one thing a backend could hide behind, so it is the
+    /// one arm whose claim is checked against the device rather than believed.
+    FalseDeviceGate,
+}
+
+impl ParityVerdict {
+    /// Whether this verdict is a **parity gap** — something nobody has accounted
+    /// for.
+    ///
+    /// The two failing outcomes and no others. [`UnprovableHere`] is deliberately
+    /// not one: a device that cannot answer is not a defect in the backend.
+    ///
+    /// [`UnprovableHere`]: Self::UnprovableHere
+    #[must_use]
+    pub const fn is_gap(self) -> bool {
+        match self {
+            Self::Supported | Self::Reviewed(_) | Self::UnprovableHere(_) => false,
+            Self::Unreviewed | Self::FalseDeviceGate => true,
+        }
+    }
+}
+
+/// What the parity record says about `capability` on `backend`, given what the
+/// backend `declared` on a device reporting `features`.
 ///
 /// The rule the agnostic seam suite applies to every capability of a running
 /// device, and the whole of what "reviewed divergence" means here:
 ///
-/// * A refusal on a device whose [`Features`] lack the capability's
-///   [`gating_feature`](Capability::gating_feature) is **not** a gap. The device
-///   is lesser, which [`Features`] already models and logs as a downgrade, and
-///   holding a software rasteriser to a mesh-shader capability would make the
-///   suite fail for the wrong reason.
-/// * A refusal that [`DIVERGENCES`] names is **not** a gap. Somebody decided it
-///   and wrote down why.
-/// * Any other refusal **is** a gap: this backend cannot do something its peers
-///   can, on a device that reports it should, and nobody has said so.
+/// * [`Support::Yes`] is [`Supported`](ParityVerdict::Supported). The backend
+///   does it, and the suite's other half holds it to that by driving the call.
+/// * [`Support::NotOnThisDevice`] is
+///   [`UnprovableHere`](ParityVerdict::UnprovableHere) — **if the device really
+///   did withhold the gate**, which is checked here rather than assumed.
+///   Otherwise the backend blamed a device that gave it what it asked for, and
+///   that is [`FalseDeviceGate`](ParityVerdict::FalseDeviceGate).
+/// * [`Support::No`] that [`DIVERGENCES`] names is
+///   [`Reviewed`](ParityVerdict::Reviewed). Somebody decided it and wrote down
+///   why.
+/// * [`Support::No`] that it does not name is
+///   [`Unreviewed`](ParityVerdict::Unreviewed): this backend cannot do something
+///   its peers can and nobody has said so. **The device's `features` do not
+///   enter into it** — that is the fix. The old rule waived a refusal whenever
+///   the device reported the gate clear, which waived it for backends that had
+///   never looked at the gate, and so retired their rows for them.
 ///
 /// Deliberately blind to [`DivergenceKind`]: a written reason is what makes a
 /// refusal reviewed, whatever kind of divergence it turned out to be. "Which of
 /// them is still somebody's work" is the other question, and
 /// [`parity_blockers`] is where it is asked.
-///
-/// The stated limit: a backend can still put itself outside this rule by
-/// reporting the gating flag clear. That is not a hole so much as a different
-/// channel — an absent flag is visible in
-/// [`downgrades`](crate::downgrades) at device creation, which is where topic 39
-/// requires it to be reported, and it is a claim about the *device* that the
-/// adapter tests hold it to.
 #[must_use]
-pub fn is_parity_gap(capability: Capability, backend: BackendKind, features: Features) -> bool {
-    if let Some(gate) = capability.gating_feature()
-        && !features.contains(gate)
-    {
-        return false;
+pub fn parity_verdict(
+    capability: Capability,
+    backend: BackendKind,
+    declared: Support,
+    features: Features,
+) -> ParityVerdict {
+    match declared {
+        Support::Yes => ParityVerdict::Supported,
+        Support::NotOnThisDevice(_) => match capability.gating_feature() {
+            Some(gate) if !features.contains(gate) => ParityVerdict::UnprovableHere(gate),
+            _ => ParityVerdict::FalseDeviceGate,
+        },
+        Support::No(_) => match divergence(capability, backend) {
+            Some(entry) => ParityVerdict::Reviewed(entry),
+            None => ParityVerdict::Unreviewed,
+        },
     }
-    divergence(capability, backend).is_none()
 }
 
 #[cfg(test)]
@@ -1255,6 +1401,10 @@ mod tests {
         );
     }
 
+    /// The one constructor a device gate is read through, and the only source of
+    /// [`Support::NotOnThisDevice`] — so this asserts the *variant*, not merely
+    /// that it said no. A `granted` that answered [`Support::No`] would put every
+    /// lesser device back in front of [`ParityVerdict::Unreviewed`].
     #[test]
     fn granted_reads_the_flag_it_was_given() {
         let device = Features::COMPUTE | Features::TIMELINE_SEMAPHORE;
@@ -1264,13 +1414,13 @@ mod tests {
         );
         assert_eq!(
             Support::granted(device, Features::MESH_SHADER, "no mesh shader"),
-            Support::No("no mesh shader")
+            Support::NotOnThisDevice("no mesh shader")
         );
         // And it is `contains`, not `intersects`: a capability gated on a flag
         // the device half-has would otherwise report supported.
         assert_eq!(
             Support::granted(device, Features::GPU_DRIVEN, "not the whole bundle"),
-            Support::No("not the whole bundle")
+            Support::NotOnThisDevice("not the whole bundle")
         );
     }
 
@@ -1287,6 +1437,25 @@ mod tests {
             refused.to_string(),
             "unsupported: there is no such call",
             "the reason must reach the reader, not merely be stored"
+        );
+
+        // The two refusals read differently, because a reader deciding whether
+        // to try another adapter needs to know which one this was.
+        let withheld = Support::NotOnThisDevice("this device reports no MESH_SHADER");
+        assert!(!withheld.is_yes());
+        assert_eq!(
+            withheld.reason(),
+            Some("this device reports no MESH_SHADER")
+        );
+        assert_eq!(
+            withheld.to_string(),
+            "unsupported on this device: this device reports no MESH_SHADER"
+        );
+        assert_ne!(
+            withheld,
+            Support::No("this device reports no MESH_SHADER"),
+            "the same sentence in the two arms must not compare equal, or the parity rule is \
+             reading a string rather than a classification"
         );
     }
 
@@ -1375,45 +1544,165 @@ mod tests {
         );
     }
 
-    /// The rule, checked on the three cases that decide it. Written as a table
+    /// The rule, checked on every case that decides it. Written as a table
     /// because the failure mode is an `&&` where an `||` belongs, which reads
     /// identically and makes the parity suite either vacuous or unpassable.
     #[test]
-    fn a_parity_gap_is_an_unlisted_refusal_on_a_device_that_should_have_it() {
+    fn a_parity_gap_is_a_backend_refusal_nobody_wrote_down() {
         let all = Features::all();
+        let no_mesh = all.difference(Features::MESH_SHADER);
+        let refused = Support::No("this backend has not written it");
+        let withheld = Support::NotOnThisDevice("this device reports no MESH_SHADER");
 
-        // Listed, and the device has the flag: reviewed, not a gap.
-        assert!(!is_parity_gap(
-            Capability::DrawIndirectCount,
-            BackendKind::Metal,
-            all
-        ));
-        // Unlisted, and the device lacks the flag: the device is lesser, which
-        // is `Features`' job and not this one's.
-        assert!(!is_parity_gap(
-            Capability::MeshShading,
-            BackendKind::Vulkan,
-            all.difference(Features::MESH_SHADER)
-        ));
-        // Unlisted, device has the flag: nobody wrote this down. A gap.
-        assert!(is_parity_gap(
-            Capability::MeshShading,
-            BackendKind::Vulkan,
-            all
-        ));
-        // Ungated and unlisted: always a gap, whatever the device reports.
+        // Supported: nothing owed, whatever the list says.
+        assert_eq!(
+            parity_verdict(
+                Capability::MeshShading,
+                BackendKind::Vulkan,
+                Support::Yes,
+                all
+            ),
+            ParityVerdict::Supported
+        );
+        // A backend refusal the list names: reviewed.
+        assert_eq!(
+            parity_verdict(
+                Capability::DrawIndirectCount,
+                BackendKind::Metal,
+                refused,
+                all
+            ),
+            ParityVerdict::Reviewed(
+                divergence(Capability::DrawIndirectCount, BackendKind::Metal)
+                    .expect("Metal's GPU-side draw count is on the list")
+            )
+        );
+        // The device withheld the gate: this run proves nothing either way, and
+        // saying so is not a failure.
+        assert_eq!(
+            parity_verdict(
+                Capability::MeshShading,
+                BackendKind::Vulkan,
+                withheld,
+                no_mesh
+            ),
+            ParityVerdict::UnprovableHere(Features::MESH_SHADER)
+        );
+        // A backend refusal nobody wrote down: a gap.
+        assert_eq!(
+            parity_verdict(Capability::MeshShading, BackendKind::Vulkan, refused, all),
+            ParityVerdict::Unreviewed
+        );
+
+        // **The hole this rule was rewritten to close.** The same unlisted
+        // backend refusal on a device that withheld the gate: the old rule
+        // waived it, so retiring the row cost nothing and no run anywhere
+        // noticed. It is the same gap it is on a device that reports the flag.
+        assert_eq!(
+            parity_verdict(
+                Capability::MeshShading,
+                BackendKind::Vulkan,
+                refused,
+                no_mesh
+            ),
+            ParityVerdict::Unreviewed,
+            "a backend's own refusal is a gap on every device; a lesser one cannot excuse it"
+        );
+
+        // And the escape hatch is checked rather than believed, in both of its
+        // failure shapes: an ungated capability has no device to blame, and a
+        // device that reported the flag did not withhold it.
         assert_eq!(Capability::BufferFillZero.gating_feature(), None);
-        assert!(is_parity_gap(
-            Capability::BufferFillZero,
-            BackendKind::Vulkan,
-            Features::empty()
-        ));
+        assert_eq!(
+            parity_verdict(
+                Capability::BufferFillZero,
+                BackendKind::Dx12,
+                withheld,
+                Features::empty()
+            ),
+            ParityVerdict::FalseDeviceGate
+        );
+        assert_eq!(
+            parity_verdict(Capability::MeshShading, BackendKind::Vulkan, withheld, all),
+            ParityVerdict::FalseDeviceGate
+        );
+
+        // Ungated and unlisted: always a gap, whatever the device reports.
+        assert!(
+            parity_verdict(
+                Capability::BufferFillZero,
+                BackendKind::Vulkan,
+                refused,
+                Features::empty()
+            )
+            .is_gap()
+        );
         // Ungated and listed: never a gap.
-        assert!(!is_parity_gap(
-            Capability::BufferFillZero,
-            BackendKind::Dx12,
-            Features::empty()
-        ));
+        assert!(
+            !parity_verdict(
+                Capability::BufferFillZero,
+                BackendKind::Dx12,
+                refused,
+                Features::empty()
+            )
+            .is_gap()
+        );
+    }
+
+    /// Which verdicts fail, as a table: the failure mode is a variant landing on
+    /// the wrong side, which would either make the suite unpassable or make the
+    /// whole report advisory.
+    #[test]
+    fn only_an_unaccounted_refusal_is_a_gap() {
+        let entry = &DIVERGENCES[0];
+        assert!(!ParityVerdict::Supported.is_gap());
+        assert!(!ParityVerdict::Reviewed(entry).is_gap());
+        assert!(!ParityVerdict::UnprovableHere(Features::MESH_SHADER).is_gap());
+        assert!(ParityVerdict::Unreviewed.is_gap());
+        assert!(ParityVerdict::FalseDeviceGate.is_gap());
+    }
+
+    /// **Every row in the list is one a running backend can be held to.**
+    ///
+    /// The property the rule rewrite buys, asserted over the data rather than
+    /// argued in a doc comment: a row exists to excuse a [`Support::No`], and
+    /// [`parity_verdict`] answers [`ParityVerdict::Reviewed`] for that pair on
+    /// **every** device, including one reporting nothing at all. So deleting any
+    /// row turns that same pair into [`ParityVerdict::Unreviewed`] on the
+    /// backend's own CI arm — there is no device on which the deletion passes
+    /// unnoticed, which is what "a retirement must be earned" means here.
+    #[test]
+    fn no_row_can_be_retired_without_a_run_noticing() {
+        let refused = Support::No("the refusal this row exists to excuse");
+        for entry in DIVERGENCES {
+            for features in [Features::empty(), Features::all()] {
+                assert_eq!(
+                    parity_verdict(entry.capability, entry.backend, refused, features),
+                    ParityVerdict::Reviewed(entry),
+                    "{} on {}: the row must excuse the refusal on every device",
+                    entry.capability,
+                    entry.backend
+                );
+                // The counterfactual — that same refusal with no row behind it.
+                // `divergence` is the only thing the rule reads for a
+                // `Support::No`, so an unlisted pair *is* what a deleted row
+                // leaves. Vulkan stands in for one because the list names it
+                // nowhere, which is checked here rather than remembered.
+                assert_eq!(
+                    divergence(entry.capability, BackendKind::Vulkan),
+                    None,
+                    "the list has grown a Vulkan row, so it is no longer the unlisted backend this \
+                     counterfactual needs"
+                );
+                assert_eq!(
+                    parity_verdict(entry.capability, BackendKind::Vulkan, refused, features),
+                    ParityVerdict::Unreviewed,
+                    "{}: an unlisted backend refusal must be a gap on every device, or deleting \
+                     the row above would cost nothing",
+                    entry.capability
+                );
+            }
+        }
     }
 
     /// Every divergence standing between crcbl and its stated end state, as

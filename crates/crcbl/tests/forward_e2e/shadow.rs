@@ -305,7 +305,14 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
                 .map(|word| f32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
                 .collect())
         }
-        Support::No(why) => Err(refused_atlas_copy(&headless, &atlas_copy, why)),
+        // Either refusal means the same thing here — no atlas to read. The
+        // second arm is unreachable in practice, because `DepthImageCopy` has no
+        // `gating_feature` and `Support::granted` is the only source of it; it
+        // is written out rather than wildcarded so a gate arriving later is a
+        // decision somebody makes instead of one this `_` makes for them.
+        Support::No(why) | Support::NotOnThisDevice(why) => {
+            Err(refused_atlas_copy(&headless, &atlas_copy, why))
+        }
     };
 
     // Through the ring's own channel order rather than as raw RGBA. The Vulkan

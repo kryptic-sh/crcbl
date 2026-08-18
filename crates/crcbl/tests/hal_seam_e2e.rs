@@ -3632,7 +3632,8 @@ fn every_declared_capability_behaves_the_way_it_was_declared() {
             (_, Exercise::Unexercised(why)) => {
                 unexercised.push(format!("{capability} ({why})"));
             }
-            (Support::Yes, Exercise::Worked) | (Support::No(_), Exercise::Refused(_)) => {
+            (Support::Yes, Exercise::Worked)
+            | (Support::No(_) | Support::NotOnThisDevice(_), Exercise::Refused(_)) => {
                 driven += 1;
             }
             (Support::Yes, Exercise::Refused(error)) => failures.push(format!(
@@ -3643,15 +3644,23 @@ fn every_declared_capability_behaves_the_way_it_was_declared() {
                  nothing. This is the failure the declaration exists to catch: every return value \
                  said success."
             )),
-            (Support::No(why), Exercise::Worked) => failures.push(format!(
-                "{capability}: {backend} declares it unsupported ({why}) and then performed it. \
-                 Either the declaration is stale or something else answered."
-            )),
-            (Support::No(why), Exercise::SilentlyIgnored) => failures.push(format!(
-                "{capability}: {backend} declares it unsupported ({why}) and dropped the call \
-                 silently instead of refusing it. The seam requires a loud refusal — a dropped \
-                 request is a wrong picture with a clean log."
-            )),
+            // **Both refusals, held to the same standard.** A
+            // `NotOnThisDevice` is the device's no rather than the backend's,
+            // and it is still a no: a backend that blames the device and then
+            // performs the call has declared something untrue about the device.
+            (Support::No(why) | Support::NotOnThisDevice(why), Exercise::Worked) => {
+                failures.push(format!(
+                    "{capability}: {backend} declares it unsupported ({why}) and then performed \
+                     it. Either the declaration is stale or something else answered."
+                ))
+            }
+            (Support::No(why) | Support::NotOnThisDevice(why), Exercise::SilentlyIgnored) => {
+                failures.push(format!(
+                    "{capability}: {backend} declares it unsupported ({why}) and dropped the call \
+                     silently instead of refusing it. The seam requires a loud refusal — a dropped \
+                     request is a wrong picture with a clean log."
+                ))
+            }
         }
 
         // **A capability refusal is `HalError::Unsupported` and nothing else.**
@@ -3707,21 +3716,33 @@ fn every_declared_capability_behaves_the_way_it_was_declared() {
 
 /// **Divergence is deliberate or it is a bug.** The parity report.
 ///
-/// Every capability this backend refuses must be accounted for: either the
-/// device itself reports the gating [`Features`] flag clear — which is
-/// `Features` doing its job and logged as a downgrade at device creation — or
-/// the pair is in `crcbl_hal::DIVERGENCES` with a written reason.
+/// Every capability this backend refuses must be accounted for. The backend's
+/// own refusal — `Support::No` — needs a `crcbl_hal::DIVERGENCES` row with a
+/// written reason, **on every device**. A refusal the *device* caused —
+/// `Support::NotOnThisDevice`, which only `Support::granted` hands out — needs
+/// nothing, because `Features` already models a lesser device and logs it as a
+/// downgrade at creation.
 ///
 /// And the converse, which is what stops the list becoming a museum: a
 /// capability the list says this backend lacks, and which it turns out to have,
 /// fails until the entry is deleted.
+///
+/// # The third outcome, and why it is printed rather than failed
+///
+/// A pair the device withheld the gate for is `UnprovableHere`: this run learned
+/// nothing about the backend either way, so failing would be demanding hardware
+/// nobody has. It is named in the report all the same, because a coverage gap
+/// that reads as a clean pass is how this mechanism used to rot — the rule
+/// waived *every* refusal on a device reporting the flag clear, including
+/// refusals the backend made on its own account, and so retired their rows for
+/// them. Eight of `crcbl-mtl`'s nine rows were that shape.
 ///
 /// The whole matrix is printed either way, so a CI log carries the report rather
 /// than only the verdict.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
 fn the_parity_report_matches_the_reviewed_divergence_list() {
-    use crcbl::hal::{Capability, Support, divergence, is_parity_gap};
+    use crcbl::hal::{Capability, ParityVerdict, divergence, parity_verdict};
 
     let headless = Headless::open_with_every_optional_feature();
     let backend = headless.device.backend();
@@ -3729,16 +3750,17 @@ fn the_parity_report_matches_the_reviewed_divergence_list() {
 
     let mut unreviewed: Vec<String> = Vec::new();
     let mut stale: Vec<String> = Vec::new();
+    let mut unprovable: Vec<String> = Vec::new();
     let mut report = String::new();
 
     for capability in Capability::ALL {
         let declared = headless.device.supports(*capability);
-        let listed = divergence(*capability, backend);
+        let verdict = parity_verdict(*capability, backend, declared, features);
         report.push_str(&format!("\n  {capability:<30} {declared}"));
 
-        match declared {
-            Support::Yes => {
-                if let Some(entry) = listed {
+        match verdict {
+            ParityVerdict::Supported => {
+                if let Some(entry) = divergence(*capability, backend) {
                     stale.push(format!(
                         "{capability}: DIVERGENCES says {backend} lacks it — {} — and this device \
                          has it. Delete the entry.",
@@ -3746,24 +3768,57 @@ fn the_parity_report_matches_the_reviewed_divergence_list() {
                     ));
                 }
             }
-            Support::No(why) => {
-                if let Some(entry) = listed {
-                    report.push_str(&format!("  [reviewed: {}]", entry.why));
-                } else if is_parity_gap(*capability, backend, features) {
-                    unreviewed.push(format!(
-                        "{capability}: {backend} refuses it ({why}) on a device that reports \
-                         {:?}, and no DIVERGENCES entry says why. Add one with the reason, or fix \
-                         the backend.",
-                        capability.gating_feature()
-                    ));
-                } else {
-                    report.push_str("  [this device lacks the gating feature]");
-                }
+            ParityVerdict::Reviewed(entry) => {
+                report.push_str(&format!("  [reviewed: {}]", entry.why));
             }
+            // Named, counted and printed — never silently skipped. What the run
+            // could not settle is as much of the report as what it could.
+            ParityVerdict::UnprovableHere(gate) => {
+                report.push_str(&format!(
+                    "  [unprovable here: this device withheld {gate:?}]"
+                ));
+                unprovable.push(format!(
+                    "{capability} (this device withheld {gate:?}, so {backend} was never asked)"
+                ));
+            }
+            // **The failure a retired row lands on.** Deliberately says what
+            // evidence a retirement takes, because the next person to read this
+            // is whoever deleted the row.
+            ParityVerdict::Unreviewed => unreviewed.push(format!(
+                "{capability}: {backend} refuses it on its own account ({}) and no DIVERGENCES \
+                 entry says why. If a row was just deleted, put it back: retiring one takes \
+                 {backend} answering Support::Yes here and this suite driving the call — not a \
+                 device that happened to withhold {:?}, which proves nothing about the backend \
+                 either way.",
+                declared.reason().unwrap_or("no reason given"),
+                capability.gating_feature()
+            )),
+            // The one arm a backend could hide a refusal behind, so it is
+            // checked against the device rather than believed.
+            ParityVerdict::FalseDeviceGate => unreviewed.push(format!(
+                "{capability}: {backend} answered Support::NotOnThisDevice ({}) and this device \
+                 withheld nothing — the capability is gated on {:?} and the device reports \
+                 {:?}. Support::granted is the only honest source of that answer; a hand-written \
+                 one is a refusal wearing the device's name.",
+                declared.reason().unwrap_or("no reason given"),
+                capability.gating_feature(),
+                features,
+            )),
         }
     }
 
     eprintln!("crcbl hal seam e2e: capability parity on {backend}:{report}");
+    eprintln!(
+        "crcbl hal seam e2e: {} of {} capabilities were unprovable on this device:\n  {}",
+        unprovable.len(),
+        Capability::ALL.len(),
+        if unprovable.is_empty() {
+            "(none — every capability was either performed or refused by the backend itself)"
+                .to_string()
+        } else {
+            unprovable.join("\n  ")
+        }
+    );
     assert!(
         unreviewed.is_empty(),
         "{} unreviewed divergence(s) on {backend}:\n  {}",
@@ -3777,5 +3832,18 @@ fn the_parity_report_matches_the_reviewed_divergence_list() {
         stale.join("\n  ")
     );
 
+    // **No vacuity guard here, deliberately.** The obvious one — "not every
+    // capability was unprovable" — is a green light wired to nothing: an
+    // *ungated* capability can never be `UnprovableHere`, because a backend
+    // claiming the device withheld something with no gating feature is
+    // `FalseDeviceGate` and fails above. Eleven of the capabilities are ungated,
+    // so the count this would compare has a ceiling it cannot reach.
+    //
+    // What keeps the run honest instead is that both directions above are held
+    // for every capability that is not unprovable, and the tally line names the
+    // ones that are — so a device that answered for nothing says so in the log
+    // rather than passing quietly. `driven > 0` in
+    // `every_declared_capability_behaves_the_way_it_was_declared` is the
+    // vacuity guard that can actually fail, and it is that test's.
     headless.finish();
 }

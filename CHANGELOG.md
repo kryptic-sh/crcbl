@@ -23,8 +23,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stages, update-after-bind, push constants, bindless arrays, storage-image
   bindings, a buffer copy of a depth-format image, the three query kinds, the
   two semaphore kinds and the two kinds of timeline wait — and
-  `Device::supports(capability)` answers `Support::Yes` or `Support::No(reason)`
-  through an exhaustive `match` with no wildcard arm.
+  `Device::supports(capability)` answers `Support::Yes`, `Support::No(reason)`
+  or `Support::NotOnThisDevice(reason)` through an exhaustive `match` with no
+  wildcard arm. The third arm says the refusal was the _device's_ rather than
+  the backend's, and `Support::granted` — which every device-gated arm in every
+  backend already goes through — is the only thing that produces it.
 
   `Capability::DepthImageCopy` is the one to know about if you read a depth
   image back: every backend but `crcbl-dx12` performs it, and `crcbl-dx12` is
@@ -545,9 +548,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Every capability a backend knowingly lacks on every device it can open is a
   listed `(capability, backend, why)` row — Metal's absent GPU-side draw count,
   D3D12's missing buffer fill, `crcbl-wgpu`'s zero-only fill, WebGPU's immutable
-  bind groups, and thirty-odd more. `crcbl_hal::is_parity_gap` is the rule that
-  reads it: a refusal is accounted for when the device itself reports the gating
-  `Features` flag clear, or when the pair is on the list with a reason.
+  bind groups, and thirty-odd more. `crcbl_hal::parity_verdict` is the rule that
+  reads it, answering a `crcbl_hal::ParityVerdict`: a refusal is accounted for
+  when the pair is on the list with a reason, or when the backend answered
+  `Support::NotOnThisDevice` because the device itself withheld the gating
+  `Features` flag.
+
+  **Whose refusal it is decides which.** A backend's own refusal needs a listed
+  row on _every_ device, including one reporting the gating flag clear — so a
+  row cannot be retired by a device that could not have proved anything either
+  way. That distinction is `Support::NotOnThisDevice`, and it is checked against
+  the device rather than believed: a backend claiming it for a capability with
+  no gating feature, or on a device that reports the flag, is
+  `ParityVerdict::FalseDeviceGate` and fails. The verdict a device cannot settle
+  is `ParityVerdict::UnprovableHere`, which the seam suite names and counts in
+  its report instead of skipping silently.
 
   `crates/crcbl/tests/hal_seam_e2e.rs` enforces both directions against a real
   device, so divergence stays possible and stops being accidental — a backend
