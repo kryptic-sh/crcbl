@@ -60,9 +60,10 @@ use crcbl::hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
     CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
     ImageAspect, ImageBarrier, ImageCopy, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
-    ImageType, ImageUsage, Instance, LoadOp, MemoryLocation, Offset3d, PresentInfo, PresentMode,
-    QueryKind, QuerySetDesc, QuerySetHandle, ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc,
-    ResourceState, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation,
+    Offset3d, PresentInfo, PresentMode, QueryKind, QuerySetDesc, QuerySetHandle, ReadbackDesc,
+    ReadbackState, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceError,
+    SwapchainDesc,
 };
 
 /// The size every offscreen test in this file renders at.
@@ -2716,6 +2717,367 @@ fn exercise_depth_image_copy(headless: &Headless) -> Exercise {
     outcome
 }
 
+/// The format the MSAA resolve exercise clears, resolves and reads back.
+///
+/// **The sRGB one, deliberately.** This exercise owns both its images, so it
+/// names a format rather than taking the ring's — and naming the sRGB spelling
+/// is what lets the resolved texels be compared against [`expected_level`],
+/// which is the same assertion
+/// [`a_render_pass_clear_reaches_memory_with_the_colour_it_was_given`] makes
+/// about a clear that was never multisampled. A resolve is free of the usual
+/// question about *where* an sRGB average happens, because every sample of this
+/// attachment holds one value: the mean of four identical samples is that
+/// sample whether the hardware averages encoded levels or decoded light.
+const MSAA_RESOLVE_FORMAT: Format = Format::Rgba8UnormSrgb;
+
+/// Samples the multisampled colour target carries.
+///
+/// Four, which is the multisample level every backend on this seam reports —
+/// `crcbl-wgpu` answers a flat `max_sample_count: 4`, and `crcbl-vk` intersects
+/// the three `VkPhysicalDeviceLimits` sample masks that matter. The exercise
+/// reads [`crcbl::hal::Limits::max_sample_count`] rather than assuming it, and
+/// says so instead of running, on a device that reports less.
+const MSAA_RESOLVE_SAMPLES: u32 = 4;
+
+/// Texels across the two targets the exercise resolves between.
+///
+/// **256 is what picks this number**, exactly as it picks [`IMAGE_COPY_WIDTH`]
+/// and [`DEPTH_COPY_WIDTH`]: the resolve target is read back through a buffer
+/// copy, and WebGPU — with `wgpu` behind it, which is a backend this suite runs
+/// — requires such a copy's row pitch to be a multiple of 256 bytes. An
+/// [`MSAA_RESOLVE_FORMAT`] row this wide is exactly 256 bytes.
+const MSAA_RESOLVE_WIDTH: u32 = 64;
+
+/// Rows the exercise resolves.
+///
+/// More than one, so a resolve that wrote a single row, or that walked the
+/// destination at the multisampled target's pitch rather than the resolve
+/// target's, fails instead of passing on row 0.
+const MSAA_RESOLVE_HEIGHT: u32 = 4;
+
+/// The byte every channel of the resolve target holds before the pass.
+///
+/// [`FILL_POISON`]'s job for this exercise's destination: a resolve target that
+/// still holds this after the pass proves the resolve was accepted and dropped
+/// rather than performed, which is the [`Exercise::SilentlyIgnored`] the seam's
+/// rule against a quiet no-op exists to catch. Distinct from [`POISON`] too, so
+/// "the resolve never wrote the target" stays separable from "nothing reached
+/// the readback at all"; the exercise asserts it is also far enough from every
+/// level [`CLEAR`] encodes to, which is what the `SilentlyIgnored` arm rests on.
+const MSAA_RESOLVE_POISON: u8 = 0x69;
+
+/// Why [`exercise_msaa_resolve`] declines a device whose multisample level is
+/// below [`MSAA_RESOLVE_SAMPLES`].
+///
+/// The count itself is printed beside this rather than written into it: a
+/// `&'static str` cannot carry the number the device reported.
+const NO_MULTISAMPLING: &str = "this device reports a max_sample_count below the 4x this exercise resolves, so there is no \
+     multisampled colour target to resolve from — the line above says what it reported";
+
+/// Drives [`Capability::MsaaResolveAttachment`] and reports whether the pass's
+/// resolve reached the single-sampled target it named.
+///
+/// # Why this needs no pipeline
+///
+/// **A clear needs no pipeline.** The neighbouring render-pass capabilities are
+/// unexercised because asserting on them means drawing something, and this
+/// suite has a compute probe and no raster one — but a resolve is an
+/// *end-of-pass* operation over whatever the samples hold, and
+/// [`LoadOp::Clear`] puts a known value in every one of them without a draw. So
+/// the pass here has no contents at all: it clears a 4x multisampled colour
+/// target to [`CLEAR`], names a single-sampled [`ColorAttachment::resolve`]
+/// view, and ends.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// This was `crcbl-wgpu`'s `an_msaa_pass_resolves_into_its_resolve_target` —
+/// the one place in the workspace that attached a resolve view to a real
+/// device, in a crate scheduled for deletion — brought to the seam and made
+/// stricter in the two ways this suite's other exercises are:
+///
+/// * the resolve target is **primed** with [`MSAA_RESOLVE_POISON`] through a
+///   buffer→image copy first, because a fresh image's contents are undefined on
+///   this seam and a backend that dropped the resolve would otherwise be read
+///   as one that performed it. The poison surviving is
+///   [`Exercise::SilentlyIgnored`], which is exactly the bug that shipped in
+///   `crcbl-wgpu` once: every `wgpu::RenderPassColorAttachment` was built with
+///   `resolve_target: None`, so the pass rendered and nothing was ever
+///   resolved — no error, no log, a wrong picture.
+/// * the texels are compared against [`expected_level`] rather than against an
+///   ordering. `red < green < blue` holds for [`CLEAR`] both encoded and
+///   unencoded, so it cannot tell a target that skipped the sRGB encode from
+///   one that applied it; the levels can, and they are 34 to 73 apart.
+///
+/// An error out of [`finish`](crcbl::hal::CommandEncoder::finish) is the third
+/// outcome and the one `crcbl-dx12` takes: its `begin_render_pass` refuses an
+/// attachment carrying a resolve view outright, since a D3D12 resolve is a
+/// `ResolveSubresource` after the pass rather than a field of the attachment.
+///
+/// # The multisampled *view* is what nothing had asked for before
+///
+/// [`ImageViewType`] has one D2 spelling and no multisampled one, so a backend
+/// has to read the sample count off the image: `crcbl-dx12`'s `view::render_target`
+/// does, choosing `D3D12_RTV_DIMENSION_TEXTURE2DMS`, and `crcbl-mtl`'s
+/// `conv::view_texture_type` does not — every `ImageViewType::D2` becomes
+/// `MTLTextureType::Type2D`, which is not among the types Metal will make a view
+/// of a `Type2DMultisample` texture as. The `crcbl-wgpu` test this came from was
+/// the only place in the workspace that had ever created a multisampled view at
+/// all, and it ran on one backend — so this exercise is the first call to ask
+/// `crcbl-mtl` and `crcbl-dx12` for one.
+fn exercise_msaa_resolve(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let available = device.caps().limits.max_sample_count;
+    if available < MSAA_RESOLVE_SAMPLES {
+        eprintln!(
+            "crcbl hal seam e2e: max_sample_count is {available}, below the \
+             {MSAA_RESOLVE_SAMPLES} this exercise resolves"
+        );
+        return Exercise::Unexercised(NO_MULTISAMPLING);
+    }
+
+    let extent = Extent3d::d2(MSAA_RESOLVE_WIDTH, MSAA_RESOLVE_HEIGHT);
+    let bytes = u64::from(MSAA_RESOLVE_WIDTH) * u64::from(MSAA_RESOLVE_HEIGHT) * 4;
+
+    // The multisampled target first, and its failure is the capability's own
+    // rather than a broken fixture: a backend that cannot create a multisampled
+    // colour image has nothing for a resolve view to resolve *from*.
+    let msaa = match device.create_image(&ImageDesc {
+        label: Some("msaa resolve source"),
+        image_type: ImageType::D2,
+        extent,
+        format: MSAA_RESOLVE_FORMAT,
+        mip_levels: 1,
+        samples: MSAA_RESOLVE_SAMPLES,
+        // Attachment only: nothing copies this image, and a multisampled
+        // transfer source is a usage WebGPU does not have at all.
+        usage: ImageUsage::COLOR_ATTACHMENT,
+    }) {
+        Ok(image) => image,
+        Err(error) => return Exercise::Refused(error),
+    };
+    let resolved = device
+        .create_image(&ImageDesc {
+            label: Some("msaa resolve target"),
+            image_type: ImageType::D2,
+            extent,
+            format: MSAA_RESOLVE_FORMAT,
+            mip_levels: 1,
+            samples: 1,
+            // Written by the prime, resolved into by the pass, read back out.
+            usage: ImageUsage::COLOR_ATTACHMENT
+                | ImageUsage::TRANSFER_SRC
+                | ImageUsage::TRANSFER_DST,
+        })
+        .expect("a single-sampled colour image");
+
+    let view = |image, label| ImageViewDesc {
+        label: Some(label),
+        image,
+        view_type: ImageViewType::D2,
+        format: MSAA_RESOLVE_FORMAT,
+        range: ImageSubresourceRange::all(MSAA_RESOLVE_FORMAT),
+    };
+    let msaa_view = device
+        .create_image_view(&view(msaa, "msaa resolve source view"))
+        .expect("a view of the multisampled target");
+    let resolved_view = device
+        .create_image_view(&view(resolved, "msaa resolve target view"))
+        .expect("a view of the resolve target");
+
+    let prime = device
+        .create_buffer(&BufferDesc {
+            label: Some("msaa resolve prime"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a host-upload buffer");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("msaa resolve staging"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+
+    let primer = vec![MSAA_RESOLVE_POISON; bytes as usize];
+    device
+        .write_buffer(prime, 0, &primer)
+        .expect("a host-upload buffer is what write_buffer is for");
+
+    // What the resolved texels must be: the clear, through the encode its
+    // format owes it. Computed once, and asserted to be nothing like the poison
+    // — a level that landed within tolerance of it would make a resolve that
+    // was dropped and one that ran read back the same, which is the exact
+    // confusion the priming exists to remove.
+    let want = [
+        expected_level(CLEAR[0], MSAA_RESOLVE_FORMAT),
+        expected_level(CLEAR[1], MSAA_RESOLVE_FORMAT),
+        expected_level(CLEAR[2], MSAA_RESOLVE_FORMAT),
+        expected_level(CLEAR[3], MSAA_RESOLVE_FORMAT),
+    ];
+    assert!(
+        want.iter()
+            .all(|level| level.abs_diff(MSAA_RESOLVE_POISON) > LEVEL_TOLERANCE),
+        "a channel of {CLEAR:?} encodes to {want:?}, within {LEVEL_TOLERANCE} of the \
+         {MSAA_RESOLVE_POISON:#04x} the resolve target is primed with, so a resolve that was \
+         dropped and one that ran are no longer distinguishable"
+    );
+
+    let range = ImageSubresourceRange::all(MSAA_RESOLVE_FORMAT);
+    let barrier = |image, from, to| ImageBarrier::new(image, range, from, to);
+    let subresource = ImageSubresourceLayers {
+        aspect: ImageAspect::COLOR,
+        mip: 0,
+        base_layer: 0,
+        layer_count: 1,
+    };
+    // Whole-subresource, tightly packed and at offset zero, for the reason
+    // `MSAA_RESOLVE_WIDTH` gives: a partial copy carries row-pitch and
+    // buffer-offset alignments that would have to be satisfied by hand.
+    let buffer_copy = |buffer| BufferImageCopy {
+        buffer,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: resolved,
+        image_subresource: subresource,
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: extent,
+    };
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("msaa resolve exercise"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        images: &[
+            barrier(
+                msaa,
+                ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            ),
+            barrier(
+                resolved,
+                ResourceState::Undefined,
+                ResourceState::TransferDst,
+            ),
+        ],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_image(&buffer_copy(prime));
+    // The resolve target is an attachment for the pass that writes it, so the
+    // prime's write is ordered against the resolve by this transition — the
+    // same shape `exercise_fill` puts between its prime and its fill, one
+    // resource state along.
+    encoder.pipeline_barrier(&Barriers {
+        images: &[barrier(
+            resolved,
+            ResourceState::TransferDst,
+            ResourceState::ColorAttachment,
+        )],
+        ..Barriers::default()
+    });
+    encoder.begin_render_pass(&RenderPassDesc {
+        label: Some("msaa resolve clear"),
+        color_attachments: &[ColorAttachment {
+            view: msaa_view,
+            resolve: Some(resolved_view),
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color(CLEAR),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(MSAA_RESOLVE_WIDTH, MSAA_RESOLVE_HEIGHT),
+    });
+    encoder.end_render_pass();
+    encoder.pipeline_barrier(&Barriers {
+        images: &[barrier(
+            resolved,
+            ResourceState::ColorAttachment,
+            ResourceState::TransferSrc,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_image_to_buffer(&buffer_copy(staging));
+
+    let outcome = match encoder.finish() {
+        Err(error) => Exercise::Refused(error),
+        Ok(commands) => {
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+
+            let mut read = poisoned(bytes as usize);
+            headless.readback(staging, bytes, &mut read);
+            let off_by = |texel: &[u8]| {
+                texel
+                    .iter()
+                    .zip(&want)
+                    .any(|(got, expected)| got.abs_diff(*expected) > LEVEL_TOLERANCE)
+            };
+            if read == primer {
+                Exercise::SilentlyIgnored
+            } else if read.iter().all(|byte| *byte == POISON) {
+                // Not a capability verdict: the prime is a buffer→image copy
+                // and the read an image→buffer one, and every backend that gets
+                // this far performs both. All-poison means neither reached the
+                // staging buffer, so this exercise is broken rather than the
+                // resolve dropped.
+                panic!(
+                    "the staging buffer still holds {POISON:#04x} in all {bytes} bytes, so nothing \
+                     was copied out of the resolve target at all — neither the prime nor the \
+                     readback landed, and this exercise proves nothing about the resolve either way"
+                );
+            } else if let Some((index, texel)) = read
+                .chunks_exact(4)
+                .enumerate()
+                .find(|(_, texel)| off_by(texel))
+            {
+                panic!(
+                    "texel {index} of the resolve target came back as {texel:?} and a \
+                     {MSAA_RESOLVE_FORMAT:?} target holding the clear {CLEAR:?} must put {want:?} \
+                     there (±{LEVEL_TOLERANCE}). It is neither that nor the \
+                     {MSAA_RESOLVE_POISON:#04x} the target was primed with, so the resolve wrote \
+                     something and wrote the wrong thing.\n  \
+                     encoded, which is what an sRGB target owes: {enc:?}\n  \
+                     unencoded, which is what the linear values are: {lin:?}\n  \
+                     Landing on the unencoded row means the resolve or the clear went through a \
+                     view in the linear counterpart of this format.",
+                    enc = [
+                        expected_level(CLEAR[0], Format::Rgba8UnormSrgb),
+                        expected_level(CLEAR[1], Format::Rgba8UnormSrgb),
+                        expected_level(CLEAR[2], Format::Rgba8UnormSrgb),
+                    ],
+                    lin = [
+                        expected_level(CLEAR[0], Format::Rgba8Unorm),
+                        expected_level(CLEAR[1], Format::Rgba8Unorm),
+                        expected_level(CLEAR[2], Format::Rgba8Unorm),
+                    ],
+                );
+            } else {
+                eprintln!(
+                    "crcbl hal seam e2e: the {MSAA_RESOLVE_SAMPLES}x clear resolved to \
+                     {:?} in {MSAA_RESOLVE_FORMAT:?}, against {want:?}",
+                    &read[0..4]
+                );
+                Exercise::Worked
+            }
+        }
+    };
+
+    device.destroy_buffer(staging);
+    device.destroy_buffer(prime);
+    device.destroy_image_view(resolved_view);
+    device.destroy_image_view(msaa_view);
+    device.destroy_image(resolved);
+    device.destroy_image(msaa);
+    outcome
+}
+
 /// The `u64` a query resolve destination holds before the resolve.
 ///
 /// [`FILL_POISON`]'s job, one type wider. A resolve that was accepted and
@@ -3178,8 +3540,6 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
          tests/render_e2e.rs's fixture rather than reuse it";
     const NEEDS_MESH_ARTIFACTS: &str = "needs committed mesh/task shader artifacts per backend; only crcbl-vk can run one today, \
          so an exercise would assert nothing on four of the five";
-    const NEEDS_MSAA_TARGET: &str = "needs a multisampled colour target and a pipeline that renders into it; the fixture's \
-         ring is single-sampled";
     const NEEDS_TWO_SUBMISSIONS: &str = "needs a submission whose wait can outlive the test if the backend hangs rather than \
          refuses, so driving it wants a timeout the seam's wait_semaphores only offers in \
          nanoseconds and a backend that blocks in submit would deadlock this suite";
@@ -3192,7 +3552,10 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::BufferFillWord => exercise_fill(headless, 0x1234_5678),
         C::ImageToImageCopy => exercise_image_to_image_copy(headless),
         C::DepthImageCopy => exercise_depth_image_copy(headless),
-        C::MsaaResolveAttachment => Exercise::Unexercised(NEEDS_MSAA_TARGET),
+        // A clear, not a draw: `NEEDS_PIPELINE`'s wall does not stand in front
+        // of an end-of-pass resolve, which is why this neighbour is driven and
+        // the ones below it are not.
+        C::MsaaResolveAttachment => exercise_msaa_resolve(headless),
         C::StencilReference => Exercise::Unexercised(NEEDS_PIPELINE),
         C::DrawIndirectCount | C::IndirectArgumentPaddedStride => {
             Exercise::Unexercised(NEEDS_PIPELINE)
