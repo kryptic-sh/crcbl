@@ -2307,7 +2307,11 @@ const IMAGE_COPY_POISON: u32 = 0x3C3C_3C3C;
 /// * [`IMAGE_COPY_POISON`] means the prime landed and the image-to-image copy
 ///   was accepted and dropped — [`Exercise::SilentlyIgnored`];
 /// * an error out of [`finish`](crcbl::hal::CommandEncoder::finish) means it was
-///   refused, which is what `crcbl-dx12` does.
+///   refused. No backend answers that way today — `crcbl-dx12` did until it
+///   implemented the copy — but the arm stays because a refusal deferred to
+///   `finish` is how this seam's encoders report one, and a backend that gains
+///   the capability later must not be the reason this exercise stops handling
+///   it.
 ///
 /// Every texel of the pattern differs from every other, so a copy that moved
 /// row 0 into every row, or that read either image at the wrong pitch, comes
