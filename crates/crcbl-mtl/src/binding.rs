@@ -1997,7 +1997,7 @@ mod tests {
     /// Regenerate it with the compiler `crcbl-shaders` pins, from this source:
     ///
     /// ```slang
-    /// struct Sources { StructuredBuffer<uint> items[]; };
+    /// struct Sources { StructuredBuffer<uint> items[64]; };
     /// ParameterBlock<Sources> sources;
     /// RWStructuredBuffer<uint> destination;
     /// [shader("compute")] [numthreads(64,1,1)]
@@ -2017,20 +2017,41 @@ mod tests {
     /// path to name. The directives change no token the Metal front end
     /// compiles.
     ///
-    /// **`uint device* items_0[]` is the whole question.** It is a flexible
-    /// array member of device pointers inside a `constant`-addressed argument
-    /// struct: the argument buffer carries no length, so the kernel indexes it
-    /// with whatever `SV_GroupID` supplies. Every other MSL artifact this
-    /// engine ships declares plain per-stage arguments instead, which is the
-    /// reason this module's header gives for binding flat argument tables.
+    /// **The array is bounded, and that is a correction rather than a
+    /// preference.** The first version of this probe declared `items[]`, which
+    /// Slang lowers to `uint device* items_0[]` — a C99 flexible array member.
+    /// It ran on CI's `Apple Paravirtual device` and Metal's own front end
+    /// refused it:
+    ///
+    /// ```text
+    /// program_source:7:19: error: flexible array members are a C99 feature
+    /// ```
+    ///
+    /// A fixed length lowers instead to `array<uint device*, int(64)>`, an
+    /// ordinary `metal::array` of device pointers, which is the shape MSL
+    /// actually defines. Nothing is lost: a bindless table is a capacity
+    /// declared once in the shader with a count chosen per bind, which is how
+    /// Vulkan's `VARIABLE_DESCRIPTOR_COUNT` and D3D12's heap-bounded unbounded
+    /// arrays are used too.
+    ///
+    /// **The reusable half is the exit code.** `slangc -target metal` returned
+    /// 0 for the flexible-array source and emitted MSL no Metal compiler
+    /// accepts. That is the third time this target has failed by emitting
+    /// plausible garbage rather than diagnosing — see `docs/backlog.md` — so a
+    /// zero exit is not evidence a Metal shader is usable.
     #[cfg(feature = "mtl-e2e")]
     const BINDLESS_MSL: &str = r#"#include <metal_stdlib>
 #include <metal_math>
 #include <metal_texture>
 using namespace metal;
+struct _Array_default_StructuredBufferx3Cuintx3E64_0
+{
+    array<uint device*, int(64)> data_0;
+};
+
 struct Sources_default_0
 {
-    uint device*  items_0[];
+    _Array_default_StructuredBufferx3Cuintx3E64_0 items_0;
 };
 
 struct KernelContext_0
@@ -2054,7 +2075,7 @@ struct KernelContext_0
     {
         return;
     }
-    *((&kernelContext_0)->destination_0+(source_0 * 4U + sv_groupindex_0)) = (&kernelContext_0)->sources_0->items_0[source_0][sv_groupindex_0];
+    *((&kernelContext_0)->destination_0+(source_0 * 4U + sv_groupindex_0)) = (&(&kernelContext_0)->sources_0->items_0)->data_0[source_0][sv_groupindex_0];
     return;
 }
 
@@ -2063,6 +2084,36 @@ struct KernelContext_0
     /// Source buffers the probe's argument buffer points at. Four, because
     /// [`BINDLESS_MSL`]'s `if(source_0 >= 4U)` returns above that.
     #[cfg(feature = "mtl-e2e")]
+    /// The table length [`BINDLESS_MSL`] declares.
+    ///
+    /// The shader says `StructuredBuffer<uint> items[64]`, so the argument
+    /// buffer is 64 device addresses wide whatever fraction of it a bind fills
+    /// — which is how a bindless table is used in practice, a capacity declared
+    /// once and a count chosen per bind.
+    /// [`the_probes_table_length_matches_the_shader_it_binds`] is what keeps
+    /// this number and the MSL from drifting apart.
+    const BINDLESS_TABLE: u32 = 64;
+
+    /// [`BINDLESS_TABLE`] is the length [`BINDLESS_MSL`] actually declares.
+    ///
+    /// Two constants describing one thing, and the MSL is a pasted artifact
+    /// nobody edits by eye — so a regenerated shader with a different bound
+    /// would leave the argument buffer sized for the old one, which is an
+    /// out-of-bounds table rather than a failing assertion.
+    ///
+    /// Needs no device — but this module is `#[cfg(target_os = "macos")]`, so
+    /// it compiles and runs only on the Mac jobs, not in a Linux `cargo test`.
+    /// Not `#[ignore]`d, so it runs there without `--run-ignored`.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    fn the_probes_table_length_matches_the_shader_it_binds() {
+        let wanted = format!("array<uint device*, int({BINDLESS_TABLE})>");
+        assert!(
+            BINDLESS_MSL.contains(&wanted),
+            "BINDLESS_TABLE is {BINDLESS_TABLE}, so the MSL should declare {wanted:?} — the              shader was regenerated with a different bound, or lowered to a shape this no longer              recognises:\n{BINDLESS_MSL}"
+        );
+    }
+
     const BINDLESS_SOURCES: u32 = 4;
 
     /// Words each source buffer holds, and words each threadgroup copies.
@@ -2313,12 +2364,17 @@ struct KernelContext_0
              table would point the kernel at nothing: {addresses:#X?}"
         );
         println!("crcbl-mtl bindless: gpuAddress={addresses:#X?}");
+        // The shader's whole declared table, not the four entries this probe
+        // fills. `Sources_default_0` is now a fixed `array<uint device*, 64>`,
+        // so the argument buffer must be that size however few of its slots are
+        // used — a buffer sized to the prefix would leave the struct's tail off
+        // the end of the allocation.
         let table = raw
             .newBufferWithLength_options(
-                to_ns(u64::from(BINDLESS_SOURCES) * BINDLESS_ADDRESS_BYTES),
+                to_ns(u64::from(BINDLESS_TABLE) * BINDLESS_ADDRESS_BYTES),
                 options,
             )
-            .expect("an argument buffer of four device addresses");
+            .expect("an argument buffer of the shader's declared table size");
         table.setLabel(Some(&NSString::from_str(
             "crcbl-mtl bindless argument buffer",
         )));
