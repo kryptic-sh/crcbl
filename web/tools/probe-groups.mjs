@@ -3036,10 +3036,24 @@ export async function runProbeGroups({
         )
       )
     : null;
+  // **A BROWSER WITHOUT `timestamp-query` OWES THIS GROUP NOTHING.** The
+  // capability is `NotOnThisDevice` there, which the seam treats as an honest
+  // answer and not a refusal the backend chose — and CI's macOS runner is
+  // exactly that browser, on a paravirtual Metal device that advertises no
+  // counter set. Failing it would report a device's limit as this page's bug.
+  //
+  // The checks below keep their teeth everywhere the feature exists, which is
+  // both other platforms this job runs on: SwiftShader grants it on Linux and
+  // on Windows, and those two arms are what red-checking this group proves out.
+  // A browser that grants the feature and then writes nothing still fails.
+  const timestampAbsent = timestampStart?.supported === false;
+  const absentDetail =
+    "this browser opened a device without 'timestamp-query', so the capability " +
+    'is NotOnThisDevice here and there is nothing to hold it to';
   check(
     'AF',
     "wasm encoded the timed frame — a 'timestamp' query set, the reset, and a compute pass naming both of its queries",
-    timestampStart?.started === true,
+    timestampStart?.started === true || timestampAbsent,
     timestampStart?.started
       ? 'the timed pass and the read of its two queries are on the stream'
       : timestampStart?.supported === false
@@ -3051,28 +3065,35 @@ export async function runProbeGroups({
   check(
     'AF',
     'the browser wrote both queries the pass named — two ticks, and neither of them the zero an unwritten query resolves to',
-    timestamp?.done === true && timestamp.len === 16 && timestamp.bothNonZero,
-    timestamp?.done !== true
-      ? `no answer in ${TIMEOUT_MS} ms — the replayer's own map never resolved or the reply never reached wasm`
-      : timestamp.len === 0
-        ? `state ${timestamp.state} with no values, which is the only way a QueryResults reply says the read could not be served${timestamp.error ? ` — ${timestamp.error}` : ''}`
-        : timestamp.bothNonZero
-          ? `${timestamp.ticks[0]} then ${timestamp.ticks[1]}`
-          : `the pass reported ${JSON.stringify(timestamp.ticks)} — a zero is a query nothing wrote, ` +
-            'which is a pass whose timestampWrites were accepted and dropped' +
-            `${timestamp.error ? ` — ${timestamp.error}` : ''}`
+    timestampAbsent ||
+      (timestamp?.done === true &&
+        timestamp.len === 16 &&
+        timestamp.bothNonZero),
+    timestampAbsent
+      ? absentDetail
+      : timestamp?.done !== true
+        ? `no answer in ${TIMEOUT_MS} ms — the replayer's own map never resolved or the reply never reached wasm`
+        : timestamp.len === 0
+          ? `state ${timestamp.state} with no values, which is the only way a QueryResults reply says the read could not be served${timestamp.error ? ` — ${timestamp.error}` : ''}`
+          : timestamp.bothNonZero
+            ? `${timestamp.ticks[0]} then ${timestamp.ticks[1]}`
+            : `the pass reported ${JSON.stringify(timestamp.ticks)} — a zero is a query nothing wrote, ` +
+              'which is a pass whose timestampWrites were accepted and dropped' +
+              `${timestamp.error ? ` — ${timestamp.error}` : ''}`
   );
   check(
     'AF',
     'and the closing tick is not before the opening one, so the two came from a clock',
-    timestamp?.done === true && timestamp.ordered,
-    timestamp?.done !== true
-      ? 'no ticks to order'
-      : timestamp.ordered
-        ? `${timestamp.delta} ns between the two boundaries of an empty pass` +
-          ' (a browser reports nanoseconds, quantised)'
-        : `the pass opened at ${timestamp.ticks?.[0]} and closed at ${timestamp.ticks?.[1]}, ` +
-          'which is a clock running backwards or two queries read in the wrong order'
+    timestampAbsent || (timestamp?.done === true && timestamp.ordered),
+    timestampAbsent
+      ? absentDetail
+      : timestamp?.done !== true
+        ? 'no ticks to order'
+        : timestamp.ordered
+          ? `${timestamp.delta} ns between the two boundaries of an empty pass` +
+            ' (a browser reports nanoseconds, quantised)'
+          : `the pass opened at ${timestamp.ticks?.[0]} and closed at ${timestamp.ticks?.[1]}, ` +
+            'which is a clock running backwards or two queries read in the wrong order'
   );
 
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**
