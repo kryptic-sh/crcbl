@@ -213,16 +213,45 @@ pub(crate) fn texture_type(image_type: ImageType, layers: u32, samples: u32) -> 
     }
 }
 
-/// How a view reinterprets its texture's dimensionality.
-pub(crate) fn view_texture_type(view: ImageViewType) -> MTLTextureType {
-    match view {
-        ImageViewType::D1 => MTLTextureType::Type1D,
-        ImageViewType::D2 => MTLTextureType::Type2D,
-        ImageViewType::D2Array => MTLTextureType::Type2DArray,
-        ImageViewType::Cube => MTLTextureType::TypeCube,
-        ImageViewType::CubeArray => MTLTextureType::TypeCubeArray,
-        ImageViewType::D3 => MTLTextureType::Type3D,
-    }
+/// How a view reinterprets its texture's dimensionality, or `None` when Metal
+/// has no type compatible with the texture the view is of.
+///
+/// # The sample count comes from the texture, not from the seam
+///
+/// [`ImageViewType`] has one 2D spelling and no multisampled one, because
+/// Vulkan's `VkImageViewType` has none either — a Vulkan view inherits its
+/// image's sample count. Metal spells the multisampled types separately and
+/// only makes a view of a multisampled texture as one of them, so a `D2` view
+/// alone does not say which Metal type is wanted. `source` is the texture's own
+/// `textureType`, which [`texture_type`] chose from the image descriptor at
+/// creation, and it is what decides which half of the table applies. Passing a
+/// `Type2D` here for a texture that is `Type2DMultisample` asks Metal for a view
+/// it will not make.
+///
+/// `None` is a pairing that has no Metal answer at all: a 1D, 3D or cube view of
+/// a multisampled texture. Reporting it as the descriptor error it is beats
+/// handing it to Metal, whose validation layer answers an incompatible view type
+/// by aborting the process rather than by returning nil.
+pub(crate) fn view_texture_type(
+    view: ImageViewType,
+    source: MTLTextureType,
+) -> Option<MTLTextureType> {
+    let multisampled = source == MTLTextureType::Type2DMultisample
+        || source == MTLTextureType::Type2DMultisampleArray;
+    Some(match (view, multisampled) {
+        (ImageViewType::D2, true) => MTLTextureType::Type2DMultisample,
+        (ImageViewType::D2Array, true) => MTLTextureType::Type2DMultisampleArray,
+        (
+            ImageViewType::D1 | ImageViewType::Cube | ImageViewType::CubeArray | ImageViewType::D3,
+            true,
+        ) => return None,
+        (ImageViewType::D1, false) => MTLTextureType::Type1D,
+        (ImageViewType::D2, false) => MTLTextureType::Type2D,
+        (ImageViewType::D2Array, false) => MTLTextureType::Type2DArray,
+        (ImageViewType::Cube, false) => MTLTextureType::TypeCube,
+        (ImageViewType::CubeArray, false) => MTLTextureType::TypeCubeArray,
+        (ImageViewType::D3, false) => MTLTextureType::Type3D,
+    })
 }
 
 /// Permitted texture uses, and the one flag the seam cannot ask for.
@@ -1267,13 +1296,106 @@ mod tests {
         assert!(!views.is_empty(), "nothing to check");
         let mut seen: Vec<MTLTextureType> = Vec::new();
         for view in views {
-            let metal = view_texture_type(view);
+            let metal = view_texture_type(view, MTLTextureType::Type2D)
+                .expect("every seam view type has a single-sampled answer");
             assert!(!seen.contains(&metal), "{view:?} duplicates {metal:?}");
             seen.push(metal);
         }
         assert_eq!(
-            view_texture_type(ImageViewType::Cube),
-            MTLTextureType::TypeCube
+            view_texture_type(ImageViewType::Cube, MTLTextureType::Type2D),
+            Some(MTLTextureType::TypeCube)
         );
+    }
+
+    /// A view of a multisampled texture must ask Metal for a multisampled type.
+    ///
+    /// **What turns it red:** dropping `source` and answering from the
+    /// [`ImageViewType`] alone, which is what this backend did until
+    /// `exercise_msaa_resolve` in `crates/crcbl/tests/hal_seam_e2e.rs` asked it
+    /// for the first multisampled view in the workspace. `Type2D` is not among
+    /// the types Metal makes a view of a `Type2DMultisample` texture as, so the
+    /// call is refused rather than merely losing the sample count.
+    #[test]
+    fn a_view_of_a_multisampled_texture_keeps_its_sample_count() {
+        assert_eq!(
+            view_texture_type(ImageViewType::D2, MTLTextureType::Type2DMultisample),
+            Some(MTLTextureType::Type2DMultisample),
+        );
+        assert_eq!(
+            view_texture_type(
+                ImageViewType::D2Array,
+                MTLTextureType::Type2DMultisampleArray
+            ),
+            Some(MTLTextureType::Type2DMultisampleArray),
+            "the array case must not silently become the non-array type",
+        );
+        // The two cross cases: Metal's compatibility class for a multisampled
+        // texture holds both multisampled types, so either view type is
+        // creatable from either texture.
+        assert_eq!(
+            view_texture_type(ImageViewType::D2Array, MTLTextureType::Type2DMultisample),
+            Some(MTLTextureType::Type2DMultisampleArray),
+        );
+        assert_eq!(
+            view_texture_type(ImageViewType::D2, MTLTextureType::Type2DMultisampleArray),
+            Some(MTLTextureType::Type2DMultisample),
+        );
+        // And the single-sampled half is untouched by any of it.
+        assert_eq!(
+            view_texture_type(ImageViewType::D2, MTLTextureType::Type2DArray),
+            Some(MTLTextureType::Type2D),
+        );
+        assert_eq!(
+            view_texture_type(ImageViewType::D2Array, MTLTextureType::Type2D),
+            Some(MTLTextureType::Type2DArray),
+        );
+    }
+
+    /// Metal has no multisampled 1D, 3D or cube type, so those pairings are
+    /// refused here rather than handed to a validation layer that aborts.
+    ///
+    /// **What turns it red:** answering a multisampled source with the
+    /// single-sampled type — `Type1D`, `TypeCube`, `TypeCubeArray`, `Type3D` —
+    /// which Metal would reject as an incompatible view type.
+    #[test]
+    fn no_multisampled_view_exists_for_the_other_dimensionalities() {
+        for view in [
+            ImageViewType::D1,
+            ImageViewType::Cube,
+            ImageViewType::CubeArray,
+            ImageViewType::D3,
+        ] {
+            for source in [
+                MTLTextureType::Type2DMultisample,
+                MTLTextureType::Type2DMultisampleArray,
+            ] {
+                assert_eq!(
+                    view_texture_type(view, source),
+                    None,
+                    "{view:?} of a {source:?} texture has no Metal answer"
+                );
+            }
+        }
+    }
+
+    /// The two halves agree: a texture this backend created as multisampled is
+    /// one `view_texture_type` then treats as multisampled.
+    ///
+    /// **What turns it red:** either function learning a new multisampled
+    /// texture type without the other — the way a `Type2DMultisampleArray`
+    /// texture with a `Type2DArray` view would pass both tests above and still
+    /// be refused by Metal.
+    #[test]
+    fn every_multisampled_texture_type_gets_a_multisampled_view_type() {
+        for layers in [1, 2] {
+            let source = texture_type(ImageType::D2, layers, 4);
+            let view = view_texture_type(ImageViewType::D2, source)
+                .expect("a 2D view of a multisampled texture");
+            assert!(
+                view == MTLTextureType::Type2DMultisample
+                    || view == MTLTextureType::Type2DMultisampleArray,
+                "a {source:?} texture got a {view:?} view"
+            );
+        }
     }
 }

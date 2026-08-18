@@ -1591,7 +1591,12 @@ impl Device for MetalDevice {
     /// absolute ranges, so the seam's
     /// [`ImageSubresourceRange::ALL`](crcbl_hal::ImageSubresourceRange::ALL)
     /// sentinel is resolved here against the texture's own level and slice
-    /// counts, read back off the object rather than remembered.
+    /// counts, read back off the object rather than remembered. The texture's
+    /// `textureType` is read the same way, because it is what decides whether
+    /// the seam's `D2` view is a multisampled one — see `conv::view_texture_type`.
+    ///
+    /// A view that reinterprets nothing is the image's own texture rather than a
+    /// second object; the block below the range checks argues why.
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
         let mut state = self.state();
         let entry = lookup(&state.images, "image", desc.image, &*self.inner)?;
@@ -1611,6 +1616,19 @@ impl Device for MetalDevice {
         }
 
         let texture = entry.raw.clone();
+        // The texture's own type, not one derived from the descriptor a second
+        // time: it is what Metal checks the requested view type against, and
+        // `conv::view_texture_type` needs it to tell a multisampled 2D texture
+        // from a single-sampled one, which `ImageViewType` cannot say.
+        let source_type = texture.textureType();
+        let Some(view_type) = conv::view_texture_type(desc.view_type, source_type) else {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a {:?} view of a multisampled image is not a view Metal can make: the only \
+                 texture types compatible with a multisampled texture are 2D multisample and 2D \
+                 multisample array",
+                desc.view_type
+            )));
+        };
         let levels = texture.mipmapLevelCount();
         let slices = texture.arrayLength();
         let range = desc.range;
@@ -1630,28 +1648,53 @@ impl Device for MetalDevice {
             ));
         }
 
-        // SAFETY: `objc2` marks this unsafe because Metal does not bounds-check
-        // the two ranges. Both were just clamped to the texture's own
-        // `mipmapLevelCount` and `arrayLength`, read off the texture above, and
-        // both bases were checked to be inside them.
-        let view = unsafe {
-            texture.newTextureViewWithPixelFormat_textureType_levels_slices(
-                conv::pixel_format(desc.format),
-                conv::view_texture_type(desc.view_type),
-                NSRange::new(base_mip, mip_count),
-                NSRange::new(base_layer, layer_count),
-            )
+        // **A view that reinterprets nothing is the texture itself**, the same
+        // answer `Device::insert_drawable_rows` gives for a drawable and for
+        // the same reason: Metal has no separate view object, so a view whose
+        // format, type and ranges all match its texture would be a second
+        // `MTLTexture` object describing exactly what the first one already
+        // does. `wgpu-hal`'s Metal backend short-circuits the identical case
+        // (`create_texture_view` in `wgpu-hal-30.0.0/src/metal/device.rs`),
+        // noting that framebuffer-only textures cannot be aliased at all and
+        // that it also works around Metal bugs with aliased array textures.
+        let view = if desc.format == entry.format
+            && view_type == source_type
+            && base_mip == 0
+            && mip_count == levels
+            && base_layer == 0
+            && layer_count == slices
+        {
+            texture
+        } else {
+            // SAFETY: `objc2` marks this unsafe because Metal does not
+            // bounds-check the two ranges. Both were just clamped to the
+            // texture's own `mipmapLevelCount` and `arrayLength`, read off the
+            // texture above, and both bases were checked to be inside them.
+            let view = unsafe {
+                texture.newTextureViewWithPixelFormat_textureType_levels_slices(
+                    conv::pixel_format(desc.format),
+                    view_type,
+                    NSRange::new(base_mip, mip_count),
+                    NSRange::new(base_layer, layer_count),
+                )
+            };
+            let Some(view) = view else {
+                return Err(HalError::Backend(
+                    "MTLTexture::newTextureViewWithPixelFormat:textureType:levels:slices: \
+                     returned nil"
+                        .to_string(),
+                ));
+            };
+            // Only this branch labels. The other one holds the image's own
+            // texture, and `setLabel:` on it would rename the *image* in every
+            // capture and every Metal diagnostic — a view's debug name is not
+            // worth overwriting its image's. Such a view shows up under the
+            // image's label, which names the same object anyway.
+            if let Some(label) = desc.label {
+                view.setLabel(Some(&NSString::from_str(label)));
+            }
+            view
         };
-        let Some(view) = view else {
-            return Err(HalError::Backend(
-                "MTLTexture::newTextureViewWithPixelFormat:textureType:levels:slices: returned \
-                 nil"
-                .to_string(),
-            ));
-        };
-        if let Some(label) = desc.label {
-            view.setLabel(Some(&NSString::from_str(label)));
-        }
         let handle = state.views.insert(ViewEntry {
             owner: self.inner.id,
             raw: view,
