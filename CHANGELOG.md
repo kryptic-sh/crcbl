@@ -676,6 +676,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_render::OrbitCamera`** — the orbit, pan, zoom and frame-selected
+  controls the model viewer and the stage-8 editor viewport both need, in
+  `crcbl-render` rather than in an app. It takes **deltas, never keys**: nothing
+  in `crcbl_render::orbit` names a key, a button or a modifier, so an editor
+  whose input model is not a sample's can reuse the arithmetic. `orbit` turns
+  the eye about a fixed pivot — a positive yaw swings it toward the camera's own
+  right, the same rotation sense as `apps/lumen`'s `Flyer` — and clamps the
+  elevation to `orbit::PITCH_LIMIT` short of vertical, where `Camera::view`
+  panics on a degenerate basis. `pan` slides the pivot across the view plane in
+  **fractions of the viewport height**, so a drag tracks the pointer at any zoom
+  and on any window size. `zoom` is multiplicative and changes distance, never
+  the field of view, clamped to `orbit::MIN_DISTANCE..=orbit::MAX_DISTANCE` so
+  no amount of it reaches the pivot or runs off to infinity. `frame` fits an
+  `Aabb`'s **bounding sphere against both screen axes** — the horizontal
+  half-angle is `atan(tan(fov_y / 2) · aspect)`, which is the smaller one in a
+  window narrower than it is tall, so fitting by height alone leaves a wide
+  object hanging off both sides — and holds the result at least `near + radius`
+  away, so a point-sized selection is framed in front of the near plane rather
+  than inside it.
+
+  It produces a `Camera`, needs no device, and is perspective-only: `new`
+  refuses an orthographic projection outright, because zoom under one is a
+  change of `half_height` and a controller that accepted it would have a zoom
+  that moved the eye and changed nothing on screen.
+
 - **`crcbl_shaders::bindless_probe`** — the first committed shader in this
   workspace that declares an **array of descriptors**. Until it landed, every
   `Texture2DArray` here was one layered image, no committed SPIR-V declared

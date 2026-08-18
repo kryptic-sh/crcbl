@@ -372,13 +372,10 @@ be built already, which is why the list says what was checked and when:
   converter has no _app_ consumer, since `gltf_e2e` is a test. That is V-F5's
   job (opening a file) rather than a missing bridge.
 
-  Checked at the same time, and genuinely still open: **V-F2** — no orbit camera
-  type exists anywhere in the workspace — and **V-F4** — nothing in `crates/`
-  mentions hot reload.
+  Checked at the same time, and also still open then: **V-F2** — since built, as
+  `crcbl_render::orbit` — and **V-F4**, where nothing in `crates/` mentions hot
+  reload.
 
-- **V-F2 — orbit camera controls.** Orbit, pan, zoom, frame-selected. The plan
-  calls for writing it properly once here because the stage-8 editor reuses it,
-  so it belongs in a crate rather than in the app.
 - **V-F3 — UI for tools, not just a debug overlay.** Node/mesh tree, material
   and texture listing with sizes and triangle counts, a stats panel. Audit what
   `crcbl-ui` already offers before adding widgets.
@@ -395,6 +392,42 @@ Two things the plan settles that are easy to get wrong: the viewer is the one
 sanctioned exception to the server-authoritative rule (it is a tool and
 simulates nothing), and it is exempt from the `.crpix` art rule, because the
 whole point is that it shows _the user's_ asset unadorned.
+
+### What the orbit camera left out
+
+`crcbl_render::orbit` covers orbit, pan, zoom and frame-selected, and stops
+there. What it does not do, and why:
+
+- **No orthographic mode.** `OrbitCamera::new` panics on
+  `Projection::Orthographic` rather than accepting one, because zoom under an
+  orthographic projection is a change of `half_height` and not of distance: a
+  controller that took one would move the eye and change nothing on screen,
+  which is "not supported" arriving as "worked". An editor with a front/side/top
+  view needs this, and the shape is a zoom that scales `half_height` while
+  `frame` fits `radius * FRAME_MARGIN` into it with no distance term at all.
+  Deferred because nothing has an orthographic viewport yet.
+- **No app consumes it.** By design — V-F5 (opening a file) is where the viewer
+  gets both its file and its camera, and wiring a controller to a window with
+  nothing to look at would have been a second slice's decisions taken early.
+  Nothing outside the crate has therefore exercised it against a real pointer.
+- **No sensitivity, damping or inertia.** It takes raw deltas and applies them
+  immediately. Smoothing is a frame-rate-dependent filter over the same deltas
+  and belongs to whatever owns the frame clock, not to the arithmetic;
+  `apps/lumen`'s `Flyer` keeps its own `TURN` constant for the same reason.
+  Considered and declined at this slice.
+- **Pan is in fractions of the viewport height, not metres or pixels.** Chosen
+  so a drag tracks the pointer at any zoom and on any window size — the
+  conversion needs the field of view and the distance, which is exactly the
+  arithmetic that would otherwise be copied into every app. The cost is that a
+  caller holding a world-space delta has to divide by the visible height itself;
+  no caller does yet.
+- **Framing fits the bounding _sphere_, not the box.** A box fit would frame an
+  object at one orbit angle and clip it at the next, since the box's silhouette
+  turns with the camera and the sphere's does not. The price is visible air
+  around a flat object viewed face-on: framing a 10 × 1 × 1 m box in a 16:9
+  window leaves its corners at 0.48 of the frame rather than filling it. A
+  silhouette fit that re-ran on every orbit step would be tighter and is not
+  written.
 
 ### Three copies of the Chromium launch and CDP plumbing
 
