@@ -559,6 +559,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   would take it, because the seam's `Format` has no typeless-family relation and
   a silent reinterpretation is worse than a loud refusal.
 
+- **Push constants work on every backend that has them.** `crcbl-dx12` builds a
+  `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` at the `b` register the committed
+  DXIL puts the block at, and `crcbl-mtl` binds it with `setBytes:` at the
+  argument-table index the committed MSL leaves free. Both report
+  `Features::PUSH_CONSTANTS` and a real `max_push_constant_size` — 256 bytes on
+  D3D12, which is the whole root signature and therefore a ceiling rather than a
+  promise, and 4096 on Metal, which is Apple's published `setBytes` limit and is
+  not shared with anything.
+
+  Neither slot is a number somebody chose. HLSL and MSL have no push constants,
+  so Slang emits the block as an ordinary constant buffer and the compiler
+  numbers it in declaration order — and `crcbl-shaders`' declaration-order lint
+  requires a push constant to be declared **last**. So it always lands after
+  every bound resource, on both targets. WGSL has none at all, which is why the
+  probe shader ships for three targets and not four.
+
 - **`crcbl-webgpu` streams `set_stencil_reference`.** It used to record the call
   as unsupported, which made `finish()` refuse the whole command buffer rather
   than the frame merely coming out wrong.
