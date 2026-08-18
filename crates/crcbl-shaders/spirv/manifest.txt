@@ -116,13 +116,13 @@ entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext, fr
 
 [push_constant_probe]
 source = shaders/push_constant_probe.slang
-source-sha256 = d2219d24609f52b4e43f98cf8d1e5f36e66f72cef36895c54b59ecae74e4d1ee
+source-sha256 = f0fac90dc866f84b7b112e37e8a06273e3621ee6b0e46c382936f42598f5b27d
 targets = spirv, msl, dxil
 spirv = spirv/push_constant_probe.spv
-spirv-sha256 = acc12a04db43de256e2751df57da914094076da393ab2c6114508ae0efb53959
+spirv-sha256 = 58fdf67575c9a0767e85a3579f06df8585bddc243e4a43f8c52424c533e718d1
 msl = msl/push_constant_probe.metal
-msl-sha256 = 911e40ce03d6a61867cfeac597c16aa3b3077b7cb19b1ee76a4f40c883f065fb
-dxil = computeMain:dxil/push_constant_probe.computeMain.dxil:3e8cdfbe6255d4cfa47cfa72a2ddae32d8b251399d807c1551a807c0c4ec1b56
+msl-sha256 = 9165ec1593109bdbcb23603a34308d62da3172d1f56dd5a54cb37b76cda8b31c
+dxil = computeMain:dxil/push_constant_probe.computeMain.dxil:c84ada0087de1ec143b50ab49f102b28d9c44a7f26c9c7ce444ad579d69e7707
 entry-points = computeMain:glcompute
 
 [sprite]

@@ -37,7 +37,40 @@ struct KernelContext_0
         return;
     }
 
-    *((&kernelContext_0)->destination_0+index_0) = (&kernelContext_0)->constants_0->values_0[index_0];
+#line 117
+    switch(index_0)
+    {
+    case 0U:
+        {
+
+#line 120
+            *((&kernelContext_0)->destination_0+index_0) = (&kernelContext_0)->constants_0->values_0.x;
+            break;
+        }
+    case 1U:
+        {
+
+#line 123
+            *((&kernelContext_0)->destination_0+index_0) = (&kernelContext_0)->constants_0->values_0.y;
+            break;
+        }
+    case 2U:
+        {
+
+#line 126
+            *((&kernelContext_0)->destination_0+index_0) = (&kernelContext_0)->constants_0->values_0.z;
+            break;
+        }
+    default:
+        {
+
+#line 129
+            *((&kernelContext_0)->destination_0+index_0) = (&kernelContext_0)->constants_0->values_0.w;
+            break;
+        }
+    }
+
+#line 132
     return;
 }
 

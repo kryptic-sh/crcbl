@@ -97,5 +97,36 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         return;
     }
 
-    destination[index] = constants.values[index];
+    // EACH COMPONENT IS NAMED, RATHER THAN INDEXED BY `index`.
+    //
+    // `constants.values[index]` is valid SPIR-V and reads correctly on
+    // llvmpipe, and it is wrong on real hardware. NIR defines a
+    // `load_push_constant` offset as dynamically uniform, so ACO scalarises a
+    // divergent one: RADV emits `v_readfirstlane_b32` on the byte offset and
+    // every invocation then reads the block at lane 0's index. All four
+    // elements come back holding `values[0]`, on both a discrete Navi31 and an
+    // integrated Raphael.
+    //
+    // That asymmetry is the dangerous part rather than the wrongness: CI's
+    // Vulkan arm is lavapipe, which gets it right, so an indexed read would
+    // have been green on every runner and wrong on every AMD card.
+    //
+    // The switch keeps the `uint4` layout this block is declared with and takes
+    // the divergent index out of the load — the offset each invocation uses is
+    // now a compile-time constant, which is what the rule asks for.
+    switch (index)
+    {
+    case 0:
+        destination[index] = constants.values.x;
+        break;
+    case 1:
+        destination[index] = constants.values.y;
+        break;
+    case 2:
+        destination[index] = constants.values.z;
+        break;
+    default:
+        destination[index] = constants.values.w;
+        break;
+    }
 }
