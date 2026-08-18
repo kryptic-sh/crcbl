@@ -53,6 +53,28 @@ itself.
 demos run on the discrete GPU. Whether Chrome on the Intel UHD survives is the
 cheapest next measurement and needs that machine; nothing in the tree reproduces
 it, and every gate here runs on an RX 7900 XTX or on CI's software adapters.
+Running Chrome with `DRI_PRIME=0` and no `__NV_PRIME_RENDER_OFFLOAD` is the way
+to take it.
+
+**Recovery is the follow-up, and it is what the platform expects.** Reporting a
+loss well still leaves the demo dead. The WebGPU specification treats device
+loss as recoverable and expects an application to respond by requesting a new
+adapter and rebuilding its resources — it is the reason `GPUDevice.lost` is a
+promise carrying a reason rather than a fatal error. So the sequence is: report
+the loss with its cause (in flight), then rebuild on it.
+
+**Note what the engine does not currently choose.** `gpu-replay.js` calls
+`this.#gpu.requestAdapter()` with **no options at all** — no `powerPreference` —
+so the browser picks, and on a hybrid laptop that is typically the discrete GPU.
+This is deliberate as a default and should stay: forcing `'low-power'` would
+move every desktop with a healthy discrete GPU onto its integrated one, which
+trades a real regression everywhere for a workaround on one machine. But it
+means a recovery path has a genuine decision in it — whether a **second**
+`requestAdapter` after a loss should ask for something different from the one
+that just died, or whether retrying the same choice is honest and a repeated
+loss should surface as a permanent failure. Retrying identically risks an
+immediate second loss; asking differently silently changes which GPU renders.
+Worth deciding when recovery is built, not before.
 
 ### The canvas encode is gated for three demos, not six
 
