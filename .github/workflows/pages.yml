@@ -567,6 +567,17 @@ jobs:
       # Named, executed and printed before anything drives it, for the same
       # reason `build` does it: a missing browser must fail here rather than
       # turn the gate below into a step that skips and reports success.
+      #
+      # The ALSA headers first: the comparator is a native build and the
+      # workspace reaches `cpal` through `crcbl-audio`, so it links ALSA. This
+      # job's first CI run failed there rather than on any golden — all eleven
+      # scenes rendered, and then `alsa-sys` could not find its headers.
+      - name: Install the ALSA headers cpal links against
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: libasound2-dev
+
       - name: Check the browser gate's assumptions
         run: |
           set -euo pipefail
