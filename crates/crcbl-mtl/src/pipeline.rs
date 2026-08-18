@@ -346,6 +346,12 @@ impl MetalDevice {
                 desc.color_targets.len()
             )));
         }
+        // The other half of `crcbl_mtl::quirk`'s withheld `Features::DEPTH_CLAMP`,
+        // and the half without which withholding it would be worse than not: a
+        // backend that declares the capability absent and then sets
+        // `MTLDepthClipMode::Clamp` anyway has moved the untruth from the
+        // adapter to the encoder, where nothing observes it.
+        crate::quirk::check_depth_clamp(desc.primitive, self.inner.caps.features)?;
         let samples = check_multisample(&desc.multisample)?;
 
         let descriptor = MTLRenderPipelineDescriptor::new();

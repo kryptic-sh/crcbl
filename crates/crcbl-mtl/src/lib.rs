@@ -123,15 +123,17 @@
 //! rather than linked, because a link to it is unresolvable in exactly the
 //! builds that do not have it, and rustdoc is a CI gate in this workspace.
 //!
-//! **One module is the exception, and only in a test build.** The present
+//! **Two modules are the exception, and only in a test build.** The present
 //! ledger — the count that answers `Device::wait_until_presented`, since Metal
 //! numbers no present — is plain Rust with no Objective-C in it, and it is
 //! compiled off macOS under `cfg(test)` so that `cargo test` on any host runs
-//! its assertions. Nothing it contains is public or reachable from a non-test
-//! build, so the paragraph above still holds for anything a caller can see; the
-//! reason for the exception is that the drawable half of that capability is
-//! covered by no automated test anywhere, and this converts the half that can
-//! be checked into one that is.
+//! its assertions. `crcbl_mtl::quirk` is the other, for the same reason: what a
+//! device does that Metal answers no query for is a decision made from a string,
+//! and a machine with no Metal can still check the decision. Nothing either
+//! contains is public or reachable from a non-test build, so the paragraph above
+//! still holds for anything a caller can see; the reason for the first exception
+//! is that the drawable half of that capability is covered by no automated test
+//! anywhere, and this converts the half that can be checked into one that is.
 //!
 //! No `#[cfg(target_os = …)]` appears *above* the seam as a result of any of
 //! this — `crcbl-hal`'s rule — because the absence is expressed by the crate
@@ -302,6 +304,15 @@
 //! [`INDIRECT_FIRST_INSTANCE`](crcbl_hal::Features::INDIRECT_FIRST_INSTANCE)
 //! with the binding slice's indirect loop. The full list, with a reason against
 //! every flag that is absent, is in this crate's `adapter` module.
+//!
+//! **`DEPTH_CLAMP` carries one exception, and it is the only flag that does.**
+//! A call this crate makes is necessary and it turned out not to be sufficient:
+//! GitHub's `Apple Paravirtual device` accepts `setDepthClipMode:` and discards
+//! the primitive anyway, measured on that device rather than inferred. So the
+//! flag is withheld from a device whose name says it is virtual, and
+//! `create_graphics_pipeline` refuses a descriptor that asks for clamping
+//! without it. `crcbl_mtl::quirk` holds both halves, the evidence, and the
+//! reason a name is what the decision is keyed on.
 
 #[cfg(target_os = "macos")]
 mod adapter;
@@ -326,6 +337,10 @@ mod pipeline;
 // `cargo test` on any host runs the present-wait assertions.
 #[cfg(any(target_os = "macos", test))]
 mod present;
+// The second, and for the same reason: what a device does that Metal answers no
+// query for is decided in plain Rust, so `cargo test` on any host runs it.
+#[cfg(any(target_os = "macos", test))]
+mod quirk;
 #[cfg(target_os = "macos")]
 mod swapchain;
 

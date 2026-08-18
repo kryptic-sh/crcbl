@@ -68,10 +68,11 @@ pub(crate) fn adapter_info(
     device: &ProtocolObject<dyn MTLDevice>,
     driver: String,
 ) -> AdapterInfo {
-    let features = features_of(device);
+    let name = device.name().to_string();
+    let features = features_of(device, &name);
     AdapterInfo {
         id: AdapterId(index),
-        name: device.name().to_string(),
+        name,
         // **Metal exposes no PCI ids, and there is nothing honest to put here.**
         // The seam documents `0` as "unknown" for exactly this case. What Metal
         // offers instead is `registryID`, an IOKit registry entry id — a 64-bit
@@ -111,6 +112,11 @@ pub(crate) fn adapter_info(
 /// question below exactly as the built-in one does, so it enumerates as
 /// [`DeviceType::Integrated`]. Nothing short of matching on the device's name
 /// would separate them, and name-matching is not a capability query.
+///
+/// `crcbl_mtl::quirk` does match on that name, and the two are not in tension:
+/// it withholds one flag a specific device was *measured* to lie about, and says
+/// so; reporting a whole [`DeviceType`] from a string would be a claim about
+/// every device with that name and about nothing anybody checked.
 fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
     let location = device.location();
     if device.isRemovable()
@@ -208,14 +214,20 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   on a driver that has `VK_KHR_present_wait`. The flag therefore means what
 ///   the seam says it means, "the CPU can find out", and not "every swapchain
 ///   on this device will block".
-/// * [`Features::DEPTH_CLAMP`], [`Features::DEPTH_BIAS_CLAMP`] and
-///   [`Features::POLYGON_MODE_LINE`] — all three are unconditional in Metal
-///   and all three are now replayed onto the render encoder by
-///   `bind_graphics_pipeline`: `setDepthClipMode:`,
+/// * [`Features::DEPTH_BIAS_CLAMP`] and [`Features::POLYGON_MODE_LINE`] — both
+///   are unconditional in Metal and both are now replayed onto the render
+///   encoder by `bind_graphics_pipeline`:
 ///   `setDepthBias:slopeScale:clamp:` (whose third argument *is* the clamp) and
 ///   `setTriangleFillMode:`. They are reported because those calls are made,
 ///   which is the same standard `SAMPLER_ANISOTROPY` and `TIMELINE_SEMAPHORE`
 ///   were held to.
+/// * [`Features::DEPTH_CLAMP`] — the same call is made,
+///   `bind_graphics_pipeline`'s `setDepthClipMode:`, and on one device that is
+///   not enough: it accepts the call and clips the primitive regardless. So this
+///   is the one flag here that a *measurement* rather than a query withholds,
+///   from a device whose name says it is virtual, and `crcbl_mtl::quirk` carries
+///   what was measured, on what, and why Metal offers nothing better to key on.
+///   Every other device reports it exactly as before.
 ///
 /// # Absent, with the reason for each
 ///
@@ -274,7 +286,7 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   a backend without the feature.
 /// * [`Features::SHADER_DEBUG_PRINTF`] — `MTLLogState` exists, and nothing
 ///   routes it into `log` yet.
-fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
+fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     let mut out = Features::empty();
     if device.supportsFamily(MTLGPUFamily::Metal3) {
         out |= Features::BUFFER_DEVICE_ADDRESS;
@@ -283,16 +295,21 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
     // No query for any of these: every Metal device has anisotropic sampling,
-    // `MTLSharedEvent`, `pushDebugGroup:`, compute pipelines, depth clamping,
-    // a depth-bias clamp, a line fill mode and a drawable that will call back
-    // once it has been shown — and the slice that calls each one has now
-    // landed. See the doc comment above for which call backs each, and for why
-    // the last is reported for a device whose swapchain may be offscreen.
+    // `MTLSharedEvent`, `pushDebugGroup:`, compute pipelines, a depth-bias
+    // clamp, a line fill mode and a drawable that will call back once it has
+    // been shown — and the slice that calls each one has now landed. See the
+    // doc comment above for which call backs each, and for why the last is
+    // reported for a device whose swapchain may be offscreen.
     out |= Features::SAMPLER_ANISOTROPY;
     out |= Features::TIMELINE_SEMAPHORE;
     out |= Features::DEBUG_MARKERS;
     out |= Features::COMPUTE;
-    out |= Features::DEPTH_CLAMP;
+    // Depth clamping is the one guarantee of that list a device was measured to
+    // break; `crate::quirk` holds the measurement and the reason the name is
+    // what decides it.
+    if crate::quirk::honours_depth_clamp(name) {
+        out |= Features::DEPTH_CLAMP;
+    }
     out |= Features::DEPTH_BIAS_CLAMP;
     out |= Features::POLYGON_MODE_LINE;
     out |= Features::PRESENT_FEEDBACK;

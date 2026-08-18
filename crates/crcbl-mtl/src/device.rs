@@ -1082,9 +1082,16 @@ impl Device for MetalDevice {
                 Features::POLYGON_MODE_LINE,
                 "this device reports no POLYGON_MODE_LINE",
             ),
-            Capability::DepthClamp => {
-                gated(Features::DEPTH_CLAMP, "this device reports no DEPTH_CLAMP")
-            }
+            // The one flag `crate::adapter` withholds from a measurement rather
+            // than a query: a paravirtual GPU accepts `setDepthClipMode:` and
+            // clips the primitive regardless, so `crate::quirk` takes the flag
+            // off that device and `create_graphics_pipeline` refuses the state.
+            Capability::DepthClamp => gated(
+                Features::DEPTH_CLAMP,
+                "this device reports no DEPTH_CLAMP; crcbl_mtl::quirk withholds it from a \
+                 paravirtual GPU, which was measured to accept MTLDepthClipMode::Clamp and clip \
+                 the primitive anyway",
+            ),
             Capability::SamplerAnisotropy => gated(
                 Features::SAMPLER_ANISOTROPY,
                 "this device reports no SAMPLER_ANISOTROPY",
@@ -3289,15 +3296,12 @@ pub(crate) mod tests {
         device.destroy_shader_module(module);
     }
 
-    /// **Whether this device honours `MTLDepthClipMode::Clamp`, and whether a
-    /// depth attachment is what decides it.** A measurement, printed rather
-    /// than asserted — the shape
-    /// `crate::adapter`'s
-    /// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
-    /// already uses for a question this workspace cannot answer from a Linux
-    /// machine.
+    /// **A device that reports [`Features::DEPTH_CLAMP`] has to clamp, and one
+    /// that does not has to be refused.** Half measurement and half assertion,
+    /// because the measurement this started as has been made and its answer is
+    /// now `crate::quirk`.
     ///
-    /// # The question it exists to settle
+    /// # The question it settled
     ///
     /// `crates/crcbl/tests/hal_seam_e2e.rs`'s `exercise_depth_clamp` draws a
     /// triangle past the far plane at `w = 1` with
@@ -3305,39 +3309,46 @@ pub(crate) mod tests {
     /// attachment at all**, so nothing but the clipper can discard it: drawn
     /// means the clamp replaced the clip, background means the primitive was
     /// clipped anyway. It is drawn on Vulkan, on WebGPU and on D3D12's WARP.
-    /// It is *not* drawn on CI's `Apple Paravirtual device`, and the parity
-    /// report there reads "declares it supported, accepted the call and
-    /// changed nothing".
+    /// It was *not* drawn on CI's `Apple Paravirtual device`, and the parity
+    /// report there read "declares it supported, accepted the call and changed
+    /// nothing".
     ///
-    /// Two explanations survive reading the code, and they need opposite
-    /// fixes:
+    /// Two explanations survived reading the code, and they needed opposite
+    /// fixes: either the device ignores `setDepthClipMode:`, or Metal's clip
+    /// mode needs a depth attachment to apply — Metal describes `depthClipMode`
+    /// in terms of *fragments* where Vulkan defines a *primitive* clip, and
+    /// Dawn's Metal backend only ever exercises it against a pass that has one.
+    /// A third, that something in this crate defeats the call, was ruled out by
+    /// reading: `setDepthClipMode:` has exactly one call site
+    /// (`crate::command`'s `bind_graphics_pipeline`), nothing between it and
+    /// `drawPrimitives:` touches encoder state, and `RasterState::clip` has one
+    /// producer.
     ///
-    /// 1. **The device ignores `setDepthClipMode:`.** Then `crate::adapter`'s
-    ///    unconditional [`Features::DEPTH_CLAMP`] is wrong on this device and
-    ///    has to become an answer gated on something the device reports.
-    /// 2. **Metal's clip mode needs a depth attachment to apply.** Then the
-    ///    seam's exercise is asking a question Metal does not answer, and the
-    ///    exercise is what changes — Metal describes `depthClipMode` in terms
-    ///    of *fragments* where Vulkan defines a *primitive* clip, and Dawn's
-    ///    Metal backend only ever exercises it against a pass that has one.
+    /// **The two printed lines separate them, because the passes behind them
+    /// differ in the depth attachment and in nothing else** — same MSL but for
+    /// its Z literal, same [`CANVAS`], same clear, same submission, same
+    /// readback. On that runner both came back `false` with every control
+    /// passing, which is the first explanation and kills the second.
     ///
-    /// A third — that something in this crate defeats the call — is ruled out
-    /// by reading rather than by this test: `setDepthClipMode:` has exactly one
-    /// call site (`crate::command`'s `bind_graphics_pipeline`), nothing between
-    /// it and `drawPrimitives:` touches encoder state, and `RasterState::clip`
-    /// has one producer.
+    /// # So what it does now, and it is different on the two kinds of device
     ///
-    /// **The two printed lines separate 1 from 2, because the passes behind
-    /// them differ in the depth attachment and in nothing else** — same MSL but
-    /// for its Z literal, same [`CANVAS`], same clear, same submission, same
-    /// readback. `false, false` is explanation 1; `false, true` is explanation
-    /// 2.
+    /// * **The flag is reported** — every Metal GPU that is not the one above.
+    ///   The two lines are printed exactly as they were, and a `false` on
+    ///   either is a second device needing the same treatment rather than a
+    ///   settled question re-opening.
+    /// * **The flag is withheld** — the paravirtual runner, by
+    ///   `crate::quirk`. Then both clamped pipelines must come back
+    ///   [`HalError::Unsupported`], and that assertion is the half of the parity
+    ///   contract the withholding would otherwise break: a backend that takes
+    ///   the flag off and encodes the clip mode anyway has moved the untruth
+    ///   from the adapter to the encoder rather than fixed it.
     ///
     /// # What it fails on
     ///
     /// A printed measurement whose fixture is broken is a green light wired to
     /// nothing, so both halves of the comparison are backed by controls that
-    /// assert, once with a depth attachment and once without:
+    /// assert, once with a depth attachment and once without. They ask for no
+    /// clamp at all, so they run on both kinds of device:
     ///
     /// * a triangle **inside** the clip volume must be drawn, or the pass, the
     ///   pipeline or the readback is what is being measured rather than the
@@ -3349,7 +3360,7 @@ pub(crate) mod tests {
     /// A centre texel that is neither colour fails on the spot rather than
     /// being folded into "not drawn".
     ///
-    /// The controls run **after** the two measurements are printed, on purpose:
+    /// The controls run **after** the measurement is printed, on purpose:
     /// a device that cannot render the depth-attached control at all is a
     /// finding of its own, and it should not also cost this run the two lines it
     /// came for.
@@ -3372,15 +3383,19 @@ pub(crate) mod tests {
         // Whether the centre of the canvas came back the triangle's colour,
         // for one triangle at `depth` under one clip mode and one attachment
         // set. Everything else about the draw is held fixed.
-        let drew = |depth: f32, clamp: bool, attachment: Option<Format>| -> bool {
-            let msl = ink_msl_at(depth);
-            let module = device
-                .create_shader_module(&msl_module(&msl, "crcbl-mtl depth clip.metal"))
-                .expect("a shader with no bindings compiles");
-            let layout = empty_layout(&device);
-            let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
-            let pipeline = device
-                .create_graphics_pipeline(&GraphicsPipelineDesc {
+        //
+        // The pipeline's refusal is handed back rather than unwrapped, because
+        // on a device `crate::quirk` withheld the flag from it is the answer
+        // this test came for and not a failure to build a fixture.
+        let drew =
+            |depth: f32, clamp: bool, attachment: Option<Format>| -> Result<bool, HalError> {
+                let msl = ink_msl_at(depth);
+                let module = device
+                    .create_shader_module(&msl_module(&msl, "crcbl-mtl depth clip.metal"))
+                    .expect("a shader with no bindings compiles");
+                let layout = empty_layout(&device);
+                let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+                let built = device.create_graphics_pipeline(&GraphicsPipelineDesc {
                     label: Some("crcbl-mtl depth clip"),
                     layout,
                     vertex: ShaderEntry {
@@ -3407,70 +3422,101 @@ pub(crate) mod tests {
                     }),
                     multisample: MultisampleState::default(),
                     color_targets: &targets,
-                })
-                .expect("a pipeline over an Rgba8Unorm target");
+                });
+                let pipeline = match built {
+                    Ok(pipeline) => pipeline,
+                    Err(error) => {
+                        device.destroy_pipeline_layout(layout);
+                        device.destroy_shader_module(module);
+                        return Err(error);
+                    }
+                };
 
-            let bytes = draw_canvas_over(&device, Format::Rgba8Unorm, attachment, |encoder| {
-                encoder.bind_graphics_pipeline(pipeline);
-                encoder.draw(0..3, 0..1);
-            });
+                let bytes = draw_canvas_over(&device, Format::Rgba8Unorm, attachment, |encoder| {
+                    encoder.bind_graphics_pipeline(pipeline);
+                    encoder.draw(0..3, 0..1);
+                });
 
-            device.destroy_graphics_pipeline(pipeline);
-            device.destroy_pipeline_layout(layout);
-            device.destroy_shader_module(module);
+                device.destroy_graphics_pipeline(pipeline);
+                device.destroy_pipeline_layout(layout);
+                device.destroy_shader_module(module);
 
-            let centre = texel_at(&bytes, CANVAS.width / 2, CANVAS.height / 2);
-            assert!(
-                centre == INK_TEXEL || centre == CLEAR_TEXEL,
-                "the centre of the canvas is {centre:02X?}, which is neither the triangle's \
+                let centre = texel_at(&bytes, CANVAS.width / 2, CANVAS.height / 2);
+                assert!(
+                    centre == INK_TEXEL || centre == CLEAR_TEXEL,
+                    "the centre of the canvas is {centre:02X?}, which is neither the triangle's \
                  colour nor the clear's, so this pass did not run the way the controls assume"
-            );
-            centre == INK_TEXEL
-        };
+                );
+                Ok(centre == INK_TEXEL)
+            };
 
         // The measurement runs and is printed **before** the controls, so a
         // control that fails on this device leaves the two numbers on the log
         // rather than taking them down with it.
-        let colour_only = drew(BEYOND_FAR, true, None);
-        let with_depth = drew(BEYOND_FAR, true, Some(Format::D32Float));
-        println!(
-            "crcbl-mtl depth clip: Clamp at z={BEYOND_FAR}, no depth attachment, drew = \
-             {colour_only}"
-        );
-        println!(
-            "crcbl-mtl depth clip: Clamp at z={BEYOND_FAR}, D32Float depth attachment, drew = \
-             {with_depth}"
-        );
+        if device.caps().features.contains(Features::DEPTH_CLAMP) {
+            let colour_only = drew(BEYOND_FAR, true, None)
+                .expect("a device reporting DEPTH_CLAMP builds a clamped pipeline");
+            let with_depth = drew(BEYOND_FAR, true, Some(Format::D32Float))
+                .expect("a device reporting DEPTH_CLAMP builds a clamped pipeline");
+            println!(
+                "crcbl-mtl depth clip: Clamp at z={BEYOND_FAR}, no depth attachment, drew = \
+                 {colour_only}"
+            );
+            println!(
+                "crcbl-mtl depth clip: Clamp at z={BEYOND_FAR}, D32Float depth attachment, drew = \
+                 {with_depth}"
+            );
+            println!(
+                "crcbl-mtl depth clip: this device {}",
+                match (colour_only, with_depth) {
+                    (true, true) => "honours MTLDepthClipMode::Clamp",
+                    (false, true) =>
+                        "honours MTLDepthClipMode::Clamp only when the pass has a \
+                                      depth attachment",
+                    (false, false) => "ignores MTLDepthClipMode::Clamp entirely",
+                    (true, false) =>
+                        "clamped without an attachment and not with one, which neither \
+                                      explanation predicts",
+                }
+            );
+        } else {
+            // `crate::quirk` took the flag off, so the backend owes a refusal
+            // rather than a clip mode — the half that makes the withholding
+            // honest instead of merely quieter.
+            for attachment in [None, Some(Format::D32Float)] {
+                let error = drew(BEYOND_FAR, true, attachment)
+                    .expect_err("a device without DEPTH_CLAMP must refuse a clamped pipeline");
+                assert!(
+                    matches!(
+                        error,
+                        HalError::Unsupported { backend, .. } if backend == BackendKind::Metal
+                    ),
+                    "the clamped pipeline was refused with {error} and attachment \
+                     {attachment:?}, which is not the HalError::Unsupported a caller branches on \
+                     to take the fallback"
+                );
+            }
+            println!(
+                "crcbl-mtl depth clip: this device reports no DEPTH_CLAMP — crcbl_mtl::quirk \
+                 withholds it — and refused both clamped pipelines"
+            );
+        }
 
         for attachment in [None, Some(Format::D32Float)] {
             assert!(
-                drew(INSIDE, false, attachment),
+                drew(INSIDE, false, attachment)
+                    .expect("a pipeline that asks for no clamp needs no feature"),
                 "a triangle at z={INSIDE} was not drawn with attachment {attachment:?}, so this \
                  fixture reports nothing about any clip mode"
             );
             assert!(
-                !drew(BEYOND_FAR, false, attachment),
+                !drew(BEYOND_FAR, false, attachment)
+                    .expect("a pipeline that asks for no clamp needs no feature"),
                 "a triangle at z={BEYOND_FAR} survived MTLDepthClipMode::Clip with attachment \
                  {attachment:?}, so this device clips nothing and \"it was clipped\" is not a \
                  reading the lines above could report"
             );
         }
-
-        println!(
-            "crcbl-mtl depth clip: this device {}",
-            match (colour_only, with_depth) {
-                (true, true) =>
-                    "honours MTLDepthClipMode::Clamp, so the seam's failure is \
-                                 neither of the two explanations",
-                (false, true) =>
-                    "honours MTLDepthClipMode::Clamp only when the pass has a \
-                                  depth attachment",
-                (false, false) => "ignores MTLDepthClipMode::Clamp entirely",
-                (true, false) =>
-                    "clamped without an attachment and not with one, which neither \
-                                  explanation predicts",
-            }
-        );
     }
 
     /// **The engine's own `triangle.slang` artifact, compiled by a real Metal
