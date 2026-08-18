@@ -57,8 +57,8 @@ why it has drifted.
 
 **The measurement that sizes the problem, re-taken 2026-08-18.** The mechanism
 below is built, so the count is now exact rather than approximate:
-`Capability::ALL` is **25** variants and `DIVERGENCES` holds **56** reviewed
-rows — dx12 15, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
+`Capability::ALL` is **25** variants and `DIVERGENCES` holds **55** reviewed
+rows — dx12 14, WebGPU 18, wgpu 13, Metal 10, Vulkan 0. (The earlier framing,
 "28 declared `Features` bits and roughly 96 refusal sites", said the same thing
 less precisely and is superseded.)
 
@@ -74,7 +74,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Twenty-eight blockers: dx12 15, Metal 9, WebGPU 4.** That is what stands
+**Twenty-seven blockers: dx12 14, Metal 9, WebGPU 4.** That is what stands
 between here and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -804,7 +804,7 @@ hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
 
 ### dx12's remaining blockers, ordered — and two reasons that were wrong
 
-dx12 owns 15 of the 28 parity blockers and none is an API absence. Planned
+dx12 owns 14 of the 27 parity blockers and none is an API absence. Planned
 2026-08-18 against the `windows` 0.62.2 bindings and `wgpu-hal`'s dx12 backend
 on disk. **Two of the divergence list's own stated reasons did not survive
 reading the code**, and both change what the work is:
@@ -830,13 +830,10 @@ need it.
 
 **The order, and why:**
 
-1. **Depth copy** (`DepthImageCopy`). Smallest, lowest risk, and the only slice
-   where two existing tests flip from silence to real assertions on WARP —
-   including `forward_e2e/shadow.rs`, which today returns without asserting
-   anything on dx12 and would instead read the shadow atlas back. The format
-   table already has three depth columns; this adds a fourth for the copy
-   footprint. `D24UnormS8Uint` stays refused by name — the same absence WebGPU
-   has, and `wgpu-hal` encodes it as `None` too.
+1. ~~Depth copy~~ — **landed.** It also found a real defect nothing else would
+   have: the row pitch came from the format's block size rather than the plane's
+   texel size, so every copy of a multi-plane depth format read the buffer at
+   the wrong stride.
 2. **Sync** (`TimelineSemaphore`, `BinarySemaphore`, `CpuTimelineWait`,
    `TimelineWaitBeforeSignal`). Four rows for one body of work; half flip the
    existing `exercise_timeline`. `ID3D12Fence` has all three methods and
@@ -1018,7 +1015,7 @@ and a render-graph frame is passes end to end. That survives on every backend.
 **A middle position, named explicitly:** take the zero-buffer route for
 `BufferFillZero` — cheap, and it matches what the capability's own doc says the
 fill is _for_ — and leave the other two `Declined` with the reason corrected.
-That is 15 blockers to 14 for about thirty lines.
+That is 14 blockers to 13 for about thirty lines.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
