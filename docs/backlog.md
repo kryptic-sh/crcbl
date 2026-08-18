@@ -1292,6 +1292,38 @@ The alternative — a self-hosted runner with a real GPU — would close it prop
 and is the same class of decision as the hardware macOS runner the Metal rows
 want. Worth pricing the two together if either is ever taken.
 
+### The seam does not say when a bind-group update is legal, and backends differ
+
+Found while driving `UpdateBindGroup`. Two gaps, and the second is the sharper
+one.
+
+**1. Mid-recording timing is unstated, and the backends would not agree.**
+`Device::update_bind_group` covers the _pending_ case — a rewrite while command
+buffers referencing the group are still in flight — and says nothing about a
+rewrite while a command buffer that binds the group is still **recording**.
+`crcbl-dx12` writes descriptors straight into the shader-visible heap a recorded
+bind already points at, so the change lands. `crcbl-mtl` copies the values onto
+the encoder at `bind_group`, and its own docs say an update "does not reach a
+command buffer that already bound the group". Those are opposite answers to a
+question the seam never asks, so that timing **cannot be exercised portably
+until the seam picks one**. The exercise drives the timing every backend agrees
+on — between two submitted-and-waited command buffers.
+
+**2. Two backends accept a rewrite the seam documents as refused.**
+`Device::update_bind_group` documents `HalError::Unsupported` for a layout
+without `UPDATE_AFTER_BIND`. `crcbl-mtl` and `crcbl-dx12` accept it. On Metal
+that is the **only kind of layout there is** — it withdraws
+`DESCRIPTOR_INDEXING` because its bind groups are flat argument tables — so
+enforcing the documented rule there would make Metal's `Support::Yes` describe a
+call that can never succeed. Either the doc is wrong about which backends the
+rule binds, or Metal's declaration is. Worth settling before anyone writes a
+caller that branches on it.
+
+**Also noted:** `crcbl-vk`'s own update test claims to cover "the one call the
+seam permits while command buffers referencing the group are still pending". It
+does not — it waits idle first, exactly as the new agnostic exercise does. So
+the pending case this capability is defined around is driven by nothing at all.
+
 ### DECISION NEEDED — what "parity holds" has to mean before `crcbl-wgpu` goes
 
 The stated order is: reach parity, then delete `crcbl-wgpu`. Goal 2 is done and
