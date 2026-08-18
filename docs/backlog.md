@@ -3,6 +3,28 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### `render_e2e` never runs against dx12's own e2e job, and that hid a step
+
+Found while trying to reproduce the WARP device removal. The
+`dx12 e2e (software adapter)` job runs
+`crates/crcbl-dx12/tests/run-dx12-e2e.sh`, which is
+`cargo nextest run --package crcbl-dx12` — so the crate's own suite — and then a
+_separate later step_, "Draw a frame through ForwardRenderer on WARP", runs
+`run-render-e2e.sh` with `CRCBL_GPU=dx12`. The `render_e2e` tests are
+`#[ignore]`d and appear as SKIP in every other job, including
+`build + test (windows-latest)`, so a reader scanning that job's 3993 passing
+tests would conclude the renderer is covered on Windows. It is not; only that
+one step covers it.
+
+The consequence to remember: **a failure in the crate suite stops the job before
+the renderer step runs at all.** The first diagnostic attempt hit exactly that
+and produced no evidence. Any future "did the renderer break on WARP?" question
+has to check that the step actually executed rather than that the job went red.
+
+Not a defect to fix so much as a shape to know. If it is ever worth changing,
+the options are to run the render step first, or to give it its own job so the
+two failures cannot mask each other.
+
 ### `crcbl-phys`'s BVH folds AABBs the way the NaN bug did
 
 The same defect as `Aabb::from_points` and `meshlet::cluster_bounds`, in the one
@@ -2130,42 +2152,42 @@ rather than a matter of taste.** Its six rows split three ways, all measured:
 | `BindlessDescriptorArray`                   | writable — Metal's argument buffers do carry resource arrays; this backend binds flat tables |
 | `DrawIndirectCount`                         | writable, and now fully de-risked — the device creates _and executes_ ICBs                   |
 
-**`BindlessDescriptorArray` is expressible in Slang, and the way it is expressed
-is the whole finding.** `shaders/bindless_probe.slang` declares its array as
+**`BindlessDescriptorArray` on Metal: measured, and the answer moved twice.**
+`shaders/bindless_probe.slang` declares its array as
 `StructuredBuffer<uint> sources[] : register(t0, space0)`, and that annotation —
-load-bearing for the DXIL space assignment — is what makes the Metal target
-useless. `slangc -target metal` on it **exits 0** and emits
+load-bearing for the DXIL space assignment — makes `slangc -target metal` exit
+**0** while emitting a binding index of `18446744073709551615`, which is
+`(uint64)-1`, and an entry-point parameter with no attribute at all. Recast as a
+`ParameterBlock<Sources>` the same compiler emits a real argument buffer.
 
-    [[kernel]] void computeMain(..., uint device* destination_1 [[buffer(18446744073709551615)]], uint device*  sources_1[])
+**But an unbounded array still does not compile**, and CI is what said so. The
+probe in `crcbl_mtl::binding` ran on the `Apple Paravirtual device` and Metal's
+own front end refused it:
 
-`18446744073709551615` is `(uint64)-1`: an unassigned binding. `sources_1[]` is
-an entry-point parameter with no attribute at all. Neither can compile. Recast
-as a `ParameterBlock<Sources>` holding the array, the same compiler emits a real
-argument buffer —
+```text
+program_source:7:19: error: flexible array members are a C99 feature
+```
 
-    [[kernel]] void computeMain(..., uint device* destination_1 [[buffer(1)]], Sources_default_0 constant* sources_1 [[buffer(0)]])
+`StructuredBuffer<uint> items[]` lowers to `uint device* items_0[]`, a C99
+flexible array member, which MSL does not define. **A fixed length lowers to
+`array<uint device*, int(64)>`** — an ordinary `metal::array` of device pointers
+— and the probe now asks about that instead. Nothing is given up by bounding it:
+a bindless table is a capacity declared once with a count chosen per bind, which
+is how Vulkan's `VARIABLE_DESCRIPTOR_COUNT` and D3D12's heap-bounded arrays are
+used too. Whether Metal accepts the bounded form, and whether `gpuAddress` works
+on the paravirtual device, is what the next `mtl e2e` run answers.
 
-— and still emits SPIR-V. So the row is blocked by the shader's HLSL-register
-formulation, not by Slang's Metal target. What is still unknown is whether Metal
-accepts `struct Sources_default_0 { uint device* items_0[]; }` — a flexible
-array member inside an argument buffer — which only a Mac can answer; a probe is
-being written to ask it.
+**The reusable lesson is the exit code, and this is the third instance.**
+`slangc -target metal` has now silently dropped an ICB parameter, emitted a `-1`
+binding index, and emitted a flexible array member no Metal compiler accepts —
+each at exit 0. A zero exit from that target is not evidence the shader is
+usable; read the artifact or ask a device.
 
-**The reusable lesson is the exit code.** This is the second place Slang's Metal
-target has failed by emitting plausible garbage rather than diagnosing: the ICB
-parameter is silently dropped, and here a binding index comes out as `-1`. A
-zero exit from `slangc -target metal` is not evidence the shader is usable, so
-any new Metal target declaration needs its artifact read or a device asked.
-
-**Recasting is not free, and that is the next decision.** `ParameterBlock` maps
-to a descriptor set in SPIR-V and a space in HLSL, so rewriting
-`bindless_probe.slang` changes the committed SPIR-V and DXIL, and with them the
-bind-group layouts `crcbl-vk` and `crcbl-dx12` already pass. The alternatives
-are a second Metal-only source (duplication, and two files to drift) or leaving
-the vk/dx12 formulation alone and accepting that this one shader has no Metal
-artifact. Do not choose until the probe says Metal takes the argument buffer at
-all — recasting a working shader to reach a path the device may refuse is the
-wrong order.
+**Recasting the shared shader is still not done, and should not be until the
+bounded probe passes.** `ParameterBlock` maps to a descriptor set in SPIR-V and
+a space in HLSL, so rewriting `bindless_probe.slang` moves bind-group layouts
+`crcbl-vk` and `crcbl-dx12` already pass. The alternatives are a Metal-only
+second source or leaving that shader with no Metal artifact.
 
 So **four of six can never go green on the hardware this project has**, whatever
 anyone writes. "Metal fully closed" is not reachable by working harder; it is
