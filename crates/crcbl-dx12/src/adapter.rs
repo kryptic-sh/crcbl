@@ -604,10 +604,6 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   `QueueFamily`. The device slice creates only the direct queue, because a
 ///   queue handed out for a feature that is not reported is this rule in
 ///   reverse; the slice that has work to put on a second queue reports it.
-/// * [`Features::DEPTH_CLAMP`], [`Features::DEPTH_BIAS_CLAMP`] and
-///   [`Features::POLYGON_MODE_LINE`] — all three are fields of
-///   `D3D12_RASTERIZER_DESC`, which is part of a pipeline state object. The
-///   pipeline slice fills it in.
 /// * [`Features::SHADER_DEBUG_PRINTF`] — the debug layer's GPU-based validation
 ///   is the closest thing, and nothing routes it into `log` yet.
 fn features_of(raw: &RawCaps) -> Features {
@@ -625,7 +621,19 @@ fn features_of(raw: &RawCaps) -> Features {
     // the frame-latency waitable object predates D3D12 itself, `CreateFence` is
     // on every D3D12 device there is, and so are the three query heap types a
     // DIRECT queue takes. See above.
+    //
+    // The three rasteriser flags are here because CI caught them missing: the
+    // seam suite drew a wireframe and a primitive past the far plane on WARP,
+    // both worked, and the report said this backend "declares it unsupported
+    // and then performed it". They had been withheld on the grounds that
+    // `D3D12_RASTERIZER_DESC` is filled in by the pipeline slice — which landed,
+    // taking the reason with it. `FillMode`, `DepthClipEnable` and
+    // `DepthBiasClamp` are plain fields of that struct with no capability bit
+    // behind them, so on D3D12 there is nothing to query and nothing to gate.
     out |= Features::BUFFER_DEVICE_ADDRESS
+        | Features::DEPTH_CLAMP
+        | Features::DEPTH_BIAS_CLAMP
+        | Features::POLYGON_MODE_LINE
         | Features::SAMPLER_ANISOTROPY
         | Features::COMPUTE
         | Features::DRAW_INDIRECT_COUNT
