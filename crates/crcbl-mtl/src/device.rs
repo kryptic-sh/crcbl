@@ -2491,9 +2491,10 @@ pub(crate) mod tests {
     use objc2_metal::MTLHazardTrackingMode;
 
     use crate::instance::tests::{desc as device_desc, open as open_instance};
-    // Only the hardware suite draws, and only a draw sets a viewport.
+    // Only the hardware suite draws, and only a draw sets a viewport, carries a
+    // depth attachment or names a comparison for one.
     #[cfg(feature = "mtl-e2e")]
-    use crcbl_hal::Viewport;
+    use crcbl_hal::{CompareOp, DepthBias, DepthStencilAttachment, Viewport};
 
     /// Every [`MemoryLocation`] the seam has, so the buffer tests cover all
     /// three rather than the one that was convenient.
@@ -3033,6 +3034,19 @@ pub(crate) mod tests {
     /// the shader returns and the colour the assertions expect cannot drift
     /// apart.
     fn ink_msl() -> String {
+        ink_msl_at(0.0)
+    }
+
+    /// [`ink_msl`]'s triangle at an arbitrary clip-space depth.
+    ///
+    /// `w` stays at 1.0, so `depth` *is* the post-divide depth and a value
+    /// outside `0..=1` puts the primitive outside the clip volume in Z and
+    /// nowhere else — which is the only thing
+    /// [`a_device_says_whether_it_clamps_depth_without_a_depth_attachment`]
+    /// varies. The fragment stage still writes nothing but colour: a shader
+    /// that declared `[[depth]]` would change what Metal's clip mode applies
+    /// to, and that is a different question from this one.
+    fn ink_msl_at(depth: f32) -> String {
         format!(
             "#include <metal_stdlib>\n\
              using namespace metal;\n\
@@ -3041,7 +3055,7 @@ pub(crate) mod tests {
                  const float2 corners[3] = {{ float2(0.0, 0.8), float2(-0.8, -0.8), \
                      float2(0.8, -0.8) }};\n\
                  VertexOutput out;\n\
-                 out.position = float4(corners[index], 0.0, 1.0);\n\
+                 out.position = float4(corners[index], {depth:?}, 1.0);\n\
                  return out;\n\
              }}\n\
              [[fragment]] float4 fragmentMain() {{\n\
@@ -3273,6 +3287,190 @@ pub(crate) mod tests {
         device.destroy_graphics_pipeline(pipeline);
         device.destroy_pipeline_layout(layout);
         device.destroy_shader_module(module);
+    }
+
+    /// **Whether this device honours `MTLDepthClipMode::Clamp`, and whether a
+    /// depth attachment is what decides it.** A measurement, printed rather
+    /// than asserted — the shape
+    /// `crate::adapter`'s
+    /// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
+    /// already uses for a question this workspace cannot answer from a Linux
+    /// machine.
+    ///
+    /// # The question it exists to settle
+    ///
+    /// `crates/crcbl/tests/hal_seam_e2e.rs`'s `exercise_depth_clamp` draws a
+    /// triangle past the far plane at `w = 1` with
+    /// [`PrimitiveState::depth_clamp`] set, into a pass carrying **no depth
+    /// attachment at all**, so nothing but the clipper can discard it: drawn
+    /// means the clamp replaced the clip, background means the primitive was
+    /// clipped anyway. It is drawn on Vulkan, on WebGPU and on D3D12's WARP.
+    /// It is *not* drawn on CI's `Apple Paravirtual device`, and the parity
+    /// report there reads "declares it supported, accepted the call and
+    /// changed nothing".
+    ///
+    /// Two explanations survive reading the code, and they need opposite
+    /// fixes:
+    ///
+    /// 1. **The device ignores `setDepthClipMode:`.** Then `crate::adapter`'s
+    ///    unconditional [`Features::DEPTH_CLAMP`] is wrong on this device and
+    ///    has to become an answer gated on something the device reports.
+    /// 2. **Metal's clip mode needs a depth attachment to apply.** Then the
+    ///    seam's exercise is asking a question Metal does not answer, and the
+    ///    exercise is what changes — Metal describes `depthClipMode` in terms
+    ///    of *fragments* where Vulkan defines a *primitive* clip, and Dawn's
+    ///    Metal backend only ever exercises it against a pass that has one.
+    ///
+    /// A third — that something in this crate defeats the call — is ruled out
+    /// by reading rather than by this test: `setDepthClipMode:` has exactly one
+    /// call site (`crate::command`'s `bind_graphics_pipeline`), nothing between
+    /// it and `drawPrimitives:` touches encoder state, and `RasterState::clip`
+    /// has one producer.
+    ///
+    /// **The two printed lines separate 1 from 2, because the passes behind
+    /// them differ in the depth attachment and in nothing else** — same MSL but
+    /// for its Z literal, same [`CANVAS`], same clear, same submission, same
+    /// readback. `false, false` is explanation 1; `false, true` is explanation
+    /// 2.
+    ///
+    /// # What it fails on
+    ///
+    /// A printed measurement whose fixture is broken is a green light wired to
+    /// nothing, so both halves of the comparison are backed by controls that
+    /// assert, once with a depth attachment and once without:
+    ///
+    /// * a triangle **inside** the clip volume must be drawn, or the pass, the
+    ///   pipeline or the readback is what is being measured rather than the
+    ///   clip mode;
+    /// * the same triangle past the far plane under `MTLDepthClipMode::Clip`
+    ///   must **not** be drawn, or this device clips nothing and "it was
+    ///   clipped" is not a reading either printed line could report.
+    ///
+    /// A centre texel that is neither colour fails on the spot rather than
+    /// being folded into "not drawn".
+    ///
+    /// The controls run **after** the two measurements are printed, on purpose:
+    /// a device that cannot render the depth-attached control at all is a
+    /// finding of its own, and it should not also cost this run the two lines it
+    /// came for.
+    ///
+    /// nextest captures a passing test's stdout, so read this with
+    /// `--success-output immediate`, which is what `tests/run-mtl-e2e.sh`
+    /// passes.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_device_says_whether_it_clamps_depth_without_a_depth_attachment() {
+        /// Past the far plane at `w = 1`, the depth `hal_seam_e2e.rs` draws its
+        /// own clamp triangle at.
+        const BEYOND_FAR: f32 = 1.5;
+        /// A depth inside the clip volume, for the control that must be drawn.
+        const INSIDE: f32 = 0.5;
+
+        let (_instance, device) = open_device();
+
+        // Whether the centre of the canvas came back the triangle's colour,
+        // for one triangle at `depth` under one clip mode and one attachment
+        // set. Everything else about the draw is held fixed.
+        let drew = |depth: f32, clamp: bool, attachment: Option<Format>| -> bool {
+            let msl = ink_msl_at(depth);
+            let module = device
+                .create_shader_module(&msl_module(&msl, "crcbl-mtl depth clip.metal"))
+                .expect("a shader with no bindings compiles");
+            let layout = empty_layout(&device);
+            let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+            let pipeline = device
+                .create_graphics_pipeline(&GraphicsPipelineDesc {
+                    label: Some("crcbl-mtl depth clip"),
+                    layout,
+                    vertex: ShaderEntry {
+                        module,
+                        entry_point: "vertexMain",
+                    },
+                    fragment: Some(ShaderEntry {
+                        module,
+                        entry_point: "fragmentMain",
+                    }),
+                    primitive: PrimitiveState {
+                        depth_clamp: clamp,
+                        ..PrimitiveState::default()
+                    },
+                    // Always, and no writes: the depth attachment is here to
+                    // exist, not to test anything, so it cannot become the
+                    // reason a fragment vanished.
+                    depth_stencil: attachment.map(|format| DepthStencilState {
+                        format,
+                        depth_write: false,
+                        depth_compare: CompareOp::Always,
+                        stencil: None,
+                        bias: DepthBias::default(),
+                    }),
+                    multisample: MultisampleState::default(),
+                    color_targets: &targets,
+                })
+                .expect("a pipeline over an Rgba8Unorm target");
+
+            let bytes = draw_canvas_over(&device, Format::Rgba8Unorm, attachment, |encoder| {
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.draw(0..3, 0..1);
+            });
+
+            device.destroy_graphics_pipeline(pipeline);
+            device.destroy_pipeline_layout(layout);
+            device.destroy_shader_module(module);
+
+            let centre = texel_at(&bytes, CANVAS.width / 2, CANVAS.height / 2);
+            assert!(
+                centre == INK_TEXEL || centre == CLEAR_TEXEL,
+                "the centre of the canvas is {centre:02X?}, which is neither the triangle's \
+                 colour nor the clear's, so this pass did not run the way the controls assume"
+            );
+            centre == INK_TEXEL
+        };
+
+        // The measurement runs and is printed **before** the controls, so a
+        // control that fails on this device leaves the two numbers on the log
+        // rather than taking them down with it.
+        let colour_only = drew(BEYOND_FAR, true, None);
+        let with_depth = drew(BEYOND_FAR, true, Some(Format::D32Float));
+        println!(
+            "crcbl-mtl depth clip: Clamp at z={BEYOND_FAR}, no depth attachment, drew = \
+             {colour_only}"
+        );
+        println!(
+            "crcbl-mtl depth clip: Clamp at z={BEYOND_FAR}, D32Float depth attachment, drew = \
+             {with_depth}"
+        );
+
+        for attachment in [None, Some(Format::D32Float)] {
+            assert!(
+                drew(INSIDE, false, attachment),
+                "a triangle at z={INSIDE} was not drawn with attachment {attachment:?}, so this \
+                 fixture reports nothing about any clip mode"
+            );
+            assert!(
+                !drew(BEYOND_FAR, false, attachment),
+                "a triangle at z={BEYOND_FAR} survived MTLDepthClipMode::Clip with attachment \
+                 {attachment:?}, so this device clips nothing and \"it was clipped\" is not a \
+                 reading the lines above could report"
+            );
+        }
+
+        println!(
+            "crcbl-mtl depth clip: this device {}",
+            match (colour_only, with_depth) {
+                (true, true) =>
+                    "honours MTLDepthClipMode::Clamp, so the seam's failure is \
+                                 neither of the two explanations",
+                (false, true) =>
+                    "honours MTLDepthClipMode::Clamp only when the pass has a \
+                                  depth attachment",
+                (false, false) => "ignores MTLDepthClipMode::Clamp entirely",
+                (true, false) =>
+                    "clamped without an attachment and not with one, which neither \
+                                  explanation predicts",
+            }
+        );
     }
 
     /// **The engine's own `triangle.slang` artifact, compiled by a real Metal
@@ -5537,6 +5735,47 @@ using namespace metal;\n\
         format: Format,
         paint: impl FnOnce(&mut dyn CommandEncoder),
     ) -> Vec<u8> {
+        draw_canvas_over(device, format, None, paint)
+    }
+
+    /// [`draw_canvas`], with `depth` deciding whether the pass carries a
+    /// depth attachment of that format as well as the colour one.
+    ///
+    /// The two exist as one function because the depth attachment is the
+    /// **only** difference between the halves of
+    /// [`a_device_says_whether_it_clamps_depth_without_a_depth_attachment`]'s
+    /// comparison: same canvas, same clear, same submission and same readback,
+    /// so a difference in what comes back is a difference the attachment made.
+    #[cfg(feature = "mtl-e2e")]
+    fn draw_canvas_over(
+        device: &MetalDevice,
+        format: Format,
+        depth: Option<Format>,
+        paint: impl FnOnce(&mut dyn CommandEncoder),
+    ) -> Vec<u8> {
+        let depth_target = depth.map(|depth_format| {
+            let image = device
+                .create_image(&ImageDesc {
+                    label: Some("crcbl-mtl canvas depth"),
+                    image_type: ImageType::D2,
+                    extent: CANVAS,
+                    format: depth_format,
+                    mip_levels: 1,
+                    samples: 1,
+                    usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+                })
+                .expect("a depth attachment");
+            let view = device
+                .create_image_view(&ImageViewDesc {
+                    label: Some("crcbl-mtl canvas depth view"),
+                    image,
+                    view_type: ImageViewType::D2,
+                    format: depth_format,
+                    range: ImageSubresourceRange::all(depth_format),
+                })
+                .expect("a whole-image depth view");
+            (image, view)
+        });
         let (image, view) = color_target_of(device, CANVAS, format);
         let readback = readback_buffer(device, CANVAS_BYTES as u64);
         let queue = device
@@ -5555,7 +5794,19 @@ using namespace metal;\n\
                 store: StoreOp::Store,
                 clear: ClearValue::color(CLEAR),
             }],
-            depth_stencil_attachment: None,
+            // Cleared and discarded, and the pipeline half of the pair tests
+            // `Always` with writes off — so the attachment's *contents* can
+            // never be why a fragment did or did not land, and the only thing
+            // its presence changes is what Metal's clip mode is applied to.
+            depth_stencil_attachment: depth_target.map(|(_, view)| DepthStencilAttachment {
+                view,
+                read_only: false,
+                depth_load: LoadOp::Clear,
+                depth_store: StoreOp::Discard,
+                stencil_load: LoadOp::Clear,
+                stencil_store: StoreOp::Discard,
+                clear: ClearValue::default(),
+            }),
             render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
         });
         encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
@@ -5591,6 +5842,10 @@ using namespace metal;\n\
         device.destroy_command_buffer(commands);
         device.destroy_image_view(view);
         device.destroy_image(image);
+        if let Some((depth_image, depth_view)) = depth_target {
+            device.destroy_image_view(depth_view);
+            device.destroy_image(depth_image);
+        }
         device.destroy_buffer(readback);
         bytes
     }
