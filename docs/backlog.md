@@ -10606,26 +10606,33 @@ the browser gate. What stands between that and `crcbl::backend` accepting
   polls a few times and gives up.
 - **The feature intersection**, which has its own entry below.
 
-### The browser golden gate exists and runs in no job
+### The browser golden gate runs in no job, and cannot be green yet
 
 `web/run-render-harness-e2e.sh` drives `apps/render-harness` through a real
 browser and compares eleven scenes against the goldens — the only thing in the
 tree that checks the browser's _pixels_ against a reference rather than its log
-lines. **It appears in no workflow.** `grep render-harness .github/workflows/`
-returns nothing.
+lines, and therefore the only thing that would have caught the sRGB bug, which
+went through exactly that gap.
 
-It was blocked once, for a stated reason that has since dissolved: SwiftShader's
-per-stage storage-buffer ceiling refused nine of the eleven scenes, because the
-draw-generation pass bound fourteen storage buffers in one compute stage. That
-pass now binds eight, guarded by a check naming WebGPU's guaranteed floor, and
-the eleven scenes were measured matching.
+**It appears in no workflow**, and wiring it is not the one-line step it looks
+like. I ran it: **9 of 11**, with `ssr` and `ui` failing — reproducing the
+numbers already recorded further down this file to three decimal places (`ssr`
+58 gross pixels and ssim 0.988822; `ui` 506 pixels and ssim 0.983257). So the
+comparison is stable and the two failures are real, not flaky.
 
-**So this is a one-line CI step, not a blocked decision** — and it closes the
-gap the sRGB bug went through, which is that the golden harness renders
-offscreen while the browser gate reads only text. Whoever picks it up should
-check whether it wants the same `--expect-fail` treatment the Windows probe has,
-since it reads bytes back and would strand behind a stuck canvas readback the
-same way.
+**They are SwiftShader differences rather than backend defects.** `ssr` matches
+on real hardware with max channel delta 9 and zero gross pixels, and its diff is
+banding confined to the reflection ray-march and the horizon edges — geometry
+and instancing are right. `ui` is 7 distinct colours with a max delta of 166,
+which is a different shape and wants its own look.
+
+**So this gate is blocked on the same decision those two scenes are**: widen the
+tolerance for them, record them as known software-rasteriser differences, or run
+the gate with an expected-failure list the way the Windows probe does — that
+mechanism now exists and fails when a listed scene starts passing, which is what
+keeps such a list from rotting. Until one of those is chosen, the gate can only
+ever claim 9 of 11, and a CI step that reports 9 of 11 as success is worse than
+no step.
 
 ### REVERSED IN FACT — the probe was going to be deleted and became the gate
 
