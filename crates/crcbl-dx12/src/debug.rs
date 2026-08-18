@@ -23,6 +23,15 @@
 //!   not in". Where it is absent, [`enable_debug_layer`] warns and everything
 //!   else still works.
 //!
+//! # And a third, which is where the *operation* comes from
+//!
+//! Neither half above names the GPU work that did it: the reason is one
+//! `HRESULT`, and the debug layer reports API misuse rather than a command list
+//! that stopped. [`crate::dred`] is the half that does — auto-breadcrumbs, per
+//! command list, saying how many operations the GPU finished and which one it
+//! was still inside. [`diagnosis`] appends it inside the removed-device arm and
+//! nowhere else, because DRED's queries answer nothing on a live device.
+//!
 //! # The layer's output does not reach a CI log on its own
 //!
 //! `ID3D12Debug::EnableDebugLayer` sends its messages to the **debugger** —
@@ -705,6 +714,12 @@ pub(crate) fn diagnosis(device: &ID3D12Device) -> String {
             reason_name(code),
             code.0.cast_unsigned()
         ));
+        // **Only on a removed device.** DRED's two queries answer
+        // `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` on a healthy one, so asking
+        // unconditionally would put a "nothing to report" line on every
+        // ordinary refusal — a descriptor D3D12 will not take — which is
+        // precisely the case this module already returns the empty string for.
+        lines.extend(crate::dred::diagnosis(device));
     }
     lines.extend(layer.messages.iter().map(ToString::to_string));
     if !layer.is_clean() {

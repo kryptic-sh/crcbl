@@ -20,6 +20,7 @@ use windows::core::{BOOL, Interface};
 use crate::adapter::{self, RawCaps};
 use crate::debug;
 use crate::device::Dx12Device;
+use crate::dred;
 use crate::handle::{self, Owned, Owner};
 use crate::present;
 
@@ -308,6 +309,15 @@ impl Dx12Instance {
         // which also says why its messages are pulled out of the info queue
         // rather than left for a debugger nobody has attached.
         debug::enable_debug_layer();
+
+        // **Before anything else opens a device, for the same reason and with
+        // one worse failure mode.** DRED is chosen per device at creation too,
+        // and a device created before this line keeps no breadcrumbs *and
+        // reports no error* — so a removal on it would produce exactly the log
+        // a run with no DRED at all produces. Unlike the debug layer this is
+        // unconditional: see [`crate::dred`] for why `CRCBL_DX12_VALIDATION`
+        // does not reach it.
+        dred::enable();
 
         // `CreateDXGIFactory2` rather than `CreateDXGIFactory1`: they differ
         // only in the flags word. Zero here even with the D3D12 debug layer on,

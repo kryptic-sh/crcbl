@@ -130,7 +130,8 @@
 //! things a plain `cargo nextest run -p crcbl-dx12` cannot tell you. `crcbl-vk`
 //! pins lavapipe through `CRCBL_VK_ICD` for the same reason.
 //!
-//! # A removed device names its reason, and the debug layer names the call
+//! # A removed device names its reason, DRED names the operation, and the debug
+//! # layer names the call
 //!
 //! `DXGI_ERROR_DEVICE_REMOVED` arrives at the **next** call rather than at the
 //! one that caused it, so the code on its own says only that something earlier
@@ -139,12 +140,23 @@
 //! D3D12's own error text tells you to make — plus whatever the debug layer has
 //! stored for that device. `crcbl_dx12::debug` is where both come from.
 //!
+//! The reason is one `HRESULT` and names no work, so a removal also carries
+//! **DRED** — Device Removed Extended Data, Microsoft's own answer to "which
+//! operation". `crcbl_dx12::dred` forces auto-breadcrumbs and page-fault
+//! reporting on before the first device is created, and reads them back off the
+//! dead device afterwards: per command list, how many operations the GPU
+//! finished and which one it was still inside, and for a page fault the faulting
+//! address with the live and recently freed allocations around it. It is
+//! **always on**, and deliberately not behind `CRCBL_DX12_VALIDATION` — see that
+//! module for the argument.
+//!
 //! The layer itself is off in a release build, on in a debug one, and
 //! `CRCBL_DX12_VALIDATION` overrides both directions — the shape
 //! `CRCBL_VK_VALIDATION` already has in `crcbl-vk`. It needs Windows' **Graphics
 //! Tools** optional feature; without it, `enable_debug_layer` warns and the
 //! removal reason still answers, because that one is a vtable call on a device
-//! this crate already holds and needs nothing installed.
+//! this crate already holds and needs nothing installed. DRED needs it no more
+//! than the removal reason does.
 //!
 //! # Every adapter now derives `IndirectCount`, and that is *this backend* speaking
 //!
@@ -323,6 +335,16 @@ mod device;
 // reveal.
 #[cfg(any(target_os = "windows", test))]
 mod draw;
+// DRED — the operation a removed device died on. Not Windows-only for the reason
+// `present` below is not: the tables naming D3D12's breadcrumb operations and
+// allocation types, the window arithmetic that bounds the walk into driver
+// memory, and everything a report prints hold no `windows` type, so off Windows
+// they exist in the test build alone and `cargo test` on any host checks them.
+// That matters more here than in most of this crate: nothing but a real device
+// removal exercises this code, and no machine this backend is written on can
+// produce one.
+#[cfg(any(target_os = "windows", test))]
+mod dred;
 // The DXIL container, parsed as bytes. Not Windows-only for the reason
 // `present` below is not: it holds no `windows` type, and off Windows it exists
 // in the test build alone so that `cargo test` on any host checks what this

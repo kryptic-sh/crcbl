@@ -660,6 +660,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A removed D3D12 device now names the operation it died on.** `crcbl-dx12`
+  turns DRED — Device Removed Extended Data — on before the first
+  `D3D12CreateDevice`, forcing `SetAutoBreadcrumbsEnablement` and
+  `SetPageFaultEnablement` to `D3D12_DRED_ENABLEMENT_FORCED_ON`, and reads it
+  back off the dead device inside the message `crcbl_dx12::debug`'s `diagnosis`
+  already builds beside `GetDeviceRemovedReason`. Where that message used to end
+  at `DXGI_ERROR_DEVICE_REMOVED (0x887A0005)`, it now also carries, per command
+  list, the debug names of the list and its queue, how many recorded operations
+  the GPU finished, and a window of the command history around the boundary with
+  the operation the GPU had not finished marked `IN FLIGHT` — plus, for a page
+  fault, the faulting GPU virtual address with the live and recently freed
+  allocations DRED names around it.
+
+  It is **always on** rather than gated by `CRCBL_DX12_VALIDATION`: that
+  variable means "this machine has Windows' Graphics Tools feature", DRED needs
+  no such component, and a device removal is not a failure anybody gets to
+  reproduce with a flag set the second time. The new `crcbl_dx12::dred` module
+  argues it in full.
+
 - **`crcbl-dx12` builds mesh pipelines.** `Device::create_mesh_pipeline` packs a
   `D3D12_PIPELINE_STATE_STREAM_DESC` for `ID3D12Device2::CreatePipelineState`,
   and `CommandEncoder::draw_mesh_tasks` / `draw_mesh_tasks_indirect` record

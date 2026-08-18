@@ -639,8 +639,15 @@ past what TIER_1 permits (the per-dimension ceiling is a spec limit, and
 `crcbl-render` derives its counts from cluster counts rather than clamping); a
 payload larger than the amplification-stage limit; a root-signature or
 descriptor mismatch WARP enforces where RADV does not. None has been checked —
-this needs a Windows machine with the debug layer and `GetDeviceRemovedReason`,
-which nothing here has.
+this needs a Windows machine, which nothing here has.
+
+**The next attempt should name the operation rather than the `HRESULT`.**
+`crcbl_dx12::dred` now forces DRED auto-breadcrumbs on before the first device
+is created and prints them beside `GetDeviceRemovedReason`, so a re-run of the
+reverted commit on the WARP runner should say which command list stopped and on
+which operation — `DISPATCHMESH` versus the `ExecuteIndirect` after it versus a
+barrier is most of the narrowing above, answered from a CI log. That has **not**
+been observed: see the DRED entry below for what is unverified about it.
 
 **Why it is a revert and not a workaround.** Gating the report on the adapter
 name would hide a real defect behind CI's specific device, and the flag is
@@ -654,6 +661,56 @@ model gate (`TIER_1` and SM 6.6 together, because the committed DXIL is built at
 assertion, and the seam exercise are all written and reviewed; the revert is
 `6fe2d41` and they can be recovered from it rather than rewritten. The blocking
 question is only the device removal.
+
+### DRED is written and has never run
+
+`crcbl_dx12::dred` enables auto-breadcrumbs and page-fault reporting before the
+first `D3D12CreateDevice` and reads them back off a removed device. **No part of
+the Windows-only half has ever executed.** This box is Linux; the only compiler
+that sees that code is `cargo clippy --target x86_64-pc-windows-msvc`, which
+type-checks it and runs nothing. What is actually asserted on Linux is the
+portable half — `op_name`, `allocation_type_name`, `op_window`,
+`Breadcrumbs`/`Allocations` record-and-cap, and every `lines` formatter — and
+the `const` assertions tying `BREADCRUMB_OPS` and `ALLOCATION_TYPES` to the
+D3D12 constants, which the msvc build evaluates.
+
+Unverified, in the order a Windows run would settle them:
+
+- **That `D3D12GetDebugInterface` answers for
+  `ID3D12DeviceRemovedExtendedDataSettings` on a runner with no Graphics Tools
+  feature.** The whole "always on, not behind `CRCBL_DX12_VALIDATION`" argument
+  in the module docs rests on Microsoft documenting DRED as part of the D3D12
+  runtime rather than of the debug layer. That is read from documentation, not
+  measured. If it turns out to need Graphics Tools, `enable` already warns and
+  the engine still runs — but the argument for the default would be wrong and
+  the docs would need correcting, not the code.
+- **That breadcrumbs are actually populated on WARP.** A software rasteriser is
+  free to write no command history at all, in which case a removal prints
+  `Breadcrumbs` with `recorded: 0` and the report says so — honest, but no more
+  use than the `HRESULT` was. Running the reverted mesh commit (`6fe2d41`) is
+  the cheapest way to find out, and is the reason this was built.
+- **That the walk survives real driver memory.** Every loop is bounded and every
+  pointer null-checked, and `the_breadcrumb_walk_stops_at_its_limit_and_says_so`
+  proves the bound terminates — but no pointer this code dereferences has ever
+  been a real one.
+- **The `IN FLIGHT` marker's meaning.** It reads `*pLastBreadcrumbValue` as "the
+  number of operations completed", so the operation _at_ that index is the one
+  in flight. That is D3D12's documented meaning of the field; whether a given
+  driver is off by one from it has not been checked against a known failure.
+
+Deliberately not done, with reasons:
+
+- **`ID3D12DeviceRemovedExtendedDataSettings1`/`…Data1` and breadcrumb
+  contexts.** The `1` interfaces add PIX context strings per breadcrumb, which
+  are only there if something calls `SetBreadcrumbContext`; this backend sets
+  none, so the extra interface would buy an empty column and a narrower minimum
+  Windows version. Worth revisiting if this crate ever emits PIX markers.
+- **`SetWatsonDumpEnablement`.** It routes DRED into a Windows Error Reporting
+  crash dump, which nothing in this project collects.
+- **An environment variable to switch DRED off.** Adding one would be a knob
+  nobody can test here and a second way for the diagnostic to be absent exactly
+  when it is needed. If DRED's per-operation cost ever shows up in a profile,
+  that measurement is the thing that should introduce the flag.
 
 ### dx12 mesh shading: the calls exist, the flag does not
 
