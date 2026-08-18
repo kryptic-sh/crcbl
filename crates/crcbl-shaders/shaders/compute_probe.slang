@@ -22,7 +22,7 @@
 // # The element count is a uniform, not a push constant and not a length query
 //
 // Push constants have no WGSL spelling — see this crate's docs on `ui.wgsl` —
-// and no shader added here may use them until that is fixed. `GetDimensions` on
+// and this shader declares `wgsl`, so it may not read one. `GetDimensions` on
 // a `RWStructuredBuffer` was the other candidate and is rejected by Slang's
 // *Metal* target ("entrypoint uses features that are not available in 'compute'
 // stage for 'metal' compilation target"), so it would have made this artifact

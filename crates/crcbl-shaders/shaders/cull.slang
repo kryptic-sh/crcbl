@@ -134,8 +134,8 @@ static const uint PLANE_COUNT = 6;
 /// `crcbl_shaders::cull::Params`.
 ///
 /// A uniform buffer rather than push constants, for the reason
-/// `compute_probe.slang` gives: WGSL has no push constants and no shader in
-/// this crate may use one.
+/// `compute_probe.slang` gives: WGSL has no push constants, and this shader
+/// declares that target.
 struct CullParams
 {
     /// The camera frustum's six half-spaces, `xyz` the (unnormalized) outward

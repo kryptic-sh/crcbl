@@ -32,10 +32,13 @@
 //! that backend computes; declared last it takes the first index after them,
 //! and the numbered bindings keep the slots the backend assigns.
 //!
-//! No shipped shader exercises that arm today — `ui.slang` was the last one to
-//! read a push constant, and took a bound uniform buffer instead — so the rule
-//! is checked by this module's own tests rather than by an artifact. See
-//! `crcbl_shaders`' crate docs on why a new source may not reintroduce one.
+//! `push_constant_probe.slang` is the one shipped source that exercises this
+//! arm, and its MSL is what shows the rule doing its job: the block lands at
+//! `buffer(1)`, behind the one numbered binding, exactly where
+//! [`crate::push_constant_probe`] records it. Declared the other way round it
+//! would take `buffer(0)` — which is what `ui.slang`'s artifact did until
+//! 2026-08, and what the failing cases below reproduce. See `crcbl_shaders`'
+//! crate docs for why no *other* source may reintroduce one.
 //!
 //! # The rule checked here is stricter than the one that must hold
 //!

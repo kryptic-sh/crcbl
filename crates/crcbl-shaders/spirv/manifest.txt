@@ -23,7 +23,7 @@ entry-points = computeMain:glcompute
 
 [compute_probe]
 source = shaders/compute_probe.slang
-source-sha256 = b9eedd18f794d71a402f8fac0653b1f6b08b2c643b1523f9a214e977629eb2c8
+source-sha256 = 39ac586a34be941d5fd274402bc9783adbd71ed98b4f47e901d273ad42a0f18c
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/compute_probe.spv
 spirv-sha256 = f17714ecd645910c6c5e07f92f38c1425305a53442f8c4f680ff71530b46ce5a
@@ -36,7 +36,7 @@ entry-points = computeMain:glcompute
 
 [cull]
 source = shaders/cull.slang
-source-sha256 = 3512c4703059fe213a2cf1a020546e7487638539a48a41458afb803f70327981
+source-sha256 = c84910b3681ce3cc7f6bcfa79291d55053fbb67a1c908fcfd20d23c60ef98d81
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/cull.spv
 spirv-sha256 = 091c7376d5963b4859a68a868763ff425a08382dd5d44b6ca7a29f484cd66d69
@@ -49,7 +49,7 @@ entry-points = computeMain:glcompute
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = ae50da3dc72c0dcab5b575512e3542e3ae3e7aad4b859742335f0e7a59dfe8a4
+source-sha256 = 3afaf9ec9851e9f53e0cc19351b13cbfce1c20d38bcf9462126a1e2b3229a845
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
 spirv-sha256 = 50689ed58359d8144cadce197beaeab07fdaa32d4d02a8cd1f61aee1c4a3b5c5
@@ -113,6 +113,17 @@ dxil = taskMain:dxil/mesh_shader.taskMain.dxil:54f39b608039f46797f1fb8d0a168d846
 dxil = amplifiedMeshMain:dxil/mesh_shader.amplifiedMeshMain.dxil:7f0a91482a7f898ebce0bba7f85ff00820f5ba701c5c989c672e4e9b9ad5e1d4
 dxil = fragmentMain:dxil/mesh_shader.fragmentMain.dxil:fb6542d1fa84d15525bb7cd86438bf382bcafbfee6645791f494eebdde3c3129
 entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext, fragmentMain:fragment
+
+[push_constant_probe]
+source = shaders/push_constant_probe.slang
+source-sha256 = d2219d24609f52b4e43f98cf8d1e5f36e66f72cef36895c54b59ecae74e4d1ee
+targets = spirv, msl, dxil
+spirv = spirv/push_constant_probe.spv
+spirv-sha256 = acc12a04db43de256e2751df57da914094076da393ab2c6114508ae0efb53959
+msl = msl/push_constant_probe.metal
+msl-sha256 = 911e40ce03d6a61867cfeac597c16aa3b3077b7cb19b1ee76a4f40c883f065fb
+dxil = computeMain:dxil/push_constant_probe.computeMain.dxil:3e8cdfbe6255d4cfa47cfa72a2ddae32d8b251399d807c1551a807c0c4ec1b56
+entry-points = computeMain:glcompute
 
 [sprite]
 source = shaders/sprite.slang

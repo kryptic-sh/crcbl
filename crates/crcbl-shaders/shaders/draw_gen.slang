@@ -343,8 +343,8 @@ static const uint MESH_LEVELS_TOP_LEVEL = 3;
 /// `crcbl_shaders::draw_gen::Params`.
 ///
 /// A uniform buffer rather than push constants, for the reason
-/// `compute_probe.slang` gives: WGSL has no push constants and no shader in this
-/// crate may use one.
+/// `compute_probe.slang` gives: WGSL has no push constants, and this shader
+/// declares that target.
 struct DrawGenParams
 {
     /// Buckets in the table: `bucket_meshes` has this many entries and so does
