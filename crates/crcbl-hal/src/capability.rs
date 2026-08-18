@@ -745,14 +745,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     // --- copies ---
     Divergence {
-        capability: Capability::ImageToImageCopy,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "CopyTextureRegion takes two D3D12_TEXTURE_COPY_LOCATIONs, each with its own \
-              subresource and box, and neither is the placed footprint plan_copy builds; the work \
-              is a second location kind for it to emit (the DX12 pipeline slice)",
-    },
-    Divergence {
         capability: Capability::DepthImageCopy,
         backend: BackendKind::Dx12,
         kind: DivergenceKind::Unwritten,
@@ -1488,11 +1480,6 @@ mod tests {
             Capability::BufferFillWord,
             BackendKind::Dx12,
             DivergenceKind::Declined,
-        ),
-        (
-            Capability::ImageToImageCopy,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
         ),
         (
             Capability::DepthImageCopy,

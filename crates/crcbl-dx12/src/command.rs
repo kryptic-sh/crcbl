@@ -3,18 +3,19 @@
 //!
 //! # What records, and what fails the encoder
 //!
-//! Barriers, buffer↔buffer and buffer↔image copies, render passes with a real
-//! `ClearRenderTargetView`/`ClearDepthStencilView`, viewport, scissor and
-//! stencil reference — plus pipelines, bind groups, index buffers, every draw
-//! the seam has (direct, indexed, indirect and indirect-count), and dispatches
-//! both direct and indirect. [`finish`](CommandEncoder::finish) closes the list
-//! and hands back a pooled [`CommandBufferHandle`] the device can submit.
+//! Barriers, buffer↔buffer, buffer↔image and image↔image copies, render passes
+//! with a real `ClearRenderTargetView`/`ClearDepthStencilView`, viewport,
+//! scissor and stencil reference — plus pipelines, bind groups, index buffers,
+//! every draw the seam has (direct, indexed, indirect and indirect-count), and
+//! dispatches both direct and indirect. [`finish`](CommandEncoder::finish)
+//! closes the list and hands back a pooled [`CommandBufferHandle`] the device
+//! can submit.
 //!
-//! What still needs a slice — buffer fills, image↔image copies, MSAA resolve
-//! attachments, query sets, mesh dispatch, push constants — **fails the encoder** rather than recording
-//! nothing, so `finish` returns the refusal instead of a command buffer that
-//! submits and draws nothing. That is `crcbl-mtl`'s rule in its command slice,
-//! and it is the failure
+//! What still needs a slice — buffer fills, MSAA resolve attachments, query
+//! sets, mesh dispatch, push constants — **fails the encoder** rather than
+//! recording nothing, so `finish` returns the refusal instead of a command
+//! buffer that submits and draws nothing. That is `crcbl-mtl`'s rule in its
+//! command slice, and it is the failure
 //! [`Device::take_error`](crcbl_hal::Device::take_error) exists to catch on
 //! WebGPU.
 //!
@@ -76,9 +77,10 @@ use std::sync::Arc;
 use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
-    DrawIndirectCount, Format, GraphicsPipelineHandle, HalError, ImageAspect, ImageCopy,
-    ImageHandle, ImageType, IndexFormat, LoadOp, MemoryLocation, PipelineLayoutHandle,
-    QuerySetHandle, QueueTransfer, Rect2d, RenderPassDesc, ShaderStages, Viewport,
+    DrawIndirectCount, Extent3d, Format, GraphicsPipelineHandle, HalError, ImageAspect, ImageCopy,
+    ImageHandle, ImageSubresourceLayers, ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d,
+    PipelineLayoutHandle, QuerySetHandle, QueueTransfer, Rect2d, RenderPassDesc, ShaderStages,
+    Viewport,
 };
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D12::{
@@ -573,6 +575,163 @@ pub(crate) const NO_DEPTH_COPY: &str = "a buffer copy of a depth-format image: a
      is created typeless, so the copy needs a PlaneSlice and a fully typed placed footprint that \
      BufferImageCopy carries no field for (the DX12 depth slice)";
 
+/// The D3D12 plane slice an aspect names, or `None` when the format does not
+/// have that plane or the set names more than one.
+///
+/// Depth and colour are both plane zero because a format has only one of them;
+/// stencil is plane one, which is the mapping `wgpu-hal`'s dx12 backend makes in
+/// `calc_subresource_for_copy`.
+/// [`Format::texel_size`](crcbl_hal::Format::texel_size) is the arbiter of
+/// whether the plane exists at all, so "which planes has this format" is
+/// answered in one place for every backend rather than re-derived here.
+fn plane_slice(format: Format, aspect: ImageAspect) -> Option<u32> {
+    format.texel_size(aspect)?;
+    Some(u32::from(aspect.contains(ImageAspect::STENCIL)))
+}
+
+/// One side of a copy: the region of one image it names, checked against that
+/// image.
+#[derive(Clone, Copy, Debug)]
+struct ImageRegion {
+    /// Plane slice the subresource's aspect names.
+    plane: u32,
+    /// Mip level.
+    mip: u32,
+    /// First array layer, and how many. Always `0` and `1` for a volume.
+    base_layer: u32,
+    layers: u32,
+    /// Where in the image's subresource the region starts, in texels.
+    offset: (u32, u32, u32),
+    /// The region's size in texels. The depth is a **volume's** slice count and
+    /// `1` for everything else, because an array's layers are subresources of
+    /// their own rather than a third dimension of one.
+    size: (u32, u32, u32),
+}
+
+/// Checks one image's side of a copy and resolves it into texel coordinates.
+///
+/// Shared by [`plan_copy`] and [`plan_image_copy`], because "does this
+/// subresource, offset and extent name a region of this image" is one question
+/// however many images the copy has — and two copies of the answer are two
+/// copies that drift. `what` names the side for the error message, so an
+/// image-to-image copy says which of its two images was wrong.
+fn plan_region(
+    image: &ImageRef,
+    subresource: ImageSubresourceLayers,
+    offset: Offset3d,
+    extent: Extent3d,
+    what: &str,
+) -> Result<ImageRegion, HalError> {
+    let format = image.format;
+    let Some(plane) = plane_slice(format, subresource.aspect) else {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what} of a {format:?} image names {:?}; a copy names exactly one plane, and this \
+             format has {:?}",
+            subresource.aspect,
+            ImageAspect::of(format)
+        )));
+    };
+    let mip = subresource.mip;
+    if mip >= image.mip_levels {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what} names mip {mip} of an image with {} mips",
+            image.mip_levels
+        )));
+    }
+    let is_3d = matches!(image.image_type, ImageType::D3);
+    let (mip_width, mip_height, mip_depth) = image.mip_extent(mip);
+
+    let base_layer = subresource.base_layer;
+    let layers = subresource.layer_count;
+    if layers == 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what} covers no array layers, which moves nothing"
+        )));
+    }
+    if is_3d && (base_layer != 0 || layers != 1) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "a volume has one array layer, and {what} names {layers} from {base_layer}: a \
+             volume's slices are its depth, which belongs in the copy's extent"
+        )));
+    }
+    if !is_3d {
+        let end = base_layer.checked_add(layers).ok_or_else(|| {
+            HalError::InvalidDescriptor(format!("{what}'s array range overflows"))
+        })?;
+        if end > image.slices {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{what} names layers {base_layer}..{end} of a {}-layer image",
+                image.slices
+            )));
+        }
+    }
+
+    if offset.x < 0 || offset.y < 0 || offset.z < 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what}'s image offset {offset:?} is negative; D3D12's copy box is unsigned"
+        )));
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let (offset_x, offset_y, offset_z) = (offset.x as u32, offset.y as u32, offset.z as u32);
+    let depth = if is_3d { extent.depth_or_layers } else { 1 };
+    if !is_3d && extent.depth_or_layers != 1 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what} of a {:?} image has an extent depth of {}; layers belong in \
+             ImageSubresourceLayers::layer_count",
+            image.image_type, extent.depth_or_layers
+        )));
+    }
+    if extent.width == 0 || extent.height == 0 || depth == 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what} of {extent:?} texels moves nothing"
+        )));
+    }
+    let fits =
+        |start: u32, size: u32, limit: u32| start.checked_add(size).is_some_and(|end| end <= limit);
+    if !fits(offset_x, extent.width, mip_width)
+        || !fits(offset_y, extent.height, mip_height)
+        || !fits(offset_z, depth, mip_depth)
+    {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what} of {extent:?} at {offset:?} runs past mip {mip}, which is \
+             {mip_width}x{mip_height}x{mip_depth}"
+        )));
+    }
+
+    // A block is one texel for an uncompressed format, which is what makes this
+    // one calculation rather than two.
+    let (block_width, block_height) = format.block_extent();
+    if offset_x % block_width != 0 || offset_y % block_height != 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what} of a {format:?} image starts at {offset:?}, which is not on a \
+             {block_width}x{block_height} block boundary"
+        )));
+    }
+    // A compressed region ends on a block boundary too — unless it ends at the
+    // edge of the mip, which is the case a mip narrower than one block exists
+    // for and the one D3D12 carves out. Nothing here is exercised by an
+    // uncompressed format, whose block is one texel.
+    let ends_on_a_block = |offset: u32, size: u32, block: u32, mip: u32| {
+        (offset + size).is_multiple_of(block) || offset + size == mip
+    };
+    if !ends_on_a_block(offset_x, extent.width, block_width, mip_width)
+        || !ends_on_a_block(offset_y, extent.height, block_height, mip_height)
+    {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{what} of a {format:?} image ends {extent:?} from {offset:?}, which is neither on a \
+             {block_width}x{block_height} block boundary nor at the edge of mip {mip}"
+        )));
+    }
+    Ok(ImageRegion {
+        plane,
+        mip,
+        base_layer,
+        layers,
+        offset: (offset_x, offset_y, offset_z),
+        size: (extent.width, extent.height, depth),
+    })
+}
+
 /// Turns a seam buffer↔image copy into the `CopyTextureRegion` calls it is.
 ///
 /// # What D3D12 requires that the seam does not say
@@ -600,105 +759,23 @@ fn plan_copy(
         // same sentence `Dx12Device::supports` declares it with.
         return Err(crate::instance::not_yet(NO_DEPTH_COPY));
     }
-    if copy.image_subresource.aspect != ImageAspect::COLOR {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy of a {format:?} image names {:?}; a colour image has only ImageAspect::COLOR",
-            copy.image_subresource.aspect
-        )));
-    }
-    let mip = copy.image_subresource.mip;
-    if mip >= image.mip_levels {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy names mip {mip} of an image with {} mips",
-            image.mip_levels
-        )));
-    }
-    let is_3d = matches!(image.image_type, ImageType::D3);
-    let (mip_width, mip_height, mip_depth) = image.mip_extent(mip);
-
-    let base_layer = copy.image_subresource.base_layer;
-    let layers = copy.image_subresource.layer_count;
-    if layers == 0 {
-        return Err(HalError::InvalidDescriptor(
-            "a copy covering no array layers is not a copy".to_string(),
-        ));
-    }
-    if is_3d && (base_layer != 0 || layers != 1) {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a volume has one array layer, and this copy names {layers} from {base_layer}: a \
-             volume's slices are its depth, which belongs in BufferImageCopy::image_extent"
-        )));
-    }
-    if !is_3d {
-        let end = base_layer.checked_add(layers).ok_or_else(|| {
-            HalError::InvalidDescriptor("a copy's array range overflows".to_string())
-        })?;
-        if end > image.slices {
-            return Err(HalError::InvalidDescriptor(format!(
-                "a copy names layers {base_layer}..{end} of a {}-layer image",
-                image.slices
-            )));
-        }
-    }
-
-    let offset = copy.image_offset;
-    if offset.x < 0 || offset.y < 0 || offset.z < 0 {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy's image offset {offset:?} is negative; D3D12's copy box is unsigned"
-        )));
-    }
-    #[allow(clippy::cast_sign_loss)]
-    let (offset_x, offset_y, offset_z) = (offset.x as u32, offset.y as u32, offset.z as u32);
-    let extent = copy.image_extent;
-    let depth = if is_3d { extent.depth_or_layers } else { 1 };
-    if !is_3d && extent.depth_or_layers != 1 {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy of a {:?} image has an extent depth of {}; layers belong in \
-             ImageSubresourceLayers::layer_count",
-            image.image_type, extent.depth_or_layers
-        )));
-    }
-    if extent.width == 0 || extent.height == 0 || depth == 0 {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy of {extent:?} texels moves nothing"
-        )));
-    }
-    let fits =
-        |start: u32, size: u32, limit: u32| start.checked_add(size).is_some_and(|end| end <= limit);
-    if !fits(offset_x, extent.width, mip_width)
-        || !fits(offset_y, extent.height, mip_height)
-        || !fits(offset_z, depth, mip_depth)
-    {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy of {extent:?} at {offset:?} runs past mip {mip}, which is \
-             {mip_width}x{mip_height}x{mip_depth}"
-        )));
-    }
-
-    // A block is one texel for an uncompressed format, which is what makes this
-    // one calculation rather than two.
+    let region = plan_region(
+        image,
+        copy.image_subresource,
+        copy.image_offset,
+        copy.image_extent,
+        "a copy",
+    )?;
+    let ImageRegion {
+        plane,
+        mip,
+        base_layer,
+        layers,
+        offset: (offset_x, offset_y, offset_z),
+        size: (_, _, depth),
+    } = region;
     let (block_width, block_height) = format.block_extent();
-    if offset_x % block_width != 0 || offset_y % block_height != 0 {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy of a {format:?} image starts at {offset:?}, which is not on a \
-             {block_width}x{block_height} block boundary"
-        )));
-    }
-    // A compressed region ends on a block boundary too — unless it ends at the
-    // edge of the mip, which is the case a mip narrower than one block exists
-    // for and the one D3D12 carves out. Nothing here is exercised by an
-    // uncompressed format, whose block is one texel.
-    let ends_on_a_block = |offset: u32, size: u32, block: u32, mip: u32| {
-        (offset + size).is_multiple_of(block) || offset + size == mip
-    };
-    if !ends_on_a_block(offset_x, extent.width, block_width, mip_width)
-        || !ends_on_a_block(offset_y, extent.height, block_height, mip_height)
-    {
-        return Err(HalError::InvalidDescriptor(format!(
-            "a copy of a {format:?} image ends {extent:?} from {offset:?}, which is neither on a \
-             {block_width}x{block_height} block boundary nor at the edge of mip {mip}"
-        )));
-    }
+    let extent = copy.image_extent;
     // Zero means tightly packed, which is the copy's own extent.
     let row_texels = if copy.buffer_row_length == 0 {
         extent.width
@@ -760,7 +837,9 @@ fn plan_copy(
             )));
         }
         regions.push(CopyRegion {
-            subresource: image.subresource(mip, base_layer + layer),
+            // Plane zero for every format that reaches here: the depth formats,
+            // which are the only ones with a second plane, were refused above.
+            subresource: image.subresource_in_plane(mip, base_layer + layer, plane),
             footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
                 Offset: buffer_offset,
                 Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
@@ -778,6 +857,144 @@ fn plan_copy(
         });
     }
     Ok(regions)
+}
+
+/// The `CopyTextureRegion` calls one seam image-to-image copy expands into.
+///
+/// Both sides are `D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX` locations, so the
+/// only thing that varies across an array range is the pair of indices — the box
+/// and the destination origin are the same for every layer, which is why they
+/// are held once here rather than repeated per region the way [`CopyRegion`]'s
+/// footprint has to be.
+#[derive(Debug)]
+struct ImageCopyPlan {
+    /// Source and destination subresource index, one pair per array layer.
+    subresources: Vec<(u32, u32)>,
+    /// The region of the source subresource, in that subresource's texels.
+    source_box: D3D12_BOX,
+    /// Where in the destination subresource it lands, in texels.
+    destination_origin: (u32, u32, u32),
+}
+
+/// Turns a seam image-to-image copy into the `CopyTextureRegion` calls it is.
+///
+/// # What D3D12 requires that the seam does not say
+///
+/// `CopyTextureRegion` between two textures moves bytes between two
+/// subresources, so the two resources must be **copy-compatible**: the same
+/// DXGI format, or two spellings within one typeless group. Nothing in
+/// [`ImageCopy`] carries a format at all, so this holds the two images to the
+/// same seam [`Format`], which is the only compatibility this backend can vouch
+/// for — a colour image is created with its own fully typed format (see
+/// `Dx12Device::create_image_view` for why), so two different seam formats are
+/// two different DXGI formats here even where D3D12 would have accepted the
+/// pair. Refused by name rather than reinterpreted: a copy between formats of
+/// the same size that D3D12 *did* accept would move the caller's texels and
+/// change what they mean.
+///
+/// Sample count is the same kind of rule. A copy between resources of differing
+/// sample counts is `ResolveSubresource`, a different call and a different
+/// capability — [`MsaaResolveAttachment`](crcbl_hal::Capability::MsaaResolveAttachment),
+/// which this backend still refuses — so a mismatch here is refused rather than
+/// resolved.
+///
+/// # The same resource on both sides
+///
+/// D3D12 leaves a copy whose source and destination name one subresource
+/// undefined, and this refuses every such pair: the aspects and formats match by
+/// the checks above, so an overlap is exactly a shared subresource index. That
+/// is `wgpu-core`'s rule in `validate_copy_within_same_texture` — different mip,
+/// different layer range or different aspect is fine, and the same one is not —
+/// arrived at from the same restriction.
+fn plan_image_copy(
+    src: &ImageRef,
+    dst: &ImageRef,
+    copy: &ImageCopy,
+) -> Result<ImageCopyPlan, HalError> {
+    if src.format != dst.format {
+        return Err(HalError::InvalidDescriptor(format!(
+            "a copy moves a {:?} image into a {:?} one; D3D12 copies between two resources of the \
+             same format, and this backend stores every image with its own",
+            src.format, dst.format
+        )));
+    }
+    if src.image_type != dst.image_type {
+        return Err(HalError::InvalidDescriptor(format!(
+            "a copy moves a {:?} image into a {:?} one; a volume's slices are a copy box and an \
+             array's layers are subresources, so the two are not the same region",
+            src.image_type, dst.image_type
+        )));
+    }
+    if src.samples != dst.samples {
+        return Err(HalError::InvalidDescriptor(format!(
+            "a copy moves a {}-sample image into a {}-sample one; that is ResolveSubresource, \
+             which this backend does not record",
+            src.samples, dst.samples
+        )));
+    }
+    let source = plan_region(
+        src,
+        copy.src_subresource,
+        copy.src_offset,
+        copy.extent,
+        "a copy's source",
+    )?;
+    let destination = plan_region(
+        dst,
+        copy.dst_subresource,
+        copy.dst_offset,
+        copy.extent,
+        "a copy's destination",
+    )?;
+    if source.plane != destination.plane {
+        return Err(HalError::InvalidDescriptor(format!(
+            "a copy reads {:?} and writes {:?}; the two planes of a depth-stencil format hold \
+             different elements, and D3D12 copies a plane into the same plane",
+            copy.src_subresource.aspect, copy.dst_subresource.aspect
+        )));
+    }
+    if source.layers != destination.layers {
+        return Err(HalError::InvalidDescriptor(format!(
+            "a copy reads {} array layers and writes {}; each layer is a subresource of its own \
+             and needs one on the other side",
+            source.layers, destination.layers
+        )));
+    }
+    let same_resource = src.raw.as_raw() == dst.raw.as_raw();
+    let mut subresources = Vec::with_capacity(source.layers as usize);
+    for layer in 0..source.layers {
+        let from = src.subresource_in_plane(source.mip, source.base_layer + layer, source.plane);
+        let to = dst.subresource_in_plane(
+            destination.mip,
+            destination.base_layer + layer,
+            destination.plane,
+        );
+        if same_resource && from == to {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a copy reads and writes subresource {from} of one image; D3D12 leaves a copy \
+                 whose two sides are the same subresource undefined"
+            )));
+        }
+        subresources.push((from, to));
+    }
+    let (left, top, front) = source.offset;
+    let (width, height, depth) = source.size;
+    Ok(ImageCopyPlan {
+        subresources,
+        // Always the *source's* region in the source's own coordinates, which is
+        // what `CopyTextureRegion` takes; the destination contributes only an
+        // origin. Every addition here is inside the mip `plan_region` bounded
+        // the region against.
+        source_box: D3D12_BOX {
+            left,
+            top,
+            front,
+            right: left + width,
+            bottom: top + height,
+            back: front + depth,
+        },
+        destination_origin: destination.offset,
+    })
 }
 
 /// Which planes a depth-stencil clear touches, or `None` if it touches neither.
@@ -950,12 +1167,54 @@ impl CommandEncoder for Dx12CommandEncoder {
         self.record_texture_copy(copy, false);
     }
 
-    fn copy_image_to_image(&mut self, _copy: &ImageCopy) {
-        // Not the same call with two arguments swapped: both sides are texture
-        // locations with their own subresource and box, and neither is the
-        // placed footprint `plan_copy` exists to build. Nothing in this slice
-        // needs one.
-        self.refuse("image-to-image copies (the DX12 pipeline slice)");
+    /// Image-to-image copy: one `CopyTextureRegion` per array layer, both sides
+    /// a subresource index.
+    ///
+    /// A copy of several layers is several calls for the reason a buffer↔image
+    /// copy of several layers is — a D3D12 texture copy names exactly one
+    /// subresource — and [`plan_image_copy`] is where every check that decides
+    /// whether the call is legal lives.
+    fn copy_image_to_image(&mut self, copy: &ImageCopy) {
+        if self.list().is_none() || !self.outside_a_pass("an image-to-image copy") {
+            return;
+        }
+        let Some(src) = self.image(copy.src) else {
+            return;
+        };
+        let Some(dst) = self.image(copy.dst) else {
+            return;
+        };
+        let plan = match plan_image_copy(&src, &dst, copy) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let Some(list) = self.list() else { return };
+        let (x, y, z) = plan.destination_origin;
+        for (from, to) in plan.subresources {
+            let mut source = texture_location(&src.raw, from);
+            let mut destination = texture_location(&dst.raw, to);
+            // SAFETY: both locations are live, fully initialised structs holding
+            // references to resources this encoder retains, borrowed for the
+            // duration of the call, and `plan.source_box` is a live local.
+            // `plan_image_copy` bounds-checked each side's region against that
+            // image's mip extent, held the two formats and sample counts to each
+            // other, and refused a pair that names one subresource twice.
+            unsafe {
+                list.CopyTextureRegion(
+                    core::ptr::from_ref(&destination),
+                    x,
+                    y,
+                    z,
+                    core::ptr::from_ref(&source),
+                    Some(core::ptr::from_ref(&plan.source_box)),
+                );
+            }
+            release_location(&mut source);
+            release_location(&mut destination);
+        }
     }
 
     fn fill_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _size: u64, _value: u32) {

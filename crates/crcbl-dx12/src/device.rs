@@ -423,6 +423,10 @@ pub(crate) struct ImageRef {
     pub(crate) mip_levels: u32,
     /// Array layers, or depth slices for a volume — see [`ImageEntry::slices`].
     pub(crate) slices: u32,
+    /// Samples per texel. Read by the image-to-image copy, which D3D12 requires
+    /// to name two resources of the same sample count — the differing-count copy
+    /// is `ResolveSubresource` and a different call.
+    pub(crate) samples: u32,
 }
 
 impl ImageRef {
@@ -441,14 +445,28 @@ impl ImageRef {
         (halve(self.extent.width), halve(self.extent.height), depth)
     }
 
-    /// D3D12's subresource index for a mip and array layer.
+    /// D3D12's subresource index for a mip and array layer, in plane zero.
     ///
-    /// Plane zero: this backend copies colour images only, and a colour format
-    /// has one plane. `D3D12CalcSubresource` is `mip + layer * mip_levels +
-    /// plane * mip_levels * layers`, and the plane term is what a depth copy
-    /// would need.
+    /// The plane a barrier names, and the only plane a colour format has. A copy
+    /// that may name another goes through
+    /// [`subresource_in_plane`](Self::subresource_in_plane).
     pub(crate) fn subresource(&self, mip: u32, layer: u32) -> u32 {
         mip + layer * self.mip_levels
+    }
+
+    /// D3D12's subresource index for a mip, array layer and plane.
+    ///
+    /// `D3D12CalcSubresource` is `mip + layer * mip_levels + plane * mip_levels
+    /// * array_size`, and a **volume's array size is one**: its slices are its
+    /// depth, addressed by a copy box rather than by a subresource, so
+    /// [`slices`](Self::slices) is not the multiplier there.
+    pub(crate) fn subresource_in_plane(&self, mip: u32, layer: u32, plane: u32) -> u32 {
+        let array_size = if matches!(self.image_type, ImageType::D3) {
+            1
+        } else {
+            self.slices
+        };
+        self.subresource(mip, layer) + plane * self.mip_levels * array_size
     }
 
     /// Every subresource index a seam subrange covers, or the "all of them"
@@ -633,6 +651,7 @@ impl DeviceInner {
             extent: entry.extent,
             mip_levels: entry.mip_levels,
             slices: entry.slices,
+            samples: entry.samples,
         })
     }
 
@@ -1591,10 +1610,12 @@ impl Device for Dx12Device {
             Capability::BufferFillZero
             | Capability::BufferFillRepeatedByte
             | Capability::BufferFillWord => Support::No(NO_FILL),
-            Capability::ImageToImageCopy => Support::No(
-                "both sides are texture locations with their own subresource and box, and neither \
-                 is the placed footprint plan_copy builds (the DX12 pipeline slice)",
-            ),
+            // Both sides are subresource-index locations, which is the copy
+            // `crate::command::plan_image_copy` builds — including the plane
+            // slice a depth format's aspect names, since an image-to-image copy
+            // needs no placed footprint and so meets neither obstacle
+            // `NO_DEPTH_COPY` names.
+            Capability::ImageToImageCopy => Support::Yes,
             // The sentence `crate::command::plan_copy` refuses with, so the
             // declaration and the error a caller reads cannot drift apart.
             Capability::DepthImageCopy => Support::No(crate::command::NO_DEPTH_COPY),
@@ -5241,6 +5262,169 @@ pub(crate) mod tests {
         device.destroy_image(narrow);
     }
 
+    /// **The image-to-image copies D3D12 cannot express are refused by name.**
+    ///
+    /// The happy path is driven on this same runner by
+    /// `crates/crcbl/tests/hal_seam_e2e.rs`'s `exercise_image_to_image_copy`,
+    /// which reads the destination back and compares it texel for texel — so
+    /// what is left uncovered, and what this covers, is every pair the seam lets
+    /// a caller write and `CopyTextureRegion` would either reject or perform
+    /// wrongly. Each is a caller bug rather than a missing slice, so each is
+    /// [`HalError::InvalidDescriptor`] naming the rule it broke.
+    ///
+    /// **Nothing here reaches the debug layer**, unlike
+    /// `a_copy_d3d12_cannot_place_is_refused_by_name`: every refusal below is
+    /// this crate's, decided before a D3D12 call is made, so the teardown
+    /// assertion stands.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn an_image_to_image_copy_d3d12_cannot_express_is_refused_by_name() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let transfer = ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST;
+        let source = device
+            .create_image(&image(Format::Rgba8Unorm, transfer, TARGET))
+            .expect("a transfer-only colour image");
+        let destination = device
+            .create_image(&image(Format::Rgba8Unorm, transfer, TARGET))
+            .expect("a second one");
+        let other_format = device
+            .create_image(&image(Format::Bgra8Unorm, transfer, TARGET))
+            .expect("the same extent in another format");
+        let two_deep = Extent3d {
+            width: TARGET.width,
+            height: TARGET.height,
+            depth_or_layers: 2,
+        };
+        let volume = device
+            .create_image(&ImageDesc {
+                image_type: ImageType::D3,
+                extent: two_deep,
+                ..image(Format::Rgba8Unorm, transfer, TARGET)
+            })
+            .expect("a volume of the same footprint");
+        let array = device
+            .create_image(&image(Format::Rgba8Unorm, transfer, two_deep))
+            .expect("a two-layer array of the same footprint");
+
+        let layers = ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        };
+        let whole = ImageCopy {
+            src: source,
+            src_subresource: layers,
+            src_offset: Offset3d::default(),
+            dst: destination,
+            dst_subresource: layers,
+            dst_offset: Offset3d::default(),
+            extent: TARGET,
+        };
+
+        type Case = (&'static str, &'static str, ImageCopy);
+        let cases: Vec<Case> = vec![
+            (
+                "two different formats",
+                "same format",
+                ImageCopy {
+                    dst: other_format,
+                    ..whole
+                },
+            ),
+            (
+                "a volume and a flat image",
+                "not the same region",
+                ImageCopy {
+                    dst: volume,
+                    ..whole
+                },
+            ),
+            (
+                "one subresource on both sides",
+                "same subresource",
+                ImageCopy {
+                    dst: source,
+                    ..whole
+                },
+            ),
+            (
+                "a mip the destination does not have",
+                "mips",
+                ImageCopy {
+                    dst_subresource: ImageSubresourceLayers { mip: 3, ..layers },
+                    ..whole
+                },
+            ),
+            (
+                "a source region past the mip",
+                "runs past mip",
+                ImageCopy {
+                    src_offset: Offset3d { x: 4, y: 0, z: 0 },
+                    ..whole
+                },
+            ),
+            (
+                "more layers written than read",
+                "array layers",
+                ImageCopy {
+                    dst: array,
+                    dst_subresource: ImageSubresourceLayers {
+                        layer_count: 2,
+                        ..layers
+                    },
+                    ..whole
+                },
+            ),
+            (
+                "a plane a colour format does not have",
+                "exactly one plane",
+                ImageCopy {
+                    dst_subresource: ImageSubresourceLayers {
+                        aspect: ImageAspect::DEPTH,
+                        ..layers
+                    },
+                    ..whole
+                },
+            ),
+        ];
+        assert!(!cases.is_empty(), "nothing to check");
+        for (what, fragment, copy) in cases {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            encoder.copy_image_to_image(&copy);
+            let error = encoder
+                .finish()
+                .err()
+                .unwrap_or_else(|| panic!("{what} was accepted"));
+            let HalError::InvalidDescriptor(text) = error else {
+                panic!("{what}: expected InvalidDescriptor, got {error:?}");
+            };
+            assert!(
+                text.contains(fragment),
+                "{what}: the refusal must name the rule; got {text}"
+            );
+        }
+
+        // And the well-formed copy of the same two images records, so none of
+        // the refusals above is this entry point refusing everything.
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.copy_image_to_image(&whole);
+        let accepted = encoder
+            .finish()
+            .expect("two subresources of one format and one sample count is the copy D3D12 takes");
+        device.destroy_command_buffer(accepted);
+
+        device.destroy_image(array);
+        device.destroy_image(volume);
+        device.destroy_image(other_format);
+        device.destroy_image(destination);
+        device.destroy_image(source);
+    }
+
     /// An encoder built on another device's queue refuses at `finish`, which is
     /// the first call it has to refuse through.
     ///
@@ -6172,28 +6356,9 @@ pub(crate) mod tests {
             .queue(QueueKind::Graphics)
             .expect("the graphics queue exists");
         type Refused = (&'static str, fn(&mut dyn CommandEncoder));
-        let recording: &[Refused] = &[
-            ("buffer fills", |encoder| {
-                encoder.fill_buffer(unissued(), 0, 4, 0);
-            }),
-            ("image-to-image copies", |encoder| {
-                let layers = ImageSubresourceLayers {
-                    aspect: ImageAspect::COLOR,
-                    mip: 0,
-                    base_layer: 0,
-                    layer_count: 1,
-                };
-                encoder.copy_image_to_image(&ImageCopy {
-                    src: unissued(),
-                    src_subresource: layers,
-                    src_offset: Offset3d::default(),
-                    dst: unissued(),
-                    dst_subresource: layers,
-                    dst_offset: Offset3d::default(),
-                    extent: Extent3d::d2(1, 1),
-                });
-            }),
-        ];
+        let recording: &[Refused] = &[("buffer fills", |encoder| {
+            encoder.fill_buffer(unissued(), 0, 4, 0);
+        })];
         assert!(!recording.is_empty(), "nothing to check");
         for (what, record) in recording {
             let mut encoder =
@@ -6381,6 +6546,23 @@ pub(crate) mod tests {
                 encoder.push_constants(ShaderStages::ALL, 0, &[0u8; 4], unissued());
             }),
             ("draws", |encoder| encoder.draw(0..3, 0..1)),
+            ("image-to-image copies", |encoder| {
+                let layers = ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                };
+                encoder.copy_image_to_image(&ImageCopy {
+                    src: unissued(),
+                    src_subresource: layers,
+                    src_offset: Offset3d::default(),
+                    dst: unissued(),
+                    dst_subresource: layers,
+                    dst_offset: Offset3d::default(),
+                    extent: Extent3d::d2(1, 1),
+                });
+            }),
             // Each opens the pass first, because the scope is what decides the
             // bind point and a compute command outside one is a descriptor
             // error rather than a handle one — which would pass this test
