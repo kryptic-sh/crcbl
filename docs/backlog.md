@@ -1497,7 +1497,9 @@ question that has to be settled _before_ anyone restructures this backend's
 encoder for `Capability::DrawIndirectCount`. The answer is that the device can
 do everything the ICB path needs:
 
-- **Families:** `Apple1`–`Apple5`, `Mac2`, `Common1`–`Common3` all `true`.
+- **Families:** `Apple1`–`Apple5`, `Mac2`, `Common1`–`Common3` all `true`, and
+  **`Metal4`, `Metal3` and `Apple6`–`Apple10` all `false`.** That second half is
+  a finding in its own right — see below.
 - **ICB creation succeeds at every rung tried**, `64` through `1_048_576`, with
   `first refused = None` — no ceiling was found, and the top rung is
   `Limits::desktop()`'s `max_draw_indirect_count`.
@@ -1535,6 +1537,36 @@ against the same pipeline drawn directly on the encoder. **It passed on
 `mtl e2e (macos-latest)` on 2026-08-18** — 66 of 66 — so this device executes an
 ICB draw and produces a byte-identical canvas. The nominal `size` is a reporting
 quirk, not a hollow allocation.
+
+### MEASURED — Metal's mesh rows are unprovable on the Mac CI has
+
+The ICB probe's family list answers a question the mesh rows had only guessed
+at. CI's Apple Paravirtual device reports **`Metal3 = false`**, and `false` for
+every Apple family above `Apple5`; the highest it claims are `Apple5` and
+`Mac2`.
+
+**Metal mesh shading is a Metal 3 feature**, gated on
+`supportsFamily:MTLGPUFamilyMetal3` — Apple's own check, and what
+`MTLGPUFamily.metal3` documents itself as covering. So a
+`MTLMeshRenderPipelineDescriptor` cannot be created on that device at all.
+
+**What this changes, and what it does not.** `Capability::MeshShading` and
+`Capability::TaskShaderStage` for Metal stay `Unwritten`: `crcbl-mtl` genuinely
+builds no mesh pipeline, and that is a fact about the backend rather than the
+runner. What changes is the _cost_ of writing them — the work could be done and
+CI could never show it working, so it would land as code no gate exercises. That
+is the same shape as the two `Unclassified` counter-sampled query rows, which
+wait on a Mac that advertises a counter set.
+
+Both rows' `why` in `crates/crcbl-hal/src/capability.rs` now carry the
+measurement, so the parity report says it rather than leaving the next reader to
+rediscover it.
+
+**It also bounds the deletion-bar decision.** Of Metal's six blockers, **four**
+are now measured unprovable on available hardware — the two mesh rows here and
+the two counter-sampled query rows — which is the concrete content behind option
+(2) in "what bar the deletion clears": every row either closed or _measured_
+unprovable, with `Support::NotOnThisDevice` already able to say so.
 
 ### crcbl-mtl does not build with `mtl-e2e` off
 

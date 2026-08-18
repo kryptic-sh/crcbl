@@ -868,7 +868,11 @@ pub const DIVERGENCES: &[Divergence] = &[
         kind: DivergenceKind::Unwritten,
         why: "Metal has the object and mesh stages — MTLMeshRenderPipelineDescriptor and \
               drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup: — and \
-              Slang emits them, but this backend builds no such pipeline (the Metal mesh slice)",
+              Slang emits them, but this backend builds no such pipeline (the Metal mesh slice). \
+              Writing it would not be verifiable here: mesh shading is a Metal 3 feature gated on \
+              supportsFamily:MTLGPUFamilyMetal3, and the Mac CI runs this backend on answers false \
+              to Metal3 and to every Apple family above 5 — measured by \
+              a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling",
     },
     Divergence {
         capability: Capability::MeshShading,
