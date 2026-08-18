@@ -161,13 +161,53 @@ failure.**
    that unblocked dx12's and Metal's rows, which is why it was worth doing
    properly rather than three times.
 
-   **One remains**, and it is tied to an open blocker rather than orphaned:
-   `crates/crcbl-wgpu/tests/wgpu_e2e.rs` holds the only bind group built with a
-   `variable_count` **against a real device**. `crcbl-webgpu`'s two uses are
-   stream-encoding tests with no device behind them. That is
-   `Capability::BindlessDescriptorArray`, which is still an open Metal row — so
-   closing that row and re-homing this exercise are the same task, and doing it
-   removes the last coverage `crcbl-wgpu`'s deletion would cost.
+   **The fourth is not the exercise it was recorded as, and the deletion no
+   longer waits on it.** `crates/crcbl-wgpu/tests/wgpu_e2e.rs` does hold the
+   only bind group built with a `variable_count` **against a real device** — the
+   rest (`crcbl-webgpu/tests/stream.rs`, `tests/corpus/mod.rs`,
+   `crcbl-dx12/src/binding.rs`) have no device behind them. But read what it
+   asserts:
+   `a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped` creates
+   the layout, creates one group whose count the entries bear out, destroys it,
+   and asserts the refusal messages for the counts that disagree. **No pipeline,
+   no dispatch, no shader.** It proves the seam's refusal contract, which the
+   agnostic suites already drive on every backend; it proves nothing about
+   descriptor indexing. `crcbl-vk`'s
+   `a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier` is
+   the same shape — deliberately so, asserting that a device _without_
+   `DESCRIPTOR_INDEXING` refuses the flags rather than ignoring them, since "a
+   bindless array quietly downgraded to a fixed one reads garbage at index
+   4097". A layout on a real device, no group and no shader. So the deletion's
+   cost is a duplicate refusal check, not a lost GPU exercise, and goal 3 does
+   not depend on closing the Metal row first.
+
+   **Driving `BindlessDescriptorArray` for real needs a shader artifact that
+   does not exist**, checked three independent ways: no `.slang` source declares
+   a resource array (every `Texture2DArray` is one layered image, which
+   `crcbl_shaders::mesh`'s `GpuMaterial` doc says is deliberate — a layer index
+   needs no feature, a descriptor index needs `DESCRIPTOR_INDEXING`, which
+   `crcbl-mtl` withdraws); the 17 committed SPIR-V modules declare only
+   `Shader`, `DrawParameters`, `ImageQuery` and `MeshShadingEXT`, with no
+   `RuntimeDescriptorArray` and no `SPV_EXT_descriptor_indexing`; and no WGSL
+   contains `binding_array`. Every `OpTypeRuntimeArray` present is an SSBO tail
+   inside a block. So this row is a shader-artifact task shaped like
+   `push_constant_probe.slang` was, not a test-only one — and the array must be
+   the last and highest-numbered binding, because `declaration_order` is linted
+   and `BindGroupLayoutDesc::check_entries` enforces both halves.
+
+   **A second, independent blocker: `crcbl-wgpu` declares a `Support::No` its
+   own device does not honour.** Its `BindlessDescriptorArray` reason in
+   `crcbl-wgpu/src/device.rs` says wgpu "offer[s] no partial binding" — while
+   `hal_features_for` in `crcbl-wgpu/src/instance.rs` _requires_
+   `PARTIALLY_BOUND_BINDING_ARRAY` (alongside `TEXTURE_BINDING_ARRAY` and the
+   non-uniform-indexing feature) before it will grant `DESCRIPTOR_INDEXING`, and
+   grants it on this machine's RADV adapter. `create_bind_group_layout` then
+   passes `check_entries` and builds a real array binding. An honest exercise
+   would score `Worked` against a declared `No` on that backend and fail the
+   suite. This is the same class of defect CI twice caught elsewhere — a backend
+   performing a capability it denies — and it is evidence for the deletion
+   rather than work to do before it: the crate leaving takes the false
+   declaration with it.
 
    **`naga` does NOT leave with it, and notes here said otherwise twice.**
    `crcbl-shaders` takes `naga` as its own **dev-dependency** (`version = "30"`,
