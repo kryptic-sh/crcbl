@@ -3846,7 +3846,7 @@ fn raster_storage_buffer(
     label: &'static str,
     bytes: &[u8],
 ) -> crcbl::hal::BufferHandle {
-    raster_staged_buffer(
+    staged_buffer(
         headless,
         label,
         bytes,
@@ -3862,7 +3862,7 @@ fn raster_indirect_buffer(
     label: &'static str,
     bytes: &[u8],
 ) -> crcbl::hal::BufferHandle {
-    raster_staged_buffer(
+    staged_buffer(
         headless,
         label,
         bytes,
@@ -3871,14 +3871,17 @@ fn raster_indirect_buffer(
     )
 }
 
-/// The upload both of the above share: one host buffer, one copy, one barrier,
-/// one submission that is waited on.
+/// A device-local buffer holding `bytes`: one host buffer, one copy, one
+/// barrier, one submission that is waited on.
 ///
-/// Its own submission rather than the render pass's command buffer, so the
+/// Its own submission rather than the caller's command buffer, so the
 /// exercises' [`Raster::render`] records the same barriers whatever it is
 /// drawing — a submission boundary is the dependency, so nothing is left
-/// unsynchronised by moving the upload out.
-fn raster_staged_buffer(
+/// unsynchronised by moving the upload out. Written for the two raster helpers
+/// above and named for neither of them, because
+/// [`exercise_update_bind_group`]'s compute fixture stages its uniform and its
+/// source through it too.
+fn staged_buffer(
     headless: &Headless,
     label: &'static str,
     bytes: &[u8],
@@ -4663,6 +4666,600 @@ fn push_constant_dispatch(
     }
 }
 
+/// What the destination the group starts out naming holds before either
+/// dispatch.
+///
+/// Distinct from [`UPDATE_POISON_SECOND`] and not merely "some poison": the two
+/// destinations are the same size and the same shape, so a prime that landed on
+/// the wrong one is only visible if the primes differ. Both are also larger than
+/// any word a dispatch can write — see the assertion below — which is what makes
+/// "still primed" and "written" separable without comparing against the whole
+/// expectation.
+const UPDATE_POISON_FIRST: u32 = 0xC0FF_EE01;
+
+/// What the destination the update repoints the group *to* holds before either
+/// dispatch.
+const UPDATE_POISON_SECOND: u32 = 0xF00D_BA02;
+
+// The premises the four readings in `exercise_update_bind_group` rest on,
+// checked at compile time because every side is a constant.
+const _: () = {
+    assert!(
+        UPDATE_POISON_FIRST != UPDATE_POISON_SECOND,
+        "the two destinations are primed with the same value, so a dispatch that wrote the wrong \
+         one reads back exactly like one that wrote the right one"
+    );
+    assert!(
+        UPDATE_POISON_FIRST != PROBE_SENTINEL && UPDATE_POISON_SECOND != PROBE_SENTINEL,
+        "a poison equal to PROBE_SENTINEL would let another compute exercise's primer read as \
+         this one's"
+    );
+    // `probe_source` is `index + 1` over `PROBE_ELEMENTS` elements and the
+    // shader squares it, so this is the largest word either dispatch can write.
+    let largest_written = PROBE_ELEMENTS * PROBE_ELEMENTS;
+    assert!(
+        UPDATE_POISON_FIRST > largest_written,
+        "UPDATE_POISON_FIRST is inside the range of squares the probe writes, so an element the \
+         dispatch did write is no longer distinguishable from one it did not"
+    );
+    assert!(
+        UPDATE_POISON_SECOND > largest_written,
+        "UPDATE_POISON_SECOND is inside the range of squares the probe writes, so an element the \
+         dispatch did write is no longer distinguishable from one it did not"
+    );
+};
+
+/// One of [`exercise_update_bind_group`]'s two destinations, with everything
+/// that makes its contents evidence.
+///
+/// The three buffers travel together because they are one claim: `buffer` is
+/// what the bind group may name, `prime` is the host copy of [`poison`](Self::poison)
+/// that goes over it before every dispatch, and `staging` is where it comes home
+/// through. Splitting them into loose arguments put the run helper over
+/// `clippy::too_many_arguments` and made it possible to prime one destination
+/// and read the other.
+struct Destination {
+    /// The device-local storage buffer the probe's binding 2 may point at.
+    buffer: crcbl::hal::BufferHandle,
+    /// A host buffer holding nothing but [`poison`](Self::poison), copied over
+    /// [`buffer`](Self::buffer) before each dispatch. A copy rather than a
+    /// `fill_buffer` for [`ComputeProbe::run`]'s reason: wgpu offers only a zero
+    /// fill, and zero is exactly what an unwritten destination looks like.
+    prime: crcbl::hal::BufferHandle,
+    /// Host-readable copy target, so the result is asserted rather than assumed.
+    staging: crcbl::hal::BufferHandle,
+    /// This destination's own primer value.
+    poison: u32,
+}
+
+impl Destination {
+    fn open(headless: &Headless, label: &'static str, poison: u32) -> Self {
+        let device = headless.device.as_ref();
+        let buffer = device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: probe_bytes(),
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a device-local storage buffer");
+        let prime = device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: probe_bytes(),
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a host-upload buffer");
+        let staging = device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: probe_bytes(),
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a host-readback buffer");
+        let primer: Vec<u8> = core::iter::repeat_n(poison, PROBE_ELEMENTS as usize)
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        device
+            .write_buffer(prime, 0, &primer)
+            .expect("a host-upload buffer is what write_buffer is for");
+        Self {
+            buffer,
+            prime,
+            staging,
+            poison,
+        }
+    }
+
+    /// The words the last dispatch left in this destination.
+    fn read(&self, headless: &Headless) -> Vec<u32> {
+        let mut bytes = poisoned(probe_bytes() as usize);
+        headless.readback(self.staging, probe_bytes(), &mut bytes);
+        let values: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect();
+        // Before any caller compares it. A readback that came back short would
+        // otherwise satisfy `untouched` over nothing at all, and would panic on
+        // the slice in a failure message rather than saying what went wrong.
+        assert_eq!(
+            values.len(),
+            PROBE_ELEMENTS as usize,
+            "the readback is not the whole destination buffer"
+        );
+        values
+    }
+
+    /// Whether `values` is this destination's primer and nothing else.
+    fn untouched(&self, values: &[u32]) -> bool {
+        values.iter().all(|value| *value == self.poison)
+    }
+
+    fn destroy(&self, device: &dyn Device) {
+        device.destroy_buffer(self.staging);
+        device.destroy_buffer(self.prime);
+        device.destroy_buffer(self.buffer);
+    }
+}
+
+/// Primes **both** destinations, runs `record` inside a compute pass, and copies
+/// both back.
+///
+/// Both, on one submission, every time — which is the whole design. The question
+/// this exercise asks is *which* buffer a dispatch reached, and a run that
+/// primed or read only the buffer it expected could not tell a dispatch that
+/// went to the other one from a dispatch that never ran. The barrier shape is
+/// [`ComputeProbe::run`]'s, and for its reasons.
+fn update_bind_group_dispatch(
+    headless: &Headless,
+    first: &Destination,
+    second: &Destination,
+    record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
+) -> Result<(), HalError> {
+    let device = headless.device.as_ref();
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("update bind group exercise"),
+        queue: headless.queue,
+    });
+    let barrier = |buffer, from, to| crcbl::hal::BufferBarrier {
+        buffer,
+        from,
+        to,
+        queue_transfer: None,
+    };
+    let both = |from, to| {
+        [
+            barrier(first.buffer, from, to),
+            barrier(second.buffer, from, to),
+        ]
+    };
+    // `TransferSrc` as the source state is vacuous on the first run and is the
+    // real prior use on the second — a buffer barrier carries no layout, so
+    // naming a wider source scope than happened costs a stage mask and cannot be
+    // wrong. [`ComputeProbe::run`] says the same at more length.
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &both(ResourceState::TransferSrc, ResourceState::TransferDst),
+        ..Barriers::default()
+    });
+    for destination in [first, second] {
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+            src: destination.prime,
+            src_offset: 0,
+            dst: destination.buffer,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
+    }
+    // `ShaderReadWrite` rather than `ShaderWrite`, for the reason
+    // [`ComputeProbe::run`] gives: the barrier names what the *descriptor*
+    // permits, and Slang emits no `NonReadable` for an `RWStructuredBuffer`.
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &both(ResourceState::TransferDst, ResourceState::ShaderReadWrite),
+        ..Barriers::default()
+    });
+
+    encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
+        label: Some("update bind group probe"),
+    });
+    record(encoder.as_mut());
+    encoder.end_compute_pass();
+
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &both(ResourceState::ShaderReadWrite, ResourceState::TransferSrc),
+        ..Barriers::default()
+    });
+    for destination in [first, second] {
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+            src: destination.buffer,
+            src_offset: 0,
+            dst: destination.staging,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
+    }
+
+    let commands = encoder.finish()?;
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    Ok(())
+}
+
+/// Drives [`Capability::UpdateBindGroup`] and reports whether a descriptor
+/// written into a live group is the descriptor the next dispatch used.
+///
+/// # Why this one needs its own fixture
+///
+/// [`ComputeProbe`] cannot answer it twice over. Its layout carries
+/// [`BindingFlags::empty()`](crcbl::hal::BindingFlags) on every entry, which
+/// `crcbl-vk` refuses a rewrite against per *layout* rather than per device; and
+/// it owns one destination, while the observable here is which of **two** a
+/// dispatch reached. So this builds the third compute fixture in the file: the
+/// same committed `compute_probe.slang` and the same three-binding layout, with
+/// the flag on binding 2 and a second destination beside the first.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// Two dispatches with one `update_bind_group` between them, and **both**
+/// destinations primed with their own poison — [`UPDATE_POISON_FIRST`] and
+/// [`UPDATE_POISON_SECOND`] — before each. The first dispatch runs with the group
+/// as created, naming `first`; the update rewrites binding 2 to name `second`;
+/// the second dispatch runs with nothing else changed. The four readings of that
+/// second run are all distinct, which is what the two poisons buy:
+///
+/// * `first` still primed and `second` holding the squares — the rewrite decided
+///   where the dispatch wrote. [`Exercise::Worked`].
+/// * `first` holding the squares and `second` still primed — the call was
+///   accepted and the dispatch went where it always went.
+///   [`Exercise::SilentlyIgnored`], which is the failure the declaration exists
+///   to catch.
+/// * both still primed — nothing ran at all. A panic rather than an outcome: the
+///   *first* dispatch is asserted before the update, so the fixture has already
+///   shown this pipeline writes.
+/// * anything else — the panic names which buffer disagreed and where.
+///
+/// # The flag is asked for only where the device can express it
+///
+/// [`Capability::UpdateBindGroup`] is explicit that Vulkan refuses the rewrite
+/// unless the layout carries
+/// [`BindingFlags::UPDATE_AFTER_BIND`](crcbl::hal::BindingFlags::UPDATE_AFTER_BIND),
+/// and `crcbl_hal::pipeline`'s `check_entries` is equally explicit that *any*
+/// [`BindingFlags`](crcbl::hal::BindingFlags) on a device without
+/// [`Features::DESCRIPTOR_INDEXING`] must be refused rather than dropped. Those
+/// two rules meet on Metal, which declares this capability `Support::Yes` and
+/// withdraws `DESCRIPTOR_INDEXING` — its bind groups are flat argument tables,
+/// so it can create no layout carrying the flag at all. Asking for the flag
+/// unconditionally would therefore score Metal `Refused` against its own `Yes`
+/// and fail a backend that performs the operation perfectly well.
+///
+/// So the flag is set when the device reports `DESCRIPTOR_INDEXING` and left off
+/// when it does not, and each side is the strongest layout that device can
+/// build. It is not a way of dodging a refusal: a Vulkan device without
+/// `DESCRIPTOR_INDEXING` gets the flagless layout and `crcbl-vk` refuses the
+/// rewrite against it, which is `Refused` against `Support::Yes` and fails —
+/// correctly, because that device cannot do what the backend declared. No such
+/// device was found here: radv and llvmpipe both report the feature.
+///
+/// # The update is issued between submissions, and the seam does not say whether
+/// it could be issued anywhere else
+///
+/// Both dispatches are separate command buffers, each submitted and waited on,
+/// with the rewrite in the gap. That is the only timing every backend agrees on,
+/// and it is agreement rather than caution: `crcbl-mtl`'s `binding` module states
+/// that "an update does not reach a command buffer that already bound the group"
+/// — the values are copied onto the encoder when `bind_group` runs — so on Metal
+/// a rewrite only ever shows up at the *next* bind, which is what the second
+/// submission is.
+///
+/// What the seam says is narrower than what a caller needs, and the gap is worth
+/// naming rather than working around silently.
+/// [`Device::update_bind_group`](crcbl::hal::Device::update_bind_group) covers
+/// exactly one timing: with `UPDATE_AFTER_BIND` the call "may be called while
+/// command buffers referencing the group are pending". It says nothing about a
+/// group updated while a command buffer that bound it is still *recording*, and
+/// the backends would not agree if it did — `crcbl-dx12` writes descriptors
+/// straight into the shader-visible heap a recorded bind already points at,
+/// while `crcbl-mtl` copied the values onto the encoder and will not see the
+/// write. A capability whose legal timing is unstated cannot be exercised
+/// portably at that timing, so this drives the stated one.
+///
+/// Two further things the seam documents and two backends do not do, found while
+/// writing this and left as findings rather than changed here: `crcbl-mtl` and
+/// `crcbl-dx12` accept a rewrite against a layout with no `UPDATE_AFTER_BIND`,
+/// where the seam documents [`HalError::Unsupported`] — and on Metal that is the
+/// only kind of layout there is, so the documented rule would make its
+/// `Support::Yes` describe a call that can never succeed.
+///
+/// # A refusal can arrive at four different points
+///
+/// `create_bind_group_layout` is the first, and it is where the flag is judged.
+/// `create_bind_group` and `create_pipeline_layout` follow, because a backend
+/// that gained the layout and not the group would refuse there.
+/// `update_bind_group` itself is the fourth and is where `crcbl-wgpu` and
+/// `crcbl-webgpu` land, both of them on immutable WebGPU bind groups. A backend
+/// that defers its errors would refuse at
+/// [`finish`](crcbl::hal::CommandEncoder::finish) instead, which
+/// [`update_bind_group_dispatch`] returns rather than unwrapping. All of them
+/// are [`Exercise::Refused`].
+///
+/// The shader module and the pipelines are the steps that panic instead: every
+/// backend this suite runs already dispatches this exact artifact in
+/// [`a_compute_dispatch_writes_the_values_it_was_asked_for`], so a refusal there
+/// is a broken fixture rather than a capability answer.
+fn exercise_update_bind_group(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let flags = if device
+        .caps()
+        .features
+        .contains(Features::DESCRIPTOR_INDEXING)
+    {
+        crcbl::hal::BindingFlags::UPDATE_AFTER_BIND
+    } else {
+        crcbl::hal::BindingFlags::empty()
+    };
+
+    let params = staged_buffer(
+        headless,
+        "update bind group params",
+        &crcbl::shaders::compute_probe::Params {
+            count: PROBE_ELEMENTS,
+        }
+        .to_bytes(),
+        BufferUsage::UNIFORM,
+        ResourceState::ShaderRead,
+    );
+    let source_bytes: Vec<u8> = probe_source()
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let source = staged_buffer(
+        headless,
+        "update bind group source",
+        &source_bytes,
+        BufferUsage::STORAGE,
+        ResourceState::ShaderRead,
+    );
+    let first = Destination::open(headless, "update bind group first", UPDATE_POISON_FIRST);
+    let second = Destination::open(headless, "update bind group second", UPDATE_POISON_SECOND);
+
+    // `compute_probe.slang`'s own three bindings, and the flag on the one this
+    // exercise rewrites.
+    let layout_entries = [
+        crcbl::hal::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::UniformBuffer { dynamic: false },
+            count: 1,
+            flags: crcbl::hal::BindingFlags::empty(),
+        },
+        crcbl::hal::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: crcbl::hal::BindingFlags::empty(),
+        },
+        crcbl::hal::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: false,
+            },
+            count: 1,
+            flags,
+        },
+    ];
+
+    let outcome = match device.create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
+        label: Some("update bind group probe"),
+        entries: &layout_entries,
+    }) {
+        Err(error) => Exercise::Refused(error),
+        Ok(bind_group_layout) => {
+            let group_entries = [
+                crcbl::hal::BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: crcbl::hal::BindingResource::whole_buffer(params),
+                },
+                crcbl::hal::BindGroupEntry {
+                    binding: 1,
+                    array_index: 0,
+                    resource: crcbl::hal::BindingResource::whole_buffer(source),
+                },
+                crcbl::hal::BindGroupEntry {
+                    binding: 2,
+                    array_index: 0,
+                    resource: crcbl::hal::BindingResource::whole_buffer(first.buffer),
+                },
+            ];
+            let outcome = match device.create_bind_group(&crcbl::hal::BindGroupDesc {
+                label: Some("update bind group probe"),
+                layout: bind_group_layout,
+                entries: &group_entries,
+                variable_count: None,
+            }) {
+                Err(error) => Exercise::Refused(error),
+                Ok(bind_group) => {
+                    let set_layouts = [bind_group_layout];
+                    let outcome =
+                        match device.create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
+                            label: Some("update bind group probe"),
+                            bind_group_layouts: &set_layouts,
+                            push_constants: None,
+                        }) {
+                            Err(error) => Exercise::Refused(error),
+                            Ok(pipeline_layout) => update_bind_group_rewrite(
+                                headless,
+                                &first,
+                                &second,
+                                bind_group,
+                                pipeline_layout,
+                            ),
+                        };
+                    device.destroy_bind_group(bind_group);
+                    outcome
+                }
+            };
+            device.destroy_bind_group_layout(bind_group_layout);
+            outcome
+        }
+    };
+
+    second.destroy(device);
+    first.destroy(device);
+    device.destroy_buffer(source);
+    device.destroy_buffer(params);
+    outcome
+}
+
+/// The two dispatches and the rewrite between them, once the layout, the group
+/// and the pipeline layout have all been accepted.
+///
+/// Split out of [`exercise_update_bind_group`] so the part that is about
+/// `update_bind_group` is not four `match` arms deep in the part that is about
+/// building a compute pipeline. Its caller destroys everything it is handed.
+fn update_bind_group_rewrite(
+    headless: &Headless,
+    first: &Destination,
+    second: &Destination,
+    bind_group: crcbl::hal::BindGroupHandle,
+    pipeline_layout: crcbl::hal::PipelineLayoutHandle,
+) -> Exercise {
+    let device = headless.device.as_ref();
+    let module = device
+        .create_shader_module(&crcbl::hal::ShaderModuleDesc {
+            label: Some("compute_probe.slang"),
+            spirv: crcbl::shaders::COMPUTE_PROBE.spirv(),
+            wgsl: crcbl::shaders::COMPUTE_PROBE.wgsl(),
+            msl: crcbl::shaders::COMPUTE_PROBE.msl(),
+            dxil: &crcbl::shaders::COMPUTE_PROBE.dxil_containers(),
+        })
+        .expect("the committed shader is accepted");
+    let entry_point = crcbl::shaders::COMPUTE_PROBE
+        .entry_point(crcbl::shaders::Stage::Compute)
+        .expect("the probe has exactly one compute entry point");
+    let pipeline = device
+        .create_compute_pipeline(&crcbl::hal::ComputePipelineDesc {
+            label: Some("update bind group probe"),
+            layout: pipeline_layout,
+            compute: crcbl::hal::ShaderEntry {
+                module,
+                entry_point,
+            },
+            workgroup_size: [crcbl::shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
+        })
+        .expect("a compute pipeline");
+    device.destroy_shader_module(module);
+
+    let dispatch = |encoder: &mut dyn crcbl::hal::CommandEncoder| {
+        encoder.bind_compute_pipeline(pipeline);
+        // Inside the pass, because the open scope is the only signal the seam
+        // gives the backend about which bind point a group is for.
+        encoder.bind_group(0, bind_group, &[], pipeline_layout);
+        encoder.dispatch(PROBE_GROUPS, 1, 1);
+    };
+    let squares = probe_expected(PROBE_ELEMENTS);
+
+    let outcome = match update_bind_group_dispatch(headless, first, second, dispatch) {
+        Err(error) => Exercise::Refused(error),
+        Ok(()) => {
+            // **The fixture asserts itself before it asserts the capability.**
+            // Every reading below is "which buffer did the dispatch reach", and
+            // that question is only meaningful once this dispatch is known to
+            // reach one.
+            assert_probe(
+                &first.read(headless),
+                &squares,
+                "before the rewrite, the buffer the group was created naming",
+            );
+            let before_second = second.read(headless);
+            assert!(
+                second.untouched(&before_second),
+                "before the rewrite, the buffer the group does not name yet already holds {:#010x?} \
+                 where {:#010x} was primed. Nothing has rewritten anything at this point, so this \
+                 is the fixture writing to the wrong buffer rather than a capability answer.",
+                &before_second[..4],
+                second.poison
+            );
+
+            match device.update_bind_group(
+                bind_group,
+                &[crcbl::hal::BindGroupEntry {
+                    binding: 2,
+                    array_index: 0,
+                    resource: crcbl::hal::BindingResource::whole_buffer(second.buffer),
+                }],
+            ) {
+                Err(error) => Exercise::Refused(error),
+                Ok(()) => match update_bind_group_dispatch(headless, first, second, dispatch) {
+                    Err(error) => Exercise::Refused(error),
+                    Ok(()) => update_bind_group_verdict(headless, first, second, &squares),
+                },
+            }
+        }
+    };
+
+    device.destroy_compute_pipeline(pipeline);
+    outcome
+}
+
+/// Reads both destinations after the second dispatch and says which of the four
+/// readings it is.
+fn update_bind_group_verdict(
+    headless: &Headless,
+    first: &Destination,
+    second: &Destination,
+    squares: &[u32],
+) -> Exercise {
+    let after_first = first.read(headless);
+    let after_second = second.read(headless);
+    let first_untouched = first.untouched(&after_first);
+    let second_untouched = second.untouched(&after_second);
+
+    if first_untouched && after_second == squares {
+        Exercise::Worked
+    } else if second_untouched && after_first == squares {
+        // The rewrite was accepted and the dispatch went where it always went.
+        eprintln!(
+            "crcbl hal seam e2e: after update_bind_group the dispatch still wrote the buffer the \
+             group was created naming, and the buffer it was rewritten onto still holds \
+             {:#010x}",
+            second.poison
+        );
+        Exercise::SilentlyIgnored
+    } else if first_untouched && second_untouched {
+        panic!(
+            "neither destination was written by the second dispatch: the first still holds \
+             {:#010x} and the second still holds {:#010x}. The first dispatch wrote its \
+             destination — that is asserted above — so this is not a pipeline that does nothing; \
+             the rewrite pointed binding 2 somewhere neither of these buffers is.",
+            first.poison, second.poison
+        )
+    } else {
+        panic!(
+            "the second dispatch left a reading none of the three outcomes describes. The first \
+             destination begins {:#010x?} (primed with {:#010x}) and the second begins {:#010x?} \
+             (primed with {:#010x}); both were expected to be either their own primer throughout \
+             or the squares beginning {:#010x?}. Two destinations written, or one written \
+             partially, is a rewrite that reached the descriptor and named the wrong range.",
+            &after_first[..4],
+            first.poison,
+            &after_second[..4],
+            second.poison,
+            &squares[..4],
+        )
+    }
+}
+
 /// Drives [`Capability::PolygonModeLine`] and reports whether the triangle
 /// arrived as an outline.
 ///
@@ -5269,14 +5866,17 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::DrawIndirectCount => exercise_draw_indirect_count(headless),
         C::IndirectArgumentPaddedStride => exercise_indirect_argument_padded_stride(headless),
         C::MeshShading | C::TaskShaderStage => Exercise::Unexercised(NEEDS_MESH_ARTIFACTS),
-        C::UpdateBindGroup | C::BindlessDescriptorArray | C::StorageImageBinding => {
-            Exercise::Unexercised(
-                "needs a bind-group layout built for the capability and a shader that reads it; \
-                 the compute probe's layout is a fixed three-buffer one",
-            )
-        }
-        // The one that left that group: `push_constant_probe.slang` is a second
-        // compute fixture whose only input besides its one binding is the block.
+        C::BindlessDescriptorArray | C::StorageImageBinding => Exercise::Unexercised(
+            "needs a bind-group layout built for the capability and a shader that reads it; \
+             the compute probe's layout is a fixed three-buffer one",
+        ),
+        // The one that left that group: `compute_probe.slang`'s layout is fixed,
+        // but nothing said it had to be built once — this one is built again
+        // with UPDATE_AFTER_BIND on its destination and a second destination
+        // beside it, which is all the capability needs to be observable.
+        C::UpdateBindGroup => exercise_update_bind_group(headless),
+        // The one before it: `push_constant_probe.slang` is a second compute
+        // fixture whose only input besides its one binding is the block.
         C::PushConstants => exercise_push_constants(headless),
         C::PolygonModeLine => exercise_polygon_mode_line(headless),
         C::DepthClamp => exercise_depth_clamp(headless),
