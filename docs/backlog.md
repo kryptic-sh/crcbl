@@ -745,100 +745,142 @@ machine, so the choice was to make the degrade visible rather than to harden a
 condition nobody has observed. If CI's lavapipe arm never prints that line, the
 degrade path is dead and the test should simply require the feature.
 
-### The browser gates run on Linux only — the plan to fix that
+### The macOS and Windows probe gates are unproven
 
-Every browser gate is a step inside `pages.yml`'s one `ubuntu-latest` job: the
-five demos and the probe. `ci.yml` has no browser step at all. Scoped 2026-08-18
-against the runner-image manifests and Chromium's own sources.
+`pages.yml` now runs the seam probe on `macos-15` (headless, real Metal) and
+`windows-latest` (headed, on the runner's desktop), both `continue-on-error`.
+**Nothing about either has been executed** — this machine is Linux, and Linux is
+green at 57/57 with the shared launcher in place.
 
-**The decisive fact, and it is not the obvious one:** headless Chrome can only
-read a WebGPU canvas back on **macOS**. On Windows and Linux the canvas renders
-but never reaches the headless compositor — an upstream limitation with no flag
-that fixes it, and exactly the phenomenon `run-browser-e2e.sh`'s own measured
-table already records for Linux (headless + SwiftShader reads back transparent
-black). So each platform needs a different answer: Linux keeps Xvfb, **macOS
-runs headless against real Metal**, and **Windows runs headed on the runner's
-own desktop session**, which it has.
+**Take `continue-on-error` off each job after three green runs**, and not
+before: an unproven gate blocking the Pages deploy is worse than no gate, and
+one that silently never fails is worse still.
 
-**Recommendation: ship the probe gate to macOS and Windows as two new jobs, and
-leave the five demos on Linux.** The probe is where the backend coverage is — it
-drives `crcbl-webgpu`'s command stream verb by verb — and it costs **2 seconds**
-of browser time against **2m38s** for the demos, both measured from a real run.
-The jobs take `needs: build` and download the existing `site` artifact rather
-than re-running `web/build.sh`, which needs `python3` and a wasm toolchain; that
-removes the build script's portability from the problem entirely and means every
-OS tests the identical bytes that ship. Separate jobs rather than a matrix,
-because a matrix would build the site three times and collide on the artifact
-name. Runner minutes are free — this is a public repo.
+**What the first runs answer**, and the line to read for each:
 
-**macOS first**: it is the only platform in the whole workspace where WebGPU on
-real hardware is reachable in CI. Use `macos-15` or `macos-latest` and **never
-`macos-14`**, which returns nil from `MTLCreateSystemDefaultDevice()`.
+- **macOS.** `browser: /Applications/Google Chrome.app/…` — absent means the
+  image assumption is wrong rather than the gate. Then
+  `probe e2e: adapter mode "hardware" (auto on darwin)`, then the `groups` line.
+  `G…AA` and 57/57 means headless macOS really does close the canvas readback
+  gap. A missing `X Y Z` means it does not, and macOS needs a headed session
+  too.
+- **Windows.** The open question is whether a GPU-less runner exposes any WebGPU
+  adapter at all. No group letters means it does not; `X Y Z AA` missing while
+  everything else passes means headed did not close the readback gap either, and
+  Windows cannot host this gate.
 
-**Three source changes are required first, all in `web/tools/`:**
+**Coverage gap in what landed:** `render-harness-e2e.mjs` was moved onto the
+shared launcher but its _launch_ path was never executed — only its startup
+error path. Its imports resolve at link time and its call shape matches the two
+that were exercised, but that is reasoning, not a run. It also remains wired
+into no workflow at all.
 
-1. **`probe-e2e.mjs` has no adapter mode switch** — it hardcodes
-   `--use-webgpu-adapter=swiftshader --use-vulkan=swiftshader --enable-features=Vulkan`,
-   and `CRCBL_CHROMIUM_FLAGS` only appends. On macOS that asks for an adapter
-   that cannot exist, since Chrome's Dawn has no Vulkan backend there. It needs
-   the `auto|hardware|swiftshader` switch `browser-e2e.mjs` already has.
-2. **`browser-e2e.mjs`'s hardware mode is Vulkan-shaped** — `--use-angle=vulkan`
-   is wrong on macOS (`metal`) and Windows (`d3d11`). As it stands macOS has no
-   working mode at all: hardware fails on the flags, and the fallback fails too.
-3. **Windows cleanup throws.** Both drivers kill the browser with
-   `process.kill(-pid)`, a POSIX process-group kill; on Windows a negative pid
-   is not a group, the call throws into a bare `catch {}`, Chrome keeps handles
-   on the profile directory, and the following `rmSync` fails **inside the exit
-   handler** — turning a passing run red after its checks succeeded. Needs
-   `taskkill /pid <pid> /T /F`.
+**One behaviour change on Linux:** `--enable-unsafe-webgpu` is now passed in
+hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
+43/43); unverified anywhere else.
 
-**The predicted failure worth reading twice**, because it is a trap the repo has
-already been caught by once: forcing `--use-webgpu-adapter=swiftshader` on
-Windows re-creates the Chrome-151 two-device mismatch recorded elsewhere in this
-file. It moves **Dawn** to SwiftShader while Chromium's shared-image device
-stays D3D11, and the canvas is handed between them. **Run Windows in the default
-D3D mode**, which is the real argument for change 1 being a mode switch rather
-than a hardcoded flip.
+### dx12's remaining blockers, ordered — and two reasons that were wrong
 
-**What only a real run can answer:** whether Chrome exposes any WebGPU adapter
-on a GPU-less Windows runner, and whether headed closes the readback gap. Both
-are answered by one line the harness already prints —
-`control page under "<mode>": adapter <name>` — and by which group letters
-appear in the probe's `groups` line. That granularity is why the probe reports
-per-group rather than pass/fail.
+dx12 owns 16 of the 29 parity blockers and none is an API absence. Planned
+2026-08-18 against the `windows` 0.62.2 bindings and `wgpu-hal`'s dx12 backend
+on disk. **Two of the divergence list's own stated reasons did not survive
+reading the code**, and both change what the work is:
 
-**Two smaller things found on the way:** `run-probe-e2e.sh` and
-`run-browser-e2e.sh` strip ANSI with `sed -E 's/\x1b…'`, and BSD sed has no `\x`
-escape, so on macOS that line matches nothing — harmless today because nothing
-colours that output, and maximally confusing the day something does. And
-`web/run-render-harness-e2e.sh` is referenced from the roadmap and this file but
-wired into **no workflow at all**.
+- **The shader-visible descriptor heap already exists.** The three `Declined`
+  fill rows say the obstacle is a heap `crcbl_dx12::descriptor` does not create.
+  True of `descriptor.rs`, whose docs say the flag is "deliberately never set" —
+  but `binding.rs` creates shader-visible CBV/SRV/UAV and sampler heaps lazily
+  and hands them to `SetDescriptorHeaps`, and has since the bind-group slice.
+  There is no descriptor-heap prerequisite to schedule.
+- **No committed DXIL has a push-constant block.** The `PushConstants` row says
+  nothing knows which root slot the committed DXIL puts one at. No `.slang` in
+  the repo declares one — `ui.slang`'s was replaced by a bound uniform buffer in
+  2026-08 — and every `push_constants:` field in `crcbl-render` is `None`. The
+  obstacle is a missing test artifact, not a missing fact about a shader.
 
-### `BinarySemaphore` stays unexercised, deliberately
+**The one real shared prerequisite is about five lines:** adapter caps are
+computed before any device or queue exists, and `Features::TIMESTAMP_QUERY` is
+withheld because the timestamp period needs `GetTimestampFrequency`, which needs
+a queue. Let `Dx12Device::open` amend caps after the queue it already creates,
+and move the queue-free flags into `features_of`. Both the sync and query slices
+need it.
 
-The seam suite drives 10 of 25 capabilities. `BinarySemaphore` is not one of
-them, and the entry that used to claim it was covered was **false** — the
-timeline test it named never creates a binary semaphore at all. The capability's
-own docs say why the two are separate: a backend that refused both would pass
-every test that checks only the timeline half.
+**The order, and why:**
 
-**A creation-only exercise is available and was declined.** It would assert that
-`create_semaphore(Binary)` handed back a handle, which is what the capability's
-own wording claims, and `exercise_query_set_creation` sets the precedent. It was
-declined because the tally means "driven by real GPU work", and a check that a
-handle came back would move the number without moving the coverage — and the
-query-set precedent is recorded in this file as a **ceiling to live with**, not
-a pattern to copy.
+1. **Depth copy** (`DepthImageCopy`). Smallest, lowest risk, and the only slice
+   where two existing tests flip from silence to real assertions on WARP —
+   including `forward_e2e/shadow.rs`, which today returns without asserting
+   anything on dx12 and would instead read the shadow atlas back. The format
+   table already has three depth columns; this adds a fourth for the copy
+   footprint. `D24UnormS8Uint` stays refused by name — the same absence WebGPU
+   has, and `wgpu-hal` encodes it as `None` too.
+2. **Sync** (`TimelineSemaphore`, `BinarySemaphore`, `CpuTimelineWait`,
+   `TimelineWaitBeforeSignal`). Four rows for one body of work; half flip the
+   existing `exercise_timeline`. `ID3D12Fence` has all three methods and
+   `ID3D12CommandQueue::Wait` permits waiting on an unsignalled value, which is
+   what makes wait-before-signal a genuine `Yes` here where Metal says no. The
+   crate already writes the event-wait idiom twice; what is new is a timeout.
+3. **Queries** (three rows, all flipping existing exercises). The one thing
+   `wgpu-hal` does not have to solve and this seam does: `query_results` is a
+   _device_ call, and D3D12 has no CPU-side read of a query heap — so a query
+   set must own a hidden resolve buffer and the call must submit and wait on its
+   own one-shot list. **A risk only CI can settle:** the exercise demands two
+   strictly increasing timestamps, and whether WARP's counter advances across a
+   small copy is a property of that runner.
+4. **MSAA resolve.** Small implementation, but the first slice needing a test
+   written. It can avoid `NEEDS_PIPELINE` entirely: clear a multisampled
+   attachment with `resolve: Some(view)`, then read the resolve target back — a
+   clear needs no pipeline. Runs on vk and Metal too.
+5. **Push constants.** Small implementation; the evidence costs a new committed
+   shader artifact, since nothing in the engine would consume one. WGSL cannot
+   carry it, so the artifact's target list excludes wgsl and both wgpu backends
+   stay refused.
+6. **Mesh, and only after a measurement.** Largest, riskiest, and the only one
+   whose provability is unknown: `crcbl-dx12` never calls `CheckFeatureSupport`
+   for `OPTIONS7`, so it reports no mesh support **by construction rather than
+   by measurement**. Worse, it would be _silently_ unprovable — `MeshShading` is
+   feature-gated, so with the flag clear the parity report stays green over a
+   row deleted on nobody's evidence. And reporting the flag flips `GeometryPath`
+   to `MeshShader`, which re-keys every dx12 golden in four suites. Split it:
+   probe-and-log first, then the PSO stream with the flag still withheld, then
+   the flag and the re-bless only once a mesh frame has actually been drawn.
 
-**What a real exercise would need:** the observable is ordering between two
-submissions, and on a single-queue backend a dropped binary semaphore is
-indistinguishable from an honoured one, because submission order already
-provides the ordering. So it needs either a second queue or a device that can be
-shown to reorder without it. That is a fixture decision, and it is the same
-missing machinery as the `NEEDS_TWO_SUBMISSIONS` rows.
+**Every slice must delete its rows from both `DIVERGENCES` and
+`REVIEWED_BLOCKERS`** or the snapshot test fails — that is the mechanism working
+— and must shrink the dx12-local test asserting every remaining refusal names
+itself.
 
-**Honest 10 is worth more than a padded 11**, which is the whole reason the
-tally exists.
+### DECISION NEEDED — do the three dx12 fill rows stay declined?
+
+They were declined for a reason that turns out to be wrong (above), and they now
+count as three of the 29 blockers. `exercise_fill` already drives all three on
+WARP with distinct values and poison priming, so **the evidence is free and only
+the work is optional** — an unusual combination.
+
+Three routes, and they differ in what they cost:
+
+- **Zero-buffer copy — closes `BufferFillZero` only.** What `wgpu-hal`'s dx12
+  actually does: one 256 KiB device-local zeroed resource at device open, then
+  `CopyBufferRegion` in a loop. No descriptor, no heap, no change to how buffers
+  are created. About thirty lines.
+- **`ClearUnorderedAccessViewUint` — closes all three.** Needs a UAV of the
+  destination, so either every device-local buffer gains
+  `ALLOW_UNORDERED_ACCESS` (a cost paid by every allocation on the backend) or
+  `fill_buffer` refuses buffers not created `STORAGE` — a capability that works
+  only sometimes, which is worse than a clean `No`.
+- **Pattern-buffer copy — closes all three, no UAV.** A per-encoder upload arena
+  holding the repeated word, then `CopyBufferRegion`. The new thing is an
+  encoder-owned upload allocation the crate does not have.
+
+**What closing them does not buy:** `crcbl-render` still cannot use a fill. It
+zeroes its draw-generation counters with a dispatch for two reasons, and only
+one is dx12's refusal — the other is that a fill is legal only outside a pass
+and a render-graph frame is passes end to end. That survives on every backend.
+
+**A middle position, named explicitly:** take the zero-buffer route for
+`BufferFillZero` — cheap, and it matches what the capability's own doc says the
+fill is _for_ — and leave the other two `Declined` with the reason corrected.
+That is 16 blockers to 15 for about thirty lines.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
