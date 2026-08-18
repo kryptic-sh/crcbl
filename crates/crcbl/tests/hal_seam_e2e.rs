@@ -4249,6 +4249,420 @@ fn exercise_indirect_argument_padded_stride(headless: &Headless) -> Exercise {
     outcome
 }
 
+/// The word every element of the push-constant destination holds before the
+/// dispatch.
+///
+/// [`FILL_POISON`]'s job for this exercise, and a different value from it and
+/// from [`IMAGE_COPY_POISON`] so that "this destination was never written" stays
+/// separable from "some other exercise's primer reached it". A destination that
+/// still holds this after the dispatch is a dispatch that produced nothing at
+/// all — which is a different reading from the constants having gone missing,
+/// and [`push_constant_dispatch`] keeps the two apart.
+const PUSH_CONSTANT_POISON: u32 = 0x5A5A_A5A5;
+
+/// The block [`exercise_push_constants`] pushes.
+///
+/// **One distinct word per index, not a repeated value.**
+/// `push_constant_probe.slang` writes `values[i]` into element `i` of its
+/// destination and reads nothing else, so a block that arrived shifted — a range
+/// whose offset a backend applied twice, a root-constant slot off by one —
+/// comes back as the right four words in the wrong four elements. A repeated
+/// value could not tell that from a correct dispatch; this pattern makes the
+/// comparison name the element that moved.
+///
+/// Each word differs from every other in both halves, so a rotation and a
+/// byte-swap are both visible rather than folded into each other.
+const PUSHED: crcbl::shaders::push_constant_probe::Constants =
+    crcbl::shaders::push_constant_probe::Constants {
+        values: [0x1111_0001, 0x2222_0002, 0x3333_0003, 0x4444_0004],
+    };
+
+// The premise both `SilentlyIgnored` arms rest on, checked at compile time
+// because every side is a constant. A pushed word equal to the poison would make
+// a dispatch that never ran read back as one that worked, and a pushed word of
+// zero would do the same for a block that arrived empty — which are the two
+// confusions those arms exist to separate.
+const _: () = {
+    let mut index = 0;
+    while index < crcbl::shaders::push_constant_probe::WORD_COUNT {
+        assert!(
+            PUSHED.values[index] != PUSH_CONSTANT_POISON,
+            "a word of PUSHED equals PUSH_CONSTANT_POISON, so a dispatch that never ran and one \
+             that delivered the block are no longer distinguishable"
+        );
+        assert!(
+            PUSHED.values[index] != 0,
+            "a word of PUSHED is zero, so a push-constant block that arrived empty and one that \
+             was delivered are no longer distinguishable"
+        );
+        index += 1;
+    }
+};
+
+/// Drives [`Capability::PushConstants`] and reports whether the words the caller
+/// pushed are the words the shader read.
+///
+/// # Why this one needs its own fixture
+///
+/// [`ComputeProbe`] cannot answer it. Its layout declares
+/// `push_constants: None` and `compute_probe.slang` reads its element count from
+/// a bound uniform, so nothing in that dispatch could distinguish a push constant
+/// that arrived from one that never left. This builds the second compute
+/// fixture in the file instead: one storage buffer, no uniform, no source — and
+/// `crcbl_shaders::PUSH_CONSTANT_PROBE`, whose only input besides the destination
+/// binding is the block.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// The destination is primed with [`PUSH_CONSTANT_POISON`] through a copy from a
+/// host buffer — a copy rather than a `fill_buffer`, for the reason
+/// [`ComputeProbe::run`] gives: wgpu offers only a zero fill, and zero is exactly
+/// the value an unwritten destination is indistinguishable from. Then
+/// [`PUSHED`] goes in through
+/// [`push_constants`](crcbl::hal::CommandEncoder::push_constants), one group is
+/// dispatched, and the buffer is read back and compared word for word:
+///
+/// * the pattern — the shader obtained four values it had no other way to reach,
+///   at the elements the block's offsets put them. [`Exercise::Worked`].
+/// * [`PUSH_CONSTANT_POISON`] throughout — the prime landed and the dispatch
+///   produced nothing at all. [`Exercise::SilentlyIgnored`].
+/// * zeros throughout — the prime was overwritten, so the shader ran, and the
+///   block it read was empty. This is what a `push_constants` call that was
+///   accepted and dropped actually looks like, and it is deliberately a
+///   *different* value from the poison so the two stay apart:
+///   [`Exercise::SilentlyIgnored`] as well, because both are the seam accepting
+///   a request and changing nothing observable.
+/// * anything else — the constants reached the shader wrong, and the panic names
+///   the first element that disagreed.
+///
+/// # A refusal can arrive at three different points
+///
+/// [`Capability::PushConstants`] is the one capability whose refusal the seam
+/// pins to a *place*: `crcbl_hal::pipeline` requires
+/// [`PipelineLayoutDesc::push_constants`](crcbl::hal::PipelineLayoutDesc) to fail
+/// at layout creation rather than have the writes dropped later. Three backends
+/// do exactly that today — `crcbl-mtl`, `crcbl-dx12` and `crcbl-wgpu` all return
+/// [`HalError::Unsupported`] from `create_pipeline_layout`. But a backend that
+/// gains the range and not the write would refuse at pipeline creation, and one
+/// that defers its errors would refuse at
+/// [`finish`](crcbl::hal::CommandEncoder::finish), so all three points return
+/// [`Exercise::Refused`] rather than the first one alone. Anything less and the
+/// two open `PushConstants` divergence rows would have to be re-plumbed the day
+/// they are closed.
+///
+/// The shader module is the one step that panics instead. It is reached only
+/// after the layout was accepted, which no backend without push constants gets
+/// to — and the artifact ships SPIR-V, MSL and DXIL but deliberately no WGSL,
+/// because WGSL has no push constants at all. A backend that accepted the range
+/// and then rejected the artifact is a fixture that needs looking at, not a
+/// capability answer.
+///
+/// # The shader indexes its block with a divergent index, and that does not work
+/// on RADV
+///
+/// **This is a known failure of the fixture, not of any backend, and it is why a
+/// `CRCBL_GPU=vk` run can go red on an AMD card while passing on a software
+/// one.** `push_constant_probe.slang` reads `constants.values[index]` with
+/// `index` taken from `SV_DispatchThreadID`, which Slang emits as an
+/// `OpAccessChain` into the push-constant vector with a per-invocation index.
+/// NIR defines the offset of a `load_push_constant` as dynamically uniform, so
+/// ACO is entitled to scalarise it — and does. Measured here on Mesa 26.1.7:
+/// `RADV_DEBUG=shaders` shows `v_readfirstlane_b32 s3, v0` ahead of the
+/// `s_load_b32`, so every invocation reads the block at lane 0's offset and all
+/// four elements come back holding `values[0]`. Both RADV adapters on this
+/// machine — a discrete Navi31 and an integrated Raphael — answer that way;
+/// llvmpipe, which addresses per lane, returns the four words correctly.
+///
+/// Nothing this file can do fixes that: the exercise, the range and the write
+/// are all correct, and the shader is what has to change — the block wants
+/// reading at constant component indices (`values.x`/`.y`/`.z`/`.w` selected by
+/// a switch) rather than through a pointer, which keeps the one-`uint4` layout
+/// the source argues for and takes the divergent index out of the load. Until
+/// then this exercise is honest about a real defect and reports it where it
+/// happens rather than passing quietly on the one device that hides it.
+fn exercise_push_constants(headless: &Headless) -> Exercise {
+    use crcbl::shaders::push_constant_probe::{CONSTANTS_SIZE, WORD_COUNT, WORKGROUP_SIZE};
+
+    let device = headless.device.as_ref();
+    let bytes = u64::from(CONSTANTS_SIZE);
+
+    let prime = device
+        .create_buffer(&BufferDesc {
+            label: Some("push constant prime"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a host-upload buffer");
+    let destination = device
+        .create_buffer(&BufferDesc {
+            label: Some("push constant destination"),
+            size: bytes,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a device-local buffer");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("push constant readback"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+
+    let primer: Vec<u8> = core::iter::repeat_n(PUSH_CONSTANT_POISON, WORD_COUNT)
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    device
+        .write_buffer(prime, 0, &primer)
+        .expect("a host-upload buffer is what write_buffer is for");
+
+    // One binding, because the shader has one: the block is the only other
+    // thing the dispatch reads, which is what makes the readback evidence about
+    // the block rather than about whatever else was bound.
+    let layout_entries = [crcbl::hal::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: crcbl::hal::ShaderStages::COMPUTE,
+        kind: crcbl::hal::BindingKind::StorageBuffer {
+            read_only: false,
+            dynamic: false,
+        },
+        count: 1,
+        flags: crcbl::hal::BindingFlags::empty(),
+    }];
+    let bind_group_layout = device
+        .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
+            label: Some("push constant probe"),
+            entries: &layout_entries,
+        })
+        .expect("a one-binding layout");
+    let group_entries = [crcbl::hal::BindGroupEntry {
+        binding: 0,
+        array_index: 0,
+        resource: crcbl::hal::BindingResource::whole_buffer(destination),
+    }];
+    let bind_group = device
+        .create_bind_group(&crcbl::hal::BindGroupDesc {
+            label: Some("push constant probe"),
+            layout: bind_group_layout,
+            entries: &group_entries,
+            variable_count: None,
+        })
+        .expect("a bind group");
+
+    let set_layouts = [bind_group_layout];
+    // The range the artifacts were measured at: the SPIR-V decorates the block's
+    // only member `Offset 0` and nothing sits in front of it on any target, so
+    // the whole block is one range starting at zero.
+    let outcome = match device.create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
+        label: Some("push constant probe"),
+        bind_group_layouts: &set_layouts,
+        push_constants: Some(crcbl::hal::PushConstantRange {
+            stages: crcbl::hal::ShaderStages::COMPUTE,
+            offset: 0,
+            size: CONSTANTS_SIZE,
+        }),
+    }) {
+        Err(error) => Exercise::Refused(error),
+        Ok(pipeline_layout) => {
+            let module = device
+                .create_shader_module(&crcbl::hal::ShaderModuleDesc {
+                    label: Some("push_constant_probe.slang"),
+                    spirv: crcbl::shaders::PUSH_CONSTANT_PROBE.spirv(),
+                    // `None`, and that is the artifact rather than an omission:
+                    // the source declares no `wgsl` target because WGSL has no
+                    // push constants.
+                    wgsl: crcbl::shaders::PUSH_CONSTANT_PROBE.wgsl(),
+                    msl: crcbl::shaders::PUSH_CONSTANT_PROBE.msl(),
+                    dxil: &crcbl::shaders::PUSH_CONSTANT_PROBE.dxil_containers(),
+                })
+                .expect(
+                    "this backend accepted a push-constant range and then refused the committed \
+                     push_constant_probe artifact — see the note above; that is a fixture problem \
+                     rather than a capability answer",
+                );
+            let entry_point = crcbl::shaders::PUSH_CONSTANT_PROBE
+                .entry_point(crcbl::shaders::Stage::Compute)
+                .expect("the probe has exactly one compute entry point");
+            let outcome = match device.create_compute_pipeline(&crcbl::hal::ComputePipelineDesc {
+                label: Some("push constant probe"),
+                layout: pipeline_layout,
+                compute: crcbl::hal::ShaderEntry {
+                    module,
+                    entry_point,
+                },
+                workgroup_size: [WORKGROUP_SIZE, 1, 1],
+            }) {
+                Err(error) => Exercise::Refused(error),
+                Ok(pipeline) => {
+                    let outcome =
+                        push_constant_dispatch(headless, prime, destination, staging, bytes, |e| {
+                            e.bind_compute_pipeline(pipeline);
+                            e.bind_group(0, bind_group, &[], pipeline_layout);
+                            e.push_constants(
+                                crcbl::hal::ShaderStages::COMPUTE,
+                                0,
+                                &PUSHED.to_bytes(),
+                                pipeline_layout,
+                            );
+                            // One group, which is wider than WORD_COUNT on
+                            // purpose: the shader's bounds check is a branch this
+                            // dispatch really takes.
+                            e.dispatch(1, 1, 1);
+                        });
+                    device.destroy_compute_pipeline(pipeline);
+                    outcome
+                }
+            };
+            device.destroy_shader_module(module);
+            device.destroy_pipeline_layout(pipeline_layout);
+            outcome
+        }
+    };
+
+    device.destroy_bind_group(bind_group);
+    device.destroy_bind_group_layout(bind_group_layout);
+    device.destroy_buffer(staging);
+    device.destroy_buffer(destination);
+    device.destroy_buffer(prime);
+    outcome
+}
+
+/// Primes the destination, runs `record` inside a compute pass, reads the result
+/// back and says which of the three outcomes it is.
+///
+/// Split out of [`exercise_push_constants`] so the recording — which is the only
+/// part that is about push constants — sits next to the pipeline it needs, with
+/// the barriers, the submit and the comparison out of the way. The barrier shape
+/// is [`ComputeProbe::run`]'s, and for its reasons.
+fn push_constant_dispatch(
+    headless: &Headless,
+    prime: crcbl::hal::BufferHandle,
+    destination: crcbl::hal::BufferHandle,
+    staging: crcbl::hal::BufferHandle,
+    bytes: u64,
+    record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
+) -> Exercise {
+    let device = headless.device.as_ref();
+    let barrier = |buffer, from, to| crcbl::hal::BufferBarrier {
+        buffer,
+        from,
+        to,
+        queue_transfer: None,
+    };
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("push constant exercise"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            destination,
+            ResourceState::Undefined,
+            ResourceState::TransferDst,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: prime,
+        src_offset: 0,
+        dst: destination,
+        dst_offset: 0,
+        size: bytes,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            destination,
+            ResourceState::TransferDst,
+            ResourceState::ShaderReadWrite,
+        )],
+        ..Barriers::default()
+    });
+
+    encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
+        label: Some("push constant probe"),
+    });
+    record(encoder.as_mut());
+    encoder.end_compute_pass();
+
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[barrier(
+            destination,
+            ResourceState::ShaderReadWrite,
+            ResourceState::TransferSrc,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: destination,
+        src_offset: 0,
+        dst: staging,
+        dst_offset: 0,
+        size: bytes,
+    });
+
+    let commands = match encoder.finish() {
+        Err(error) => return Exercise::Refused(error),
+        Ok(commands) => commands,
+    };
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+
+    let mut read = poisoned(bytes as usize);
+    headless.readback(staging, bytes, &mut read);
+    let words: Vec<u32> = read
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .collect();
+
+    if words == PUSHED.values {
+        Exercise::Worked
+    } else if words.iter().all(|word| *word == PUSH_CONSTANT_POISON) {
+        // The prime is all that ever reached the buffer, so the dispatch itself
+        // produced nothing.
+        eprintln!(
+            "crcbl hal seam e2e: the destination still holds {PUSH_CONSTANT_POISON:#010x} \
+             throughout, so the dispatch wrote nothing at all"
+        );
+        Exercise::SilentlyIgnored
+    } else if words.iter().all(|word| *word == 0) {
+        // **The shape a dropped `push_constants` actually takes**, and it is not
+        // the poison: the dispatch ran — the poison is gone, so the shader did
+        // write every element — and the block it read was empty. Measured rather
+        // than assumed, by deleting the `push_constants` call from the recording
+        // above and running it: the readback came back four zeros where the
+        // poison had been. A backend that accepts the write and never delivers
+        // it lands here, which is the outcome the seam's rule against a quiet
+        // no-op exists to catch.
+        eprintln!(
+            "crcbl hal seam e2e: the dispatch overwrote the prime with zeros, so the shader ran \
+             and the push-constant block it read was empty"
+        );
+        Exercise::SilentlyIgnored
+    } else {
+        let index = words
+            .iter()
+            .zip(PUSHED.values)
+            .position(|(got, want)| *got != want)
+            .expect("the two agree word for word only on the arm above");
+        panic!(
+            "element {index} of the destination came back {:#010x} where {:#010x} was pushed. The \
+             dispatch left {words:#010x?} and the block pushed was {:#010x?}. The shader writes \
+             values[i] into element i and reads nothing else, so every word here came out of the \
+             block and landed in the wrong place — the right constants written somewhere else, \
+             which is a wrong picture with a clean log. Three things produce it, and the readback \
+             above says which: the range reached the shader at the wrong offset, only part of the \
+             block was delivered, or every element holds one and the same pushed word — see \
+             `exercise_push_constants` on that last one, which is the driver reading the block \
+             with a divergent index and is not this backend's doing.",
+            words[index], PUSHED.values[index], PUSHED.values,
+        )
+    }
+}
+
 /// Drives [`Capability::PolygonModeLine`] and reports whether the triangle
 /// arrived as an outline.
 ///
@@ -4855,13 +5269,15 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::DrawIndirectCount => exercise_draw_indirect_count(headless),
         C::IndirectArgumentPaddedStride => exercise_indirect_argument_padded_stride(headless),
         C::MeshShading | C::TaskShaderStage => Exercise::Unexercised(NEEDS_MESH_ARTIFACTS),
-        C::UpdateBindGroup
-        | C::PushConstants
-        | C::BindlessDescriptorArray
-        | C::StorageImageBinding => Exercise::Unexercised(
-            "needs a bind-group layout built for the capability and a shader that reads it; the \
-             compute probe's layout is a fixed three-buffer one",
-        ),
+        C::UpdateBindGroup | C::BindlessDescriptorArray | C::StorageImageBinding => {
+            Exercise::Unexercised(
+                "needs a bind-group layout built for the capability and a shader that reads it; \
+                 the compute probe's layout is a fixed three-buffer one",
+            )
+        }
+        // The one that left that group: `push_constant_probe.slang` is a second
+        // compute fixture whose only input besides its one binding is the block.
+        C::PushConstants => exercise_push_constants(headless),
         C::PolygonModeLine => exercise_polygon_mode_line(headless),
         C::DepthClamp => exercise_depth_clamp(headless),
         // The one rasteriser capability the raster fixture does not reach, and
