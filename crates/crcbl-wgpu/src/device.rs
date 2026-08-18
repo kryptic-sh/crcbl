@@ -398,8 +398,9 @@ impl Device for WgpuDevice {
                  binding, so the runtime-sized form the seam describes has no expression",
             ),
             C::StorageImageBinding => hal::Support::No(
-                "wgpu needs the texel format and view dimension at bind-group-layout creation and \
-                 BindingKind::StorageImage carries neither",
+                "the seam carries the view dimension and texel format wgpu's StorageTexture \
+                 binding needs, and this backend never grew the arm that reads them; it is \
+                 scheduled for deletion, so the work went to crcbl-webgpu",
             ),
             C::PolygonModeLine => gated(
                 hal::Features::POLYGON_MODE_LINE,

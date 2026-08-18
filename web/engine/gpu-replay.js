@@ -860,11 +860,31 @@ export function webgpuTextureUsageFor(usage) {
  * what a colour format is for the attachment rule. It lives on the rows rather
  * than in a second table keyed by `GPUTextureFormat` name so there is one place
  * that says which seam formats are depth formats — two would be free to drift.
+ *
+ * `storage` IS THE THIRD SUCH FLAG, and it rides here for the same reason: it
+ * says whether {@link webgpuBindingLayoutFor} may put the format in a
+ * `GPUStorageTextureBindingLayout`. **Seven of the twenty-nine may.** WebGPU's
+ * storage-binding list is short and this seam meets it in exactly `rgba8unorm`,
+ * `rgba16float`, `r32float`, `rg32float`, `rgba32float`, `r32uint` and
+ * `rg32uint`; the specification's remaining storage formats — the snorm, sint
+ * and uint widths, and `rgba32sint` — have no seam spelling to reach them from.
+ *
+ * WHAT IS REFUSED, AND IT IS NOT AN OVERSIGHT. Every sRGB row: a storage write
+ * has no encode step, so the specification allows no `-srgb` format as a storage
+ * texture at all. Every depth and stencil row, and every BC row, for the same
+ * flat reason — neither is in the list. `bgra8unorm` is the one that is only
+ * *nearly* allowed: WebGPU gates it behind the `bgra8unorm-storage` feature,
+ * which {@link FEATURE_MAP} does not carry because `crcbl_hal::Features` has no
+ * bit for it, so no device this replayer opens has ever enabled it and a row
+ * claiming it would promise a layout every such device refuses. The narrower
+ * formats — `r8unorm`, `rg8unorm`, `r16float`, `rg16float`, `rgb10a2unorm`,
+ * `rg11b10ufloat` — are storage only under the `texture-formats-tier1` feature,
+ * which is the same story with a different name.
  */
 const TEXTURE_FORMAT = Object.freeze({
   R8_UNORM: { name: 'r8unorm' },
   RG8_UNORM: { name: 'rg8unorm' },
-  RGBA8_UNORM: { name: 'rgba8unorm' },
+  RGBA8_UNORM: { name: 'rgba8unorm', storage: true },
   RGBA8_UNORM_SRGB: { name: 'rgba8unorm-srgb' },
   BGRA8_UNORM: { name: 'bgra8unorm' },
   BGRA8_UNORM_SRGB: { name: 'bgra8unorm-srgb' },
@@ -872,12 +892,12 @@ const TEXTURE_FORMAT = Object.freeze({
   R11G11B10_FLOAT: { name: 'rg11b10ufloat' },
   R16_FLOAT: { name: 'r16float' },
   RG16_FLOAT: { name: 'rg16float' },
-  RGBA16_FLOAT: { name: 'rgba16float' },
-  R32_FLOAT: { name: 'r32float' },
-  RG32_FLOAT: { name: 'rg32float' },
-  RGBA32_FLOAT: { name: 'rgba32float' },
-  R32_UINT: { name: 'r32uint' },
-  RG32_UINT: { name: 'rg32uint' },
+  RGBA16_FLOAT: { name: 'rgba16float', storage: true },
+  R32_FLOAT: { name: 'r32float', storage: true },
+  RG32_FLOAT: { name: 'rg32float', storage: true },
+  RGBA32_FLOAT: { name: 'rgba32float', storage: true },
+  R32_UINT: { name: 'r32uint', storage: true },
+  RG32_UINT: { name: 'rg32uint', storage: true },
   D32_FLOAT: { name: 'depth32float', depth: true },
   D32_FLOAT_S8_UINT: {
     name: 'depth32float-stencil8',
@@ -1600,6 +1620,53 @@ export function webgpuShaderStageFor(visibility) {
 const SAMPLE_TYPE = Object.freeze({ Float: 'float', Depth: 'depth' });
 
 /**
+ * The `GPUStorageTextureAccess` a `BindingKind::StorageImage`'s `read_only`
+ * names.
+ *
+ * **A `bool` meeting a three-valued enum, and the missing value is the one the
+ * seam arguably means.** WebGPU spells the access `'write-only'`, `'read-only'`
+ * or `'read-write'`; the seam carries one flag, so `read_only: true` is
+ * `'read-only'` and `false` is `'write-only'`. `'read-write'` is unreachable
+ * from here, and that is a deliberate narrowing rather than an oversight, so say
+ * what it costs: `crcbl_hal::BindingKind::StorageImage` calls itself "a
+ * read/write storage image", so a `false` permits a shader that reads as well as
+ * writes, and this maps it to a layout that permits only writing.
+ *
+ * It is the safe direction of the two. WebGPU allows `'read-write'` on a much
+ * shorter format list than the storage list itself — `r32uint`, `r32sint` and
+ * `r32float` in core — so mapping `false` to it would refuse the `rgba8unorm`
+ * and `rgba16float` layouts this seam actually asks for. What the narrowing
+ * costs instead is a *loud* failure and never a silent one: a WGSL module that
+ * reads through a `write` binding is rejected at pipeline creation naming the
+ * binding, so nothing reads garbage. Widening it means a second seam field
+ * distinguishing "writes" from "reads and writes", which nothing declares yet.
+ *
+ * Keyed by the two booleans as strings, so a value that is neither is
+ * `undefined` rather than falling through to whichever member `false` indexes.
+ */
+const STORAGE_TEXTURE_ACCESS = Object.freeze({
+  true: 'read-only',
+  false: 'write-only',
+});
+
+/**
+ * The `GPUTextureViewDimension`s a storage texture may not be.
+ *
+ * WebGPU validates a `GPUStorageTextureBindingLayout` by rejecting `'cube'` and
+ * `'cube-array'` outright — a cube face is addressed through a sampler's
+ * direction vector, and a storage write takes integer texel coordinates — while
+ * accepting the other four. Refused here by name for
+ * {@link webgpuTextureFormatFor}'s reason: the browser answers a bad layout with
+ * an object and a validation error a turn of the event loop later, so passing it
+ * on files an invalid layout under the handle and every bind group made against
+ * it fails again, none of them naming the layout that was wrong.
+ */
+const STORAGE_TEXTURE_FORBIDDEN_DIMENSIONS = Object.freeze([
+  'cube',
+  'cube-array',
+]);
+
+/**
  * The `count` that means "as many descriptors as this device can", which is
  * `u32::MAX` on the wire.
  *
@@ -1663,21 +1730,27 @@ const MAX_BUFFER_BINDING = BigInt(Number.MAX_SAFE_INTEGER);
  *     would be the same `false` arrived at by accident.
  *   * `Sampler` → `sampler: { type: 'comparison' | 'filtering' }`. WebGPU's
  *     third value, `'non-filtering'`, has no seam variant.
- *   * `StorageImage` → **nothing, and this is the one WebGPU cannot express.**
+ *   * `StorageImage` → `storageTexture: { access, format, viewDimension }`.
+ *     **This used to be the one WebGPU could not express**, and the gap was the
+ *     seam's descriptor rather than the API's:
  *     `GPUStorageTextureBindingLayout.format` is a *required* member with no
- *     default, and `crcbl_hal::BindingKind::StorageImage` carries no format at
- *     all: it has `read_only` and nothing else, because Vulkan, Metal and D3D12
- *     take the format off the bound view. There is no value this file could
- *     supply that would not be a guess, and a guessed storage-texture format is
- *     a shader writing the wrong number of channels with nothing reporting it.
- *     So it is refused, and the refusal says which member is missing.
+ *     default, and `crcbl_hal::BindingKind::StorageImage` carried `read_only`
+ *     and nothing else, because Vulkan, Metal and D3D12 take the format off the
+ *     bound view. The variant now names a `view_type` and a `format` for the
+ *     same reason `SampledImage` does, so all three members come off the wire
+ *     and none is guessed. `access` is the one that is *derived*: the seam has a
+ *     flag where WebGPU has three words — see {@link STORAGE_TEXTURE_ACCESS}.
+ *     Two shapes are still refused rather than passed on, each named: a format
+ *     WebGPU does not allow as a storage texture, and the two view dimensions it
+ *     forbids.
  *
  * `externalTexture` is the fifth WebGPU member and nothing on this seam maps to
  * it: a `GPUExternalTexture` is a video frame, which `crcbl-hal` has no concept
  * of.
  *
  * @param {{ name: string, dynamic?: boolean, readOnly?: boolean,
- *           viewType?: string, sampleType?: string, comparison?: boolean }} kind
+ *           viewType?: string, sampleType?: string, format?: string,
+ *           comparison?: boolean }} kind
  *   A `crcbl_hal::BindingKind`, as `gpu-stream.js` decodes it.
  * @returns {{ layout: object | null, reason: string | null }} `reason` is a
  *   phrase for the message a person reads, and is `null` exactly when `layout`
@@ -1724,14 +1797,52 @@ export function webgpuBindingLayoutFor(kind) {
         reason: null,
       };
     }
-    case 'StorageImage':
+    case 'StorageImage': {
+      const viewDimension = VIEW_DIMENSION[kind.viewType];
+      if (viewDimension === undefined) {
+        return {
+          layout: null,
+          reason: `is a StorageImage of ImageViewType::${kind.viewType}, which is no GPUTextureViewDimension`,
+        };
+      }
+      if (STORAGE_TEXTURE_FORBIDDEN_DIMENSIONS.includes(viewDimension)) {
+        return {
+          layout: null,
+          reason: `is a StorageImage of ImageViewType::${kind.viewType}, which WebGPU spells ${viewDimension} and forbids on a GPUStorageTextureBindingLayout`,
+        };
+      }
+      // The device's features are deliberately not consulted: every row this
+      // table marks `storage` is core WebGPU, and the ones it does not are
+      // gated behind features `FEATURE_MAP` cannot ask for, so there is no
+      // device on which the answer would differ. Refusing by name here is
+      // `webgpuTextureFormatFor`'s rule applied to a second member.
+      const row = TEXTURE_FORMAT[kind.format];
+      if (row === undefined) {
+        return {
+          layout: null,
+          reason: `is a StorageImage of Format::${kind.format}, which this backend has no GPUTextureFormat for`,
+        };
+      }
+      if (row.storage !== true) {
+        return {
+          layout: null,
+          reason: `is a StorageImage of Format::${kind.format}, which WebGPU spells ${row.name} and does not allow as a storage texture`,
+        };
+      }
+      const access = STORAGE_TEXTURE_ACCESS[String(kind.readOnly)];
+      if (access === undefined) {
+        return {
+          layout: null,
+          reason: `is a StorageImage whose read_only decoded as ${JSON.stringify(kind.readOnly)}, which is no GPUStorageTextureAccess`,
+        };
+      }
       return {
-        layout: null,
-        reason:
-          'is a BindingKind::StorageImage, which WebGPU cannot express from this ' +
-          'seam: GPUStorageTextureBindingLayout.format is required and has no ' +
-          'default, and BindingKind::StorageImage carries no format for it',
+        layout: {
+          storageTexture: { access, format: row.name, viewDimension },
+        },
+        reason: null,
       };
+    }
     case 'Sampler':
       return {
         layout: {

@@ -16,6 +16,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_hal::BindingKind::StorageImage` gained `view_type` and `format`, and
+  WebGPU can now build a storage-texture layout.** The variant used to carry
+  `read_only` alone, which is everything Vulkan, Metal and D3D12 need — each
+  takes the dimension and the texel format off the bound `ImageViewDesc` — and
+  nothing WebGPU needs: `GPUStorageTextureBindingLayout.format` is a required
+  member with no default, so `crcbl-webgpu` and `crcbl-wgpu` both answered
+  `Support::No` to `Capability::StorageImageBinding`. It now mirrors
+  `BindingKind::SampledImage`, whose `view_type`/`sample_type` exist for the
+  same reason, and each of the other backends' conversions says where it drops
+  the two new fields. **Every construction of `BindingKind::StorageImage` must
+  name them.**
+
+  `crcbl-webgpu` answers `Support::Yes`. The two fields cross the WebGPU command
+  stream after `read_only` — an `ImageViewType` code then a `Format` code,
+  making it the longest `BindingKind` body on the wire — and
+  `web/engine/gpu-replay.js` turns them into
+  `storageTexture: { access, format, viewDimension }`. A format WebGPU does not
+  allow as a storage texture (every sRGB, depth and block-compressed one, and
+  `bgra8unorm`, whose `bgra8unorm-storage` feature the seam has no bit to ask
+  for) and the two cube view dimensions it forbids are each refused **by name at
+  layout creation**, rather than becoming a browser validation error against a
+  handle that already exists.
+
+  `read_only` maps to `'read-only'`/`'write-only'` and never to WebGPU's
+  `'read-write'`, which is legal on a much shorter format list; the narrowing is
+  documented at `STORAGE_TEXTURE_ACCESS` and fails loudly at pipeline creation
+  rather than silently.
+
+  `crcbl-wgpu` still refuses, now honestly: wgpu's `BindingType::StorageTexture`
+  takes exactly what the seam carries, and that backend — scheduled for deletion
+  — never grew the arm. Its `DIVERGENCES` row stays, classified `Unwritten`.
+
 - **`crcbl_hal::Device` gained a required `supports` method, and every backend
   must answer for every seam behaviour.** The new `crcbl_hal::Capability` enum
   names one seam behaviour per variant — the three different `fill_buffer`

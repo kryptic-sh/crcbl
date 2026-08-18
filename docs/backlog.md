@@ -541,12 +541,12 @@ The seam suite drives most of `Capability::ALL` with real GPU work; the tally it
 prints on every run is the current answer and this entry does not restate it —
 earlier versions did, and were wrong within a day.
 
-**Seven remain unexercised, for three different reasons:**
+**Six remain unexercised, for three different reasons:**
 
 - **A fixture that does not exist yet.** `SamplerAnisotropy` needs a shader that
   samples a minified texture at a grazing angle and a second to compare against;
-  the committed raster artifact samples nothing. `StorageImageBinding` and
-  `BindlessDescriptorArray` need a bind-group layout built for the capability.
+  the committed raster artifact samples nothing. `BindlessDescriptorArray` needs
+  a bind-group layout built for the capability and a shader that indexes it.
 - **An observable the seam cannot reach.** `BinarySemaphore`'s claim is ordering
   between two submissions, and on a one-queue backend a dropped binary semaphore
   is indistinguishable from an honoured one. `TimelineWaitBeforeSignal` needs a
@@ -724,12 +724,11 @@ closed** — `MsaaResolveAttachment`, `IndirectArgumentPaddedStride`,
 `UpdateBindGroup` and `StencilReference` are all driven now, three of them by
 exercises written specifically because the claim rested on nothing.
 
-**Three survive**, and they are the ones a wrong `Yes` would reach a user
-through:
+**Two survive**, and they are the ones a wrong `Yes` would reach a user through.
+`StorageImageBinding` was the third and is now driven by
+`exercise_storage_image_binding` in `tests/hal_seam_e2e.rs`, on every backend
+and in both directions:
 
-- **`StorageImageBinding`** — claimed by vk, dx12 and Metal.
-  `BindingKind:: StorageImage` appears only in the WebGPU stream's encoder-level
-  tests, and nothing in `crcbl-render` declares one.
 - **`SamplerAnisotropy`** — answered from a device flag and never set against a
   device. The one anisotropy test asserts a _limit refusal_, not a working
   anisotropic sampler.
@@ -1047,11 +1046,12 @@ until the timestamp slice lands.**
 3. **`WriteTimestamp` and `TimestampQuery`.** Needs a feature the browser may
    not have and a change to the probe's device descriptor, and is much cheaper
    once the spine exists.
-4. **`StorageImageBinding`** — the largest, and the only one whose work is in
-   the **seam** rather than the backend, so it touches every backend crate.
-   Sequence it after the dx12 slices in flight.
 
-**A recommended fifth slice that no row requires:** a browser-side parity
+`StorageImageBinding` used to be a fourth entry here and has landed:
+`BindingKind::StorageImage` grew a `view_type` and a `format`, so the work was
+in the **seam** rather than in this backend and it touched every backend crate.
+
+**A recommended extra slice that no row requires:** a browser-side parity
 report. The probe **never constructs a `WebGpuDevice`** — it imports the writer
 and the replayer and nothing from `crate::hal` — so nothing anywhere compares a
 `supports()` answer against a behaviour on this backend. Every row deletion here
@@ -1059,23 +1059,20 @@ rests on a probe group rather than on the declaration having moved with it. If
 it turns out cheap it belongs _first_, because it would turn each subsequent
 deletion from a claim into a failing check.
 
-### Four WebGPU divergence reasons that are wrong
+### Three WebGPU divergence reasons that are wrong
 
-1. **`StorageImageBinding` names two required fields; only one is required.**
-   The IDL makes `format` required and gives `viewDimension` and `access`
-   defaults. The two-field sentence is `crcbl-wgpu`'s, where it is true,
-   imported wholesale — and the replayer already states it correctly. **The
-   minimum seam change is one field.** The row also hides the actual design
-   question: `read_only: false` means read/write on this seam, and WebGPU's
-   `'read-write'` access is legal only for a narrow format set, so the mapping
-   is not simply `read_only ? 'read-only' : 'write-only'`.
-2. **`IndirectArgumentPaddedStride` is classified `ApiAbsence` and is already
+`StorageImageBinding` was the fourth and its row is gone:
+`BindingKind::StorageImage` grew a `view_type` and a `format`, `crcbl-webgpu`
+answers `Support::Yes`, and the design question the row hid is now its own
+entry, `BindingKind::StorageImage` has no way to say "reads _and_ writes".
+
+1. **`IndirectArgumentPaddedStride` is classified `ApiAbsence` and is already
    implemented.** True of the WebGPU call, false of this backend: `stride`
    crosses the stream whole and the replayer unrolls it into one `drawIndirect`
    per draw at `offset + i * stride`, so any stride is honoured, padded
    included. `Support::Yes` is the correct declaration. It is `ApiAbsence` so it
    is not in the 27, but it costs one probe check to make honest.
-3. **`TimestampQuery` says the seam's "arbitrary-point" write must narrow. There
+2. **`TimestampQuery` says the seam's "arbitrary-point" write must narrow. There
    is no arbitrary-point write to narrow.** The seam's scope rules already
    require query writes **outside** any pass, the null backend enforces it, and
    the render graph obeys it structurally. So the replayer may legally open its
@@ -8640,32 +8637,43 @@ clippy runs are a type-check and nothing more. Those two backends' new tests
 first _execute_ on CI's Windows and macOS runners, which is where their evidence
 comes from.
 
-## `BindingKind::StorageImage` still cannot name its format or its dimension
+## `BindingKind::StorageImage` has no way to say "reads _and_ writes"
 
-`crcbl_wgpu::conv::map_binding_kind` returns `HalError::Unsupported` for every
-storage-image binding, because `wgpu::BindingType::StorageTexture` needs the
-texel format _and_ the view dimension at bind-group-layout creation and
-`BindingKind::StorageImage { read_only }` carries neither.
+`BindingKind::StorageImage` now carries `read_only`, `view_type` and `format`,
+and `web/engine/gpu-replay.js` builds a real `GPUStorageTextureBindingLayout`
+out of the three. What is left is the one distinction the `bool` cannot make.
 
-The sampled half of that hole was closed in 2026-08 — `SampledImage` now carries
-a `view_type` — and the storage half was **considered and deliberately left
-open**: nothing in the engine declares a storage-image binding, so a `format`
-and a `view_type` field there would be two fields nothing reads and 0 call sites
-to prove them against. `SampledImage`'s field earned itself because
-`crcbl_render::forward` binds a `D2Array` through it today.
+The variant calls itself "a read/write storage image", so `read_only: false`
+permits a shader that reads as well as writes. `STORAGE_TEXTURE_ACCESS` in
+`gpu-replay.js` maps it to WebGPU's `'write-only'` and never to `'read-write'` —
+**deliberately**, because WebGPU allows `'read-write'` on a much shorter format
+list than the storage list itself (`r32uint`, `r32sint`, `r32float` in core), so
+mapping `false` to it would refuse the `rgba8unorm` and `rgba16float` layouts
+the seam actually asks for.
 
-Close it the same way when a compute pass first wants one — a mip-generation
-pass is the likely first, `docs/plan/03-gpu-driven-rendering.md` §3.2 — and note
-that the format half has no `ImageViewType`-shaped answer already sitting in the
-seam: it needs `Format`, and the arm must reject a `Format` wgpu cannot express
-as a storage format rather than substituting one.
+The narrowing fails loudly rather than silently: a WGSL module that reads
+through a `write` binding is rejected at pipeline creation naming the binding.
+So this is recorded rather than fixed. **Fixing it wants a decision**, and the
+two options are:
 
-**A second backend now confirms this is the seam's hole and not wgpu's.**
-`web/engine/gpu-replay.js` refuses every `StorageImage` binding for the same
-reason, independently: `GPUStorageTextureBindingLayout.format` is a **required**
-member with no default, and the variant carries nothing to put in it. Two
-backends refusing the same variant for the same missing field is what makes this
-a `crcbl-hal` change rather than two workarounds.
+- a third state on the seam — `StorageAccess { Read, Write, ReadWrite }` in
+  place of the `bool` — with `crcbl-webgpu` refusing `ReadWrite` on a format
+  WebGPU does not allow it for; or
+- leaving the `bool` and documenting that a WebGPU target must declare the
+  binding `write` in WGSL.
+
+Nothing in `crcbl-render` or the committed shaders declares a storage image at
+all, so neither option has a caller to prove itself against yet. Revisit when a
+compute pass first wants one — a mip-generation pass is the likely first,
+`docs/plan/03-gpu-driven-rendering.md` §3.2.
+
+**`crcbl-wgpu` deliberately did not grow the arm.** It could:
+`wgpu::BindingType::StorageTexture` takes exactly the three values the seam now
+carries. It is scheduled for deletion once the other four backends reach parity,
+so `map_binding_kind` still answers `HalError::Unsupported` and
+`crcbl_hal::DIVERGENCES` classifies the row `Unwritten` — off the parity
+blockers because `BackendKind::is_parity_target` answers `false` for it. Writing
+the arm is maybe fifteen lines if anybody ever wants it before the crate goes.
 
 ## What the sun shadow pass owes
 

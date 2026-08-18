@@ -165,7 +165,15 @@ impl ByteWriter {
                 self.put_u8(tag::image_view_type_code(view_type));
                 self.put_u8(tag::sample_type_code(sample_type));
             }
-            BindingKind::StorageImage { read_only } => self.put_bool(read_only),
+            BindingKind::StorageImage {
+                read_only,
+                view_type,
+                format,
+            } => {
+                self.put_bool(read_only);
+                self.put_u8(tag::image_view_type_code(view_type));
+                self.put_u8(tag::format_code(format));
+            }
             BindingKind::Sampler { comparison } => self.put_bool(comparison),
         }
     }

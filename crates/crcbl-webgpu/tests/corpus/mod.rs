@@ -543,10 +543,14 @@ pub fn every_command() -> Vec<Command> {
         // The seam's rules are the caller's to enforce before encoding; the
         // encoding refuses a malformed *stream* and nothing else, and a `u32`
         // claims every value it can hold. `BindingKind::StorageImage` is here
-        // for a second reason of the same kind: WebGPU's
-        // `GPUStorageTextureBindingLayout.format` is a required member and this
-        // seam's variant carries no format, so it is the one `BindingKind` a
-        // replayer cannot express — and it can only refuse what it was told.
+        // for a second reason: it is the longest binding body on the stream —
+        // a presence byte, an `ImageViewType` code and a `Format` code — so a
+        // reader that advanced by the wrong number of bytes lands inside the
+        // twin rather than at the end of the command. Both entries name a
+        // dimension and a format `GPUStorageTextureBindingLayout` accepts, so
+        // what this command drives on the far side is the *creation*; the
+        // formats WebGPU forbids as storage are driven in
+        // `web/tools/gpu-replay.mjs`, against layouts it builds itself.
         Command::CreateBindGroupLayout {
             layout: handle(103, 104),
             label: Some("gbuffer store".into()),
@@ -554,14 +558,22 @@ pub fn every_command() -> Vec<Command> {
                 BindGroupLayoutEntry {
                     binding: 11,
                     visibility: ShaderStages::COMPUTE,
-                    kind: BindingKind::StorageImage { read_only: false },
+                    kind: BindingKind::StorageImage {
+                        read_only: false,
+                        view_type: ImageViewType::D2,
+                        format: Format::Rgba8Unorm,
+                    },
                     count: 1,
                     flags: BindingFlags::empty(),
                 },
                 BindGroupLayoutEntry {
                     binding: 11,
                     visibility: ShaderStages::COMPUTE,
-                    kind: BindingKind::StorageImage { read_only: true },
+                    kind: BindingKind::StorageImage {
+                        read_only: true,
+                        view_type: ImageViewType::D2,
+                        format: Format::Rgba8Unorm,
+                    },
                     count: 1,
                     flags: BindingFlags::empty(),
                 },

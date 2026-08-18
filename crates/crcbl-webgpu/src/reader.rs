@@ -233,6 +233,8 @@ impl ByteReader<'_> {
             }),
             tag::BINDING_KIND_STORAGE_IMAGE => Ok(BindingKind::StorageImage {
                 read_only: self.read_bool("BindingKind::read_only")?,
+                view_type: self.read_image_view_type("BindingKind::view_type")?,
+                format: self.read_format("BindingKind::format")?,
             }),
             tag::BINDING_KIND_SAMPLER => Ok(BindingKind::Sampler {
                 comparison: self.read_bool("BindingKind::comparison")?,

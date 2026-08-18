@@ -2002,8 +2002,8 @@ async function main() {
   // one layout holding every `BindingKind` WebGPU can express, one carrying the
   // portable bindless declaration, one with no entries at all, one with a fixed
   // array count, one visible to the two stages WebGPU has no bit for, and one
-  // whose kind needs a texture format the seam does not carry. Every one of
-  // those is a branch below, replayed as the Rust encoder wrote it.
+  // holding a pair of storage textures that differ only in `read_only`. Every
+  // one of those is a branch below, replayed as the Rust encoder wrote it.
   const layouts = commands.filter(
     (command) => command.name === 'CreateBindGroupLayout'
   );
@@ -5155,36 +5155,28 @@ async function main() {
     // exactly one field, so a replayer that built its list from a map keyed on
     // `binding` would hand the device one entry instead of two.
     //
-    // It is driven with the kind replaced, because `StorageImage` is the one
-    // WebGPU cannot express and is refused two blocks down — leaving this check
-    // about the ordering it is named for. Every other field is the command the
-    // Rust encoder wrote.
-    const sampled = {
-      ...storageImageLayout,
-      entries: storageImageLayout.entries.map((entry) => ({
-        ...entry,
-        kind: {
-          name: 'SampledImage',
-          viewType: 'D2',
-          sampleType: entry.kind.readOnly ? 'Depth' : 'Float',
-        },
-      })),
-    };
+    // It is driven exactly as the Rust encoder wrote it — no field replaced —
+    // because a storage texture is now expressible, and the one field the two
+    // entries differ in is `read_only`, which becomes the `access` asserted
+    // below. So this check reads the ordering it is named for off the very
+    // member the fold would corrupt.
     const { replayer, device } = await readyWithDevice();
-    replayer.replay(frameOf(sampled, 121n));
+    replayer.replay(frameOf(storageImageLayout, 121n));
     checkEqual(
       device.createdLayouts[0]?.entries?.map((entry) => [
         entry.binding,
-        entry.texture?.sampleType,
+        entry.storageTexture?.access,
+        entry.storageTexture?.format,
+        entry.storageTexture?.viewDimension,
       ]),
       [
-        [11, 'float'],
-        [11, 'depth'],
+        [11, 'write-only', 'rgba8unorm', '2d'],
+        [11, 'read-only', 'rgba8unorm', '2d'],
       ],
       'two entries sharing a binding number both reach the device, in slice order'
     );
     check(
-      replayer.bindGroupLayouts.get(sampled.layout) !== undefined &&
+      replayer.bindGroupLayouts.get(storageImageLayout.layout) !== undefined &&
         replayer.takeError() === null,
       'and the layout is built: a duplicate binding is the browser’s to refuse, not this file’s'
     );
@@ -5293,21 +5285,61 @@ async function main() {
     );
   }
   {
-    // **`StorageImage` IS THE ONE `BindingKind` WEBGPU CANNOT EXPRESS FROM THIS
-    // SEAM**, and the reason is a *missing* field rather than a missing word:
-    // `GPUStorageTextureBindingLayout.format` is required and has no default,
-    // and `crcbl_hal::BindingKind::StorageImage` carries `read_only` and nothing
-    // else — the other three backends take the format off the bound view. There
-    // is no value this backend could supply that would not be a guess.
-    const { replayer, device } = await readyWithDevice();
-    replayer.replay(frameOf(storageImageLayout, 132n));
-    const reason = replayer.takeError();
+    // **A STORAGE TEXTURE IS EXPRESSIBLE AND STILL NOT UNCONDITIONAL**, which
+    // is what replaced the flat refusal this block used to hold. WebGPU's
+    // storage-binding format list is short — no sRGB, no depth or stencil, no
+    // block-compressed format — and `GPUStorageTextureBindingLayout` forbids the
+    // two cube view dimensions besides. Neither is a validation the browser does
+    // early: it answers a bad layout with an object and an error a turn of the
+    // event loop later, so the handle would be filed and every bind group made
+    // against it would fail instead, naming the group.
+    //
+    // Driven off the fixture's own layout with one field moved at a time, so
+    // each refusal is the field it names and not a second one riding along.
+    const forbidden = [
+      ['RGBA8_UNORM_SRGB', {}, 'rgba8unorm-srgb'],
+      ['D32_FLOAT', {}, 'depth32float'],
+      ['BC7_RGBA_UNORM', {}, 'bc7-rgba-unorm'],
+      // The one that is only *nearly* allowed: WebGPU gates it behind the
+      // `bgra8unorm-storage` feature, which the seam has no bit to ask for.
+      ['BGRA8_UNORM', {}, 'bgra8unorm'],
+      ['RGBA8_UNORM', { viewType: 'Cube' }, 'cube'],
+      ['RGBA8_UNORM', { viewType: 'CubeArray' }, 'cube-array'],
+    ];
+    const refused = [];
+    for (const [format, override, phrase] of forbidden) {
+      const { replayer, device } = await readyWithDevice();
+      replayer.replay(
+        frameOf(
+          {
+            ...storageImageLayout,
+            entries: [
+              {
+                ...storageImageLayout.entries[0],
+                kind: {
+                  ...storageImageLayout.entries[0].kind,
+                  format,
+                  ...override,
+                },
+              },
+            ],
+          },
+          132n
+        )
+      );
+      const reason = replayer.takeError();
+      refused.push(
+        device.createdLayouts.length === 0 &&
+          replayer.bindGroupLayouts.size === 0 &&
+          String(reason).includes('StorageImage') &&
+          String(reason).includes(phrase)
+          ? null
+          : `${format}${JSON.stringify(override)}: ${JSON.stringify(reason)}`
+      );
+    }
     check(
-      device.createdLayouts.length === 0 &&
-        replayer.bindGroupLayouts.size === 0 &&
-        String(reason).includes('BindingKind::StorageImage') &&
-        String(reason).includes('format'),
-      `a StorageImage binding is refused and says which member is missing (${JSON.stringify(reason)})`
+      refused.every((wrong) => wrong === null),
+      `a storage texture WebGPU forbids is refused by name (${JSON.stringify(refused.filter(Boolean))})`
     );
   }
   {
@@ -9070,17 +9102,52 @@ async function main() {
           },
         },
       ],
+      // Both `read_only` values, because the seam's one flag is what the three
+      // `GPUStorageTextureAccess` words are reached through and a mapping that
+      // answered one of them for both would build a write-only layout for a
+      // shader that reads.
+      [
+        {
+          name: 'StorageImage',
+          readOnly: false,
+          viewType: 'D2',
+          format: 'RGBA8_UNORM',
+        },
+        {
+          storageTexture: {
+            access: 'write-only',
+            format: 'rgba8unorm',
+            viewDimension: '2d',
+          },
+        },
+      ],
+      [
+        {
+          name: 'StorageImage',
+          readOnly: true,
+          viewType: 'D3',
+          format: 'R32_UINT',
+        },
+        {
+          storageTexture: {
+            access: 'read-only',
+            format: 'r32uint',
+            viewDimension: '3d',
+          },
+        },
+      ],
     ];
     checkEqual(
       rows.map(([kind]) => webgpuBindingLayoutFor(kind).layout),
       rows.map(([, expected]) => expected),
       'every BindingKind WebGPU can express becomes the member it names'
     );
-    // …and the three it cannot: the variant with no format, a view dimension no
-    // table claims, and a sample type no table claims. Each is refused with the
-    // reason named rather than defaulted, for `webgpuTextureFormatFor`'s reason.
+    // …and the ones it cannot: a view dimension or a sample type no table
+    // claims, a storage texture whose format WebGPU does not allow as one or
+    // whose dimension it forbids, a format no table claims at all, and a kind
+    // this file has no member for. Each is refused with the reason named rather
+    // than defaulted, for `webgpuTextureFormatFor`'s reason.
     const refusals = [
-      [{ name: 'StorageImage', readOnly: false }, 'format'],
       [
         { name: 'SampledImage', viewType: 'D4', sampleType: 'Float' },
         'GPUTextureViewDimension',
@@ -9088,6 +9155,42 @@ async function main() {
       [
         { name: 'SampledImage', viewType: 'D2', sampleType: 'Sint' },
         'GPUTextureSampleType',
+      ],
+      [
+        {
+          name: 'StorageImage',
+          readOnly: false,
+          viewType: 'D2',
+          format: 'BGRA8_UNORM_SRGB',
+        },
+        'does not allow as a storage texture',
+      ],
+      [
+        {
+          name: 'StorageImage',
+          readOnly: false,
+          viewType: 'Cube',
+          format: 'RGBA8_UNORM',
+        },
+        'forbids on a GPUStorageTextureBindingLayout',
+      ],
+      [
+        {
+          name: 'StorageImage',
+          readOnly: false,
+          viewType: 'D2',
+          format: 'ASTC_4X4_UNORM',
+        },
+        'no GPUTextureFormat for',
+      ],
+      [
+        {
+          name: 'StorageImage',
+          readOnly: false,
+          viewType: 'D4',
+          format: 'RGBA8_UNORM',
+        },
+        'GPUTextureViewDimension',
       ],
       [{ name: 'ExternalTexture' }, 'no GPUBindGroupLayoutEntry member'],
     ].map(([kind, phrase]) => {

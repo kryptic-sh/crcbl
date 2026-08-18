@@ -494,11 +494,27 @@ impl Device for WebGpuDevice {
             Capability::BindlessDescriptorArray => {
                 Support::No("WebGPU has no binding arrays at all")
             }
-            Capability::StorageImageBinding => Support::No(
-                "GPUStorageTextureBindingLayout requires a texel format and view dimension at \
-                 layout creation, and BindingKind::StorageImage carries neither — the same gap in \
-                 the seam's descriptor that crcbl-wgpu names",
-            ),
+            // `GPUStorageTextureBindingLayout` requires a texel format and a
+            // view dimension at layout creation, and this used to be a `No`
+            // because `BindingKind::StorageImage` carried neither. The gap was
+            // the seam's own descriptor rather than WebGPU's: the variant now
+            // names both, `crate::StreamWriter` puts them on the wire after
+            // `read_only`, and `web/engine/gpu-replay.js` builds the
+            // `storageTexture` member out of them.
+            //
+            // **And this claims exactly what the capability defines**, which is
+            // "a `BindingKind::StorageImage` entry in a bind group layout" — the
+            // layout, not a shader that writes through it. The narrower claim is
+            // the honest one on this backend for the same reason it is on the
+            // others: nothing the seam records decides what a WGSL module
+            // declares.
+            //
+            // A format WebGPU does not allow as a storage texture — every sRGB,
+            // depth and block-compressed one — is refused by name at layout
+            // creation on the far side rather than becoming a browser validation
+            // error against a handle that already exists, which is
+            // `webgpuTextureFormatFor`'s rule applied to a second member.
+            Capability::StorageImageBinding => Support::Yes,
             Capability::PolygonModeLine => {
                 Support::No("WebGPU has no core expression for a wireframe fill mode")
             }

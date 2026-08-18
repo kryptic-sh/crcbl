@@ -163,10 +163,14 @@ impl Table {
     /// `MTLTexture` carries its own `textureType` and `pixelFormat`, set by
     /// `conv::view_texture_type` and `conv::pixel_format` when the view was
     /// created, and binding one into an argument table takes neither a dimension
-    /// nor a format. [`BindingKind::Sampler`]'s `comparison` goes the same way:
-    /// an `MTLSamplerState` decides whether it compares through its descriptor's
+    /// nor a format. [`BindingKind::StorageImage`]'s `view_type` and `format`
+    /// are dropped in the same place and for the same reason — a
+    /// `RWTexture2D<float4>` is bound with `setComputeTexture:atIndex:`, which
+    /// takes a texture and a slot and nothing else, and the texture already
+    /// knows both. [`BindingKind::Sampler`]'s `comparison` goes the same way: an
+    /// `MTLSamplerState` decides whether it compares through its descriptor's
     /// `compareFunction`, which is where `SamplerDesc::compare` lands. Only
-    /// WebGPU wants any of the three in the layout.
+    /// WebGPU wants any of the five in the layout.
     const fn of(kind: BindingKind) -> Self {
         match kind {
             BindingKind::UniformBuffer { .. } | BindingKind::StorageBuffer { .. } => Self::Buffer,

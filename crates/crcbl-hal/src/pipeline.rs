@@ -146,6 +146,41 @@ pub enum BindingKind {
     StorageImage {
         /// Whether the shader only reads it.
         read_only: bool,
+        /// Dimensionality the shader declares for it — the `D2` of a
+        /// `RWTexture2D`, the `D2Array` of a `RWTexture2DArray`.
+        ///
+        /// Carried here rather than read off the bound view because WebGPU puts
+        /// it in the *layout*: `GPUStorageTextureBindingLayout` has a
+        /// `viewDimension`, and a layout that says `D2` while the view is
+        /// `D2Array` is refused at pipeline creation, not at bind time. Vulkan,
+        /// Metal and D3D12 all take it from the view instead and ignore this,
+        /// which each backend's conversion says where it drops it.
+        ///
+        /// It must match the view every [`BindingResource::ImageView`] filling
+        /// this slot was created with — see
+        /// [`ImageViewDesc::view_type`](crate::ImageViewDesc::view_type).
+        view_type: ImageViewType,
+        /// Texel format the shader declares for it — the `float4` of an
+        /// `RWTexture2D<float4>` narrowed to the one format it writes.
+        ///
+        /// Here for the same reason, and it is the field the capability turned
+        /// on: `GPUStorageTextureBindingLayout.format` is a **required** member
+        /// with no default, so without it there is no storage-texture layout
+        /// WebGPU can be asked for at all. Vulkan, Metal and D3D12 take the
+        /// format off the bound view's own descriptor and ignore this, each
+        /// saying so at the arm that drops it.
+        ///
+        /// It must match the format every [`BindingResource::ImageView`] filling
+        /// this slot was created with — see
+        /// [`ImageViewDesc::format`](crate::ImageViewDesc::format).
+        ///
+        /// **Not every [`Format`] is legal here on every backend.** WebGPU's
+        /// storage-texture format list is a short one — no sRGB encoding, no
+        /// depth or stencil format, no block-compressed format — so
+        /// `crcbl-webgpu` refuses the rest by name at layout creation rather
+        /// than letting the browser raise a validation error against a handle
+        /// that already exists.
+        format: Format,
     },
     /// A sampler, separate from the image it filters.
     ///

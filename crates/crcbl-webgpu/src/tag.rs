@@ -1656,7 +1656,13 @@ pub const BINDING_KIND_STORAGE_BUFFER: u8 = 0x01;
 /// [`BindingKind::SampledImage`]; an [`ImageViewType`] code then a
 /// [`SampleType`] code.
 pub const BINDING_KIND_SAMPLED_IMAGE: u8 = 0x02;
-/// [`BindingKind::StorageImage`]; a `bool` `read_only` follows.
+/// [`BindingKind::StorageImage`]; a `bool` `read_only`, then an
+/// [`ImageViewType`] code, then a [`Format`] code.
+///
+/// **The longest body of the five, and the only one carrying a format.** Both
+/// trailing codes are what `GPUStorageTextureBindingLayout` requires and the
+/// other three backends read off the bound view — a stream that dropped either
+/// would leave the replayer with the member it cannot default.
 pub const BINDING_KIND_STORAGE_IMAGE: u8 = 0x03;
 /// [`BindingKind::Sampler`]; a `bool` `comparison` follows.
 pub const BINDING_KIND_SAMPLER: u8 = 0x04;
@@ -2589,7 +2595,11 @@ mod tests {
                 view_type: ImageViewType::D2,
                 sample_type: SampleType::Float,
             },
-            BindingKind::StorageImage { read_only: false },
+            BindingKind::StorageImage {
+                read_only: false,
+                view_type: ImageViewType::D2,
+                format: Format::Rgba8Unorm,
+            },
             BindingKind::Sampler { comparison: false },
         ];
         let codes: Vec<u8> = binding_kind.iter().map(|k| binding_kind_code(*k)).collect();

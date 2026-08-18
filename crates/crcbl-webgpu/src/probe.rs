@@ -1142,11 +1142,14 @@ pub const PROBE_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
 /// of its `type`s that this seam can reach and `hasDynamicOffset` both ways;
 /// `texture`, whose `sampleType` and `viewDimension` are two more tables;
 /// `sampler`, whose `type` is the comparison flag. [`BindingKind::StorageImage`]
-/// is deliberately absent — `GPUStorageTextureBindingLayout.format` is a
-/// required member and the seam's variant carries no format, so a probe naming
-/// one would be testing the refusal rather than the creation.
-/// `web/tools/gpu-replay.mjs` drives that path against a stub, through a command
-/// the corpus really carries.
+/// is deliberately absent, and the reason has changed rather than gone: the
+/// seam's variant now carries the `view_type` and `format`
+/// `GPUStorageTextureBindingLayout` requires, so a fifth entry here would be
+/// expressible — but this probe runs against a real browser and the four above
+/// already cover the stride, while a storage texture is the one member whose
+/// legality depends on the *format*, which is a table `web/tools/gpu-replay.mjs`
+/// drives entry by entry against a stub. Adding it here would move that coverage
+/// somewhere it can only be tested one format at a time.
 ///
 /// **Every `count` is `1` and no entry sets a [`BindingFlags`]**, for the same
 /// reason turned around: WebGPU has no binding arrays at all — a

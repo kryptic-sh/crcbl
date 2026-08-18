@@ -570,6 +570,11 @@ pub fn descriptor_type(kind: crcbl_hal::BindingKind) -> vk::DescriptorType {
         // `viewType` and `format` and those are what the shader's `OpTypeImage`
         // is matched against. Only WebGPU wants either in the layout.
         K::SampledImage { .. } => vk::DescriptorType::SAMPLED_IMAGE,
+        // The `view_type` and the `format` are dropped for the same reason, and
+        // the format is the one WebGPU cannot do without: a Vulkan storage image
+        // takes its format from the `VkImageView`'s own `format`, which is what
+        // the shader's `OpTypeImage` format operand is matched against, and a
+        // `VkDescriptorSetLayoutBinding` has nowhere to put either.
         K::StorageImage { .. } => vk::DescriptorType::STORAGE_IMAGE,
         // `comparison` is dropped for the same reason: a Vulkan sampler decides
         // whether it compares at `vkCreateSampler` time, through

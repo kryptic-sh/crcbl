@@ -706,13 +706,16 @@ pub(crate) const fn descriptor_range_type(
         // A read-only storage buffer is an SRV and a writable one a UAV — the
         // same split `StructuredBuffer` and `RWStructuredBuffer` make in the
         // HLSL `crcbl-shaders` generates, so the two agree by construction.
-        BindingKind::StorageBuffer { read_only, .. } | BindingKind::StorageImage { read_only } => {
-            Some(if read_only {
-                D3D12_DESCRIPTOR_RANGE_TYPE_SRV
-            } else {
-                D3D12_DESCRIPTOR_RANGE_TYPE_UAV
-            })
-        }
+        // A storage image splits the same way and drops its `view_type` and its
+        // `format` doing it: a `D3D12_UNORDERED_ACCESS_VIEW_DESC` carries both,
+        // and it is written when the view is created rather than when the range
+        // is declared — see `crate::device`'s view creation.
+        BindingKind::StorageBuffer { read_only, .. }
+        | BindingKind::StorageImage { read_only, .. } => Some(if read_only {
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV
+        } else {
+            D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+        }),
         // The `view_type` and the `sample_type` are both dropped: a descriptor
         // range names a register and a type, never a dimension or a format. What
         // the shader reads is decided by the `D3D12_SHADER_RESOURCE_VIEW_DESC`
@@ -1669,7 +1672,11 @@ mod tests {
                 "storage buffer read_only={read_only}"
             );
             assert_eq!(
-                descriptor_range_type(BindingKind::StorageImage { read_only }),
+                descriptor_range_type(BindingKind::StorageImage {
+                    read_only,
+                    view_type: ImageViewType::D2,
+                    format: Format::Rgba8Unorm,
+                }),
                 Some(expected),
                 "storage image read_only={read_only}"
             );

@@ -959,21 +959,18 @@ pub const DIVERGENCES: &[Divergence] = &[
               material table is indexed through a storage buffer here rather than through \
               descriptors",
     },
+    // The WebGPU row that used to sit here is gone: the gap was the seam's own
+    // descriptor, and `BindingKind::StorageImage` now carries the `view_type`
+    // and `format` `GPUStorageTextureBindingLayout` demands, so `crcbl-webgpu`
+    // answers `Support::Yes`. What is left is the backend nobody is finishing.
     Divergence {
         capability: Capability::StorageImageBinding,
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::Unwritten,
-        why: "wgpu needs the texel format and view dimension at bind-group-layout creation and \
-              BindingKind::StorageImage carries neither — a gap in the seam's descriptor rather \
-              than in wgpu, and the work is a field on that descriptor",
-    },
-    Divergence {
-        capability: Capability::StorageImageBinding,
-        backend: BackendKind::WebGpu,
-        kind: DivergenceKind::Unwritten,
-        why: "GPUStorageTextureBindingLayout requires a texel format and view dimension at layout \
-              creation, and BindingKind::StorageImage carries neither — the same seam-descriptor \
-              gap crcbl-wgpu names, reached through a different API and closed by the same field",
+        why: "wgpu's BindingType::StorageTexture takes the view dimension and texel format the \
+              seam's BindingKind::StorageImage now carries, and this backend never grew the arm \
+              that reads them; it is scheduled for deletion once the other four reach parity, so \
+              the field was spent on crcbl-webgpu instead",
     },
     // --- rasteriser state ---
     //
@@ -1723,14 +1720,11 @@ mod tests {
             BackendKind::Metal,
             DivergenceKind::Unwritten,
         ),
-        // The browser's two. Everything else `crcbl-webgpu` refuses is WebGPU
+        // The browser's one. Everything else `crcbl-webgpu` refuses is WebGPU
         // itself refusing, which is why this is the short list and not the long
-        // one.
-        (
-            Capability::StorageImageBinding,
-            BackendKind::WebGpu,
-            DivergenceKind::Unwritten,
-        ),
+        // one. `StorageImageBinding` was the second and left when
+        // `BindingKind::StorageImage` grew its `view_type` and `format`: the
+        // work landed, which is one of the three ways a row is allowed to go.
         (
             Capability::TimestampQuery,
             BackendKind::WebGpu,

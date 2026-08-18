@@ -601,9 +601,13 @@ const EXPECTED = [
   // duplicate binding — this encoding refuses a malformed stream and nothing
   // else, which is the division of labour.
   //
-  // `StorageImage` is here for a second reason of the same kind: it is the one
-  // `BindingKind` WebGPU cannot express, and a replayer can only refuse what it
-  // was told.
+  // `StorageImage` is here for a second reason: it is the longest binding body
+  // on the stream — a presence byte and two code bytes — so a reader that
+  // advanced by the wrong number of bytes lands inside the twin rather than at
+  // the end of the command. Both entries name a dimension and a format
+  // `GPUStorageTextureBindingLayout` accepts, so this command drives the
+  // creation; the formats WebGPU forbids as storage are driven in
+  // `gpu-replay.mjs`, against layouts it builds itself.
   {
     name: 'CreateBindGroupLayout',
     layout: handle(103, 104),
@@ -612,14 +616,24 @@ const EXPECTED = [
       {
         binding: 11,
         visibility: ['COMPUTE'],
-        kind: { name: 'StorageImage', readOnly: false },
+        kind: {
+          name: 'StorageImage',
+          readOnly: false,
+          viewType: 'D2',
+          format: 'RGBA8_UNORM',
+        },
         count: 1,
         flags: [],
       },
       {
         binding: 11,
         visibility: ['COMPUTE'],
-        kind: { name: 'StorageImage', readOnly: true },
+        kind: {
+          name: 'StorageImage',
+          readOnly: true,
+          viewType: 'D2',
+          format: 'RGBA8_UNORM',
+        },
         count: 1,
         flags: [],
       },
@@ -2164,7 +2178,15 @@ async function main() {
       [2, 4, 1],
       { name: 'SampledImage', viewType: 'CubeArray', sampleType: 'Depth' },
     ],
-    [[3, 1], { name: 'StorageImage', readOnly: true }],
+    [
+      [3, 1, 2, 0x0a],
+      {
+        name: 'StorageImage',
+        readOnly: true,
+        viewType: 'D2Array',
+        format: 'RGBA16_FLOAT',
+      },
+    ],
     [[4, 1], { name: 'Sampler', comparison: true }],
   ].map(([kind, expected]) => {
     const [command] = decodeStream(streamOf(header, layoutBody({ kind })));

@@ -382,11 +382,15 @@ pub fn map_view_dimension(t: ImageViewType) -> wgpu::TextureViewDimension {
 
 /// Binding kinds.
 ///
-/// Fallible because of storage images: wgpu's `BindingType::StorageTexture`
-/// needs the texel format and the view dimension at *layout* creation, and
-/// [`BindingKind::StorageImage`] carries neither. Inventing `Rgba8Unorm` there
-/// produced a layout that silently disagreed with every shader whose storage
-/// image was anything else, so this refuses instead.
+/// Fallible because of storage images, and no longer because the seam is short
+/// of a field: [`BindingKind::StorageImage`] now carries the `view_type` and the
+/// `format` wgpu's `BindingType::StorageTexture` wants at *layout* creation, and
+/// this backend simply does not build one. **`crcbl-wgpu` is scheduled for
+/// deletion once the other four reach parity** — see `crcbl_hal::DIVERGENCES`,
+/// which classifies this row `Unwritten` and leaves it off the parity blockers
+/// because `BackendKind::is_parity_target` answers `false` here — so the arm
+/// below refuses by name rather than growing an implementation nothing will
+/// outlive. `crcbl-webgpu` is where the field is read.
 ///
 /// A sampled image's view dimension comes from
 /// [`BindingKind::SampledImage::view_type`] and its sample type from
@@ -424,8 +428,9 @@ pub fn map_binding_kind(k: BindingKind) -> Result<wgpu::BindingType, HalError> {
         BindingKind::StorageImage { .. } => {
             return Err(HalError::Unsupported {
                 backend: BackendKind::Wgpu,
-                what: "storage-image bindings: wgpu needs the texel format and view dimension at \
-                       bind-group-layout creation and BindingKind::StorageImage carries neither",
+                what: "storage-image bindings: the seam carries the view dimension and texel \
+                       format wgpu::BindingType::StorageTexture needs, and this backend does not \
+                       build one — it is scheduled for deletion, so the work went to crcbl-webgpu",
             });
         }
         BindingKind::Sampler { comparison: false } => {
@@ -620,10 +625,21 @@ mod tests {
         }
     }
 
+    /// The refusal survives a kind that carries everything wgpu would need.
+    ///
+    /// Which is the whole of what changed: the seam now names a dimension and a
+    /// format `wgpu::BindingType::StorageTexture` could be built from, and this
+    /// backend still refuses because nobody wrote the arm. Passing a fully
+    /// populated variant is what keeps the test honest — one built from a
+    /// half-filled kind would pass on a backend that had implemented it.
     #[test]
-    fn a_storage_image_binding_is_refused_rather_than_guessed() {
-        let error = map_binding_kind(BindingKind::StorageImage { read_only: false })
-            .expect_err("wgpu cannot express this without a format");
+    fn a_storage_image_binding_is_refused_by_a_backend_that_never_grew_the_arm() {
+        let error = map_binding_kind(BindingKind::StorageImage {
+            read_only: false,
+            view_type: ImageViewType::D2,
+            format: Format::Rgba8Unorm,
+        })
+        .expect_err("crcbl-wgpu builds no storage-texture layout");
         assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
     }
 

@@ -858,6 +858,32 @@ fn two_entries_differing_in_one_field_are_distinguishable_field_by_field() {
                 ..base
             },
         ),
+        // The longest payload on the stream, and the two fields that made it
+        // so. Both are swept against a `StorageImage` that differs from the
+        // baseline in the code byte as well, which is why the pair is compared
+        // against *each other* below.
+        (
+            "kind::storage_image_view_type",
+            BindGroupLayoutEntry {
+                kind: BindingKind::StorageImage {
+                    read_only: true,
+                    view_type: ImageViewType::D2Array,
+                    format: Format::Rgba8Unorm,
+                },
+                ..base
+            },
+        ),
+        (
+            "kind::storage_image_format",
+            BindGroupLayoutEntry {
+                kind: BindingKind::StorageImage {
+                    read_only: true,
+                    view_type: ImageViewType::D2Array,
+                    format: Format::Rgba16Float,
+                },
+                ..base
+            },
+        ),
     ];
 
     let baseline = layout_of(&[base]);
@@ -887,6 +913,16 @@ fn two_entries_differing_in_one_field_are_distinguishable_field_by_field() {
         layout_of(&[variants[7].1]).bytes(),
         layout_of(&[variants[8].1]).bytes(),
         "sample_type is not on the wire beside a view_type that did not change"
+    );
+
+    // And the same for the pair the storage-texture layout needs, which is the
+    // one that would otherwise go unpinned: `format` is the last byte of the
+    // longest payload here, so an encoder that stopped after the dimension
+    // still differs from `base` and would pass the sweep above.
+    assert_ne!(
+        layout_of(&[variants[10].1]).bytes(),
+        layout_of(&[variants[11].1]).bytes(),
+        "a StorageImage's format is not on the wire beside a view_type that did not change"
     );
 }
 
@@ -956,6 +992,38 @@ fn a_binding_kind_code_no_variant_claims_is_refused_rather_than_folded_into_a_ne
         decode_stream(&bytes),
         Err(DecodeError::InvalidEnum {
             field: "BindingKind::sample_type",
+            ..
+        })
+    ));
+
+    // A `StorageImage` is the same shape one byte longer, and the third byte is
+    // the one WebGPU cannot default: a `Format` code no variant claims must be
+    // an error naming the format rather than a plausible neighbour, because the
+    // replayer turns it straight into `GPUStorageTextureBindingLayout.format`.
+    let stored = layout_of(&[BindGroupLayoutEntry {
+        kind: BindingKind::StorageImage {
+            read_only: false,
+            view_type: ImageViewType::D2,
+            format: Format::Rgba8Unorm,
+        },
+        ..probe_entry()
+    }]);
+    let whole = stored.bytes().to_vec();
+    let mut bytes = whole.clone();
+    bytes[LAYOUT_KIND_AT + 2] = tag::IMAGE_VIEW_TYPE_D3 + 1;
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "BindingKind::view_type",
+            ..
+        })
+    ));
+    let mut bytes = whole;
+    bytes[LAYOUT_KIND_AT + 3] = tag::FORMAT_BC7_RGBA_UNORM_SRGB + 1;
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "BindingKind::format",
             ..
         })
     ));

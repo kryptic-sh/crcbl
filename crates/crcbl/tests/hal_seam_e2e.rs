@@ -5827,6 +5827,107 @@ fn exercise_query_set_creation(headless: &Headless, kind: QueryKind) -> Exercise
     outcome
 }
 
+/// Drives [`Capability::StorageImageBinding`](crcbl::hal::Capability::StorageImageBinding):
+/// a layout holding [`BindingKind::StorageImage`](crcbl::hal::BindingKind::StorageImage)
+/// entries, and a pipeline layout over it.
+///
+/// **A LAYOUT AND NOT A DISPATCH, WHICH IS WHAT THE CAPABILITY SAYS IT IS.** Its
+/// own words are "a `BindingKind::StorageImage` entry in a bind group layout …
+/// so the layout cannot be built at all, rather than the binding merely being
+/// slower" — the refusal it exists to describe arrives at layout creation, on
+/// every backend that has one, and a shader that writes through the binding
+/// would be observing something the capability does not claim. No committed
+/// artifact declares a storage image in any case: neither the `.slang` sources
+/// nor the WGSL the WebGPU path carries has one, so a dispatch here would need a
+/// fifth shader before it could assert anything.
+///
+/// **The pipeline layout is what stops this asserting that a handle came back.**
+/// `create_bind_group_layout` on a backend that streams its commands answers
+/// `Ok` without a device having seen the descriptor, so building the layout
+/// alone would be the "every return value said success" shape the declaration
+/// test exists to catch. A pipeline layout is where D3D12 serialises the root
+/// signature the descriptor ranges went into and where Vulkan and Metal size
+/// their tables, so it is the first call that must read the entry to succeed.
+///
+/// **Two entries, so neither new field is dead.** One writable `D2` slot and one
+/// read-only `D2Array` one, in two different formats — a mapping that dropped
+/// the `view_type` or the `format` still builds this layout, but a backend that
+/// went on to disagree with the bound view about either would have nothing here
+/// to disagree *with* if both entries were the same.
+///
+/// [`Format::Rgba8Unorm`] and [`Format::Rgba16Float`] are the two formats every
+/// backend allows as a storage texture, WebGPU included — its list excludes
+/// every sRGB, depth and block-compressed format, and the seam's remaining
+/// colour formats are gated behind WebGPU features `crcbl_hal::Features` has no
+/// bit to ask for.
+fn exercise_storage_image_binding(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let entries = [
+        crcbl::hal::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::StorageImage {
+                read_only: false,
+                view_type: ImageViewType::D2,
+                format: Format::Rgba8Unorm,
+            },
+            count: 1,
+            flags: crcbl::hal::BindingFlags::empty(),
+        },
+        crcbl::hal::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::StorageImage {
+                read_only: true,
+                view_type: ImageViewType::D2Array,
+                format: Format::Rgba16Float,
+            },
+            count: 1,
+            flags: crcbl::hal::BindingFlags::empty(),
+        },
+    ];
+
+    let layout = match device.create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
+        label: Some("storage image binding exercise"),
+        entries: &entries,
+    }) {
+        Ok(layout) => layout,
+        // The capability's refusal is `Unsupported` and nothing else. An
+        // `InvalidDescriptor` here would be this exercise writing a layout the
+        // seam's own rules reject, which is a broken test rather than a backend
+        // declining a capability — and reporting it as a refusal would let a
+        // `Support::No` be satisfied by a typo.
+        Err(error @ HalError::Unsupported { .. }) => return Exercise::Refused(error),
+        Err(error) => panic!(
+            "a two-entry storage-image layout was refused with {error}, and \
+             Capability::StorageImageBinding is declared through HalError::Unsupported. Either \
+             this exercise builds a layout the seam rejects for an unrelated reason, or the \
+             backend is reporting a capability refusal under the wrong error."
+        ),
+    };
+
+    let set_layouts = [layout];
+    let outcome = match device.create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
+        label: Some("storage image binding exercise"),
+        bind_group_layouts: &set_layouts,
+        push_constants: None,
+    }) {
+        Ok(pipeline_layout) => {
+            device.destroy_pipeline_layout(pipeline_layout);
+            Exercise::Worked
+        }
+        Err(error @ HalError::Unsupported { .. }) => Exercise::Refused(error),
+        Err(error) => panic!(
+            "the bind group layout was built and the pipeline layout over it was refused with \
+             {error}. A backend that accepts a storage-image entry and then cannot put it in a \
+             root signature or an argument table has declared something it does not do."
+        ),
+    };
+
+    device.destroy_bind_group_layout(layout);
+    outcome
+}
+
 /// Drives `capability` against this device, or says why it cannot be.
 ///
 /// **Exhaustive with no wildcard arm**, so a capability added to
@@ -5866,10 +5967,14 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::DrawIndirectCount => exercise_draw_indirect_count(headless),
         C::IndirectArgumentPaddedStride => exercise_indirect_argument_padded_stride(headless),
         C::MeshShading | C::TaskShaderStage => Exercise::Unexercised(NEEDS_MESH_ARTIFACTS),
-        C::BindlessDescriptorArray | C::StorageImageBinding => Exercise::Unexercised(
+        C::BindlessDescriptorArray => Exercise::Unexercised(
             "needs a bind-group layout built for the capability and a shader that reads it; \
              the compute probe's layout is a fixed three-buffer one",
         ),
+        // The one that left that pair, and it left because the capability is
+        // narrower than the reason was: it is about the layout, not about a
+        // shader reading it. See `exercise_storage_image_binding`.
+        C::StorageImageBinding => exercise_storage_image_binding(headless),
         // The one that left that group: `compute_probe.slang`'s layout is fixed,
         // but nothing said it had to be built once — this one is built again
         // with UPDATE_AFTER_BIND on its destination and a second destination

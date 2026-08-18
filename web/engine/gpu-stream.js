@@ -462,7 +462,8 @@ const SAMPLE_TYPE = ['Float', 'Depth'];
  * Every other enum on this stream is a byte that names a value; this one is a
  * byte that names a *shape*, because `crcbl_hal::BindingKind`'s variants carry
  * data and the payloads are different lengths — one presence byte, two presence
- * bytes, or two enum codes. That is what makes a fold here worse than anywhere
+ * bytes, two enum codes, or a presence byte and two enum codes. That is what
+ * makes a fold here worse than anywhere
  * else in this file: a code read as its neighbour does not merely mis-name the
  * binding, it consumes the wrong number of bytes, and every field after it in
  * the entry — and every entry after that — decodes out of the wrong offsets and
@@ -1246,8 +1247,16 @@ class ByteReader {
           viewType: this.readEnum('BindingKind::view_type', IMAGE_VIEW_TYPE),
           sampleType: this.readEnum('BindingKind::sample_type', SAMPLE_TYPE),
         };
+      // The longest body of the five: a presence byte and *two* code bytes,
+      // because `GPUStorageTextureBindingLayout` needs both a `viewDimension`
+      // and a `format` and has no default for the format at all.
       case 'StorageImage':
-        return { name, readOnly: this.readPresent('BindingKind::read_only') };
+        return {
+          name,
+          readOnly: this.readPresent('BindingKind::read_only'),
+          viewType: this.readEnum('BindingKind::view_type', IMAGE_VIEW_TYPE),
+          format: this.readEnum('BindingKind::format', IMAGE_FORMAT),
+        };
       // The last row, and spelled out rather than left to a `default`: a
       // `default` here would give a variant added tomorrow an empty body and
       // leave the cursor one field short, which is the failure the table's own
