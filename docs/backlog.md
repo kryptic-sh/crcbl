@@ -799,6 +799,38 @@ or redefine the capability in terms of the reported feature rather than the
 callable surface — which would weaken what it asserts for every backend to
 accommodate one, and is worth naming only to reject.
 
+### `PushConstants` is driven on compute only, on every backend
+
+`Capability::PushConstants` is stage-agnostic — its own doc says
+"`push_constants` and the `PipelineLayoutDesc::push_constants` range they are
+written through". `exercise_push_constants` drives it with
+`push_constant_probe.slang`, which is a **compute** shader
+(`SV_DispatchThreadID`). So the capability reports as _driven_ on every backend
+while only half its surface is covered: no test anywhere pushes constants
+through a graphics pipeline.
+
+**That is not a rounding error, because the plumbing genuinely differs by
+stage.** dx12 maps the range to a root parameter whose _shader visibility_ is
+computed per stage — `crcbl_dx12::conv::shader_visibility`, which gained `MESH`
+and `TASK` arms this week. Metal splices a per-stage shadow and sends it with
+`setVertexBytes:`/`setFragmentBytes:` rather than the compute call, and its
+render path now records the block instead of writing it eagerly. Vulkan's
+`vkCmdPushConstants` takes a stage mask that a compute-only test never varies. A
+backend that got any of those wrong for the graphics stages would pass every
+gate this repo has.
+
+**Nothing in the engine would catch it either:** `crcbl-render` passes
+`push_constants: None` at every render-pass site it has, so the renderer never
+exercises the path in anger.
+
+**What would close it:** a raster shader that reads a push-constant block, and a
+seam exercise that draws twice in one pass with _different_ blocks, asserting
+each draw saw its own. Two draws rather than one is the point — a single draw
+cannot tell a copied block from a shared one, which is exactly the failure the
+Metal deferral's `Vec<u8>` copy exists to prevent. `crcbl-shaders`' committed
+`triangle` reads no constants, so this is a shader-artifact slice of the same
+shape `push_constant_probe` itself was.
+
 ### The doc gate does not cover private items
 
 CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding
@@ -1877,25 +1909,14 @@ executed off a Mac, and the local gates only type-check it.
   Ordering is a `Vec` push and drain with no branch in it, which is why that was
   accepted rather than mocked.
 
-- **The one semantic change the deferral makes is the one nothing exercises.**
-  `RenderCommand::PushConstants` carries `bytes: Vec<u8>`, a copy taken with
-  `shadow.bytes().to_vec()` rather than a pointer into the live shadow — because
-  `setBytes:length:atIndex:` copies immediately when encoding straight through,
-  while a recorded command would otherwise see whatever a _later_
-  `push_constants` spliced into that shadow. The copy is correct, and checked by
-  reading. **Nothing tests it.** `crcbl-render` passes `push_constants: None` at
-  every render-pass site it has, and the seam's `exercise_push_constants` is a
-  **compute** dispatch — and compute passes are not deferred. So no test
-  anywhere drives push constants across two draws in one Metal render pass,
-  which is the only arrangement in which getting this wrong is visible.
-
-  The guard that would close it: a Metal render test with two draws in one pass
-  pushing _different_ blocks, asserting each draw saw its own. It needs an MSL
-  raster shader that reads a push-constant block, which `crcbl-shaders`'
-  committed `triangle` does not — so it is a shader-artifact slice like
-  `push_constant_probe` was, not a test-only one. Worth doing before anyone
-  edits this recording path again, because the failure it prevents is silent and
-  would look like a shader bug.
+- **The one semantic change the deferral makes is the one nothing exercises —
+  and the gap is not Metal's.** `RenderCommand::PushConstants` carries
+  `bytes: Vec<u8>`, a copy taken with `shadow.bytes().to_vec()` rather than a
+  pointer into the live shadow, because `setBytes:length:atIndex:` copies
+  immediately when encoding straight through while a recorded command would
+  otherwise see whatever a _later_ `push_constants` spliced in. The copy is
+  correct and was checked by reading. Nothing tests it — see the entry below,
+  which is the general version of the problem.
 
 **And one widely repeated claim is false, which our own measurement settles.**
 Several sources say fragment shaders cannot be used with indirect command
