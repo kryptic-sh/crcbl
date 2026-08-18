@@ -58,10 +58,11 @@ use crcbl::backend::{BACKEND_ENV_VAR, GpuBackend};
 use crcbl::core::SurfaceTarget;
 use crcbl::hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-    CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
-    ImageAspect, ImageBarrier, ImageCopy, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation,
-    Offset3d, PresentInfo, PresentMode, QueryKind, QuerySetDesc, QuerySetHandle, ReadbackDesc,
+    CommandEncoderDesc, CompositeAlpha, DepthStencilAttachment, Device, DeviceDesc, DrawIndirect,
+    Extent3d, Features, Format, HalError, ImageAspect, ImageBarrier, ImageCopy, ImageDesc,
+    ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewType, Instance, LoadOp, MemoryLocation, Offset3d, PolygonMode, PresentInfo,
+    PresentMode, PrimitiveState, QueryKind, QuerySetDesc, QuerySetHandle, ReadbackDesc,
     ReadbackState, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceError,
     SwapchainDesc,
 };
@@ -2783,14 +2784,13 @@ const NO_MULTISAMPLING: &str = "this device reports a max_sample_count below the
 ///
 /// # Why this needs no pipeline
 ///
-/// **A clear needs no pipeline.** The neighbouring render-pass capabilities are
-/// unexercised because asserting on them means drawing something, and this
-/// suite has a compute probe and no raster one — but a resolve is an
-/// *end-of-pass* operation over whatever the samples hold, and
-/// [`LoadOp::Clear`] puts a known value in every one of them without a draw. So
-/// the pass here has no contents at all: it clears a 4x multisampled colour
-/// target to [`CLEAR`], names a single-sampled [`ColorAttachment::resolve`]
-/// view, and ends.
+/// **A clear needs no pipeline.** A resolve is an *end-of-pass* operation over
+/// whatever the samples hold, and [`LoadOp::Clear`] puts a known value in every
+/// one of them without a draw. So the pass here has no contents at all: it
+/// clears a 4x multisampled colour target to [`CLEAR`], names a single-sampled
+/// [`ColorAttachment::resolve`] view, and ends. That is why this one was driven
+/// while its render-pass neighbour [`Capability::StencilReference`] was not,
+/// until [`Raster`] gave the suite a pipeline to draw through.
 ///
 /// # What is asserted, and why a backend that does nothing cannot pass it
 ///
@@ -3079,6 +3079,1297 @@ fn exercise_msaa_resolve(headless: &Headless) -> Exercise {
     device.destroy_image_view(msaa_view);
     device.destroy_image(resolved);
     device.destroy_image(msaa);
+    outcome
+}
+
+// --- the raster path --------------------------------------------------------
+//
+// One fixture behind five capabilities: a colour target, a storage buffer of
+// vertices, and `crcbl-shaders`' committed `triangle` artifact — the only raster
+// shader this workspace ships for every one of this suite's targets, in SPIR-V,
+// WGSL, MSL and DXIL. [`Raster`] builds that much once per exercise and each
+// exercise adds a pipeline that varies exactly one piece of state, so the texel
+// that comes back is evidence about that piece and nothing else.
+
+/// The format every raster exercise draws into and reads back.
+///
+/// **Linear, and not the sRGB spelling the ring prefers.** The fragment stage
+/// returns the vertex colour unchanged, so an [`Rgba8Unorm`](Format::Rgba8Unorm)
+/// target holds `round(c * 255)` and the comparison against [`expected_level`]
+/// is exact to a level. That is also what makes the comparison worth making: a
+/// target a backend viewed in this format's sRGB counterpart would encode every
+/// write, and each of the colours below lands 30 to 60 levels away encoded — far
+/// outside [`LEVEL_TOLERANCE`].
+const RASTER_FORMAT: Format = Format::Rgba8Unorm;
+
+/// Texels across the colour target.
+///
+/// **256 is what picks this number**, exactly as it picks [`IMAGE_COPY_WIDTH`],
+/// [`DEPTH_COPY_WIDTH`] and [`MSAA_RESOLVE_WIDTH`]: the target is read back
+/// through an image→buffer copy, and WebGPU — with `wgpu` behind it, which is a
+/// backend this suite runs — requires such a copy's row pitch to be a multiple
+/// of 256 bytes. A [`RASTER_FORMAT`] row this wide is exactly 256 bytes.
+const RASTER_WIDTH: u32 = 64;
+
+/// Rows of the colour target.
+///
+/// Enough that [`RASTER_TRIANGLE`] covers a wide interior, so the centre texel
+/// the exercises read sits many texels away from every edge — which is what lets
+/// a wireframe be told from a fill by one texel rather than by a threshold.
+const RASTER_HEIGHT: u32 = 64;
+
+/// Bytes the colour target occupies, and so the size of every buffer that
+/// primes or reads it.
+const RASTER_BYTES: u64 = RASTER_WIDTH as u64 * RASTER_HEIGHT as u64 * 4;
+
+/// The triangle every raster exercise draws, in clip space.
+///
+/// **Symmetric about `x = 0` and containing the origin with room to spare**, so
+/// the target's centre texel is inside it whichever sign convention clip-space Y
+/// carries — Vulkan's, which `crcbl-vk` flips back with a negative-height
+/// viewport, or the +Y-up one every other backend has natively. This suite is
+/// not the place a Y flip is caught (`tests/render_e2e.rs` and `crcbl-vk`'s
+/// golden triangle are), and a sample that moved with the convention would make
+/// every verdict below a claim about the convention instead of about the
+/// capability.
+const RASTER_TRIANGLE: [[f32; 2]; 3] = [[-0.8, -0.8], [0.8, -0.8], [0.0, 0.8]];
+
+/// Vertices one triangle contributes to the storage buffer.
+const RASTER_TRIANGLE_VERTICES: u32 = RASTER_TRIANGLE.len() as u32;
+
+/// The clip-space depth of a triangle that is inside the volume.
+///
+/// Anywhere in `0..=1` would do; the middle is chosen so neither plane is near.
+const RASTER_DEPTH: f32 = 0.5;
+
+/// The clip-space depth of the triangle [`exercise_depth_clamp`] draws.
+///
+/// Past the far plane at `w = 1`, so the primitive is culled entirely by the
+/// clip stage and survives only where depth clamping replaced that clip. Nothing
+/// else about it differs from the triangles above.
+const RASTER_DEPTH_BEYOND_FAR: f32 = 1.5;
+
+/// What every raster pass clears its colour target to.
+///
+/// Three different channels and none of them a fixed point of the sRGB transfer
+/// function, for [`CLEAR`]'s reasons. It is the "the pass ran and the draw did
+/// not land" reading, which is what most of the [`Exercise::SilentlyIgnored`]
+/// arms below rest on.
+const RASTER_BACKGROUND: [f32; 4] = [0.1, 0.3, 0.5, 1.0];
+
+/// The colour of the first triangle in the pair.
+const RASTER_FIRST: [f32; 4] = [0.9, 0.2, 0.6, 1.0];
+
+/// The colour of the second triangle in the pair.
+///
+/// Drawn after [`RASTER_FIRST`] wherever a draw covers both, so "the second
+/// triangle was reached" is a colour rather than an absence.
+const RASTER_SECOND: [f32; 4] = [0.2, 0.7, 0.35, 1.0];
+
+/// The colour of the triangle at [`RASTER_DEPTH_BEYOND_FAR`].
+const RASTER_BEYOND: [f32; 4] = [0.6, 0.15, 0.85, 1.0];
+
+/// The byte every channel of the colour target holds before the pass.
+///
+/// [`MSAA_RESOLVE_POISON`]'s job for this fixture, and it answers a different
+/// question from the four colours: they separate "which draw landed", this
+/// separates "the render pass ran at all". Every pass here loads with
+/// [`LoadOp::Clear`], so a texel that still holds this was never touched by a
+/// pass — which is a broken fixture rather than a capability verdict, and
+/// [`RasterRead::from_bytes`] panics on it rather than folding it into one.
+const RASTER_POISON: u8 = 0x5B;
+
+/// The value the stencil plane is cleared to, and the reference
+/// [`exercise_stencil_reference`]'s surviving draw sets.
+const STENCIL_CLEARED: u32 = 0x2A;
+
+/// The reference the second draw sets, which the cleared plane must reject.
+const STENCIL_MISS: u32 = 0x11;
+
+/// The reference the *pipeline* carries.
+///
+/// A third value, and one the cleared plane rejects: a backend that baked this
+/// into the pipeline state instead of taking
+/// [`set_stencil_reference`](crcbl::hal::CommandEncoder::set_stencil_reference)'s
+/// draws nothing at all, which is a distinct reading from taking only the first
+/// call. Vulkan cannot land here — `crcbl-vk` declares
+/// `VK_DYNAMIC_STATE_STENCIL_REFERENCE`, so this field is ignored there — but
+/// Metal and D3D12 both hold a pipeline-side reference that a missing
+/// `set_stencil_reference` would leave in force.
+const STENCIL_BAKED: u32 = 0x33;
+
+// The three references must differ, or the exercise cannot separate a reference
+// that was applied from one that was not.
+const _: () = assert!(STENCIL_CLEARED != STENCIL_MISS);
+const _: () = assert!(STENCIL_CLEARED != STENCIL_BAKED);
+
+/// Bits the stencil comparison reads: all of them.
+const STENCIL_READ_MASK: u32 = 0xFF;
+
+/// The depth-stencil formats [`StencilTarget::open`] tries, in the order it
+/// tries them.
+///
+/// **Two, because no single one is a depth-stencil attachment everywhere, and
+/// the seam has no way to ask which is.** [`Device::caps`] reports features and
+/// numeric limits and no format table at all, so the only probe available is to
+/// create the image and look at what came back.
+///
+/// [`Format::D32FloatS8Uint`] is first because it is the one every *native* API
+/// has: radv reports `D24_UNORM_S8_UINT` with no
+/// `DEPTH_STENCIL_ATTACHMENT` format feature at all, and Metal's
+/// `isDepth24Stencil8PixelFormatSupported` answers no on Apple silicon.
+/// [`Format::D24UnormS8Uint`] is second and exists for wgpu, which is the
+/// mirror image: `Depth24PlusStencil8` is core there and `Depth32FloatStencil8`
+/// is behind a feature `crcbl-wgpu` does not enable.
+const STENCIL_FORMATS: [Format; 2] = [Format::D32FloatS8Uint, Format::D24UnormS8Uint];
+
+/// Why [`exercise_stencil_reference`] declines a device that will make neither
+/// of [`STENCIL_FORMATS`].
+const NO_STENCIL_FORMAT: &str = "this device would not create an image in either of the two depth-stencil formats the seam \
+     spells, so there is no stencil plane to compare a reference against";
+
+/// Bytes one `draw_indirect` argument structure occupies.
+///
+/// `VkDrawIndirectCommand`, `D3D12_DRAW_ARGUMENTS`,
+/// `MTLDrawPrimitivesIndirectArguments` and `wgpu::util::DrawIndirectArgs` are
+/// the same four 32-bit words in the same order — vertex count, instance count,
+/// first vertex, first instance — because a driver reads these bytes directly.
+/// The seam does not restate the layout, so this is the one the backends share.
+const DRAW_ARGS_TIGHT_STRIDE: u32 = 16;
+
+/// The stride [`exercise_indirect_argument_padded_stride`] asks for.
+///
+/// Twice [`DRAW_ARGS_TIGHT_STRIDE`], so an implementation that read its own
+/// packed structures lands on the decoy the exercise puts between the two real
+/// arguments rather than on the second of them.
+const DRAW_ARGS_PADDED_STRIDE: u32 = DRAW_ARGS_TIGHT_STRIDE * 2;
+
+/// Draws both indirect exercises record, and so the count both need room for.
+const RASTER_INDIRECT_DRAWS: u32 = 2;
+
+/// Why an indirect exercise declines a device that cannot record more than one
+/// draw from a single call.
+///
+/// The stride between two argument structures is unobservable with one of them,
+/// and so is a count buffer that selects one out of one.
+const NO_MULTI_DRAW_INDIRECT: &str = "the observable in both indirect exercises is which of two argument structures a draw read, \
+     and this device reports neither MULTI_DRAW_INDIRECT nor a max_draw_indirect_count above one \
+     — so a single call can only ever reach the first";
+
+/// One `draw_indirect` argument structure, little-endian.
+///
+/// `first_vertex` is zero in every one of these and that is deliberate rather
+/// than incidental: `triangle.slang`'s `SV_VertexID` compiles to
+/// `gl_VertexIndex - gl_BaseVertex` in SPIR-V and to a bare
+/// `@builtin(vertex_index)` in WGSL, so a non-zero first vertex indexes a
+/// *different* vertex on Vulkan from the one it indexes on wgpu. Every exercise
+/// here varies the vertex **count** instead, which every target agrees about.
+fn raster_draw_args(vertex_count: u32) -> [u8; DRAW_ARGS_TIGHT_STRIDE as usize] {
+    let mut out = [0u8; DRAW_ARGS_TIGHT_STRIDE as usize];
+    for (slot, value) in [vertex_count, 1, 0, 0].iter().enumerate() {
+        out[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+/// The bytes of one [`RASTER_TRIANGLE`], in the layout
+/// `triangle.slang`'s `StructuredBuffer<Vertex>` declares.
+///
+/// Built out of [`crcbl::shaders::triangle::Vertex`] rather than out of a local
+/// struct, so the layout is the one the crate that owns the shader source
+/// publishes and cannot drift from it.
+fn raster_triangle_bytes(color: [f32; 4], z: f32) -> Vec<u8> {
+    let bytes: Vec<u8> = RASTER_TRIANGLE
+        .iter()
+        .map(|[x, y]| crcbl::shaders::triangle::Vertex {
+            position: [*x, *y, z, 1.0],
+            color,
+        })
+        .flat_map(|vertex| {
+            vertex
+                .position
+                .into_iter()
+                .chain(vertex.color)
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<u8>>()
+        })
+        .collect();
+    assert_eq!(
+        bytes.len(),
+        RASTER_TRIANGLE.len() * crcbl::shaders::triangle::VERTEX_STRIDE,
+        "the packed vertices are not the stride `triangle.slang` declares, so the vertex stage \
+         would read a different struct from the one written"
+    );
+    bytes
+}
+
+/// A linear colour as the four bytes [`RASTER_FORMAT`] stores it in.
+fn raster_levels(color: [f32; 4]) -> [u8; 4] {
+    [
+        expected_level(color[0], RASTER_FORMAT),
+        expected_level(color[1], RASTER_FORMAT),
+        expected_level(color[2], RASTER_FORMAT),
+        expected_level(color[3], RASTER_FORMAT),
+    ]
+}
+
+/// Whether `texel` is `want` to within [`LEVEL_TOLERANCE`] on every channel.
+fn raster_texel_is(texel: &[u8], want: [u8; 4]) -> bool {
+    texel
+        .iter()
+        .zip(&want)
+        .all(|(got, expected)| got.abs_diff(*expected) <= LEVEL_TOLERANCE)
+}
+
+/// What one raster pass left in the colour target.
+///
+/// Two numbers rather than the whole image, because two are what every exercise
+/// below actually asks: which colour reached the centre, and how much of the
+/// target stopped being the background at all. The second is what separates a
+/// wireframe from a fill without a threshold — a wireframe leaves the centre
+/// clear and still covers texels — and what separates it from a draw that never
+/// happened.
+#[derive(Debug)]
+struct RasterRead {
+    /// The texel at the centre of the target, which [`RASTER_TRIANGLE`] covers.
+    centre: [u8; 4],
+    /// Texels that are not [`RASTER_BACKGROUND`].
+    drawn: usize,
+}
+
+impl RasterRead {
+    /// Reads the two numbers out of a whole target, failing loudly on the two
+    /// ways the fixture itself can be broken.
+    fn from_bytes(read: &[u8]) -> Self {
+        assert_eq!(
+            read.len(),
+            RASTER_BYTES as usize,
+            "the readback is not the whole colour target"
+        );
+        assert!(
+            !read.iter().all(|byte| *byte == POISON),
+            "the staging buffer still holds {POISON:#04x} in all {RASTER_BYTES} bytes, so nothing \
+             was copied out of the colour target at all — the readback never landed, and this \
+             exercise proves nothing about what was drawn either way"
+        );
+        assert!(
+            !read.iter().all(|byte| *byte == RASTER_POISON),
+            "every texel still holds the {RASTER_POISON:#04x} the target was primed with, so the \
+             render pass never ran: its LoadOp::Clear alone would have replaced this. Nothing \
+             about the draw inside it can be read off a pass that did not happen."
+        );
+
+        let background = raster_levels(RASTER_BACKGROUND);
+        let centre_texel = ((RASTER_HEIGHT / 2) * RASTER_WIDTH + RASTER_WIDTH / 2) as usize;
+        let centre = read[centre_texel * 4..centre_texel * 4 + 4]
+            .try_into()
+            .expect("four bytes");
+        let drawn = read
+            .chunks_exact(4)
+            .filter(|texel| !raster_texel_is(texel, background))
+            .count();
+        Self { centre, drawn }
+    }
+
+    /// Whether the centre texel holds `color`.
+    fn is(&self, color: [f32; 4]) -> bool {
+        raster_texel_is(&self.centre, raster_levels(color))
+    }
+
+    /// The centre texel and the levels each known colour would have put there,
+    /// for a panic that has to say what the target came back holding.
+    fn diagnosis(&self) -> String {
+        format!(
+            "the centre texel is {:?} and {} of {} texels are not the background.\n  \
+             background {:?}\n  first {:?}\n  second {:?}\n  beyond the far plane {:?}",
+            self.centre,
+            self.drawn,
+            RASTER_WIDTH * RASTER_HEIGHT,
+            raster_levels(RASTER_BACKGROUND),
+            raster_levels(RASTER_FIRST),
+            raster_levels(RASTER_SECOND),
+            raster_levels(RASTER_BEYOND),
+        )
+    }
+}
+
+/// A depth-stencil attachment one exercise creates for itself.
+struct StencilTarget {
+    image: crcbl::hal::ImageHandle,
+    view: crcbl::hal::ImageViewHandle,
+    format: Format,
+}
+
+impl StencilTarget {
+    /// The first of [`STENCIL_FORMATS`] this device will make a depth-stencil
+    /// attachment of, or `None` when it will make neither.
+    ///
+    /// # Both error channels, because the backends use both
+    ///
+    /// A refusal arrives as a returned [`HalError`] on the native backends —
+    /// `crcbl-mtl` answers [`HalError::InvalidDescriptor`] for `D24UnormS8Uint`
+    /// on Apple silicon — and out of band on wgpu, where `create_texture`
+    /// reports a format the device did not enable through the uncaptured-error
+    /// handler and hands back a texture regardless. Reading only the return
+    /// value would take that texture and build a pass on it; reading only
+    /// [`Device::take_error`] would miss Metal's. So this checks both, and
+    /// [`assert_no_out_of_band_error`] runs *first* so that an error already
+    /// pending is reported rather than swallowed by the probe.
+    fn open(device: &dyn Device) -> Option<Self> {
+        assert_no_out_of_band_error(device);
+        for format in STENCIL_FORMATS {
+            let Ok(image) = device.create_image(&ImageDesc {
+                label: Some("raster stencil target"),
+                image_type: ImageType::D2,
+                extent: Extent3d::d2(RASTER_WIDTH, RASTER_HEIGHT),
+                format,
+                mip_levels: 1,
+                samples: 1,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            }) else {
+                continue;
+            };
+            if let Some(error) = device.take_error() {
+                eprintln!(
+                    "crcbl hal seam e2e: {format:?} is not a depth-stencil attachment on this \
+                     device — {error}"
+                );
+                device.destroy_image(image);
+                continue;
+            }
+            let view = device
+                .create_image_view(&ImageViewDesc {
+                    label: Some("raster stencil target view"),
+                    image,
+                    view_type: ImageViewType::D2,
+                    format,
+                    range: ImageSubresourceRange::all(format),
+                })
+                .expect("a view of an image this device has just created");
+            eprintln!("crcbl hal seam e2e: the stencil exercise runs against {format:?}");
+            return Some(Self {
+                image,
+                view,
+                format,
+            });
+        }
+        None
+    }
+
+    fn destroy(self, device: &dyn Device) {
+        device.destroy_image_view(self.view);
+        device.destroy_image(self.image);
+    }
+}
+
+/// A colour target, the geometry the committed `triangle` artifact pulls, and
+/// the layout every raster pipeline below is built against.
+struct Raster {
+    color: crcbl::hal::ImageHandle,
+    color_view: crcbl::hal::ImageViewHandle,
+    /// A host buffer of nothing but [`RASTER_POISON`], copied over the target
+    /// before every pass.
+    prime: crcbl::hal::BufferHandle,
+    /// Host-readable copy target, so the pass's output can be asserted.
+    staging: crcbl::hal::BufferHandle,
+    /// [`RASTER_FIRST`] at vertices `0..3` and [`RASTER_SECOND`] at `3..6`, so
+    /// a draw of three vertices and a draw of six land different colours in the
+    /// same texels.
+    pair: crcbl::hal::BufferHandle,
+    pair_group: crcbl::hal::BindGroupHandle,
+    /// [`RASTER_BEYOND`] at [`RASTER_DEPTH_BEYOND_FAR`], on its own buffer
+    /// because every draw here starts at vertex zero.
+    beyond: crcbl::hal::BufferHandle,
+    beyond_group: crcbl::hal::BindGroupHandle,
+    bind_group_layout: crcbl::hal::BindGroupLayoutHandle,
+    pipeline_layout: crcbl::hal::PipelineLayoutHandle,
+    /// Kept alive rather than destroyed at the first pipeline, because each
+    /// exercise builds its own from it.
+    module: crcbl::hal::ShaderModuleHandle,
+}
+
+impl Raster {
+    /// Builds the target, the layout and the module, and stages the geometry in.
+    fn open(headless: &Headless) -> Self {
+        let device = headless.device.as_ref();
+
+        // The premise every verdict below rests on: no two of these colours are
+        // within the tolerance the texel comparison uses, so "which draw landed"
+        // is answerable from one texel.
+        let palette = [
+            ("background", RASTER_BACKGROUND),
+            ("first", RASTER_FIRST),
+            ("second", RASTER_SECOND),
+            ("beyond", RASTER_BEYOND),
+        ];
+        for (index, (name, color)) in palette.iter().enumerate() {
+            for (other_name, other) in &palette[index + 1..] {
+                assert!(
+                    !raster_texel_is(&raster_levels(*color), raster_levels(*other)),
+                    "the {name} and {other_name} colours land within {LEVEL_TOLERANCE} of each \
+                     other in {RASTER_FORMAT:?} ({:?} against {:?}), so a texel cannot say which \
+                     draw reached it",
+                    raster_levels(*color),
+                    raster_levels(*other),
+                );
+            }
+            assert!(
+                !raster_texel_is(&raster_levels(*color), [RASTER_POISON; 4]),
+                "the {name} colour lands within {LEVEL_TOLERANCE} of the {RASTER_POISON:#04x} the \
+                 target is primed with, so a pass that never ran and one that drew are no longer \
+                 distinguishable"
+            );
+        }
+
+        let color = device
+            .create_image(&ImageDesc {
+                label: Some("raster colour target"),
+                image_type: ImageType::D2,
+                extent: Extent3d::d2(RASTER_WIDTH, RASTER_HEIGHT),
+                format: RASTER_FORMAT,
+                mip_levels: 1,
+                samples: 1,
+                // Primed by a copy, drawn into by the pass, read back out.
+                usage: ImageUsage::COLOR_ATTACHMENT
+                    | ImageUsage::TRANSFER_SRC
+                    | ImageUsage::TRANSFER_DST,
+            })
+            .expect("a single-sampled colour image");
+        let color_view = device
+            .create_image_view(&ImageViewDesc {
+                label: Some("raster colour target view"),
+                image: color,
+                view_type: ImageViewType::D2,
+                format: RASTER_FORMAT,
+                range: ImageSubresourceRange::all(RASTER_FORMAT),
+            })
+            .expect("a view of the colour target");
+
+        let prime = device
+            .create_buffer(&BufferDesc {
+                label: Some("raster prime"),
+                size: RASTER_BYTES,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a host-upload buffer");
+        device
+            .write_buffer(prime, 0, &vec![RASTER_POISON; RASTER_BYTES as usize])
+            .expect("a host-upload buffer is what write_buffer is for");
+        let staging = device
+            .create_buffer(&BufferDesc {
+                label: Some("raster readback"),
+                size: RASTER_BYTES,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a host-readback buffer");
+
+        let mut pair_bytes = raster_triangle_bytes(RASTER_FIRST, RASTER_DEPTH);
+        pair_bytes.extend(raster_triangle_bytes(RASTER_SECOND, RASTER_DEPTH));
+        let beyond_bytes = raster_triangle_bytes(RASTER_BEYOND, RASTER_DEPTH_BEYOND_FAR);
+
+        let pair = raster_storage_buffer(headless, "raster pair vertices", &pair_bytes);
+        let beyond = raster_storage_buffer(headless, "raster beyond vertices", &beyond_bytes);
+
+        let layout_entries = [crcbl::hal::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: crcbl::hal::ShaderStages::VERTEX,
+            // `StructuredBuffer<Vertex>` rather than `RWStructuredBuffer`, which
+            // is what makes this read-only on the Rust side too.
+            kind: crcbl::hal::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: crcbl::hal::BindingFlags::empty(),
+        }];
+        let bind_group_layout = device
+            .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
+                label: Some("raster vertices"),
+                entries: &layout_entries,
+            })
+            .expect("a layout with no descriptor-indexing flags works on every tier");
+
+        let group = |label, buffer| {
+            let entries = [crcbl::hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::whole_buffer(buffer),
+            }];
+            device
+                .create_bind_group(&crcbl::hal::BindGroupDesc {
+                    label: Some(label),
+                    layout: bind_group_layout,
+                    entries: &entries,
+                    variable_count: None,
+                })
+                .expect("a bind group")
+        };
+        let pair_group = group("raster pair", pair);
+        let beyond_group = group("raster beyond", beyond);
+
+        let set_layouts = [bind_group_layout];
+        let pipeline_layout = device
+            .create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
+                label: Some("raster"),
+                bind_group_layouts: &set_layouts,
+                push_constants: None,
+            })
+            .expect("a pipeline layout");
+
+        // All four blobs, because all four backends run this file — the same
+        // reason `ComputeProbe::new` passes all four.
+        let module = device
+            .create_shader_module(&crcbl::hal::ShaderModuleDesc {
+                label: Some("triangle.slang"),
+                spirv: crcbl::shaders::TRIANGLE.spirv(),
+                wgsl: crcbl::shaders::TRIANGLE.wgsl(),
+                msl: crcbl::shaders::TRIANGLE.msl(),
+                dxil: &crcbl::shaders::TRIANGLE.dxil_containers(),
+            })
+            .expect("the committed shader is accepted");
+
+        Self {
+            color,
+            color_view,
+            prime,
+            staging,
+            pair,
+            pair_group,
+            beyond,
+            beyond_group,
+            bind_group_layout,
+            pipeline_layout,
+            module,
+        }
+    }
+
+    /// A pipeline over this fixture's layout and module, varying only the two
+    /// pieces of state the exercises differ in.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `create_graphics_pipeline` returned, which for
+    /// [`PolygonMode::Line`] and [`PrimitiveState::depth_clamp`] on a device
+    /// without the feature is the capability's refusal and is the point.
+    fn pipeline(
+        &self,
+        device: &dyn Device,
+        label: &'static str,
+        primitive: PrimitiveState,
+        depth_stencil: Option<crcbl::hal::DepthStencilState>,
+    ) -> Result<crcbl::hal::GraphicsPipelineHandle, HalError> {
+        let color_targets = [crcbl::hal::ColorTargetState::opaque(RASTER_FORMAT)];
+        let entry = |stage| {
+            crcbl::hal::ShaderEntry {
+                module: self.module,
+                // The manifest's name rather than a literal, for
+                // `ComputeProbe::new`'s reason: it is read out of the artifact's
+                // own entry-point table by the compile script.
+                entry_point: crcbl::shaders::TRIANGLE
+                    .entry_point(stage)
+                    .expect("the triangle artifact names both of its stages"),
+            }
+        };
+        device.create_graphics_pipeline(&crcbl::hal::GraphicsPipelineDesc {
+            label: Some(label),
+            layout: self.pipeline_layout,
+            vertex: entry(crcbl::shaders::Stage::Vertex),
+            fragment: Some(entry(crcbl::shaders::Stage::Fragment)),
+            primitive,
+            depth_stencil,
+            multisample: crcbl::hal::MultisampleState::default(),
+            color_targets: &color_targets,
+        })
+    }
+
+    /// Primes the target, runs `record` inside one render pass, and reads the
+    /// target back.
+    ///
+    /// `record` is the only thing that varies between the exercises, so all of
+    /// them go through the same prime, the same clear and the same readback and
+    /// a difference in the result is a difference in what was recorded.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `finish` returned. That is where a refusal this seam's encoders
+    /// defer surfaces — `crcbl-wgpu`'s padded-stride refusal is recorded at the
+    /// call and reported here — so the caller reads it as
+    /// [`Exercise::Refused`] rather than losing it.
+    fn render(
+        &self,
+        headless: &Headless,
+        label: &'static str,
+        depth: Option<&StencilTarget>,
+        record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
+    ) -> Result<RasterRead, HalError> {
+        let device = headless.device.as_ref();
+        let extent = Extent3d::d2(RASTER_WIDTH, RASTER_HEIGHT);
+        let range = ImageSubresourceRange::all(RASTER_FORMAT);
+        let subresource = ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        };
+        // Whole-subresource, tightly packed and at offset zero, for the reason
+        // `RASTER_WIDTH` gives: a partial copy carries row-pitch and
+        // buffer-offset alignments that would have to be satisfied by hand.
+        let buffer_copy = |buffer| BufferImageCopy {
+            buffer,
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: self.color,
+            image_subresource: subresource,
+            image_offset: Offset3d { x: 0, y: 0, z: 0 },
+            image_extent: extent,
+        };
+
+        let mut entering = vec![ImageBarrier::new(
+            self.color,
+            range,
+            ResourceState::Undefined,
+            ResourceState::TransferDst,
+        )];
+        if let Some(target) = depth {
+            entering.push(ImageBarrier::new(
+                target.image,
+                ImageSubresourceRange::all(target.format),
+                ResourceState::Undefined,
+                ResourceState::DepthStencilWrite,
+            ));
+        }
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some(label),
+            queue: headless.queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &entering,
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_image(&buffer_copy(self.prime));
+        // The target is an attachment for the pass that draws into it, so the
+        // prime's write is ordered against the clear by this transition — the
+        // same shape `exercise_msaa_resolve` puts between its prime and its
+        // pass.
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                self.color,
+                range,
+                ResourceState::TransferDst,
+                ResourceState::ColorAttachment,
+            )],
+            ..Barriers::default()
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some(label),
+            color_attachments: &[ColorAttachment {
+                view: self.color_view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(RASTER_BACKGROUND),
+            }],
+            depth_stencil_attachment: depth.map(|target| DepthStencilAttachment {
+                view: target.view,
+                // The stencil load below writes the plane, so this attachment is
+                // written rather than read and the barrier above matches.
+                read_only: false,
+                depth_load: LoadOp::Clear,
+                depth_store: StoreOp::Discard,
+                stencil_load: LoadOp::Clear,
+                stencil_store: StoreOp::Discard,
+                clear: ClearValue {
+                    stencil: STENCIL_CLEARED,
+                    ..ClearValue::default()
+                },
+            }),
+            render_area: Rect2d::from_size(RASTER_WIDTH, RASTER_HEIGHT),
+        });
+        encoder.set_viewport(&crcbl::hal::Viewport::from_size(
+            RASTER_WIDTH,
+            RASTER_HEIGHT,
+        ));
+        encoder.set_scissor(&Rect2d::from_size(RASTER_WIDTH, RASTER_HEIGHT));
+        record(encoder.as_mut());
+        encoder.end_render_pass();
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                self.color,
+                range,
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_image_to_buffer(&buffer_copy(self.staging));
+
+        let commands = encoder.finish()?;
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+
+        let mut read = poisoned(RASTER_BYTES as usize);
+        headless.readback(self.staging, RASTER_BYTES, &mut read);
+        Ok(RasterRead::from_bytes(&read))
+    }
+
+    fn destroy(self, device: &dyn Device) {
+        device.destroy_shader_module(self.module);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group(self.beyond_group);
+        device.destroy_bind_group(self.pair_group);
+        device.destroy_bind_group_layout(self.bind_group_layout);
+        device.destroy_buffer(self.beyond);
+        device.destroy_buffer(self.pair);
+        device.destroy_buffer(self.staging);
+        device.destroy_buffer(self.prime);
+        device.destroy_image_view(self.color_view);
+        device.destroy_image(self.color);
+    }
+}
+
+/// Stages `bytes` into a device-local storage buffer, on its own submission.
+///
+/// The upload is a copy from a host buffer rather than a write to the storage
+/// buffer itself, which is what `TriangleResources::new` in `crcbl-vk`'s suite
+/// does and for the same reason: a host-visible storage buffer is a memory type
+/// wgpu will not hand out.
+fn raster_storage_buffer(
+    headless: &Headless,
+    label: &'static str,
+    bytes: &[u8],
+) -> crcbl::hal::BufferHandle {
+    raster_staged_buffer(
+        headless,
+        label,
+        bytes,
+        BufferUsage::STORAGE,
+        ResourceState::ShaderRead,
+    )
+}
+
+/// Stages `bytes` into a device-local indirect-argument buffer, on its own
+/// submission and left in [`ResourceState::IndirectArgument`].
+fn raster_indirect_buffer(
+    headless: &Headless,
+    label: &'static str,
+    bytes: &[u8],
+) -> crcbl::hal::BufferHandle {
+    raster_staged_buffer(
+        headless,
+        label,
+        bytes,
+        BufferUsage::INDIRECT,
+        ResourceState::IndirectArgument,
+    )
+}
+
+/// The upload both of the above share: one host buffer, one copy, one barrier,
+/// one submission that is waited on.
+///
+/// Its own submission rather than the render pass's command buffer, so the
+/// exercises' [`Raster::render`] records the same barriers whatever it is
+/// drawing — a submission boundary is the dependency, so nothing is left
+/// unsynchronised by moving the upload out.
+fn raster_staged_buffer(
+    headless: &Headless,
+    label: &'static str,
+    bytes: &[u8],
+    usage: BufferUsage,
+    state: ResourceState,
+) -> crcbl::hal::BufferHandle {
+    let device = headless.device.as_ref();
+    let size = bytes.len() as u64;
+    let upload = device
+        .create_buffer(&BufferDesc {
+            label: Some(label),
+            size,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a host-upload buffer");
+    device
+        .write_buffer(upload, 0, bytes)
+        .expect("a host-upload buffer is what write_buffer is for");
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: Some(label),
+            size,
+            usage: usage | BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a device-local buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some(label),
+        queue: headless.queue,
+    });
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: upload,
+        src_offset: 0,
+        dst: buffer,
+        dst_offset: 0,
+        size,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[crcbl::hal::BufferBarrier {
+            buffer,
+            from: ResourceState::TransferDst,
+            to: state,
+            queue_transfer: None,
+        }],
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(upload);
+    buffer
+}
+
+/// Drives [`Capability::StencilReference`] and reports whether the value
+/// [`set_stencil_reference`](crcbl::hal::CommandEncoder::set_stencil_reference)
+/// carried decided which draw survived.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// The stencil plane is cleared to [`STENCIL_CLEARED`] and the pipeline compares
+/// [`CompareOp::Equal`](crcbl::hal::CompareOp::Equal) against it, writing
+/// nothing back. Two draws follow, in one pass, with the reference set
+/// differently before each:
+///
+/// * [`STENCIL_CLEARED`], then the first triangle — which must pass the test and
+///   put [`RASTER_FIRST`] in the centre;
+/// * [`STENCIL_MISS`], then *both* triangles — which must fail it and leave that
+///   texel alone.
+///
+/// So [`RASTER_FIRST`] is the only reading a backend that applied both values
+/// produces, and every other way this can go lands somewhere else.
+/// [`RASTER_SECOND`] means the second reference never took effect — either the
+/// call was dropped or the test is not enabled at all, and the draw that should
+/// have been discarded drew over the first. [`RASTER_BACKGROUND`] means the
+/// *first* reference never took effect either, which is what a pipeline-side
+/// [`STENCIL_BAKED`] produces. Both are [`Exercise::SilentlyIgnored`]: the
+/// reference was accepted and changed nothing observable.
+///
+/// The order matters and is not free to reverse. Drawing the rejected reference
+/// first would make "the stencil test is not enabled" and "both references were
+/// applied" produce the same texel, because the last draw would win either way.
+fn exercise_stencil_reference(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let Some(target) = StencilTarget::open(device) else {
+        return Exercise::Unexercised(NO_STENCIL_FORMAT);
+    };
+    let raster = Raster::open(headless);
+
+    let face = crcbl::hal::StencilFaceState {
+        compare: crcbl::hal::CompareOp::Equal,
+        fail_op: crcbl::hal::StencilOp::Keep,
+        depth_fail_op: crcbl::hal::StencilOp::Keep,
+        pass_op: crcbl::hal::StencilOp::Keep,
+    };
+    let depth_stencil = crcbl::hal::DepthStencilState {
+        format: target.format,
+        // The depth half is deliberately inert: this exercise is about the
+        // stencil reference, and a depth test that could also discard a fragment
+        // would be a second explanation for an empty target.
+        depth_write: false,
+        depth_compare: crcbl::hal::CompareOp::Always,
+        stencil: Some(crcbl::hal::StencilState {
+            front: face,
+            back: face,
+            read_mask: STENCIL_READ_MASK,
+            // Nothing writes the plane, so the second draw is tested against the
+            // same value the first was.
+            write_mask: 0,
+            reference: STENCIL_BAKED,
+        }),
+        bias: crcbl::hal::DepthBias::default(),
+    };
+
+    let outcome = match raster.pipeline(
+        device,
+        "stencil reference",
+        PrimitiveState::default(),
+        Some(depth_stencil),
+    ) {
+        Err(error) => Exercise::Refused(error),
+        Ok(pipeline) => {
+            let read = raster.render(headless, "stencil reference", Some(&target), |encoder| {
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, raster.pair_group, &[], raster.pipeline_layout);
+                encoder.set_stencil_reference(STENCIL_CLEARED);
+                encoder.draw(0..RASTER_TRIANGLE_VERTICES, 0..1);
+                encoder.set_stencil_reference(STENCIL_MISS);
+                encoder.draw(0..RASTER_TRIANGLE_VERTICES * 2, 0..1);
+            });
+            device.destroy_graphics_pipeline(pipeline);
+            match read {
+                Err(error) => Exercise::Refused(error),
+                Ok(read) if read.is(RASTER_FIRST) => Exercise::Worked,
+                Ok(read) if read.is(RASTER_SECOND) => {
+                    eprintln!(
+                        "crcbl hal seam e2e: the draw at {STENCIL_MISS:#04x} was not discarded, so \
+                         the second set_stencil_reference changed nothing — {}",
+                        read.diagnosis()
+                    );
+                    Exercise::SilentlyIgnored
+                }
+                Ok(read) if read.is(RASTER_BACKGROUND) => {
+                    eprintln!(
+                        "crcbl hal seam e2e: neither draw survived, so the first \
+                         set_stencil_reference changed nothing and the pipeline's own \
+                         {STENCIL_BAKED:#04x} decided both — {}",
+                        read.diagnosis()
+                    );
+                    Exercise::SilentlyIgnored
+                }
+                Ok(read) => panic!(
+                    "the stencil pass left a colour this exercise never draws: {}",
+                    read.diagnosis()
+                ),
+            }
+        }
+    };
+
+    raster.destroy(device);
+    target.destroy(device);
+    outcome
+}
+
+/// Whether this device can record more than one draw from a single indirect
+/// call, which both indirect exercises need to observe anything at all.
+fn can_multi_draw(headless: &Headless) -> bool {
+    let caps = headless.device.caps();
+    caps.features.contains(Features::MULTI_DRAW_INDIRECT)
+        && caps.limits.max_draw_indirect_count >= RASTER_INDIRECT_DRAWS
+}
+
+/// Drives [`Capability::DrawIndirectCount`] and reports whether the draw count
+/// came out of the buffer that holds it.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// Two argument structures sit at `args_offset`: the first draws one triangle,
+/// the second draws both. The count buffer holds a `1`, and `max_draw_count` is
+/// [`RASTER_INDIRECT_DRAWS`] — so the whole claim is that the smaller number
+/// wins. [`RASTER_FIRST`] in the centre is the only reading that follows;
+/// [`RASTER_SECOND`] means the second structure was executed anyway, which is a
+/// count taken from `max_draw_count` rather than from memory and is the failure
+/// this capability exists to name.
+///
+/// Both offsets carry a decoy at the value a backend that dropped them would
+/// read — an argument structure at zero that draws both triangles, and a count
+/// of [`RASTER_INDIRECT_DRAWS`] at zero — so "the offsets were honoured" is
+/// checkable rather than assumed. Both decoys produce [`RASTER_SECOND`], which
+/// is the arm that panics.
+fn exercise_draw_indirect_count(headless: &Headless) -> Exercise {
+    /// Where the arguments the call actually names begin. Non-zero, so the
+    /// decoy at zero is what an ignored offset reaches.
+    const ARGS_AT: u64 = 32;
+    /// Where the count the call actually names sits, for the same reason.
+    const COUNT_AT: u64 = 4;
+
+    if !can_multi_draw(headless) {
+        return Exercise::Unexercised(NO_MULTI_DRAW_INDIRECT);
+    }
+    let device = headless.device.as_ref();
+    let raster = Raster::open(headless);
+
+    let mut args = vec![0u8; ARGS_AT as usize + 2 * DRAW_ARGS_TIGHT_STRIDE as usize];
+    args[..DRAW_ARGS_TIGHT_STRIDE as usize]
+        .copy_from_slice(&raster_draw_args(RASTER_TRIANGLE_VERTICES * 2));
+    args[ARGS_AT as usize..ARGS_AT as usize + DRAW_ARGS_TIGHT_STRIDE as usize]
+        .copy_from_slice(&raster_draw_args(RASTER_TRIANGLE_VERTICES));
+    args[ARGS_AT as usize + DRAW_ARGS_TIGHT_STRIDE as usize..]
+        .copy_from_slice(&raster_draw_args(RASTER_TRIANGLE_VERTICES * 2));
+    let mut counts = Vec::new();
+    counts.extend(RASTER_INDIRECT_DRAWS.to_le_bytes());
+    counts.extend(1u32.to_le_bytes());
+
+    let args = raster_indirect_buffer(headless, "raster indirect count args", &args);
+    let counts = raster_indirect_buffer(headless, "raster indirect count", &counts);
+
+    let outcome = match raster.pipeline(
+        device,
+        "draw indirect count",
+        PrimitiveState::default(),
+        None,
+    ) {
+        Err(error) => Exercise::Refused(error),
+        Ok(pipeline) => {
+            let read = raster.render(headless, "draw indirect count", None, |encoder| {
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, raster.pair_group, &[], raster.pipeline_layout);
+                encoder.draw_indirect_count(&crcbl::hal::DrawIndirectCount {
+                    args,
+                    args_offset: ARGS_AT,
+                    count_buffer: counts,
+                    count_offset: COUNT_AT,
+                    max_draw_count: RASTER_INDIRECT_DRAWS,
+                    stride: DRAW_ARGS_TIGHT_STRIDE,
+                });
+            });
+            device.destroy_graphics_pipeline(pipeline);
+            match read {
+                Err(error) => Exercise::Refused(error),
+                Ok(read) if read.is(RASTER_FIRST) => Exercise::Worked,
+                Ok(read) if read.is(RASTER_BACKGROUND) => {
+                    eprintln!(
+                        "crcbl hal seam e2e: no draw at all reached the target — {}",
+                        read.diagnosis()
+                    );
+                    Exercise::SilentlyIgnored
+                }
+                Ok(read) if read.is(RASTER_SECOND) => panic!(
+                    "both argument structures were executed against a count buffer holding one, \
+                     so the draw count came from max_draw_count ({RASTER_INDIRECT_DRAWS}) or from \
+                     the decoy at offset zero rather than from {COUNT_AT} of the count buffer. A \
+                     pass whose size the CPU never learns cannot be built on a count that is \
+                     ignored.\n  {}",
+                    read.diagnosis()
+                ),
+                Ok(read) => panic!(
+                    "the indirect pass left a colour this exercise never draws: {}",
+                    read.diagnosis()
+                ),
+            }
+        }
+    };
+
+    device.destroy_buffer(counts);
+    device.destroy_buffer(args);
+    raster.destroy(device);
+    outcome
+}
+
+/// Drives [`Capability::IndirectArgumentPaddedStride`] and reports whether the
+/// second argument structure was read where the stride put it.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// Three argument structures, and the draw asks for two of them at
+/// [`DRAW_ARGS_PADDED_STRIDE`]. The first draws nothing at all, so the whole
+/// picture is decided by *where the second one was read from*: at the padded
+/// stride it is a structure drawing one triangle, and at the tight stride it is
+/// a decoy drawing both.
+///
+/// * [`RASTER_FIRST`] — the stride was honoured. [`Exercise::Worked`].
+/// * [`RASTER_SECOND`] — the arguments were walked at
+///   [`DRAW_ARGS_TIGHT_STRIDE`] and the decoy between them was executed, which
+///   is reading the wrong words silently and is exactly what
+///   `crcbl-wgpu` refuses rather than does. A panic, because the call did
+///   something and did the wrong thing.
+/// * [`RASTER_BACKGROUND`] — nothing was drawn, so the call was accepted and
+///   dropped. [`Exercise::SilentlyIgnored`].
+///
+/// This is the first positive call to a padded stride anywhere in the workspace:
+/// every other indirect call site — `crcbl-vk`'s `vk_e2e/indirect.rs`,
+/// `tests/draw_gen_e2e` and the render graph itself — passes the tight one, so
+/// "draws indirectly" was proven and "honours a stride" was not.
+fn exercise_indirect_argument_padded_stride(headless: &Headless) -> Exercise {
+    if !can_multi_draw(headless) {
+        return Exercise::Unexercised(NO_MULTI_DRAW_INDIRECT);
+    }
+    let device = headless.device.as_ref();
+    let raster = Raster::open(headless);
+
+    let mut args = vec![0u8; DRAW_ARGS_PADDED_STRIDE as usize + DRAW_ARGS_TIGHT_STRIDE as usize];
+    let put = |args: &mut Vec<u8>, at: usize, source: [u8; DRAW_ARGS_TIGHT_STRIDE as usize]| {
+        args[at..at + source.len()].copy_from_slice(&source);
+    };
+    // The first argument draws nothing, so neither reading of the stride is
+    // decided by it.
+    put(&mut args, 0, raster_draw_args(0));
+    // The decoy a tightly packed walk lands on.
+    put(
+        &mut args,
+        DRAW_ARGS_TIGHT_STRIDE as usize,
+        raster_draw_args(RASTER_TRIANGLE_VERTICES * 2),
+    );
+    // The second argument, where the stride says it is.
+    put(
+        &mut args,
+        DRAW_ARGS_PADDED_STRIDE as usize,
+        raster_draw_args(RASTER_TRIANGLE_VERTICES),
+    );
+    let args = raster_indirect_buffer(headless, "raster padded stride args", &args);
+
+    let outcome = match raster.pipeline(device, "padded stride", PrimitiveState::default(), None) {
+        Err(error) => Exercise::Refused(error),
+        Ok(pipeline) => {
+            let read = raster.render(headless, "padded stride", None, |encoder| {
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, raster.pair_group, &[], raster.pipeline_layout);
+                encoder.draw_indirect(&DrawIndirect {
+                    args,
+                    offset: 0,
+                    draw_count: RASTER_INDIRECT_DRAWS,
+                    stride: DRAW_ARGS_PADDED_STRIDE,
+                });
+            });
+            device.destroy_graphics_pipeline(pipeline);
+            match read {
+                Err(error) => Exercise::Refused(error),
+                Ok(read) if read.is(RASTER_FIRST) => Exercise::Worked,
+                Ok(read) if read.is(RASTER_BACKGROUND) => {
+                    eprintln!(
+                        "crcbl hal seam e2e: no draw at all reached the target — {}",
+                        read.diagnosis()
+                    );
+                    Exercise::SilentlyIgnored
+                }
+                Ok(read) if read.is(RASTER_SECOND) => panic!(
+                    "the decoy between the two arguments was executed, so a stride of \
+                     {DRAW_ARGS_PADDED_STRIDE} was accepted and the arguments were walked at \
+                     {DRAW_ARGS_TIGHT_STRIDE}. Every word after the first structure is then read \
+                     from the wrong place, which is a wrong picture with a clean log.\n  {}",
+                    read.diagnosis()
+                ),
+                Ok(read) => panic!(
+                    "the indirect pass left a colour this exercise never draws: {}",
+                    read.diagnosis()
+                ),
+            }
+        }
+    };
+
+    device.destroy_buffer(args);
+    raster.destroy(device);
+    outcome
+}
+
+/// Drives [`Capability::PolygonModeLine`] and reports whether the triangle
+/// arrived as an outline.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// One triangle, one pipeline, and the only thing that separates the two answers
+/// is [`PolygonMode::Line`]. The centre texel is the whole discriminator and
+/// needs no threshold: [`RASTER_TRIANGLE`] contains it with room to spare, so a
+/// filled triangle covers it and an outline of the same triangle does not.
+///
+/// * the centre is [`RASTER_BACKGROUND`] and something else was drawn — an
+///   outline. [`Exercise::Worked`].
+/// * the centre is [`RASTER_FIRST`] — the triangle was filled, so the fill mode
+///   was accepted and ignored. [`Exercise::SilentlyIgnored`].
+/// * nothing was drawn at all — a panic, because that is a broken fixture rather
+///   than a wireframe: an outline of a triangle this size covers texels on every
+///   rasteriser.
+fn exercise_polygon_mode_line(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let raster = Raster::open(headless);
+
+    let primitive = PrimitiveState {
+        polygon_mode: PolygonMode::Line,
+        ..PrimitiveState::default()
+    };
+    let outcome = match raster.pipeline(device, "polygon mode line", primitive, None) {
+        Err(error) => Exercise::Refused(error),
+        Ok(pipeline) => {
+            let read = raster.render(headless, "polygon mode line", None, |encoder| {
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, raster.pair_group, &[], raster.pipeline_layout);
+                encoder.draw(0..RASTER_TRIANGLE_VERTICES, 0..1);
+            });
+            device.destroy_graphics_pipeline(pipeline);
+            match read {
+                Err(error) => Exercise::Refused(error),
+                Ok(read) if read.is(RASTER_FIRST) => {
+                    eprintln!(
+                        "crcbl hal seam e2e: the triangle came back filled — {}",
+                        read.diagnosis()
+                    );
+                    Exercise::SilentlyIgnored
+                }
+                Ok(read) if read.is(RASTER_BACKGROUND) && read.drawn > 0 => {
+                    eprintln!(
+                        "crcbl hal seam e2e: the wireframe covered {} of {} texels and left the \
+                         centre clear",
+                        read.drawn,
+                        RASTER_WIDTH * RASTER_HEIGHT
+                    );
+                    Exercise::Worked
+                }
+                Ok(read) if read.drawn == 0 => panic!(
+                    "the pass drew nothing at all, so this says nothing about the fill mode: an \
+                     outline of a triangle this size lights texels on every rasteriser.\n  {}",
+                    read.diagnosis()
+                ),
+                Ok(read) => panic!(
+                    "the wireframe pass left a colour this exercise never draws: {}",
+                    read.diagnosis()
+                ),
+            }
+        }
+    };
+
+    raster.destroy(device);
+    outcome
+}
+
+/// Drives [`Capability::DepthClamp`] and reports whether a primitive past the
+/// far plane survived to the target.
+///
+/// # What is asserted, and why a backend that does nothing cannot pass it
+///
+/// The triangle sits at [`RASTER_DEPTH_BEYOND_FAR`] with `w = 1`, so it is
+/// entirely outside the clip volume in Z and inside it in X and Y. Clipping
+/// discards it; clamping is defined as replacing that clip with a clamp of the
+/// fragment's depth, so it survives. The pass carries no depth attachment at
+/// all, which keeps the reading unambiguous: there is no depth *test* that could
+/// be the reason a fragment vanished, only the clip.
+///
+/// * [`RASTER_BEYOND`] in the centre — the primitive was clamped rather than
+///   clipped. [`Exercise::Worked`].
+/// * [`RASTER_BACKGROUND`] — it was clipped, so `depth_clamp` was accepted and
+///   ignored. [`Exercise::SilentlyIgnored`].
+fn exercise_depth_clamp(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let raster = Raster::open(headless);
+
+    let primitive = PrimitiveState {
+        depth_clamp: true,
+        ..PrimitiveState::default()
+    };
+    let outcome = match raster.pipeline(device, "depth clamp", primitive, None) {
+        Err(error) => Exercise::Refused(error),
+        Ok(pipeline) => {
+            let read = raster.render(headless, "depth clamp", None, |encoder| {
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, raster.beyond_group, &[], raster.pipeline_layout);
+                encoder.draw(0..RASTER_TRIANGLE_VERTICES, 0..1);
+            });
+            device.destroy_graphics_pipeline(pipeline);
+            match read {
+                Err(error) => Exercise::Refused(error),
+                Ok(read) if read.is(RASTER_BEYOND) => Exercise::Worked,
+                Ok(read) if read.is(RASTER_BACKGROUND) => {
+                    eprintln!(
+                        "crcbl hal seam e2e: the primitive at z={RASTER_DEPTH_BEYOND_FAR} was \
+                         clipped, so depth clamping was not applied — {}",
+                        read.diagnosis()
+                    );
+                    Exercise::SilentlyIgnored
+                }
+                Ok(read) => panic!(
+                    "the depth-clamp pass left a colour this exercise never draws: {}",
+                    read.diagnosis()
+                ),
+            }
+        }
+    };
+
+    raster.destroy(device);
     outcome
 }
 
@@ -3422,12 +4713,11 @@ fn exercise_timestamp_resolve(
 /// written" resolves to, which is zero on the backend that has them, and zero
 /// is also what a backend doing nothing produces.
 ///
-/// Two further things would have to change before a count could be asserted
-/// even with that verb. Occlusion needs the graphics pipeline the fixture does
-/// not have, for the same reason `NEEDS_PIPELINE` gives elsewhere. And
-/// `crcbl-vk` creates its statistics pools with `VERTEX_SHADER_INVOCATIONS |
-/// FRAGMENT_SHADER_INVOCATIONS | CLIPPING_PRIMITIVES` and no compute counter,
-/// so the dispatch this suite *can* size would be counted by none of them.
+/// The missing verb is the whole of it, and it is worth saying that the *work*
+/// is no longer the obstacle: [`Raster`] draws a triangle of a known size, which
+/// is what an occlusion count and `crcbl-vk`'s `VERTEX_SHADER_INVOCATIONS |
+/// FRAGMENT_SHADER_INVOCATIONS | CLIPPING_PRIMITIVES` statistics pool would
+/// count. Neither can be scoped around it from this seam.
 ///
 /// # What it does assert
 ///
@@ -3539,9 +4829,10 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
     // Every reason below names what an exercise would need, not merely that
     // there isn't one — an unexercised capability is a coverage gap, and a gap
     // nobody can act on is worse than one nobody wrote down.
-    const NEEDS_PIPELINE: &str = "needs a graphics pipeline and committed shader artifacts for every backend; this suite \
-         has a compute probe and no raster one, and building one here would duplicate \
-         tests/render_e2e.rs's fixture rather than reuse it";
+    const NEEDS_TEXTURE_SAMPLING: &str = "the observable is a filtered texel, so it needs a shader that samples a minified \
+         texture at a grazing angle and a second one to compare against; the committed raster \
+         artifact this suite drives — triangle.slang — samples nothing, and creating a sampler \
+         and getting a handle back asserts that a handle came back and nothing about anisotropy";
     const NEEDS_MESH_ARTIFACTS: &str = "needs committed mesh/task shader artifacts per backend; only crcbl-vk can run one today, \
          so an exercise would assert nothing on four of the five";
     const NEEDS_TWO_SUBMISSIONS: &str = "needs a submission whose wait can outlive the test if the backend hangs rather than \
@@ -3556,14 +4847,12 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::BufferFillWord => exercise_fill(headless, 0x1234_5678),
         C::ImageToImageCopy => exercise_image_to_image_copy(headless),
         C::DepthImageCopy => exercise_depth_image_copy(headless),
-        // A clear, not a draw: `NEEDS_PIPELINE`'s wall does not stand in front
-        // of an end-of-pass resolve, which is why this neighbour is driven and
-        // the ones below it are not.
+        // A clear, not a draw: this one needs no pipeline at all, which is why
+        // it was driven before the raster fixture below existed.
         C::MsaaResolveAttachment => exercise_msaa_resolve(headless),
-        C::StencilReference => Exercise::Unexercised(NEEDS_PIPELINE),
-        C::DrawIndirectCount | C::IndirectArgumentPaddedStride => {
-            Exercise::Unexercised(NEEDS_PIPELINE)
-        }
+        C::StencilReference => exercise_stencil_reference(headless),
+        C::DrawIndirectCount => exercise_draw_indirect_count(headless),
+        C::IndirectArgumentPaddedStride => exercise_indirect_argument_padded_stride(headless),
         C::MeshShading | C::TaskShaderStage => Exercise::Unexercised(NEEDS_MESH_ARTIFACTS),
         C::UpdateBindGroup
         | C::PushConstants
@@ -3572,9 +4861,11 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
             "needs a bind-group layout built for the capability and a shader that reads it; the \
              compute probe's layout is a fixed three-buffer one",
         ),
-        C::PolygonModeLine | C::DepthClamp | C::SamplerAnisotropy => {
-            Exercise::Unexercised(NEEDS_PIPELINE)
-        }
+        C::PolygonModeLine => exercise_polygon_mode_line(headless),
+        C::DepthClamp => exercise_depth_clamp(headless),
+        // The one rasteriser capability the raster fixture does not reach, and
+        // it is a shader gap rather than a pipeline one.
+        C::SamplerAnisotropy => Exercise::Unexercised(NEEDS_TEXTURE_SAMPLING),
         C::TimestampQuery => exercise_timestamp_query(headless),
         // Creation and refusal only, and `exercise_query_set_creation` says at
         // length why there is no count to assert: the seam has no begin/end
