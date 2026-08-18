@@ -59,9 +59,11 @@
 //! The seam has a fill for exactly this — `CommandEncoder::fill_buffer`, "the
 //! idiomatic way to zero an indirect count buffer" — and it is unusable here
 //! twice over. A fill is legal only *outside* a pass, and a render-graph frame
-//! is passes end to end; and `crcbl-dx12` refuses one outright, because D3D12's
-//! fill is `ClearUnorderedAccessViewUint` over a descriptor from a
-//! shader-visible heap, which that backend does not create.
+//! is passes end to end; and `crcbl-dx12` refuses one outright — a deliberate
+//! non-fix argued at its `fill_buffer`, D3D12's fill being
+//! `ClearUnorderedAccessViewUint` over a descriptor from a shader-visible heap.
+//! The first reason is the one that binds here regardless of what any backend
+//! decides: a frame of passes has nowhere to put a fill.
 //!
 //! So the zero is a dispatch of its own, `clear_counters.slang`, scheduled
 //! ahead of the cull pass by [`DrawGen::add_passes`] like any other producer —

@@ -760,10 +760,13 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::BufferFillZero,
         backend: BackendKind::Dx12,
         kind: DivergenceKind::Declined,
-        why: "D3D12's fill is ClearUnorderedAccessViewUint, which takes a descriptor from a \
-              shader-visible heap that crcbl_dx12::descriptor does not create. A deliberate \
-              non-fix: crcbl-render zeroes its draw-generation counters with a clear dispatch, \
-              which runs anywhere that can dispatch",
+        why: "a deliberate non-fix rather than a missing slice: D3D12's fill is \
+              ClearUnorderedAccessViewUint, and crcbl-render zeroes its draw-generation counters \
+              with a clear dispatch instead, which runs anywhere that can dispatch. The \
+              descriptor it needs would come from a shader-visible heap, which \
+              crcbl_dx12::binding builds for bind groups — crcbl_dx12::descriptor is the module \
+              that never sets the flag, so this is about which heap and whose lifetime rather \
+              than the crate having none",
     },
     Divergence {
         capability: Capability::BufferFillRepeatedByte,

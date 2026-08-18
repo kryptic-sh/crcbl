@@ -1425,14 +1425,15 @@ impl CommandEncoder for Dx12CommandEncoder {
     }
 
     fn fill_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _size: u64, _value: u32) {
-        // `ClearUnorderedAccessViewUint` is D3D12's fill, and it takes a
-        // descriptor from a **shader-visible** heap — which is the one
-        // `crate::descriptor` deliberately never creates, because a
-        // shader-visible heap is a frame resource belonging to the slice that
-        // has a root signature to bind it against.
         // **Deliberately not implemented, and nothing needs it.** D3D12's fill
         // is `ClearUnorderedAccessViewUint`, which needs a descriptor from a
-        // shader-visible heap that `crcbl_dx12::descriptor` does not create.
+        // **shader-visible** heap. `crate::descriptor` deliberately never sets
+        // that flag — but `crate::binding` does build shader-visible heaps for
+        // bind groups, so the obstacle is which heap such a descriptor would
+        // come from and its lifetime, not that the crate has none. Read the old
+        // phrasing of this comment as the state of the crate before bind groups
+        // landed.
+        //
         // `crcbl-render` zeroes its draw-generation counters with a clear
         // dispatch instead — chosen over a graph-level fill precisely because
         // `fill_buffer` is four separate backend promises (Metal repeats a

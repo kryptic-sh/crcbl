@@ -1989,10 +1989,13 @@ impl Device for Dx12Device {
              backend does not yet report Features::MESH_SHADER, because doing so moves every \
              adapter onto GeometryPath::MeshShader and re-keys every golden image (the DX12 mesh \
              reporting slice)";
-        const NO_FILL: &str = "D3D12's fill is ClearUnorderedAccessViewUint, which takes a descriptor from a \
-             shader-visible heap that crcbl_dx12::descriptor does not create. A deliberate \
-             non-fix: crcbl-render zeroes its counters with a clear dispatch, which runs anywhere \
-             that can dispatch";
+        const NO_FILL: &str = "a deliberate non-fix rather than a missing slice: D3D12's fill is \
+             ClearUnorderedAccessViewUint, and crcbl-render zeroes its counters with a clear \
+             dispatch instead, which runs anywhere that can dispatch and does not make \
+             fill_buffer's four different backend promises load-bearing. The descriptor it needs \
+             would come from a shader-visible heap, which crcbl_dx12::binding builds for bind \
+             groups — crcbl_dx12::descriptor is the module that never sets the flag, so the heap \
+             is a question of where one is taken from and not of whether the crate has any";
 
         match capability {
             Capability::BufferFillZero
