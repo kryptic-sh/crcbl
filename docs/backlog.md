@@ -1790,16 +1790,45 @@ anyone writes. "Metal fully closed" is not reachable by working harder; it is
 reachable only by buying a Mac runner. That is the whole content of position (1)
 versus (2), and it is worth seeing before choosing between them.
 
-**And the two writable rows are not free.** `DrawIndirectCount` needs the
-encoder restructuring — commands written by a kernel that must run before the
-render encoder opens, which means deferring render-pass encoding in a backend
-that encodes straight through. It also cannot land half-done: `crcbl-mtl` would
-report `DRAW_INDIRECT_COUNT`, `GeometryPath` would flip for every Metal adapter,
-and that is precisely the shape of change that removed the WARP device when dx12
-reported `MESH_SHADER` today. The seam suite drives `DrawIndirectCount`, so
-implementing without reporting fails it the other way — "declares unsupported
-and then performed it" — which is why the dx12 trick of landing the calls and
-withholding the flag does not transfer here.
+**And the two writable rows are not free.** `DrawIndirectCount` needs commands
+written by a kernel that must run before the render encoder opens, in a backend
+that encodes straight through.
+
+**It does split into safe slices, and an earlier note here said it did not.**
+That note reasoned that implementing without reporting would fail the seam suite
+as "declares unsupported and then performed it". It would not:
+`crcbl-vk::command`'s `indirect_count` refuses with `HalError::Unsupported`
+whenever `Features::DRAW_INDIRECT_COUNT` is absent from the device's own caps,
+and `crcbl-mtl` doing the same keeps the capability honestly `No` while the
+machinery exists underneath. The exercise sees `Refused`, which is what a `No`
+owes. So the dx12 shape — land the calls, withhold the flag, flip it in a
+separate revertible change — transfers exactly.
+
+**The flip is still the dangerous half**, and knowingly so: reporting
+`DRAW_INDIRECT_COUNT` moves every Metal adapter onto
+`GeometryPath::IndirectCount`, which is the same class of change that removed
+the WARP device when dx12 reported `MESH_SHADER` today.
+
+**One real design decision sits inside the first slice**, and it should be made
+deliberately rather than discovered:
+
+1. **Defer render-pass encoding.** Record a pass's commands and encode them at
+   `end_render_pass`, so a compute encoder can be opened ahead of the render
+   encoder when the pass turns out to contain a `draw_indirect_count`. Correct
+   and costs nothing at run time, but it touches _every_ Metal draw — the whole
+   backend's encoding model — and is verifiable only on CI.
+2. **Split the pass at the call.** End the render encoder, run the kernel in a
+   compute encoder, reopen the render encoder with load actions preserving the
+   attachments, execute the ICB. Local to the one call and far smaller, but a
+   pass split stores and reloads every attachment, which is a real per-call cost
+   on a tiler, and it silently drops any in-pass memory guarantee across the
+   split.
+
+(1) is the performant answer and (2) is the cheap one; the seam calls
+`draw_indirect_count` once per bucket per frame, so (2)'s cost is not
+hypothetical. Worth noting that (1) has a free prerequisite: the deferral can
+land on its own as a pure refactor with no capability change at all, proven by
+the existing 66 Metal tests and 26 render tests continuing to pass.
 
 **So the question is what bar the deletion clears.** Three honest positions:
 
