@@ -1224,6 +1224,58 @@ target contributes nothing to it, and one that declares it again is caught.
 re-homing of `crcbl-wgpu`'s push-constant-range exercise, which is one of the
 two coverage losses still standing between here and that crate's deletion.
 
+### DECISION NEEDED — what "parity holds" has to mean before `crcbl-wgpu` goes
+
+The stated order is: reach parity, then delete `crcbl-wgpu`. Goal 2 is done and
+gated. Parity is at **18 blockers**, down from 29, and the composition now
+matters more than the number — because **a strict reading of "all blockers
+closed" is not reachable with the hardware this project has.**
+
+Sorting the remaining rows by what actually stands in the way:
+
+**Ordinary work — 8 rows.** dx12's `PushConstants` (now unblocked: the committed
+shader exists and its DXIL slot is measured at `b0`), Metal's `PushConstants`,
+`DrawIndirectCount`, `BindlessDescriptorArray`, `OcclusionQuery` and
+`TimelineWaitBeforeSignal`, WebGPU's `StorageImageBinding` and `TimestampQuery`.
+These need slices, and the slices are planned.
+
+**Measured unprovable on the only hardware available — 4 rows.** Metal's
+`TimestampQuery` and `PipelineStatisticsQuery`: CI's device reports three
+counter sampling points and **zero counter sets**, so no sample buffer can be
+built there at all. Metal's `MeshShading` and `TaskShaderStage`: the runner is
+`Apple Paravirtual device`, and `wgpu-hal`'s own gate excludes a device whose
+name says virtual. These can be _implemented_ and can never be _proved_ here.
+
+**Unknown, and cheap to settle — 2 rows.** dx12's `MeshShading` and
+`TaskShaderStage`. `crcbl-dx12` never calls `CheckFeatureSupport` for
+`OPTIONS7`, so it reports no mesh support **by construction rather than by
+measurement**, and nobody knows what WARP answers. A probe-and-log slice settles
+it the way the Metal counter probe did.
+
+**Awaiting a decision already raised — 3 rows.** dx12's fills, below.
+
+**So the question is what bar the deletion clears.** Three honest positions:
+
+1. **Every row closed.** Requires a hardware macOS runner for four Metal rows,
+   and possibly a hardware Windows runner for the two mesh rows. Real money, and
+   it would close the loop completely.
+2. **Every row either closed or _measured_ unprovable here**, with the
+   unprovable ones implemented and marked. `Support::NotOnThisDevice` and the
+   report's _unprovable here_ state already express this exactly — it is what
+   Metal's `DepthClamp` does today. The claim becomes "every backend implements
+   it, and the CI we have proves it wherever it can".
+3. **Delete now on the coverage argument.** `crcbl-wgpu` closes zero capability
+   gaps — every capability its 13 rows name is also refused by a keeper backend
+   — and on Linux it runs Vulkan underneath, so agreement with `crcbl-vk` proves
+   less than it appears. Two of the four exercises its deletion would have cost
+   are already re-homed; the other two are one slice each.
+
+**My reading, for what it is worth:** (2) is the honest bar and (1) is the same
+thing plus hardware. (3) is defensible on its own terms and is the only one that
+does not make the deletion wait on Metal's mesh support, which nothing in the
+engine uses on that backend today. But it is a scope call, not a technical one,
+and it is the last thing standing between here and goal 3.
+
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
 They were declined for a reason that turns out to be wrong (above), and they now
