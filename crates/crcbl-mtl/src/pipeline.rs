@@ -39,15 +39,16 @@
 //! hand-written triangle in `device.rs`'s tests a real draw through the real
 //! seam.
 //!
-//! A push-constant range is refused for a different reason and with a different
-//! error: [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) is
-//! absent from this backend's caps, and `crcbl_hal::pipeline` requires a
-//! backend without it to fail **at layout creation** rather than dropping every
-//! `push_constants` call silently. The error is
-//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported): no range of any
-//! size would be accepted here, so this is
-//! [`Capability::PushConstants`](crcbl_hal::Capability::PushConstants) answered,
-//! not a field the caller could correct.
+//! A **push-constant range is one more buffer argument**, because that is what
+//! Slang lowers it to: [`crate::argument`] decides the index it takes and the
+//! bytes it spans, and `crate::command`'s `push_constants` feeds it with
+//! `setBytes:length:atIndex:`. See that module on why the index is the one
+//! *after* every binding rather than a number chosen here, and on why the whole
+//! block is re-sent on every write.
+//!
+//! There is no Metal object for it either, so a layout entry carries the
+//! [`Block`](crate::argument::Block) itself: the index and the length *are* the
+//! binding.
 //!
 //! # Metal splits pipeline state in two, so a pipeline entry carries both
 //!
@@ -121,6 +122,11 @@ pub(crate) struct PipelineLayoutEntry {
     pub(crate) owner: u64,
     /// In set order, so `sets[n]` is what `bind_group(n, …)` binds into.
     pub(crate) sets: Vec<crate::binding::SetPlacement>,
+    /// The push-constant block, if the descriptor declared a range: which
+    /// buffer-table entry it occupies, how many bytes it spans and which stages
+    /// read it. `None` is a layout with no range, and a `push_constants` call
+    /// naming one is refused rather than dropped.
+    pub(crate) push_constants: Option<crate::argument::Block>,
 }
 
 /// The half of a graphics pipeline Metal keeps on the encoder rather than in
@@ -222,6 +228,34 @@ impl DeviceInner {
         let entry = lookup(&state.compute_pipelines, "compute pipeline", handle, self)?;
         Ok((entry.raw.clone(), entry.threads_per_threadgroup))
     }
+
+    /// The push-constant block a pipeline layout declares.
+    ///
+    /// Resolved with the device lock held and applied without it, exactly as
+    /// [`bind_group_raw`](DeviceInner::bind_group_raw) is and for the same
+    /// reason: the encoder reads device state before it records, never during.
+    ///
+    /// # Errors
+    ///
+    /// As [`lookup`] for the layout, plus [`HalError::InvalidDescriptor`] when
+    /// the layout declares no range at all — the seam requires a write to fail
+    /// loudly rather than be dropped, and a caller here is holding a layout it
+    /// did not declare push constants on.
+    pub(crate) fn push_constant_block(
+        &self,
+        layout: PipelineLayoutHandle,
+    ) -> Result<crate::argument::Block, HalError> {
+        let state = self.state();
+        let entry = lookup(&state.pipeline_layouts, "pipeline layout", layout, self)?;
+        entry.push_constants.ok_or_else(|| {
+            HalError::InvalidDescriptor(
+                "push_constants through a pipeline layout that declares no push-constant range: \
+                 the block is a buffer argument this backend places from the range, so there is \
+                 no argument-table index to write it at"
+                    .to_string(),
+            )
+        })
+    }
 }
 
 impl MetalDevice {
@@ -260,38 +294,20 @@ impl MetalDevice {
         Ok(self.stamp(handle))
     }
 
-    /// Places every set of a pipeline layout in Metal's argument tables.
+    /// Places every set of a pipeline layout in Metal's argument tables, and the
+    /// push-constant block after them.
     ///
     /// See `crcbl_mtl::binding` for the flattening rule and the evidence behind
-    /// it. The push-constant range stays refused, and the binding slice
-    /// *sharpened* rather than removed its reason: with the tables flattened,
-    /// the question is no longer "which buffer index would it take" in the
-    /// abstract but which one the **committed artifacts** put it at, and
-    /// `msl/ui.metal` answers `buffer(0)` — ahead of every bound buffer, where
-    /// no rule derivable from a [`PipelineLayoutDesc`] could place it.
+    /// it, and `crcbl_mtl::argument` for the block. **The order of the two calls
+    /// below is the whole push-constant rule**: Slang lowers the block to an
+    /// ordinary buffer argument numbered in declaration order, and
+    /// `crcbl-shaders` requires every source to declare its push constant last —
+    /// so its index is the buffer total the sets leave behind, which is why
+    /// `plan` is handed that total rather than a number written down here.
     pub(crate) fn create_pipeline_layout_impl(
         &self,
         desc: &PipelineLayoutDesc<'_>,
     ) -> Result<PipelineLayoutHandle, HalError> {
-        if desc.push_constants.is_some() {
-            // `crcbl_hal::pipeline` requires this to fail here rather than at
-            // the `push_constants` call, so a caller learns at start-up instead
-            // of watching every draw read stale constants.
-            //
-            // **`Unsupported`, not `InvalidDescriptor`.** The range is not
-            // malformed — no size would be accepted, because this backend
-            // reports `Features::PUSH_CONSTANTS` on no device — so this answers
-            // `Capability::PushConstants`, and the variant is the one a caller
-            // matches on to reach for the dynamic-offset uniform buffer the seam
-            // names as the substitute. `crcbl-wgpu` already refuses the same
-            // field the same way at the same point.
-            return Err(crate::MetalInstance::unsupported(
-                "a push-constant range, on a backend that reports Features::PUSH_CONSTANTS on no \
-                 device: `setVertexBytes:length:atIndex:` is Metal's closest fit, and the \
-                 committed MSL puts its push-constant block at buffer(0) — ahead of every bound \
-                 buffer, which no flattening of this descriptor can reproduce",
-            ));
-        }
         let ceiling = self.inner.caps.limits.max_bind_groups as usize;
         if desc.bind_group_layouts.len() > ceiling {
             return Err(HalError::InvalidDescriptor(format!(
@@ -299,7 +315,7 @@ impl MetalDevice {
                 desc.bind_group_layouts.len()
             )));
         }
-        let sets = {
+        let (sets, occupied) = {
             let state = self.state();
             let mut totals = Vec::with_capacity(desc.bind_group_layouts.len());
             for handle in desc.bind_group_layouts {
@@ -313,9 +329,15 @@ impl MetalDevice {
             }
             crate::binding::plan_layout(&totals)?
         };
+        let push_constants = crate::argument::plan(
+            desc.push_constants,
+            occupied[crate::binding::Table::Buffer.slot()],
+            &self.inner.caps,
+        )?;
         let handle = self.state().pipeline_layouts.insert(PipelineLayoutEntry {
             owner: self.inner.id,
             sets,
+            push_constants,
         });
         Ok(self.stamp(handle))
     }

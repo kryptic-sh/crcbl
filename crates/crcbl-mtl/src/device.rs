@@ -1068,10 +1068,15 @@ impl Device for MetalDevice {
                 "no mesh pipeline to put an object stage in front of (the Metal mesh slice)",
             ),
             Capability::UpdateBindGroup => Support::Yes,
-            Capability::PushConstants => Support::No(
-                "setVertexBytes:length:atIndex: is Metal's closest fit, and the committed MSL puts \
-                 its push-constant block at buffer(0) — ahead of every bound buffer, which no \
-                 flattening of this descriptor can reproduce",
+            // `create_pipeline_layout` places the block at the buffer index the
+            // committed MSL puts it at — one past every binding, which
+            // `crcbl_mtl::argument` derives — and `push_constants` sends it with
+            // `setBytes:length:atIndex:` or its vertex/fragment twins.
+            // `setBytes:` is on every Metal encoder, so the gate below never
+            // fires: it is the flag's own arm, not a device question.
+            Capability::PushConstants => gated(
+                Features::PUSH_CONSTANTS,
+                "this device reports no PUSH_CONSTANTS",
             ),
             Capability::BindlessDescriptorArray => Support::No(
                 "this backend binds Metal's flat argument tables, which have a fixed length and \
@@ -3952,52 +3957,64 @@ using namespace metal;\n\
         device.destroy_pipeline_layout(layout);
     }
 
-    /// A pipeline layout is the empty one or a refusal, and the two refusals are
-    /// different errors because they have different causes.
+    /// A pipeline layout is the empty one, one carrying a push-constant range, or
+    /// a refusal that names the caller's own mistake.
     ///
-    /// **What turns it red.** Accepting a push-constant range — the seam
-    /// requires the failure *here* rather than at the `push_constants` call, and
-    /// this backend reports no [`Features::PUSH_CONSTANTS`]. Refusing it as
-    /// anything but [`HalError::Unsupported`]: no range of any size is
-    /// acceptable here, so this is
-    /// [`Capability::PushConstants`](crcbl_hal::Capability::PushConstants)
-    /// answered and a caller must be able to branch on the variant to reach for
-    /// the seam's dynamic-offset substitute. Accepting a non-empty bind-group
-    /// list — nothing could satisfy it, since the handle names nothing.
-    /// Collapsing the two onto one error — the two `matches!` demand different
-    /// variants, and that contrast is the point: "this backend cannot" and "you
-    /// handed me a dead handle" send a caller to different places.
+    /// The push-constant half used to be the refusal: no range of any size was
+    /// accepted, because nothing here knew which argument-table index the
+    /// committed MSL put a block at. `crcbl_mtl::argument` derives that index,
+    /// so the range is a *placement* now — which is what makes the
+    /// budget assertions below reachable at all.
+    ///
+    /// **What turns it red.** Refusing a range this device's own
+    /// `max_push_constant_size` says fits — the flag and the budget are reported
+    /// together, so a layout asking for exactly the budget must be one this
+    /// backend builds or the number is wrong. Accepting one four bytes past it.
+    /// Accepting a non-empty bind-group list of a handle nobody issued — nothing
+    /// could satisfy it. Collapsing the last two onto one error: "you asked for
+    /// more than I said I had" and "you handed me a dead handle" send a caller to
+    /// different places.
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_pipeline_layout_is_empty_or_refused_by_cause() {
         let (_instance, device) = open_device();
+        let budget = device.caps().limits.max_push_constant_size;
         assert!(
-            !device.caps().features.contains(Features::PUSH_CONSTANTS),
-            "the refusal below is only correct while the feature is absent"
+            device.caps().features.contains(Features::PUSH_CONSTANTS) && budget > 0,
+            "setBytes:length:atIndex: is on every Metal encoder, so every device reports the flag \
+             and a budget with it"
         );
 
         let layout = empty_layout(&device);
         device.destroy_pipeline_layout(layout);
 
+        let range = |size| crcbl_hal::PushConstantRange {
+            stages: crcbl_hal::ShaderStages::COMPUTE,
+            offset: 0,
+            size,
+        };
+        // The whole reported budget, which must be a block this backend places
+        // or the figure the adapter reports is not one a caller can spend.
+        let layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("the whole inlined-buffer budget"),
+                bind_group_layouts: &[],
+                push_constants: Some(range(budget)),
+            })
+            .expect("max_push_constant_size must be a range this backend accepts");
+        device.destroy_pipeline_layout(layout);
+
         let error = device
             .create_pipeline_layout(&PipelineLayoutDesc {
-                label: Some("with constants"),
+                label: Some("past the budget"),
                 bind_group_layouts: &[],
-                push_constants: Some(crcbl_hal::PushConstantRange {
-                    stages: crcbl_hal::ShaderStages::ALL,
-                    offset: 0,
-                    size: 64,
-                }),
+                push_constants: Some(range(budget + 4)),
             })
-            .expect_err("this device reports no PUSH_CONSTANTS");
-        let HalError::Unsupported { backend, what } = error else {
-            panic!(
-                "a capability this backend has on no device is HalError::Unsupported, which is \
-                 what a caller matches on to take the dynamic-offset substitute; got {error:?}"
-            );
+            .expect_err("four bytes more than setBytes: takes");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("a range past the reported budget is not {error:?}");
         };
-        assert_eq!(backend, BackendKind::Metal);
-        assert!(what.contains("PUSH_CONSTANTS"), "{what}");
+        assert!(text.contains("max_push_constant_size"), "{text}");
 
         // Until the binding slice this was `Unsupported`, because no bind group
         // layout could exist at all. Now that they are real, a hand-made handle
@@ -5145,7 +5162,10 @@ using namespace metal;\n\
                     );
                 }) as fn(&mut dyn CommandEncoder),
             ),
-            ("push constants this device has no feature for", |encoder| {
+            // Not a capability answer any more: `setBytes:length:atIndex:`
+            // writes the open encoder's argument table, so a write with no
+            // encoder open is the caller's own error and must read as one.
+            ("push constants outside any pass", |encoder| {
                 encoder.push_constants(
                     crcbl_hal::ShaderStages::ALL,
                     0,

@@ -118,25 +118,18 @@ use objc2_metal::{
     MTLBuffer, MTLComputeCommandEncoder, MTLRenderCommandEncoder, MTLSamplerState, MTLTexture,
 };
 
+use crate::argument::BUFFER_TABLE_ENTRIES;
 use crate::device::{
     DeviceInner, DeviceState, MetalDevice, Owned, lookup, lookup_mut, owned, take_owned, to_ns,
 };
 
-/// Entries in Metal's per-stage **buffer** argument table.
-///
-/// Fixed by the API rather than by any device: Apple's Metal Feature Set Tables
-/// give the same number for every GPU family, and it is what
-/// `setVertexBuffer:offset:atIndex:` bounds its index against. Exceeding it
-/// raises rather than returning an error, which is why [`plan_set`] and
-/// [`plan_layout`] check it while it is still a descriptor bug.
-const BUFFER_TABLE_ENTRIES: u32 = 31;
-
 /// Entries in Metal's per-stage **texture** argument table. See
-/// [`BUFFER_TABLE_ENTRIES`].
+/// [`BUFFER_TABLE_ENTRIES`], which carries the argument for all three and lives
+/// in [`crate::argument`] because a push-constant block competes for it.
 const TEXTURE_TABLE_ENTRIES: u32 = 128;
 
 /// Entries in Metal's per-stage **sampler** argument table. See
-/// [`BUFFER_TABLE_ENTRIES`].
+/// [`TEXTURE_TABLE_ENTRIES`].
 const SAMPLER_TABLE_ENTRIES: u32 = 16;
 
 /// How many argument tables Metal gives a stage.
@@ -183,7 +176,7 @@ impl Table {
     }
 
     /// Position in a [`TableCounts`].
-    const fn slot(self) -> usize {
+    pub(crate) const fn slot(self) -> usize {
         match self {
             Self::Buffer => 0,
             Self::Texture => 1,
@@ -368,6 +361,12 @@ pub(crate) struct SetPlacement {
 /// This is the "earlier sets first" half of the flattening rule; [`plan_set`]
 /// is the "lower binding numbers first" half.
 ///
+/// Returns the placements **and** what the sets occupy in total, because the
+/// running counts are what a push-constant block's index is: it lands one past
+/// the last binding, so [`crate::argument::plan`] needs the buffer total this
+/// walk ends on. Handing it back rather than letting the caller re-sum the
+/// per-set totals keeps one arithmetic instead of two that can disagree.
+///
 /// # Errors
 ///
 /// [`HalError::InvalidDescriptor`] when the sets together need more entries of
@@ -376,7 +375,7 @@ pub(crate) struct SetPlacement {
 /// competes for them.
 pub(crate) fn plan_layout(
     sets: &[(BindGroupLayoutHandle, TableCounts)],
-) -> Result<Vec<SetPlacement>, HalError> {
+) -> Result<(Vec<SetPlacement>, TableCounts), HalError> {
     let mut base: TableCounts = [0; TABLES];
     let mut out = Vec::with_capacity(sets.len());
     for (index, (layout, totals)) in sets.iter().enumerate() {
@@ -395,7 +394,7 @@ pub(crate) fn plan_layout(
             base[slot] = next;
         }
     }
-    Ok(out)
+    Ok((out, base))
 }
 
 /// The refusal for a pipeline layout whose sets together overrun a table.
@@ -1114,12 +1113,18 @@ mod tests {
         }];
         let plan = plan_set(&layout(&entries)).expect("one read-only storage buffer");
         assert_eq!(placed(&plan, 0), (Table::Buffer, 0));
-        let placements = plan_layout(&[(unissued_layout(), plan.totals)]).expect("one set");
+        let (placements, totals) =
+            plan_layout(&[(unissued_layout(), plan.totals)]).expect("one set");
         assert_eq!(placements.len(), 1);
         assert_eq!(
             placements[0].base,
             [0, 0, 0],
             "the first set starts every table at zero"
+        );
+        assert_eq!(
+            totals,
+            [1, 0, 0],
+            "the totals are what a push-constant block's index is taken from"
         );
     }
 
@@ -1154,7 +1159,7 @@ mod tests {
             entry(1, BindingKind::Sampler { comparison: false }, 1),
         ]))
         .expect("a texture and a sampler in set 1");
-        let placements = plan_layout(&[
+        let (placements, totals) = plan_layout(&[
             (unissued_layout(), frame.totals),
             (unissued_layout(), sheet.totals),
         ])
@@ -1165,6 +1170,12 @@ mod tests {
             placements[1].base,
             [2, 0, 0],
             "set 1's buffers start after set 0's two, and its texture still starts at zero"
+        );
+        assert_eq!(
+            totals,
+            [2, 1, 1],
+            "the totals run across every set, which is what puts a push-constant block past all \
+             of them"
         );
     }
 

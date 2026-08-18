@@ -67,8 +67,20 @@
 //! the SPIR-V it compiles — so a number disagreeing with `[numthreads(…)]`
 //! fails there rather than launching the wrong thread count here.
 //!
+//! **Push constants arrived with `crcbl_mtl::argument`**, which answers the
+//! question the binding slice sharpened rather than closed. Metal has no push
+//! constants, so Slang lowers the block to an ordinary buffer argument, and
+//! *which* index the committed MSL puts it at is now derived instead of guessed:
+//! the one after every binding, because `crcbl-shaders`' declaration-order lint
+//! requires a source to declare its push constant last —
+//! `msl/push_constant_probe.metal` has the block at `[[buffer(1)]]` behind its
+//! one storage buffer at `[[buffer(0)]]`. So `create_pipeline_layout` places it,
+//! `push_constants` sends it with `setBytes:length:atIndex:`, and the encoder
+//! keeps a shadow of the block because that selector replaces the whole argument
+//! rather than a range of it.
+//!
 //! What is still refused, with `what` naming what is missing: **query sets**,
-//! **push constants**, **indirect-count draws**, a **word-wide buffer fill**, a
+//! **indirect-count draws**, a **word-wide buffer fill**, a
 //! **variable-count bind group** and a **wait for a timeline value nothing has
 //! signalled**. The indirect count is not simply unwritten: it needs an
 //! `MTLIndirectCommandBuffer` filled by a compute pass that would have to run
@@ -123,13 +135,18 @@
 //! rather than linked, because a link to it is unresolvable in exactly the
 //! builds that do not have it, and rustdoc is a CI gate in this workspace.
 //!
-//! **Two modules are the exception, and only in a test build.** The present
+//! **Three modules are the exception, and only in a test build.** The present
 //! ledger — the count that answers `Device::wait_until_presented`, since Metal
 //! numbers no present — is plain Rust with no Objective-C in it, and it is
 //! compiled off macOS under `cfg(test)` so that `cargo test` on any host runs
 //! its assertions. `crcbl_mtl::quirk` is the other, for the same reason: what a
 //! device does that Metal answers no query for is a decision made from a string,
-//! and a machine with no Metal can still check the decision. Nothing either
+//! and a machine with no Metal can still check the decision.
+//! `crcbl_mtl::argument` is the third: how big Metal's argument tables are, and
+//! which entry of the buffer one a push-constant block lands in, are arithmetic
+//! over a descriptor — and **nothing in Metal reports a wrong index**, so a
+//! machine with no Metal checking it is worth more here than in either of the
+//! others. Nothing any of them
 //! contains is public or reachable from a non-test build, so the paragraph above
 //! still holds for anything a caller can see; the reason for the first exception
 //! is that the drawable half of that capability is covered by no automated test
@@ -300,9 +317,13 @@
 //! [`DEPTH_BIAS_CLAMP`](crcbl_hal::Features::DEPTH_BIAS_CLAMP) and
 //! [`POLYGON_MODE_LINE`](crcbl_hal::Features::POLYGON_MODE_LINE) with the
 //! pipeline slice — each because `bind_graphics_pipeline` makes the call behind
-//! it — and `MULTI_DRAW_INDIRECT` plus
+//! it — `MULTI_DRAW_INDIRECT` plus
 //! [`INDIRECT_FIRST_INSTANCE`](crcbl_hal::Features::INDIRECT_FIRST_INSTANCE)
-//! with the binding slice's indirect loop. The full list, with a reason against
+//! with the binding slice's indirect loop, and
+//! [`PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) with the
+//! `setBytes:length:atIndex:` behind `push_constants` — see
+//! `crcbl_mtl::argument` for the argument-table index that call is given, which
+//! is read off the committed MSL rather than chosen here. The full list, with a reason against
 //! every flag that is absent, is in this crate's `adapter` module.
 //!
 //! **`DEPTH_CLAMP` carries one exception, and it is the only flag that does.**
@@ -316,6 +337,12 @@
 
 #[cfg(target_os = "macos")]
 mod adapter;
+// The third module that is not macOS-only, and for the reason the other two
+// give: how big Metal's argument tables are and where a push-constant block
+// lands in the buffer one are decided in plain Rust, and nothing in Metal
+// reports a wrong index — so `cargo test` on any host runs the arithmetic.
+#[cfg(any(target_os = "macos", test))]
+mod argument;
 #[cfg(target_os = "macos")]
 mod binding;
 #[cfg(target_os = "macos")]

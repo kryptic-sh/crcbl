@@ -917,16 +917,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::PushConstants,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::Unwritten,
-        why: "setVertexBytes:length:atIndex: is Metal's closest fit and is right there, but the \
-              committed MSL puts its push-constant block at buffer(0) — ahead of every bound \
-              buffer, which no flattening of this descriptor reproduces; the work is a \
-              buffer-index assignment the shaders and the binder agree on (the Metal root-constant \
-              slice)",
-    },
-    Divergence {
-        capability: Capability::PushConstants,
         backend: BackendKind::Wgpu,
         kind: DivergenceKind::Unwritten,
         why: "wgpu calls them immediates and gates them behind its own IMMEDIATES feature, which \
@@ -1708,11 +1698,6 @@ mod tests {
         ),
         (
             Capability::TaskShaderStage,
-            BackendKind::Metal,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::PushConstants,
             BackendKind::Metal,
             DivergenceKind::Unwritten,
         ),

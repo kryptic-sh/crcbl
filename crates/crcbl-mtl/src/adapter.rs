@@ -274,16 +274,6 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   Metal has one `MTLCommandQueue` type and no queue families at all, which
 ///   `crcbl_hal::QueueKind` already records as the reason it is not named
 ///   `QueueFamily`.
-/// * [`Features::PUSH_CONSTANTS`] — `setVertexBytes:length:atIndex:` and its
-///   siblings are the closest fit and cap at 4 KiB, and the binding slice
-///   sharpened the obstacle rather than removing it. The block competes for the
-///   same buffer table as every bind group's buffers, and the artifact that
-///   uses one — `msl/ui.metal` — has Slang place it at `buffer(0)`, **ahead of
-///   the bound buffers**, which no flattening of a
-///   [`PipelineLayoutDesc`](crcbl_hal::PipelineLayoutDesc) can reproduce.
-///   `crcbl_mtl::pipeline`'s `create_pipeline_layout` refuses a push-constant
-///   range by name and says so, which is what `crcbl_hal::pipeline` requires of
-///   a backend without the feature.
 /// * [`Features::SHADER_DEBUG_PRINTF`] — `MTLLogState` exists, and nothing
 ///   routes it into `log` yet.
 fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
@@ -318,6 +308,14 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     // loop is the call that makes both true of this backend.
     out |= Features::MULTI_DRAW_INDIRECT;
     out |= Features::INDIRECT_FIRST_INSTANCE;
+    // And no query for this one either, for a sharper reason: there is nothing
+    // to ask. Metal has no push constants, so `crcbl-shaders` commits MSL in
+    // which the block is an ordinary buffer argument and this backend sends it
+    // with `setBytes:length:atIndex:` — a selector on every render and compute
+    // encoder there is. What the feature waited for was knowing *which*
+    // argument-table index the committed artifacts put the block at, which
+    // `crcbl_mtl::argument` now derives rather than assumes.
+    out |= Features::PUSH_CONSTANTS;
     out
 }
 
@@ -347,10 +345,19 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
 ///
 /// The feature-keyed fields stay consistent with `features_of`: the anisotropy
 /// cap is Metal's own ceiling because [`Features::SAMPLER_ANISOTROPY`] is
-/// reported, and the bindless capacity, the push-constant budget and the
-/// timestamp period all stay at the floor's zeroes because their features are
+/// reported, `max_push_constant_size` is
+/// [`argument::MAX_PUSH_CONSTANT_BYTES`](crate::argument::MAX_PUSH_CONSTANT_BYTES)
+/// because [`Features::PUSH_CONSTANTS`] is, and the bindless capacity and the
+/// timestamp period stay at the floor's zeroes because their features are
 /// absent — `max_bindless_descriptors` since the binding slice, which took
 /// [`Features::DESCRIPTOR_INDEXING`] off for the reason `features_of` gives.
+///
+/// The push-constant figure is the **call's** documented ceiling rather than a
+/// share of anything: Apple's feature-set tables cap inlined buffer contents at
+/// 4 KB on every GPU family, and unlike `crcbl-dx12`'s root-signature budget it
+/// is not spent by the bind groups too. What a bind group can exhaust is the
+/// one argument-table *entry* the block needs, which
+/// `crcbl_mtl::argument`'s `plan` refuses by name at layout creation.
 fn limits_of(device: &ProtocolObject<dyn MTLDevice>, features: Features) -> Limits {
     let floor = Limits::minimum();
     let threads = device.maxThreadsPerThreadgroup();
@@ -362,6 +369,11 @@ fn limits_of(device: &ProtocolObject<dyn MTLDevice>, features: Features) -> Limi
             crate::device::MAX_SAMPLER_ANISOTROPY
         } else {
             floor.max_sampler_anisotropy
+        },
+        max_push_constant_size: if features.contains(Features::PUSH_CONSTANTS) {
+            crate::argument::MAX_PUSH_CONSTANT_BYTES
+        } else {
+            floor.max_push_constant_size
         },
         max_sample_count: max_sample_count(device),
         max_compute_workgroup_size: [

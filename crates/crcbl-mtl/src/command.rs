@@ -62,6 +62,7 @@
 //! refuses to be built.
 
 use core::ops::Range;
+use core::ptr::NonNull;
 use std::sync::Arc;
 
 use crcbl_hal::{
@@ -187,6 +188,17 @@ pub(crate) struct MetalCommandEncoder {
     /// and `crcbl_mtl::draw` argues why: there is no Metal state to lose, so
     /// keeping it is what makes the binding behave the way Vulkan's does.
     index: Option<crate::draw::IndexBinding>,
+    /// The push-constant block as it stands on the open encoder.
+    ///
+    /// `setBytes:length:atIndex:` replaces the whole argument, so a seam write
+    /// of part of the block has to be re-sent with the rest of it;
+    /// `crcbl_mtl::argument` holds the splice and argues the shape.
+    ///
+    /// Cleared by [`Self::close_open`] alongside [`Self::bound_primitive`] and
+    /// for the same reason: an encoder's argument tables do not survive
+    /// `endEncoding`, so carrying the shadow into the next pass would let a
+    /// dispatch there proceed with a block Metal no longer holds.
+    push_constants: Option<crate::argument::Shadow>,
 }
 
 impl core::fmt::Debug for MetalCommandEncoder {
@@ -236,6 +248,7 @@ impl MetalCommandEncoder {
             bound_primitive: None,
             bound_threads: None,
             index: None,
+            push_constants: None,
         };
         // The queue is checked before the command buffer is taken, so a handle
         // belonging to another device is reported as the crossing it is rather
@@ -283,10 +296,12 @@ impl MetalCommandEncoder {
             encoder.endEncoding();
         }
         self.open = Open::None;
-        // Pipeline state belongs to the encoder that is going away; see
-        // `bound_primitive` and `bound_threads`.
+        // Pipeline state and argument tables belong to the encoder that is
+        // going away; see `bound_primitive`, `bound_threads` and
+        // `push_constants`.
         self.bound_primitive = None;
         self.bound_threads = None;
+        self.push_constants = None;
     }
 
     /// The blit encoder, opening one if the command buffer has none.
@@ -1112,26 +1127,115 @@ impl CommandEncoder for MetalCommandEncoder {
         }
     }
 
-    /// Refused: this device reports no
-    /// [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS).
+    /// Sends the push-constant block through `setBytes:length:atIndex:`, at the
+    /// buffer index the pipeline layout placed it at.
     ///
-    /// `create_pipeline_layout` is where the refusal that matters happens — the
-    /// seam requires a backend without the feature to fail there rather than
-    /// dropping writes here — so a caller can only reach this by passing a
-    /// layout it did not get from this backend. Failing anyway is what stops a
-    /// draw reading constants nobody wrote.
+    /// **The caller's `stages` are not consulted; the layout's are.** Metal's
+    /// argument tables are per stage and each has its own selector — vertex,
+    /// fragment, and the compute encoder's unqualified one — so which of them a
+    /// write reaches has to be decided by something, and the range the layout
+    /// declared is the only side that also decided the index. `crcbl-vk` passes
+    /// the layout's mask rather than the caller's for a related reason:
+    /// `vkCmdPushConstants` demands the declared one. A layout naming only
+    /// [`ShaderStages::COMPUTE`] therefore writes nothing in a render pass,
+    /// which is exactly what `crcbl_mtl::binding`'s `apply` does with a
+    /// compute-only binding.
+    ///
+    /// **The whole block goes every time**, spliced into the shadow this encoder
+    /// keeps: `setBytes:length:atIndex:` replaces the argument and has no
+    /// destination offset, so sending only the caller's `data` would bind a
+    /// block starting at the caller's `offset` and every member behind it would
+    /// be read from the wrong bytes. `crcbl_mtl::argument` holds that arithmetic
+    /// and its tests.
+    ///
+    /// **Outside a pass this is a caller error rather than a no-op**, for the
+    /// reason [`bind_group`](CommandEncoder::bind_group) gives: Metal keeps its
+    /// argument tables on the encoder, so there is nowhere to record the write
+    /// and the following draw or dispatch would not see it.
     fn push_constants(
         &mut self,
         _stages: ShaderStages,
-        _offset: u32,
-        _data: &[u8],
-        _layout: PipelineLayoutHandle,
+        offset: u32,
+        data: &[u8],
+        layout: PipelineLayoutHandle,
     ) {
-        self.fail(HalError::InvalidDescriptor(
-            "push_constants on a device that reports no Features::PUSH_CONSTANTS; \
-             create_pipeline_layout refuses the range that would have declared them, and says why"
-                .to_string(),
-        ));
+        if !self.ok() {
+            return;
+        }
+        enum Target {
+            Render(Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>),
+            Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
+        }
+        let target = match &self.open {
+            Open::Render(encoder) => Target::Render(encoder.clone()),
+            Open::Compute(encoder) => Target::Compute(encoder.clone()),
+            _ => {
+                self.fail(HalError::InvalidDescriptor(
+                    "push_constants outside a render or compute pass: Metal has no push constants \
+                     and this backend sends the block with setBytes:length:atIndex:, which writes \
+                     the open encoder's argument table"
+                        .to_string(),
+                ));
+                return;
+            }
+        };
+        // The layout is resolved before the emptiness check, so an empty write
+        // through a layout that declares no range is still the refusal the seam
+        // asks for rather than a quiet no-op.
+        let block = match self.device.push_constant_block(layout) {
+            Ok(block) => block,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        // A shadow planned from another layout has another index and another
+        // length, so it is replaced rather than spliced into.
+        let mut shadow = match self.push_constants.take() {
+            Some(shadow) if shadow.matches(layout) => shadow,
+            _ => crate::argument::Shadow::new(layout, block),
+        };
+        if let Err(error) = shadow.splice(offset, data) {
+            self.push_constants = Some(shadow);
+            self.fail(error);
+            return;
+        }
+        if data.is_empty() {
+            // Nothing was asked for, and the layout was still checked above.
+            self.push_constants = Some(shadow);
+            return;
+        }
+
+        let index = to_ns(u64::from(block.index));
+        let bytes = shadow.bytes();
+        let length = to_ns(bytes.len() as u64);
+        let source = NonNull::from(bytes).cast::<core::ffi::c_void>();
+        // SAFETY: `objc2` marks these unsafe because Metal bounds-checks neither
+        // the pointer nor the argument-table index. `source` points at `length`
+        // initialised bytes of a slice this encoder owns and does not touch for
+        // the duration of the call, and Metal copies them before returning —
+        // that is what "inlined buffer contents" means. `length` is the shadow's
+        // own length, which `crate::argument::plan` bounded by
+        // `Limits::max_push_constant_size`, and `index` is the buffer-table
+        // entry after the last binding, which the same call bounded by
+        // `BUFFER_TABLE_ENTRIES`. The encoder is kept alive by the `Retained`
+        // held across the call.
+        match target {
+            Target::Render(encoder) => {
+                if block.stages.contains(ShaderStages::VERTEX) {
+                    unsafe { encoder.setVertexBytes_length_atIndex(source, length, index) };
+                }
+                if block.stages.contains(ShaderStages::FRAGMENT) {
+                    unsafe { encoder.setFragmentBytes_length_atIndex(source, length, index) };
+                }
+            }
+            Target::Compute(encoder) => {
+                if block.stages.contains(ShaderStages::COMPUTE) {
+                    unsafe { encoder.setBytes_length_atIndex(source, length, index) };
+                }
+            }
+        }
+        self.push_constants = Some(shadow);
     }
 
     // --- draws ---
