@@ -23,21 +23,23 @@
 //!   are packed 32-bit HDR formats and only one of them has 11/11/10 bits with
 //!   no shared exponent.
 //!
-//! # Depth formats have three spellings in D3D12, not one
+//! # Depth formats have four spellings in D3D12, not one
 //!
 //! This is the one place D3D12 needs a table Metal and Vulkan do not.
 //! `D3D12_RESOURCE_DESC::Format` names the *storage*, and a resource created as
 //! `DXGI_FORMAT_D32_FLOAT` can carry a depth-stencil view and nothing else — an
 //! SRV on it is rejected, so a shadow map created that way would be unreadable.
 //! The API's answer is a **typeless** storage format plus a concrete format per
-//! view, and this module spells all three:
+//! view — and a fourth for the buffer side of a copy, which is a view of
+//! nothing and so gets no say from either of the other two. This module spells
+//! all four:
 //!
-//! | seam | [`resource_format`] (sampled depth) | [`dxgi_format`] (DSV) | [`depth_read_format`] (SRV) |
-//! | --- | --- | --- | --- |
-//! | `D32Float` | `R32_TYPELESS` | `D32_FLOAT` | `R32_FLOAT` |
-//! | `D16Unorm` | `R16_TYPELESS` | `D16_UNORM` | `R16_UNORM` |
-//! | `D24UnormS8Uint` | `R24G8_TYPELESS` | `D24_UNORM_S8_UINT` | `R24_UNORM_X8_TYPELESS` |
-//! | `D32FloatS8Uint` | `R32G8X24_TYPELESS` | `D32_FLOAT_S8X24_UINT` | `R32_FLOAT_X8X24_TYPELESS` |
+//! | seam | [`resource_format`] (sampled depth) | [`dxgi_format`] (DSV) | [`depth_read_format`] (SRV) | [`copy_footprint_format`] (copy, `DEPTH`) |
+//! | --- | --- | --- | --- | --- |
+//! | `D32Float` | `R32_TYPELESS` | `D32_FLOAT` | `R32_FLOAT` | `R32_FLOAT` |
+//! | `D16Unorm` | `R16_TYPELESS` | `D16_UNORM` | `R16_UNORM` | `R16_UNORM` |
+//! | `D24UnormS8Uint` | `R24G8_TYPELESS` | `D24_UNORM_S8_UINT` | `R24_UNORM_X8_TYPELESS` | **none** |
+//! | `D32FloatS8Uint` | `R32G8X24_TYPELESS` | `D32_FLOAT_S8X24_UINT` | `R32_FLOAT_X8X24_TYPELESS` | `R32_FLOAT` |
 //!
 //! A depth image that is never sampled keeps the concrete storage format, which
 //! is what lets the driver keep its depth-specific compression.
@@ -52,8 +54,8 @@
 
 use crcbl_hal::{
     BindingKind, BlendFactor, BlendOp, BufferUsage, ColorWrites, CompareOp, CullMode, FilterMode,
-    Format, ImageType, ImageUsage, IndexFormat, MemoryLocation, PolygonMode, PrimitiveTopology,
-    ResourceState, SamplerAddressMode, SamplerDesc, ShaderStages, StencilOp,
+    Format, ImageAspect, ImageType, ImageUsage, IndexFormat, MemoryLocation, PolygonMode,
+    PrimitiveTopology, ResourceState, SamplerAddressMode, SamplerDesc, ShaderStages, StencilOp,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_PRIMITIVE_TOPOLOGY, D3D_PRIMITIVE_TOPOLOGY_LINELIST, D3D_PRIMITIVE_TOPOLOGY_LINESTRIP,
@@ -113,14 +115,14 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_BC3_UNORM_SRGB, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_BC5_UNORM,
     DXGI_FORMAT_BC6H_UF16, DXGI_FORMAT_BC7_UNORM, DXGI_FORMAT_BC7_UNORM_SRGB,
     DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT,
-    DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM,
-    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R10G10B10A2_UNORM,
-    DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_TYPELESS,
-    DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_FLOAT,
-    DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R24_UNORM_X8_TYPELESS, DXGI_FORMAT_R24G8_TYPELESS,
-    DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, DXGI_FORMAT_R32_TYPELESS,
-    DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32G32_FLOAT,
-    DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
+    DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R8_UNORM,
+    DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+    DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16_FLOAT,
+    DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_UNORM,
+    DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+    DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
+    DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G8X24_TYPELESS,
+    DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
 };
 
 /// The seam's texel format as DXGI spells it, for a **view**.
@@ -225,6 +227,78 @@ pub(crate) const fn depth_read_format(format: Format) -> Option<DXGI_FORMAT> {
         Format::D32FloatS8Uint => Some(DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS),
         _ => None,
     }
+}
+
+/// The format a `D3D12_PLACED_SUBRESOURCE_FOOTPRINT` carries when a copy moves
+/// **one plane** of an image of this format between the image and a buffer.
+///
+/// The fourth column of the module's depth table, and the one no view supplies.
+/// A footprint describes the *buffer* side of `CopyTextureRegion` — rows of
+/// texels at a pitch — so it needs a single-plane format with a defined element
+/// width, and neither of the image's own spellings is one: a sampled depth
+/// image is stored typeless (see [`resource_format`]) and
+/// `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT` describe two planes at once.
+/// This is the same question `wgpu-hal`'s dx12 backend answers in
+/// `auxil::dxgi::conv::map_texture_format_for_copy`, and the same answers.
+///
+/// `None` means D3D12 has no footprint for that pair and the copy has to be
+/// refused; it is **not** a colour/depth distinction, because a colour format's
+/// answer is simply [`dxgi_format`].
+///
+/// # `D24UnormS8Uint`'s depth plane has no entry, and that is the answer
+///
+/// Not an omission and not work owed: **no fully typed single-plane DXGI format
+/// has 24-bit unorm elements.** Enumerating every `DXGI_FORMAT` the `windows`
+/// crate declares, the ones naming a 24-bit component are
+/// `D24_UNORM_S8_UINT` and `R24G8_TYPELESS` — two planes each — and
+/// `R24_UNORM_X8_TYPELESS` and `X24_TYPELESS_G8_UINT`, the per-plane spellings,
+/// typeless by name. So there is no typed format of that width to lay a
+/// buffer's rows out against. `wgpu-hal` returns `None` for exactly this pair
+/// while giving the same format's *stencil* plane `R8_UINT`, and WebGPU
+/// withholds the pair too, for a reason of its own that arrives at the same
+/// place:
+/// [`Capability::DepthImageCopy`](crcbl_hal::Capability::DepthImageCopy)'s
+/// documentation has that table.
+///
+/// The two things that could be tried instead are both declined rather than
+/// guessed at. Whether D3D12 accepts a *typeless* format in a placed footprint
+/// is untested here and no backend read for this was willing to find out; and
+/// `R32_UINT`, the typed format of the right width, is a reinterpretation that
+/// would hand the caller the plane's eight `X8` padding bits mixed into every
+/// depth value. `crate::command::plan_copy` refuses the pair by name instead.
+pub(crate) const fn copy_footprint_format(
+    format: Format,
+    aspect: ImageAspect,
+) -> Option<DXGI_FORMAT> {
+    // The seam's own arbiter of "does this format have exactly this one plane",
+    // so an aspect set naming two planes and a colour aspect on a depth image
+    // are both turned away here rather than re-derived. It also fixes the
+    // element width each answer below must have, which is what
+    // `every_footprint_format_is_as_wide_as_the_plane_it_copies` holds them to.
+    if format.texel_size(aspect).is_none() {
+        return None;
+    }
+    if aspect.contains(ImageAspect::STENCIL) {
+        // One byte per texel whichever depth-stencil format it came from: the
+        // stencil plane of `D24_UNORM_S8_UINT` and of `D32_FLOAT_S8X24_UINT` is
+        // the same eight bits, and `X24_TYPELESS_G8_UINT` — the plane's own
+        // spelling — is typeless, so `R8_UINT` is the typed format of that
+        // width. `wgpu-hal` makes the same substitution.
+        return Some(DXGI_FORMAT_R8_UINT);
+    }
+    if aspect.contains(ImageAspect::DEPTH) {
+        return match format {
+            Format::D16Unorm => Some(DXGI_FORMAT_R16_UNORM),
+            // `D32_FLOAT_S8X24_UINT`'s depth plane is a plain 32-bit float; the
+            // `X24` padding belongs to the *stencil* plane's spelling and is not
+            // part of this one.
+            Format::D32Float | Format::D32FloatS8Uint => Some(DXGI_FORMAT_R32_FLOAT),
+            // `D24UnormS8Uint`, and only it — see above.
+            _ => None,
+        };
+    }
+    // Colour, and `texel_size` already established the format has that aspect.
+    Some(dxgi_format(format))
 }
 
 /// Which D3D12 heap a resource of this memory location lives on.
@@ -866,6 +940,200 @@ mod tests {
                 view,
                 "{format:?} went typeless without being sampled"
             );
+        }
+    }
+
+    /// The plane of one image a copy can name: an aspect, and nothing else.
+    ///
+    /// Every single-plane aspect the seam has, so the tables below are asked
+    /// about every (format, plane) pair rather than the depth ones somebody
+    /// remembered.
+    const ASPECTS: &[ImageAspect] = &[ImageAspect::COLOR, ImageAspect::DEPTH, ImageAspect::STENCIL];
+
+    /// **The one pair D3D12 has no placed footprint for, pinned as the only
+    /// one.**
+    ///
+    /// `crate::command::plan_copy` refuses a `None` from
+    /// [`copy_footprint_format`] with a single sentence naming
+    /// `D24UnormS8Uint`'s depth plane, and a sentence is only true if that pair
+    /// is the sole hole. So this asserts the hole is exactly one and exactly
+    /// that one: a format added to the seam without a footprint entry, or an
+    /// entry deleted, makes the refusal a lie and makes this go red instead.
+    ///
+    /// The `None`s that are *not* holes are asserted too — a plane the format
+    /// does not have, and an aspect set naming two — because a table that
+    /// answered those would hand a copy a footprint for a plane that is not
+    /// there.
+    #[test]
+    fn the_depth_plane_of_d24_unorm_s8_uint_is_the_only_copy_with_no_footprint() {
+        assert!(!Format::ALL.is_empty(), "nothing to check");
+        let mut holes: Vec<(Format, ImageAspect)> = Vec::new();
+        for &format in Format::ALL {
+            for &aspect in ASPECTS {
+                match (
+                    format.texel_size(aspect),
+                    copy_footprint_format(format, aspect),
+                ) {
+                    // A plane this format does not have is not a hole in the
+                    // table; it is a copy nothing could ask for.
+                    (None, None) => {}
+                    (None, Some(dxgi)) => panic!(
+                        "{format:?} has no {aspect:?} plane and copy_footprint_format offered \
+                         {dxgi:?} for it"
+                    ),
+                    (Some(_), None) => holes.push((format, aspect)),
+                    (Some(_), Some(_)) => {}
+                }
+            }
+        }
+        assert_eq!(
+            holes,
+            vec![(Format::D24UnormS8Uint, ImageAspect::DEPTH)],
+            "the set of copies this backend has no footprint for changed, and \
+             crate::command::plan_copy still refuses all of them with one sentence naming \
+             D24UnormS8Uint's depth plane"
+        );
+        // An aspect set naming both planes is not one plane, so it has no
+        // footprint however many of its planes the format has.
+        assert_eq!(
+            copy_footprint_format(
+                Format::D32FloatS8Uint,
+                ImageAspect::DEPTH | ImageAspect::STENCIL
+            ),
+            None
+        );
+        assert_eq!(
+            copy_footprint_format(Format::Rgba8Unorm, ImageAspect::empty()),
+            None
+        );
+    }
+
+    /// **A footprint's format is as wide as the plane's texel**, which is what
+    /// makes the row pitch `crate::command::plan_copy` computes from
+    /// [`Format::texel_size`] describe the same rows D3D12 will read.
+    ///
+    /// The failure this closes is silent and is the reason the fourth column
+    /// exists at all: a depth plane given `R16_UNORM` where its texel is four
+    /// bytes copies at half the pitch, so every row after the first lands
+    /// shifted and the image is *sheared* rather than absent. The seam's
+    /// `texel_size` is the width `plan_copy` sizes the buffer against; DXGI's
+    /// constant is the width the runtime reads at; nothing else compares them.
+    ///
+    /// Only the depth and stencil planes need the widths spelled out — a colour
+    /// aspect's footprint is [`dxgi_format`] itself, which is asserted as an
+    /// identity instead and cannot disagree with a width it did not choose.
+    #[test]
+    fn every_footprint_format_is_as_wide_as_the_plane_it_copies() {
+        // The typed single-plane formats a depth or stencil footprint can name,
+        // with the bytes per texel DXGI gives each.
+        const PLANE_WIDTHS: &[(DXGI_FORMAT, u32)] = &[
+            (DXGI_FORMAT_R8_UINT, 1),
+            (DXGI_FORMAT_R16_UNORM, 2),
+            (DXGI_FORMAT_R32_FLOAT, 4),
+        ];
+        let depth: Vec<Format> = Format::ALL
+            .iter()
+            .copied()
+            .filter(|format| format.is_depth_stencil())
+            .collect();
+        assert!(!depth.is_empty(), "nothing to check");
+        let mut checked = 0_usize;
+        for format in depth {
+            for &aspect in ASPECTS {
+                let Some(texel) = format.texel_size(aspect) else {
+                    continue;
+                };
+                let Some(dxgi) = copy_footprint_format(format, aspect) else {
+                    // `D24UnormS8Uint`'s depth plane, pinned as the only one by
+                    // the test above.
+                    continue;
+                };
+                let (_, width) = PLANE_WIDTHS
+                    .iter()
+                    .find(|(candidate, _)| *candidate == dxgi)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{format:?}'s {aspect:?} plane copies through {dxgi:?}, which is not \
+                             one of the typed single-plane formats this table knows a width for"
+                        )
+                    });
+                assert_eq!(
+                    *width, texel,
+                    "{format:?}'s {aspect:?} plane is {texel} bytes per texel and its footprint \
+                     format {dxgi:?} is {width}; a copy would read the buffer at the wrong pitch"
+                );
+                checked += 1;
+            }
+        }
+        // The loop above `continue`s past every pair it cannot check, so
+        // without this it would pass by checking nothing at all. The number is
+        // every depth and stencil plane the seam's formats have, less the one
+        // the test above pins as having no footprint.
+        assert_eq!(checked, 5, "depth and stencil planes checked");
+
+        // And a colour format's footprint is its own format, with no second
+        // spelling to get wrong.
+        for &format in Format::ALL {
+            if format.is_depth_stencil() {
+                continue;
+            }
+            assert_eq!(
+                copy_footprint_format(format, ImageAspect::COLOR),
+                Some(dxgi_format(format)),
+                "{format:?}"
+            );
+        }
+    }
+
+    /// The depth planes' footprint formats by name, because a transposition
+    /// between two of them is a copy that runs and reads the wrong bytes.
+    ///
+    /// These are the answers `wgpu-hal`'s `map_texture_format_for_copy` gives
+    /// for the same pairs, which is the only cross-check available off a
+    /// Windows machine.
+    #[test]
+    fn the_depth_and_stencil_planes_copy_through_the_formats_wgpu_hal_uses() {
+        assert_eq!(
+            copy_footprint_format(Format::D16Unorm, ImageAspect::DEPTH),
+            Some(DXGI_FORMAT_R16_UNORM)
+        );
+        assert_eq!(
+            copy_footprint_format(Format::D32Float, ImageAspect::DEPTH),
+            Some(DXGI_FORMAT_R32_FLOAT)
+        );
+        assert_eq!(
+            copy_footprint_format(Format::D32FloatS8Uint, ImageAspect::DEPTH),
+            Some(DXGI_FORMAT_R32_FLOAT)
+        );
+        assert_eq!(
+            copy_footprint_format(Format::D32FloatS8Uint, ImageAspect::STENCIL),
+            Some(DXGI_FORMAT_R8_UINT)
+        );
+        assert_eq!(
+            copy_footprint_format(Format::D24UnormS8Uint, ImageAspect::STENCIL),
+            Some(DXGI_FORMAT_R8_UINT)
+        );
+        // The footprint is never the image's own spelling for a depth format:
+        // that is either planar or typeless, and a placed footprint is neither.
+        for &format in Format::ALL {
+            if !format.is_depth_stencil() {
+                continue;
+            }
+            for &aspect in ASPECTS {
+                let Some(dxgi) = copy_footprint_format(format, aspect) else {
+                    continue;
+                };
+                assert_ne!(
+                    dxgi,
+                    dxgi_format(format),
+                    "{format:?}'s {aspect:?} plane copies through the format's own DSV spelling"
+                );
+                assert_ne!(
+                    dxgi,
+                    resource_format(format, ImageUsage::SAMPLED),
+                    "{format:?}'s {aspect:?} plane copies through a typeless format"
+                );
+            }
         }
     }
 

@@ -1613,12 +1613,17 @@ impl Device for Dx12Device {
             // Both sides are subresource-index locations, which is the copy
             // `crate::command::plan_image_copy` builds — including the plane
             // slice a depth format's aspect names, since an image-to-image copy
-            // needs no placed footprint and so meets neither obstacle
-            // `NO_DEPTH_COPY` names.
+            // needs no placed footprint at all.
             Capability::ImageToImageCopy => Support::Yes,
-            // The sentence `crate::command::plan_copy` refuses with, so the
-            // declaration and the error a caller reads cannot drift apart.
-            Capability::DepthImageCopy => Support::No(crate::command::NO_DEPTH_COPY),
+            // `crate::conv::copy_footprint_format` is the placed footprint's
+            // fourth column and `crate::command::plan_copy` lays the rows out
+            // against the plane's own texel, so a depth plane copies both ways.
+            // The capability asks whether the backend has an expression for the
+            // copy at all; the one pair D3D12 withholds — `D24UnormS8Uint`'s
+            // depth plane, which no fully typed single-plane DXGI format
+            // describes — is refused by name at the call, which is what the
+            // capability's own documentation says a `Yes` still does.
+            Capability::DepthImageCopy => Support::Yes,
             Capability::MsaaResolveAttachment => Support::No(
                 "the render-pass path binds render-target views directly and emits no \
                  ResolveSubresource, so a resolve view has nothing to attach to (the DX12 pipeline \

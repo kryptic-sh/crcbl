@@ -75,12 +75,12 @@ use core::ops::Range;
 use std::sync::Arc;
 
 use crcbl_hal::{
-    Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
-    CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
-    DrawIndirectCount, Extent3d, Format, GraphicsPipelineHandle, HalError, ImageAspect, ImageCopy,
-    ImageHandle, ImageSubresourceLayers, ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d,
-    PipelineLayoutHandle, QuerySetHandle, QueueTransfer, Rect2d, RenderPassDesc, ShaderStages,
-    Viewport,
+    BackendKind, Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy,
+    CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePassDesc,
+    ComputePipelineHandle, DrawIndirect, DrawIndirectCount, Extent3d, Format,
+    GraphicsPipelineHandle, HalError, ImageAspect, ImageCopy, ImageHandle, ImageSubresourceLayers,
+    ImageType, IndexFormat, LoadOp, MemoryLocation, Offset3d, PipelineLayoutHandle, QuerySetHandle,
+    QueueTransfer, Rect2d, RenderPassDesc, ShaderStages, Viewport,
 };
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D12::{
@@ -193,7 +193,8 @@ impl Drop for Transitions {
 /// writes the wrong texels.
 #[derive(Clone, Copy, Debug)]
 struct CopyRegion {
-    /// Subresource index in the image: mip and array layer, plane zero.
+    /// Subresource index in the image: mip, array layer, and the plane the
+    /// copy's aspect names.
     subresource: u32,
     /// Where in the buffer this layer's rows sit, and how they are laid out.
     footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
@@ -562,31 +563,44 @@ fn release_location(location: &mut D3D12_TEXTURE_COPY_LOCATION) {
     unsafe { ManuallyDrop::drop(&mut location.pResource) };
 }
 
-/// What this backend answers
-/// [`Capability::DepthImageCopy`](crcbl_hal::Capability::DepthImageCopy) with,
-/// in the declaration and in the refusal alike.
+/// The one buffer↔image copy D3D12 has no expression for, refused by name.
 ///
-/// **One sentence in two places on purpose.** `Dx12Device::supports` hands this
-/// to [`Support::No`](crcbl_hal::Support::No) and [`plan_copy`] hands it to
-/// [`crate::instance::not_yet`], so a caller that reads the declaration before
-/// recording and one that reads the error afterwards are told the same thing —
-/// and a test can hold the two to each other.
-pub(crate) const NO_DEPTH_COPY: &str = "a buffer copy of a depth-format image: a D3D12 depth format has two planes and a sampled one \
-     is created typeless, so the copy needs a PlaneSlice and a fully typed placed footprint that \
-     BufferImageCopy carries no field for (the DX12 depth slice)";
+/// A *permanent* refusal and deliberately not [`crate::instance::not_yet`]'s
+/// voice, for the reason `crate::instance::create_surface` gives about the
+/// window-system targets: no slice of work makes it arrive. No fully typed
+/// single-plane DXGI format has 24-bit unorm elements, so nothing can describe
+/// the buffer side of this copy — [`conv::copy_footprint_format`] carries the
+/// enumeration, and `wgpu-hal` and WebGPU both withhold the same pair.
+///
+/// It names the format and the aspect because it is the *only* pair
+/// [`conv::copy_footprint_format`] has no answer for; `conv`'s
+/// `the_depth_plane_of_d24_unorm_s8_uint_is_the_only_copy_with_no_footprint`
+/// is what holds that to being true rather than remembered.
+const NO_D24_DEPTH_FOOTPRINT: &str = "a buffer copy of the DEPTH plane of a D24UnormS8Uint image: DXGI has no fully typed \
+     single-plane format with 24-bit unorm elements — the plane's own spellings, \
+     R24_UNORM_X8_TYPELESS and R24G8_TYPELESS, are typeless — so there is no placed footprint to \
+     lay the buffer's rows out with and this backend refuses the pair rather than reinterpreting \
+     the plane's bits. Its STENCIL plane copies, and so does every plane of D16Unorm, D32Float \
+     and D32FloatS8Uint";
 
-/// The D3D12 plane slice an aspect names, or `None` when the format does not
-/// have that plane or the set names more than one.
+/// Which plane of one image an aspect names, and how wide that plane's texel is.
+///
+/// One question rather than two: a plane a format does not have has no width,
+/// and a width taken from a format that has two planes is the wrong one for
+/// either. `None` when the format does not have that plane or the set names
+/// more than one.
 ///
 /// Depth and colour are both plane zero because a format has only one of them;
 /// stencil is plane one, which is the mapping `wgpu-hal`'s dx12 backend makes in
 /// `calc_subresource_for_copy`.
-/// [`Format::texel_size`](crcbl_hal::Format::texel_size) is the arbiter of
-/// whether the plane exists at all, so "which planes has this format" is
-/// answered in one place for every backend rather than re-derived here.
-fn plane_slice(format: Format, aspect: ImageAspect) -> Option<u32> {
-    format.texel_size(aspect)?;
-    Some(u32::from(aspect.contains(ImageAspect::STENCIL)))
+/// [`Format::texel_size`](crcbl_hal::Format::texel_size) is the arbiter of both
+/// halves — and is **not** [`Format::block_size`](crcbl_hal::Format::block_size)
+/// for a combined depth-stencil format, whose planes are narrower than the
+/// element the format as a whole occupies — so the answer is the seam's, given
+/// once for every backend rather than re-derived here.
+fn plane_slice(format: Format, aspect: ImageAspect) -> Option<(u32, u32)> {
+    let texel_size = format.texel_size(aspect)?;
+    Some((u32::from(aspect.contains(ImageAspect::STENCIL)), texel_size))
 }
 
 /// One side of a copy: the region of one image it names, checked against that
@@ -595,6 +609,10 @@ fn plane_slice(format: Format, aspect: ImageAspect) -> Option<u32> {
 struct ImageRegion {
     /// Plane slice the subresource's aspect names.
     plane: u32,
+    /// Bytes one texel of **that plane** occupies in a copy's buffer. Not the
+    /// format's element size where the two differ: the depth plane of a
+    /// combined depth-stencil format is narrower than the format is.
+    texel_size: u32,
     /// Mip level.
     mip: u32,
     /// First array layer, and how many. Always `0` and `1` for a volume.
@@ -623,7 +641,7 @@ fn plan_region(
     what: &str,
 ) -> Result<ImageRegion, HalError> {
     let format = image.format;
-    let Some(plane) = plane_slice(format, subresource.aspect) else {
+    let Some((plane, texel_size)) = plane_slice(format, subresource.aspect) else {
         return Err(HalError::InvalidDescriptor(format!(
             "{what} of a {format:?} image names {:?}; a copy names exactly one plane, and this \
              format has {:?}",
@@ -724,6 +742,7 @@ fn plan_region(
     }
     Ok(ImageRegion {
         plane,
+        texel_size,
         mip,
         base_layer,
         layers,
@@ -742,6 +761,15 @@ fn plan_region(
 /// [`BufferImageCopy`], and both are refused by name rather than rounded:
 /// rounding the pitch would move every row of the caller's data.
 ///
+/// A footprint also needs a **format**, and the image's own is not always one a
+/// footprint can take: a sampled depth image is stored typeless and a
+/// depth-stencil format describes two planes at once, where a footprint
+/// describes rows of one plane's texels. That is
+/// [`conv::copy_footprint_format`]'s fourth column, and the pitch is sized from
+/// the plane's own texel — [`ImageRegion::texel_size`], which for a combined
+/// depth-stencil format is narrower than the format's element — rather than
+/// from the format as a whole.
+///
 /// Pure, and separate from the encoder, so the arithmetic is readable on its
 /// own — it is the part of a copy that is wrong *silently*, producing an image
 /// that is sheared rather than absent.
@@ -751,14 +779,6 @@ fn plan_copy(
     copy: &BufferImageCopy,
 ) -> Result<Vec<CopyRegion>, HalError> {
     let format = image.format;
-    if format.is_depth_stencil() {
-        // `Unsupported`, not `InvalidDescriptor`: nothing the caller could
-        // write in `BufferImageCopy` makes this copy legal here, so the variant
-        // a caller matches on to pick a fallback is the one that has to arrive.
-        // It answers `Capability::DepthImageCopy`, and `NO_DEPTH_COPY` is the
-        // same sentence `Dx12Device::supports` declares it with.
-        return Err(crate::instance::not_yet(NO_DEPTH_COPY));
-    }
     let region = plan_region(
         image,
         copy.image_subresource,
@@ -768,12 +788,25 @@ fn plan_copy(
     )?;
     let ImageRegion {
         plane,
+        texel_size,
         mip,
         base_layer,
         layers,
         offset: (offset_x, offset_y, offset_z),
         size: (_, _, depth),
     } = region;
+    // `plan_region` has established the aspect names exactly one plane this
+    // format has, so the only pair left without a footprint is the one
+    // `NO_D24_DEPTH_FOOTPRINT` names. `Unsupported`, not `InvalidDescriptor`:
+    // no field of `BufferImageCopy` makes this copy legal, so the variant a
+    // caller matches on to pick a fallback is the one that has to arrive.
+    let Some(footprint_format) = conv::copy_footprint_format(format, copy.image_subresource.aspect)
+    else {
+        return Err(HalError::Unsupported {
+            backend: BackendKind::Dx12,
+            what: NO_D24_DEPTH_FOOTPRINT,
+        });
+    };
     let (block_width, block_height) = format.block_extent();
     let extent = copy.image_extent;
     // Zero means tightly packed, which is the copy's own extent.
@@ -796,7 +829,7 @@ fn plan_copy(
     }
     let row_pitch = row_texels
         .div_ceil(block_width)
-        .checked_mul(format.block_size())
+        .checked_mul(texel_size)
         .ok_or_else(|| HalError::InvalidDescriptor("a copy's row pitch overflows".to_string()))?;
     if row_pitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 {
         return Err(HalError::InvalidDescriptor(format!(
@@ -837,15 +870,16 @@ fn plan_copy(
             )));
         }
         regions.push(CopyRegion {
-            // Plane zero for every format that reaches here: the depth formats,
-            // which are the only ones with a second plane, were refused above.
+            // The plane the subresource's aspect names — zero for a colour
+            // format and for a depth one, one for a stencil plane.
             subresource: image.subresource_in_plane(mip, base_layer + layer, plane),
             footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
                 Offset: buffer_offset,
                 Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                    // The image's own format, never a view's: a copy moves bytes
-                    // and a reinterpretation would move them wrongly.
-                    Format: conv::dxgi_format(format),
+                    // The plane's own spelling, never a view's: a copy moves
+                    // bytes and a reinterpretation would move them wrongly. For
+                    // a colour format that is the image's format itself.
+                    Format: footprint_format,
                     Width: row_texels,
                     Height: column_texels,
                     Depth: depth,

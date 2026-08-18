@@ -39,14 +39,17 @@
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
 //! the clear that no slice has written — queries, timeline semaphores, buffer
-//! fills, a buffer copy of a depth-format image, mesh dispatch, a push-constant
-//! range at pipeline-layout creation — refuses with
+//! fills, mesh dispatch, a push-constant range at pipeline-layout creation —
+//! refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
 //! yet" rather than "broken". A refusal that is *permanent* deliberately does
-//! not read that way: a Wayland, XCB, AppKit or canvas surface names the
-//! backend that owns it instead, because D3D12 presents to an `HWND` and
-//! nothing else. What is **not** folded into either refusal is
+//! not read that way, and names the absence instead: a Wayland, XCB, AppKit or
+//! canvas surface names the backend that owns it, because D3D12 presents to an
+//! `HWND` and nothing else, and a buffer copy of a `D24UnormS8Uint` image's
+//! depth plane names the DXGI format table, which has no fully typed
+//! single-plane spelling for 24-bit unorm elements to lay a footprint out with.
+//! What is **not** folded into either refusal is
 //! anything the backend can genuinely diagnose: an out-of-range adapter is
 //! [`NoSuchAdapter`](crcbl_hal::HalError::NoSuchAdapter), a stale handle is
 //! [`InvalidHandle`](crcbl_hal::HalError::InvalidHandle), one from another

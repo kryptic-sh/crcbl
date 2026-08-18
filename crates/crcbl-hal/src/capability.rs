@@ -631,8 +631,9 @@ pub struct Divergence {
 /// Metal's answer for [`Capability::DrawIndirectCount`], in the parity record
 /// and in the backend's own declaration alike.
 ///
-/// **One sentence in two places on purpose**, the shape `crcbl-dx12` uses for
-/// `NO_DEPTH_COPY`. The two used to disagree — this list called the count
+/// **One sentence in two places on purpose**, the shape a backend uses when a
+/// refusal has to survive the trip from `Device::supports` to the error a
+/// caller reads. The two used to disagree — this list called the count
 /// "absent from the API rather than unwritten" while `MetalDevice::supports`
 /// ended its refusal with "(the Metal ICB slice)", which is this workspace's
 /// idiom for work that is owed. The API settles it: `MTLRenderCommandEncoder`
@@ -742,16 +743,6 @@ pub const DIVERGENCES: &[Divergence] = &[
         backend: BackendKind::Dx12,
         kind: DivergenceKind::Declined,
         why: "no buffer fill at all on this backend; see the BufferFillZero entry",
-    },
-    // --- copies ---
-    Divergence {
-        capability: Capability::DepthImageCopy,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "a D3D12 depth format has two planes and a sampled one is created typeless, so the \
-              copy needs a PlaneSlice and a fully typed D3D12_PLACED_SUBRESOURCE_FOOTPRINT — \
-              neither of which BufferImageCopy carries and neither of which plan_copy can derive \
-              from the image alone (the DX12 depth slice)",
     },
     // --- render pass ---
     Divergence {
@@ -1480,11 +1471,6 @@ mod tests {
             Capability::BufferFillWord,
             BackendKind::Dx12,
             DivergenceKind::Declined,
-        ),
-        (
-            Capability::DepthImageCopy,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
         ),
         (
             Capability::MsaaResolveAttachment,
