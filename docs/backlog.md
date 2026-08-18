@@ -10635,12 +10635,20 @@ their full numbers on every green run: `ssr` 58 gross pixels and ssim 0.988822,
   Note the Windows probe's four expected failures do **not** transfer: those are
   a canvas readback stranding the queue behind it, and this harness never
   touches a canvas.
-- **`ui` has never been checked on real hardware.** `ssr` is known to match
-  there with zero gross pixels, which is what makes it a rasteriser difference.
-  `ui`'s diff is confined to the translucent panel fill and glyph edges with
-  layout and text placement identical — consistent with a blend or coverage
-  rounding difference, but that is an inference, not a measurement. Running the
-  harness against the hardware adapter would settle it.
+- ~~`ui` has never been checked on real hardware~~ — **measured, and both scenes
+  pass.** Driving the same harness against this machine's discrete adapter
+  instead of SwiftShader gives **11 of 11**: `ui` at max channel delta **1**
+  with **zero** pixels over tolerance, and `ssr` at max delta 9 with zero
+  grossly wrong. So neither is a backend defect — **the WebGPU backend draws
+  every one of the eleven goldens correctly on real hardware**, and both
+  exclusions are properties of the software rasteriser CI has to use.
+
+  Two things follow. The `--expect-fail ssr,ui` list is a statement about
+  SwiftShader, not about `crcbl-webgpu`, and it should empty the day a hardware
+  runner exists — which the mechanism will force, since a listed scene that
+  passes fails the run. And the harness pins `swiftshader` deliberately: a
+  golden comparison must not leave the rasteriser to the machine, so this was
+  measured by patching a copy and restoring it, not by changing the gate.
 
 ### REVERSED IN FACT — the probe was going to be deleted and became the gate
 
