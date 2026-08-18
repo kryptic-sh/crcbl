@@ -985,6 +985,100 @@ untidy.
 supersedes — macos-26 executes correctly and the hang was
 `setDepthStencilState:nil`.
 
+### WebGPU's four blockers, ordered — and an ordering landmine
+
+Planned 2026-08-18 against the normative WebGPU IDL, `web-sys 0.3.104`'s
+generated bindings and `wgpu-core 30.0.0`. **Every slice here is verifiable on
+this machine in a real browser**, which is unusual for this project.
+
+**The landmine first, because getting it wrong reddens all three browser gates
+at once.** The moment `create_query_set` accepts `QueryKind::Timestamp`,
+`PassTimers::new` stops returning `None` and the engine starts calling
+`reset_query_set` and `write_timestamp` **every frame**. Both currently
+`record_unsupported`, and this backend's `finish()` then refuses the _whole
+command buffer_ — so every demo frame would fail to record. Today the only thing
+standing between the engine and that failure is `create_query_set` refusing.
+**The query-spine slice must keep refusing `QueryKind::Timestamp` explicitly
+until the timestamp slice lands.**
+
+**The order:**
+
+1. **`SetStencilReference`** — one tag, no gate, no seam change, no design
+   question. It re-establishes the whole tag → fixture → JS decoder → replayer →
+   probe pipeline on the smallest possible payload. Its probe group draws twice
+   with the same pipeline and the same draw, differing only by whether the
+   command was recorded: one target reads back the draw colour, the other the
+   clear.
+2. **The query spine, and `OcclusionQuery`.** `FAMILY_QUERY` has held eight
+   empty tag slots since the format was designed; this fills them. It goes
+   second because `OcclusionQuery`'s gating feature is reported on **every**
+   device this backend can open — `occlusionQuerySet` is core WebGPU and only
+   _timestamp_ queries need a feature — so the spine lands beneath a proof no
+   browser can dodge. **The answer half already exists and is fixture-pinned**:
+   `Reply::QueryResults`, its tag, its JS writer and both fixture halves are all
+   built.
+3. **`WriteTimestamp` and `TimestampQuery`.** Needs a feature the browser may
+   not have and a change to the probe's device descriptor, and is much cheaper
+   once the spine exists.
+4. **`StorageImageBinding`** — the largest, and the only one whose work is in
+   the **seam** rather than the backend, so it touches every backend crate.
+   Sequence it after the dx12 slices in flight.
+
+**A recommended fifth slice that no row requires:** a browser-side parity
+report. The probe **never constructs a `WebGpuDevice`** — it imports the writer
+and the replayer and nothing from `crate::hal` — so nothing anywhere compares a
+`supports()` answer against a behaviour on this backend. Every row deletion here
+rests on a probe group rather than on the declaration having moved with it. If
+it turns out cheap it belongs _first_, because it would turn each subsequent
+deletion from a claim into a failing check.
+
+### Four WebGPU divergence reasons that are wrong
+
+1. **`StorageImageBinding` names two required fields; only one is required.**
+   The IDL makes `format` required and gives `viewDimension` and `access`
+   defaults. The two-field sentence is `crcbl-wgpu`'s, where it is true,
+   imported wholesale — and the replayer already states it correctly. **The
+   minimum seam change is one field.** The row also hides the actual design
+   question: `read_only: false` means read/write on this seam, and WebGPU's
+   `'read-write'` access is legal only for a narrow format set, so the mapping
+   is not simply `read_only ? 'read-only' : 'write-only'`.
+2. **`IndirectArgumentPaddedStride` is classified `ApiAbsence` and is already
+   implemented.** True of the WebGPU call, false of this backend: `stride`
+   crosses the stream whole and the replayer unrolls it into one `drawIndirect`
+   per draw at `offset + i * stride`, so any stride is honoured, padded
+   included. `Support::Yes` is the correct declaration. It is `ApiAbsence` so it
+   is not in the 27, but it costs one probe check to make honest.
+3. **`TimestampQuery` says the seam's "arbitrary-point" write must narrow. There
+   is no arbitrary-point write to narrow.** The seam's scope rules already
+   require query writes **outside** any pass, the null backend enforces it, and
+   the render graph obeys it structurally. So the replayer may legally open its
+   own empty compute pass carrying `timestampWrites` — no pipeline, no dispatch
+   — which is the WebGPU equivalent of the backend-opened encoder Metal needs.
+   **Implement, do not narrow.**
+4. **`StencilReference` says the value "would be dropped rather than applied".**
+   Nothing is dropped: the call records unsupported and `finish()` refuses the
+   entire command buffer. The crate's own test asserts exactly that. The same
+   wrong story appears a second time in the declaration's doc comment. This
+   matters to a caller — not a subtly wrong frame, a hard refusal at the
+   boundary.
+
+**And a live feature leak both files predicted and neither closed:**
+`crcbl-webgpu` reports `Features::TIMESTAMP_QUERY` from the browser's own
+feature set and then refuses `create_query_set`. Both the Rust and JS halves
+wrote down that this must stop once an `impl Instance` existed. It exists.
+**Close it by implementing, not by masking the bit** — masking would make the
+gate permanently clear and manufacture, on the one WebGPU row that does not have
+it, exactly the unprovable-by-construction shape Metal has on eight.
+
+**What has no browser-side evidence at all**, and matters because after
+`crcbl-wgpu` is deleted these are claims resting on nothing:
+`MsaaResolveAttachment` — no probe group makes a multisampled texture and
+nothing in the engine sets a resolve attachment, so the replayer code is
+exercised only against the node stub; `DepthClamp` — every probe pipeline sets
+it false; `BinarySemaphore` — unprovable by construction and honestly declared
+so; and `SamplerAnisotropy`, whose `Yes` arm is **unreachable** because the
+limit is pinned to 1.
+
 ### DECISION NEEDED — do the three dx12 fill rows stay declined?
 
 They were declined for a reason that turns out to be wrong (above), and they now
