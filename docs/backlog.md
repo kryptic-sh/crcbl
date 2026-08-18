@@ -859,6 +859,25 @@ The seam suite drives most of `Capability::ALL` with real GPU work; the tally it
 prints on every run is the current answer and this entry does not restate it —
 earlier versions did, and were wrong within a day.
 
+**This is the practical ceiling, not a to-do list.** Of the four left, two wait
+on work that is itself blocked (the dx12 mesh reporting slice, blocked on a
+device removal only a Windows session can diagnose) and **two have no robust
+observable at all** — they are not waiting on effort:
+
+- `SamplerAnisotropy` — a conformant implementation may legally take fewer
+  samples than `maxAnisotropy` asks for, so "the anisotropic image differs from
+  the isotropic one" is not guaranteed even on a device that honestly reports
+  the feature. A test asserting the difference would report a false
+  `SilentlyIgnored`; one accepting either outcome asserts nothing.
+- `BinarySemaphore` — the claim is ordering between two submissions, and
+  demonstrating it requires the unordered case to actually lose a race. A test
+  that depends on losing a race passes when it should fail, which is worse than
+  the gap.
+
+Both were considered and declined on those grounds rather than left undone, and
+the shader toolchain being available locally (`slangc` 2026.14, `dxc` 1.9) does
+not change either — the obstacle is the observable, not the artifact.
+
 **Four remain unexercised, for three different reasons:**
 
 - **A fixture that does not exist yet.** `SamplerAnisotropy` needs a shader that
