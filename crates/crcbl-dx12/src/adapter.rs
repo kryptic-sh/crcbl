@@ -50,16 +50,17 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION, D3D12_CS_THREAD_GROUP_MAX_THREADS_PER_GROUP,
     D3D12_CS_THREAD_GROUP_MAX_X, D3D12_CS_THREAD_GROUP_MAX_Y, D3D12_CS_THREAD_GROUP_MAX_Z,
     D3D12_FEATURE, D3D12_FEATURE_ARCHITECTURE1, D3D12_FEATURE_D3D12_OPTIONS,
-    D3D12_FEATURE_DATA_ARCHITECTURE1, D3D12_FEATURE_DATA_D3D12_OPTIONS,
+    D3D12_FEATURE_D3D12_OPTIONS7, D3D12_FEATURE_DATA_ARCHITECTURE1,
+    D3D12_FEATURE_DATA_D3D12_OPTIONS, D3D12_FEATURE_DATA_D3D12_OPTIONS7,
     D3D12_FEATURE_DATA_FORMAT_SUPPORT, D3D12_FEATURE_DATA_SHADER_MODEL,
     D3D12_FEATURE_FORMAT_SUPPORT, D3D12_FEATURE_SHADER_MODEL, D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE,
     D3D12_FORMAT_SUPPORT1_TEXTURE2D, D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2,
-    D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT,
-    D3D12_REQ_MAXANISOTROPY, D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
-    D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION,
-    D3D12_RESOURCE_BINDING_TIER, D3D12_RESOURCE_BINDING_TIER_3,
-    D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,
-    D3D12CreateDevice, ID3D12Device,
+    D3D12_MESH_SHADER_TIER, D3D12_MESH_SHADER_TIER_1, D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT,
+    D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT, D3D12_REQ_MAXANISOTROPY,
+    D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION, D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,
+    D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION, D3D12_RESOURCE_BINDING_TIER,
+    D3D12_RESOURCE_BINDING_TIER_3, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
+    D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12CreateDevice, ID3D12Device,
 };
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1, IDXGIDevice,
@@ -157,6 +158,13 @@ pub(crate) struct RawCaps {
     /// flag — a partial answer would be a feature that is true of some of the
     /// formats it names, which is worse than either.
     pub(crate) block_compression: bool,
+    /// `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier`.
+    ///
+    /// Kept raw rather than reduced to a bool for the same reason
+    /// [`binding_tier`](Self::binding_tier) is: the tier is what the probe
+    /// prints, and a derived flag cannot be checked against its input once the
+    /// input is thrown away.
+    pub(crate) mesh_shader_tier: D3D12_MESH_SHADER_TIER,
 }
 
 impl RawCaps {
@@ -174,6 +182,23 @@ impl RawCaps {
     /// reason [`RawCaps`] is kept.
     pub(crate) fn dynamic_resources(self) -> bool {
         self.binding_tier.0 >= D3D12_RESOURCE_BINDING_TIER_3.0
+            && self.shader_model.0 >= D3D_SHADER_MODEL_6_6.0
+    }
+
+    /// Whether this adapter can run the amplification and mesh stages **and**
+    /// load the DXIL this workspace ships for them.
+    ///
+    /// Both halves are required and neither implies the other, on exactly the
+    /// terms [`dynamic_resources`](Self::dynamic_resources) is written on:
+    /// [`D3D12_MESH_SHADER_TIER_1`] is what makes the stages exist, and the
+    /// shader model is what makes the committed artifact loadable — the
+    /// `crcbl-shaders` manifest builds DXIL at `dxil-model = 6_6`, so a device
+    /// with the tier and a lower model would create the pipeline state object
+    /// against bytecode it cannot accept. A tier-only rule would report mesh
+    /// shading on such a device and fail at `create_mesh_pipeline`, which is the
+    /// direction a capability must never fail in.
+    pub(crate) fn mesh_shading(self) -> bool {
+        self.mesh_shader_tier.0 >= D3D12_MESH_SHADER_TIER_1.0
             && self.shader_model.0 >= D3D_SHADER_MODEL_6_6.0
     }
 }
@@ -208,6 +233,10 @@ impl FeatureQuery for D3D12_FEATURE_DATA_ARCHITECTURE1 {
 
 impl FeatureQuery for D3D12_FEATURE_DATA_FORMAT_SUPPORT {
     const FEATURE: D3D12_FEATURE = D3D12_FEATURE_FORMAT_SUPPORT;
+}
+
+impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS7 {
+    const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS7;
 }
 
 /// One `CheckFeatureSupport` call, with the answer returned rather than written
@@ -512,12 +541,42 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   and `crcbl-mtl` withdrawing a flag no call had earned is the precedent that
 ///   made the wait the rule.
 ///
-///   **`DRAW_INDIRECT_COUNT` is the one that moves a selector.** With it
-///   reported and no mesh shader, [`GeometryPath::from_features`](crcbl_hal::GeometryPath::from_features)
-///   puts this backend on
-///   [`IndirectCount`](crcbl_hal::GeometryPath::IndirectCount) rather than the
-///   per-batch floor — the arm `crcbl-mtl` cannot reach, because Metal has no
-///   count-from-memory execution to back it.
+///   **`DRAW_INDIRECT_COUNT` is a selector input**, and the one that lifted this
+///   backend off the per-batch floor before there was a mesh stage to report:
+///   [`GeometryPath::from_features`](crcbl_hal::GeometryPath::from_features)
+///   answers [`IndirectCount`](crcbl_hal::GeometryPath::IndirectCount) from it —
+///   the arm `crcbl-mtl` cannot reach, because Metal has no count-from-memory
+///   execution to back it. It is the fallback rather than the answer on any
+///   adapter that also reports [`Features::MESH_SHADER`] below, and
+///   `the_cube_scene_draws_the_same_frame_on_every_geometry_path` is what holds
+///   the two to the same picture.
+/// * [`Features::MESH_SHADER`] and [`Features::TASK_SHADER`] ←
+///   [`RawCaps::mesh_shading`], which is
+///   `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` at
+///   [`D3D12_MESH_SHADER_TIER_1`] or better **and** `HighestShaderModel` 6.6 or
+///   better, both from real `CheckFeatureSupport` calls. WARP measures `TIER_1`,
+///   so CI's software adapter is where this is proved.
+///
+///   **One tier answers both flags, because D3D12 has one bit for the pair.**
+///   There is no separate amplification-stage capability: `MeshShaderTier` is
+///   what makes `D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS` and `_MS` exist
+///   together, and a device with the mesh stage and no amplification stage is
+///   not a shape D3D12 can report. Splitting them here would be a distinction
+///   invented by this backend, which is why the two move as one.
+///
+///   They waited for the calls rather than for a query, exactly as
+///   [`Features::COMPUTE`] did. `Device::create_mesh_pipeline` packs the
+///   `D3D12_PIPELINE_STATE_STREAM_DESC` both stages need,
+///   `CommandEncoder::draw_mesh_tasks` records `DispatchMesh` and
+///   `draw_mesh_tasks_indirect` an `ExecuteIndirect` of a `DISPATCH_MESH`
+///   command signature, and `crcbl_dx12::device`'s
+///   `a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible`
+///   reads the picture back on WARP with the amplification stage's contribution
+///   in it. Reporting them earlier would have been the "unsupported arriving as
+///   passed" shape the crate docs name — and it was also the reverse shape for
+///   as long as the calls existed unreported, which
+///   `crcbl_hal::Capability::MeshShading` scores as declaring unsupported
+///   something this backend performs.
 /// * [`Features::PRESENT_FEEDBACK`] — **unconditional, and for a stronger
 ///   reason than Metal's.** The mechanism is
 ///   `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` plus
@@ -631,6 +690,9 @@ fn features_of(raw: &RawCaps) -> Features {
     }
     if raw.block_compression {
         out |= Features::TEXTURE_COMPRESSION_BC;
+    }
+    if raw.mesh_shading() {
+        out |= Features::MESH_SHADER | Features::TASK_SHADER;
     }
     // No query for any of these: a GPU virtual address is not optional in
     // D3D12, anisotropic sampling is an architectural constant, compute is what
@@ -846,6 +908,16 @@ pub(crate) fn describe(
         },
     )
     .unwrap_or_default();
+    // Same direction of failure as `D3D12_FEATURE_D3D12_OPTIONS` above, and it
+    // matters more here: this feature id is newer than D3D12 itself, so a
+    // runtime that has never heard of it answers `E_INVALIDARG` rather than a
+    // tier — the case [`check_feature`] exists to turn into a `None` rather than
+    // an error. `D3D12_FEATURE_DATA_D3D12_OPTIONS7::default()` leaves
+    // `MeshShaderTier` at zero, which is
+    // `D3D12_MESH_SHADER_TIER_NOT_SUPPORTED`, so such a runtime loses mesh
+    // shading rather than gaining it.
+    let options7 =
+        check_feature(&device, D3D12_FEATURE_DATA_D3D12_OPTIONS7::default()).unwrap_or_default();
 
     let raw = RawCaps {
         binding_tier: options.ResourceBindingTier,
@@ -858,6 +930,7 @@ pub(crate) fn describe(
         luid: (u64::from(desc.AdapterLuid.HighPart.cast_unsigned()) << 32)
             | u64::from(desc.AdapterLuid.LowPart),
         block_compression: supports_block_compression(&device),
+        mesh_shader_tier: options7.MeshShaderTier,
     };
     let features = features_of(&raw);
     let info = AdapterInfo {
@@ -888,12 +961,10 @@ mod tests {
     /// the mesh probe's, and named where that test says what each answer
     /// settles.
     use windows::Win32::Graphics::Direct3D12::{
-        D3D12_FEATURE_D3D12_OPTIONS3, D3D12_FEATURE_D3D12_OPTIONS7,
-        D3D12_FEATURE_DATA_D3D12_OPTIONS3, D3D12_FEATURE_DATA_D3D12_OPTIONS7,
-        D3D12_MESH_SHADER_TIER, D3D12_MESH_SHADER_TIER_1, D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
-        D3D12_RESOURCE_BINDING_TIER_2, D3D12_SAMPLER_FEEDBACK_TIER,
-        D3D12_SAMPLER_FEEDBACK_TIER_0_9, D3D12_SAMPLER_FEEDBACK_TIER_1_0,
-        D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED,
+        D3D12_FEATURE_D3D12_OPTIONS3, D3D12_FEATURE_DATA_D3D12_OPTIONS3,
+        D3D12_MESH_SHADER_TIER_NOT_SUPPORTED, D3D12_RESOURCE_BINDING_TIER_2,
+        D3D12_SAMPLER_FEEDBACK_TIER, D3D12_SAMPLER_FEEDBACK_TIER_0_9,
+        D3D12_SAMPLER_FEEDBACK_TIER_1_0, D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED,
     };
 
     use crate::device::tests::open_device;
@@ -958,6 +1029,7 @@ mod tests {
             unified_memory: false,
             luid: 0,
             block_compression: true,
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
         };
         assert!(base.dynamic_resources(), "tier 3 with SM6.6 is the answer");
 
@@ -989,6 +1061,82 @@ mod tests {
         assert!(newer.dynamic_resources(), "{newer:?}");
     }
 
+    /// Mesh shading needs **both** answers, and the two flags move together.
+    ///
+    /// The failing shapes are the same two [`RawCaps::dynamic_resources`] pins,
+    /// with a worse landing: a rule reading only `MeshShaderTier` reports mesh
+    /// shading on a device whose highest shader model cannot load the DXIL
+    /// `crcbl-shaders` commits at 6.6, and `create_mesh_pipeline` then fails on
+    /// a capability the seam already promised. A rule reading only the model
+    /// reports it on every modern D3D12 device there is.
+    ///
+    /// The third thing pinned is that [`Features::TASK_SHADER`] never travels
+    /// without [`Features::MESH_SHADER`] — D3D12 has one bit for the pair, so a
+    /// device offering the amplification stage alone is not a shape this
+    /// backend may report.
+    #[test]
+    fn mesh_shading_needs_the_mesh_tier_and_the_shader_model_together() {
+        let base = RawCaps {
+            binding_tier: D3D12_RESOURCE_BINDING_TIER_3,
+            shader_model: D3D_SHADER_MODEL_6_6,
+            software: true,
+            unified_memory: true,
+            luid: 0,
+            block_compression: true,
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER_1,
+        };
+        assert!(
+            base.mesh_shading(),
+            "TIER_1 with SM6.6 is what WARP measures: {base:?}"
+        );
+
+        let no_tier = RawCaps {
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
+            ..base
+        };
+        assert!(
+            !no_tier.mesh_shading(),
+            "SM6.6 alone is not enough: {no_tier:?}"
+        );
+
+        let older_model = RawCaps {
+            shader_model: D3D_SHADER_MODEL_6_5,
+            ..base
+        };
+        assert!(
+            !older_model.mesh_shading(),
+            "the tier alone is not enough — the committed DXIL is built at 6.6: {older_model:?}"
+        );
+
+        // A tier newer than the constant this rule names must still answer yes,
+        // for the reason the `>=` above `dynamic_resources` is written for.
+        let newer = RawCaps {
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER(D3D12_MESH_SHADER_TIER_1.0 + 1),
+            shader_model: D3D_SHADER_MODEL_6_9,
+            ..base
+        };
+        assert!(newer.mesh_shading(), "{newer:?}");
+
+        for (raw, expected) in [
+            (base, true),
+            (no_tier, false),
+            (older_model, false),
+            (newer, true),
+        ] {
+            let features = features_of(&raw);
+            assert_eq!(
+                features.contains(Features::MESH_SHADER),
+                expected,
+                "MESH_SHADER must be exactly mesh_shading's answer: {raw:?}"
+            );
+            assert_eq!(
+                features.contains(Features::TASK_SHADER),
+                expected,
+                "TASK_SHADER is the same measurement and cannot differ: {raw:?}"
+            );
+        }
+    }
+
     /// The features and the limits keyed off them cannot disagree.
     ///
     /// Checked on constructed [`RawCaps`] rather than on a real adapter, because
@@ -1010,6 +1158,7 @@ mod tests {
                 unified_memory: false,
                 luid: 0,
                 block_compression: true,
+                mesh_shader_tier: D3D12_MESH_SHADER_TIER_NOT_SUPPORTED,
             };
             let features = features_of(&raw);
             let limits = limits_of(features);
@@ -1146,6 +1295,7 @@ mod tests {
             unified_memory: true,
             luid: 0,
             block_compression: true,
+            mesh_shader_tier: D3D12_MESH_SHADER_TIER_1,
         };
         assert_eq!(device_type_of(&warp), DeviceType::Cpu, "{warp:?}");
 
@@ -1176,18 +1326,16 @@ mod tests {
     /// deal else.
     const MESH_PROBE: &str = "crcbl-dx12 mesh";
 
-    // The two feature ids the probe below adds, each paired with the struct
-    // D3D12 fills in for it. They live here rather than beside the production
-    // pairings because nothing above the probe asks either question: this
-    // backend reports no mesh shading, and its timestamp queries are the graphics
-    // and compute queues' rather than the copy queue's. The pairing is an `impl`
+    // The one feature id the probe below adds that nothing above it asks about:
+    // this backend's timestamp queries are the graphics and compute queues'
+    // rather than the copy queue's, so `features_of` never reads this struct.
+    // `D3D12_FEATURE_DATA_D3D12_OPTIONS7` used to live here beside it and now
+    // sits with the production pairings, because `features_of` reads its
+    // `MeshShaderTier`; it could not be in both places, since a second impl of
+    // the trait for one type is a coherence error. The pairing is an `impl`
     // rather than a hand-written feature id at the call site for the reason
     // `FeatureQuery` exists at all — `CheckFeatureSupport` takes a void pointer,
     // and a mismatched pair is a struct filled in with another feature's fields.
-    impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS7 {
-        const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS7;
-    }
-
     impl FeatureQuery for D3D12_FEATURE_DATA_D3D12_OPTIONS3 {
         const FEATURE: D3D12_FEATURE = D3D12_FEATURE_D3D12_OPTIONS3;
     }
@@ -1223,52 +1371,49 @@ mod tests {
         }
     }
 
-    /// **The measurement that decides whether this backend's two mesh rows can
-    /// ever be _proved_ here** —
-    /// [`Capability::MeshShading`](crcbl_hal::Capability::MeshShading) and
-    /// [`TaskShaderStage`](crcbl_hal::Capability::TaskShaderStage), which
-    /// `crcbl_hal::DIVERGENCES` records for [`BackendKind::Dx12`] as
-    /// [`DivergenceKind::Unwritten`](crcbl_hal::DivergenceKind::Unwritten).
+    /// **The measurement [`features_of`] reports
+    /// [`Features::MESH_SHADER`] and [`Features::TASK_SHADER`] off**, printed
+    /// beside the flags it produced so a CI log carries the input as well as the
+    /// answer.
     ///
-    /// # Why the rows are not what they look like
+    /// # What it is for now that the flags are reported
     ///
-    /// `Unwritten` reads as "somebody types the mesh pipeline and the rows go
-    /// away", and for this backend that is not established. **This crate has
-    /// never asked D3D12 whether it has a mesh shader tier**: [`features_of`]
-    /// reports neither [`Features::MESH_SHADER`] nor
-    /// [`Features::TASK_SHADER`], and nothing in this crate names
-    /// [`D3D12_FEATURE_D3D12_OPTIONS7`] outside this test. So "no mesh shading
-    /// on D3D12" is true **by construction rather than by measurement**, and
-    /// nobody knows what this crate's CI adapter would answer.
+    /// It began as the probe that settled whether this backend's two mesh rows
+    /// could ever be *proved* on CI's adapter, because nothing in this crate
+    /// named [`D3D12_FEATURE_D3D12_OPTIONS7`] outside it and "no mesh shading on
+    /// D3D12" was therefore true by construction rather than by measurement.
+    /// WARP answered `TIER_1` at SM6.6, the reporting slice moved the query up
+    /// into [`describe`], and the rows left `crcbl_hal::DIVERGENCES` on that
+    /// evidence.
     ///
-    /// That matters because both capabilities are gated —
-    /// `Capability::gating_feature` maps them onto those two flags — and a gated
-    /// capability whose flag is clear is *skipped* by the parity report rather
-    /// than checked. A slice that implemented the pipelines and deleted the rows
-    /// could therefore leave a green report standing over evidence nobody has.
-    ///
-    /// It creates nothing, submits nothing and asserts one thing: that the
-    /// queries ran. It **prints**, and the CI log is the artifact — the same
-    /// shape as `crcbl-mtl`'s
-    /// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`,
-    /// which puts that backend's two unsettled rows' answers into its own log.
+    /// What it does now is **check the production read against a fresh one**:
+    /// the tier below is queried on the open device, and the flags on the
+    /// enumerated adapter came from the same query made per adapter at
+    /// [`describe`] time on a device that no longer exists. Those two answers
+    /// disagreeing is either the query being made about a different adapter than
+    /// the record it lands on or [`RawCaps::mesh_shading`] having grown a second
+    /// rule, and neither is visible to a test that only prints. It still creates
+    /// no pipeline and submits nothing —
+    /// `crcbl_dx12::device`'s
+    /// `a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible`
+    /// is what draws through the stages.
     ///
     /// # What each answer settles
     ///
     /// **`MeshShaderTier` together with the shader model.** Neither half is
     /// enough on its own, exactly as [`RawCaps::dynamic_resources`] needs both a
-    /// tier and a model:
+    /// tier and a model, and [`RawCaps::mesh_shading`] is the rule:
     ///
-    /// * `TIER_1` **and** at least [`D3D_SHADER_MODEL_6_6`] — the two rows are
-    ///   ordinary `Unwritten` work, provable on this CI, and the mesh slice is
-    ///   worth planning.
-    /// * `NOT_SUPPORTED` — the rows can be implemented and **never proved
-    ///   here**, because CI has this adapter and no other. That turns the
-    ///   deletion question from "finish the work" into "accept an unproven state
-    ///   or buy a runner", which is a decision rather than a task.
+    /// * `TIER_1` **and** at least [`D3D_SHADER_MODEL_6_6`] — the flags are
+    ///   reported and this device is one the mesh path runs on.
+    /// * `NOT_SUPPORTED` — the flags are withheld, the derived
+    ///   [`GeometryPath`](crcbl_hal::GeometryPath) falls back to
+    ///   `IndirectCount`, and the two capabilities answer `NotOnThisDevice`
+    ///   rather than `No`. A result, not a failure.
     /// * A tier with a model below 6.6 — the committed DXIL cannot load whatever
     ///   the hardware can do, because `crcbl-shaders`' manifest ships
-    ///   `dxil-model = 6_6`. Different problem, different fix.
+    ///   `dxil-model = 6_6`, so the flags are withheld for the second reason
+    ///   rather than the first.
     ///
     /// **`SamplerFeedbackTier`** comes back in the same struct and costs nothing
     /// extra, so it is printed rather than discarded.
@@ -1288,7 +1433,8 @@ mod tests {
     /// expensive way, asserting twice on values a truthful device reported as
     /// zero and reddening the board both times.
     ///
-    /// The one thing asserted is that the questions were **asked**: a refused
+    /// What is asserted is that the questions were **asked**, and that the
+    /// answers agree with what this adapter reports. A refused
     /// [`check_feature`] is the *runtime* saying it has never heard of the
     /// query, not the device saying no, and those are opposite readings of this
     /// log. A run that printed nothing but refusals is a zero-checks pass in a
@@ -1296,10 +1442,12 @@ mod tests {
     /// run names all of them — this suite costs a whole CI round trip per
     /// question, which is why `tests/run-dx12-e2e.sh` passes `--no-fail-fast`.
     ///
-    /// The falsifying edit is swapping the two [`FeatureQuery`] ids above.
-    /// D3D12 checks the payload size against the feature id and the two structs
-    /// are different widths, so both queries are refused and the assertion fires
-    /// naming them.
+    /// The falsifying edits are two. Swapping the [`FeatureQuery`] ids of the
+    /// two `OPTIONS` structs makes D3D12 check the payload size against the
+    /// wrong feature and refuse both, and the refusal assertion fires naming
+    /// them. Dropping either flag from [`features_of`], or reading the tier
+    /// without the shader model, makes the agreement assertion fire instead —
+    /// which is the half that would otherwise be a log nobody compares.
     ///
     /// nextest captures a passing test's stdout, so read this with
     /// `--success-output immediate`, which is what `tests/run-dx12-e2e.sh`
@@ -1405,14 +1553,15 @@ mod tests {
         });
         let model = negotiated.map_or(D3D_SHADER_MODEL_NONE, |answer| answer.HighestShaderModel);
         let verdict = if tier.0 < D3D12_MESH_SHADER_TIER_1.0 {
-            "no mesh tier here — MeshShading and TaskShaderStage can be implemented on this \
-             backend and never proved on this device"
+            "no mesh tier here — MESH_SHADER and TASK_SHADER are withheld and this adapter derives \
+             GeometryPath::IndirectCount"
         } else if model.0 < D3D_SHADER_MODEL_6_6.0 {
             "a mesh tier with no shader model to load the committed DXIL — crcbl-shaders ships \
-             dxil-model = 6_6, so this device could not run it whatever its hardware can do"
+             dxil-model = 6_6, so this device could not run it whatever its hardware can do, and \
+             the flags are withheld for that reason rather than for the tier"
         } else {
-            "MeshShading and TaskShaderStage are ordinary Unwritten work and are provable on \
-             this device"
+            "MESH_SHADER and TASK_SHADER are reported and this adapter derives \
+             GeometryPath::MeshShader"
         };
         println!("{MESH_PROBE}: verdict — {verdict}");
 
@@ -1423,6 +1572,32 @@ mod tests {
              and the two are opposite readings of the log above. A tier reported as NOT_SUPPORTED \
              is a result and passes; this is a run that asked nothing.",
             record.info.name,
+        );
+
+        // The fresh reading against the reported one. `describe` made this same
+        // query on a device it then dropped, so the two agreeing is what says
+        // the per-adapter read landed on the adapter it was made about — and
+        // what turns every number printed above from a log into a check.
+        let measured = tier.0 >= D3D12_MESH_SHADER_TIER_1.0 && model.0 >= D3D_SHADER_MODEL_6_6.0;
+        for (flag, name) in [
+            (Features::MESH_SHADER, "MESH_SHADER"),
+            (Features::TASK_SHADER, "TASK_SHADER"),
+        ] {
+            assert_eq!(
+                record.info.caps.features.contains(flag),
+                measured,
+                "{name} disagrees with this device's own MeshShaderTier = {} at shader model {}: \
+                 {}",
+                mesh_shader_tier_name(tier),
+                shader_model_name(model),
+                record.report(),
+            );
+        }
+        assert_eq!(
+            record.raw.mesh_shader_tier.0,
+            tier.0,
+            "the tier describe() recorded is not the tier this device answers now: {}",
+            record.report(),
         );
     }
 }

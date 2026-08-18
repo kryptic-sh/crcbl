@@ -1961,16 +1961,14 @@ impl Device for Dx12Device {
 
     /// What this backend does with each seam behaviour.
     ///
-    /// **This is the backend mid-build, and the reasons say so.** D3D12 has
-    /// every capability below; what is missing is this crate's expression of it,
-    /// and each refusal names the slice that owes it — the one exception being
-    /// the buffer fill, which is a deliberate non-fix argued at
+    /// D3D12 has every capability below, and what this crate still withholds is
+    /// the buffer fill and nothing else — a deliberate non-fix argued at
     /// [`fill_buffer`](crate::Dx12CommandEncoder) rather than an unwritten
-    /// slice.
+    /// slice. Every other arm is a `Yes` or a device gate, which is why
+    /// `crcbl_hal::DIVERGENCES` lists this backend only for those fills.
     ///
-    /// The honest reading of this list is that `crcbl-dx12` is the furthest from
-    /// parity of the five, and the point of writing it down is that the number
-    /// is now visible instead of being spread across twenty-six refusal sites.
+    /// The reasons are written out per arm rather than summarised, so that "why
+    /// not" is answerable at the refusal instead of by reading the whole list.
     ///
     /// Exhaustive with no wildcard arm, and `deny`-ed as such.
     #[deny(clippy::wildcard_enum_match_arm)]
@@ -1982,13 +1980,6 @@ impl Device for Dx12Device {
         // One sentence for the three fills: they are three capabilities refused
         // at one site, and three paraphrases of one obstacle would read like
         // three obstacles.
-        // One sentence for both mesh rows, for the same reason: the amplification
-        // stage is not separately missing, it is behind the same unreported flag.
-        const NO_MESH_FLAG: &str = "the mesh and amplification stages are built — crcbl_dx12::pipeline packs the \
-             D3D12_PIPELINE_STATE_STREAM_DESC and the encoder records DispatchMesh — but this \
-             backend does not yet report Features::MESH_SHADER, because doing so moves every \
-             adapter onto GeometryPath::MeshShader and re-keys every golden image (the DX12 mesh \
-             reporting slice)";
         const NO_FILL: &str = "a deliberate non-fix rather than a missing slice: D3D12's fill is \
              ClearUnorderedAccessViewUint, and crcbl-render zeroes its counters with a clear \
              dispatch instead, which runs anywhere that can dispatch and does not make \
@@ -2031,21 +2022,34 @@ impl Device for Dx12Device {
             // An `ID3D12CommandSignature` is built per stride, so a padded one
             // is described rather than assumed away.
             Capability::IndirectArgumentPaddedStride => Support::Yes,
-            // **The calls are written; the flag is not reported.** `pipeline`'s
-            // `mesh` packs the subobject stream, `CommandEncoder`'s
+            // `pipeline`'s `mesh` packs the subobject stream, `CommandEncoder`'s
             // `draw_mesh_tasks` records `DispatchMesh` and its indirect twin
-            // executes a `DISPATCH_MESH` command signature. What is missing is
-            // `adapter`'s `features_of` reading
-            // `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` and reporting
-            // `Features::MESH_SHADER` — which flips
-            // `GeometryPath::from_features` to `MeshShader` for every adapter
-            // and re-keys every golden image, so it is its own change.
-            //
-            // Until then this stays `No`: a `granted` here would answer
-            // `NotOnThisDevice` on a device that never withheld anything, and
-            // `parity_verdict` calls that `FalseDeviceGate` — which is the loud
-            // failure, and rightly.
-            Capability::MeshShading | Capability::TaskShaderStage => Support::No(NO_MESH_FLAG),
+            // executes a `DISPATCH_MESH` command signature — and `adapter`'s
+            // `features_of` now reads
+            // `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` beside the
+            // shader model and reports both flags off it. So these are device
+            // questions rather than crate ones, and the gates really can fire: a
+            // device below `TIER_1`, a device whose highest shader model is
+            // below the 6.6 the committed DXIL needs, and a runtime that has
+            // never heard of the query all leave the flags clear.
+            Capability::MeshShading => gated(
+                Features::MESH_SHADER,
+                "this device reports no MESH_SHADER, so its D3D12_FEATURE_DATA_D3D12_OPTIONS7 \
+                 MeshShaderTier is below TIER_1 or its highest shader model is below the 6.6 the \
+                 committed DXIL needs",
+            ),
+            // The two gates are one measurement on this backend — D3D12 has no
+            // separate amplification-stage bit — so this arm can only differ
+            // from the one above by refusing where it does not, which is a shape
+            // `features_of` cannot produce. Written out anyway rather than
+            // merged, because `Capability::gating_feature` maps the two onto
+            // different flags and an arm gating on the wrong one would be a
+            // `FalseDeviceGate` on any backend that ever split them.
+            Capability::TaskShaderStage => gated(
+                Features::TASK_SHADER,
+                "this device reports no TASK_SHADER, which on D3D12 is the same MeshShaderTier \
+                 measurement the mesh stage is gated on; see the MeshShading reason",
+            ),
             Capability::UpdateBindGroup => Support::Yes,
             // `create_pipeline_layout` builds a
             // `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` parameter at the `b`

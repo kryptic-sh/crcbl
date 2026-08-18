@@ -83,6 +83,7 @@ impl AdapterRecord {
             "crcbl-dx12 adapter {id} \"{name}\" luid={luid:#018x} type={kind:?} \
              vendor={vendor:#06x} device={device:#06x} ResourceBindingTier={tier} \
              HighestShaderModel={model} sm66-dynamic-resources={dynamic} \
+             MeshShaderTier={mesh_tier} mesh-shading={mesh} \
              block-compression={bc} geometry={geometry:?} binding={binding:?} \
              lighting={lighting:?} features={features:?} \
              driver=\"{driver}\"",
@@ -99,6 +100,8 @@ impl AdapterRecord {
             } else {
                 "no"
             },
+            mesh_tier = self.raw.mesh_shader_tier.0,
+            mesh = if self.raw.mesh_shading() { "yes" } else { "no" },
             bc = if self.raw.block_compression {
                 "yes"
             } else {
@@ -1210,10 +1213,22 @@ pub(crate) mod tests {
     /// [`Features::MULTI_DRAW_INDIRECT`] and [`Features::DRAW_INDIRECT_COUNT`]
     /// with `ExecuteIndirect` for a *draw* — which is what moved the derived
     /// path off the per-batch floor and onto
-    /// [`GeometryPath::IndirectCount`], asserted here so the move cannot happen
-    /// unnoticed in either direction — and
+    /// [`GeometryPath::IndirectCount`] — and
     /// [`Features::TIMELINE_SEMAPHORE`] with `CreateFence` handed out as a seam
     /// semaphore and consumed by `ID3D12CommandQueue::Wait` and `Signal`.
+    ///
+    /// **The derived path is checked against this adapter's own features rather
+    /// than pinned to one value**, because there are now two answers a truthful
+    /// D3D12 adapter can give: [`GeometryPath::MeshShader`] once
+    /// `crate::adapter`'s `features_of` reports [`Features::MESH_SHADER`] off
+    /// `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier`, and
+    /// [`GeometryPath::IndirectCount`] below that tier or below SM6.6. The
+    /// falsifying edit is the same either way — a flag this crate stops
+    /// reporting, or a selector that stops reading it — and it is caught here
+    /// without the assertion having to guess which machine it is running on.
+    /// The mesh flags themselves are not in the earned list above, because
+    /// unlike the five that are they are a genuine device measurement rather
+    /// than something every D3D12 device has.
     ///
     /// That last one was the only member of [`Features::GPU_DRIVEN`] still
     /// waiting on a call, so what this test now says is that **the whole bundle
@@ -1250,10 +1265,33 @@ pub(crate) mod tests {
                 missing.difference(Features::DESCRIPTOR_INDEXING).is_empty(),
                 "a GPU-driven flag with a call behind it went missing: {missing:?} on {line}"
             );
+            // The path is *derived*, so what is asserted is the derivation and
+            // not one answer: `MeshShader` on an adapter reporting the mesh
+            // stage, `IndirectCount` on one that does not. Both arms are live —
+            // WARP measures `TIER_1` and a device below it or below SM6.6 does
+            // not — and pinning either answer alone would go red on the other
+            // machine while telling nobody the rule had broken.
+            let expected = if record.info.caps.features.contains(Features::MESH_SHADER) {
+                GeometryPath::MeshShader
+            } else {
+                GeometryPath::IndirectCount
+            };
             assert_eq!(
                 record.info.caps.geometry_path(),
-                GeometryPath::IndirectCount,
-                "the derived geometry path moved; the crate docs say what selects it: {line}"
+                expected,
+                "the derived geometry path is not what this adapter's features select; the crate \
+                 docs say what selects it: {line}"
+            );
+            // The two mesh flags are one `MeshShaderTier` measurement on this
+            // backend, so an adapter carrying one and not the other is
+            // `features_of` having grown a second rule rather than a device
+            // answering two questions. Asserted because the derived path above
+            // reads only the first of them, so a lost `TASK_SHADER` would leave
+            // every other assertion here green.
+            assert_eq!(
+                record.info.caps.features.contains(Features::MESH_SHADER),
+                record.info.caps.features.contains(Features::TASK_SHADER),
+                "D3D12 gates both stages on one MeshShaderTier, so these cannot disagree: {line}"
             );
             // The ceiling has to move with the flag, or a caller reading it
             // would cap every indirect-count call at one draw while the backend

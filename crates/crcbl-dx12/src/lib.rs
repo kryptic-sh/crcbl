@@ -146,31 +146,34 @@
 //! removal reason still answers, because that one is a vtable call on a device
 //! this crate already holds and needs nothing installed.
 //!
-//! # Every adapter now derives `IndirectCount`, and that is *this backend* speaking
+//! # A mesh-capable adapter derives `MeshShader`, and that is *this backend* speaking
 //!
 //! [`GeometryPath`](crcbl_hal::GeometryPath) is derived from
 //! [`Features`](crcbl_hal::Features) precisely so a backend cannot claim a path
-//! it has not earned. The derived path is
-//! [`IndirectCount`](crcbl_hal::GeometryPath::IndirectCount) for every adapter
-//! since the draw slice: `ExecuteIndirect` takes a **count buffer** as an
-//! ordinary parameter, so
-//! [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) has a call
-//! behind it here where `crcbl-mtl` had to withdraw the same flag — Metal has no
-//! count-from-memory execution at all. It is not
-//! [`MeshShader`](crcbl_hal::GeometryPath::MeshShader), and that is now a
-//! **reporting** gap rather than a missing call: `create_mesh_pipeline` packs
-//! the `D3D12_PIPELINE_STATE_STREAM_DESC` an amplification and mesh stage need
-//! — see `crcbl_dx12::stream` for the packing, which is hand-written because
-//! `windows-rs` ships no `CD3DX12_PIPELINE_STATE_STREAM` — and the encoder
-//! records `DispatchMesh` and an `ExecuteIndirect` of `DISPATCH_MESH`. What has
-//! *not* happened is `crcbl_dx12::adapter` reading
-//! `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` and reporting
-//! [`MESH_SHADER`](crcbl_hal::Features::MESH_SHADER), because that flag moves
-//! **every** D3D12 adapter onto the mesh path at once and re-keys every golden
-//! image `crcbl-render` holds against its
-//! [`GeometryPath`](crcbl_hal::GeometryPath). That is a change with a golden
-//! re-bless in it, deliberately not riding along with the implementation, and
-//! `docs/backlog.md` carries it.
+//! it has not earned, and this crate has now earned both of the top two arms.
+//!
+//! [`IndirectCount`](crcbl_hal::GeometryPath::IndirectCount) came with the draw
+//! slice: `ExecuteIndirect` takes a **count buffer** as an ordinary parameter,
+//! so [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) has a
+//! call behind it here where `crcbl-mtl` had to withdraw the same flag — Metal
+//! has no count-from-memory execution at all.
+//!
+//! [`MeshShader`](crcbl_hal::GeometryPath::MeshShader) came with the mesh slice
+//! and the reporting one behind it: `create_mesh_pipeline` packs the
+//! `D3D12_PIPELINE_STATE_STREAM_DESC` an amplification and mesh stage need — see
+//! `crcbl_dx12::stream` for the packing, which is hand-written because
+//! `windows-rs` ships no `CD3DX12_PIPELINE_STATE_STREAM` — the encoder records
+//! `DispatchMesh` and an `ExecuteIndirect` of `DISPATCH_MESH`, and
+//! `crcbl_dx12::adapter` reads
+//! `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` beside the shader model
+//! and reports [`MESH_SHADER`](crcbl_hal::Features::MESH_SHADER) and
+//! [`TASK_SHADER`](crcbl_hal::Features::TASK_SHADER) off the pair. So the
+//! derived path is `MeshShader` on any adapter measuring `TIER_1` at SM6.6,
+//! which WARP does, and `IndirectCount` on the rest. What holds the two arms to
+//! one picture is `crates/crcbl/tests/render_e2e.rs`'s
+//! `the_cube_scene_draws_the_same_frame_on_every_geometry_path`, which opens one
+//! adapter twice — once with the mesh-stage features and once with them
+//! subtracted — and requires the frames to be byte-identical.
 //!
 //! **Nothing in [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) is waiting on a
 //! call any more.** [`COMPUTE`](crcbl_hal::Features::COMPUTE),
