@@ -1344,8 +1344,9 @@ closed" is not reachable with the hardware this project has.**
 
 Sorting the remaining rows by what actually stands in the way:
 
-**Ordinary work — 8 rows.** dx12's `PushConstants` (now unblocked: the committed
-shader exists and its DXIL slot is measured at `b0`), Metal's `PushConstants`,
+**Ordinary work — 10 rows** (8, plus dx12's two mesh rows once the probe settled
+them; see below). dx12's `PushConstants` (now unblocked: the committed shader
+exists and its DXIL slot is measured at `b0`), Metal's `PushConstants`,
 `DrawIndirectCount`, `BindlessDescriptorArray`, `OcclusionQuery` and
 `TimelineWaitBeforeSignal`, WebGPU's `StorageImageBinding` and `TimestampQuery`.
 These need slices, and the slices are planned.
@@ -1357,11 +1358,12 @@ built there at all. Metal's `MeshShading` and `TaskShaderStage`: the runner is
 `Apple Paravirtual device`, and `wgpu-hal`'s own gate excludes a device whose
 name says virtual. These can be _implemented_ and can never be _proved_ here.
 
-**Unknown, and cheap to settle — 2 rows.** dx12's `MeshShading` and
-`TaskShaderStage`. `crcbl-dx12` never calls `CheckFeatureSupport` for
-`OPTIONS7`, so it reports no mesh support **by construction rather than by
-measurement**, and nobody knows what WARP answers. A probe-and-log slice settles
-it the way the Metal counter probe did.
+**~~Unknown~~ — settled, and favourably.** A probe now runs on the WARP job and
+answers: **`MeshShaderTier = TIER_1`**, shader model 6.6 offered (6.8 by
+descending probe), `ResourceBindingTier = 3`. So dx12's `MeshShading` and
+`TaskShaderStage` are **ordinary work and provable on this CI** — they move into
+the eight above, making it ten. The committed `ms_6_6` DXIL will load. Nothing
+in the blocker list is unknown any more.
 
 **Awaiting a decision already raised — 3 rows.** dx12's fills, below.
 
