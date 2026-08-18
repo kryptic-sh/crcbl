@@ -947,6 +947,19 @@ mod tests {
         ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation, PipelineLayoutDesc,
         QueueKind, Rect2d, RenderPassDesc, SampleType, SamplerDesc, StoreOp,
     };
+    // Only the bindless probe hand-encodes a compute dispatch rather than going
+    // through the seam, because nothing in this backend can build a pipeline
+    // that reads an argument buffer — see
+    // [`a_kernel_reads_four_buffers_through_an_unbounded_argument_buffer_array`].
+    // Ungated, these would fail `cargo clippy -p crcbl-mtl` without the feature
+    // on unused imports, in a configuration every developer can run.
+    #[cfg(feature = "mtl-e2e")]
+    use objc2_foundation::NSString;
+    #[cfg(feature = "mtl-e2e")]
+    use objc2_metal::{
+        MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder as _, MTLComputePipelineState,
+        MTLDevice, MTLGPUAddress, MTLLibrary, MTLResource, MTLResourceUsage, MTLSize,
+    };
 
     use crate::MetalInstance;
     use crate::instance::tests::{desc as device_desc, open as open_instance};
@@ -1969,5 +1982,454 @@ mod tests {
         device.destroy_buffer(buffer);
         device.destroy_pipeline_layout(pipeline_layout);
         device.destroy_bind_group_layout(set);
+    }
+
+    // --- the bindless probe -------------------------------------------------
+    //
+    // A measurement, not a feature. Everything below is `#[cfg(mtl-e2e)]`d
+    // because it makes the GPU execute a kernel, and none of it is reachable
+    // from the seam: `crcbl-shaders` emits no `ParameterBlock`, so there is no
+    // pipeline this backend could build that would read an argument buffer.
+
+    /// The MSL for an unbounded array of buffers, **verbatim from the pinned
+    /// Slang** — nothing here was written by hand.
+    ///
+    /// Regenerate it with the compiler `crcbl-shaders` pins, from this source:
+    ///
+    /// ```slang
+    /// struct Sources { StructuredBuffer<uint> items[]; };
+    /// ParameterBlock<Sources> sources;
+    /// RWStructuredBuffer<uint> destination;
+    /// [shader("compute")] [numthreads(64,1,1)]
+    /// void computeMain(uint3 group: SV_GroupID, uint thread: SV_GroupIndex) {
+    ///     if (thread >= 4) return;
+    ///     uint source = group.x;
+    ///     if (source >= 4) return;
+    ///     destination[source * 4 + thread] = sources.items[source][thread];
+    /// }
+    /// ```
+    ///
+    /// as `slangc -target metal -line-directive-mode none <source>`. The
+    /// `-line-directive-mode none` is the one departure from
+    /// `crates/crcbl-shaders/tools/compile-shaders.sh`, and it is not cosmetic:
+    /// Slang copies the path it was *given* into the `#line` directives of its
+    /// Metal output, and this probe has no committed `.slang` file for such a
+    /// path to name. The directives change no token the Metal front end
+    /// compiles.
+    ///
+    /// **`uint device* items_0[]` is the whole question.** It is a flexible
+    /// array member of device pointers inside a `constant`-addressed argument
+    /// struct: the argument buffer carries no length, so the kernel indexes it
+    /// with whatever `SV_GroupID` supplies. Every other MSL artifact this
+    /// engine ships declares plain per-stage arguments instead, which is the
+    /// reason this module's header gives for binding flat argument tables.
+    #[cfg(feature = "mtl-e2e")]
+    const BINDLESS_MSL: &str = r#"#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+struct Sources_default_0
+{
+    uint device*  items_0[];
+};
+
+struct KernelContext_0
+{
+    uint device* destination_0;
+    Sources_default_0 constant* sources_0;
+};
+
+[[kernel]] void computeMain(uint3 sv_groupthreadid_0 [[thread_position_in_threadgroup]], uint3 group_0 [[threadgroup_position_in_grid]], uint device* destination_1 [[buffer(1)]], Sources_default_0 constant* sources_1 [[buffer(0)]])
+{
+    thread KernelContext_0 kernelContext_0;
+    (&kernelContext_0)->destination_0 = destination_1;
+    (&kernelContext_0)->sources_0 = sources_1;
+    uint sv_groupindex_0 = (sv_groupthreadid_0[int(2)] + sv_groupthreadid_0[int(1)]) * 64U + sv_groupthreadid_0[int(0)];
+    if(sv_groupindex_0 >= 4U)
+    {
+        return;
+    }
+    uint source_0 = group_0.x;
+    if(source_0 >= 4U)
+    {
+        return;
+    }
+    *((&kernelContext_0)->destination_0+(source_0 * 4U + sv_groupindex_0)) = (&kernelContext_0)->sources_0->items_0[source_0][sv_groupindex_0];
+    return;
+}
+
+"#;
+
+    /// Source buffers the probe's argument buffer points at. Four, because
+    /// [`BINDLESS_MSL`]'s `if(source_0 >= 4U)` returns above that.
+    #[cfg(feature = "mtl-e2e")]
+    const BINDLESS_SOURCES: u32 = 4;
+
+    /// Words each source buffer holds, and words each threadgroup copies.
+    /// Four, because [`BINDLESS_MSL`]'s `if(sv_groupindex_0 >= 4U)` returns
+    /// above that.
+    #[cfg(feature = "mtl-e2e")]
+    const BINDLESS_WORDS: u32 = 4;
+
+    /// Threads per threadgroup, which is [`BINDLESS_MSL`]'s `[numthreads]` and
+    /// therefore not free to differ: Metal derives nothing about thread counts
+    /// from a `[[kernel]]`, so a dispatch that disagreed with the source would
+    /// simply run the wrong shape.
+    #[cfg(feature = "mtl-e2e")]
+    const BINDLESS_THREADS: u32 = 64;
+
+    /// What the probe's destination buffer holds before the dispatch, so a
+    /// dispatch that writes *nothing* fails instead of passing.
+    ///
+    /// Chosen to be a value the kernel cannot produce: [`bindless_word`] fixes
+    /// the top half of every word it makes, and this does not match it.
+    #[cfg(feature = "mtl-e2e")]
+    const BINDLESS_POISON: u32 = 0xDEAD_BEEF;
+
+    /// Bytes in the `uint` [`BINDLESS_MSL`] reads and writes.
+    #[cfg(feature = "mtl-e2e")]
+    const BINDLESS_WORD_BYTES: u64 = size_of::<u32>() as u64;
+
+    /// Bytes in one entry of the argument buffer, which is one device address.
+    #[cfg(feature = "mtl-e2e")]
+    const BINDLESS_ADDRESS_BYTES: u64 = size_of::<MTLGPUAddress>() as u64;
+
+    /// The word source buffer `source` holds at index `word`.
+    ///
+    /// Distinct per buffer **and** per index, never zero and never
+    /// [`BINDLESS_POISON`] — so a dispatch that read the right buffer at the
+    /// wrong index, the wrong buffer at the right index, an unwritten
+    /// allocation, or nothing at all cannot come back equal to what the
+    /// assertion expects.
+    #[cfg(feature = "mtl-e2e")]
+    fn bindless_word(source: u32, word: u32) -> u32 {
+        0x00BD_0000 | (source << 8) | word
+    }
+
+    /// **Whether this device will read four separate buffers through one
+    /// argument buffer holding an unbounded array of device pointers.**
+    ///
+    /// # This is a measurement and moves nothing
+    ///
+    /// This module's header takes flat argument tables over argument buffers,
+    /// and [`MetalDevice::create_bind_group_impl`] refuses
+    /// [`BindGroupDesc::variable_count`] because "this backend binds flat
+    /// argument tables". Both say the argument-buffer road becomes the right
+    /// one on the day `crcbl-shaders` emits `ParameterBlock`-shaped MSL — and
+    /// that day is what
+    /// [`Capability::BindlessDescriptorArray`](crcbl_hal::Capability::BindlessDescriptorArray)
+    /// is blocked on. Nothing here had ever asked the device whether the shape
+    /// is legal at all.
+    ///
+    /// So this is `crcbl_mtl::device`'s
+    /// `an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`
+    /// applied to bindless: prove the hardware path runs *before* committing a
+    /// design that rests on it. **It changes no capability row, reports no
+    /// feature, and nothing in this crate calls what it exercises.**
+    ///
+    /// # The argument buffer is a table of `gpuAddress` values
+    ///
+    /// [`BINDLESS_MSL`]'s `Sources_default_0` is a flexible array member of
+    /// `uint device*`, which is to say sixty-four-bit device addresses and
+    /// nothing else — no `[[id(n)]]`, no textures, no samplers. That is the
+    /// Metal 3 argument-buffer layout, and the CPU writes it by storing
+    /// [`MTLBuffer::gpuAddress`] values into an ordinary buffer.
+    ///
+    /// **`MTLArgumentEncoder` is not an alternative here**, which is why the
+    /// simpler-looking call is also the only one: `newArgumentEncoderWithBufferIndex:`
+    /// encodes the MSL 2.x `[[id(n)]]` layout, and it derives a stride and a
+    /// size from the declared struct — a flexible array member declares
+    /// neither. The addresses are read back and asserted non-zero before they
+    /// are stored, so a device that answers nothing to `gpuAddress` is reported
+    /// as that rather than as a kernel reading garbage.
+    ///
+    /// # Residency is explicit, and that is the pairing being tested
+    ///
+    /// Metal cannot see through those raw addresses to the buffers behind them,
+    /// so the sources are not automatically resident the way a directly bound
+    /// buffer is — this module's header states that consequence and this is the
+    /// call it names. Every source goes through `useResource:usage:` with
+    /// [`MTLResourceUsage::Read`] before the dispatch. Omitting it is the
+    /// classic way a bindless dispatch reads garbage or page-faults, so its
+    /// presence is part of what "the device can do this" means.
+    ///
+    /// # What turns it red, and how that was confirmed
+    ///
+    /// The assertion is on **values**, never on the absence of an error.
+    ///
+    /// * The destination is primed with [`BINDLESS_POISON`] before the
+    ///   dispatch, and the surviving-poison count is asserted before the
+    ///   comparison — so a dispatch that silently wrote nothing is reported as
+    ///   "wrote none of it", with the word count, rather than passing.
+    /// * [`bindless_word`] is distinct per buffer and per index, so a read that
+    ///   swapped the two, clamped to the first source, or returned zero lands
+    ///   on a value the comparison rejects.
+    /// * The command buffer's status is asserted rather than assumed, with
+    ///   [`crate::fault::describe`] printing the reason — a faulted submission
+    ///   arrives as a named failure, not as a readback of the poison pattern.
+    ///
+    /// **How that was confirmed, and how far the confirmation goes.** By
+    /// construction, not by execution: this was written on Linux, where the
+    /// crate compiles for `aarch64-apple-darwin` and runs nothing. What was
+    /// actually checked is that [`bindless_word`] and [`BINDLESS_POISON`]
+    /// share no value and that neither is zero, so the untouched destination,
+    /// the zeroed destination and the mis-indexed destination are each a
+    /// different vector from the expected one. The gate that says the code
+    /// compiles *was* watched fail and pass — a deliberate type error, then its
+    /// removal. **None of the three red paths has been observed going red on
+    /// hardware, because nothing in this repository can run them.**
+    ///
+    /// # If the device refuses
+    ///
+    /// That is a result and it is the one this probe is worth running for. A
+    /// refusal from `newLibraryWithSource:options:error:` or
+    /// `newComputePipelineStateWithFunction:error:` **prints Metal's own
+    /// `NSError` text and returns**, rather than failing.
+    ///
+    /// That is not a check wired to nothing, and the line is worth being exact
+    /// about. Nothing in this backend yet claims an unbounded argument-buffer
+    /// array works — `create_bind_group_impl` refuses `variable_count` and
+    /// `Capability::BindlessDescriptorArray` is `No` — so a refusal contradicts
+    /// no promise this crate makes; it is a fact about Metal that the probe was
+    /// written to go and collect, and failing the job to report it would be
+    /// reporting the answer as a defect. `adapter.rs`'s capability probes print
+    /// device facts the same way. **Everything past the front end is asserted
+    /// hard**, because once Metal has accepted the kernel a wrong readback is
+    /// this backend's own bug.
+    ///
+    /// The follow-up either way is to assert what the runner actually said —
+    /// which needs the text, and this is how the text is obtained.
+    ///
+    /// nextest captures a passing test's stdout, so read the addresses and the
+    /// destination words with `--success-output immediate`, which is what
+    /// `tests/run-mtl-e2e.sh` passes.
+    ///
+    /// **Needs a real GPU.** `cargo clippy --target aarch64-apple-darwin`
+    /// compiles this and runs none of it.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_kernel_reads_four_buffers_through_an_unbounded_argument_buffer_array() {
+        // `crate::device::tests::open_device`, not this module's, because this
+        // is the one test here that submits a command buffer: what that one
+        // returns asserts at teardown that Metal interposed its validation
+        // layer and that no submission ended in `MTLCommandBufferStatus::Error`.
+        let (_validated, device) = crate::device::tests::open_device();
+        let raw = &*device.inner.raw;
+
+        let name = raw.name().to_string();
+        assert!(
+            !name.is_empty(),
+            "MTLDevice::name came back empty, so this probe never reached a device"
+        );
+        println!("crcbl-mtl bindless: device={name:?}");
+
+        // Half of the question is whether the front end accepts the flexible
+        // array member at all. A refusal is an answer; see the doc comment.
+        let library =
+            match raw.newLibraryWithSource_options_error(&NSString::from_str(BINDLESS_MSL), None) {
+                Ok(library) => library,
+                Err(error) => {
+                    // Printed rather than asserted, and the distinction is what this
+                    // probe is for. A refusal here is a fact about Metal, not a
+                    // regression in this backend — nothing yet claims the shape
+                    // works, so failing would turn the job red to report an answer
+                    // the probe was written to go and get. `adapter.rs`'s
+                    // capability probes report device facts the same way. Every
+                    // assertion below stays hard: once the front end has accepted
+                    // the kernel, a wrong readback IS this backend's defect.
+                    println!(
+                        "crcbl-mtl bindless: newLibraryWithSource:options:error: REFUSED the \
+                     unbounded argument-buffer array — {error}"
+                    );
+                    return;
+                }
+            };
+        let function = library
+            .newFunctionWithName(&NSString::from_str("computeMain"))
+            .expect("BINDLESS_MSL declares a [[kernel]] named computeMain");
+        let pipeline = match raw.newComputePipelineStateWithFunction_error(&function) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                println!(
+                    "crcbl-mtl bindless: the front end compiled the kernel and \
+                     newComputePipelineStateWithFunction:error: REFUSED to specialise it — \
+                     {error}"
+                );
+                return;
+            }
+        };
+        let allowed = pipeline.maxTotalThreadsPerThreadgroup();
+        let wanted = to_ns(u64::from(BINDLESS_THREADS));
+        assert!(
+            allowed >= wanted,
+            "the kernel's maxTotalThreadsPerThreadgroup is {allowed}, below the {wanted} threads \
+             BINDLESS_MSL declares, so the dispatch below would raise rather than fail"
+        );
+
+        // What the kernel must land in the destination, in the order
+        // `destination[source * 4 + thread]` writes them.
+        let expected: Vec<u32> = (0..BINDLESS_SOURCES)
+            .flat_map(|source| (0..BINDLESS_WORDS).map(move |word| bindless_word(source, word)))
+            .collect();
+
+        // Shared and cached: the CPU writes all three allocations below and
+        // reads one of them back, which is what `MemoryLocation::HostReadback`
+        // maps to — and it goes through the same `conv` helper every `MTLBuffer`
+        // this backend allocates goes through.
+        let options = crate::conv::resource_options(MemoryLocation::HostReadback);
+        let source_bytes = u64::from(BINDLESS_WORDS) * BINDLESS_WORD_BYTES;
+        let sources: Vec<Retained<ProtocolObject<dyn MTLBuffer>>> = (0..BINDLESS_SOURCES)
+            .map(|source| {
+                let buffer = raw
+                    .newBufferWithLength_options(to_ns(source_bytes), options)
+                    .expect("a four-word shared buffer");
+                buffer.setLabel(Some(&NSString::from_str("crcbl-mtl bindless source")));
+                let words: Vec<u32> = (0..BINDLESS_WORDS)
+                    .map(|word| bindless_word(source, word))
+                    .collect();
+                // SAFETY: `contents` covers the `source_bytes` this buffer was
+                // just created with and `words` is exactly that many bytes; the
+                // allocation is `Shared`, so the pointer is CPU-writable; and
+                // no GPU work has been submitted against it yet.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        words.as_ptr(),
+                        buffer.contents().as_ptr().cast::<u32>(),
+                        words.len(),
+                    );
+                }
+                buffer
+            })
+            .collect();
+
+        // The argument buffer: `BINDLESS_SOURCES` device addresses and nothing
+        // else, which is what `Sources_default_0` declares.
+        let addresses: Vec<MTLGPUAddress> =
+            sources.iter().map(|source| source.gpuAddress()).collect();
+        assert!(
+            addresses.iter().all(|address| *address != 0),
+            "MTLBuffer::gpuAddress answered zero for one of the probe's source buffers, so the \
+             table would point the kernel at nothing: {addresses:#X?}"
+        );
+        println!("crcbl-mtl bindless: gpuAddress={addresses:#X?}");
+        let table = raw
+            .newBufferWithLength_options(
+                to_ns(u64::from(BINDLESS_SOURCES) * BINDLESS_ADDRESS_BYTES),
+                options,
+            )
+            .expect("an argument buffer of four device addresses");
+        table.setLabel(Some(&NSString::from_str(
+            "crcbl-mtl bindless argument buffer",
+        )));
+        // SAFETY: as above — `contents` covers the bytes this buffer was just
+        // created with, `addresses` is exactly that many, the allocation is
+        // `Shared`, and nothing has been submitted against it.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                addresses.as_ptr(),
+                table.contents().as_ptr().cast::<MTLGPUAddress>(),
+                addresses.len(),
+            );
+        }
+
+        // Primed with the poison, so "the dispatch wrote nothing" cannot reach
+        // the comparison looking like a pass. See the doc comment.
+        let destination = raw
+            .newBufferWithLength_options(to_ns(u64::from(BINDLESS_SOURCES) * source_bytes), options)
+            .expect("a sixteen-word shared buffer");
+        destination.setLabel(Some(&NSString::from_str("crcbl-mtl bindless destination")));
+        let poison = vec![BINDLESS_POISON; expected.len()];
+        // SAFETY: as above, for a buffer created with
+        // `BINDLESS_SOURCES * source_bytes` bytes — which is `expected.len()`
+        // words, because `expected` has one word per source per index.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                poison.as_ptr(),
+                destination.contents().as_ptr().cast::<u32>(),
+                poison.len(),
+            );
+        }
+
+        let command_buffer =
+            crate::fault::command_buffer(&device.inner.queue, "crcbl-mtl bindless")
+                .expect("MTLCommandQueue::commandBufferWithDescriptor: returned nil");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("MTLCommandBuffer::computeCommandEncoder returned nil");
+        encoder.setComputePipelineState(&pipeline);
+        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
+        // the offset nor the index, and because the buffer's contents must be
+        // of the type the shader declared. Both offsets are zero; both indices
+        // are the ones BINDLESS_MSL's entry point names — `[[buffer(0)]]` for
+        // `sources_1` and `[[buffer(1)]]` for `destination_1`; and both buffers
+        // are `Retained` locals held across the `waitUntilCompleted` below.
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(&table), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(&destination), 0, 1);
+        }
+        // The residency half, and it is not optional: the kernel reaches the
+        // sources through raw addresses, which Metal cannot follow.
+        for source in &sources {
+            encoder.useResource_usage(ProtocolObject::from_ref(&**source), MTLResourceUsage::Read);
+        }
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(
+            MTLSize {
+                width: to_ns(u64::from(BINDLESS_SOURCES)),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: to_ns(u64::from(BINDLESS_THREADS)),
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+
+        // Asserted rather than assumed: a faulted or hung submission must
+        // arrive naming its reason, not as a readback of the poison pattern.
+        let status = command_buffer.status();
+        assert_eq!(
+            status,
+            MTLCommandBufferStatus::Completed,
+            "the bindless probe's command buffer ended {status:?} rather than Completed: {}",
+            if status == MTLCommandBufferStatus::Error {
+                crate::fault::describe(&command_buffer)
+            } else {
+                "no NSError was recorded".to_string()
+            }
+        );
+
+        // SAFETY: `contents` covers the bytes `destination` was created with,
+        // `expected.len()` words is exactly that many, the allocation is
+        // `Shared`, and the submission that wrote it has completed — asserted
+        // immediately above rather than assumed.
+        let written = unsafe {
+            core::slice::from_raw_parts(
+                destination.contents().as_ptr().cast::<u32>(),
+                expected.len(),
+            )
+        }
+        .to_vec();
+        println!("crcbl-mtl bindless: destination={written:#X?}");
+
+        let surviving = written
+            .iter()
+            .filter(|word| **word == BINDLESS_POISON)
+            .count();
+        assert_eq!(
+            surviving,
+            0,
+            "the dispatch left {surviving} of the destination's {} words at the poison value, so \
+             it wrote less than the whole array — or none of it: {written:#X?}",
+            written.len()
+        );
+        assert_eq!(
+            written, expected,
+            "the kernel read the wrong words through the unbounded argument-buffer array"
+        );
     }
 }

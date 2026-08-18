@@ -263,6 +263,14 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLDevice",
   "MTLDrawable",
   "MTLEvent",
+  # `MTLBuffer::gpuAddress` and the `MTLGPUAddress` alias it returns, which is
+  # how a Metal 3 argument buffer is written: a table of 64-bit device addresses
+  # the CPU stores directly. `crcbl_mtl::binding`'s
+  # `a_kernel_reads_four_buffers_through_an_unbounded_argument_buffer_array`
+  # is the only caller, and it measures whether that shape works at all before
+  # any of it is designed against. The feature is `MTLGPUAddress = []` upstream
+  # — a bare type alias — so it adds nothing to the lockfile.
+  "MTLGPUAddress",
   "MTLIndirectCommandBuffer",
   "MTLIndirectCommandEncoder",
   "MTLLibrary",
