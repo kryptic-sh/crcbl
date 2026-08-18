@@ -4,7 +4,8 @@
 //! # What records, and what fails the encoder
 //!
 //! Barriers, buffer↔buffer, buffer↔image and image↔image copies, render passes
-//! with a real `ClearRenderTargetView`/`ClearDepthStencilView`, viewport,
+//! with a real `ClearRenderTargetView`/`ClearDepthStencilView` and a real
+//! `ResolveSubresource` behind a resolve attachment, viewport,
 //! scissor and stencil reference — plus pipelines, bind groups, index buffers,
 //! every draw the seam has (direct, indexed, indirect and indirect-count),
 //! dispatches both direct and indirect, and the query verbs — a timestamp
@@ -12,8 +13,8 @@
 //! `ResolveQueryData`. [`finish`](CommandEncoder::finish) closes the list and
 //! hands back a pooled [`CommandBufferHandle`] the device can submit.
 //!
-//! What still needs a slice — buffer fills, MSAA resolve attachments, mesh
-//! dispatch, push constants — **fails the encoder** rather than
+//! What still needs a slice — buffer fills, mesh dispatch, push constants —
+//! **fails the encoder** rather than
 //! recording nothing, so `finish` returns the refusal instead of a command
 //! buffer that submits and draws nothing. That is `crcbl-mtl`'s rule in its
 //! command slice, and it is the failure
@@ -22,7 +23,9 @@
 //!
 //! The indirect path's arithmetic — offsets, strides, spans and the
 //! index-buffer view's size — lives in [`crate::draw`], which holds no `windows`
-//! type and is therefore the one part of it a non-Windows host can test. The
+//! type and is therefore the one part of it a non-Windows host can test. Which
+//! subresources a resolve attachment names lives in [`crate::resolve`] for the
+//! same reason. The
 //! query path's arithmetic lives in [`crate::query`] for the same reason, and it
 //! carries the one bound D3D12 will not report: `ResolveQueryData` writes the
 //! width its query type defines and takes no stride, so a destination sized at
@@ -93,14 +96,16 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_INDEX_BUFFER_VIEW, D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
     D3D12_RESOURCE_BARRIER, D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
     D3D12_RESOURCE_BARRIER_FLAG_NONE, D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-    D3D12_RESOURCE_BARRIER_TYPE_UAV, D3D12_RESOURCE_STATES, D3D12_RESOURCE_TRANSITION_BARRIER,
-    D3D12_RESOURCE_UAV_BARRIER, D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV,
-    D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION, D3D12_TEXTURE_COPY_LOCATION_0,
-    D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-    D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT,
-    ID3D12CommandAllocator, ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12QueryHeap,
-    ID3D12Resource,
+    D3D12_RESOURCE_BARRIER_TYPE_UAV, D3D12_RESOURCE_STATE_RENDER_TARGET,
+    D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATES,
+    D3D12_RESOURCE_TRANSITION_BARRIER, D3D12_RESOURCE_UAV_BARRIER, D3D12_ROOT_PARAMETER_TYPE_CBV,
+    D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION,
+    D3D12_TEXTURE_COPY_LOCATION_0, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+    D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT,
+    D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT, ID3D12CommandAllocator,
+    ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12QueryHeap, ID3D12Resource,
 };
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::core::Interface;
 
 use crate::conv;
@@ -110,7 +115,7 @@ use crate::device::{
 };
 use crate::draw::{IndirectKind, check_count, plan_index_binding, plan_indirect};
 use crate::instance::not_yet;
-use crate::query;
+use crate::{query, resolve};
 
 /// A batch of resource-state transitions, and the references they borrowed.
 ///
@@ -186,6 +191,30 @@ impl Drop for Transitions {
     }
 }
 
+/// One colour attachment's MSAA resolve, held from `begin_render_pass` until
+/// the pass ends.
+///
+/// The pass is where the seam says a resolve is asked for and the only place the
+/// two views are named; the calls belong after the pass's own commands, so what
+/// [`begin_render_pass`](CommandEncoder::begin_render_pass) can do is resolve
+/// the handles, refuse a pairing D3D12 has no call for, and put the rest here.
+///
+/// Both resources are also in [`Dx12CommandEncoder::retained`], which is what
+/// keeps them alive for the submission; these are the references the calls
+/// themselves name.
+#[derive(Debug)]
+struct PendingResolve {
+    /// The multisampled attachment, read from.
+    source: ID3D12Resource,
+    /// The single-sampled resolve target, written to.
+    target: ID3D12Resource,
+    /// The format both resources carry — [`crate::resolve`] refuses a pair that
+    /// does not agree on one, so there is a single answer to give here.
+    format: DXGI_FORMAT,
+    /// Source and destination subresource index, one pair per array layer.
+    subresources: Vec<(u32, u32)>,
+}
+
 /// One `CopyTextureRegion` a buffer↔image copy expands into.
 ///
 /// A copy of several array layers is several calls, because a D3D12 texture
@@ -248,6 +277,10 @@ pub(crate) struct Dx12CommandEncoder {
     index_buffer: bool,
     in_render_pass: bool,
     in_compute_pass: bool,
+    /// The resolves the open render pass asked for, emptied by
+    /// [`end_render_pass`](CommandEncoder::end_render_pass) as it records them.
+    /// See [`PendingResolve`].
+    resolves: Vec<PendingResolve>,
 }
 
 impl core::fmt::Debug for Dx12CommandEncoder {
@@ -281,6 +314,7 @@ impl Dx12CommandEncoder {
             index_buffer: false,
             in_render_pass: false,
             in_compute_pass: false,
+            resolves: Vec::new(),
         };
         // The queue check comes first and is the one failure here that is a
         // caller bug rather than a driver refusal — a queue from another device
@@ -510,6 +544,98 @@ impl Dx12CommandEncoder {
             }
         }
         Some(transitions)
+    }
+
+    /// Records the `ResolveSubresource` calls the closing pass asked for, with
+    /// the state excursion each one needs around it.
+    ///
+    /// # Who owns the resolve target's resource state
+    ///
+    /// **This seam's graph owns resource states and this backend tracks none of
+    /// them**: a transition is a caller's command, and between two of them the
+    /// backend knows only what the seam obliges. `wgpu-hal`'s dx12 backend does
+    /// the same three steps here and its own comment admits it *assumes* both
+    /// resources are in `RENDER_TARGET`.
+    ///
+    /// The assumption is the seam's rule rather than a guess:
+    /// [`ColorAttachment::view`](crcbl_hal::ColorAttachment::view) must already
+    /// be in [`ResourceState::ColorAttachment`](crcbl_hal::ResourceState::ColorAttachment),
+    /// and `crcbl-vk` reads the resolve view the same way — it names
+    /// `COLOR_ATTACHMENT_OPTIMAL` as the resolve image's layout, which is the
+    /// Vulkan spelling of the same requirement on the same handle.
+    ///
+    /// **The excursion is the encoder's business, not the caller's**, because it
+    /// is closed: both subresources leave `RENDER_TARGET`, are resolved, and are
+    /// put back before the encoder records anything else. Every barrier the
+    /// caller writes around the pass is true before this runs and true after, so
+    /// there is nothing here for a graph to have asked for. The alternative
+    /// would be `ResourceState::ResolveSource` and `ResolveDest` in the seam's
+    /// enum for every caller to name — a pair of D3D12 words that Vulkan and
+    /// Metal have no counterpart for, since both resolve inside the pass, and
+    /// which a caller omitting them would be told about by a debug-layer message
+    /// on one backend rather than by an error anywhere.
+    fn record_resolves(&mut self) {
+        let resolves = core::mem::take(&mut self.resolves);
+        // `list()` rather than `self.list`: a pass that failed records no
+        // resolve, exactly as it records no draw.
+        if resolves.is_empty() || self.list().is_none() {
+            return;
+        }
+        let mut out = Transitions::new();
+        let mut back = Transitions::new();
+        for resolve in &resolves {
+            for &(source, target) in &resolve.subresources {
+                out.push(
+                    &resolve.source,
+                    source,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
+                );
+                out.push(
+                    &resolve.target,
+                    target,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    D3D12_RESOURCE_STATE_RESOLVE_DEST,
+                );
+                back.push(
+                    &resolve.source,
+                    source,
+                    D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET,
+                );
+                back.push(
+                    &resolve.target,
+                    target,
+                    D3D12_RESOURCE_STATE_RESOLVE_DEST,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET,
+                );
+            }
+        }
+        // One batch rather than a barrier per resolve: a `ResourceBarrier` is a
+        // synchronisation point, and every transition here is independent of
+        // every other.
+        self.barrier(&out);
+        let Some(list) = self.list() else { return };
+        for resolve in &resolves {
+            for &(source, target) in &resolve.subresources {
+                // SAFETY: both resources are live, are retained by this encoder
+                // for the submission's length, and are in the states the batch
+                // above put them in. `crate::resolve::plan` held the two views to
+                // one format — which is what `resolve.format` names — to the same
+                // resource type, extent and layer count, and produced each index
+                // pair from the images' own geometry.
+                unsafe {
+                    list.ResolveSubresource(
+                        &resolve.target,
+                        target,
+                        &resolve.source,
+                        source,
+                        resolve.format,
+                    );
+                }
+            }
+        }
+        self.barrier(&back);
     }
 }
 
@@ -963,8 +1089,8 @@ struct ImageCopyPlan {
 /// Sample count is the same kind of rule. A copy between resources of differing
 /// sample counts is `ResolveSubresource`, a different call and a different
 /// capability — [`MsaaResolveAttachment`](crcbl_hal::Capability::MsaaResolveAttachment),
-/// which this backend still refuses — so a mismatch here is refused rather than
-/// resolved.
+/// which a render pass's resolve view records and [`crate::resolve`] plans — so
+/// a mismatch here is refused rather than resolved.
 ///
 /// # The same resource on both sides
 ///
@@ -1339,25 +1465,65 @@ impl CommandEncoder for Dx12CommandEncoder {
             }
         };
 
+        // A pass records its own resolves and nothing carries over from the last
+        // one, including a pass that failed partway through this loop.
+        self.resolves.clear();
         let mut colors: Vec<AttachmentRef> = Vec::with_capacity(desc.color_attachments.len());
-        for attachment in desc.color_attachments {
-            if attachment.resolve.is_some() {
-                // An MSAA resolve is `ResolveSubresource` after the pass, not a
-                // field of the attachment — and running it needs the resolve
-                // target's state transitioned, which the graph did not ask for.
-                self.refuse("MSAA resolve attachments (the DX12 pipeline slice)");
-                return;
-            }
-            match self.device.color_attachment(attachment.view) {
-                Ok(reference) => {
-                    self.retain(&reference.image);
-                    colors.push(reference);
-                }
+        // Every subresource the pass's resolve barriers will name, tagged with
+        // the attachment that asked for it. See `resolve::check_unique`, which
+        // is the one rule no single attachment can be checked against.
+        let mut touched: Vec<(usize, usize, u32)> = Vec::new();
+        for (index, attachment) in desc.color_attachments.iter().enumerate() {
+            let reference = match self.device.color_attachment(attachment.view) {
+                Ok(reference) => reference,
                 Err(error) => {
                     self.fail(error);
                     return;
                 }
+            };
+            self.retain(&reference.image);
+            if let Some(view) = attachment.resolve {
+                // An MSAA resolve is `ResolveSubresource` after the pass rather
+                // than a field of the attachment, so all that happens here is
+                // that the pairing is settled while both views are still named.
+                // `end_render_pass` records it.
+                let target = match self.device.color_attachment(view) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        self.fail(error);
+                        return;
+                    }
+                };
+                self.retain(&target.image);
+                let subresources = match resolve::plan(index, &reference.attached, &target.attached)
+                {
+                    Ok(subresources) => subresources,
+                    Err(error) => {
+                        self.fail(error);
+                        return;
+                    }
+                };
+                // The interface pointers are identities to compare and are never
+                // dereferenced, which is what lets the rule live in a module
+                // that compiles anywhere.
+                let source_id = reference.image.as_raw() as usize;
+                let target_id = target.image.as_raw() as usize;
+                for &(from, to) in &subresources {
+                    touched.push((index, source_id, from));
+                    touched.push((index, target_id, to));
+                }
+                self.resolves.push(PendingResolve {
+                    source: reference.image.clone(),
+                    target: target.image,
+                    format: conv::dxgi_format(target.attached.format),
+                    subresources,
+                });
             }
+            colors.push(reference);
+        }
+        if let Err(error) = resolve::check_unique(&touched) {
+            self.fail(error);
+            return;
         }
         let depth_stencil = match desc.depth_stencil_attachment {
             None => None,
@@ -1430,7 +1596,7 @@ impl CommandEncoder for Dx12CommandEncoder {
         }
         if let (Some(attachment), Some(reference)) = (desc.depth_stencil_attachment, &depth_stencil)
             && let Some(flags) = clear_flags(
-                reference.format,
+                reference.attached.format,
                 attachment.depth_load,
                 attachment.stencil_load,
             )
@@ -1491,6 +1657,9 @@ impl CommandEncoder for Dx12CommandEncoder {
         // SAFETY: `list` is live and recording. Unbinding takes a count of zero
         // and three null pointers, which is what `None` compiles to here.
         unsafe { list.OMSetRenderTargets(0, None, false, None) };
+        // After the unbind, so that nothing is transitioning a subresource the
+        // output merger still holds a descriptor for.
+        self.record_resolves();
     }
 
     /// Sets the viewport, one to one.

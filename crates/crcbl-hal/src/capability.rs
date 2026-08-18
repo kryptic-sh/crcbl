@@ -813,15 +813,6 @@ pub const DIVERGENCES: &[Divergence] = &[
         kind: DivergenceKind::Declined,
         why: "no buffer fill at all on this backend; see the BufferFillZero entry",
     },
-    // --- render pass ---
-    Divergence {
-        capability: Capability::MsaaResolveAttachment,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Unwritten,
-        why: "the render-pass path binds render-target views directly and emits no \
-              ResolveSubresource, so there is nothing for a resolve view to attach to (the DX12 \
-              pipeline slice)",
-    },
     // --- draws ---
     Divergence {
         capability: Capability::DrawIndirectCount,
@@ -1704,11 +1695,6 @@ mod tests {
             Capability::BufferFillWord,
             BackendKind::Dx12,
             DivergenceKind::Declined,
-        ),
-        (
-            Capability::MsaaResolveAttachment,
-            BackendKind::Dx12,
-            DivergenceKind::Unwritten,
         ),
         (
             Capability::MeshShading,

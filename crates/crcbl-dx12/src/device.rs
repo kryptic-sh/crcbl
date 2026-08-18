@@ -121,6 +121,7 @@ use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_i
 use crate::pipeline::{self, ComputePipelineEntry, GraphicsPipelineEntry, PipelineLayoutEntry};
 use crate::present::{self, PresentWait};
 use crate::query;
+use crate::resolve;
 use crate::retire::RetireQueue;
 use crate::swapchain::{self, SwapchainEntry};
 use crate::sync;
@@ -225,11 +226,15 @@ impl ViewDescriptors {
 struct ViewEntry {
     owner: u64,
     descriptors: ViewDescriptors,
-    /// The image's format, which is also the view's — `create_image_view`
-    /// refuses a differing one. Kept so a render pass can ask whether a
-    /// depth-stencil attachment has a stencil plane to clear without resolving
-    /// the image handle it no longer has.
-    format: Format,
+    /// What this view's attachment descriptor addresses, computed once while
+    /// `create_image_view` still holds the image's geometry.
+    ///
+    /// Kept so a render pass can ask what the view covers without resolving the
+    /// image handle it was never given: the format, so a depth-stencil clear
+    /// knows whether there is a stencil plane, and the sample count, extent and
+    /// subresource indices, so a colour attachment's resolve view can be turned
+    /// into `ResolveSubresource` calls. See [`crate::resolve`].
+    attached: resolve::Attachment,
     /// Held so the resource cannot outlive its own descriptors. The seam already
     /// obliges a caller to destroy every view before its image, but a descriptor
     /// is a raw address into a freed resource if it does not, and a refcount is
@@ -568,29 +573,46 @@ pub(crate) struct ImageRef {
     pub(crate) samples: u32,
 }
 
+/// The extent of one mip level of an image, in texels.
+///
+/// A mip halves each *spatial* dimension and rounds up to one; an array's layer
+/// count is not a spatial dimension and does not change, which is the
+/// distinction `depth_or_layers` folds together and this has to unfold.
+///
+/// A free function rather than a method because [`create_image_view`] needs it
+/// while it holds an image *table entry* rather than an [`ImageRef`], and one
+/// halving that both callers read is the whole point.
+///
+/// [`create_image_view`]: crcbl_hal::Device::create_image_view
+fn mip_extent(extent: Extent3d, image_type: ImageType, mip: u32) -> (u32, u32, u32) {
+    let halve = |size: u32| (size >> mip.min(31)).max(1);
+    let depth = if matches!(image_type, ImageType::D3) {
+        halve(extent.depth_or_layers)
+    } else {
+        1
+    };
+    (halve(extent.width), halve(extent.height), depth)
+}
+
+/// D3D12's subresource index for a mip and array layer, in plane zero.
+///
+/// The plane a barrier names, and the only plane a colour format has. A copy
+/// that may name another goes through [`ImageRef::subresource_in_plane`]. Free
+/// for the reason [`mip_extent`] is.
+const fn subresource_index(mip: u32, layer: u32, mip_levels: u32) -> u32 {
+    mip + layer * mip_levels
+}
+
 impl ImageRef {
-    /// The extent of one mip level, in texels.
-    ///
-    /// A mip halves each *spatial* dimension and rounds up to one; an array's
-    /// layer count is not a spatial dimension and does not change, which is the
-    /// distinction `depth_or_layers` folds together and this has to unfold.
+    /// The extent of one mip level, in texels. See [`mip_extent`].
     pub(crate) fn mip_extent(&self, mip: u32) -> (u32, u32, u32) {
-        let halve = |size: u32| (size >> mip.min(31)).max(1);
-        let depth = if matches!(self.image_type, ImageType::D3) {
-            halve(self.extent.depth_or_layers)
-        } else {
-            1
-        };
-        (halve(self.extent.width), halve(self.extent.height), depth)
+        mip_extent(self.extent, self.image_type, mip)
     }
 
-    /// D3D12's subresource index for a mip and array layer, in plane zero.
-    ///
-    /// The plane a barrier names, and the only plane a colour format has. A copy
-    /// that may name another goes through
-    /// [`subresource_in_plane`](Self::subresource_in_plane).
+    /// D3D12's subresource index for a mip and array layer, in plane zero. See
+    /// [`subresource_index`].
     pub(crate) fn subresource(&self, mip: u32, layer: u32) -> u32 {
-        mip + layer * self.mip_levels
+        subresource_index(mip, layer, self.mip_levels)
     }
 
     /// D3D12's subresource index for a mip, array layer and plane.
@@ -691,12 +713,16 @@ pub(crate) struct BoundRoot {
     pub(crate) address: u64,
 }
 
-/// A render pass attachment: its descriptor, and the resource behind it.
+/// A render pass attachment: its descriptor, the resource behind it, and what
+/// the descriptor addresses.
+///
+/// The format lives in [`attached`](Self::attached) rather than beside it, so
+/// there is one copy of it and not two that can disagree.
 #[derive(Debug)]
 pub(crate) struct AttachmentRef {
     pub(crate) descriptor: D3D12_CPU_DESCRIPTOR_HANDLE,
     pub(crate) image: ID3D12Resource,
-    pub(crate) format: Format,
+    pub(crate) attached: resolve::Attachment,
 }
 
 impl DeviceInner {
@@ -889,14 +915,14 @@ impl DeviceInner {
 
     fn attachment(&self, view: ImageViewHandle, depth: bool) -> Result<AttachmentRef, HalError> {
         let mut state = self.state();
-        let (slot, image, format) = {
+        let (slot, image, attached) = {
             let entry = handle::lookup(&state.views, "image view", view, self.owner)?;
             let slot = if depth {
                 entry.descriptors.depth_stencil
             } else {
                 entry.descriptors.render_target
             };
-            (slot, entry.image.clone(), entry.format)
+            (slot, entry.image.clone(), entry.attached)
         };
         let Some(slot) = slot else {
             let usage = if depth {
@@ -905,14 +931,15 @@ impl DeviceInner {
                 "ImageUsage::COLOR_ATTACHMENT"
             };
             return Err(HalError::InvalidDescriptor(format!(
-                "this view of a {format:?} image has no attachment descriptor, because its image \
-                 was not created with {usage}"
+                "this view of a {:?} image has no attachment descriptor, because its image was \
+                 not created with {usage}",
+                attached.format
             )));
         };
         Ok(AttachmentRef {
             descriptor: state.descriptors.cpu_handle(slot),
             image,
-            format,
+            attached,
         })
     }
 
@@ -1947,11 +1974,14 @@ impl Device for Dx12Device {
             // describes — is refused by name at the call, which is what the
             // capability's own documentation says a `Yes` still does.
             Capability::DepthImageCopy => Support::Yes,
-            Capability::MsaaResolveAttachment => Support::No(
-                "the render-pass path binds render-target views directly and emits no \
-                 ResolveSubresource, so a resolve view has nothing to attach to (the DX12 pipeline \
-                 slice)",
-            ),
+            // `crate::command`'s `end_render_pass` records the
+            // `ResolveSubresource` a resolve view asks for, one call per array
+            // layer, and `crate::resolve` refuses by name every pairing the seam
+            // allows and D3D12 has no such call for — a format or extent
+            // mismatch, a volume, a destination that is itself multisampled.
+            // The capability asks whether the backend has an expression for the
+            // resolve at all, which is what those refusals leave intact.
+            Capability::MsaaResolveAttachment => Support::Yes,
             Capability::StencilReference => Support::Yes,
             Capability::DrawIndirectCount => gated(
                 Features::DRAW_INDIRECT_COUNT,
@@ -2562,13 +2592,14 @@ impl Device for Dx12Device {
         // Everything the view needs is copied out of the entry here, so the
         // borrow of the image table ends before the descriptor heaps — in the
         // same lock — are borrowed mutably below.
-        let (image, image_format, image_type, usage, levels, slices, samples) = {
+        let (image, image_format, image_type, usage, extent, levels, slices, samples) = {
             let entry = handle::lookup(&state.images, "image", desc.image, self.inner.owner)?;
             (
                 entry.raw.clone(),
                 entry.format,
                 entry.image_type,
                 entry.usage,
+                entry.extent,
                 entry.mip_levels,
                 entry.slices,
                 entry.samples,
@@ -2606,6 +2637,22 @@ impl Device for Dx12Device {
             ));
         }
         let built = validate::build_views(image_format, usage, desc, sub)?;
+
+        // What the attachment descriptors below address, worked out here because
+        // this is the last place the image's own geometry is in hand. A render
+        // target or depth stencil view covers exactly one mip — `Subresource`
+        // says so — so `base_mip` is the mip, and `attached_layers` is what
+        // decides how many array layers the descriptor reaches rather than how
+        // many the caller's range names.
+        let attached = resolve::Attachment {
+            format: image_format,
+            image_type,
+            samples,
+            subresource: subresource_index(sub.base_mip, sub.base_layer, levels),
+            layer_stride: levels,
+            layers: resolve::attached_layers(desc.view_type, sub.layer_count),
+            extent: mip_extent(extent, image_type, sub.base_mip),
+        };
 
         // Every slot is taken before any descriptor is written, so a heap that
         // will not grow leaves nothing half-created — and the ones already taken
@@ -2701,7 +2748,7 @@ impl Device for Dx12Device {
         let handle = state.views.insert(ViewEntry {
             owner: self.inner.owner.id,
             descriptors,
-            format: image_format,
+            attached,
             image,
         });
         Ok(handle::stamp(self.inner.owner, handle))

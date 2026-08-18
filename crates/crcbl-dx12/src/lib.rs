@@ -338,6 +338,13 @@ mod present;
 // nothing.
 #[cfg(any(target_os = "windows", test))]
 mod query;
+// Which subresources an MSAA resolve attachment names. Not Windows-only for the
+// reason `present` above is not — it holds no `windows` type — and that matters
+// here because `ResolveSubresource` returns `void`: an index wrong by one array
+// layer resolves the wrong slice, and the only report is a debug-layer message
+// on a machine that has the debug layer on.
+#[cfg(any(target_os = "windows", test))]
+mod resolve;
 #[cfg(target_os = "windows")]
 mod retire;
 // Where every binding of a pipeline layout lands among the root parameters,
