@@ -76,14 +76,26 @@ pub(crate) enum IndirectKind {
     Draw,
     /// `D3D12_DRAW_INDEXED_ARGUMENTS`.
     DrawIndexed,
+    /// `D3D12_DISPATCH_MESH_ARGUMENTS`, for
+    /// [`draw_mesh_tasks_indirect`](crcbl_hal::CommandEncoder::draw_mesh_tasks_indirect).
+    ///
+    /// The same three `u32`s a compute dispatch's arguments are and a **separate
+    /// kind all the same**: `D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH` and
+    /// `_DISPATCH` are different argument types, and a signature created with
+    /// the wrong one executes the wrong bind point — a compute dispatch of a
+    /// mesh pipeline's thread counts, which draws nothing and reports nothing.
+    /// Sharing the arm because the widths match would be the identical shape of
+    /// mistake `conv::query_types` exists to avoid.
+    DispatchMesh,
 }
 
 impl IndirectKind {
     /// Bytes one argument structure occupies, fixed by D3D12's own struct: three
-    /// `u32`s for a dispatch, four for a draw, five for an indexed draw.
+    /// `u32`s for a dispatch and for a mesh dispatch, four for a draw, five for
+    /// an indexed draw.
     pub(crate) const fn arguments(self) -> u64 {
         match self {
-            Self::Dispatch => 12,
+            Self::Dispatch | Self::DispatchMesh => 12,
             Self::Draw => 16,
             Self::DrawIndexed => 20,
         }
@@ -95,6 +107,7 @@ impl IndirectKind {
             Self::Dispatch => "dispatch_indirect",
             Self::Draw => "an indirect draw",
             Self::DrawIndexed => "an indexed indirect draw",
+            Self::DispatchMesh => "an indirect mesh draw",
         }
     }
 }
@@ -276,11 +289,10 @@ pub(crate) fn plan_index_binding(
 mod tests {
     use super::*;
 
-    /// The three argument widths are D3D12's own, and nothing else may decide
-    /// them.
+    /// The argument widths are D3D12's own, and nothing else may decide them.
     ///
-    /// **What turns it red.** Any of the three moving. They are the `ByteStride`
-    /// a command signature is created with and the span every bounds check below
+    /// **What turns it red.** Any of them moving. They are the `ByteStride` a
+    /// command signature is created with and the span every bounds check below
     /// is computed from, so one wrong number is a signature that reads every
     /// structure after the first from the wrong offset — which draws a plausible
     /// picture out of the wrong words rather than failing.
@@ -289,6 +301,16 @@ mod tests {
         assert_eq!(IndirectKind::Dispatch.arguments(), 12);
         assert_eq!(IndirectKind::Draw.arguments(), 16);
         assert_eq!(IndirectKind::DrawIndexed.arguments(), 20);
+        // `D3D12_DISPATCH_MESH_ARGUMENTS` is three thread-group counts, the same
+        // three words `D3D12_DISPATCH_ARGUMENTS` is — which is why the two are
+        // separate `IndirectKind`s rather than one: nothing about the width
+        // would ever tell them apart.
+        assert_eq!(IndirectKind::DispatchMesh.arguments(), 12);
+        assert_ne!(
+            IndirectKind::DispatchMesh,
+            IndirectKind::Dispatch,
+            "two argument types with one width still need two command signatures"
+        );
         // The same five words `draw_gen.slang` writes and every other backend
         // reads, which is what lets one compute pass feed all of them.
         assert_eq!(

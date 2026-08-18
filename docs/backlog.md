@@ -497,6 +497,51 @@ and the backend must not surface that cancellation through `take_error`.
 Worth writing down because the other four backends satisfy it by accident — they
 just drop a tracking entry — while WebGPU had to be told.
 
+### dx12 mesh shading: the calls exist, the flag does not
+
+`crcbl-dx12` now builds mesh pipelines and records both mesh draws — the
+subobject stream, `DispatchMesh`, and an `ExecuteIndirect` of `DISPATCH_MESH`.
+What is left is **reporting** `Features::MESH_SHADER` and `TASK_SHADER`, which
+is deliberately a separate change because it is not a one-line flag flip:
+
+- The read is `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` from
+  `crcbl_dx12::adapter`'s `features_of`. WARP measures `TIER_1`, so the software
+  adapter CI runs on does support it.
+- **The `FeatureQuery` impl for `D3D12_FEATURE_DATA_D3D12_OPTIONS7` is inside
+  `adapter.rs`'s `mod tests`**, while the four production impls sit above it. It
+  has to move up rather than be copied — a second impl of the trait for the same
+  type is a coherence error, so the compiler enforces this rather than it being
+  a preference.
+- Reporting the flag flips `GeometryPath::from_features` to
+  `GeometryPath::MeshShader` for **every** D3D12 adapter, which re-keys every
+  golden image keyed on `(GeometryPath, BindingModel, LightingPath)` and breaks
+  the `IndirectCount` assertion in `instance.rs`. So the change carries a golden
+  re-bless, which is exactly why it did not ride along with the implementation.
+
+Retiring the `MeshShading` and `TaskShaderStage` dx12 divergences happens there
+and not before: a row leaves on `Support::Yes`, and that answer is gated on the
+flag. Their `why` strings now say the calls exist and the flag does not, rather
+than claiming no stream is built.
+
+Also still true after this work: `crates/crcbl/tests/hal_seam_e2e.rs` maps both
+capabilities to `Exercise::Unexercised(NEEDS_MESH_ARTIFACTS)`, so even a
+reporting dx12 would not be _driven_ until the seam suite grows a mesh exercise.
+
+### The doc gate does not cover private items
+
+CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding
+`--document-private-items` to that same command fails with 104 diagnostic lines
+on the Linux target, measured today — 20 of them in `crcbl-webgpu/src/probe.rs`,
+then `crcbl-audio`'s `qoa.rs` with 3, and a long tail of one or two across
+`crcbl-vk`, `crcbl-render`, `crcbl-webgpu` and `crcbl-rand`.
+
+Not a regression and not currently a failure: these are private-item links and
+sections nothing has ever checked. Worth knowing before anyone proposes turning
+the flag on as a "small hardening" — it is a real cleanup, and the count is
+target-dependent besides, since `crcbl-dx12`'s Windows-gated modules document
+nothing on Linux and add their own diagnostics under
+`--target x86_64-pc-windows-msvc`.
+
 ### What is still declared but not driven
 
 The seam suite drives most of `Capability::ALL` with real GPU work; the tally it

@@ -44,12 +44,13 @@
 //!
 //! **Nothing in this crate is a stub that reports success** — a draw recorded
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
-//! rather than a command buffer that submits and draws nothing. Everything past
-//! the clear that no slice has written — buffer fills, mesh dispatch — refuses
-//! with
+//! rather than a command buffer that submits and draws nothing. What no slice
+//! has written refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
-//! yet" rather than "broken". A refusal that is *permanent* deliberately does
+//! yet" rather than "broken" — and that list is down to the buffer fills, which
+//! are a deliberate non-fix argued at `Dx12CommandEncoder`'s `fill_buffer`
+//! rather than a slice anybody owes. A refusal that is *permanent* deliberately does
 //! not read that way, and names the absence instead: a Wayland, XCB, AppKit or
 //! canvas surface names the backend that owns it, because D3D12 presents to an
 //! `HWND` and nothing else, and a buffer copy of a `D24UnormS8Uint` image's
@@ -156,9 +157,20 @@
 //! [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) has a call
 //! behind it here where `crcbl-mtl` had to withdraw the same flag — Metal has no
 //! count-from-memory execution at all. It is not
-//! [`MeshShader`](crcbl_hal::GeometryPath::MeshShader) because
-//! `create_mesh_pipeline` and `DispatchMesh` are still unwritten, which is a gap
-//! in this crate rather than in any adapter.
+//! [`MeshShader`](crcbl_hal::GeometryPath::MeshShader), and that is now a
+//! **reporting** gap rather than a missing call: `create_mesh_pipeline` packs
+//! the `D3D12_PIPELINE_STATE_STREAM_DESC` an amplification and mesh stage need
+//! — see `crcbl_dx12::stream` for the packing, which is hand-written because
+//! `windows-rs` ships no `CD3DX12_PIPELINE_STATE_STREAM` — and the encoder
+//! records `DispatchMesh` and an `ExecuteIndirect` of `DISPATCH_MESH`. What has
+//! *not* happened is `crcbl_dx12::adapter` reading
+//! `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` and reporting
+//! [`MESH_SHADER`](crcbl_hal::Features::MESH_SHADER), because that flag moves
+//! **every** D3D12 adapter onto the mesh path at once and re-keys every golden
+//! image `crcbl-render` holds against its
+//! [`GeometryPath`](crcbl_hal::GeometryPath). That is a change with a golden
+//! re-bless in it, deliberately not riding along with the implementation, and
+//! `docs/backlog.md` carries it.
 //!
 //! **Nothing in [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) is waiting on a
 //! call any more.** [`COMPUTE`](crcbl_hal::Features::COMPUTE),
@@ -361,6 +373,14 @@ mod retire;
 // was built with.
 #[cfg(any(target_os = "windows", test))]
 mod root;
+// Where each subobject of a pipeline state stream lands, in bytes. Not
+// Windows-only for the reason `present` below is not — it holds no `windows`
+// type — and that matters here as much as it does in `root`: a mesh pipeline is
+// packed by hand because `windows-rs` ships no `CD3DX12_PIPELINE_STATE_STREAM`,
+// and a subobject at the wrong offset is a stream the runtime reads a different
+// subobject out of, with nothing but a debug-layer message to say so.
+#[cfg(any(target_os = "windows", test))]
+mod stream;
 #[cfg(target_os = "windows")]
 mod swapchain;
 // What value a submission's semaphore wait and signal carry. Not Windows-only

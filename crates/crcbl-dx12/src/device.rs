@@ -97,14 +97,14 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMPARISON_FUNC_ALWAYS, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
     D3D12_FENCE_FLAG_NONE, D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_HEAP_FLAG_NONE,
     D3D12_HEAP_PROPERTIES, D3D12_INDIRECT_ARGUMENT_DESC, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
-    D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
-    D3D12_MEMORY_POOL_UNKNOWN, D3D12_QUERY_HEAP_DESC, D3D12_QUERY_TYPE, D3D12_RANGE,
-    D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER,
-    D3D12_ROOT_PARAMETER_TYPE, D3D12_SAMPLER_DESC, D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-    D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList,
-    ID3D12CommandQueue, ID3D12CommandSignature, ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence,
-    ID3D12GraphicsCommandList, ID3D12Object, ID3D12PipelineState, ID3D12QueryHeap, ID3D12Resource,
-    ID3D12RootSignature,
+    D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW,
+    D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, D3D12_MEMORY_POOL_UNKNOWN, D3D12_QUERY_HEAP_DESC,
+    D3D12_QUERY_TYPE, D3D12_RANGE, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC,
+    D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_ROOT_PARAMETER_TYPE, D3D12_SAMPLER_DESC,
+    D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12CreateDevice,
+    ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12CommandSignature,
+    ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Object,
+    ID3D12PipelineState, ID3D12QueryHeap, ID3D12Resource, ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
@@ -117,7 +117,7 @@ use crate::descriptor::{Descriptors, Kind, Slot};
 use crate::draw::IndirectKind;
 use crate::dxil::ShaderModuleEntry;
 use crate::handle::{self, Owned, Owner};
-use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id, not_yet};
+use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id};
 use crate::pipeline::{self, ComputePipelineEntry, GraphicsPipelineEntry, PipelineLayoutEntry};
 use crate::present::{self, PresentWait};
 use crate::query;
@@ -665,7 +665,9 @@ impl ImageRef {
 pub(crate) struct BoundPipeline {
     pub(crate) raw: ID3D12PipelineState,
     pub(crate) root_signature: ID3D12RootSignature,
-    pub(crate) topology: D3D_PRIMITIVE_TOPOLOGY,
+    /// `None` for a mesh pipeline; see
+    /// [`GraphicsPipelineEntry::topology`](crate::pipeline::GraphicsPipelineEntry::topology).
+    pub(crate) topology: Option<D3D_PRIMITIVE_TOPOLOGY>,
     pub(crate) stencil_reference: Option<u32>,
 }
 
@@ -1003,6 +1005,7 @@ impl DeviceInner {
                 IndirectKind::Dispatch => D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
                 IndirectKind::Draw => D3D12_INDIRECT_ARGUMENT_TYPE_DRAW,
                 IndirectKind::DrawIndexed => D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
+                IndirectKind::DispatchMesh => D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH,
             },
             ..Default::default()
         };
@@ -1979,6 +1982,13 @@ impl Device for Dx12Device {
         // One sentence for the three fills: they are three capabilities refused
         // at one site, and three paraphrases of one obstacle would read like
         // three obstacles.
+        // One sentence for both mesh rows, for the same reason: the amplification
+        // stage is not separately missing, it is behind the same unreported flag.
+        const NO_MESH_FLAG: &str = "the mesh and amplification stages are built — crcbl_dx12::pipeline packs the \
+             D3D12_PIPELINE_STATE_STREAM_DESC and the encoder records DispatchMesh — but this \
+             backend does not yet report Features::MESH_SHADER, because doing so moves every \
+             adapter onto GeometryPath::MeshShader and re-keys every golden image (the DX12 mesh \
+             reporting slice)";
         const NO_FILL: &str = "D3D12's fill is ClearUnorderedAccessViewUint, which takes a descriptor from a \
              shader-visible heap that crcbl_dx12::descriptor does not create. A deliberate \
              non-fix: crcbl-render zeroes its counters with a clear dispatch, which runs anywhere \
@@ -2018,13 +2028,21 @@ impl Device for Dx12Device {
             // An `ID3D12CommandSignature` is built per stride, so a padded one
             // is described rather than assumed away.
             Capability::IndirectArgumentPaddedStride => Support::Yes,
-            Capability::MeshShading => Support::No(
-                "D3D12 has the stages and the DXIL is committed, but this backend builds no \
-                 pipeline state stream for them (the DX12 mesh slice)",
-            ),
-            Capability::TaskShaderStage => Support::No(
-                "no mesh pipeline to put an amplification stage in front of (the DX12 mesh slice)",
-            ),
+            // **The calls are written; the flag is not reported.** `pipeline`'s
+            // `mesh` packs the subobject stream, `CommandEncoder`'s
+            // `draw_mesh_tasks` records `DispatchMesh` and its indirect twin
+            // executes a `DISPATCH_MESH` command signature. What is missing is
+            // `adapter`'s `features_of` reading
+            // `D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier` and reporting
+            // `Features::MESH_SHADER` — which flips
+            // `GeometryPath::from_features` to `MeshShader` for every adapter
+            // and re-keys every golden image, so it is its own change.
+            //
+            // Until then this stays `No`: a `granted` here would answer
+            // `NotOnThisDevice` on a device that never withheld anything, and
+            // `parity_verdict` calls that `FalseDeviceGate` — which is the loud
+            // failure, and rightly.
+            Capability::MeshShading | Capability::TaskShaderStage => Support::No(NO_MESH_FLAG),
             Capability::UpdateBindGroup => Support::Yes,
             // `create_pipeline_layout` builds a
             // `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` parameter at the `b`
@@ -3161,24 +3179,83 @@ impl Device for Dx12Device {
         Ok(handle::stamp(self.inner.owner, handle))
     }
 
-    /// Still refused, and the obstacle is this backend rather than D3D12.
+    /// Builds a `D3D12_PIPELINE_STATE_STREAM_DESC` and the object from it.
     ///
-    /// D3D12 has amplification and mesh shaders from SM6.5, and the DXIL is
-    /// already committed — `crates/crcbl-shaders/dxil/mesh_shader.*.dxil`, at
-    /// `ms_6_6` and `as_6_6`. What is missing here is the backend: a mesh
-    /// pipeline needs the `D3D12_PIPELINE_STATE_STREAM_DESC` path rather than
-    /// the fixed `D3D12_GRAPHICS_PIPELINE_STATE_DESC` `pipeline::graphics`
-    /// fills, and the draw is `DispatchMesh` on an `ID3D12GraphicsCommandList6`.
+    /// The same lookups [`create_graphics_pipeline`](Self::create_graphics_pipeline)
+    /// makes, with the vertex module replaced by a mesh module and an optional
+    /// amplification one, and `ID3D12Device2::CreatePipelineState` in place of
+    /// `CreateGraphicsPipelineState` — see [`crate::pipeline`]'s `mesh` for why
+    /// there is no other call, and [`crate::stream`] for the packing.
     ///
-    /// This backend accordingly reports no `Features::MESH_SHADER`.
+    /// **This backend still reports no
+    /// [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER)**, so a bind
+    /// group layout naming [`ShaderStages::MESH`](crcbl_hal::ShaderStages::MESH)
+    /// or `TASK` is still refused by
+    /// [`ShaderStages::check_supported`](crcbl_hal::ShaderStages::check_supported)
+    /// — a mesh pipeline built here reads its resources through sets declared
+    /// `ShaderStages::ALL`, which D3D12 maps to
+    /// `D3D12_SHADER_VISIBILITY_ALL` and which does reach both stages. Reporting
+    /// the flag flips
+    /// [`GeometryPath::from_features`](crcbl_hal::GeometryPath::from_features)
+    /// to [`MeshShader`](crcbl_hal::GeometryPath::MeshShader) for every adapter,
+    /// which re-keys every golden image `crcbl-render` holds; that is a separate
+    /// change with a re-bless in it, and `docs/backlog.md` carries it.
     fn create_mesh_pipeline(
         &self,
-        _desc: &crcbl_hal::MeshPipelineDesc<'_>,
+        desc: &crcbl_hal::MeshPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        Err(not_yet(
-            "mesh pipelines: D3D12 has the stages and the DXIL is committed, but this backend \
-             builds no pipeline state stream (the DX12 mesh slice)",
-        ))
+        let ceiling = self.inner.caps.limits.max_color_attachments as usize;
+        if desc.color_targets.len() > ceiling {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} colour targets exceed this device's limit of {ceiling}",
+                desc.color_targets.len()
+            )));
+        }
+        let mut state = self.state();
+        let layout = handle::lookup(
+            &state.pipeline_layouts,
+            "pipeline layout",
+            desc.layout,
+            self.inner.owner,
+        )?;
+        let mesh = handle::lookup(
+            &state.shader_modules,
+            "shader module",
+            desc.mesh.module,
+            self.inner.owner,
+        )?;
+        let task = match desc.task {
+            Some(entry) => Some(handle::lookup(
+                &state.shader_modules,
+                "shader module",
+                entry.module,
+                self.inner.owner,
+            )?),
+            None => None,
+        };
+        let fragment = match desc.fragment {
+            Some(entry) => Some(handle::lookup(
+                &state.shader_modules,
+                "shader module",
+                entry.module,
+                self.inner.owner,
+            )?),
+            None => None,
+        };
+        let entry = pipeline::mesh(
+            &self.inner.raw,
+            desc,
+            layout,
+            task,
+            mesh,
+            fragment,
+            self.inner.owner.id,
+        )?;
+        if let Some(label) = desc.label {
+            label_object(&entry.raw, label);
+        }
+        let handle = state.graphics_pipelines.insert(entry);
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
     fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {
@@ -5034,6 +5111,266 @@ pub(crate) mod tests {
         device.destroy_buffer(readback);
         device.destroy_image_view(view);
         device.destroy_image(target);
+    }
+
+    /// **The mesh path, end to end: a packed subobject stream, `DispatchMesh`,
+    /// and a triangle read back — twice, so the amplification stage is a
+    /// difference rather than an assumption.**
+    ///
+    /// This is what proves [`crate::stream`]'s arithmetic against a real
+    /// runtime. Every other check on it is arithmetic checked against
+    /// arithmetic; a subobject packed at the wrong offset still adds up, and
+    /// what disagrees is `CreatePipelineState` — which on this job runs with the
+    /// debug layer on, so a malformed stream arrives as a named message in the
+    /// info queue `open_device`'s `Validated` asserts is clean on drop, rather
+    /// than as a wrong picture.
+    ///
+    /// # Why it is run twice
+    ///
+    /// `taskMain` tints every colour by `(0, 1, 1, 1)`, so a frame drawn through
+    /// the amplification stage has the **red channel killed** and nothing else
+    /// changed. Drawing without it and with it and comparing the same texel is
+    /// what makes the `AS` subobject observable: a stream that dropped it, or
+    /// packed it where the runtime did not look, draws the identical picture the
+    /// mesh-only pipeline does — which is exactly the failure a single
+    /// "something was drawn" assertion cannot see. `crcbl-shaders`'
+    /// `mesh_shader.slang` says the same thing about its own payload.
+    ///
+    /// # The bind group is `ShaderStages::ALL`, not `MESH`
+    ///
+    /// `mesh_shader.slang` declares its geometry buffer mesh-visible, and this
+    /// backend reports no
+    /// [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER) yet — so
+    /// [`ShaderStages::check_supported`](crcbl_hal::ShaderStages::check_supported)
+    /// refuses a layout naming that bit, and rightly. `ALL` is
+    /// `D3D12_SHADER_VISIBILITY_ALL`, which does reach the amplification and
+    /// mesh stages; the slice that reports the flag is what lets this say `MESH`
+    /// and get `D3D12_SHADER_VISIBILITY_MESH` instead.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible() {
+        use crcbl_shaders::{MESH_SHADER, mesh_shader};
+
+        let (_instance, device) = open_device();
+
+        let geometry = mesh_shader::vertex_bytes();
+        let vertices = device
+            .create_buffer(&BufferDesc {
+                label: Some("mesh_shader vertices"),
+                size: geometry.len() as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a vertex storage buffer");
+        device
+            .write_buffer(vertices, 0, &geometry)
+            .expect("an upload-heap buffer is host-visible");
+
+        let set_layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("mesh_shader geometry"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    // See the doc comment on why this is not `MESH`.
+                    visibility: ShaderStages::ALL,
+                    kind: BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                }],
+            })
+            .expect("one read-only storage buffer");
+        let pipeline_layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("mesh_shader"),
+                bind_group_layouts: &[set_layout],
+                push_constants: None,
+            })
+            .expect("a root signature with one descriptor table");
+        let group = device
+            .create_bind_group(&BindGroupDesc {
+                label: Some("mesh_shader geometry"),
+                layout: set_layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(vertices),
+                }],
+                variable_count: None,
+            })
+            .expect("a bind group over the vertex buffer");
+
+        // One module for all four entry points, as everywhere else in this
+        // backend. `mesh_shader.slang` declares no WGSL target, so the
+        // descriptor carries DXIL alone.
+        let module = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("mesh_shader.slang"),
+                dxil: &MESH_SHADER.dxil_containers(),
+                ..ShaderModuleDesc::default()
+            })
+            .unwrap_or_else(|error| panic!("stage=create_shader_module: {error:?}"));
+
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        // One frame: its own attachment and readback, so the two runs never
+        // share an image whose state the second barrier would have to guess.
+        let frame = |label: &'static str, task: Option<&'static str>, entry: &'static str| {
+            let target = device
+                .create_image(&image(
+                    Format::Rgba8Unorm,
+                    ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                    SQUARE,
+                ))
+                .expect("a colour target");
+            let view = device
+                .create_image_view(&whole(target, Format::Rgba8Unorm))
+                .expect("a render target view");
+            let readback = readback_buffer(&device, SQUARE_BYTES);
+            let pipeline = device
+                .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
+                    label: Some(label),
+                    layout: pipeline_layout,
+                    task: task.map(|entry_point| ShaderEntry {
+                        module,
+                        entry_point,
+                    }),
+                    mesh: ShaderEntry {
+                        module,
+                        entry_point: entry,
+                    },
+                    fragment: Some(ShaderEntry {
+                        module,
+                        entry_point: "fragmentMain",
+                    }),
+                    // `topology` is ignored here — the mesh shader's own
+                    // `[outputtopology("triangle")]` decides it — and the
+                    // default's winding and cull mode are what the three
+                    // vertices were authored for.
+                    primitive: PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: MultisampleState::default(),
+                    color_targets: &targets,
+                })
+                .unwrap_or_else(|error| panic!("stage=create_mesh_pipeline {label}: {error:?}"));
+
+            let pass = clear_pass(
+                view,
+                CLEAR,
+                LoadOp::Clear,
+                Rect2d::from_size(SQUARE.width, SQUARE.height),
+            );
+            run(&device, |encoder| {
+                encoder.pipeline_barrier(&Barriers {
+                    images: &[ImageBarrier::new(
+                        target,
+                        ImageSubresourceRange::all(Format::Rgba8Unorm),
+                        ResourceState::Undefined,
+                        ResourceState::ColorAttachment,
+                    )],
+                    ..Barriers::default()
+                });
+                encoder.begin_render_pass(&pass.desc());
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, group, &[], pipeline_layout);
+                // One workgroup: `meshMain` and `amplifiedMeshMain` are
+                // `[numthreads(3, 1, 1)]`, one thread per vertex, and `taskMain`
+                // is `[numthreads(1, 1, 1)]` and dispatches one mesh group.
+                encoder.draw_mesh_tasks(1, 1, 1);
+                encoder.end_render_pass();
+                encoder.pipeline_barrier(&Barriers {
+                    images: &[ImageBarrier::new(
+                        target,
+                        ImageSubresourceRange::all(Format::Rgba8Unorm),
+                        ResourceState::ColorAttachment,
+                        ResourceState::TransferSrc,
+                    )],
+                    ..Barriers::default()
+                });
+                encoder.copy_image_to_buffer(&BufferImageCopy {
+                    buffer: readback,
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image: target,
+                    image_subresource: ImageSubresourceLayers {
+                        aspect: ImageAspect::COLOR,
+                        mip: 0,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: Offset3d::default(),
+                    image_extent: SQUARE,
+                });
+            });
+
+            let request = device
+                .request_readback(&ReadbackDesc {
+                    label: Some("crcbl-dx12 mesh readback"),
+                    buffer: readback,
+                    offset: 0,
+                    size: SQUARE_BYTES as u64,
+                    after: None,
+                })
+                .expect("a readback of a HostReadback buffer");
+            let bytes = drain(&device, request, SQUARE_BYTES);
+
+            device.destroy_readback(request);
+            device.destroy_graphics_pipeline(pipeline);
+            device.destroy_buffer(readback);
+            device.destroy_image_view(view);
+            device.destroy_image(target);
+            bytes
+        };
+
+        let plain = frame("mesh_shader", None, "meshMain");
+        let amplified = frame(
+            "mesh_shader amplified",
+            Some("taskMain"),
+            "amplifiedMeshMain",
+        );
+
+        // The triangle is apex-*down* and covers the centre of the target; both
+        // corners are outside it whichever way the rasteriser reads Y, which is
+        // what makes this assertion independent of the winding question the
+        // golden images settle elsewhere.
+        for (what, bytes) in [("mesh only", &plain), ("amplified", &amplified)] {
+            assert_eq!(texel(bytes, 0, 0), CLEAR_TEXEL, "{what}: top-left corner");
+            assert_eq!(
+                texel(bytes, SQUARE.width as usize - 1, SQUARE.height as usize - 1),
+                CLEAR_TEXEL,
+                "{what}: bottom-right corner"
+            );
+            assert_ne!(
+                texel(bytes, 32, 32),
+                CLEAR_TEXEL,
+                "{what}: the mesh stage emitted nothing over the centre of the target"
+            );
+        }
+
+        // **The amplification stage, as a difference.** `taskMain`'s tint is
+        // exactly `(0, 1, 1, 1)`, so the red channel goes to zero and the other
+        // three are multiplied by one — bit-identical inputs to the same
+        // interpolation, so this is an equality rather than a tolerance.
+        let centre = texel(&plain, 32, 32);
+        let tinted = texel(&amplified, 32, 32);
+        assert!(
+            centre[0] > 0,
+            "the mesh-only frame must have red to lose: {centre:?}"
+        );
+        assert_eq!(
+            tinted,
+            [0, centre[1], centre[2], centre[3]],
+            "the amplification stage's payload did not reach the mesh stage: {centre:?} became \
+             {tinted:?}"
+        );
+
+        device.destroy_shader_module(module);
+        device.destroy_bind_group(group);
+        device.destroy_pipeline_layout(pipeline_layout);
+        device.destroy_bind_group_layout(set_layout);
+        device.destroy_buffer(vertices);
     }
 
     /// The index pool every indexed draw below reads, and the decoy in front of
@@ -7642,49 +7979,21 @@ pub(crate) mod tests {
 
     /// Every slice that has not arrived still refuses, by name — so none of them
     /// can be half-implemented without this saying so.
+    ///
+    /// **No `Device` entry point is on this list any more.** The mesh pipeline
+    /// was the last one, and the mesh slice took it off:
+    /// [`create_mesh_pipeline`](crcbl_hal::Device::create_mesh_pipeline) now
+    /// packs a `D3D12_PIPELINE_STATE_STREAM_DESC` and diagnoses its descriptor,
+    /// so it moved to
+    /// [`the_entry_points_that_landed_never_answer_unsupported_again`]. What is
+    /// left is the buffer fill, and that one is a *deliberate* non-fix argued at
+    /// `Dx12CommandEncoder::fill_buffer` rather than an unwritten slice — so if
+    /// it ever moves, this whole test goes with it rather than being emptied and
+    /// left standing.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
-
-        // The mesh path is what is left of this list: D3D12 has the stages and
-        // `crcbl-shaders` commits the DXIL, so the obstacle is the pipeline
-        // state stream nobody has written — which is why the refusal has to name
-        // the slice rather than the device.
-        let refusals: Vec<(&str, HalError)> = vec![(
-            "mesh pipelines",
-            device
-                .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
-                    label: None,
-                    layout: unissued(),
-                    task: None,
-                    mesh: ShaderEntry {
-                        module: unissued(),
-                        entry_point: "meshMain",
-                    },
-                    fragment: None,
-                    primitive: PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: MultisampleState::default(),
-                    color_targets: &[],
-                })
-                // Ahead of every handle, deliberately: the refusal is about the
-                // slice, so it must not depend on the descriptor resolving.
-                .expect_err("this backend builds no pipeline state stream"),
-        )];
-        assert!(!refusals.is_empty(), "nothing to check");
-        for (what, error) in &refusals {
-            assert!(
-                matches!(error, HalError::Unsupported { backend, .. } if *backend == BackendKind::Dx12),
-                "{what}: {error:?}"
-            );
-            let text = error.to_string();
-            assert!(text.contains("dx12"), "{what}: {text}");
-            assert!(
-                text.contains("DX12") && text.contains("slice"),
-                "{what}: {text}"
-            );
-        }
 
         // **Recording works now, so the encoder's refusals moved to the commands
         // that still need a pipeline state object or a root signature.** This is
@@ -7852,6 +8161,29 @@ pub(crate) mod tests {
                     .expect_err("that pipeline layout was never issued"),
             ),
             (
+                // The one that arrived last, and the one whose regression this
+                // list would otherwise not catch: a `create_mesh_pipeline`
+                // reverted to `not_yet` answers `Unsupported` for a descriptor
+                // that is merely wrong, which is what every entry here rules out.
+                "mesh pipelines",
+                device
+                    .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
+                        label: None,
+                        layout: unissued(),
+                        task: None,
+                        mesh: ShaderEntry {
+                            module: unissued(),
+                            entry_point: "meshMain",
+                        },
+                        fragment: None,
+                        primitive: PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: MultisampleState::default(),
+                        color_targets: &[],
+                    })
+                    .expect_err("that pipeline layout was never issued"),
+            ),
+            (
                 "compute pipelines",
                 device
                     .create_compute_pipeline(&ComputePipelineDesc {
@@ -7914,6 +8246,19 @@ pub(crate) mod tests {
                 encoder.push_constants(ShaderStages::ALL, 0, &[0u8; 4], unissued());
             }),
             ("draws", |encoder| encoder.draw(0..3, 0..1)),
+            // Both mesh draws, because they are two entry points and either
+            // could regress to `not_yet` on its own. Each refuses here for the
+            // reason the plain draw above does — no pipeline is bound — which is
+            // an `InvalidDescriptor` and not an `Unsupported`.
+            ("mesh draws", |encoder| encoder.draw_mesh_tasks(1, 1, 1)),
+            ("indirect mesh draws", |encoder| {
+                encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                    args: unissued(),
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 0,
+                });
+            }),
             ("image-to-image copies", |encoder| {
                 let layers = ImageSubresourceLayers {
                     aspect: ImageAspect::COLOR,

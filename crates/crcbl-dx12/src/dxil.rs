@@ -64,6 +64,17 @@ pub(crate) const KIND_PIXEL: u32 = 0;
 pub(crate) const KIND_VERTEX: u32 = 1;
 /// `DXIL::ShaderKind` for a compute shader.
 pub(crate) const KIND_COMPUTE: u32 = 5;
+/// `DXIL::ShaderKind` for a mesh shader.
+pub(crate) const KIND_MESH: u32 = 13;
+/// `DXIL::ShaderKind` for an amplification shader — what the seam and Vulkan
+/// call the **task** stage, and what D3D12's `as_6_6` profile compiles.
+///
+/// Not adjacent to [`KIND_MESH`] by accident: the format numbers the two
+/// together at the end of the enumeration, after the ray-tracing kinds, so
+/// neither can be guessed from the graphics kinds above. Both are measured
+/// against the committed artifacts by
+/// `the_committed_mesh_shaders_carry_the_two_kinds_this_backend_expects`.
+pub(crate) const KIND_AMPLIFICATION: u32 = 14;
 
 /// Bytes of `PSVRuntimeInfo2`, the first version of the struct to carry a
 /// thread-group size. Fixed by the container format.
@@ -194,21 +205,24 @@ impl Dxil {
     ///
     /// # Errors
     ///
-    /// [`HalError::ShaderCompilation`] naming both stages.
+    /// [`HalError::ShaderCompilation`] naming both stages, or naming `stage`
+    /// itself when it is not one this backend has a container kind for — see
+    /// [`expected`].
     pub(crate) fn expect(&self, stage: ShaderStages, entry_point: &str) -> Result<(), HalError> {
-        let wanted = match stage {
-            ShaderStages::VERTEX => KIND_VERTEX,
-            ShaderStages::FRAGMENT => KIND_PIXEL,
-            _ => KIND_COMPUTE,
+        let Some((wanted, name)) = expected(stage) else {
+            return Err(HalError::ShaderCompilation(format!(
+                "the module bound as `{entry_point}` names {stage:?}, which is not one shader \
+                 stage; a DXIL container is compiled for one entry point at one stage, so there \
+                 is no single kind to check this one against"
+            )));
         };
         if self.kind == wanted {
             return Ok(());
         }
         Err(HalError::ShaderCompilation(format!(
-            "the module bound as `{entry_point}` for the {} stage holds a {} container; a DXIL \
-             container is compiled for one entry point at one stage, so this is the wrong \
+            "the module bound as `{entry_point}` for the {name} stage holds a {} container; a \
+             DXIL container is compiled for one entry point at one stage, so this is the wrong \
              artifact rather than the wrong entry-point name",
-            stage_name(stage),
             stage_name_of_kind(self.kind),
         )))
     }
@@ -378,21 +392,39 @@ fn psv_numthreads(bytes: &[u8], data: usize) -> Option<[u32; 3]> {
     Some(size)
 }
 
-/// How a message names a stage.
-const fn stage_name(stage: ShaderStages) -> &'static str {
-    match stage {
-        ShaderStages::VERTEX => "vertex",
-        ShaderStages::FRAGMENT => "fragment",
-        _ => "compute",
+/// The container kind one stage must hold, and how a message names that stage.
+///
+/// **One table rather than two**, so a stage cannot be named in a message it was
+/// not checked against.
+///
+/// `None` for a set that is not exactly one stage — which is what a stage bit
+/// added to [`ShaderStages`] after this was written would arrive as. That case
+/// is the reason this is a `match` with no catch-all mapping onto a kind: the
+/// arm it used to fall into was [`KIND_COMPUTE`], so a mesh container checked
+/// against a mesh stage read as "this is not a compute shader" — a refusal with
+/// the wrong sentence — and, worse, a *compute* container in a mesh slot passed.
+const fn expected(stages: ShaderStages) -> Option<(u32, &'static str)> {
+    match stages {
+        ShaderStages::VERTEX => Some((KIND_VERTEX, "vertex")),
+        ShaderStages::FRAGMENT => Some((KIND_PIXEL, "fragment")),
+        ShaderStages::COMPUTE => Some((KIND_COMPUTE, "compute")),
+        ShaderStages::MESH => Some((KIND_MESH, "mesh")),
+        ShaderStages::TASK => Some((KIND_AMPLIFICATION, "task")),
+        _ => None,
     }
 }
 
 /// How a message names a container's own shader kind.
+///
+/// D3D12's word for the seam's task stage is **amplification**, and this is a
+/// message about an artifact `dxc` produced, so it uses D3D12's.
 const fn stage_name_of_kind(kind: u32) -> &'static str {
     match kind {
         KIND_PIXEL => "pixel",
         KIND_VERTEX => "vertex",
         KIND_COMPUTE => "compute",
+        KIND_MESH => "mesh",
+        KIND_AMPLIFICATION => "amplification",
         _ => "non-graphics",
     }
 }
@@ -603,6 +635,104 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{}: {error}", shader.name()));
             }
         }
+    }
+
+    /// **[`KIND_MESH`] and [`KIND_AMPLIFICATION`] are the numbers the committed
+    /// artifacts actually carry**, not the numbers `DXIL::ShaderKind` was
+    /// remembered as.
+    ///
+    /// This is the measurement the two constants rest on, and it is worth its
+    /// own test because they are the only kinds in this module with no other
+    /// check behind them: a wrong value would let a *task* container into the
+    /// mesh slot, which `CreatePipelineState` reports as a pipeline it does not
+    /// like rather than as the wrong artifact — and would do it on a Windows
+    /// runner, one CI round trip from here.
+    ///
+    /// Both shaders are listed because `mesh_shader.slang` and
+    /// `mesh_cluster.slang` are compiled separately, and `amplifiedMeshMain` is
+    /// listed beside `meshMain` because the two are different entry points of
+    /// one stage — a container table that paired an entry point with the wrong
+    /// stage would show here.
+    #[test]
+    fn the_committed_mesh_shaders_carry_the_two_kinds_this_backend_expects() {
+        let cases: &[(&str, &crcbl_shaders::Shader)] = &[
+            ("mesh_shader", &crcbl_shaders::MESH_SHADER),
+            ("mesh_cluster", &crcbl_shaders::MESH_CLUSTER),
+        ];
+        assert!(!cases.is_empty(), "nothing to check");
+        for (name, shader) in cases {
+            let entry = module(
+                &ShaderModuleDesc {
+                    label: Some(name),
+                    dxil: &shader.dxil_containers(),
+                    ..ShaderModuleDesc::default()
+                },
+                1,
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            for (entry_point, stage) in [
+                ("taskMain", ShaderStages::TASK),
+                ("meshMain", ShaderStages::MESH),
+                ("amplifiedMeshMain", ShaderStages::MESH),
+            ] {
+                let dxil = entry
+                    .container(entry_point)
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+                dxil.expect(stage, entry_point)
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+                // And the other of the two kinds is refused, so the check above
+                // is the kind matching rather than `expect` accepting anything
+                // a mesh pipeline hands it.
+                let other = if stage == ShaderStages::MESH {
+                    ShaderStages::TASK
+                } else {
+                    ShaderStages::MESH
+                };
+                let error = dxil
+                    .expect(other, entry_point)
+                    .expect_err("the two mesh-pipeline stages are not interchangeable");
+                let HalError::ShaderCompilation(text) = &error else {
+                    panic!("{name}: {error:?}");
+                };
+                assert!(text.contains(entry_point), "{name}: {text}");
+            }
+        }
+    }
+
+    /// A stage set that is not exactly one stage is refused rather than
+    /// checked against whichever kind a catch-all arm would have picked.
+    ///
+    /// The falsifying edit is restoring that arm: with `_ => KIND_COMPUTE` a
+    /// compute container passes `expect(ShaderStages::MESH, …)`, which is
+    /// exactly the artifact mix-up this whole module exists to catch.
+    #[test]
+    fn a_stage_set_that_is_not_one_stage_has_no_container_kind() {
+        let compute = Dxil::parse(&container(KIND_COMPUTE), "probe").expect("a compute container");
+        for stages in [
+            ShaderStages::GRAPHICS,
+            ShaderStages::ALL,
+            ShaderStages::MESH | ShaderStages::TASK,
+            ShaderStages::empty(),
+        ] {
+            let error = compute
+                .expect(stages, "computeMain")
+                .expect_err("a stage set with no single container kind");
+            let HalError::ShaderCompilation(text) = &error else {
+                panic!("{stages:?}: {error:?}");
+            };
+            assert!(text.contains("not one shader stage"), "{stages:?}: {text}");
+        }
+        // A mesh container is not a compute one, which is what the deleted
+        // catch-all used to claim it was.
+        let mesh = Dxil::parse(&container(KIND_MESH), "mesh_shader").expect("a mesh container");
+        let error = mesh
+            .expect(ShaderStages::COMPUTE, "meshMain")
+            .expect_err("a mesh container in a compute slot");
+        let HalError::ShaderCompilation(text) = &error else {
+            panic!("{error:?}");
+        };
+        assert!(text.contains("mesh container"), "{text}");
+        assert!(text.contains("compute stage"), "{text}");
     }
 
     /// **Every way a container can be wrong is refused, by name.**

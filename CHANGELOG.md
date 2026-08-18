@@ -541,6 +541,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-dx12` builds mesh pipelines.** `Device::create_mesh_pipeline` packs a
+  `D3D12_PIPELINE_STATE_STREAM_DESC` for `ID3D12Device2::CreatePipelineState`,
+  and `CommandEncoder::draw_mesh_tasks` / `draw_mesh_tasks_indirect` record
+  `DispatchMesh` and an `ExecuteIndirect` of `DISPATCH_MESH`. The stream carries
+  the amplification stage, so `MeshPipelineDesc::task` reaches D3D12's `AS`; it
+  omits input layout, strip cut, stream output, vertex shader and primitive
+  topology, the last because the seam documents `PrimitiveState::topology` as
+  ignored for a mesh pipeline — so a mesh pipeline records no
+  `IASetPrimitiveTopology` at all rather than setting `UNDEFINED`, which is a
+  debug-layer error.
+
+  No `Device` entry point on this backend answers `Unsupported` any more.
+
+  **The backend still reports no `Features::MESH_SHADER`**, so `GeometryPath` is
+  unchanged, every golden keeps its key, and a bind group reaching these stages
+  declares `ShaderStages::ALL` — `check_supported` refuses the mesh bit on an
+  adapter that reports no mesh support, and `ALL` maps to
+  `D3D12_SHADER_VISIBILITY_ALL`, which reaches both stages. Reporting the flag
+  is a separate change with a golden re-bless in it, and the `MeshShading` and
+  `TaskShaderStage` divergences stay until then — with reasons that now say the
+  calls exist and the flag does not, rather than claiming no stream is built.
+
 - **`crcbl-dx12` gained five capabilities it used to refuse**, taking it from
   sixteen open parity divergences to six. It copies image to image (depth and
   stencil planes included — an image-to-image copy needs no placed footprint, so

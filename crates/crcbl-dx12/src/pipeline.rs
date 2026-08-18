@@ -110,8 +110,8 @@
 use core::mem::ManuallyDrop;
 
 use crcbl_hal::{
-    ColorTargetState, ComputePipelineDesc, DepthStencilState, GraphicsPipelineDesc, HalError,
-    MultisampleState, PipelineLayoutDesc, PrimitiveState, ShaderStages,
+    BackendKind, ColorTargetState, ComputePipelineDesc, DepthStencilState, GraphicsPipelineDesc,
+    HalError, MeshPipelineDesc, MultisampleState, PipelineLayoutDesc, PrimitiveState, ShaderStages,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY, ID3DBlob};
 use windows::Win32::Graphics::Direct3D12::{
@@ -120,20 +120,33 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_DEPTH_STENCIL_DESC, D3D12_DEPTH_STENCILOP_DESC, D3D12_DEPTH_WRITE_MASK_ALL,
     D3D12_DEPTH_WRITE_MASK_ZERO, D3D12_DESCRIPTOR_RANGE, D3D12_GRAPHICS_PIPELINE_STATE_DESC,
     D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED, D3D12_INPUT_LAYOUT_DESC, D3D12_LOGIC_OP_NOOP,
-    D3D12_MAX_ROOT_COST, D3D12_PIPELINE_STATE_FLAG_NONE, D3D12_RASTERIZER_DESC,
+    D3D12_MAX_ROOT_COST, D3D12_PIPELINE_STATE_FLAG_NONE, D3D12_PIPELINE_STATE_FLAGS,
+    D3D12_PIPELINE_STATE_STREAM_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC,
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, D3D12_RASTERIZER_DESC,
     D3D12_RENDER_TARGET_BLEND_DESC, D3D12_ROOT_CONSTANTS, D3D12_ROOT_DESCRIPTOR_TABLE,
     D3D12_ROOT_PARAMETER, D3D12_ROOT_PARAMETER_0, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
     D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, D3D12_ROOT_SIGNATURE_DESC,
-    D3D12_ROOT_SIGNATURE_FLAG_NONE, D3D12SerializeRootSignature, ID3D12Device, ID3D12PipelineState,
+    D3D12_ROOT_SIGNATURE_FLAG_NONE, D3D12_RT_FORMAT_ARRAY, D3D12_SHADER_BYTECODE,
+    D3D12SerializeRootSignature, ID3D12Device, ID3D12Device2, ID3D12PipelineState,
     ID3D12RootSignature,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
+use windows::core::Interface;
 
 use crate::binding::SetTables;
 use crate::conv;
 use crate::dxil::{Dxil, ShaderModuleEntry};
 use crate::handle::Owned;
 use crate::root::{self, RootConstants, SetPlacement, Slot, SlotKind};
+use crate::stream::Stream;
 
 /// `crate::root` spells D3D12's root budget out because it compiles off Windows.
 /// This is the build that has the real constant, so this is where the two are
@@ -180,8 +193,12 @@ pub(crate) struct GraphicsPipelineEntry {
     /// how the encoder reaches the right one without resolving the layout handle
     /// it was never given.
     pub(crate) root_signature: ID3D12RootSignature,
-    /// `IASetPrimitiveTopology`, which the PSO takes only the category of.
-    pub(crate) topology: D3D_PRIMITIVE_TOPOLOGY,
+    /// `IASetPrimitiveTopology`, which the PSO takes only the category of — or
+    /// `None` for a **mesh** pipeline, which has no input assembler to set one
+    /// on. The topology there is the mesh shader's own `[outputtopology(…)]`,
+    /// and `IASetPrimitiveTopology(UNDEFINED)` is a debug-layer error rather
+    /// than a no-op, so the absence has to be a value the encoder can read.
+    pub(crate) topology: Option<D3D_PRIMITIVE_TOPOLOGY>,
     /// `OMSetStencilRef`, or `None` for a pipeline that declares no stencil
     /// state. `Some(0)` and `None` differ: the first overwrites whatever an
     /// earlier `set_stencil_reference` left, the second leaves it.
@@ -574,7 +591,7 @@ pub(crate) fn graphics(
         owner,
         raw,
         root_signature: layout.raw.clone(),
-        topology: conv::primitive_topology(desc.primitive.topology),
+        topology: Some(conv::primitive_topology(desc.primitive.topology)),
         stencil_reference: desc
             .depth_stencil
             .and_then(|state| state.stencil)
@@ -593,6 +610,319 @@ fn release_root_signature(state: &mut D3D12_GRAPHICS_PIPELINE_STATE_DESC) {
     // `graphics`, and this is its matching release. The field is not read again:
     // every caller returns or moves on immediately afterwards.
     unsafe { ManuallyDrop::drop(&mut state.pRootSignature) };
+}
+
+/// A *permanent* refusal on a Windows old enough to have no stream path, and
+/// deliberately not [`crate::instance::not_yet`]'s voice: no slice of work in
+/// this repository makes `ID3D12Device2` appear on a runtime that predates it.
+///
+/// It is separately worth naming because the interface arrived in Windows 10
+/// 1703 while the mesh stages themselves arrived in 2004, so a device that fails
+/// this cast has no mesh tier either — which is the answer
+/// `crcbl_dx12::adapter`'s `features_of` would have given first if this backend
+/// reported the flag.
+const NO_PIPELINE_STATE_STREAM: &str = "a mesh pipeline: D3D12_GRAPHICS_PIPELINE_STATE_DESC has no slot for an amplification or mesh \
+     stage, so the only call that takes one is ID3D12Device2::CreatePipelineState — and this \
+     device does not implement ID3D12Device2";
+
+/// One subobject of a pipeline state stream, paired with the tag D3D12 reads it
+/// as.
+///
+/// `CreatePipelineState` walks a byte array in which every subobject is a `u32`
+/// tag followed by the payload that tag names, so the pairing is the whole
+/// contract — see [`crate::stream`] for the packing it implies.
+///
+/// # Safety
+///
+/// `TAG` must be the `D3D12_PIPELINE_STATE_SUBOBJECT_TYPE` whose documented
+/// payload is exactly `Self`, and `Self` must be the exact struct D3D12 defines
+/// for it. The runtime reads `size_of::<Self>()` bytes and interprets them per
+/// the tag, so a mismatched pair is one struct read as another — a shader
+/// bytecode pointer taken out of the middle of a blend state, with no
+/// diagnostic anywhere.
+///
+/// This is the same hazard [`crate::adapter`]'s `FeatureQuery` exists for, and
+/// it is enforced the same way: the tag comes from the type, so [`add`] cannot
+/// be called with a pair nobody wrote down.
+unsafe trait Subobject: Copy {
+    /// The tag D3D12 reads this payload under.
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE;
+}
+
+/// The root signature subobject's payload: the interface **pointer itself**,
+/// not a pointer to it.
+///
+/// A borrow rather than a reference — `as_raw` takes no refcount — so unlike
+/// `D3D12_GRAPHICS_PIPELINE_STATE_DESC::pRootSignature` there is nothing here
+/// for [`release_root_signature`] to give back. What replaces that discipline
+/// is the obligation stated on [`mesh`]: the layout outlives the call.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct RootSignature(*mut core::ffi::c_void);
+
+/// The mesh stage's bytecode. A newtype because three stages share
+/// `D3D12_SHADER_BYTECODE` and each is its own tag, which is exactly the pairing
+/// [`Subobject`] exists to fix.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct MeshShader(D3D12_SHADER_BYTECODE);
+
+/// The amplification stage's bytecode — the seam's `task` stage.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct TaskShader(D3D12_SHADER_BYTECODE);
+
+/// The pixel stage's bytecode.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct PixelShader(D3D12_SHADER_BYTECODE);
+
+/// The sample mask, which is a bare `u32` in the stream and would otherwise be
+/// indistinguishable from any other.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct SampleMask(u32);
+
+/// The root signature subobject's payload is the **interface pointer**, so the
+/// newtype has to be laid out exactly as `windows` lays that interface out.
+///
+/// A `const` assertion rather than a sentence, because it is the one pairing
+/// above whose payload is not a `windows` struct named after its tag —
+/// everything else is checked by the type system when the `impl` names it.
+const _: () = assert!(size_of::<RootSignature>() == size_of::<ID3D12RootSignature>());
+const _: () = assert!(align_of::<RootSignature>() == align_of::<ID3D12RootSignature>());
+
+// SAFETY for each: the payload is the struct D3D12 documents for the tag beside
+// it, taken from `windows`' own bindings rather than redeclared here. Every
+// newtype above is `repr(transparent)` over exactly that payload — a
+// `D3D12_SHADER_BYTECODE` for the three stages, D3D12's own `UINT` for the
+// sample mask, and the interface pointer the assertions above pin for the root
+// signature — so each has its size and alignment.
+unsafe impl Subobject for RootSignature {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE =
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE;
+}
+unsafe impl Subobject for MeshShader {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS;
+}
+unsafe impl Subobject for TaskShader {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS;
+}
+unsafe impl Subobject for PixelShader {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS;
+}
+unsafe impl Subobject for SampleMask {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE =
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK;
+}
+unsafe impl Subobject for D3D12_BLEND_DESC {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND;
+}
+unsafe impl Subobject for D3D12_RASTERIZER_DESC {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER;
+}
+unsafe impl Subobject for D3D12_DEPTH_STENCIL_DESC {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE =
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL;
+}
+unsafe impl Subobject for D3D12_RT_FORMAT_ARRAY {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE =
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS;
+}
+unsafe impl Subobject for DXGI_FORMAT {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE =
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT;
+}
+unsafe impl Subobject for DXGI_SAMPLE_DESC {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE =
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC;
+}
+unsafe impl Subobject for D3D12_PIPELINE_STATE_FLAGS {
+    const TAG: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS;
+}
+
+/// Packs one subobject into `stream`.
+///
+/// The arithmetic is [`Stream::push`]'s, so the only thing happening here is the
+/// copy of the payload into the space it reserved.
+fn add<T: Subobject>(stream: &mut Stream, object: T) {
+    let at = stream.push(T::TAG.0.cast_unsigned(), align_of::<T>(), size_of::<T>());
+    let slot = stream.data_mut(at, size_of::<T>());
+    // SAFETY: `push` reserved exactly `size_of::<T>()` bytes at `at`, so `slot`
+    // is that long and the write lands wholly inside it. `write_unaligned`
+    // rather than `write` because a `Vec<u8>`'s allocation is only byte-aligned,
+    // and the stream's alignments are relative to its own start rather than to
+    // an address — see `crate::stream`. `T: Copy`, so nothing is being moved out
+    // of and the stream owns no destructor for what it now holds.
+    unsafe { slot.as_mut_ptr().cast::<T>().write_unaligned(object) };
+}
+
+/// Builds a `D3D12_PIPELINE_STATE_STREAM_DESC` for a **mesh** pipeline and the
+/// object from it.
+///
+/// # A mesh pipeline is the one graphics object `CreateGraphicsPipelineState`
+/// cannot make
+///
+/// `D3D12_GRAPHICS_PIPELINE_STATE_DESC` has a `VS`, `PS`, `DS`, `HS` and `GS`
+/// and no slot for either stage this builds, so the amplification and mesh
+/// stages are reachable only through `ID3D12Device2::CreatePipelineState` and
+/// the packed subobject stream [`crate::stream`] lays out. Everything the
+/// subobjects *contain* is [`graphics`]': the same [`blend_state`],
+/// [`rasterizer_state`] and [`depth_stencil_state`], from the same seam
+/// descriptor fields.
+///
+/// # What is deliberately not in the stream
+///
+/// **No input layout, no index-buffer strip cut and no stream output**, because
+/// a mesh pipeline has no input assembler at all — the mesh stage writes its own
+/// vertices and index triples. `crcbl_hal::MeshPipelineDesc` says the same thing
+/// one level up.
+///
+/// **No primitive topology.** `PrimitiveState::topology` is documented as
+/// ignored on a mesh pipeline: the topology is the mesh shader's own
+/// `[outputtopology(…)]`, and there are no input primitives to assemble. So
+/// [`GraphicsPipelineEntry::topology`] is `None` for one of these and
+/// `bind_graphics_pipeline` records no `IASetPrimitiveTopology`.
+///
+/// # Errors
+///
+/// [`HalError::Unsupported`] on a Windows runtime with no `ID3D12Device2`,
+/// which is where the stream path lives.
+/// [`HalError::InvalidDescriptor`] for a descriptor D3D12 cannot express — the
+/// same ones [`graphics`] refuses — [`HalError::ShaderCompilation`] for a
+/// container that is not the stage it was bound as, and
+/// [`HalError::PipelineCreation`] carrying D3D12's own message when the driver
+/// refuses the object, which is what a malformed stream arrives as.
+pub(crate) fn mesh(
+    device: &ID3D12Device,
+    desc: &MeshPipelineDesc<'_>,
+    layout: &PipelineLayoutEntry,
+    task: Option<&ShaderModuleEntry>,
+    mesh: &ShaderModuleEntry,
+    fragment: Option<&ShaderModuleEntry>,
+    owner: u64,
+) -> Result<GraphicsPipelineEntry, HalError> {
+    let label = desc.label.unwrap_or("<unlabelled>");
+    let device2: ID3D12Device2 = device.cast().map_err(|error| {
+        // The `HRESULT` goes to the log rather than into the refusal, because
+        // `HalError::Unsupported::what` is a `&'static str` — and because the
+        // code an absent interface answers with says nothing the sentence does
+        // not.
+        crcbl_core::log::debug!("crcbl-dx12: this device is not an ID3D12Device2: {error}");
+        HalError::Unsupported {
+            backend: BackendKind::Dx12,
+            what: NO_PIPELINE_STATE_STREAM,
+        }
+    })?;
+
+    let mesh_dxil = mesh.container(desc.mesh.entry_point)?;
+    mesh_dxil.expect(ShaderStages::MESH, desc.mesh.entry_point)?;
+    let task_dxil = match (task, desc.task) {
+        (Some(module), Some(entry)) => {
+            let dxil = module.container(entry.entry_point)?;
+            dxil.expect(ShaderStages::TASK, entry.entry_point)?;
+            Some(dxil)
+        }
+        _ => None,
+    };
+    let fragment_dxil = match (fragment, desc.fragment) {
+        (Some(module), Some(entry)) => {
+            let dxil = module.container(entry.entry_point)?;
+            dxil.expect(ShaderStages::FRAGMENT, entry.entry_point)?;
+            Some(dxil)
+        }
+        _ => None,
+    };
+
+    if desc.color_targets.len() > RENDER_TARGETS {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{} colour targets exceed the {RENDER_TARGETS} a D3D12 pipeline state declares",
+            desc.color_targets.len()
+        )));
+    }
+    for (index, target) in desc.color_targets.iter().enumerate() {
+        if target.format.is_depth_stencil() {
+            return Err(HalError::InvalidDescriptor(format!(
+                "colour target {index} is {:?}, which is a depth/stencil format",
+                target.format
+            )));
+        }
+    }
+    let samples = desc.multisample.samples.max(1);
+    let depth_stencil = depth_stencil_state(desc.depth_stencil.as_ref())?;
+    let mut formats = D3D12_RT_FORMAT_ARRAY {
+        RTFormats: [DXGI_FORMAT_UNKNOWN; RENDER_TARGETS],
+        NumRenderTargets: u32::try_from(desc.color_targets.len()).unwrap_or(0),
+    };
+    for (slot, target) in formats.RTFormats.iter_mut().zip(desc.color_targets) {
+        *slot = conv::dxgi_format(target.format);
+    }
+
+    let mut stream = Stream::new();
+    add(&mut stream, D3D12_PIPELINE_STATE_FLAG_NONE);
+    // The pointer rather than a clone; see `RootSignature`.
+    add(&mut stream, RootSignature(layout.raw.as_raw()));
+    if let Some(dxil) = task_dxil {
+        add(&mut stream, TaskShader(dxil.bytecode()));
+    }
+    add(&mut stream, MeshShader(mesh_dxil.bytecode()));
+    if let Some(dxil) = fragment_dxil {
+        add(&mut stream, PixelShader(dxil.bytecode()));
+    }
+    add(
+        &mut stream,
+        blend_state(desc.color_targets, &desc.multisample),
+    );
+    add(&mut stream, SampleMask(desc.multisample.mask));
+    add(
+        &mut stream,
+        rasterizer_state(&desc.primitive, desc.depth_stencil.as_ref(), samples),
+    );
+    add(&mut stream, depth_stencil);
+    if let Some(state) = desc.depth_stencil {
+        add(&mut stream, conv::dxgi_format(state.format));
+    }
+    add(&mut stream, formats);
+    add(
+        &mut stream,
+        DXGI_SAMPLE_DESC {
+            Count: samples,
+            // Quality zero, for the reason `graphics` gives.
+            Quality: 0,
+        },
+    );
+
+    let bytes = stream.as_mut_slice();
+    let stream_desc = D3D12_PIPELINE_STATE_STREAM_DESC {
+        SizeInBytes: bytes.len(),
+        pPipelineStateSubobjectStream: bytes.as_mut_ptr().cast(),
+    };
+    // SAFETY: `stream_desc` names `stream`'s own live allocation and its own
+    // length, and both outlive the call. Every subobject in it was written by
+    // `add`, so each is one of D3D12's own structs under the tag that names it.
+    // Every stage's bytecode borrows `mesh`, `task` or `fragment`, which are
+    // parameters and therefore outlive this statement, and the root signature
+    // pointer borrows `layout` on the same terms. `ID3D12PipelineState` is the
+    // IID asked for.
+    let raw: ID3D12PipelineState = unsafe { device2.CreatePipelineState(&raw const stream_desc) }
+        .map_err(|error| {
+        HalError::PipelineCreation(format!(
+            "ID3D12Device2::CreatePipelineState rejected the mesh pipeline `{label}`: {error}"
+        ))
+    })?;
+
+    Ok(GraphicsPipelineEntry {
+        owner,
+        raw,
+        root_signature: layout.raw.clone(),
+        // A mesh pipeline has no input assembly to set a topology on; see the
+        // doc comment.
+        topology: None,
+        stencil_reference: desc
+            .depth_stencil
+            .and_then(|state| state.stencil)
+            .map(|stencil| stencil.reference),
+    })
 }
 
 /// Builds a `D3D12_COMPUTE_PIPELINE_STATE_DESC` and the object from it.

@@ -854,8 +854,12 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::MeshShading,
         backend: BackendKind::Dx12,
         kind: DivergenceKind::Unwritten,
-        why: "D3D12 has the stages and the DXIL is committed, but this backend builds no pipeline \
-              state stream for them (the DX12 mesh slice)",
+        why: "the calls exist — crcbl_dx12::pipeline packs the D3D12_PIPELINE_STATE_STREAM_DESC an \
+              amplification and mesh stage need, and the encoder records DispatchMesh and an \
+              ExecuteIndirect of DISPATCH_MESH — but crcbl_dx12::adapter does not report \
+              Features::MESH_SHADER, so the capability cannot answer Yes. Reporting it moves every \
+              D3D12 adapter onto GeometryPath::MeshShader and re-keys every golden image, which is \
+              its own change (the DX12 mesh reporting slice)",
     },
     Divergence {
         capability: Capability::MeshShading,
@@ -884,8 +888,9 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::TaskShaderStage,
         backend: BackendKind::Dx12,
         kind: DivergenceKind::Unwritten,
-        why: "no mesh pipeline to put an amplification stage in front of; see the MeshShading \
-              entry",
+        why: "MeshPipelineDesc::task reaches D3D12's amplification stage through the same \
+              subobject stream the mesh one does, and it is behind the same unreported flag; see \
+              the MeshShading entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,

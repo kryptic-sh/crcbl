@@ -78,11 +78,11 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_QUERY_DATA_PIPELINE_STATISTICS, D3D12_QUERY_HEAP_TYPE, D3D12_QUERY_HEAP_TYPE_OCCLUSION,
     D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, D3D12_QUERY_HEAP_TYPE_TIMESTAMP, D3D12_QUERY_TYPE,
     D3D12_QUERY_TYPE_OCCLUSION, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, D3D12_QUERY_TYPE_TIMESTAMP,
-    D3D12_SHADER_VISIBILITY, D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_PIXEL,
-    D3D12_SHADER_VISIBILITY_VERTEX, D3D12_STENCIL_OP, D3D12_STENCIL_OP_DECR,
-    D3D12_STENCIL_OP_DECR_SAT, D3D12_STENCIL_OP_INCR, D3D12_STENCIL_OP_INCR_SAT,
-    D3D12_STENCIL_OP_INVERT, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_REPLACE,
-    D3D12_STENCIL_OP_ZERO,
+    D3D12_SHADER_VISIBILITY, D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_AMPLIFICATION,
+    D3D12_SHADER_VISIBILITY_MESH, D3D12_SHADER_VISIBILITY_PIXEL, D3D12_SHADER_VISIBILITY_VERTEX,
+    D3D12_STENCIL_OP, D3D12_STENCIL_OP_DECR, D3D12_STENCIL_OP_DECR_SAT, D3D12_STENCIL_OP_INCR,
+    D3D12_STENCIL_OP_INCR_SAT, D3D12_STENCIL_OP_INVERT, D3D12_STENCIL_OP_KEEP,
+    D3D12_STENCIL_OP_REPLACE, D3D12_STENCIL_OP_ZERO,
 };
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMPARISON_FUNC, D3D12_COMPARISON_FUNC_ALWAYS, D3D12_COMPARISON_FUNC_EQUAL,
@@ -735,11 +735,27 @@ pub(crate) const fn descriptor_range_type(
 /// That is wider than the caller asked for and never narrower, which is the
 /// only direction that cannot make a legal shader fail to read its own
 /// resource.
+///
+/// # The two mesh stages have their own values, and had to get them here
+///
+/// [`ShaderStages::MESH`] and [`ShaderStages::TASK`] are
+/// `D3D12_SHADER_VISIBILITY_MESH` and `_AMPLIFICATION`. Before the mesh slice
+/// they fell into the `ALL` arm, which was sound only in the sense that nothing
+/// could reach it: `crcbl_dx12::binding`'s `plan_layout` runs
+/// [`ShaderStages::check_supported`](crcbl_hal::ShaderStages::check_supported)
+/// first, and that refuses either bit on a device reporting no
+/// `Features::MESH_SHADER` — which this backend's adapters do not. A mesh
+/// pipeline built here now names those stages, so the arms are written rather
+/// than argued away.
 pub(crate) const fn shader_visibility(stages: ShaderStages) -> D3D12_SHADER_VISIBILITY {
     if stages.bits() == ShaderStages::VERTEX.bits() {
         D3D12_SHADER_VISIBILITY_VERTEX
     } else if stages.bits() == ShaderStages::FRAGMENT.bits() {
         D3D12_SHADER_VISIBILITY_PIXEL
+    } else if stages.bits() == ShaderStages::MESH.bits() {
+        D3D12_SHADER_VISIBILITY_MESH
+    } else if stages.bits() == ShaderStages::TASK.bits() {
+        D3D12_SHADER_VISIBILITY_AMPLIFICATION
     } else {
         D3D12_SHADER_VISIBILITY_ALL
     }
@@ -1666,26 +1682,46 @@ mod tests {
     /// Narrowing is the failure that matters — a root parameter visible to the
     /// vertex stage alone makes a fragment shader's read of the same set a
     /// device removal, where a wider one only costs the driver an optimisation.
+    ///
+    /// **Every stage the seam has is named, and each maps to a different D3D12
+    /// value.** The two mesh ones are the arms that did not exist before the
+    /// mesh slice, and the falsifying edit is deleting either: the stage falls
+    /// into `ALL`, the root signature still serialises, and nothing anywhere
+    /// says the parameter is visible to five stages the caller did not ask for.
     #[test]
     fn shader_visibility_widens_and_never_narrows() {
-        assert_eq!(
-            shader_visibility(ShaderStages::VERTEX),
-            D3D12_SHADER_VISIBILITY_VERTEX
-        );
-        assert_eq!(
-            shader_visibility(ShaderStages::FRAGMENT),
-            D3D12_SHADER_VISIBILITY_PIXEL
-        );
+        let single = [
+            (ShaderStages::VERTEX, D3D12_SHADER_VISIBILITY_VERTEX),
+            (ShaderStages::FRAGMENT, D3D12_SHADER_VISIBILITY_PIXEL),
+            (ShaderStages::MESH, D3D12_SHADER_VISIBILITY_MESH),
+            (ShaderStages::TASK, D3D12_SHADER_VISIBILITY_AMPLIFICATION),
+        ];
+        for (stages, expected) in single {
+            assert_eq!(
+                shader_visibility(stages),
+                expected,
+                "{stages:?} is one stage and D3D12 has a value for it"
+            );
+        }
+        // Distinct from each other as well as from `ALL`: a table of four arms
+        // that all answered the same constant would pass every assertion above.
+        for (index, (_, mapped)) in single.iter().enumerate() {
+            assert_ne!(*mapped, D3D12_SHADER_VISIBILITY_ALL, "{index}");
+            for (_, other) in &single[..index] {
+                assert_ne!(mapped, other, "two stages share one visibility: {index}");
+            }
+        }
         for stages in [
             ShaderStages::GRAPHICS,
             ShaderStages::ALL,
             ShaderStages::COMPUTE,
+            ShaderStages::MESH | ShaderStages::TASK,
             ShaderStages::empty(),
         ] {
             assert_eq!(
                 shader_visibility(stages),
                 D3D12_SHADER_VISIBILITY_ALL,
-                "{stages:?} is not one graphics stage, so it must widen to ALL"
+                "{stages:?} is not one stage D3D12 has a value for, so it must widen to ALL"
             );
         }
     }

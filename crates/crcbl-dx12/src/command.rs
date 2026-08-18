@@ -103,7 +103,8 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_TEXTURE_COPY_LOCATION_0, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
     D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT,
     D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT, ID3D12CommandAllocator,
-    ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12QueryHeap, ID3D12Resource,
+    ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12GraphicsCommandList6, ID3D12QueryHeap,
+    ID3D12Resource,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::core::Interface;
@@ -742,6 +743,18 @@ const NO_D24_DEPTH_FOOTPRINT: &str = "a buffer copy of the DEPTH plane of a D24U
      lay the buffer's rows out with and this backend refuses the pair rather than reinterpreting \
      the plane's bits. Its STENCIL plane copies, and so does every plane of D16Unorm, D32Float \
      and D32FloatS8Uint";
+
+/// A *permanent* refusal, on the same terms as [`NO_D24_DEPTH_FOOTPRINT`] and
+/// [`crate::pipeline`]'s `NO_PIPELINE_STATE_STREAM`: no slice of work makes
+/// `ID3D12GraphicsCommandList6` appear on a runtime that predates it.
+///
+/// Written out rather than left to an `expect` because a `QueryInterface` that
+/// fails is a mismatched Windows and not a bug in this crate — and because it
+/// should be unreachable in practice: the interface and the mesh stages shipped
+/// together, so a caller with a mesh pipeline to bind already got one out of
+/// `ID3D12Device2`.
+const NO_DISPATCH_MESH: &str = "draw_mesh_tasks: DispatchMesh lives on ID3D12GraphicsCommandList6, and this runtime's \
+     command list does not implement that interface";
 
 /// Which plane of one image an aspect names, and how wide that plane's texel is.
 ///
@@ -1736,7 +1749,12 @@ impl CommandEncoder for Dx12CommandEncoder {
         unsafe {
             list.SetGraphicsRootSignature(&bound.root_signature);
             list.SetPipelineState(&bound.raw);
-            list.IASetPrimitiveTopology(bound.topology);
+            // A mesh pipeline has no topology to replay — there is no input
+            // assembler behind it — and `IASetPrimitiveTopology(UNDEFINED)` is
+            // a debug-layer error rather than the no-op it looks like.
+            if let Some(topology) = bound.topology {
+                list.IASetPrimitiveTopology(topology);
+            }
             if let Some(reference) = bound.stencil_reference {
                 list.OMSetStencilRef(reference);
             }
@@ -2010,20 +2028,58 @@ impl CommandEncoder for Dx12CommandEncoder {
         self.indirect_count(draw, IndirectKind::DrawIndexed);
     }
 
-    /// Refused for the same reason `create_mesh_pipeline` is: there is no mesh
-    /// pipeline for this to have been recorded against.
-    fn draw_mesh_tasks(&mut self, _x: u32, _y: u32, _z: u32) {
-        self.refuse("DispatchMesh (the DX12 mesh slice)");
+    /// `DispatchMesh`, which lives on `ID3D12GraphicsCommandList6` and nowhere
+    /// else.
+    ///
+    /// **The interface is queried per call rather than kept.** A `QueryInterface`
+    /// is an atomic increment and a vtable walk beside a command list that is
+    /// already recording, and keeping a second interface on the encoder would
+    /// mean every `Dx12CommandEncoder` — most of which never dispatch a mesh —
+    /// pays for one at construction and holds a reference to it. The refusal
+    /// path is the reason it can fail at all: `ID3D12GraphicsCommandList6`
+    /// arrived with the mesh stages themselves, so a runtime without it is a
+    /// runtime `create_mesh_pipeline` would already have refused.
+    ///
+    /// A dispatch with no pipeline bound fails the encoder, for the reason
+    /// [`draw`](Self::draw) gives. The seam deliberately does **not** track
+    /// whether the pipeline bound is a *mesh* one — see
+    /// `crcbl_hal::MeshPipelineDesc` on why both kinds share
+    /// [`GraphicsPipelineHandle`] — so that pairing is the debug layer's to
+    /// catch, here as everywhere else.
+    fn draw_mesh_tasks(&mut self, x: u32, y: u32, z: u32) {
+        if self.list().is_none() || !self.drawable("a mesh draw") {
+            return;
+        }
+        let Some(list) = self.list() else { return };
+        match list.cast::<ID3D12GraphicsCommandList6>() {
+            // SAFETY: the cast handed back an interface onto the same live,
+            // recording command list, and `DispatchMesh` takes three scalars.
+            Ok(list) => unsafe { list.DispatchMesh(x, y, z) },
+            Err(error) => {
+                crcbl_core::log::debug!(
+                    "crcbl-dx12: this command list is not an ID3D12GraphicsCommandList6: {error}"
+                );
+                self.fail(HalError::Unsupported {
+                    backend: BackendKind::Dx12,
+                    what: NO_DISPATCH_MESH,
+                });
+            }
+        }
     }
 
-    /// Refused with [`draw_mesh_tasks`](Self::draw_mesh_tasks), and it would
-    /// need one thing more than that one does: `ExecuteIndirect` reads
-    /// `D3D12_DISPATCH_MESH_ARGUMENTS` through a command signature, so this
-    /// backend would have to create an `ID3D12CommandSignature` carrying
-    /// `D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH` as well as the pipeline
-    /// state stream `create_mesh_pipeline` does not build.
-    fn draw_mesh_tasks_indirect(&mut self, _draw: &DrawIndirect) {
-        self.refuse("ExecuteIndirect of DISPATCH_MESH (the DX12 mesh slice)");
+    /// `ExecuteIndirect` through a `D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH`
+    /// command signature.
+    ///
+    /// Every bounds and stride rule is the other indirect calls', because
+    /// `D3D12_DISPATCH_MESH_ARGUMENTS` is one more argument layout rather than
+    /// one more call — see [`crate::draw`] on why it is its own
+    /// [`IndirectKind`] despite being the same three words a compute dispatch's
+    /// arguments are.
+    ///
+    /// There is no count-buffer twin because the seam has none: mesh work is
+    /// culled by the amplification stage rather than by a count somebody wrote.
+    fn draw_mesh_tasks_indirect(&mut self, draw: &DrawIndirect) {
+        self.indirect(draw, IndirectKind::DispatchMesh);
     }
 
     // --- compute scope ---
