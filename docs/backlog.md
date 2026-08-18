@@ -739,7 +739,36 @@ machine, so the choice was to make the degrade visible rather than to harden a
 condition nobody has observed. If CI's lavapipe arm never prints that line, the
 degrade path is dead and the test should simply require the feature.
 
-### The macOS and Windows probe gates are unproven
+### The Windows probe gate has no adapter; macOS is proven
+
+**macOS works, first run, exactly as predicted.** `probe-macos` ran headless on
+`macos-15` against a real Apple adapter — Chrome 150.0.7871.187, adapter mode
+`hardware` resolved automatically on darwin, **57/57 over groups `G…AA`**. So
+headless Chrome really does close the WebGPU canvas readback gap on macOS, and
+that is the first proof of `crcbl-webgpu` on Metal-backed Dawn. Take
+`continue-on-error` off after two more green runs.
+
+**Windows has no WebGPU adapter in the default mode.** The job found Chrome
+151.0.7922.109 exactly where the registry said, resolved `hardware` on win32,
+and died at `requestAdapter() returned no adapter — no GPU to drive`. So a
+GPU-less `windows-latest` exposes nothing through D3D, and that mode gates
+nothing. The runner reported it correctly — "the driver reported no checks — the
+gate is not gating" — rather than passing on zero.
+
+**The remaining route is SwiftShader, now being measured.** It is the one this
+file warned against, and the warning is still true: it moves Dawn to SwiftShader
+while Chromium's shared-image device stays on D3D11, so a canvas handed between
+them reads back as uninitialised memory. But that is a _canvas_ fault, and most
+of the probe is not a canvas — G through W and AA drive the command stream
+against textures the replayer owns. **Expected: real seam coverage with X, Y and
+Z failing.** If that is what comes back, the honest end state is a Windows job
+that runs the groups Windows can serve and says which, not one that pretends to
+run them all.
+
+**Also seen and not chased:** `actions/download-artifact` logged
+`digest-mismatch: error` on the Windows job while still extracting the site. It
+did not cause the failure — the probe page loaded and asked for an adapter — but
+nobody has looked at why the digest disagrees on that runner and not on macOS.
 
 `pages.yml` now runs the seam probe on `macos-15` (headless, real Metal) and
 `windows-latest` (headed, on the runner's desktop), both `continue-on-error`.

@@ -439,15 +439,32 @@ jobs:
       # sees `/d/a/crcbl/...`, and Node is a native Windows binary that would
       # resolve that against the current drive root and find no site there.
       #
-      # The adapter mode resolves to `hardware`, and **must not be forced to
-      # swiftshader here**: that moves Dawn to SwiftShader while Chromium's
-      # shared-image device stays on D3D11, and a canvas handed between two
-      # devices comes back as uninitialised memory with
-      # `ReadPixels: Source shared image is not accessible` behind it —
-      # `docs/backlog.md` records the mismatch from Chrome 151.
+      # **SwiftShader is forced here, having measured the alternative.** The
+      # first run of this job took the default `hardware` mode, found Chrome
+      # 151.0.7922.109 exactly where the registry said, and died at
+      # `requestAdapter() returned no adapter — no GPU to drive`. So a
+      # GPU-less `windows-latest` exposes no WebGPU through D3D at all, and in
+      # that mode this job gates nothing.
+      #
+      # The known cost, recorded in `docs/backlog.md` from Chrome 151: this
+      # moves **Dawn** to SwiftShader while Chromium's shared-image device
+      # stays on D3D11, and a canvas handed between two devices reads back as
+      # uninitialised memory behind `ReadPixels: Source shared image is not
+      # accessible`. That is a *canvas* fault, and most of the probe is not a
+      # canvas — groups G through W and AA drive the command stream against
+      # textures the replayer owns. So the expected outcome is real coverage of
+      # the seam with X, Y and Z failing, which the runner names per group
+      # rather than passing quietly on fewer checks.
+      #
+      # This job stays `continue-on-error` until that guess is a measurement.
+      # If the canvas groups do fail, the honest end state is a Windows job
+      # that runs the groups Windows can serve and says so — not one that
+      # pretends to run all of them.
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         shell: bash
-        run: SITE_DIR="$(pwd -W)/target/site" ./web/run-probe-e2e.sh --headless
+        run: >-
+          SITE_DIR="$(pwd -W)/target/site" ./web/run-probe-e2e.sh --headless
+          --adapter swiftshader
 
   deploy:
     name: deploy to GitHub Pages
