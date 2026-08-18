@@ -151,6 +151,29 @@ crcbl-shaders = { workspace = true }
 # neither pulls a crate — `NSData` wants `bitflags`, which `NSArray` already
 # switched on.
 #
+# `MTLIndirectCommandBuffer` is here on the same terms, and the terms matter
+# because the type it names is the one `crcbl_mtl::command`'s `indirect_count`
+# refuses over. **Nothing this crate ships creates an ICB.** The refusal is
+# unchanged, `Features::DRAW_INDIRECT_COUNT` is still off, and
+# `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` still names the compute kernel that
+# would have to encode one. What needs the feature is `crcbl_mtl::adapter`'s
+# `a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling`,
+# which measures whether the runner CI has could verify that slice at all if it
+# were written: `MTLDevice::newIndirectCommandBufferWithDescriptor:
+# maxCommandCount:options:` is `cfg`-gated on it upstream — together with
+# `MTLAllocation` and `MTLResource`, both long since on — and so are
+# `MTLIndirectCommandBufferDescriptor`, `MTLIndirectCommandType` and the
+# `MTLIndirectCommandBuffer` protocol whose `size` the probe reads.
+#
+# `MTLIndirectCommandEncoder` is **not** enabled beside it: that feature is what
+# `indirectRenderCommandAtIndex:` needs, and a probe that creates an ICB without
+# encoding into one never asks for a command. The slice that encodes adds it.
+#
+# It adds no package to `Cargo.lock` either. The feature's whole dependency list
+# is `bitflags`, `objc2-foundation/NSObject` and `objc2-foundation/NSRange`, and
+# all three were already switched on — the first two by `MTLCounters` above, the
+# third by this crate's own `NSRange` entry.
+#
 # `MTLVertexDescriptor` stays absent — this engine has no vertex input state at
 # all, by design, and enabling it would advertise a path `crcbl_hal::pipeline`
 # deliberately does not have.
@@ -226,6 +249,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLDevice",
   "MTLDrawable",
   "MTLEvent",
+  "MTLIndirectCommandBuffer",
   "MTLLibrary",
   "MTLPixelFormat",
   "MTLRenderPipeline",

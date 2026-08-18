@@ -195,7 +195,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Twelve blockers: dx12 5, Metal 6, WebGPU 1.** That is what stands between here
+**Eleven blockers: dx12 5, Metal 6, WebGPU 0.** That is what stands between here
 and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -1514,6 +1514,62 @@ to be unprovable on the only Metal machine this project has. The options are a
 hardware macOS runner, an explicit "implemented but unproven here" state that a
 reviewer accepts once, or leaving them open indefinitely. Closing them on a
 device that cannot execute them is not among the options.
+
+### AWAITING CI — the Metal ICB probe has never run anywhere
+
+`crcbl_mtl::adapter`'s
+`a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling`
+landed alongside the counter probe and asks the question that has to be answered
+_before_ anyone restructures this backend's encoder for `DrawIndirectCount`:
+**can CI's Mac create an `MTLIndirectCommandBuffer` at all, and how large?** It
+prints `supportsFamily:` for every non-deprecated `MTLGPUFamily`, the
+descriptor's own round-trip, and the result of
+`newIndirectCommandBufferWithDescriptor:maxCommandCount:options:` at each rung
+of an ascending ladder, stopping at the first nil. It closes no row, reports no
+feature and changes no limit: `Features::DRAW_INDIRECT_COUNT` is still off and
+`indirect_count()` still refuses.
+
+**It has been type-checked and never executed.** The workspace that wrote it is
+Linux, `crcbl-mtl`'s modules are `#[cfg(target_os = "macos")]`, and
+`--target aarch64-apple-darwin` compiles without running. The only thing that
+runs it is the `mtl e2e (macos-latest)` job. Read that log before treating
+anything below as known.
+
+**What the counter probe already implies about the answer.** That device is
+`Mac2` and neither `Metal3` nor `Apple7`. Apple's feature-set tables put render
+indirect command buffers at Mac2, so a `Draw | DrawIndexed` descriptor should be
+legal there — but that is inference from a table, and the whole point of the
+probe is that this device has contradicted a table before (three sampling points
+and zero counter sets).
+
+**One live risk, and where to turn it down.** The ladder's top rung is
+`Limits::desktop().max_draw_indirect_count`. Apple documents the call as
+returning nil for a request it cannot satisfy, and `objc2-metal` types it
+`Option`, so a refusal should be data — but if some device raises instead, the
+Objective-C exception unwinds through Rust and **the whole mtl e2e job dies
+rather than fails a test**. Catching it would need `objc2`'s `exception`
+feature, which pulls `objc2-exception-helper` into `Cargo.lock` and is a new
+dependency nobody has approved. If that job ever aborts around this test, lower
+`ICB_COMMAND_COUNTS` in `crates/crcbl-mtl/src/adapter.rs` rather than debugging
+the runner. `ICB_STAGE_BUFFER_BINDS` bounds the allocation the top rung asks for
+and is set well below Metal's default for the same reason.
+
+**Coverage gap, stated plainly.** The guard that makes the probe un-fakeable —
+reading `commandTypes` before and after `setCommandTypes:` and asserting the
+"after" both equals what was set and differs from what was there — was
+red-checked by transcribing those assertions into a standalone program on Linux
+and driving them with stub values, because nothing on this machine can compile
+the real module. Both directions went red and the live-shaped values passed. The
+_compiled_ assertion has still never been run.
+
+**A second blind spot found while doing it:** rustdoc never sees `#[cfg(test)]`
+modules, in any configuration CI runs — including with
+`--document-private-items`, which the entry above is about. So the intra-doc
+links in both Metal probes' doc comments are checked by nothing on the way in.
+They were verified once by hand with
+`RUSTDOCFLAGS="--cfg test" cargo doc --document-private-items --target aarch64-apple-darwin`,
+which reports 13 pre-existing warnings elsewhere in the crate and none in
+`adapter.rs`. There is no gate keeping that true.
 
 ### A measurement test must not read a truthful zero as a broken apparatus
 

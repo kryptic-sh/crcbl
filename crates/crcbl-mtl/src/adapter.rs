@@ -425,9 +425,11 @@ mod tests {
     use std::ptr::NonNull;
     use std::time::{Duration, Instant};
 
+    use crcbl_hal::MemoryLocation;
     use objc2_metal::{
         MTLCommonCounterSetStageUtilization, MTLCommonCounterSetStatistic,
         MTLCommonCounterSetTimestamp, MTLCounter, MTLCounterSamplingPoint, MTLCounterSet,
+        MTLIndirectCommandBuffer, MTLIndirectCommandBufferDescriptor, MTLIndirectCommandType,
         MTLTimestamp,
     };
 
@@ -462,6 +464,94 @@ mod tests {
         ),
         ("AtBlitBoundary", MTLCounterSamplingPoint::AtBlitBoundary),
     ];
+
+    /// Every `MTLGPUFamily` the ICB probe asks about, newest first.
+    ///
+    /// Which command types an `MTLIndirectCommandBuffer` may hold is a
+    /// family-gated question in Apple's feature-set tables, so the family answer
+    /// is the precondition for every other answer the probe takes. The list is
+    /// wider than the counter probe's three on purpose: that one asks the three
+    /// terms `wgpu-hal` derives its mesh support from, while this one is trying
+    /// to place a device on the ladder at all, and a device that answers `Mac2`
+    /// and nothing above it is a different machine from one that answers
+    /// `Apple9`.
+    ///
+    /// `MTLGPUFamily` is an `NSInteger` newtype carrying associated constants
+    /// rather than a Rust enum, so nothing but reading `objc2_metal`'s
+    /// declaration says this list is complete. What *is* checked below is that
+    /// the entries are pairwise distinct — a duplicated constant would print one
+    /// family twice and silently never ask about another.
+    ///
+    /// `Mac1`, `MacCatalyst1` and `MacCatalyst2` are absent because
+    /// `objc2-metal` marks all three `#[deprecated]`, and this workspace builds
+    /// with `-D warnings`. Nothing is lost: a device that answers `Mac1` and not
+    /// `Mac2` predates every macOS this backend's floor allows.
+    const ICB_FAMILIES: [(&str, MTLGPUFamily); 16] = [
+        ("Metal4", MTLGPUFamily::Metal4),
+        ("Metal3", MTLGPUFamily::Metal3),
+        ("Apple10", MTLGPUFamily::Apple10),
+        ("Apple9", MTLGPUFamily::Apple9),
+        ("Apple8", MTLGPUFamily::Apple8),
+        ("Apple7", MTLGPUFamily::Apple7),
+        ("Apple6", MTLGPUFamily::Apple6),
+        ("Apple5", MTLGPUFamily::Apple5),
+        ("Apple4", MTLGPUFamily::Apple4),
+        ("Apple3", MTLGPUFamily::Apple3),
+        ("Apple2", MTLGPUFamily::Apple2),
+        ("Apple1", MTLGPUFamily::Apple1),
+        ("Mac2", MTLGPUFamily::Mac2),
+        ("Common3", MTLGPUFamily::Common3),
+        ("Common2", MTLGPUFamily::Common2),
+        ("Common1", MTLGPUFamily::Common1),
+    ];
+
+    /// The command types an ICB standing in for the seam's indirect draws would
+    /// have to hold.
+    ///
+    /// [`CommandEncoder::draw_indirect_count`](crcbl_hal::CommandEncoder::draw_indirect_count)
+    /// needs `Draw` and `draw_indexed_indirect_count` needs `DrawIndexed`; the
+    /// seam has both verbs, so an ICB that could hold only one of them would
+    /// close half a row. The patch and mesh types are absent because no seam
+    /// verb reaches them, and the two dispatch types are absent because Metal's
+    /// own header says a dispatch command type cannot be mixed with any other —
+    /// asking for one here would measure a descriptor the draw path could never
+    /// use.
+    const ICB_DRAW_COMMANDS: MTLIndirectCommandType =
+        MTLIndirectCommandType::Draw.union(MTLIndirectCommandType::DrawIndexed);
+
+    /// `maxCommandCount` values to ask for, **strictly ascending**.
+    ///
+    /// Ascending, and the probe stops at the first refusal, because the useful
+    /// measurement is where the device stops rather than whether it clears the
+    /// top rung — and because climbing towards a ceiling asks for at most one
+    /// allocation past it. The top rung is
+    /// [`Limits::desktop`]`().max_draw_indirect_count`, which is the number a
+    /// backend reporting the capability would want to promise; the bottom is
+    /// well clear of the `1` this backend reports today, which the probe's own
+    /// last line prints for comparison.
+    const ICB_COMMAND_COUNTS: [NSUInteger; 6] = [64, 1024, 4096, 16384, 65536, 1 << 20];
+
+    /// Per-stage buffer bind slots each ICB command is sized for.
+    ///
+    /// An ICB reserves storage for every command's worst case, so this number
+    /// multiplies into the allocation the top rung of [`ICB_COMMAND_COUNTS`]
+    /// asks for. It is set rather than left at Metal's default because the
+    /// default is far larger than any pipeline this engine builds binds, and a
+    /// probe that asks for a gigabyte to learn a ceiling has changed what it is
+    /// measuring. The printed line carries the default beside it, and the ICB's
+    /// own `size` beside that, so the reader can scale to any other value.
+    const ICB_STAGE_BUFFER_BINDS: NSUInteger = 8;
+
+    /// The inheritance settings to try, and the one axis the probe varies.
+    ///
+    /// A `draw_indirect_count` built on an ICB inherits both: the pipeline state
+    /// and the argument tables are set on the render encoder the seam's pass
+    /// already opened, and the encoding kernel writes draw arguments alone. The
+    /// second row is the control — if creation fails for the first and succeeds
+    /// for the second, the inheritance is what the device refused rather than
+    /// the command types or the count.
+    const ICB_INHERITANCE: [(&str, bool, bool); 2] =
+        [("inherit=YES", true, true), ("inherit=NO", false, false)];
 
     /// One `sampleTimestamps:gpuTimestamp:` call, as the pair it writes.
     fn sample_timestamps(device: &ProtocolObject<dyn MTLDevice>) -> (MTLTimestamp, MTLTimestamp) {
@@ -690,5 +780,281 @@ mod tests {
                  reports no derivable tick period"
             );
         }
+    }
+
+    /// **The measurement that says whether the Metal ICB slice could be
+    /// verified**, before anyone restructures this backend's encoder to write
+    /// it.
+    ///
+    /// [`Capability::DrawIndirectCount`](crcbl_hal::Capability::DrawIndirectCount)
+    /// is `DivergenceKind::Unwritten` for Metal, and
+    /// [`METAL_NO_DRAW_INDIRECT_COUNT`](crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT)
+    /// names the work: a compute kernel encoding the seam's `DrawIndirect`
+    /// structs into an `MTLIndirectCommandBuffer` that
+    /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` then runs
+    /// with a GPU-written execution range. That is a change to how this backend
+    /// encodes, and the question this test answers first is the cheaper one:
+    /// **on the only Mac this repository's CI has, can an ICB be created at
+    /// all, and at what size?** A slice whose result no runner could observe is
+    /// a slice written blind.
+    ///
+    /// It creates ICBs and destroys them; it encodes nothing, submits nothing
+    /// and executes nothing. Like
+    /// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
+    /// above, **it prints** and the CI log is the artifact. Neither this test
+    /// nor anything else in this crate reports
+    /// [`Features::DRAW_INDIRECT_COUNT`] or moves a capability row: an ICB the
+    /// probe allocated and dropped is evidence about a device, not a code path.
+    ///
+    /// # What each answer settles
+    ///
+    /// **`supportsFamily:` over [`ICB_FAMILIES`].** Which command types an ICB
+    /// may hold is family-gated in Apple's feature-set tables, so every answer
+    /// below is conditional on this one. CI's `Apple Paravirtual device` has
+    /// already surprised this crate once by reporting no `counterSets`
+    /// whatsoever, so its place on the family ladder is worth reading rather
+    /// than assuming.
+    ///
+    /// **`newIndirectCommandBufferWithDescriptor:maxCommandCount:options:`.**
+    /// The one call that decides whether the slice is buildable here. A
+    /// descriptor Metal accepted and an ICB that came back nil are different
+    /// answers and print differently — the first says the *shape* is legal and
+    /// the allocation was not, the second would be a descriptor Metal rejected
+    /// outright, which on this call surfaces as the same nil and is why the
+    /// descriptor's own round-trip is printed above every attempt.
+    ///
+    /// **The [`ICB_COMMAND_COUNTS`] ladder.** `1` would tell nobody anything: an
+    /// ICB holding one command is exactly the `drawPrimitives:indirectBuffer:`
+    /// this backend already emits in a CPU loop. What matters is whether the
+    /// device reaches [`Limits::desktop`]`().max_draw_indirect_count`, and if
+    /// not, where it stops — that number is the ceiling a Metal
+    /// `max_draw_indirect_count` would have to report.
+    ///
+    /// **[`ICB_INHERITANCE`].** An ICB feeding the seam's `draw_indirect_count`
+    /// must inherit both buffers and pipeline state, because the pass that calls
+    /// the verb has already bound both on its render encoder and the encoding
+    /// kernel writes only draw arguments. Varying it is what separates "this
+    /// device refuses ICBs" from "this device refuses *inheriting* ICBs", which
+    /// are a closed row and a solvable problem respectively.
+    ///
+    /// **[`Limits::max_draw_indirect_count`].** Printed beside
+    /// [`Limits::minimum`]'s and [`Limits::desktop`]'s so the `1` this backend
+    /// reports is legible as what it is: `limits_of` writes no value for the
+    /// field at all, so the number is the seam's floor — a backend choice — and
+    /// not anything this device was asked.
+    ///
+    /// # What it fails on
+    ///
+    /// A measurement test that silently measures nothing is a green light wired
+    /// to nothing, so the ways this could reach the end having asked the device
+    /// nothing are assertions.
+    ///
+    /// The first is the sibling test's: an empty `MTLDevice::name` means no
+    /// device was reached.
+    ///
+    /// The second is **two-sided, and it is the one that makes the ICB half
+    /// un-fakeable**. `MTLIndirectCommandBufferDescriptor` is read *before* and
+    /// *after* `setCommandTypes:`, and both readings are asserted — `after`
+    /// must equal [`ICB_DRAW_COMMANDS`] and must also differ from `before`. A
+    /// stub answering nothing fails the first; a stub answering the wanted value
+    /// unconditionally fails the second. Only a live Objective-C object that
+    /// stores what it was given and hands it back satisfies both, and if the
+    /// descriptor is live then so is the device that the next line asks for an
+    /// ICB.
+    ///
+    /// The third is that the ladder ran to a conclusion: either a rung was
+    /// refused, or every rung was attempted. A loop that stopped early having
+    /// refused nothing skipped a `maxCommandCount` and its printed ceiling would
+    /// be a floor.
+    ///
+    /// A device that honestly refuses every ICB is a *result* and passes. That
+    /// is the whole point — it would turn the `DrawIndirectCount` row's reason
+    /// from "unwritten" into "unwritten, and unverifiable on the hardware this
+    /// project has".
+    ///
+    /// nextest captures a passing test's stdout, so read this with
+    /// `--success-output immediate`, which is what `tests/run-mtl-e2e.sh`
+    /// passes.
+    #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling() {
+        let (_validated, device) = crate::device::tests::open_device();
+        let raw = &*device.inner.raw;
+
+        let name = raw.name().to_string();
+        assert!(
+            !name.is_empty(),
+            "MTLDevice::name came back empty, so this test never reached a device"
+        );
+        println!("crcbl-mtl icb: device={name:?} {}", driver_string());
+
+        let mut seen: Vec<MTLGPUFamily> = Vec::new();
+        for (label, family) in ICB_FAMILIES {
+            assert!(
+                !seen.contains(&family),
+                "ICB_FAMILIES lists {label} twice, so one MTLGPUFamily is never asked about"
+            );
+            seen.push(family);
+            println!(
+                "crcbl-mtl icb: supportsFamily {label} = {}",
+                raw.supportsFamily(family)
+            );
+        }
+
+        // Device-local, and through the same helper every `MTLBuffer` this
+        // backend allocates goes through: an ICB a compute kernel writes and a
+        // render encoder executes is never touched by the CPU, so it wants the
+        // storage mode `MemoryLocation::DeviceLocal` already maps to.
+        let options = crate::conv::resource_options(MemoryLocation::DeviceLocal);
+
+        for (label, inherit_buffers, inherit_pipeline) in ICB_INHERITANCE {
+            let descriptor = MTLIndirectCommandBufferDescriptor::new();
+            // Read before writing: these are Metal's defaults, and the two bind
+            // counts are what the per-command stride would be if this probe left
+            // them alone.
+            let default_types = descriptor.commandTypes();
+            let default_vertex_binds = descriptor.maxVertexBufferBindCount();
+            let default_fragment_binds = descriptor.maxFragmentBufferBindCount();
+
+            descriptor.setCommandTypes(ICB_DRAW_COMMANDS);
+            let set_types = descriptor.commandTypes();
+            descriptor.setInheritBuffers(inherit_buffers);
+            descriptor.setInheritPipelineState(inherit_pipeline);
+            descriptor.setMaxVertexBufferBindCount(ICB_STAGE_BUFFER_BINDS);
+            descriptor.setMaxFragmentBufferBindCount(ICB_STAGE_BUFFER_BINDS);
+
+            println!(
+                "crcbl-mtl icb: descriptor {label} commandTypes {default_types:?} -> \
+                 {set_types:?}, inheritBuffers={} inheritPipelineState={}, \
+                 maxVertexBufferBindCount {default_vertex_binds} -> {}, \
+                 maxFragmentBufferBindCount {default_fragment_binds} -> {}",
+                descriptor.inheritBuffers(),
+                descriptor.inheritPipelineState(),
+                descriptor.maxVertexBufferBindCount(),
+                descriptor.maxFragmentBufferBindCount(),
+            );
+
+            // THE GUARD, and it is two-sided so that a probe which asked the
+            // device nothing cannot reach the end green. See the doc comment.
+            assert_eq!(
+                set_types, ICB_DRAW_COMMANDS,
+                "MTLIndirectCommandBufferDescriptor did not hand back the command types it was \
+                 given, so nothing here reached a live descriptor"
+            );
+            assert_ne!(
+                set_types, default_types,
+                "MTLIndirectCommandBufferDescriptor answered the wanted command types before it \
+                 was given them, so the answer is not this descriptor's"
+            );
+            assert_eq!(
+                descriptor.inheritBuffers(),
+                inherit_buffers,
+                "setInheritBuffers: did not stick, so the descriptor Metal is about to be handed \
+                 is not the one this row describes"
+            );
+            assert_eq!(
+                descriptor.inheritPipelineState(),
+                inherit_pipeline,
+                "setInheritPipelineState: did not stick, so the descriptor Metal is about to be \
+                 handed is not the one this row describes"
+            );
+
+            let mut attempted = 0usize;
+            let mut previous: Option<NSUInteger> = None;
+            let mut largest_created: Option<NSUInteger> = None;
+            let mut first_refused: Option<NSUInteger> = None;
+            for count in ICB_COMMAND_COUNTS {
+                assert!(
+                    previous.is_none_or(|prev| prev < count),
+                    "ICB_COMMAND_COUNTS is not strictly ascending, so stopping at the first \
+                     refusal would skip a maxCommandCount this device might still accept"
+                );
+                previous = Some(count);
+                attempted += 1;
+
+                // SAFETY: `objc2-metal` marks this `unsafe` for one reason,
+                // which its own doc line gives — `maxCount` might not be
+                // bounds-checked. Every value comes from `ICB_COMMAND_COUNTS`,
+                // whose largest entry is `Limits::desktop`'s draw ceiling and
+                // whose smallest is 64, and the loop climbs from the smallest
+                // and stops at the first nil — so at most one request is ever
+                // made past what this device accepted. Metal's declaration of
+                // the call is `-> Option<Retained<…>>` precisely because a
+                // request it cannot satisfy comes back nil, which the `match`
+                // below reports rather than unwrapping.
+                let icb = unsafe {
+                    raw.newIndirectCommandBufferWithDescriptor_maxCommandCount_options(
+                        &descriptor,
+                        count,
+                        options,
+                    )
+                };
+                match icb {
+                    Some(icb) => {
+                        let size = icb.size();
+                        println!(
+                            "crcbl-mtl icb: {label} maxCommandCount={count} created, size={size} \
+                             bytes ({} per command)",
+                            size / count
+                        );
+                        largest_created = Some(count);
+                    }
+                    None => {
+                        println!(
+                            "crcbl-mtl icb: {label} maxCommandCount={count} came back nil, so \
+                             this device creates no indirect command buffer that large"
+                        );
+                        first_refused = Some(count);
+                        break;
+                    }
+                }
+            }
+
+            assert!(
+                first_refused.is_some() || attempted == ICB_COMMAND_COUNTS.len(),
+                "the maxCommandCount ladder stopped before its last rung without a refusal, so a \
+                 count was silently never asked about and the ceiling printed below is a floor"
+            );
+            println!(
+                "crcbl-mtl icb: {label} largest maxCommandCount created = {largest_created:?}, \
+                 first refused = {first_refused:?}"
+            );
+        }
+
+        // The backend's own derivation, so the printed ceiling above can be read
+        // against what this backend promises today. `limits_of` never assigns
+        // `max_draw_indirect_count`, which is what makes the `1` a floor rather
+        // than a measurement — the two numbers below being equal is that fact,
+        // visible.
+        let features = features_of(raw, &name);
+        let limits = limits_of(raw, features);
+        println!(
+            "crcbl-mtl icb: derived max_draw_indirect_count={} (Limits::minimum() is {}, \
+             Limits::desktop() is {}; limits_of assigns the field nothing, so the derived value \
+             is this backend's choice of floor and not this device's answer)",
+            limits.max_draw_indirect_count,
+            Limits::minimum().max_draw_indirect_count,
+            Limits::desktop().max_draw_indirect_count,
+        );
+        println!(
+            "crcbl-mtl icb: DRAW_INDIRECT_COUNT={} MULTI_DRAW_INDIRECT={} \
+             INDIRECT_FIRST_INSTANCE={} COMPUTE={}",
+            features.contains(Features::DRAW_INDIRECT_COUNT),
+            features.contains(Features::MULTI_DRAW_INDIRECT),
+            features.contains(Features::INDIRECT_FIRST_INSTANCE),
+            features.contains(Features::COMPUTE),
+        );
+        // The caps a compute kernel writing an ICB would spend: the argument
+        // buffer it reads and the count buffer it reads are both `MTLBuffer`, so
+        // the storage range bounds how many draws could be described at all, and
+        // the workgroup limits bound the dispatch that would encode them.
+        println!(
+            "crcbl-mtl icb: max_storage_buffer_range={} max_compute_workgroup_size={:?} \
+             max_compute_invocations_per_workgroup={} max_compute_workgroups_per_dimension={}",
+            limits.max_storage_buffer_range,
+            limits.max_compute_workgroup_size,
+            limits.max_compute_invocations_per_workgroup,
+            limits.max_compute_workgroups_per_dimension,
+        );
     }
 }
