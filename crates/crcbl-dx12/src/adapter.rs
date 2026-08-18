@@ -664,6 +664,14 @@ fn features_of(raw: &RawCaps) -> Features {
         | Features::TIMESTAMP_QUERY
         | Features::OCCLUSION_QUERY
         | Features::PIPELINE_STATISTICS_QUERY;
+    // DIAGNOSTIC ONLY — DO NOT MERGE. Reporting these is what removed the WARP
+    // device in 90ba604, and `crcbl_dx12::dred` was written to find out which
+    // operation did it and has never run. This branch exists to make that
+    // happen once; `docs/backlog.md`'s "DRED is written and has never run"
+    // names this as the cheapest way to settle it. The report arrives through
+    // `debug::diagnosis`, which folds `dred::diagnosis` into the error every
+    // removed-device call raises.
+    out |= Features::MESH_SHADER | Features::TASK_SHADER;
     out
 }
 
