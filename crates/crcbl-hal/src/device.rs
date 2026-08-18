@@ -650,6 +650,24 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// On WebGPU this is the `unmap`; abandoning readbacks without destroying
     /// them leaks a mapped buffer, which is why this exists rather than being
     /// implicit.
+    ///
+    /// **Destroying one whose bytes never landed is legal and silent.** The
+    /// request is cancelled, its bytes are never delivered, and the call reports
+    /// nothing — not through a return value it does not have, and not through
+    /// [`take_error`](Self::take_error) either. A caller that stops caring about
+    /// a readback mid-flight is doing the thing this call is for.
+    ///
+    /// The obligation is on the backend, and only one of them has to do
+    /// anything for it. On WebGPU the cancel is `unmap()`, which **rejects** an
+    /// outstanding `mapAsync` with an `AbortError`; filing that rejection as a
+    /// device error is how a cancelled readback came to report
+    /// `could not be mapped: AbortError`, naming a call that did as it was told.
+    /// The backend must tell that rejection apart from a real failure and stay
+    /// quiet. Vulkan, D3D12 and Metal satisfy this by accident — there is no
+    /// promise to reject, so dropping the tracking entry is the whole of it —
+    /// which is exactly why it is written down here and asserted for every
+    /// backend by `destroying_a_readback_before_its_bytes_land_reports_nothing`
+    /// rather than left to three backends continuing to be incidentally right.
     fn destroy_readback(&self, readback: ReadbackHandle);
 
     /// Creates an image.

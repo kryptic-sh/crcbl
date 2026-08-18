@@ -578,19 +578,6 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
-### `Device::destroy_readback` does not say what happens to a pending map
-
-`crcbl-hal`'s doc says only "Releases a readback request, whether or not it
-completed", which sanctions the call and leaves the consequence unstated — and
-the consequence is exactly where a backend can get it wrong. It should say:
-destroying a readback whose completion has not landed is legal and produces no
-error on any backend; the request is cancelled and its bytes are never
-delivered; on WebGPU this is `unmap()`, which cancels an outstanding `mapAsync`,
-and the backend must not surface that cancellation through `take_error`.
-
-Worth writing down because the other four backends satisfy it by accident — they
-just drop a tracking entry — while WebGPU had to be told.
-
 ### dx12 mesh shading: the calls exist, the flag does not
 
 `crcbl-dx12` now builds mesh pipelines and records both mesh draws — the

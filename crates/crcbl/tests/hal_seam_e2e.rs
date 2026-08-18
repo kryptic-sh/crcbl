@@ -1855,6 +1855,84 @@ fn a_readback_of_the_wrong_buffer_or_range_is_refused_instead_of_panicking() {
     drop(device);
 }
 
+/// Destroying a readback whose bytes never landed is legal and reports nothing.
+///
+/// **The shape of a bug that reached a user.** On WebGPU `destroy_readback` is
+/// `unmap()`, and unmapping a buffer whose `mapAsync` is still resolving rejects
+/// that promise with an `AbortError` — which, filed as a device error, reads as
+/// `readback N could not be mapped: AbortError` and names a call that did
+/// exactly what it was told. The other four backends satisfy this by accident:
+/// they drop a tracking entry and there is no promise to reject. So this is the
+/// obligation WebGPU had to be told about, and the one an agnostic test has to
+/// hold every backend to rather than trusting four of them to keep being
+/// incidentally right.
+///
+/// The readback is destroyed **without ever being polled to
+/// [`ReadbackState::Ready`]**, which is the whole point: a poll that reached
+/// `Ready` has nothing outstanding to cancel, so a test that polled first would
+/// pass on a backend that surfaced the cancellation loudly.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn destroying_a_readback_before_its_bytes_land_reports_nothing() {
+    let instance = instance();
+    let adapter = select_adapter(instance.as_ref());
+    let device = open_headless_device(instance.as_ref(), adapter.id);
+
+    let readable = device
+        .create_buffer(&BufferDesc {
+            label: Some("cancelled readback"),
+            size: 64,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+
+    let readback = device
+        .request_readback(&ReadbackDesc {
+            label: Some("destroyed while still mapping"),
+            buffer: readable,
+            offset: 0,
+            size: 64,
+            after: None,
+        })
+        .expect("a readback request");
+    device.destroy_readback(readback);
+
+    // And a second one afterwards still works, so the cancel did not leave the
+    // backend's readback bookkeeping wedged — the failure a "no error was
+    // reported" assertion alone would sit happily beside.
+    let mut out = [0u8; 64];
+    let again = device
+        .request_readback(&ReadbackDesc {
+            label: Some("after a cancelled one"),
+            buffer: readable,
+            offset: 0,
+            size: 64,
+            after: None,
+        })
+        .expect("a readback request after a cancelled one");
+    let deadline = Instant::now() + READBACK_DEADLINE;
+    loop {
+        match device
+            .poll_readback(again, &mut out)
+            .expect("the second readback did not fail")
+        {
+            ReadbackState::Ready => break,
+            ReadbackState::Pending => assert!(
+                Instant::now() < deadline,
+                "a readback issued after a cancelled one never completed, so the cancel left \
+                 the backend's bookkeeping wedged"
+            ),
+        }
+        std::thread::yield_now();
+    }
+    device.destroy_readback(again);
+
+    device.destroy_buffer(readable);
+    assert_no_out_of_band_error(device.as_ref());
+    drop(device);
+}
+
 /// Presenting an image nothing acquired is refused.
 ///
 /// Migrated from `crcbl-wgpu`'s `wgpu_e2e.rs` and `crcbl-mtl`'s `swapchain.rs`.
