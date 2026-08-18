@@ -2743,6 +2743,18 @@ pub(crate) mod tests {
     // depth attachment or names a comparison for one.
     #[cfg(feature = "mtl-e2e")]
     use crcbl_hal::{CompareOp, DepthBias, DepthStencilAttachment, Viewport};
+    // The indirect-command-buffer draw is the one test in this crate that
+    // hand-encodes a render pass rather than going through the seam, because
+    // neither `executeCommandsInBuffer:withRange:` nor a pipeline built with
+    // `supportIndirectCommandBuffers` has a seam verb — see
+    // [`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`].
+    #[cfg(feature = "mtl-e2e")]
+    use objc2_metal::{
+        MTLCommandEncoder as _, MTLIndirectCommandBuffer, MTLIndirectCommandBufferDescriptor,
+        MTLIndirectCommandType, MTLIndirectRenderCommand, MTLLibrary, MTLPrimitiveType,
+        MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
+        MTLRenderPipelineState, MTLScissorRect, MTLViewport,
+    };
 
     /// Every [`MemoryLocation`] the seam has, so the buffer tests cover all
     /// three rather than the one that was convenient.
@@ -6024,6 +6036,400 @@ using namespace metal;\n\
         device.destroy_graphics_pipeline(pipeline);
         device.destroy_pipeline_layout(layout);
         device.destroy_shader_module(module);
+    }
+
+    // --- the indirect command buffer rung -----------------------------------
+    //
+    // Nothing this crate ships creates an `MTLIndirectCommandBuffer`, and this
+    // rung does not change that. What it settles is a measurement caveat: the
+    // adapter probe found that CI's Apple Paravirtual device creates ICBs at
+    // every `maxCommandCount` from 64 to 1048576, and that every one of them
+    // reported a `size` of exactly one byte per command — implausibly small for
+    // real command storage, so creation succeeding was evidence the API path is
+    // open and *not* evidence that `executeCommandsInBuffer:` runs what was
+    // encoded. `docs/backlog.md` carries the numbers.
+
+    /// How many commands the ICB below holds, and the whole of the range that is
+    /// reset, encoded and executed.
+    ///
+    /// One, because the question is whether an ICB executes at all. A ladder of
+    /// counts is the adapter probe's job and it has already run; a second
+    /// command here would only widen what an
+    /// `executeCommandsInBuffer:withRange:` failure could mean.
+    #[cfg(feature = "mtl-e2e")]
+    const ICB_COMMAND_COUNT: NSUInteger = 1;
+
+    /// [`ink_msl`]'s triangle as an `MTLRenderPipelineState` an ICB may name.
+    ///
+    /// **Built by hand rather than through
+    /// [`create_graphics_pipeline`](crcbl_hal::Device::create_graphics_pipeline),
+    /// for one reason**: an ICB command that sets a pipeline state raises unless
+    /// that state was created from a descriptor with
+    /// `supportIndirectCommandBuffers` set, and this backend's descriptor path
+    /// never sets it — nothing it ships encodes into an ICB, so advertising the
+    /// capability on every pipeline would cost residency for a path with no
+    /// caller. The flag is read back off both the descriptor and the finished
+    /// state before anything encodes with it, so a device that quietly dropped
+    /// it fails an assertion here instead of raising an Objective-C exception
+    /// two calls later — which would kill the test process rather than fail the
+    /// test.
+    ///
+    /// Everything else is the seam's own pipeline in miniature: the same MSL,
+    /// the same entry-point names, one `Rgba8Unorm` colour attachment, and no
+    /// bindings at all.
+    #[cfg(feature = "mtl-e2e")]
+    fn icb_triangle_pipeline(
+        device: &MetalDevice,
+    ) -> Retained<ProtocolObject<dyn MTLRenderPipelineState>> {
+        let source = ink_msl();
+        let library = device
+            .inner
+            .raw
+            .newLibraryWithSource_options_error(&NSString::from_str(&source), None)
+            .expect("the ink shader compiles");
+        let vertex = library
+            .newFunctionWithName(&NSString::from_str("vertexMain"))
+            .expect("the ink shader declares vertexMain");
+        let fragment = library
+            .newFunctionWithName(&NSString::from_str("fragmentMain"))
+            .expect("the ink shader declares fragmentMain");
+
+        let descriptor = MTLRenderPipelineDescriptor::new();
+        descriptor.setLabel(Some(&NSString::from_str("crcbl-mtl icb triangle")));
+        descriptor.setVertexFunction(Some(&vertex));
+        descriptor.setFragmentFunction(Some(&fragment));
+        descriptor.setSupportIndirectCommandBuffers(true);
+        // SAFETY: `objc2` marks the subscript unsafe because Metal does not
+        // bounds-check the attachment index. Zero is the one index every
+        // `MTLRenderPipelineColorAttachmentDescriptorArray` has, which is the
+        // same argument `create_graphics_pipeline` makes for the identical call.
+        let slot = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        slot.setPixelFormat(conv::pixel_format(Format::Rgba8Unorm));
+
+        assert!(
+            descriptor.supportIndirectCommandBuffers(),
+            "MTLRenderPipelineDescriptor did not keep supportIndirectCommandBuffers, so the state \
+             built from it could not legally be named by an indirect command"
+        );
+        let state = device
+            .inner
+            .raw
+            .newRenderPipelineStateWithDescriptor_error(&descriptor)
+            .expect("a colour-only pipeline that supports indirect command buffers");
+        assert!(
+            state.supportIndirectCommandBuffers(),
+            "MTLRenderPipelineState::supportIndirectCommandBuffers is false on a state built from \
+             a descriptor that asked for it, so setRenderPipelineState: on an indirect command \
+             would raise"
+        );
+        state
+    }
+
+    /// [`draw_canvas`]'s picture, from a hand-encoded `MTLRenderCommandEncoder`.
+    ///
+    /// The seam has no verb for `executeCommandsInBuffer:withRange:`, so the
+    /// render pass this rung needs cannot be recorded through
+    /// [`CommandEncoder`]. What it does instead is open one Metal render encoder
+    /// directly on this device's queue, hand it to `record`, and then read the
+    /// result back **through the seam** — the barrier, the image-to-buffer copy
+    /// and the readback are `draw_canvas`'s, unchanged, in a second command
+    /// buffer that Metal orders after the first on the one queue.
+    ///
+    /// Everything the two callers share lives here so the *only* difference
+    /// between the control and the indirect path is what `record` encodes: same
+    /// [`CANVAS`], same [`CLEAR`], same viewport and scissor, same
+    /// `MTLDepthStencilState` — this device's always-pass default, never nil,
+    /// for the reason `crcbl_mtl::pipeline`'s `default_depth_stencil_state`
+    /// gives — and the same command-buffer descriptor, from
+    /// [`crate::fault::command_buffer`], so a fault is reported per encoder.
+    ///
+    /// The command buffer's status is asserted rather than assumed: a hung or
+    /// faulted submission must arrive as a failed assertion naming the reason,
+    /// not as a readback of whatever the poison pattern left behind.
+    #[cfg(feature = "mtl-e2e")]
+    fn ink_pass_canvas(
+        device: &MetalDevice,
+        label: &str,
+        record: impl FnOnce(&ProtocolObject<dyn MTLRenderCommandEncoder>),
+    ) -> Vec<u8> {
+        let (image, view) = color_target_of(device, CANVAS, Format::Rgba8Unorm);
+        let readback = readback_buffer(device, CANVAS_BYTES as u64);
+        let (texture, _) = device
+            .inner
+            .view_raw(view)
+            .expect("the view was just created on this device");
+
+        let descriptor = MTLRenderPassDescriptor::new();
+        // SAFETY: as in `icb_triangle_pipeline` — index zero of the colour
+        // attachment array, which every render pass descriptor has.
+        let slot = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        slot.setTexture(Some(&texture));
+        slot.setLoadAction(conv::load_action(LoadOp::Clear));
+        slot.setClearColor(conv::clear_color(CLEAR));
+        slot.setStoreAction(conv::store_action(StoreOp::Store));
+
+        let command_buffer = crate::fault::command_buffer(&device.inner.queue, label)
+            .expect("MTLCommandQueue::commandBufferWithDescriptor: returned nil");
+        let encoder = command_buffer
+            .renderCommandEncoderWithDescriptor(&descriptor)
+            .expect("MTLCommandBuffer::renderCommandEncoderWithDescriptor: returned nil");
+        encoder.setViewport(MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: f64::from(CANVAS.width),
+            height: f64::from(CANVAS.height),
+            znear: 0.0,
+            zfar: 1.0,
+        });
+        encoder.setScissorRect(MTLScissorRect {
+            x: 0,
+            y: 0,
+            width: to_ns(u64::from(CANVAS.width)),
+            height: to_ns(u64::from(CANVAS.height)),
+        });
+        encoder.setDepthStencilState(Some(&device.inner.default_depth_stencil));
+        record(&encoder);
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+
+        let status = command_buffer.status();
+        assert_eq!(
+            status,
+            MTLCommandBufferStatus::Completed,
+            "the `{label}` command buffer ended {status:?} rather than Completed: {}",
+            if status == MTLCommandBufferStatus::Error {
+                crate::fault::describe(&command_buffer)
+            } else {
+                "no NSError was recorded".to_string()
+            }
+        );
+
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let mut copies = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl icb readback"),
+            queue,
+        });
+        copies.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                image,
+                ImageSubresourceRange::all(Format::Rgba8Unorm),
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        copies.copy_image_to_buffer(&whole_image_copy_of(image, readback, CANVAS));
+        let commands = copies.finish().expect("the recording is complete");
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("the queue accepts it");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("the hand-encoded canvas"),
+                buffer: readback,
+                offset: 0,
+                size: CANVAS_BYTES as u64,
+                after: None,
+            })
+            .expect("a HostReadback buffer, in range");
+        let bytes = drain(device, request, CANVAS_BYTES);
+
+        device.destroy_readback(request);
+        device.destroy_command_buffer(commands);
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+        device.destroy_buffer(readback);
+        bytes
+    }
+
+    /// **An `MTLIndirectCommandBuffer` executes the draw encoded into it**, and
+    /// paints the picture the same draw paints when it is recorded directly.
+    ///
+    /// This is the smallest thing that can close the adapter probe's caveat. The
+    /// probe showed that CI's device *creates* ICBs at every size asked for; it
+    /// could not show that `executeCommandsInBuffer:withRange:` runs their
+    /// contents, and every ICB's one-byte-per-command `size` is a live reason to
+    /// doubt it. Drawing through one and reading the texels back is the only
+    /// answer to that, and it has to arrive before anyone restructures this
+    /// backend's encoder for [`Capability::DrawIndirectCount`] on the strength
+    /// of an allocation that may be nominal.
+    ///
+    /// # The controlled experiment
+    ///
+    /// Both halves go through [`ink_pass_canvas`] and share **one**
+    /// [`MTLRenderPipelineState`] — the same object, not an equivalent one — so
+    /// the pipeline, the shader, the target, the clear, the viewport, the
+    /// scissor, the depth/stencil state and the readback are literally the same
+    /// calls. The only difference is what `record` encodes:
+    ///
+    /// * the control sets the pipeline and calls
+    ///   `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:` on
+    ///   the render encoder;
+    /// * the subject calls `executeCommandsInBuffer:withRange:` and nothing
+    ///   else, having encoded that same pipeline and that same draw into
+    ///   [`ICB_COMMAND_COUNT`] indirect commands beforehand.
+    ///
+    /// So the assertion is byte equality against the control, and it means "the
+    /// ICB executed the draw" rather than "something changed". The control is
+    /// itself checked with [`assert_ink_triangle`] first, because two blank
+    /// canvases are also equal.
+    ///
+    /// # This is CPU encoding, deliberately
+    ///
+    /// `indirectRenderCommandAtIndex:` writes the command from the CPU, which is
+    /// the *simple* half. Metal's count-from-memory execution needs commands a
+    /// **compute kernel** wrote — that restructuring is what
+    /// `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` names and what the
+    /// `DrawIndirectCount` row is still blocked on. Proving the execution path
+    /// runs at all is what this rung buys; it moves no capability row and
+    /// reports no feature.
+    ///
+    /// The ICB therefore inherits **neither** buffers nor pipeline state: the
+    /// command names its own pipeline, and the shader reads nothing. A real
+    /// `draw_indirect_count` would set both inheritance flags, which the adapter
+    /// probe already measured as creatable on this device.
+    ///
+    /// # What turns it red
+    ///
+    /// An ICB that allocates but does not execute — the centre comes back
+    /// [`CLEAR_TEXEL`], which [`assert_ink_triangle`] names as "nothing was
+    /// drawn" and prints. An ICB that executes a stale or reset slot — likewise,
+    /// since [`resetWithRange:`](MTLIndirectCommandBuffer::resetWithRange) makes
+    /// every command a no-op until one is written. An execution that ran
+    /// something *other* than the encoded draw — the per-texel comparison
+    /// against the control. A device that refuses the ICB outright — the
+    /// `expect` on the creation, which Metal answers with nil rather than a
+    /// raise.
+    ///
+    /// **Needs a real GPU**, like every other gated draw; nothing on Linux
+    /// compiles this module at all, let alone runs it.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints() {
+        let (_instance, device) = open_device();
+        let pipeline = icb_triangle_pipeline(&device);
+
+        // The control: the same pipeline and the same draw, recorded straight
+        // onto the render encoder.
+        let direct = ink_pass_canvas(&device, "crcbl-mtl icb control", |encoder| {
+            encoder.setRenderPipelineState(&pipeline);
+            // SAFETY: `objc2` marks this unsafe because Metal bounds-checks
+            // neither the vertex count nor the instance count. Both are
+            // literals here, and they are the three vertices `ink_msl`'s
+            // `corners` array declares and the one instance every other draw in
+            // this suite records.
+            unsafe {
+                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    3,
+                    1,
+                    0,
+                );
+            }
+        });
+        assert_ink_triangle(&direct, Format::Rgba8Unorm);
+
+        let descriptor = MTLIndirectCommandBufferDescriptor::new();
+        descriptor.setCommandTypes(MTLIndirectCommandType::Draw);
+        // The command carries its own pipeline and reads no buffer, so neither
+        // inheritance flag is wanted; see the doc comment.
+        descriptor.setInheritPipelineState(false);
+        descriptor.setInheritBuffers(false);
+        // Read back rather than assumed, so a descriptor that stored nothing
+        // fails here instead of producing an ICB nobody can explain.
+        assert_eq!(
+            descriptor.commandTypes(),
+            MTLIndirectCommandType::Draw,
+            "MTLIndirectCommandBufferDescriptor did not keep the command types it was given"
+        );
+
+        // `Shared`, because the command below is written by the CPU: a `Private`
+        // ICB is the one a compute kernel would encode, and it has no CPU
+        // mapping for `indirectRenderCommandAtIndex:` to write through.
+        // `HostReadback` is the seam location that maps to shared-and-cached,
+        // which is what a CPU-encoded ICB wants — `HostUpload` maps to
+        // write-combined.
+        let options = conv::resource_options(MemoryLocation::HostReadback);
+        // SAFETY: `objc2` marks this unsafe because `maxCount` might not be
+        // bounds-checked. It is `ICB_COMMAND_COUNT`, which is 1 — far below the
+        // 1048576 the adapter probe watched this device accept — and Metal's
+        // declared return is `Option`, so a request it cannot satisfy comes back
+        // nil and is reported by the `expect` rather than unwound.
+        let icb = unsafe {
+            device
+                .inner
+                .raw
+                .newIndirectCommandBufferWithDescriptor_maxCommandCount_options(
+                    &descriptor,
+                    ICB_COMMAND_COUNT,
+                    options,
+                )
+        }
+        .expect("this device creates a one-command indirect command buffer");
+
+        // An ICB's contents are undefined until they are written, so the whole
+        // range is reset before anything is encoded into it. Without this a
+        // "passing" run could be executing whatever the allocation held.
+        //
+        // SAFETY: `objc2` marks this unsafe because the range might not be
+        // bounds-checked. It is the ICB's whole range, `0..ICB_COMMAND_COUNT`,
+        // which is the `maxCommandCount` the buffer was just created with.
+        unsafe { icb.resetWithRange(NSRange::new(0, ICB_COMMAND_COUNT)) };
+
+        // SAFETY: `objc2` marks this unsafe because the command index might not
+        // be bounds-checked. Zero is in range for any `maxCommandCount` of at
+        // least one, and `ICB_COMMAND_COUNT` is one.
+        let command = unsafe { icb.indirectRenderCommandAtIndex(0) };
+        command.setRenderPipelineState(&pipeline);
+        // SAFETY: the counts are unchecked, exactly as on the render encoder
+        // above, and they are the same two literals for the same reason.
+        unsafe {
+            command.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                MTLPrimitiveType::Triangle,
+                0,
+                3,
+                1,
+                0,
+            );
+        }
+
+        let painted = ink_pass_canvas(&device, "crcbl-mtl icb", |encoder| {
+            // SAFETY: `objc2` marks this unsafe because the ICB may need
+            // synchronising, may be unretained, and the execution range might
+            // not be bounds-checked. The ICB is `Shared` and was written by this
+            // thread before the command buffer was committed; `icb` is a live
+            // `Retained` held across this call and the `waitUntilCompleted`
+            // inside `ink_pass_canvas`; and the range is the whole buffer, which
+            // is the `maxCommandCount` it was created with.
+            unsafe {
+                encoder.executeCommandsInBuffer_withRange(&icb, NSRange::new(0, ICB_COMMAND_COUNT))
+            };
+        });
+
+        // Asserted before the comparison, so a canvas the ICB left untouched is
+        // reported as "nothing was drawn" with the texel it actually holds,
+        // rather than as a mismatch against the control.
+        assert_ink_triangle(&painted, Format::Rgba8Unorm);
+
+        let differing = direct
+            .chunks_exact(4)
+            .zip(painted.chunks_exact(4))
+            .filter(|(control, indirect)| control != indirect)
+            .count();
+        let (centre_x, centre_y) = (CANVAS.width / 2, CANVAS.height / 2);
+        assert_eq!(
+            differing,
+            0,
+            "{differing} texels differ between the direct draw and the indirect one; at the centre \
+             the direct draw left {:02X?} and the indirect one left {:02X?}",
+            texel_at(&direct, centre_x, centre_y),
+            texel_at(&painted, centre_x, centre_y),
+        );
     }
 
     /// Records `paint` into a [`CANVAS`]-sized pass over a `format` target,

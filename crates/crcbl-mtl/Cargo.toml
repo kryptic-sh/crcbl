@@ -165,14 +165,28 @@ crcbl-shaders = { workspace = true }
 # `MTLIndirectCommandBufferDescriptor`, `MTLIndirectCommandType` and the
 # `MTLIndirectCommandBuffer` protocol whose `size` the probe reads.
 #
-# `MTLIndirectCommandEncoder` is **not** enabled beside it: that feature is what
-# `indirectRenderCommandAtIndex:` needs, and a probe that creates an ICB without
-# encoding into one never asks for a command. The slice that encodes adds it.
-#
 # It adds no package to `Cargo.lock` either. The feature's whole dependency list
 # is `bitflags`, `objc2-foundation/NSObject` and `objc2-foundation/NSRange`, and
 # all three were already switched on — the first two by `MTLCounters` above, the
 # third by this crate's own `NSRange` entry.
+#
+# `MTLIndirectCommandEncoder` is the feature that entry said "the slice that
+# encodes adds", and this is that slice — **still without shipping anything that
+# encodes**. `crcbl_mtl::command`'s `indirect_count` refuses exactly as before,
+# `Features::DRAW_INDIRECT_COUNT` is off, and nothing outside `#[cfg(test)]`
+# names an ICB. What needs the feature is `crcbl_mtl::device`'s
+# `an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`,
+# which closes the measurement caveat the probe above left open: creation
+# succeeding is not execution succeeding, and the only way to tell them apart is
+# to draw through an ICB and read the texels back.
+#
+# `MTLIndirectCommandBuffer::indirectRenderCommandAtIndex:` is `cfg`-gated on it
+# upstream, and so is the `MTLIndirectRenderCommand` protocol the returned
+# command is — which is where `setRenderPipelineState:` and the indirect
+# `drawPrimitives:…` the test encodes live.
+#
+# It adds nothing to `Cargo.lock` at all: the feature's dependency list upstream
+# is **empty**, so it switches on no crate and no other feature.
 #
 # `MTLVertexDescriptor` stays absent — this engine has no vertex input state at
 # all, by design, and enabling it would advertise a path `crcbl_hal::pipeline`
@@ -250,6 +264,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLDrawable",
   "MTLEvent",
   "MTLIndirectCommandBuffer",
+  "MTLIndirectCommandEncoder",
   "MTLLibrary",
   "MTLPixelFormat",
   "MTLRenderPipeline",
