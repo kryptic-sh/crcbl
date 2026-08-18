@@ -3,6 +3,7 @@
 // `GPUDevice` — groups G through Z, which live in `web/tools/probe-groups.mjs`.
 //
 //   node web/tools/probe-e2e.mjs [--site target/site] [--timeout 90000]
+//                                [--adapter auto] [--expect-fail X,Y,Z,AA]
 //
 // `web/run-probe-e2e.sh` is the entry point a human or CI runs; this file is the
 // half that needs a JS engine. Plain Node with no dependencies, like every other
@@ -32,12 +33,22 @@
 // takes.
 //
 // **A DISPLAY IS STILL NOT OPTIONAL** on a machine with no GPU, and that was
-// measured rather than assumed. Under `--headless=new` plus SwiftShader, groups
-// X, Y and Z — the three that acquire a canvas frame or present one — encode
-// their frame and then never resolve the readback map, while every other group
-// passes; in the same browser inside Xvfb all three pass. Measured on Chromium
-// 151. So `web/run-probe-e2e.sh` brings up an Xvfb the way the demo gate does,
-// and a headless run on such a machine fails loudly rather than skipping.
+// measured rather than assumed. Under `--headless=new` plus SwiftShader, group X
+// — the first that presents a canvas frame — encodes its frame and then never
+// resolves the readback map, and groups Y, Z and AA go down with it; inside Xvfb
+// all four pass. Measured on Chromium 151. So `web/run-probe-e2e.sh` brings up an
+// Xvfb the way the demo gate does, and a headless run on such a machine fails
+// loudly rather than skipping.
+//
+// ONE STUCK PRESENT TAKES THE WHOLE TAIL OF THE RUN WITH IT, and that is not a
+// guess either: with `startPresentProbe` and `startReconfigureProbe` stubbed out
+// so X and Y submit nothing, in that same headless SwiftShader browser, Z and AA
+// both pass. The page has ONE `GPUDevice` and therefore one queue, and a
+// `mapAsync` resolves only behind the submits before it — so a present the
+// compositor never completes strands every readback queued after it. Z draws
+// indirectly into a texture the replayer owns and AA copies a depth plane;
+// neither touches a canvas, and both fail anyway. **The dividing line is not
+// "uses a canvas" and not "reads back" — it is "is queued behind X".**
 //
 // ENVIRONMENT
 //   SITE_DIR                     Where the built site is. Default `target/site`.
@@ -57,11 +68,24 @@
 //                                on a Windows runner's own desktop session.
 //   CRCBL_WEB_E2E_TIMEOUT_MS     How long each poll is given. SwiftShader is
 //                                slow, and the readback groups map buffers.
+//   CRCBL_WEB_E2E_EXPECT_FAIL    Group letters this platform is not expected to
+//                                produce a verdict for, comma- or
+//                                space-separated: `X,Y,Z,AA`. Also
+//                                `--expect-fail`. They still run and still
+//                                print; see EXIT STATUS.
 //
 // EXIT STATUS. Non-zero if any check fails *or* if zero checks ran. The second
 // half is not decoration: `docs/plan/12-testing.md` names a silently-skipped e2e
 // job as a known trap, and a gate whose browser never started would otherwise
 // print nothing and succeed.
+//
+// `--expect-fail` narrows the first half and cannot touch the second. It is
+// exact in both directions, because a list that merely *tolerates* failure is
+// worse than no list at all — it silently absorbs the regression it was not
+// written for. A named group that fails is excused and named as excused; a named
+// group that PASSES fails the run as a stale list; a named group that recorded
+// no checks fails it too. The groups themselves are untouched either way: they
+// run, their failures print, and they count towards the tally.
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync } from 'node:fs';
@@ -157,6 +181,31 @@ const MODE =
       : 'hardware'
     : ADAPTER;
 
+/**
+ * Groups whose failure here is a known property of the platform, not a bug.
+ *
+ * Handed in from outside rather than decided by a `process.platform` test in
+ * this file, and deliberately: this driver knows about browsers and adapters and
+ * has no business knowing what Windows is. `.github/workflows/pages.yml` sets it
+ * per job, beside the comment carrying the run it was measured from.
+ *
+ * **Exact in both directions**, which is the whole design. A list that only
+ * tolerates failure is worse than no list — the day the group it excuses starts
+ * working, it goes on excusing the *next* thing that breaks there, and nothing
+ * says so. So a named group that passes is a hard failure, spelled "the list is
+ * stale", and the same for a named group that ran nothing at all: both mean the
+ * list no longer describes the run it was written against.
+ *
+ * @type {string[]}
+ */
+const EXPECT_FAIL = (
+  args['expect-fail'] ??
+  process.env.CRCBL_WEB_E2E_EXPECT_FAIL ??
+  ''
+)
+  .split(/[\s,]+/)
+  .filter(Boolean);
+
 if (!existsSync(join(SITE, 'probe', 'index.html'))) {
   fail(`no probe page at ${SITE}/probe/index.html — run web/build.sh first`);
 }
@@ -167,6 +216,16 @@ if (!Number.isFinite(TIMEOUT_MS) || TIMEOUT_MS <= 0) {
 }
 if (!['auto', 'hardware', 'swiftshader'].includes(ADAPTER)) {
   fail(`--adapter must be auto, hardware or swiftshader, got "${ADAPTER}"`);
+}
+// Shape only. Which letters exist is not restated here — a letter that names no
+// group is caught at the verdict, by the same rule that catches a letter whose
+// group has started passing, and with a message that says which run it stopped
+// describing.
+const MISSHAPEN = EXPECT_FAIL.filter((letter) => !/^[A-Z]{1,2}$/.test(letter));
+if (MISSHAPEN.length) {
+  fail(
+    `--expect-fail takes group letters like "X,Y,Z,AA", got "${MISSHAPEN.join('", "')}"`
+  );
 }
 
 const pause = (ms) => new Promise((ok) => setTimeout(ok, ms));
@@ -432,6 +491,14 @@ try {
     `probe e2e: adapter mode "${MODE}"` +
       `${ADAPTER === 'auto' ? ` (auto on ${process.platform})` : ''}`
   );
+  // Said before the run as well as after it. A reader who stops at the top of a
+  // green log has to be able to see what this run's verdict does not cover.
+  if (EXPECT_FAIL.length) {
+    console.log(
+      `probe e2e: --expect-fail ${EXPECT_FAIL.join(' ')} — those groups still run, ` +
+        'and a pass from any of them fails this run as a stale list'
+    );
+  }
 
   browser = await launch(binary);
   console.log(
@@ -524,9 +591,36 @@ console.log(
   `probe e2e: ${checks.length - failed.length}/${checks.length} checks passed`
 );
 
-if (failed.length) {
+// What the expected-fail list actually did, group by group. `stale` is the half
+// that keeps it honest: a named group with nothing failing in it has outlived
+// the defect it was written for, and left alone it would go on covering whatever
+// breaks there next.
+const stale = [];
+const absent = [];
+for (const letter of EXPECT_FAIL) {
+  const ran = checks.filter((c) => c.group === letter);
+  if (ran.length === 0) absent.push(letter);
+  else if (ran.every((c) => c.ok)) stale.push(letter);
+}
+const excused = failed.filter((c) => EXPECT_FAIL.includes(c.group));
+const unexpected = failed.filter((c) => !EXPECT_FAIL.includes(c.group));
+
+if (EXPECT_FAIL.length) {
+  // On a green run too, and check by check rather than only by letter: "the run
+  // passed" and "these four claims were not made" have to be readable off the
+  // same log, or the second one is not really said.
+  console.log(
+    `probe e2e: expected to fail on this platform: ${EXPECT_FAIL.join(' ')}`
+  );
+  for (const c of excused)
+    console.log(
+      `  excused ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`
+    );
+}
+
+if (unexpected.length) {
   console.error('\nprobe e2e: FAILED');
-  for (const c of failed)
+  for (const c of unexpected)
     console.error(`  ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
   if (deviceErrors.length) {
     console.error('\nprobe e2e: WebGPU device errors, in full:');
@@ -546,7 +640,27 @@ if (failed.length) {
     for (const line of consoleLines.slice(-CONSOLE_TAIL))
       console.error(`    ${line}`);
   }
-  process.exit(1);
 }
+
+// Reported after the real failures rather than instead of them, so a run that
+// has both says both: a stale entry and a regression arriving together is
+// exactly the case where seeing only one sends the reader to the wrong half.
+if (stale.length || absent.length) {
+  console.error(
+    '\nprobe e2e: THE EXPECTED-FAIL LIST NO LONGER DESCRIBES THIS RUN'
+  );
+  for (const letter of stale)
+    console.error(
+      `  ${letter}: every check in it passed, and --expect-fail names it. ` +
+        'Drop it from the list — this platform serves that group now.'
+    );
+  for (const letter of absent)
+    console.error(
+      `  ${letter}: --expect-fail names it and it recorded no checks at all. ` +
+        'Either it is not a group letter, or the run never reached it.'
+    );
+}
+
+if (unexpected.length || stale.length || absent.length) process.exit(1);
 
 process.exit(exitCode);

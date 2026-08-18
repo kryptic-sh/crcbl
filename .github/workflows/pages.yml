@@ -329,13 +329,12 @@ jobs:
   # that silently never fails is worse still, so each job carries it only until
   # it has been green three runs.
   #
-  # **macOS has served its three and the line is gone** — 57/57 over groups G to
-  # AA on every one, headless against a real Apple adapter. Windows keeps it:
-  # its first run found no WebGPU adapter at all, its second died reading
+  # **Neither job carries it any more.** macOS served its three at 57/57 over
+  # groups G to AA, headless against a real Apple adapter. Windows took the other
+  # exit: its first run found no WebGPU adapter at all, its second died reading
   # Chrome's port file, and its third reached 53/57 with four readbacks timing
-  # out. That last number is a measurement rather than a failure to chase, and
-  # the job stays advisory until it either serves all 57 or is taught which
-  # groups this platform cannot serve.
+  # out — which is a measurement, so the job now gates on exactly that, through
+  # the `--expect-fail` list on its run step. Both jobs can fail the workflow.
   probe-macos:
     name: probe the seam on macOS
     needs: build
@@ -389,7 +388,6 @@ jobs:
     needs: build
     runs-on: windows-latest
     timeout-minutes: 20
-    continue-on-error: true
     env:
       # THE PAIRING THAT READS AS A CONTRADICTION AND IS NOT. `--headless` below
       # tells **the script** not to go looking for an Xvfb Windows cannot have;
@@ -454,21 +452,30 @@ jobs:
       # moves **Dawn** to SwiftShader while Chromium's shared-image device
       # stays on D3D11, and a canvas handed between two devices reads back as
       # uninitialised memory behind `ReadPixels: Source shared image is not
-      # accessible`. That is a *canvas* fault, and most of the probe is not a
-      # canvas — groups G through W and AA drive the command stream against
-      # textures the replayer owns. So the expected outcome is real coverage of
-      # the seam with X, Y and Z failing, which the runner names per group
-      # rather than passing quietly on fewer checks.
+      # accessible`.
       #
-      # This job stays `continue-on-error` until that guess is a measurement.
-      # If the canvas groups do fail, the honest end state is a Windows job
-      # that runs the groups Windows can serve and says so — not one that
-      # pretends to run all of them.
+      # **`--expect-fail X,Y,Z,AA` IS THE MEASUREMENT THAT REPLACED THE GUESS.**
+      # Run 32085351076 reached `53/57 checks passed` over groups G through AA,
+      # with those four failing identically — `no … readback in 90000 ms`, no
+      # device error anywhere — and every other group green. So this job now
+      # gates: those four produce no verdict on this runner, everything else
+      # must pass, and the driver fails the run if any of the four starts
+      # passing, which is what stops this line outliving the defect.
+      #
+      # ONLY X IS THE CANVAS FAULT; Y, Z AND AA ARE COLLATERAL. Z draws
+      # indirectly into a texture the replayer owns and AA copies a depth plane
+      # — neither goes near a canvas, and both pass on Linux in the same
+      # headless SwiftShader browser once X and Y are stubbed out so they submit
+      # nothing. The page has one `GPUDevice` and therefore one queue, and a
+      # `mapAsync` resolves only behind the submits ahead of it, so X's stuck
+      # present strands every readback queued after it. Giving the canvas groups
+      # their own device, or running them last, would recover Z and AA here;
+      # `docs/backlog.md` is where that belongs until someone does it.
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         shell: bash
         run: >-
           SITE_DIR="$(pwd -W)/target/site" ./web/run-probe-e2e.sh --headless
-          --adapter swiftshader
+          --adapter swiftshader --expect-fail X,Y,Z,AA
 
   deploy:
     name: deploy to GitHub Pages

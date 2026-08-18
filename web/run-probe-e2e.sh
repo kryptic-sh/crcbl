@@ -3,6 +3,9 @@
 #
 #   ./web/run-probe-e2e.sh [--build] [--headless] [driver args…]
 #
+# Anything it does not recognise is forwarded to `web/tools/probe-e2e.mjs`
+# untouched — `--adapter`, `--timeout` and `--expect-fail` are all the driver's.
+#
 # The same shape as `web/run-browser-e2e.sh`: it brings its own environment up,
 # says what it needs and why, prints what it actually checked, and **fails when
 # zero checks ran** — `docs/plan/12-testing.md` names a silently-skipped e2e job
@@ -36,11 +39,27 @@
 #   * Node 22+, for the global `WebSocket` the DevTools client uses.
 #   * A Chromium/Chrome with WebGPU. `CRCBL_CHROMIUM` pins one.
 #   * Xvfb, unless `--headless`. **It is not optional on a machine with no GPU**:
-#     under `--headless=new` plus SwiftShader the three groups that acquire a
-#     canvas frame or present one — X, Y and Z — never resolve their readback
-#     map, measured on Chromium 151, while every one of them passes in the same
-#     browser inside Xvfb. A headless run on such a machine therefore fails
+#     under `--headless=new` plus SwiftShader group X — the first that presents a
+#     canvas frame — never resolves its readback map, and Y, Z and AA never
+#     resolve theirs either, measured on Chromium 151, while all four pass in the
+#     same browser inside Xvfb. A headless run on such a machine therefore fails
 #     loudly rather than quietly skipping, which is the point.
+#
+#     Z AND AA ARE COLLATERAL, not canvas groups: Z draws indirectly into a
+#     texture the replayer owns and AA copies a depth plane, and neither touches a
+#     canvas. The page has one `GPUDevice` and therefore one queue, and a
+#     `mapAsync` resolves only behind the submits ahead of it — so the stuck
+#     present in X strands every readback queued after it. Stubbing X and Y out so
+#     they submit nothing makes Z and AA pass in that same headless browser, which
+#     is how that was established rather than assumed.
+#
+# WHAT A PLATFORM CANNOT SERVE, when it comes to that. `--expect-fail X,Y,Z,AA`
+# tells the driver those groups produce no verdict here. They still run, still
+# print and still count; only the verdict changes — and it changes in both
+# directions, because a named group that *passes* fails the run as a stale list.
+# `web/tools/probe-e2e.mjs`'s EXIT STATUS carries the rest. The guards below are
+# untouched by it: every letter must still appear and the run must still have
+# checked something, so the list cannot empty a run and call it a pass.
 #
 # THE OTHER TWO PLATFORMS, and why `--headless` means something different on each.
 # Xvfb is an X server, so it exists on neither.
@@ -73,6 +92,9 @@
 #   CRCBL_CHROMIUM_NO_SANDBOX  `1` adds --no-sandbox.
 #   CRCBL_WEB_E2E_HEADED       `1` drops `--headless=new` from the browser.
 #   CRCBL_WEB_E2E_TIMEOUT_MS   How long each poll is given. SwiftShader is slow.
+#   CRCBL_WEB_E2E_EXPECT_FAIL  Group letters that produce no verdict on this
+#                              platform, comma- or space-separated;
+#                              `--expect-fail X,Y,Z,AA` is the same switch.
 #   CRCBL_WEB_E2E_SCREEN       Xvfb geometry. Default 1280x800x24.
 set -euo pipefail
 
@@ -165,8 +187,8 @@ unset XAUTHORITY
 if [ "$HEADLESS" = "0" ] && ! command -v Xvfb > /dev/null 2>&1; then
     echo "crcbl probe e2e: Xvfb is not installed; falling back to --headless."
     echo "                 On a machine with no GPU that combination cannot resolve the"
-    echo "                 canvas-frame readbacks in groups X, Y and Z, and the run will"
-    echo "                 say so rather than pass."
+    echo "                 canvas-frame readback in group X, and Y, Z and AA are queued"
+    echo "                 behind it, so the run will say so rather than pass."
     HEADLESS=1
 fi
 
@@ -493,9 +515,33 @@ if [ -z "$DEPTH_TRIP" ]; then
 fi
 
 if [ "$STATUS" -ne 0 ]; then
-    echo "crcbl probe e2e: $RAN checks ran and at least one failed" >&2
+    # Which of the two the driver decided on. "at least one failed" is the wrong
+    # sentence for a run where nothing failed and the `--expect-fail` list had
+    # simply gone stale — and that run is the entire reason the list is safe to
+    # keep, so the line that closes it has to say what actually happened.
+    WENT_STALE="$(grep -E '^probe e2e: THE EXPECTED-FAIL LIST' "${OUTPUT}.plain" || true)"
+    REAL_FAILURE="$(grep -E '^probe e2e: FAILED$' "${OUTPUT}.plain" || true)"
+    if [ -n "$WENT_STALE" ] && [ -z "$REAL_FAILURE" ]; then
+        echo "crcbl probe e2e: $RAN checks ran, nothing failed unexpectedly, and the --expect-fail list no longer describes them" >&2
+    else
+        echo "crcbl probe e2e: $RAN checks ran and at least one failed" >&2
+    fi
     exit "$STATUS"
 fi
 
+# **THE CLOSING SENTENCE HAS TO MATCH WHAT HAPPENED.** With `--expect-fail` in
+# play a green run is "every group but these" and not "every byte back", and a
+# harness that says the stronger thing anyway is the same defect as the list it
+# is reporting on. The driver is the authority on which groups were excused — it
+# is the half that owns the verdict — so this reads its line back rather than
+# re-deriving one from the flags, and the two cannot drift.
+EXCUSED="$(grep -E '^probe e2e: expected to fail on this platform: ' "${OUTPUT}.plain" | tail -1 || true)"
 echo "crcbl probe e2e: $RAN checks ran in a real browser, over ${LETTERS#probe e2e: groups }"
-echo "crcbl probe e2e: crcbl-webgpu opened a device, made every resource, and read every byte back"
+if [ -n "$EXCUSED" ]; then
+    echo "crcbl probe e2e: crcbl-webgpu opened a device and made every resource, and every"
+    echo "                 group but ${EXCUSED#probe e2e: expected to fail on this platform: } read its bytes back"
+    echo "                 those are excused here by --expect-fail, and this run would have failed"
+    echo "                 had any of them passed"
+else
+    echo "crcbl probe e2e: crcbl-webgpu opened a device, made every resource, and read every byte back"
+fi
