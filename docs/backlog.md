@@ -623,36 +623,6 @@ differing on radv today, with a max channel delta of 6 and 0.66% over tolerance.
 It passes, but with far less headroom than any sprite golden, so a cross-backend
 move needs the numbers measured on each backend rather than assumed.
 
-### `crcbl-sprite`'s docs only build with `--all-features`
-
-`cargo doc -p crcbl-sprite --features load` fails with six
-`unresolved link to crate::bake` errors — `crpix.rs`'s module header, four in
-`load.rs`'s header and body, and `aseprite_json`'s own doc line. `bake` is
-behind the `bake` feature, `load` is behind `load`, and they cross-reference
-each other freely.
-
-CI never sees it: both `cargo doc` jobs pass `--all-features`, where every
-module exists. So the crate's docs are correct in exactly one configuration and
-broken in the one a consumer that only wants to _read_ sprite sheets would
-build.
-
-None of the three obvious fixes is free, which is why this is a note rather than
-a change:
-
-- **`load = ["bake"]`** resolves every link and is semantically wrong — reading
-  a sidecar would drag in the whole baker's dependency tree.
-- **`#![cfg_attr(not(feature = "bake"), allow(rustdoc::broken_intra_doc_links))]`**
-  is the common ecosystem answer and is a blanket suppression: it would also
-  hide a genuinely dead link introduced later.
-- **`#[cfg_attr(feature = "bake", doc = "…")]` pairs at each site** keep the
-  errors real, and cost a duplicated sentence per link — tried at one site, and
-  the result reads badly enough that doing it six times is worse than the
-  problem.
-
-A fourth option worth measuring first: whether `bake` and `load` still need to
-be separate features at all. If `bake`'s extra dependencies are small, merging
-them deletes the question.
-
 ### Three capabilities are still declared `Yes` and exercised by nothing
 
 The mechanism proves every backend _answers_ for every capability. It does not
@@ -9381,6 +9351,20 @@ on `bake`, so `load.rs` compiles and its links into `bake` dangle. CI's `docs`
 job in `.github/workflows/ci.yml` runs `--all-features`, under which every one
 of them resolves; `cargo doc --all-features --no-deps -p crcbl-sprite` was run
 to confirm and emits **zero** warnings.
+
+**Re-derived independently on 2026-08-18, and it is the same answer.** A later
+pass found the six links again and wrote them up as a live defect with three
+unattractive fixes — merge the features, blanket-allow the lint, or duplicate a
+sentence per link. That entry has been deleted rather than kept beside this one,
+because two entries disagreeing about whether something is a defect is worse
+than either.
+
+What the second pass did add is a measurement the first left open: **`bake` and
+`load` gate the identical dependency set** — both are `["dep:png"]` — so merging
+them costs nothing in dependencies and only widens what a `load`-only consumer
+compiles. That is a public-surface decision rather than a fix, and nothing
+forces it: `cargo doc --all-features -p crcbl-sprite` was re-run today and still
+emits zero warnings.
 
 **The lesson worth keeping is about the gate, not the crate.** A feature-gated
 module is normal Rust and an intra-doc link into one is not a defect, but a doc
