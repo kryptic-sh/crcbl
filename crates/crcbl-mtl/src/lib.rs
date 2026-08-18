@@ -357,6 +357,14 @@ mod draw;
 mod fault;
 #[cfg(target_os = "macos")]
 mod instance;
+// The fifth, and for the reason the other four give: where a render pass's area
+// lands as a scissor rectangle and which of Metal's two debug-group stacks a
+// label was pushed onto are decided in plain Rust — and neither fails loudly.
+// A scissor that leaves the render target raises, which aborts the process
+// rather than returning an error, and a group popped on the wrong stack is
+// visible only inside a capture tool. So `cargo test` on any host runs both.
+#[cfg(any(target_os = "macos", test))]
+mod pass;
 #[cfg(target_os = "macos")]
 mod pipeline;
 // The one module that is not macOS-only, and the crate docs say why: it holds

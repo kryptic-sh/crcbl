@@ -38,12 +38,47 @@
 //! outside any pass"), so this is a caller bug being caught, not a restriction
 //! this backend invents.
 //!
-//! **A pass owns its encoder for exactly its own length.** Both
-//! [`begin_render_pass`](CommandEncoder::begin_render_pass) and
-//! [`begin_compute_pass`](CommandEncoder::begin_compute_pass) create one, and
-//! their `end_*` closes it — which is what makes pipeline state, argument
-//! tables and the seam's scope rules line up with Metal's, since every one of
-//! those dies with `endEncoding`.
+//! **A pass owns its encoder for exactly its own length.**
+//! [`begin_compute_pass`](CommandEncoder::begin_compute_pass) creates one and
+//! [`end_compute_pass`](CommandEncoder::end_compute_pass) closes it; a render
+//! pass has the same *lifetime* and reaches it the other way round, which the
+//! next section is about. Either way pipeline state, argument tables and the
+//! seam's scope rules line up with Metal's, since every one of those dies with
+//! `endEncoding`.
+//!
+//! # A render pass is recorded, then encoded at `end_render_pass`
+//!
+//! [`begin_render_pass`](CommandEncoder::begin_render_pass) builds the
+//! `MTLRenderPassDescriptor` — which is where every attachment handle is
+//! resolved and every bound checked, so **a bad descriptor still fails there** —
+//! and then opens no encoder at all. Each command the pass records becomes a
+//! [`RenderCommand`] in a list, and
+//! [`end_render_pass`](CommandEncoder::end_render_pass) creates the
+//! `MTLRenderCommandEncoder` and replays the list into it in order.
+//!
+//! **Every other check keeps its original timing too**, because a recorded
+//! command carries only values that have already been validated: handles are
+//! resolved, ranges are checked and refusals are recorded at the moment the
+//! seam call arrives, exactly as they were when the same call encoded straight
+//! through. What is deferred is the Objective-C message send and nothing else,
+//! so the Metal calls a pass makes — and the order it makes them in — are the
+//! ones a straight-through encoder would have made.
+//!
+//! The one thing that does move is the failure Metal reports by handing back a
+//! nil encoder, which is a [`HalError::DeviceLost`] raised at
+//! `end_render_pass` instead of at `begin_render_pass`. Both are before
+//! [`finish`](CommandEncoder::finish), which is where the seam observes it.
+//!
+//! **Why defer at all**, since the straight-through form was simpler: Metal's
+//! only count-from-memory execution is
+//! `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
+//! `MTLIndirectCommandBuffer`, whose commands a *compute kernel* has to write —
+//! and that kernel must run **before** the render encoder the seam calls
+//! [`draw_indirect_count`](CommandEncoder::draw_indirect_count) inside was
+//! opened. A backend that has already opened the encoder cannot reach backwards
+//! to do that; one that has only a list of commands can. `indirect_count` still
+//! refuses, and `docs/backlog.md` holds the decision and the alternatives that
+//! lost.
 //!
 //! # A barrier is an encoder boundary
 //!
@@ -101,41 +136,294 @@ const UNLABELLED_COMPUTE_PASS: &str = "crcbl compute pass";
 /// See [`UNLABELLED_COMMAND_BUFFER`].
 const COPY_ENCODER: &str = "crcbl copies";
 
-/// The one Metal encoder that may be open on the command buffer.
+/// The one Metal encoder that may be open on the command buffer — or, for a
+/// render pass, the commands that will become one.
 enum Open {
     /// Nothing is encoding; the command buffer will accept a new encoder.
     None,
     /// A blit encoder, kept open across consecutive copies.
     Blit(Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>),
-    /// A render pass.
-    Render(Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>),
+    /// A render pass under record. No Metal encoder exists yet; see the module
+    /// docs.
+    Render(RenderRecording),
     /// A compute pass.
     Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
 }
 
 impl Open {
     /// The open encoder as the base protocol, for the calls they all share.
+    ///
+    /// `None` for a recording render pass as well as for nothing at all: there
+    /// is no Metal object to send to yet, and a caller that has something to
+    /// say to the pass records it instead. Both callers below check for
+    /// [`Open::Render`] first, and this returning `None` for it is what keeps a
+    /// missed check from quietly reaching the wrong encoder.
     fn as_encoder(&self) -> Option<&ProtocolObject<dyn objc2_metal::MTLCommandEncoder>> {
         match self {
-            Self::None => None,
+            Self::None | Self::Render(_) => None,
             Self::Blit(encoder) => Some(ProtocolObject::from_ref(&**encoder)),
-            Self::Render(encoder) => Some(ProtocolObject::from_ref(&**encoder)),
             Self::Compute(encoder) => Some(ProtocolObject::from_ref(&**encoder)),
         }
     }
 }
 
-/// Where a debug group was pushed, so it is popped in the same place.
-struct Label {
-    /// `true` if the group went on a Metal encoder rather than on the command
-    /// buffer. An encoder's groups die with `endEncoding`, so one whose encoder
-    /// has since closed is dropped rather than popped off its successor — which
-    /// would fold every later command into the wrong region of the capture
-    /// tree, the same failure `crcbl-vk`'s `render_pass_label` exists to avoid.
-    on_encoder: bool,
-    /// Which encoder it went on. Compared against
-    /// [`MetalCommandEncoder::epoch`].
-    epoch: u64,
+/// Which pass a command with no bind point of its own belongs to.
+///
+/// See [`MetalCommandEncoder::pass_target`]. The render arm carries nothing
+/// because a recording render pass has no Metal object yet; the compute arm
+/// carries its encoder, which is what the call is made on.
+enum Target {
+    Render,
+    Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
+}
+
+/// A render pass being recorded: everything `end_render_pass` needs to open an
+/// `MTLRenderCommandEncoder` and drive it.
+///
+/// The descriptor is built — and every attachment handle resolved — when the
+/// pass begins, so it is an already-validated Objective-C object held here
+/// rather than a plan to be re-checked at replay.
+struct RenderRecording {
+    descriptor: Retained<MTLRenderPassDescriptor>,
+    /// `setLabel:`, which the fault reporter reads a faulting encoder back out
+    /// by; see [`UNLABELLED_RENDER_PASS`].
+    label: Retained<NSString>,
+    /// The seam's render area as a scissor rectangle, or `None` when Metal
+    /// should be told nothing. See [`crate::pass::plan_scissor`].
+    scissor: Option<MTLScissorRect>,
+    /// The pass's commands, in the order the seam recorded them.
+    commands: Vec<RenderCommand>,
+}
+
+/// One render-pass command, holding everything its Metal call will need.
+///
+/// **Every variant owns or retains what it references**, which is the whole
+/// obligation deferral creates: a `Retained` keeps the Objective-C object alive
+/// from the moment the seam call arrived until the replay, so a buffer or
+/// pipeline the caller destroys in between is still there to be encoded
+/// against. Nothing here borrows, and nothing here is a handle to be looked up
+/// a second time — a lookup at replay could fail, and its failure would arrive
+/// at the wrong call.
+enum RenderCommand {
+    /// `pushDebugGroup:` on the encoder.
+    PushDebugGroup(Retained<NSString>),
+    /// `popDebugGroup` on the encoder.
+    PopDebugGroup,
+    /// `insertDebugSignpost:`.
+    InsertDebugSignpost(Retained<NSString>),
+    SetViewport(MTLViewport),
+    SetScissor(MTLScissorRect),
+    SetStencilReference(u32),
+    /// The pipeline state **and** the rasteriser state Metal keeps on the
+    /// encoder rather than in the pipeline object; see
+    /// [`bind_graphics_pipeline`](CommandEncoder::bind_graphics_pipeline).
+    BindPipeline(crate::pipeline::BoundPipeline),
+    /// One resolved bind group, with every argument-table index already
+    /// absolute and every dynamic offset already folded in.
+    BindGroup(Vec<crate::binding::BoundBinding>),
+    /// The whole push-constant block as it stood when the write arrived.
+    ///
+    /// **A copy, not a borrow of the shadow.** `setBytes:length:atIndex:`
+    /// copies the bytes it is given, so encoding straight through could point
+    /// at the shadow itself; a recorded command cannot, because a later write
+    /// splices the shadow in place and the two draws either side of it are
+    /// meant to see different blocks.
+    PushConstants {
+        index: NSUInteger,
+        bytes: Vec<u8>,
+        /// Whether the pipeline layout's range declares the vertex stage. The
+        /// caller's `stages` are not consulted; see
+        /// [`push_constants`](CommandEncoder::push_constants).
+        vertex: bool,
+        /// As `vertex`, for the fragment stage.
+        fragment: bool,
+    },
+    Draw {
+        primitive: objc2_metal::MTLPrimitiveType,
+        vertex_start: NSUInteger,
+        vertex_count: NSUInteger,
+        instance_count: NSUInteger,
+        base_instance: NSUInteger,
+    },
+    DrawIndexed {
+        primitive: objc2_metal::MTLPrimitiveType,
+        index_count: NSUInteger,
+        index_type: objc2_metal::MTLIndexType,
+        index_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+        index_offset: NSUInteger,
+        instance_count: NSUInteger,
+        base_vertex: isize,
+        base_instance: NSUInteger,
+    },
+    /// One argument structure of an indirect draw. The multi-draw loop records
+    /// one of these per structure, because that is one Metal call per
+    /// structure; see `crcbl_mtl::draw`.
+    DrawIndirect {
+        primitive: objc2_metal::MTLPrimitiveType,
+        args: Retained<ProtocolObject<dyn MTLBuffer>>,
+        offset: NSUInteger,
+    },
+    /// [`DrawIndirect`](Self::DrawIndirect) with the bound index buffer, which
+    /// Metal takes as an argument of the draw.
+    DrawIndexedIndirect {
+        primitive: objc2_metal::MTLPrimitiveType,
+        index_type: objc2_metal::MTLIndexType,
+        index_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+        index_offset: NSUInteger,
+        args: Retained<ProtocolObject<dyn MTLBuffer>>,
+        offset: NSUInteger,
+    },
+}
+
+/// Makes one recorded command's Metal call.
+///
+/// Every value here was checked when the seam call arrived — a handle resolved,
+/// a range bounded, a stage mask read off the pipeline layout — so this makes
+/// calls and decides nothing. That is deliberate: a check moved down here would
+/// report its failure at `end_render_pass` rather than at the call the caller
+/// made, and `crcbl_hal`'s own recorder tests assert on which call failed.
+fn replay(encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>, command: &RenderCommand) {
+    match command {
+        RenderCommand::PushDebugGroup(name) => encoder.pushDebugGroup(name),
+        RenderCommand::PopDebugGroup => encoder.popDebugGroup(),
+        RenderCommand::InsertDebugSignpost(name) => encoder.insertDebugSignpost(name),
+        RenderCommand::SetViewport(viewport) => encoder.setViewport(*viewport),
+        RenderCommand::SetScissor(rect) => encoder.setScissorRect(*rect),
+        RenderCommand::SetStencilReference(reference) => {
+            encoder.setStencilReferenceValue(*reference);
+        }
+        RenderCommand::BindPipeline(bound) => {
+            encoder.setRenderPipelineState(&bound.raw);
+            encoder.setCullMode(bound.raster.cull);
+            encoder.setFrontFacingWinding(bound.raster.winding);
+            encoder.setTriangleFillMode(bound.raster.fill);
+            encoder.setDepthClipMode(bound.raster.clip);
+            let [constant, slope_scale, clamp] = bound.raster.bias;
+            encoder.setDepthBias_slopeScale_clamp(constant, slope_scale, clamp);
+            // Always an object, never nil: a pipeline with no depth/stencil
+            // state carries the device's always-pass one instead, because nil
+            // hangs Apple's paravirtual GPU. `crcbl_mtl::pipeline`'s
+            // `default_depth_stencil_state` has the bisect and the no-op
+            // argument.
+            encoder.setDepthStencilState(Some(&bound.depth_stencil));
+            if let Some(reference) = bound.raster.stencil_reference {
+                encoder.setStencilReferenceValue(reference);
+            }
+        }
+        RenderCommand::BindGroup(bindings) => crate::binding::apply(bindings, encoder),
+        RenderCommand::PushConstants {
+            index,
+            bytes,
+            vertex,
+            fragment,
+        } => {
+            let length = to_ns(bytes.len() as u64);
+            let source = NonNull::from(&**bytes).cast::<core::ffi::c_void>();
+            // SAFETY: `objc2` marks these unsafe because Metal bounds-checks
+            // neither the pointer nor the argument-table index. `source` points
+            // at `length` initialised bytes of a `Vec` this command owns and
+            // nothing mutates for the duration of the call, and Metal copies
+            // them before returning — that is what "inlined buffer contents"
+            // means. `length` is the recorded block's own length, which
+            // `crate::argument::plan` bounded by `Limits::max_push_constant_size`,
+            // and `index` is the buffer-table entry after the last binding,
+            // which the same call bounded by `BUFFER_TABLE_ENTRIES`.
+            if *vertex {
+                unsafe { encoder.setVertexBytes_length_atIndex(source, length, *index) };
+            }
+            // SAFETY: as above, on the fragment stage's table.
+            if *fragment {
+                unsafe { encoder.setFragmentBytes_length_atIndex(source, length, *index) };
+            }
+        }
+        RenderCommand::Draw {
+            primitive,
+            vertex_start,
+            vertex_count,
+            instance_count,
+            base_instance,
+        } => {
+            // SAFETY: `objc2` marks this unsafe because Metal bounds-checks
+            // neither count. Neither is a bound into an object here — a draw's
+            // vertex count indexes whatever the vertex shader chooses to read,
+            // not a buffer this call names — and `draw` recorded this only
+            // after checking both ranges non-empty, which is the one value
+            // (`0`) Metal's own validation layer objects to.
+            unsafe {
+                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                    *primitive,
+                    *vertex_start,
+                    *vertex_count,
+                    *instance_count,
+                    *base_instance,
+                );
+            }
+        }
+        RenderCommand::DrawIndexed {
+            primitive,
+            index_count,
+            index_type,
+            index_buffer,
+            index_offset,
+            instance_count,
+            base_vertex,
+            base_instance,
+        } => {
+            // SAFETY: `objc2` marks this unsafe because Metal bounds-checks
+            // neither the index count nor the buffer offset. `draw_indexed`'s
+            // `draw_offset` checked the whole index range against the bound
+            // region's own length, which `bind_index_buffer` computed from the
+            // allocation's, and the counts were checked non-empty there. The
+            // buffer is kept alive by the `Retained` this command holds.
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
+                    *primitive,
+                    *index_count,
+                    *index_type,
+                    index_buffer,
+                    *index_offset,
+                    *instance_count,
+                    *base_vertex,
+                    *base_instance,
+                );
+            }
+        }
+        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks the
+        // indirect offset. `crate::draw::plan_indirect` checked every structure
+        // recorded against the argument buffer's own length, and the buffer is
+        // kept alive by the `Retained` this command holds.
+        //
+        // What Metal cannot check, and neither can this, is the *contents* of
+        // the argument structures — an index count larger than the bound index
+        // buffer is a GPU-side fault either way, which is the whole nature of
+        // an indirect draw.
+        RenderCommand::DrawIndirect {
+            primitive,
+            args,
+            offset,
+        } => unsafe {
+            encoder.drawPrimitives_indirectBuffer_indirectBufferOffset(*primitive, args, *offset);
+        },
+        // SAFETY: as above, plus the index buffer's offset — which
+        // `bind_index_buffer` checked against its allocation.
+        RenderCommand::DrawIndexedIndirect {
+            primitive,
+            index_type,
+            index_buffer,
+            index_offset,
+            args,
+            offset,
+        } => unsafe {
+            encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
+                *primitive,
+                *index_type,
+                index_buffer,
+                *index_offset,
+                args,
+                *offset,
+            );
+        },
+    }
 }
 
 /// Records into one `MTLCommandBuffer`.
@@ -159,8 +447,9 @@ pub(crate) struct MetalCommandEncoder {
     /// quietly.
     in_render_pass: bool,
     in_compute_pass: bool,
-    /// Open debug groups, innermost last.
-    labels: Vec<Label>,
+    /// Open debug groups, innermost last, and which of Metal's two stacks each
+    /// went on. See [`crate::pass::Labels`].
+    labels: crate::pass::Labels,
     /// Whether the open render pass pushed a label of its own.
     render_pass_label: bool,
     /// Whether the open compute pass pushed a label of its own.
@@ -227,7 +516,9 @@ impl core::fmt::Debug for MetalCommandEncoder {
 //   Metal call.
 // * Retain and release are atomic in the Objective-C runtime, so moving the
 //   `Retained` pointers between threads and dropping them on another is sound
-//   on its own.
+//   on its own. That covers the recorded [`RenderCommand`]s as well: they hold
+//   `Retained` pointers and nothing else that is not plain data, and they are
+//   only ever read back through the same `&mut self`.
 unsafe impl Send for MetalCommandEncoder {}
 // SAFETY: as above.
 unsafe impl Sync for MetalCommandEncoder {}
@@ -242,7 +533,7 @@ impl MetalCommandEncoder {
             failed: None,
             in_render_pass: false,
             in_compute_pass: false,
-            labels: Vec::new(),
+            labels: crate::pass::Labels::default(),
             render_pass_label: false,
             compute_pass_label: false,
             bound_primitive: None,
@@ -310,21 +601,83 @@ impl MetalCommandEncoder {
     }
 
     /// Closes whatever encoder is open, leaving the command buffer ready to
-    /// accept another.
+    /// accept another — and, for a render pass, *encodes* it first.
     ///
     /// Called before every encoder change *and* by `finish`, because
     /// `MTLCommandBuffer::commit` with an encoder still encoding raises.
+    ///
+    /// A recording render pass is replayed here rather than only in
+    /// `end_render_pass`, so that every path which used to end a render encoder
+    /// still produces one: `finish` with a pass left open, and `drop` on an
+    /// encoder that was never finished. The second makes no difference to
+    /// anything observable — a command buffer that is never committed executes
+    /// nothing whatever is in it — and it is done anyway, because "sometimes we
+    /// encode the pass and sometimes we do not" is a second rule to keep in
+    /// step with the first.
     fn close_open(&mut self) {
-        if let Some(encoder) = self.open.as_encoder() {
-            encoder.endEncoding();
+        match core::mem::replace(&mut self.open, Open::None) {
+            Open::None => {}
+            Open::Blit(encoder) => encoder.endEncoding(),
+            Open::Compute(encoder) => encoder.endEncoding(),
+            Open::Render(recording) => self.encode_render_pass(&recording),
         }
-        self.open = Open::None;
         // Pipeline state and argument tables belong to the encoder that is
         // going away; see `bound_primitive`, `bound_threads` and
         // `push_constants`.
         self.bound_primitive = None;
         self.bound_threads = None;
         self.push_constants = None;
+    }
+
+    /// Opens the render encoder a recorded pass has been waiting for, replays
+    /// the pass into it, and ends it.
+    ///
+    /// The order is the one a straight-through encoder produced: the label and
+    /// the scissor rectangle `begin_render_pass` would have set on the fresh
+    /// encoder, then every command in the order the seam recorded it, then
+    /// `endEncoding`.
+    ///
+    /// This runs whether or not recording has failed, for the reason
+    /// `end_render_pass` gives: the encoder must exist and be ended before
+    /// `commit`, and a failed encoder's command buffer is thrown away
+    /// regardless.
+    fn encode_render_pass(&mut self, recording: &RenderRecording) {
+        let Some(raw) = self.raw.as_ref() else {
+            return;
+        };
+        let encoder = raw.renderCommandEncoderWithDescriptor(&recording.descriptor);
+        let Some(encoder) = encoder else {
+            self.fail(HalError::DeviceLost(
+                "MTLCommandBuffer::renderCommandEncoderWithDescriptor: returned nil".to_string(),
+            ));
+            return;
+        };
+        encoder.setLabel(Some(&recording.label));
+        if let Some(scissor) = recording.scissor {
+            encoder.setScissorRect(scissor);
+        }
+        for command in &recording.commands {
+            replay(&encoder, command);
+        }
+        encoder.endEncoding();
+    }
+
+    /// Whether a render pass is recording.
+    const fn recording(&self) -> bool {
+        matches!(self.open, Open::Render(_))
+    }
+
+    /// Appends a command to the open render pass.
+    ///
+    /// Every caller has already established that one is open — the seam's
+    /// scope rules make "outside a render pass" a refusal with its own sentence
+    /// rather than a silent drop, so the check belongs at the call site where
+    /// that sentence is written. Nothing is recorded if there is no pass, which
+    /// is what that refusal already reported.
+    fn record(&mut self, command: RenderCommand) {
+        if let Open::Render(recording) = &mut self.open {
+            recording.commands.push(command);
+        }
     }
 
     /// The blit encoder, opening one if the command buffer has none.
@@ -450,49 +803,58 @@ impl CommandEncoder for MetalCommandEncoder {
     /// `MTLCommandBuffer::pushDebugGroup:` for the space between encoders and
     /// `MTLCommandEncoder::pushDebugGroup:` for the space inside one. A group
     /// pushed on an encoder ends when that encoder does, whatever this trait's
-    /// caller intended, so [`Label`] records which stack each push went on and
-    /// `end_debug_label` pops it there — never on the encoder that happens to
-    /// be open by then.
+    /// caller intended, so [`crate::pass::Labels`] records which stack each push
+    /// went on and `end_debug_label` pops it there — never on the encoder that
+    /// happens to be open by then.
+    ///
+    /// A group opened **inside a render pass** is one of the encoder's, and
+    /// becomes a recorded command like every other call the pass makes.
     fn begin_debug_label(&mut self, label: &str) {
         if !self.ok() {
             return;
         }
+        let epoch = self.epoch;
         let name = NSString::from_str(label);
-        let on_encoder = if let Some(encoder) = self.open.as_encoder() {
+        let placement = if self.recording() {
+            self.record(RenderCommand::PushDebugGroup(name));
+            crate::pass::Placement::Encoder
+        } else if let Some(encoder) = self.open.as_encoder() {
             encoder.pushDebugGroup(&name);
-            true
+            crate::pass::Placement::Encoder
         } else {
             let Some(raw) = self.raw.as_ref() else {
                 return;
             };
             raw.pushDebugGroup(&name);
-            false
+            crate::pass::Placement::CommandBuffer
         };
-        self.labels.push(Label {
-            on_encoder,
-            epoch: self.epoch,
-        });
+        self.labels.push(placement, epoch);
     }
 
     fn end_debug_label(&mut self) {
         // Popped whether or not recording has failed: `finish` drains this
         // stack, and a push that is never matched leaves the capture tool's
         // tree open around every later command.
-        let Some(label) = self.labels.pop() else {
+        let epoch = self.epoch;
+        let Some(placement) = self.labels.pop(epoch) else {
             return;
         };
-        if !label.on_encoder {
-            if let Some(raw) = self.raw.as_ref() {
-                raw.popDebugGroup();
+        match placement {
+            crate::pass::Placement::CommandBuffer => {
+                if let Some(raw) = self.raw.as_ref() {
+                    raw.popDebugGroup();
+                }
             }
-            return;
-        }
-        // Only if the same encoder is still open; otherwise `endEncoding`
-        // already closed the group.
-        if label.epoch == self.epoch
-            && let Some(encoder) = self.open.as_encoder()
-        {
-            encoder.popDebugGroup();
+            // The epoch matched, so no *new* encoder has been opened since the
+            // push — but the one it went on may have been closed without a
+            // successor, and then there is nothing to pop it off.
+            crate::pass::Placement::Encoder => {
+                if self.recording() {
+                    self.record(RenderCommand::PopDebugGroup);
+                } else if let Some(encoder) = self.open.as_encoder() {
+                    encoder.popDebugGroup();
+                }
+            }
         }
     }
 
@@ -506,8 +868,11 @@ impl CommandEncoder for MetalCommandEncoder {
         if !self.ok() {
             return;
         }
-        if let Some(encoder) = self.open.as_encoder() {
-            encoder.insertDebugSignpost(&NSString::from_str(label));
+        let name = NSString::from_str(label);
+        if self.recording() {
+            self.record(RenderCommand::InsertDebugSignpost(name));
+        } else if let Some(encoder) = self.open.as_encoder() {
+            encoder.insertDebugSignpost(&name);
         }
     }
 
@@ -937,45 +1302,34 @@ impl CommandEncoder for MetalCommandEncoder {
             // read and deliberately not acted on here.
         }
 
+        // The blit encoder a preceding upload left open, which Metal will not
+        // let the render encoder coexist with — and which is also this
+        // backend's barrier. Closed when the pass *begins* rather than when it
+        // is encoded, so the command buffer's encoder order is the one a
+        // straight-through backend produced.
         self.close_open();
-        let Some(raw) = self.raw.as_ref() else {
+        if self.raw.is_none() {
             return;
-        };
-        let Some(encoder) = raw.renderCommandEncoderWithDescriptor(&descriptor) else {
-            self.fail(HalError::DeviceLost(
-                "MTLCommandBuffer::renderCommandEncoderWithDescriptor: returned nil".to_string(),
-            ));
-            return;
-        };
-        self.epoch += 1;
-        encoder.setLabel(Some(&NSString::from_str(
-            desc.label.unwrap_or(UNLABELLED_RENDER_PASS),
-        )));
-        if let Some((width, height)) = target {
-            let area = desc.render_area;
-            // Clamped to the attachment, because `setScissorRect:` raises on a
-            // rectangle that leaves the render target.
-            let x = to_ns(u64::try_from(area.x).unwrap_or(0)).min(width);
-            let y = to_ns(u64::try_from(area.y).unwrap_or(0)).min(height);
-            let scissor = MTLScissorRect {
-                x,
-                y,
-                width: to_ns(u64::from(area.width)).min(width - x),
-                height: to_ns(u64::from(area.height)).min(height - y),
-            };
-            // Set only for a genuine sub-rectangle. Metal's default scissor is
-            // already the whole render target, so the common case — the seam's
-            // own "usually the full attachment size" — makes no call at all,
-            // and a degenerate rectangle (which Metal rejects) is never sent.
-            let whole = scissor.x == 0
-                && scissor.y == 0
-                && scissor.width >= width
-                && scissor.height >= height;
-            if !whole && scissor.width > 0 && scissor.height > 0 {
-                encoder.setScissorRect(scissor);
-            }
         }
-        self.open = Open::Render(encoder);
+        // Set only for a genuine sub-rectangle, and clamped to the attachment;
+        // `crate::pass::plan_scissor` holds the rule and its tests.
+        let scissor = target
+            .and_then(|(width, height)| {
+                crate::pass::plan_scissor(desc.render_area, width as u64, height as u64)
+            })
+            .map(|scissor| MTLScissorRect {
+                x: to_ns(scissor.x),
+                y: to_ns(scissor.y),
+                width: to_ns(scissor.width),
+                height: to_ns(scissor.height),
+            });
+        self.epoch += 1;
+        self.open = Open::Render(RenderRecording {
+            descriptor,
+            label: NSString::from_str(desc.label.unwrap_or(UNLABELLED_RENDER_PASS)),
+            scissor,
+            commands: Vec::new(),
+        });
         self.in_render_pass = true;
         if let Some(label) = desc.label {
             self.begin_debug_label(label);
@@ -990,48 +1344,51 @@ impl CommandEncoder for MetalCommandEncoder {
         if core::mem::take(&mut self.render_pass_label) {
             self.end_debug_label();
         }
-        // Not gated on `ok`: an already-failed encoder still has to close its
-        // render encoder, because `commit` with one still encoding raises.
+        // Not gated on `ok`: an already-failed encoder still has to encode and
+        // end its render encoder, because `commit` with one still encoding
+        // raises — and the recorded list is what the straight-through form had
+        // already put on the encoder by this point, so replaying it is what
+        // keeps the two identical.
         self.close_open();
         self.in_render_pass = false;
     }
 
     fn set_viewport(&mut self, viewport: &Viewport) {
-        let Open::Render(encoder) = &self.open else {
+        if !self.recording() {
             return;
-        };
+        }
         // No Y flip and no depth inversion. Metal's clip space already matches
         // the seam's convention — unlike Vulkan, whose inverted Y is why
         // `crcbl-vk` passes a negative height — and reversed-Z comes from the
         // projection matrix, so touching `znear`/`zfar` here would apply it
         // twice.
-        encoder.setViewport(MTLViewport {
+        self.record(RenderCommand::SetViewport(MTLViewport {
             originX: f64::from(viewport.x),
             originY: f64::from(viewport.y),
             width: f64::from(viewport.width),
             height: f64::from(viewport.height),
             znear: f64::from(viewport.depth_min),
             zfar: f64::from(viewport.depth_max),
-        });
+        }));
     }
 
     fn set_scissor(&mut self, rect: &Rect2d) {
-        let Open::Render(encoder) = &self.open else {
+        if !self.recording() {
             return;
-        };
-        encoder.setScissorRect(MTLScissorRect {
+        }
+        self.record(RenderCommand::SetScissor(MTLScissorRect {
             x: to_ns(rect.x.max(0) as u64),
             y: to_ns(rect.y.max(0) as u64),
             width: to_ns(u64::from(rect.width)),
             height: to_ns(u64::from(rect.height)),
-        });
+        }));
     }
 
     fn set_stencil_reference(&mut self, reference: u32) {
-        let Open::Render(encoder) = &self.open else {
+        if !self.recording() {
             return;
-        };
-        encoder.setStencilReferenceValue(reference);
+        }
+        self.record(RenderCommand::SetStencilReference(reference));
     }
 
     /// Sets the pipeline state, **and the rasteriser state Metal keeps on the
@@ -1053,17 +1410,14 @@ impl CommandEncoder for MetalCommandEncoder {
         if !self.ok() {
             return;
         }
-        let encoder = match &self.open {
-            Open::Render(encoder) => encoder.clone(),
-            _ => {
-                self.fail(HalError::InvalidDescriptor(
-                    "bind_graphics_pipeline outside a render pass: Metal keeps pipeline state on \
-                     the render encoder, so there is nowhere to record it"
-                        .to_string(),
-                ));
-                return;
-            }
-        };
+        if !self.recording() {
+            self.fail(HalError::InvalidDescriptor(
+                "bind_graphics_pipeline outside a render pass: Metal keeps pipeline state on the \
+                 render encoder, so there is nowhere to record it"
+                    .to_string(),
+            ));
+            return;
+        }
         let bound = match self.device.graphics_pipeline_raw(pipeline) {
             Ok(bound) => bound,
             Err(error) => {
@@ -1071,22 +1425,11 @@ impl CommandEncoder for MetalCommandEncoder {
                 return;
             }
         };
-        encoder.setRenderPipelineState(&bound.raw);
-        encoder.setCullMode(bound.raster.cull);
-        encoder.setFrontFacingWinding(bound.raster.winding);
-        encoder.setTriangleFillMode(bound.raster.fill);
-        encoder.setDepthClipMode(bound.raster.clip);
-        let [constant, slope_scale, clamp] = bound.raster.bias;
-        encoder.setDepthBias_slopeScale_clamp(constant, slope_scale, clamp);
-        // Always an object, never nil: a pipeline with no depth/stencil state
-        // carries the device's always-pass one instead, because nil hangs
-        // Apple's paravirtual GPU. `crcbl_mtl::pipeline`'s
-        // `default_depth_stencil_state` has the bisect and the no-op argument.
-        encoder.setDepthStencilState(Some(&bound.depth_stencil));
-        if let Some(reference) = bound.raster.stencil_reference {
-            encoder.setStencilReferenceValue(reference);
-        }
+        // The topology is read at the *draw* rather than sent to Metal, so it
+        // stays encoder state here; `replay` makes every call the rest of this
+        // binding becomes.
         self.bound_primitive = Some(bound.raster.primitive);
+        self.record(RenderCommand::BindPipeline(bound));
     }
 
     /// Records which buffer a later indexed draw reads, because Metal takes it
@@ -1145,21 +1488,12 @@ impl CommandEncoder for MetalCommandEncoder {
         if !self.ok() {
             return;
         }
-        enum Target {
-            Render(Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>),
-            Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
-        }
-        let target = match &self.open {
-            Open::Render(encoder) => Target::Render(encoder.clone()),
-            Open::Compute(encoder) => Target::Compute(encoder.clone()),
-            _ => {
-                self.fail(HalError::InvalidDescriptor(
-                    "bind_group outside a render or compute pass: Metal keeps its argument \
-                     tables on the encoder, so there is nowhere to record it"
-                        .to_string(),
-                ));
-                return;
-            }
+        let target = match self.pass_target(
+            "bind_group outside a render or compute pass: Metal keeps its argument tables on the \
+             encoder, so there is nowhere to record it",
+        ) {
+            Some(target) => target,
+            None => return,
         };
         let limits = self.device.caps.limits;
         match self
@@ -1167,7 +1501,7 @@ impl CommandEncoder for MetalCommandEncoder {
             .bind_group_raw(slot, group, dynamic_offsets, layout, &limits)
         {
             Ok(bindings) => match target {
-                Target::Render(encoder) => crate::binding::apply(&bindings, &encoder),
+                Target::Render => self.record(RenderCommand::BindGroup(bindings)),
                 Target::Compute(encoder) => crate::binding::apply_compute(&bindings, &encoder),
             },
             Err(error) => self.fail(error),
@@ -1209,22 +1543,13 @@ impl CommandEncoder for MetalCommandEncoder {
         if !self.ok() {
             return;
         }
-        enum Target {
-            Render(Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>),
-            Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
-        }
-        let target = match &self.open {
-            Open::Render(encoder) => Target::Render(encoder.clone()),
-            Open::Compute(encoder) => Target::Compute(encoder.clone()),
-            _ => {
-                self.fail(HalError::InvalidDescriptor(
-                    "push_constants outside a render or compute pass: Metal has no push constants \
-                     and this backend sends the block with setBytes:length:atIndex:, which writes \
-                     the open encoder's argument table"
-                        .to_string(),
-                ));
-                return;
-            }
+        let target = match self.pass_target(
+            "push_constants outside a render or compute pass: Metal has no push constants and this \
+             backend sends the block with setBytes:length:atIndex:, which writes the open \
+             encoder's argument table",
+        ) {
+            Some(target) => target,
+            None => return,
         };
         // The layout is resolved before the emptiness check, so an empty write
         // through a layout that declares no range is still the refusal the seam
@@ -1254,30 +1579,45 @@ impl CommandEncoder for MetalCommandEncoder {
         }
 
         let index = to_ns(u64::from(block.index));
-        let bytes = shadow.bytes();
-        let length = to_ns(bytes.len() as u64);
-        let source = NonNull::from(bytes).cast::<core::ffi::c_void>();
-        // SAFETY: `objc2` marks these unsafe because Metal bounds-checks neither
-        // the pointer nor the argument-table index. `source` points at `length`
-        // initialised bytes of a slice this encoder owns and does not touch for
-        // the duration of the call, and Metal copies them before returning —
-        // that is what "inlined buffer contents" means. `length` is the shadow's
-        // own length, which `crate::argument::plan` bounded by
-        // `Limits::max_push_constant_size`, and `index` is the buffer-table
-        // entry after the last binding, which the same call bounded by
-        // `BUFFER_TABLE_ENTRIES`. The encoder is kept alive by the `Retained`
-        // held across the call.
         match target {
-            Target::Render(encoder) => {
-                if block.stages.contains(ShaderStages::VERTEX) {
-                    unsafe { encoder.setVertexBytes_length_atIndex(source, length, index) };
-                }
-                if block.stages.contains(ShaderStages::FRAGMENT) {
-                    unsafe { encoder.setFragmentBytes_length_atIndex(source, length, index) };
+            Target::Render => {
+                let vertex = block.stages.contains(ShaderStages::VERTEX);
+                let fragment = block.stages.contains(ShaderStages::FRAGMENT);
+                // A layout naming neither raster stage writes nothing here, and
+                // recording a command that would make no call is not worth the
+                // copy of the block that carrying it costs.
+                if vertex || fragment {
+                    // A **copy** of the shadow rather than a pointer into it,
+                    // which is the one thing deferral changes about this call:
+                    // a later `push_constants` splices the same shadow in
+                    // place, and the two draws either side of it are meant to
+                    // see different blocks.
+                    let bytes = shadow.bytes().to_vec();
+                    self.record(RenderCommand::PushConstants {
+                        index,
+                        bytes,
+                        vertex,
+                        fragment,
+                    });
                 }
             }
             Target::Compute(encoder) => {
                 if block.stages.contains(ShaderStages::COMPUTE) {
+                    let bytes = shadow.bytes();
+                    let length = to_ns(bytes.len() as u64);
+                    let source = NonNull::from(bytes).cast::<core::ffi::c_void>();
+                    // SAFETY: `objc2` marks this unsafe because Metal
+                    // bounds-checks neither the pointer nor the argument-table
+                    // index. `source` points at `length` initialised bytes of a
+                    // slice this encoder owns and does not touch for the
+                    // duration of the call, and Metal copies them before
+                    // returning — that is what "inlined buffer contents" means.
+                    // `length` is the shadow's own length, which
+                    // `crate::argument::plan` bounded by
+                    // `Limits::max_push_constant_size`, and `index` is the
+                    // buffer-table entry after the last binding, which the same
+                    // call bounded by `BUFFER_TABLE_ENTRIES`. The encoder is
+                    // kept alive by the `Retained` held across the call.
                     unsafe { encoder.setBytes_length_atIndex(source, length, index) };
                 }
             }
@@ -1307,27 +1647,19 @@ impl CommandEncoder for MetalCommandEncoder {
     /// seam's ranges are half-open and `0..0` is a legitimate "no work this
     /// frame" a culling pass produces.
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        let Some((encoder, primitive)) = self.draw_target("draw") else {
+        let Some(primitive) = self.draw_target("draw") else {
             return;
         };
         if vertices.is_empty() || instances.is_empty() {
             return;
         }
-        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
-        // count. Neither is a bound into an object here — a draw's vertex count
-        // indexes whatever the vertex shader chooses to read, not a buffer this
-        // call names — and both ranges were just checked to be non-empty, which
-        // is the one value (`0`) Metal's own validation layer objects to. The
-        // encoder is kept alive by the `Retained` held across the call.
-        unsafe {
-            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
-                primitive,
-                to_ns(u64::from(vertices.start)),
-                to_ns(u64::from(vertices.end - vertices.start)),
-                to_ns(u64::from(instances.end - instances.start)),
-                to_ns(u64::from(instances.start)),
-            );
-        }
+        self.record(RenderCommand::Draw {
+            primitive,
+            vertex_start: to_ns(u64::from(vertices.start)),
+            vertex_count: to_ns(u64::from(vertices.end - vertices.start)),
+            instance_count: to_ns(u64::from(instances.end - instances.start)),
+            base_instance: to_ns(u64::from(instances.start)),
+        });
     }
 
     /// `drawIndexedPrimitives:…:baseVertex:baseInstance:`, with the index
@@ -1342,7 +1674,7 @@ impl CommandEncoder for MetalCommandEncoder {
     /// to Metal, which has no nil to pass — `indexBuffer` is a non-optional
     /// argument of the selector, so there is no call to make at all.
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
-        let Some((encoder, primitive)) = self.draw_target("draw_indexed") else {
+        let Some(primitive) = self.draw_target("draw_indexed") else {
             return;
         };
         if indices.is_empty() || instances.is_empty() {
@@ -1365,24 +1697,16 @@ impl CommandEncoder for MetalCommandEncoder {
                 return;
             }
         };
-        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
-        // the index count nor the buffer offset. `draw_offset` just checked the
-        // whole index range against the bound region's own length, which
-        // `bind_index_buffer` computed from the allocation's, and the counts
-        // were checked non-empty above. The buffer and the encoder are kept
-        // alive by the `Retained`s held across the call.
-        unsafe {
-            encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
-                primitive,
-                to_ns(u64::from(count)),
-                index_type,
-                &raw,
-                to_ns(offset),
-                to_ns(u64::from(instances.end - instances.start)),
-                base_vertex as isize,
-                to_ns(u64::from(instances.start)),
-            );
-        }
+        self.record(RenderCommand::DrawIndexed {
+            primitive,
+            index_count: to_ns(u64::from(count)),
+            index_type,
+            index_buffer: raw,
+            index_offset: to_ns(offset),
+            instance_count: to_ns(u64::from(instances.end - instances.start)),
+            base_vertex: base_vertex as isize,
+            base_instance: to_ns(u64::from(instances.start)),
+        });
     }
 
     /// One `drawPrimitives:indirectBuffer:indirectBufferOffset:` per argument
@@ -1755,23 +2079,16 @@ impl MetalCommandEncoder {
     /// topology and no pipeline state, and Metal answers that by raising —
     /// which aborts the process — so it is refused here while it is still an
     /// error a caller can catch.
-    fn draw_target(
-        &mut self,
-        what: &str,
-    ) -> Option<(
-        Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>,
-        objc2_metal::MTLPrimitiveType,
-    )> {
+    fn draw_target(&mut self, what: &str) -> Option<objc2_metal::MTLPrimitiveType> {
         if !self.ok() {
             return None;
         }
-        let Open::Render(encoder) = &self.open else {
+        if !self.recording() {
             self.fail(HalError::InvalidDescriptor(format!(
                 "{what} outside a render pass; the seam places every draw inside one"
             )));
             return None;
-        };
-        let encoder = encoder.clone();
+        }
         let Some(primitive) = self.bound_primitive else {
             self.fail(HalError::InvalidDescriptor(format!(
                 "{what} with no graphics pipeline bound: Metal raises rather than reporting it, \
@@ -1779,7 +2096,25 @@ impl MetalCommandEncoder {
             )));
             return None;
         };
-        Some((encoder, primitive))
+        Some(primitive)
+    }
+
+    /// Which kind of pass is open, or the failure that says none is.
+    ///
+    /// The two commands the seam gives no bind point — `bind_group` and
+    /// `push_constants` — read the open pass to decide where they go, and each
+    /// has its own sentence for the case where there is none. A render pass
+    /// carries no encoder here (see [`Open::Render`]), so this answers *which*
+    /// and the caller records or encodes accordingly.
+    fn pass_target(&mut self, refusal: &str) -> Option<Target> {
+        match &self.open {
+            Open::Render(_) => Some(Target::Render),
+            Open::Compute(encoder) => Some(Target::Compute(encoder.clone())),
+            _ => {
+                self.fail(HalError::InvalidDescriptor(refusal.to_string()));
+                None
+            }
+        }
     }
 
     /// The open compute encoder and the threadgroup size a dispatch needs, or
@@ -1822,7 +2157,7 @@ impl MetalCommandEncoder {
     /// [`plan_indirect`](crate::draw::plan_indirect) is what bounds the span
     /// they read first.
     fn indirect(&mut self, draw: &DrawIndirect, indexed: bool) {
-        let Some((encoder, primitive)) = self.draw_target(if indexed {
+        let Some(primitive) = self.draw_target(if indexed {
             "draw_indexed_indirect"
         } else {
             "draw_indirect"
@@ -1857,37 +2192,27 @@ impl MetalCommandEncoder {
         } else {
             None
         };
+        // One recorded command per argument structure, because that is one
+        // Metal call per structure — the loop is the multi-draw, and deferring
+        // it must not fold it into anything smaller.
         for structure in 0..plan.count {
             let offset = to_ns(plan.offset(structure));
-            match &index {
-                // SAFETY: `objc2` marks these unsafe because Metal
-                // bounds-checks neither the indirect offset nor the index
-                // buffer's. `plan_indirect` checked every structure this loop
-                // reads against the argument buffer's own length, and the index
-                // buffer's offset was checked against its allocation by
-                // `bind_index_buffer`. Both buffers and the encoder are kept
-                // alive by the `Retained`s held across the loop.
-                //
-                // What Metal cannot check, and neither can this, is the
-                // *contents* of the argument structures — an index count larger
-                // than the bound index buffer is a GPU-side fault either way,
-                // which is the whole nature of an indirect draw.
-                Some((raw, index_type, index_offset)) => unsafe {
-                    encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
-                        primitive,
-                        *index_type,
-                        raw,
-                        to_ns(*index_offset),
-                        &args,
-                        offset,
-                    );
+            let command = match &index {
+                Some((raw, index_type, index_offset)) => RenderCommand::DrawIndexedIndirect {
+                    primitive,
+                    index_type: *index_type,
+                    index_buffer: raw.clone(),
+                    index_offset: to_ns(*index_offset),
+                    args: args.clone(),
+                    offset,
                 },
-                None => unsafe {
-                    encoder.drawPrimitives_indirectBuffer_indirectBufferOffset(
-                        primitive, &args, offset,
-                    );
+                None => RenderCommand::DrawIndirect {
+                    primitive,
+                    args: args.clone(),
+                    offset,
                 },
-            }
+            };
+            self.record(command);
         }
     }
 
@@ -2031,7 +2356,10 @@ impl Drop for MetalCommandEncoder {
     fn drop(&mut self) {
         // Only reached when `finish` was never called or failed. The command
         // buffer is released without ever being committed, which Metal permits
-        // — but an encoder still encoding on it is not, so close it first.
+        // — but an encoder still encoding on it is not, so close it first. A
+        // render pass still recording is encoded and ended here too; see
+        // `close_open` for why that is unconditional rather than skipped on a
+        // buffer nothing will run.
         self.close_open();
     }
 }

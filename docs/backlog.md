@@ -1522,9 +1522,11 @@ do everything the ICB path needs:
 **So the row's obstacle is exactly what it always said and nothing more:** the
 architecture, not the hardware. Metal's only count-from-memory execution needs
 commands a compute kernel wrote, and that kernel must run before the render
-encoder `draw_indirect_count` is called inside was opened. `crcbl-mtl` encodes
-straight through. That restructuring is the whole of the work, and it is now
-known to be verifiable on the runner we have.
+encoder `draw_indirect_count` is called inside was opened. **`crcbl-mtl` no
+longer encodes straight through** — `crcbl_mtl::command` records a render pass
+and encodes it at `end_render_pass`, so the compute encoder can be opened ahead
+of the render one. That restructuring was the prerequisite, it has landed as a
+pure refactor, and what remains is the ICB kernel itself.
 
 **The one-byte-per-command caveat is closed by measurement.** Every ICB reported
 `size` equal to its `maxCommandCount` — one byte per command, implausible for
@@ -1791,8 +1793,9 @@ reachable only by buying a Mac runner. That is the whole content of position (1)
 versus (2), and it is worth seeing before choosing between them.
 
 **And the two writable rows are not free.** `DrawIndirectCount` needs commands
-written by a kernel that must run before the render encoder opens, in a backend
-that encodes straight through.
+written by a kernel that must run before the render encoder opens. The backend
+can now express that ordering — see the deferral below, which has landed — so
+what is left is the kernel, the ICB and the flag rather than the encoding model.
 
 **It does split into safe slices, and an earlier note here said it did not.**
 That note reasoned that implementing without reporting would fail the seam suite
@@ -1816,7 +1819,9 @@ deliberately rather than discovered:
    `end_render_pass`, so a compute encoder can be opened ahead of the render
    encoder when the pass turns out to contain a `draw_indirect_count`. Correct
    and costs nothing at run time, but it touches _every_ Metal draw — the whole
-   backend's encoding model — and is verifiable only on CI.
+   backend's encoding model — and is verifiable only on CI. **Done:**
+   `crcbl_mtl::command`'s `RenderCommand`/`RenderRecording` and the pure
+   `crcbl_mtl::pass`.
 2. **Split the pass at the call.** End the render encoder, run the kernel in a
    compute encoder, reopen the render encoder with load actions preserving the
    attachments, execute the ICB. Local to the one call and far smaller, but a
@@ -1826,9 +1831,10 @@ deliberately rather than discovered:
 
 (1) is the performant answer and (2) is the cheap one; the seam calls
 `draw_indirect_count` once per bucket per frame, so (2)'s cost is not
-hypothetical. Worth noting that (1) has a free prerequisite: the deferral can
-land on its own as a pure refactor with no capability change at all, proven by
-the existing 66 Metal tests and 26 render tests continuing to pass.
+hypothetical. (1)'s free prerequisite — the deferral landing on its own as a
+pure refactor with no capability change at all — **has landed**, and the
+existing Metal e2e and render jobs are what prove it: nothing about it can be
+executed off a Mac, and the local gates only type-check it.
 
 **Decided: (1), and the research is why rather than taste.**
 
@@ -1848,6 +1854,48 @@ the existing 66 Metal tests and 26 render tests continuing to pass.
   render encoder on a tiler stores every attachment out of tile memory and
   reloads it — per call, and the seam makes one call per bucket per frame. On
   Apple silicon that is the expensive operation, not a rounding error.
+
+**What the deferral left behind, stated as a gap rather than a footnote.**
+
+- **Nothing about it executed a Metal call before it was pushed.** The refactor
+  was written and gated on Linux, where `crcbl-mtl` compiles for
+  `aarch64-apple-darwin` and runs nothing. The only proof it works is
+  `mtl e2e (macos-latest)` and the Metal render job — every draw, every bind,
+  every golden comparison — so a red run there is the first real signal, not a
+  regression against a local pass.
+- **One failure moved, and only one.** `renderCommandEncoderWithDescriptor:`
+  returning nil is now a `HalError::DeviceLost` recorded at `end_render_pass`
+  instead of at `begin_render_pass`; both are before `finish`, which is where
+  the seam observes it. The visible difference is confined to the case where a
+  copy is recorded inside a pass whose encoder would have been nil — then the
+  first error is the copy's `InvalidDescriptor` rather than the `DeviceLost`.
+  Nothing can produce a nil encoder here without a lost device, so it is
+  documented in `crcbl_mtl::command` rather than worked around.
+- **The command list's replay order is not unit-testable off macOS.** Every
+  `RenderCommand` payload is an Objective-C object, so only `crcbl_mtl::pass`'s
+  scissor plan and debug-group stack are covered by `cargo test` on any host.
+  Ordering is a `Vec` push and drain with no branch in it, which is why that was
+  accepted rather than mocked.
+
+- **The one semantic change the deferral makes is the one nothing exercises.**
+  `RenderCommand::PushConstants` carries `bytes: Vec<u8>`, a copy taken with
+  `shadow.bytes().to_vec()` rather than a pointer into the live shadow — because
+  `setBytes:length:atIndex:` copies immediately when encoding straight through,
+  while a recorded command would otherwise see whatever a _later_
+  `push_constants` spliced into that shadow. The copy is correct, and checked by
+  reading. **Nothing tests it.** `crcbl-render` passes `push_constants: None` at
+  every render-pass site it has, and the seam's `exercise_push_constants` is a
+  **compute** dispatch — and compute passes are not deferred. So no test
+  anywhere drives push constants across two draws in one Metal render pass,
+  which is the only arrangement in which getting this wrong is visible.
+
+  The guard that would close it: a Metal render test with two draws in one pass
+  pushing _different_ blocks, asserting each draw saw its own. It needs an MSL
+  raster shader that reads a push-constant block, which `crcbl-shaders`'
+  committed `triangle` does not — so it is a shader-artifact slice like
+  `push_constant_probe` was, not a test-only one. Worth doing before anyone
+  edits this recording path again, because the failure it prevents is silent and
+  would look like a shader bug.
 
 **And one widely repeated claim is false, which our own measurement settles.**
 Several sources say fragment shaders cannot be used with indirect command
