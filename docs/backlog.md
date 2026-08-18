@@ -1768,6 +1768,32 @@ in the blocker list is unknown any more.
 
 **Awaiting a decision already raised — 3 rows.** dx12's fills, below.
 
+**Metal's end state is now calculable, which makes the choice below concrete
+rather than a matter of taste.** Its six rows split three ways, all measured:
+
+| row                                         | state                                                                                        |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `MeshShading`, `TaskShaderStage`            | **unprovable here** — the runner answers `Metal3 = false`                                    |
+| `TimestampQuery`, `PipelineStatisticsQuery` | **unprovable here** — no `counterSets`, and no honest `timestamp_period_ns`                  |
+| `BindlessDescriptorArray`                   | writable — Metal's argument buffers do carry resource arrays; this backend binds flat tables |
+| `DrawIndirectCount`                         | writable, and now fully de-risked — the device creates _and executes_ ICBs                   |
+
+So **four of six can never go green on the hardware this project has**, whatever
+anyone writes. "Metal fully closed" is not reachable by working harder; it is
+reachable only by buying a Mac runner. That is the whole content of position (1)
+versus (2), and it is worth seeing before choosing between them.
+
+**And the two writable rows are not free.** `DrawIndirectCount` needs the
+encoder restructuring — commands written by a kernel that must run before the
+render encoder opens, which means deferring render-pass encoding in a backend
+that encodes straight through. It also cannot land half-done: `crcbl-mtl` would
+report `DRAW_INDIRECT_COUNT`, `GeometryPath` would flip for every Metal adapter,
+and that is precisely the shape of change that removed the WARP device when dx12
+reported `MESH_SHADER` today. The seam suite drives `DrawIndirectCount`, so
+implementing without reporting fails it the other way — "declares unsupported
+and then performed it" — which is why the dx12 trick of landing the calls and
+withholding the flag does not transfer here.
+
 **So the question is what bar the deletion clears.** Three honest positions:
 
 1. **Every row closed.** Requires a hardware macOS runner for four Metal rows,
