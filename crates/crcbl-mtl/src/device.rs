@@ -79,17 +79,39 @@ pub(crate) const MAX_SAMPLER_ANISOTROPY: f32 = 16.0;
 ///
 /// **Both kinds need an `MTLCounterSampleBuffer`, and the occlusion kind does
 /// not** — see `crate::query` — which is the whole of why one of the three is
-/// served and two are not. An `MTLCounterSampleBufferDescriptor` must name a set
+/// served and two are not.
+///
+/// **Two separate obstacles, and this refuses on the first, which holds
+/// everywhere.** [`Device::create_query_set`] matches on
+/// [`QuerySetDesc::kind`](crcbl_hal::QuerySetDesc) alone and never asks the
+/// device anything, so the refusal is the same on every Mac — and the reason it
+/// is the same is the one `crate::adapter`'s `features_of` gives for withholding
+/// [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) and
+/// [`Features::PIPELINE_STATISTICS_QUERY`](crcbl_hal::Features::PIPELINE_STATISTICS_QUERY):
+/// reporting either obliges a
+/// [`Limits::timestamp_period_ns`](crcbl_hal::Limits::timestamp_period_ns), and
+/// Metal correlates the GPU clock to the host's through
+/// `sampleTimestamps:gpuTimestamp:` at sample time rather than ticking at a
+/// fixed period, so there is no honest number to report and this workspace will
+/// not fabricate one.
+///
+/// The device-specific fact is the *second* obstacle and is why CI cannot even
+/// measure its way out: an `MTLCounterSampleBufferDescriptor` must name a set
 /// from `MTLDevice::counterSets`, and the paravirtual GPU this backend's CI runs
 /// on reports **zero** of them while answering `supportsCounterSampling:` yes at
-/// three boundaries; `crate::adapter`'s
+/// three boundaries. `crate::adapter`'s
 /// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
-/// is the probe that printed it. So the obstacle is a device's, and it is
-/// unsettled rather than absent: another Mac may well advertise the sets.
+/// is the probe that printed it, and it prints the correlated period too — it is
+/// the measurement the first obstacle waits on.
+///
+/// Said the other way round: another Mac advertising counter sets would still be
+/// refused here, so a message blaming only the CI device would be untrue on it.
 const NO_COUNTER_SAMPLED_SET: &str = "a timestamp or pipeline-statistics query set needs an \
-     MTLCounterSampleBuffer, whose descriptor must name one of MTLDevice::counterSets — and the \
-     device this backend's CI runs on advertises none, so neither pool can be built there. The \
-     occlusion kind is a plain MTLBuffer and is served (the Metal query slice)";
+     MTLCounterSampleBuffer, and this backend builds neither on any device: reporting the \
+     features obliges a timestamp_period_ns, and Metal correlates the GPU clock to the host at \
+     sample time rather than ticking at a fixed period, so there is no honest period to report \
+     (the Metal timestamp slice). The GPU this backend's CI runs on additionally advertises no \
+     MTLDevice::counterSets. The occlusion kind is a plain MTLBuffer and is served";
 
 /// Anything the object tables hold, so one lookup helper serves them all.
 pub(crate) trait Owned {

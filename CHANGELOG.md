@@ -1695,6 +1695,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-mtl` refused timestamp and pipeline-statistics query sets with a
+  reason that was untrue on any Mac but the CI one.** The message said an
+  `MTLCounterSampleBuffer`'s descriptor must name one of
+  `MTLDevice::counterSets` "and the device this backend's CI runs on advertises
+  none, so neither pool can be built there" — a device-specific claim on a
+  refusal that never asks the device anything: `create_query_set` matches on the
+  query kind alone, so an Apple-silicon Mac advertising counter sets is refused
+  identically and told about a machine it is not. The operative reason is the
+  one `adapter::features_of` already gives for withholding
+  `Features::TIMESTAMP_QUERY` and `Features::PIPELINE_STATISTICS_QUERY`:
+  reporting either obliges a `Limits::timestamp_period_ns`, and Metal correlates
+  the GPU clock to the host's at sample time rather than ticking at a fixed
+  period, so there is no honest period to report. The message now leads with
+  that, keeps the CI device's zero counter sets as the second obstacle it is,
+  and the constant's doc says which of the two each half describes.
+
 - **Every frame the browser backend presented was a whole transfer function too
   dark.** `crcbl-webgpu` answered a canvas surface with the two linear formats a
   `GPUCanvasContext` can be configured with and nothing sRGB, so
