@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Drives `crcbl-webgpu`'s HAL seam directly, in a real browser, against a real
-// `GPUDevice` — groups G through Z, which live in `web/tools/probe-groups.mjs`.
+// `GPUDevice` — groups G through AE, which live in `web/tools/probe-groups.mjs`.
 //
 //   node web/tools/probe-e2e.mjs [--site target/site] [--timeout 90000]
 //                                [--adapter auto] [--expect-fail X,Y,Z,AA]

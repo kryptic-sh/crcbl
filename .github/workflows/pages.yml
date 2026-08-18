@@ -223,7 +223,7 @@ jobs:
       # THE crcbl-webgpu SEAM GATE. **It must not be deleted**, nor folded into
       # the demo runs above.
       #
-      # `web/tools/probe-groups.mjs` carries the PROBE groups — **G through Z** —
+      # `web/tools/probe-groups.mjs` carries the PROBE groups — **G through AE** —
       # which drive `crcbl-webgpu`'s command stream directly rather than through
       # the engine: the wasm→JS→wasm round trip and the device it opens, a
       # surface, the capability query held against what `navigator.gpu` tells the
@@ -251,7 +251,7 @@ jobs:
       #
       # WHAT SHOWS IT IS STILL DOING ITS JOB is the line it prints naming every
       # group letter it recorded a check under, beside the count:
-      # `web/run-probe-e2e.sh` fails when any of G–Z or AA is missing from it, so a
+      # `web/run-probe-e2e.sh` fails when any of G–Z or AA–AE is missing from it, so a
       # page that silently drove only some of the probes is a red step rather
       # than a smaller number nobody reads. It also names individual checks, so a
       # group that keeps its letter while dropping the claim that makes it worth
