@@ -1689,18 +1689,42 @@ is a variant, an arm in `blocks_parity`, and an entry in that test's list.
 valued fills was; emptying a kind was what it did, and the alternative was
 weakening the test that noticed.
 
-### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
+### Three offscreen fixtures hand-roll what `GpuContext::open_offscreen` now does
 
-Checked on 2026-08-19, because the obvious assumption is wrong. `apps/quarry`
-does not exist; the phase table's S4C row asks for "meshlet clusters, QEM
-cluster LOD, and all three `GeometryPath` values on one dense scene", gated by
-"golden frames per `GeometryPath`; three-way comparison recorded; no LOD popping
-on any path".
+`GpuContext::open_offscreen` landed with `apps/quarry`'s frame test as its
+caller, and it is not the first place in the tree to open an instance, an
+offscreen surface, a device and a two-image ring in that order.
+`crates/crcbl/tests/gpu_scene/harness.rs`'s `Headless::open_at_format` and
+`crates/crcbl-vk/tests/vk_e2e/harness.rs` both do it by hand, and each carries
+its own copy of the adapter selection, the format choice and the teardown order.
 
-**The engine work is largely already there.** `crcbl-scene` carries
-`meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
-`lod_resolve.rs`, and `crcbl-hal` defines all three paths. quarry is mostly
-assembling and gating what exists rather than building a subsystem.
+**Not converged in the same slice, deliberately.** Both fixtures do more than
+open a ring — a `DeviceSlot` a `finish` can empty, a validation report asserted
+clean, a pinned format checked against the caps with a divergence message — and
+none of that belongs on the engine's public context. Converging them means
+deciding which of those are fixture concerns and which are missing engine API,
+which is its own piece of work rather than a rename.
+
+What would make it worth doing: a fourth copy. Two fixtures with different
+requirements are a resemblance; a third caller needing the same extras is
+duplicated knowledge.
+
+### quarry (S4C): milestone 1 is done, and the gate is reachable on Vulkan alone
+
+The phase table's S4C row asks for "meshlet clusters, QEM cluster LOD, and all
+three `GeometryPath` values on one dense scene", gated by "golden frames per
+`GeometryPath`; three-way comparison recorded; no LOD popping on any path".
+
+**Milestone 1 shipped.** `apps/quarry` generates the face, bakes it into meshlet
+clusters and draws it: `tests/residency.rs` records a frame through the real
+`ForwardRenderer` and the real graph on an offscreen context, and on an RX 7900
+XTX the face selects `GeometryPath::MeshShader` and covers 57.6% of a 256×192
+frame. What is **not** there yet is a window, a dolly, and any golden.
+
+**The engine work for what remains is largely already there.** `crcbl-scene`
+carries `meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
+`lod_resolve.rs`, and `crcbl-hal` defines all three paths. Milestones 2 to 4 are
+mostly assembling and gating what exists rather than building a subsystem.
 
 **`MeshShading` being `Unwritten` on dx12 and Metal does not block the gate**,
 which is the thing worth writing down. The paths are not one-per-backend: they
@@ -1723,12 +1747,15 @@ whose three arms name all three paths and which opens its device without
 ever select the floor path. A three-way quarry gate would follow `draw_gen.rs`'s
 shape, not `render_e2e.rs`'s.
 
-**The decision this needs** is only whether quarry is the right next sample at
-all, against the alternatives: `breakout-as-wasm` (P6A, a `wasmtime` `WasmHost`
-seam — self-contained, no renderer work, no new demo), lumen's second half (S4B,
-blocked on P7C's ray tracing), and orbit (S5, the roadmap's own "flashiest web
-demo", behind three physics phases: P6, P8, P11). quarry is the only one whose
-prerequisites are already built.
+**Next, in order:** the QEM cluster hierarchy over the face and per-cluster
+selection with hysteresis (milestone 2), then the forced-path three-way
+comparison on `draw_gen.rs`'s shape (milestone 3). The golden frames the gate
+wants come with milestone 3, because a golden per path needs all three paths.
+
+**Which sample came next was decided** — quarry, over `breakout-as-wasm` (P6A, a
+`wasmtime` `WasmHost` seam), lumen's second half (S4B, blocked on P7C's ray
+tracing) and orbit (S5, behind three physics phases). quarry was the only one
+whose prerequisites were already built.
 
 ### `DivergenceKind::Unclassified` is gone, and can come back
 
