@@ -1757,7 +1757,8 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
     eprintln!("vk e2e: dunes cut — {interfaces} interface edge(s)");
     assert!(
         interfaces > 20,
-        "only {interfaces} edge(s) have one level on one side and another on the other,          which is too few to be the seam between the two ends"
+        "only {interfaces} edge(s) have one level on one side and another on the other, \
+         which is too few to be the seam between the two ends"
     );
 
     // The same check, shown to refuse — because one that passed whatever it was

@@ -1715,7 +1715,8 @@ fn borderless_on_a_named_monitor_uses_that_monitor() {
     assert_ne!(
         session.size(window),
         Some(SECOND_OUTPUT_SIZE),
-        "the windowed size must differ from the answer, or the assertion below          cannot fail"
+        "the windowed size must differ from the answer, or the assertion below \
+         cannot fail"
     );
 
     session

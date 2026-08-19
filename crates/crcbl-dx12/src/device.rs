@@ -1679,7 +1679,8 @@ impl Dx12Device {
         // `u64` it returns.
         let frequency = unsafe { queue.GetTimestampFrequency() }.map_err(|error| {
             HalError::Backend(format!(
-                "ID3D12CommandQueue::GetTimestampFrequency failed on a DIRECT queue, which is                  where D3D12 defines it: {error}{}",
+                "ID3D12CommandQueue::GetTimestampFrequency failed on a DIRECT queue, which is \
+                 where D3D12 defines it: {error}{}",
                 debug::diagnosis(&raw)
             ))
         })?;

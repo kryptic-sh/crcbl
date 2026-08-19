@@ -530,7 +530,8 @@ impl Device for WebGpuDevice {
             // backend.
             Capability::TimestampQuery => gated(
                 Features::TIMESTAMP_QUERY,
-                "this device reports no TIMESTAMP_QUERY, so the browser has no 'timestamp-query'                  feature and no GPUQuerySet of that type could be created",
+                "this device reports no TIMESTAMP_QUERY, so the browser has no 'timestamp-query' \
+                 feature and no GPUQuerySet of that type could be created",
             ),
             // **And this claims exactly what the capability defines and no
             // more.** `Capability::OcclusionQuery` is "a QueryKind::Occlusion

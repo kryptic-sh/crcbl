@@ -420,7 +420,8 @@ mod tests {
 
         assert!(
             folded.min.x <= low.min.x && folded.max.x >= high.max.x,
-            "the union came back as {:?}..{:?}, which does not contain the boxes it was folded              from — a BVH node like this misses every pair in the part it dropped",
+            "the union came back as {:?}..{:?}, which does not contain the boxes it was folded \
+             from — a BVH node like this misses every pair in the part it dropped",
             folded.min,
             folded.max
         );
