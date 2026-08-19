@@ -1378,7 +1378,10 @@ impl Device for MetalDevice {
             // value from outside the queue — so a wait may be submitted before
             // anything has signalled it. One queue is not the obstacle it was
             // while the seam had no host signal to pair with the wait.
-            Capability::TimelineWaitBeforeSignal => Support::Yes,
+            Capability::TimelineWaitBeforeSignal => gated(
+                Features::TIMELINE_SEMAPHORE,
+                "this device reports no TIMELINE_SEMAPHORE, so there is no timeline to wait on",
+            ),
         }
     }
 
@@ -2351,6 +2354,24 @@ impl Device for MetalDevice {
     /// `crcbl-wgpu`. Nothing here signals a binary semaphore from outside a
     /// submission, so the rule stands unweakened.
     fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
+        // **The declaration has to be true.** `supports` answers the timeline
+        // rows through `Features::TIMELINE_SEMAPHORE`, and `MTLSharedEvent` is
+        // core Metal — so without this check a device opened without the feature
+        // declares timelines unsupported and then builds one anyway. The same
+        // inconsistency was found and fixed on `crcbl-vk` by running the seam
+        // suite with `CRCBL_SEAM_WITHHOLD=all`; this backend is held to it by
+        // the same step on its own CI job.
+        if matches!(desc.kind, SemaphoreKind::Timeline { .. })
+            && !self
+                .inner
+                .caps
+                .features
+                .contains(Features::TIMELINE_SEMAPHORE)
+        {
+            return Err(not_yet(
+                "a timeline semaphore on a device opened without Features::TIMELINE_SEMAPHORE",
+            ));
+        }
         let label = desc.label.map(NSString::from_str);
         let (raw, shared) = match desc.kind {
             SemaphoreKind::Timeline { initial_value } => {

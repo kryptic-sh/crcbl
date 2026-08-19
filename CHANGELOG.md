@@ -846,6 +846,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
     and the `descriptor_binding_*_update_after_bind` bits all come from
     `Features::DESCRIPTOR_INDEXING`. Gated on it.
 
+  **`crcbl-dx12` and `crcbl-mtl` carried the same `TimelineWaitBeforeSignal`
+  inconsistency** — `ID3D12Fence` and `MTLSharedEvent` are both core, so each
+  built a timeline on a device that had just declared it unsupported. Found by
+  reading, since nothing here runs either backend; each got the same two changes
+  and each job got the narrow step, landed type-checked against
+  `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`.
+
   A CI step on the lavapipe job runs the narrow pass, scoped to the one test:
   the reviewed-divergence snapshot and the pipeline-layout ceiling describe the
   capable configuration and legitimately do not hold on a device opened with

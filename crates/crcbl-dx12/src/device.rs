@@ -2268,7 +2268,10 @@ impl Device for Dx12Device {
             // a CPU-side `Signal` of its own, so `ID3D12CommandQueue::Wait` may
             // be issued for a value nothing has submitted yet — which is how
             // D3D12 expresses ordering in the first place.
-            Capability::TimelineWaitBeforeSignal => Support::Yes,
+            Capability::TimelineWaitBeforeSignal => gated(
+                Features::TIMELINE_SEMAPHORE,
+                "this device reports no TIMELINE_SEMAPHORE, so there is no timeline to wait on",
+            ),
         }
     }
 
@@ -3793,6 +3796,25 @@ impl Device for Dx12Device {
     ///
     /// [`HalError::Backend`] if `CreateFence` fails.
     fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
+        // **The declaration has to be true.** `supports` answers the timeline
+        // rows through `Features::TIMELINE_SEMAPHORE`, and `ID3D12Fence` is core
+        // D3D12 — so without this check a device opened without the feature
+        // declares timelines unsupported and then builds one anyway. The same
+        // inconsistency was found and fixed on `crcbl-vk` by running the seam
+        // suite with `CRCBL_SEAM_WITHHOLD=all`; this backend is held to it by
+        // the same step on its own CI job.
+        if matches!(desc.kind, SemaphoreKind::Timeline { .. })
+            && !self
+                .inner
+                .caps
+                .features
+                .contains(Features::TIMELINE_SEMAPHORE)
+        {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Dx12,
+                what: "a timeline semaphore on a device opened without Features::TIMELINE_SEMAPHORE",
+            });
+        }
         let initial = match desc.kind {
             SemaphoreKind::Timeline { initial_value } => initial_value,
             // A binary semaphore's counter is private to this crate, so it

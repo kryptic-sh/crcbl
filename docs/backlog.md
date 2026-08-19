@@ -2063,34 +2063,17 @@ that matters: "a caller branching on that variant to pick a fallback would miss
 this refusal entirely". Left alone because that crate is slated for deletion; if
 the deletion is ever abandoned, this is a real defect in it.
 
-**`crcbl-dx12` and `crcbl-mtl` have vk's exact inconsistency, found by reading
-rather than running.** Both declare
+**`crcbl-dx12` and `crcbl-mtl` had vk's exact inconsistency and it is fixed.**
+Both declared `Capability::TimelineWaitBeforeSignal => Support::Yes`
+unconditionally while the arm beside it gated the timeline group on
+`Features::TIMELINE_SEMAPHORE` — and `ID3D12Fence` and `MTLSharedEvent` are both
+core, so `create_semaphore` built a timeline regardless. Found by reading, since
+nothing here runs either backend. Each got the two changes `crcbl-vk` got, and
+each job got the narrow step, so the fix is exercised rather than asserted.
 
-```rust
-Capability::TimelineWaitBeforeSignal => Support::Yes,
-```
-
-unconditionally, while the neighbouring arm gates
-`TimelineSemaphore | CpuTimelineWait | CpuTimelineSignal` on
-`Features::TIMELINE_SEMAPHORE` — `crcbl-dx12/src/device.rs` and
-`crcbl-mtl/src/device.rs`, in each one's `supports`. A wait-before-signal needs
-a timeline to wait on, so on a device opened without the feature both declare
-support for something whose semaphore they have just declared unsupported. That
-is the row `crcbl-vk` was fixed for.
-
-**The fix is two changes per backend and neither was made, deliberately.** The
-declaration gate alone does not make the narrow pass hold: without a guard in
-`create_semaphore`, both would go on _building_ timelines on a device opened
-without the feature and report "declares it unsupported and then performed it",
-which is the other three rows vk had. `crcbl-vk`'s commit is the template — a
-feature check returning `not_yet(...)` at the top of `create_semaphore`, plus
-`gated(Features::TIMELINE_SEMAPHORE, …)` on the wait-before-signal arm.
-
-It was not written here because nothing in this project can run either backend:
-the guard would be unexercised on the wide path CI does run, and a blind guard
-that no gate reaches is hope rather than robustness. **What it needs is the
-narrow CI step on those two jobs, landed together with the fix** — and until
-both exist, adding the step alone reddens `main` on Windows and macOS.
+**Both were landed type-checked only**, against `x86_64-pc-windows-msvc` and
+`aarch64-apple-darwin` — the project's own practice for platform code, and the
+same footing the nanosecond refactor was landed on. CI is what settles them.
 
 **`crcbl-webgpu` has not been examined this way at all** — it is a browser
 backend the native suite cannot open, so its equivalent would be a probe group
