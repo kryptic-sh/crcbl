@@ -10,7 +10,7 @@
 //! GPU to tell you how many triangles it generates would be untestable in every
 //! job this repository runs on a machine without one.
 
-use crcbl_quarry::face;
+use crcbl_quarry::{face, scene};
 
 /// Quads per side of the reported face.
 ///
@@ -28,15 +28,25 @@ fn main() {
         triangles = face.triangles(),
     );
 
-    match crcbl::scene::meshlet::build_meshlets(&face.positions, &face.indices) {
-        Ok(build) => println!(
-            "quarry: {} meshlet cluster(s), {} vertex reference(s)",
-            build.clusters().len(),
-            build.vertices().len(),
-        ),
+    let scene = match scene::quarry_scene(&face) {
+        Ok(scene) => scene,
         Err(error) => {
-            eprintln!("quarry: the meshlet builder refused the face: {error}");
+            eprintln!("quarry: the face could not be partitioned into meshlets: {error}");
             std::process::exit(1);
         }
-    }
+    };
+
+    let clusters = match &scene.meshes[0].geometry {
+        crcbl::render::scene::Geometry::Flat { clusters, .. } => clusters.clusters.len(),
+        crcbl::render::scene::Geometry::Dag { .. } => 0,
+    };
+    let reserved = scene.capacities;
+    println!("quarry: {clusters} meshlet cluster(s)");
+    println!(
+        "quarry: pools reserve {} vertices and {} indices — the defaults are {} and {}",
+        reserved.vertices,
+        reserved.indices,
+        crcbl::render::scene::Capacities::default().vertices,
+        crcbl::render::scene::Capacities::default().indices,
+    );
 }

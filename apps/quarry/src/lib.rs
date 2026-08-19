@@ -23,3 +23,4 @@
 //! tiling cases with a Pages demo.
 
 pub mod face;
+pub mod scene;
