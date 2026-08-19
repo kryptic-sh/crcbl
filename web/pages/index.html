@@ -24,15 +24,16 @@ meta-->
     <span class="grad">in your browser.</span>
   </h1>
   <p class="tagline">
-    Crucible is a game engine written from scratch in Rust — its own Vulkan
-    backend, its own Wayland and X11 windowing over hand-written FFI, its own
-    ECS, renderer, physics, netcode and audio.
+    Crucible is a game engine written from scratch in Rust — its own Vulkan,
+    Metal and D3D12 backends, its own Wayland, X11, AppKit and Win32 windowing
+    over hand-written FFI, its own ECS, renderer, physics, netcode and audio.
   </p>
   <p class="tagline small">
-    A second graphics backend on <code>wgpu</code> is what makes this page
-    possible: the same engine and the same sample code, compiled to
-    <code>wasm32-unknown-unknown</code> and drawing through WebGPU. Not a port —
-    the same source.
+    A fourth graphics backend is what makes this page possible: a hand-written
+    <code>wasm</code> &rarr; JS command stream straight onto the browser's
+    WebGPU, with no <code>wgpu</code> and no <code>wasm-bindgen</code> anywhere
+    in the build. The same engine and the same sample code, compiled to
+    <code>wasm32-unknown-unknown</code>. Not a port — the same source.
   </p>
   <div class="cta">
     <a class="btn primary" href="demos/breakout/">play breakout →</a>

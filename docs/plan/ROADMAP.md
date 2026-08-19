@@ -18,7 +18,64 @@ Two hard rules govern the ordering:
 breakout onward ships as a browser demo on GitHub Pages. The demo site is the
 engine's public face and its continuous cross-backend regression test.
 
-## Status (as of 2026-08-15)
+## Status (as of 2026-08-19)
+
+**Since 2026-08-15 the work has been backend parity and the viewer sample**, and
+neither has a phase row of its own: parity cuts across P2, P10 and P14, and the
+viewer is `sample/05-viewer.md`'s own milestones.
+
+- **Parity stopped being a claim and became a mechanism.** `crcbl-hal` carries
+  an exhaustive `Capability` enum that every backend answers for through a
+  `match`, so a capability added to one backend fails to compile on the others.
+  `crates/crcbl/tests/hal_seam_e2e.rs` drives that enum in **both** directions —
+  a declared capability must work, a declared refusal must refuse with the
+  documented error — and prints which capabilities the device withheld, so a row
+  that ran nowhere cannot read as a row that passed. Real divergence goes on
+  `REVIEWED_BLOCKERS`, and a snapshot test refuses to let that list drift
+  without a human editing it.
+
+- **Rows closed, mostly on D3D12 and Metal.** D3D12 gained mesh pipelines and
+  both mesh draws, root constants, query heaps, timelines, image-to-image and
+  depth-plane copies, an MSAA resolve, a zero fill, and a device-removal report
+  that carries its DRED breadcrumbs. Metal gained push constants, occlusion
+  query sets, a bindless descriptor array as an argument buffer, and a GPU-side
+  draw count packed by a compute kernel rather than through an indirect command
+  buffer — the ICB route hung the GPU three times and was abandoned, and that is
+  written up in `docs/backlog.md`. WebGPU gained streamed query sets and the
+  stencil reference.
+
+- **Four breaking changes at the seam, each because a backend could not answer
+  truthfully.** Timestamp results are nanoseconds rather than ticks plus a
+  period; `MultisampleState::mask` is gone; `StencilState::reference` is gone
+  and `set_stencil_reference` is the only channel; a pass takes its timestamps
+  in its descriptor. Each is in `CHANGELOG.md` with the backend that forced it.
+
+- **Two browser defects fixed**: frames came back dark because the canvas was
+  not encoded as sRGB, and cancelling a readback was reported as a device error
+  rather than as the ordinary thing it is.
+
+- **`apps/viewer` — milestones 1 to 3 of `sample/05-viewer.md`.** It loads a
+  `.glb` through the asset seam, frames and orbits it, draws it over a
+  screen-space infinite grid, and lists what the document holds and what the
+  conversion skipped (`I`). Wireframe (`W`), world-space normals (`N`) and a
+  runtime exposure on `-`/`=` and on a menu slider are the debug views.
+  **Re-export the file and the frame becomes the new document**, which is V-F4's
+  artist loop. `crcbl-render` gained `OrbitCamera` and the grid out of it, and
+  `crcbl-ui` gained menu sliders.
+
+  This is _not_ P9's hot reload: `crate::watch` polls one path from the sample's
+  own tick, and `crcbl-assets` still has no reload of its own. The Fetch source
+  and the RON scene format are also still P9's remainder.
+
+- **NaN robustness, found by the viewer opening files nobody curated.** A `NaN`
+  vertex no longer shrinks a bounding box, displaces a cluster sphere, or
+  shrinks a physics BVH node — `glam`'s `Vec3::min`/`max` are bare comparisons
+  that yield the right-hand side on a `NaN`, which is not `f32::min`.
+
+- **`crcbl-wgpu` is slated for deletion** once the parity list closes. The bar
+  and the trade are in `docs/backlog.md`, awaiting a decision.
+
+### As of 2026-08-15
 
 **Since S3, the work has been the render side and two fixtures rather than a
 fifth game**, and none of it has a phase row of its own because it was pulled

@@ -666,14 +666,28 @@ be built already, which is why the list says what was checked and when:
 - **V-F3 — UI for tools, not just a debug overlay.** Node/mesh tree, material
   and texture listing with sizes and triangle counts, a stats panel. Audit what
   `crcbl-ui` already offers before adding widgets.
-- **V-F4 — asset hot reload.** Re-export from Blender, viewer picks it up. The
-  artist-loop demo, and the first user-facing use of reload.
+- **V-F4 — asset hot reload. The mechanism is built; the demo is not recorded.**
+  `crate::watch` plus `Gpu::reload` pick a re-export up — verified by hand on
+  2026-08-19 against a real Vulkan device, swapping Khronos `Avocado.glb` for
+  `Box.glb` under a running viewer, and the reload landed one poll later. What
+  the milestone actually asks for is a **recording** of the Blender loop, and
+  nobody has made one. It also remains the app's own poll rather than P9's
+  reload: `crcbl-assets` has no reload of its own.
 - **V-F5 — opening a file.** Path argument natively, drop target in the browser.
 
 Then **V-S**, the sample itself, against the plan's own exit criteria: ≥90% of
 the Khronos glTF-Sample-Models suite loads without crashing, unsupported
 features log actionable skip messages, and the Blender re-export loop updates
 live.
+
+**None of those three has been measured.** The skip messages are asserted by
+`app::tests`' `skip_report` cases, which is the message's _shape_ and not a
+claim about any real document; the ≥90% figure needs the suite fetched and run
+in bulk, which nothing does; and the Blender loop has been exercised with
+`std::fs::write` and one manual `cp`, never with Blender. The suite is ~2 GB, so
+the shape this wants is a script that fetches it, runs
+`viewer --headless --frames 1` over every `.glb`, and reports the pass rate — a
+slice of its own.
 
 Two things the plan settles that are easy to get wrong: the viewer is the one
 sanctioned exception to the server-authoritative rule (it is a tool and
