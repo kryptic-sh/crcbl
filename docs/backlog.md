@@ -874,6 +874,63 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
+### DECISION — `Limits::timestamp_period_ns` is what keeps Metal's query rows open
+
+Metal's `TimestampQuery` and `PipelineStatisticsQuery` are the last two
+`Unclassified` rows in `REVIEWED_BLOCKERS`, and reading why says the divergence
+is **the seam's shape rather than Metal's**.
+
+`crcbl_mtl::device`'s own reason: building the query set needs an
+`MTLCounterSampleBuffer`, which is unwritten — but the deeper obstacle is that
+**reporting the feature obliges a `Limits::timestamp_period_ns`, and Metal has
+no fixed tick period.** Its GPU clock is correlated to the host at sample time
+(`sampleTimestamps:gpuTimestamp:`) rather than ticking at a constant rate, so
+there is no honest number to put in that field.
+
+**One backend is already papering over the same mismatch.** `crcbl-webgpu`
+reports `timestamp_period_ns = 1.0` — not a measurement, but a sentinel meaning
+"the results are already nanoseconds", which is what WebGPU's timestamp queries
+return. So the field is a Vulkan-shaped concept that two of four backends cannot
+answer truthfully.
+
+The four APIs:
+
+| backend | what it gives                                               |
+| ------- | ----------------------------------------------------------- |
+| Vulkan  | ticks + `timestampPeriod` (ns per tick)                     |
+| D3D12   | ticks + `GetTimestampFrequency` (ticks per second)          |
+| WebGPU  | **nanoseconds directly**                                    |
+| Metal   | a GPU timestamp correlated to the host clock at sample time |
+
+**The options:**
+
+1. **Leave it.** Metal's two rows stay divergent permanently and WebGPU keeps
+   reporting a sentinel. Costs nothing now; the parity claim carries two rows
+   that no work can ever close, for a reason nobody reading the enum would
+   guess.
+2. **Return nanoseconds from the seam** and drop the period from the public
+   contract. Each backend converts in the one place that knows how: Vulkan
+   multiplies by its period, D3D12 divides by its frequency, WebGPU passes
+   through, Metal correlates. Every backend can then serve the capability, and
+   the sentinel disappears. Breaking, pre-1.0 so permitted, and it touches four
+   backends plus every caller that reads a timestamp.
+3. **Make the period optional** — `Option<f32>` — so a backend can say "not a
+   fixed rate". Smaller change, but it pushes the conversion onto every caller
+   and each one has to get the Metal case right, which is the argument against.
+
+**My reading is (2), and the evidence is that WebGPU already had to fake it.**
+When a portable seam forces one backend to invent a number and another to refuse
+outright, the seam is the thing that is wrong.
+
+**It does not close the rows on its own.** Metal would still need the
+`MTLCounterSampleBuffer` written, and the CI Mac advertises **no
+`MTLDevice::counterSets` at all** — so even a complete implementation is
+`NotOnThisDevice` here, which the parity mechanism does not count as a
+divergence. That is still progress: eight rows to six, honestly.
+
+Recorded rather than taken because it is a breaking change to the seam's public
+contract, which is a bigger call than a backend fix.
+
 ### The Metal ICB line of attack, and why it is closed
 
 Kept because it cost four CI runs and the conclusion is worth not re-deriving.
