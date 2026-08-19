@@ -1843,14 +1843,28 @@ it, forced by subtracting features from one adapter.
   without giving meaningful ones — level 3 would not read as "three levels
   coarse".
 
-  **So the real cost is a shader struct change**: a `level` field on
-  `ClusterSelect`, its Rust mirror in `crcbl_shaders::cluster_dag`'s selection
-  records, and every committed artifact re-blessed through
-  `tools/compile-shaders.sh` — slangc 2026.14 and dxc are both installed here,
-  so that is possible locally rather than blocked. What makes it a slice rather
-  than an afternoon is that it changes a GPU struct on the mesh path for every
-  backend, where a mistake reads as corrupted geometry rather than a failed
-  assertion, and the goldens may move with it.
+  **So the real cost is a shader change, and it is smaller than "a struct
+  change".** The obvious form — a `level` field on `ClusterSelect` — moves
+  `CLUSTER_SELECT_STRIDE` from 16 to 20 and with it every index into the
+  selection buffer, which is a GPU-visible layout change on the mesh path for
+  every backend. **It is avoidable.** `ClusterSelect::flags` carries exactly two
+  bits today, `HAS_PRODUCER` and `HAS_CONTAINER`, and quarry's own DAG is twelve
+  levels — so the level fits in the spare thirty bits with room for any mesh
+  anyone will build. Packing it there needs a named accessor and a documented
+  bit layout on both sides, and changes no stride, no buffer size and no index.
+
+  **The toolchain is verified, which was the other unknown.**
+  `CRCBL_SLANGC=~/.local/slang/bin/slangc CRCBL_DXC=~/.local/dxc/bin/dxc crates/crcbl-shaders/tools/compile-shaders.sh --check`
+  answers "every artifact matches its source (slangc 2026.14, dxc
+  1.9(1-0d3ee6b5)(1.9.0.1))" on this machine, so re-blessing produces exactly
+  what the `shaders (committed artifacts match their sources)` CI job expects.
+
+  **The six steps, in order**: pack the level into `flags` with accessors on
+  both sides; set it in `ClusterDag::selection_records`; add a view sentinel
+  beside `NORMALS_VIEW` in `mesh.slang` and tint by the unpacked level; expose
+  `ForwardRenderer::set_lod_view`; re-bless every artifact; then verify the
+  render, mesh and forward suites unchanged, since the tint is off by default
+  and no golden should move.
 
 - **Milestone 4: the tiling case is done, the skinned one is blocked, the Pages
   demo is untouched.** `crcbl_quarry::tile` is the modular wall piece, and two
