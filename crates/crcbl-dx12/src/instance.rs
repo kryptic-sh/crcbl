@@ -820,9 +820,7 @@ impl PendingDevice for Dx12PendingDevice {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crcbl_hal::{
-        Device as _, DeviceType, Features, Limits, SemaphoreDesc, SemaphoreKind,
-    };
+    use crcbl_hal::{Device as _, DeviceType, Features, Limits, SemaphoreDesc, SemaphoreKind};
     /// The two constants the bindless rule is written against, named here so the
     /// test compares with D3D12's own numbers rather than through the function
     /// it is checking.
