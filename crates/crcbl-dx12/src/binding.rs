@@ -153,7 +153,7 @@ use crate::root;
 /// of textures beside a frame's ordinary sets, and small enough to be
 /// unremarkable. Raising it is a one-line change with a measurable cost, which
 /// is the property that matters.
-const VIEW_DESCRIPTORS: u32 = 4096;
+pub(crate) const VIEW_DESCRIPTORS: u32 = 4096;
 
 /// Descriptors in the one shader-visible sampler heap.
 ///

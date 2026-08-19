@@ -53,13 +53,12 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_FEATURE_DATA_ARCHITECTURE1, D3D12_FEATURE_DATA_D3D12_OPTIONS,
     D3D12_FEATURE_DATA_FORMAT_SUPPORT, D3D12_FEATURE_DATA_SHADER_MODEL,
     D3D12_FEATURE_FORMAT_SUPPORT, D3D12_FEATURE_SHADER_MODEL, D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE,
-    D3D12_FORMAT_SUPPORT1_TEXTURE2D, D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2,
-    D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT,
-    D3D12_REQ_MAXANISOTROPY, D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
-    D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION,
-    D3D12_RESOURCE_BINDING_TIER, D3D12_RESOURCE_BINDING_TIER_3,
-    D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,
-    D3D12CreateDevice, ID3D12Device,
+    D3D12_FORMAT_SUPPORT1_TEXTURE2D, D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT,
+    D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT, D3D12_REQ_MAXANISOTROPY,
+    D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION, D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,
+    D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION, D3D12_RESOURCE_BINDING_TIER,
+    D3D12_RESOURCE_BINDING_TIER_3, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
+    D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12CreateDevice, ID3D12Device,
 };
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1, IDXGIDevice,
@@ -755,8 +754,17 @@ fn limits_of(features: Features) -> Limits {
         max_image_array_layers: D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
         max_uniform_buffer_range: u64::from(D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT)
             * CONSTANT_BUFFER_ELEMENT_BYTES,
+        // The heap this backend actually allocates, **not**
+        // `D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2`. That constant
+        // is a million and was reported here, which is roughly 244x what
+        // `crate::binding` can ever serve: it allocates one shader-visible view
+        // heap of `VIEW_DESCRIPTORS` up front and in full. A caller believing
+        // the million got `OutOfDeviceMemory` at `create_bind_group` — not the
+        // `InvalidDescriptor` `Limits` documents for exceeding a ceiling, and
+        // dependent on what else was live at the time. A limit is a promise the
+        // backend keeps, so it has to be the number it can keep.
         max_bindless_descriptors: if features.contains(Features::DESCRIPTOR_INDEXING) {
-            D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2
+            crate::binding::VIEW_DESCRIPTORS
         } else {
             floor.max_bindless_descriptors
         },

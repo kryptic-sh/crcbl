@@ -974,14 +974,17 @@ has its own shared budget in `argument::plan`, and WebGPU caps per-stage binding
 counts, which the seam has no field for at all. Vulkan is the only backend where
 the independence assumption holds.
 
-**4. `Limits::max_bindless_descriptors` — D3D12 reports ~244x what it can
-serve.** It reports `D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2` (a
-million) while `crcbl_dx12::binding` allocates one heap of
-`VIEW_DESCRIPTORS = 4096`; exceeding that is `OutOfDeviceMemory` at bind-group
-creation, not the `InvalidDescriptor` the seam documents for exceeding a limit,
-and it depends on what else is live. Metal's 8192 is honest and honoured. **This
-one is a one-line fix** in dx12's `limits_of` and worth doing whatever else
-happens.
+**4. `Limits::max_bindless_descriptors` — FIXED.** D3D12 now reports
+`crcbl_dx12::binding::VIEW_DESCRIPTORS`, the heap it actually allocates, rather
+than `D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2`. Original finding:
+
+**D3D12 reported ~244x what it can serve.** It reports
+`D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2` (a million) while
+`crcbl_dx12::binding` allocates one heap of `VIEW_DESCRIPTORS = 4096`; exceeding
+that is `OutOfDeviceMemory` at bind-group creation, not the `InvalidDescriptor`
+the seam documents for exceeding a limit, and it depends on what else is live.
+Metal's 8192 is honest and honoured. **This one is a one-line fix** in dx12's
+`limits_of` and worth doing whatever else happens.
 
 **5. `Limits::max_draw_indirect_count` — the same field means three things.** A
 device fact on Vulkan, the type's ceiling on D3D12 (`u32::MAX`, argued), and a
