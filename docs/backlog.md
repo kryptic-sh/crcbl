@@ -96,21 +96,28 @@ module's docs name its own omission; this is the list in one place.
   change, shader means a pass in `crate::gpu` — was right about the mesh half
   and wrong about the shader half being local.
 
-  So the real choice is:
-  1. **Return the depth `ImageId` from `forward::add_passes` too**, and put the
-     grid pass in the viewer. Keeps editor chrome out of the engine, and the
-     change is small — the graph already hands back an image, and handing back
-     the depth it already owns is not a new concept. Widens a public API for one
-     consumer today, which is the honest cost.
-  2. **Put the grid in `crcbl-render`** behind a flag. No API change, wrong
-     layer: a reference grid is editor furniture, and every sample that is not
-     an editor would carry it.
-  3. **Grid as scene geometry.** Works with no API change at all and inherits
-     depth for free, which is its whole appeal — and buys the zoom and LOD
-     problems that made every editor stop doing it.
+  So the real choice is where it lives, and two facts settle it against the
+  first instinct:
+  1. **A shader cannot live in the viewer.** Every `.slang` in this workspace is
+     in `crcbl-shaders`, whose build hashes each source against its committed
+     artifacts; no app owns one. So the grid's shader is engine-side whatever
+     happens, and putting the pass in the viewer would split one feature across
+     two crates.
+  2. **`crcbl-render` already owns chrome.** `menu.rs`, `button_skin.rs`,
+     `nine_slice.rs` and `ui_pass.rs` are all in it. A reference grid is not out
+     of place beside them, which is what the "editor furniture does not belong
+     in the renderer" objection assumed.
 
-  My reading is (1). Not started; recorded so the next session does not
-  re-derive the depth finding, which is what made the question decidable.
+  **So: the grid goes in `crcbl-render`, opt-in, and `forward::add_passes` keeps
+  its signature.** Depth is right there internally, which was the whole
+  difficulty. An earlier note here recommended widening `add_passes` to hand
+  depth back so the pass could sit in the viewer — that is recorded as the wrong
+  call, because it widens a public API for one consumer _and_ still leaves the
+  shader in another crate.
+
+  Not started. Grid as scene geometry stays rejected for the reason above: it
+  inherits depth for free and buys the zoom and LOD problems every editor
+  abandoned.
 
 - **Milestone 2 in whole** — the mesh/material/texture panels, the wireframe and
   normals views, the exposure slider. `crate::gpu` has a `UiRenderer` pass now,
