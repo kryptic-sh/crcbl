@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`DivergenceKind::Unclassified` is gone.** It meant "which of the other three
+  this is cannot be settled from here", and held exactly two rows — Metal's
+  `TimestampQuery` and `PipelineStatisticsQuery`. `crcbl_mtl::adapter`'s
+  counter-sampling probe has now taken the measurement they were waiting on, so
+  both are classified `Unwritten` and the variant held nothing;
+  `every_kind_describes_at_least_one_real_row` is the test that says a kind with
+  no row is vocabulary rather than classification. `docs/backlog.md` keeps the
+  reasoning, because the concept may be wanted again.
+
+  **The parity blocker count did not move** — it is still eight. An unanswered
+  question and unwritten work both block parity, and reclassifying one as the
+  other is honesty about what is owed, not progress against it.
+
 - **Timestamp query results are nanoseconds, and `Limits::timestamp_period_ns`
   is gone.** The field asked for nanoseconds per GPU tick, which is Vulkan's
   model: D3D12 has the reciprocal, WebGPU returns nanoseconds already and so

@@ -698,13 +698,14 @@ mod tests {
         (cpu, gpu)
     }
 
-    /// **The measurement that settles the two `DivergenceKind::Unclassified`
+    /// **The measurement that settled the two counter-sampled query
     /// rows this backend carries** —
     /// [`Capability::TimestampQuery`](crcbl_hal::Capability::TimestampQuery) and
     /// [`PipelineStatisticsQuery`](crcbl_hal::Capability::PipelineStatisticsQuery),
-    /// which `crcbl_hal::DIVERGENCES` classifies as unsettled rather than
-    /// unwritten because both answers come from a *device* at run time and no
-    /// Mac runs in the workspace that wrote them.
+    /// which `crcbl_hal::DIVERGENCES` classified as unsettled rather than
+    /// unwritten until this probe ran, because both answers come from a *device*
+    /// at run time and no Mac runs in the workspace that wrote them. Its output
+    /// on CI is what moved them: see the `TimestampQuery` entry there.
     ///
     /// It creates nothing, submits nothing and asserts almost nothing. **It
     /// prints**, and the CI log is the artifact. It is here rather than in
@@ -715,8 +716,9 @@ mod tests {
     /// # What each answer settles
     ///
     /// **`supportsCounterSampling:`.** A device that answers yes at a point the
-    /// seam can reach turns the `TimestampQuery` row from `Unclassified` into
-    /// `Unwritten`: the work becomes known, and it is
+    /// seam can reach turns the `TimestampQuery` row into `Unwritten` — which
+    /// is what this probe's output did on 2026-08-19: the work becomes known,
+    /// and it is
     /// `MTLCounterSampleBufferDescriptor` plus the encoders'
     /// `sampleCountersInBuffer:atSampleIndex:withBarrier:`.
     ///

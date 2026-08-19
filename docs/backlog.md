@@ -3,6 +3,54 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### `DivergenceKind::Unclassified` is gone, and can come back
+
+Removed on 2026-08-19. It held exactly two rows — Metal's `TimestampQuery` and
+`PipelineStatisticsQuery` — and its whole meaning was "which of the other three
+this is cannot be settled from here, and the reason says what measurement would
+settle it". `crcbl_mtl::adapter`'s counter-sampling probe has now taken that
+measurement on CI, so both rows are classified and the variant held nothing.
+`every_kind_describes_at_least_one_real_row` is the test that forces the issue:
+a kind with no row is vocabulary rather than classification.
+
+**The concept was good and may be wanted again**, so the reasoning is kept here
+rather than only in `git log`. It was an admission about evidence rather than a
+fourth kind of divergence: a property of a device this workspace cannot open,
+where "a guess written into the data would read exactly like the classifications
+that were checked". It blocked parity, because "nobody has looked" is not
+"done". Reintroducing it is a variant, an arm in `blocks_parity`, and an entry
+in that test's list.
+
+**What settled the two rows**, from the `mtl e2e (macos-latest)` job:
+
+```text
+crcbl-mtl counters: supportsCounterSampling AtStageBoundary = false
+crcbl-mtl counters: supportsCounterSampling AtDrawBoundary = true
+crcbl-mtl counters: supportsCounterSampling AtDispatchBoundary = true
+crcbl-mtl counters: supportsCounterSampling AtBlitBoundary = true
+crcbl-mtl counters: counterSets = 0
+crcbl-mtl counters: sampleTimestamps ... did not move across a 50ms sleep
+```
+
+Metal expresses both features — `MTLCounterSampleBuffer`,
+`MTLCommonCounterSetStatistic` — so neither is an `ApiAbsence`; the code is
+unwritten, which is `Unwritten`. **The blocker count did not move**, and that is
+the point: reclassifying an unanswered question as unwritten work is honesty
+about what is owed, not progress against it. It is still eight.
+
+`counterSets = 0` on the CI Mac is a separate fact from the classification: no
+`MTLCounterSampleBuffer` can be built there at all, so that device could not run
+the feature however it were written. `AtStageBoundary = false` says the same
+thing about the pass-boundary shape `PassTimestampWrites` asks for — though
+`AtDrawBoundary` being true means an encoder-level sample would serve, on a Mac
+that advertised a set. **Whether any Mac available to this project advertises
+one is still unknown**, and that is the residual.
+
+`PipelineStatisticsQuery` also owes a seam change the timestamp row does not: an
+`MTLCounterResultStatistic` is eight `u64`s and `query_results` reads one per
+query, so whoever writes it decides whether the seam grows a shape for the other
+seven or this backend reports one of the eight.
+
 ### The apt cache never restored once, and the log called it a miss
 
 Fixed on 2026-08-19, and recorded here until a CI run confirms it, because the

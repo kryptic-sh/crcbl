@@ -677,25 +677,14 @@ pub enum DivergenceKind {
     /// needs it can overturn it — which is exactly what an
     /// [`ApiAbsence`](Self::ApiAbsence) row can never be.
     Declined,
-
-    /// Which of the three above this is **cannot be settled from here**, and
-    /// the reason says what measurement would settle it.
-    ///
-    /// Less a fourth kind of divergence than an admission about the evidence.
-    /// Metal's counter-sampling boundaries are a property of a device this
-    /// workspace cannot open, and a guess written into the data would read
-    /// exactly like the classifications that were checked. It blocks parity,
-    /// because "nobody has looked" is not "done".
-    Unclassified,
 }
 
 impl DivergenceKind {
     /// Whether a row of this kind stands between a backend and parity.
     ///
     /// Everything except [`ApiAbsence`](Self::ApiAbsence): an API with no
-    /// expression for something is not a backlog item, while the other three
-    /// are work owed, a decision that could be reversed, and a question nobody
-    /// has answered.
+    /// expression for something is not a backlog item, while the other two are
+    /// work owed and a decision that could be reversed.
     ///
     /// A `match` rather than a comparison against one variant, so a kind added
     /// later has to say which side of the goal it falls on.
@@ -703,7 +692,7 @@ impl DivergenceKind {
     pub const fn blocks_parity(self) -> bool {
         match self {
             Self::ApiAbsence => false,
-            Self::Unwritten | Self::Declined | Self::Unclassified => true,
+            Self::Unwritten | Self::Declined => true,
         }
     }
 }
@@ -1058,25 +1047,31 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::TimestampQuery,
         backend: BackendKind::Metal,
-        kind: DivergenceKind::Unclassified,
+        // Unclassified until 2026-08-19, and the probe adapter.rs was written to
+        // answer it with has now run. Its output on CI's Apple Paravirtual
+        // device: supportsCounterSampling AtStageBoundary=false,
+        // AtDrawBoundary=true, AtDispatchBoundary=true, AtBlitBoundary=true,
+        // counterSets=0, and sampleTimestamps:gpuTimestamp: not moving across a
+        // 50ms sleep. Metal expresses the feature — MTLCounterSampleBuffer and
+        // sampleCountersInBuffer:atSampleIndex:withBarrier: — so this is not an
+        // ApiAbsence; the code is simply unwritten, which is Unwritten.
+        kind: DivergenceKind::Unwritten,
         why: "the occlusion kind is built here and this one is not, because the two need different \
               Metal objects: a visibility-result buffer is a plain MTLBuffer, while a timestamp \
               needs an MTLCounterSampleBuffer. crcbl_mtl::create_query_set refuses on the query \
               kind alone and never reads MTLDevice.counterSets, so the refusal is the same on \
-              every Mac. One of the two reasons this used to give has been retired rather than \
-              answered: reporting the flag obliged a Limits::timestamp_period_ns, which Metal \
-              could not produce because it correlates the GPU clock to the host at sample time \
-              rather than ticking at a fixed period — and that field is gone, the seam returning \
-              nanoseconds and each backend converting where it knows how. What remains is that \
-              this backend builds no MTLCounterSampleBuffer at all, and that the Mac CI runs on \
-              advertises no counterSets to build one from. Which kind of divergence that is stays \
-              unsettled, though neither the seam's verb nor its units are part of what leaves it \
-              unsettled: \
-              PassTimestampWrites asks only for a sample where an encoder opens and closes, \
-              which is what Metal's sampleBufferAttachments express, so the open questions are \
-              the counter set and the period rather than where the sample would go — \
-              adapter.rs's counter-sampling probe is what answers them, per device (the Metal \
-              query slice)",
+              every Mac. The work is MTLCounterSampleBufferDescriptor over a set from \
+              MTLDevice.counterSets, plus a sample where each encoder opens and closes — which is \
+              exactly what PassTimestampWrites asks for, so the seam's verb and units owe nothing \
+              here. Reporting the flag once obliged a Limits::timestamp_period_ns Metal could not \
+              produce, because it correlates the GPU clock to the host at sample time rather than \
+              ticking at a fixed period; that field is gone, the seam returning nanoseconds and \
+              each backend converting where it knows how. This was Unclassified until \
+              adapter.rs's counter-sampling probe ran: the Mac in CI answers AtStageBoundary=false \
+              with AtDrawBoundary and AtDispatchBoundary true, and advertises counterSets=0, so \
+              nothing could be sampled there whatever this crate wrote — a device fact, reported \
+              per device, and not what leaves the row open. What leaves it open is that no \
+              MTLCounterSampleBuffer is built on any device (the Metal query slice)",
     },
     Divergence {
         capability: Capability::TimestampQuery,
@@ -1103,14 +1098,22 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
         backend: BackendKind::Metal,
-        kind: DivergenceKind::Unclassified,
+        // Reclassified with TimestampQuery on 2026-08-19, from the same probe
+        // output. `MTLCommonCounterSetStatistic` is a real counter set, so the
+        // API expresses this and it is not an ApiAbsence — but see the reason
+        // for the second obstacle, which the timestamp row does not have.
+        kind: DivergenceKind::Unwritten,
         why: "the occlusion kind is built here and this one is not, for the reason the \
               TimestampQuery entry gives: it needs an MTLCounterSampleBuffer rather than a plain \
               buffer, and the refusal is unconditional on every Mac rather than a property of the \
-              one CI runs on. MTLCommonCounterSetStatistic names the invocation counters, but a \
-              device advertises the set through MTLDevice.counterSets and the Mac CI runs this \
-              backend on advertises none — and a MTLCounterResultStatistic is eight u64s besides, \
-              which the seam's one-u64-per-query read has no shape for (the Metal query slice)",
+              one CI runs on. MTLCommonCounterSetStatistic names the invocation counters, so the \
+              API expresses this and the work is a counter set plus a sample buffer, as above. \
+              **This row owes a seam change the timestamp row does not**: a \
+              MTLCounterResultStatistic is eight u64s, and query_results reads one u64 per query, \
+              so there is nowhere for the other seven to go — whoever writes this decides whether \
+              the seam grows a shape for them or this backend reports one of the eight. The Mac \
+              in CI advertises counterSets=0, so it could not run either way; that is a device \
+              fact reported per device, not what leaves the row open (the Metal query slice)",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
@@ -1760,9 +1763,17 @@ mod tests {
         // the way a row is meant to: `crcbl_mtl::indirect_count` packs the
         // argument structures with a compute kernel and draws
         // `max_draw_count` times, so the count is honoured with no indirect
-        // command buffer anywhere. The two counter-sampled query rows are
-        // unclassified because settling them needs a Mac that advertises a
-        // counter set, which the one in CI does not.
+        // command buffer anywhere.
+        //
+        // The two counter-sampled query rows were `Unclassified` until
+        // 2026-08-19, on the grounds that settling them needed a measurement
+        // this workspace could not take. `crcbl_mtl::adapter`'s probe has since
+        // taken it, on CI: `AtStageBoundary=false`, `AtDrawBoundary=true`,
+        // `counterSets=0`. Metal expresses both features, so neither is an
+        // `ApiAbsence` and both are `Unwritten`. **The blocker count did not
+        // move** — an unanswered question and unwritten work both block parity,
+        // and reclassifying one as the other is honesty about what is owed,
+        // not progress against it.
         (
             Capability::MeshShading,
             BackendKind::Metal,
@@ -1776,12 +1787,12 @@ mod tests {
         (
             Capability::TimestampQuery,
             BackendKind::Metal,
-            DivergenceKind::Unclassified,
+            DivergenceKind::Unwritten,
         ),
         (
             Capability::PipelineStatisticsQuery,
             BackendKind::Metal,
-            DivergenceKind::Unclassified,
+            DivergenceKind::Unwritten,
         ),
         // `crcbl-webgpu` is not on this list at all, and that is the point:
         // everything WebGPU refuses is WebGPU itself refusing, which is an
@@ -1857,7 +1868,6 @@ mod tests {
         assert!(!DivergenceKind::ApiAbsence.blocks_parity());
         assert!(DivergenceKind::Unwritten.blocks_parity());
         assert!(DivergenceKind::Declined.blocks_parity());
-        assert!(DivergenceKind::Unclassified.blocks_parity());
     }
 
     /// A kind nothing uses is a distinction nobody made. Each of the four has to
@@ -1868,7 +1878,6 @@ mod tests {
             DivergenceKind::ApiAbsence,
             DivergenceKind::Unwritten,
             DivergenceKind::Declined,
-            DivergenceKind::Unclassified,
         ] {
             assert!(
                 DIVERGENCES.iter().any(|entry| entry.kind == kind),
