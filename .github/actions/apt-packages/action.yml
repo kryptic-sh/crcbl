@@ -3,7 +3,9 @@ description: >-
   Installs Debian packages with `apt-get`, retrying an attempt that fails *or
   hangs*. Every linux job here needs something from apt — the ALSA headers
   `cpal` links against, sway, the Vulkan loader — and a runner whose mirror goes
-  quiet should cost a retry, not a whole board.
+  quiet should cost a retry, not a whole board. The downloaded `.deb` files are
+  cached, so a mirror that is down cannot stop a job whose packages were fetched
+  on an earlier run.
 
 inputs:
   packages:
@@ -13,6 +15,34 @@ inputs:
 runs:
   using: composite
   steps:
+    # WHY A CACHE, AND WHY IT IS NOT JUST SPEED. Five jobs in one session failed
+    # here on `the runner's mirror is unreachable` — markdown-only commits among
+    # them. The retry below turns a hang into a legible failure, which is worth
+    # having, but it cannot conjure packages out of a mirror that is not
+    # answering. The archive can: `apt-get` is told to keep what it downloads,
+    # the `.deb` files are cached, and a later run installs from disk without
+    # asking the network at all.
+    #
+    # Keyed on the package list, so two jobs wanting different sets do not fight
+    # over one entry, and on the runner image, because a `.deb` built for one
+    # release is not the one another release resolves to. `restore-keys` is
+    # deliberately absent for the same reason — a near-miss here is a wrong
+    # package set, not a slightly stale one.
+    - id: archive
+      uses: actions/cache@v4
+      with:
+        path: /var/cache/apt/archives/*.deb
+        key:
+          apt-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{
+          hashFiles('.github/actions/apt-packages/action.yml') }}-${{
+          inputs.packages }}
+    # `apt-get` deletes what it downloaded once a package is unpacked, so
+    # without this the cache would save an empty directory every time.
+    - shell: bash
+      run: |
+        set -euo pipefail
+        echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+          | sudo tee /etc/apt/apt.conf.d/99crcbl-keep-debs > /dev/null
     # WHY THIS IS NOT TWO PLAIN apt-get LINES. Two runs in one session hung
     # here for twenty minutes and were killed by the job timeout, taking a
     # green board down and reporting it as "cancelled" — which reads like
@@ -49,6 +79,17 @@ runs:
         # Unquoted on purpose: the input is a space-separated list and apt
         # takes them as separate arguments.
         # shellcheck disable=SC2086
+        # THE CACHE IS TRIED FIRST, and it is the only branch that can survive
+        # an outage: `--no-download` forbids the network outright, so this
+        # either installs entirely from the restored `.deb` files or fails
+        # without waiting on anything. A miss here is ordinary — an empty cache,
+        # or one package short — and falls through to the attempts below.
+        if timeout 60 sudo apt-get install -y --no-install-recommends \
+          --no-download $PACKAGES; then
+          echo "installed from the cached archive; the mirror was not asked"
+          exit 0
+        fi
+        echo "the cached archive did not satisfy '${PACKAGES}'; asking the mirror"
         # The first attempt skips `update`: the runner image ships populated
         # package lists, and `update` and the package mirror are separate
         # endpoints that fail separately. When only the index is unreachable
