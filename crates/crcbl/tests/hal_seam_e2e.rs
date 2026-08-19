@@ -3769,6 +3769,56 @@ fn a_created_image_is_one_the_device_can_serve() {
         served += 1;
     }
 
+    // **A combination no device serves, so the refusal path runs somewhere.**
+    // Without this the accepting path is all that runs on a capable device —
+    // WARP serves both depth formats above, so `crcbl-dx12`'s refusal was
+    // untested on the first run of this test and dx12 could not be called clean.
+    // A colour format as a depth-stencil attachment is the cheapest input no
+    // implementation can honour.
+    //
+    // **It does not assert a refusal**, deliberately. The claim under test is
+    // still "if `create_image` says yes, the image is usable" — a backend that
+    // somehow served this would have to serve it *properly*, and that would be
+    // a finding rather than a failure. What the case buys is that on every
+    // backend which does refuse, the refusal path is exercised at all.
+    let impossible = ImageDesc {
+        label: Some("format contract probe, impossible"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(RASTER_WIDTH, RASTER_HEIGHT),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+    };
+    match device.create_image(&impossible) {
+        Err(error) => {
+            eprintln!(
+                "crcbl hal seam e2e: a colour format as a depth-stencil attachment is refused — \
+                 {error}"
+            );
+            assert!(
+                device.take_error().is_none(),
+                "the impossible combination was refused by return value *and* left an error \
+                 pending, so the next unrelated call would report it"
+            );
+        }
+        Ok(image) => {
+            let pending = device.take_error();
+            device.destroy_image(image);
+            assert!(
+                pending.is_none(),
+                "create_image returned Ok for a colour format as a depth-stencil attachment and \
+                 the device then reported {}. Refuse it instead — the handle looks live and the \
+                 failure arrives somewhere a caller cannot attribute it.",
+                pending.expect("just checked"),
+            );
+            eprintln!(
+                "crcbl hal seam e2e: this backend serves a colour format as a depth-stencil \
+                 attachment, which is worth knowing"
+            );
+        }
+    }
+
     // **A run where every format was refused proves nothing about the accepting
     // path**, and this suite draws that distinction everywhere else too.
     assert!(

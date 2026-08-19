@@ -3047,6 +3047,45 @@ every probe pipeline sets it false; `BinarySemaphore` — unprovable by
 construction and honestly declared so; and `SamplerAnisotropy`, whose `Yes` arm
 is **unreachable** because the limit is pinned to 1.
 
+### MEASURED — the same image descriptor is refused on vk and served on wgpu
+
+Found on 2026-08-20 by the impossible case in
+`a_created_image_is_one_the_device_can_serve`: ask for `Format::Rgba8Unorm` with
+`ImageUsage::DEPTH_STENCIL_ATTACHMENT` and
+
+- **`crcbl-vk` refuses it** — `vkGetPhysicalDeviceImageFormatProperties2`
+  answers `VK_ERROR_FORMAT_NOT_SUPPORTED`, on radv and on lavapipe alike;
+- **`crcbl-wgpu` serves it**, with no pending error.
+
+**Neither backend is wrong on its own terms**, which is what makes this a seam
+problem rather than a bug report. `crcbl_wgpu::conv::map_image_usage` folds
+`COLOR_ATTACHMENT` and `DEPTH_STENCIL_ATTACHMENT` into the single
+`wgpu::TextureUsages::RENDER_ATTACHMENT`, because that is what WebGPU has:
+whether a texture can be a depth attachment is decided by its **format**, not by
+a usage bit. So the caller's distinction is lost in the mapping, and what comes
+back is a perfectly good colour render target that cannot be a depth attachment.
+
+**The parity mechanism cannot see this**, and that is the interesting part. It
+is not a capability — no `Capability` names it, both backends would answer the
+same for every row — it is a _validation_ difference on an identical descriptor.
+The seam's contract test catches the class where a backend returns a handle the
+device cannot serve; it does not catch one where the backend returns a handle
+that is fine but is not what was asked for.
+
+**The fix that would make the seam agnostic**, and it is small: no API anywhere
+permits a colour format as a depth-stencil attachment, so the _seam_ can refuse
+it before any backend sees it. `Format` already knows whether it is a depth
+format, so a shared helper in `crcbl-hal` called at the top of each
+`create_image` would make all five refuse identically, and the impossible case
+above would then be refused everywhere rather than on some backends.
+
+**Why it was recorded rather than done:** where seam-level validation lives is a
+design call — a shared helper every backend must remember to call is a
+convention, and a convention is not a lock, which is the same objection this
+repository raises elsewhere about `unsafe` contracts. The alternatives are a
+wrapper type the backends cannot bypass, or accepting the divergence and
+documenting it. Worth deciding rather than reaching for the first shape.
+
 ### DECISION NEEDED — how a caller asks whether a format is usable
 
 Found while building the seam suite's raster fixture, which needed a
