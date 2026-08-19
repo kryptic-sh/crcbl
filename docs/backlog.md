@@ -7157,20 +7157,29 @@ except that there an exhaustive `match` in the test forces an author who adds a
 variant to visit the file — which is the mitigation `Format` cannot have,
 because its list lives in a different crate from its consumers.
 
-## `crcbl-vk` does not enforce cross-kind pass scoping, where `null` does
+## Only `null` enforces pass scoping, and that is the design
 
+**Not a defect in `crcbl-vk`, and worth saying so before someone fixes it.**
 `begin_compute_pass` checks only whether a compute pass is already open, and
 `begin_render_pass` only whether a render pass is — so a compute pass opened
-_inside_ a render pass, or the reverse, is accepted. `dispatch` checks no scope
-at all. The null recorder rejects every one of those as `NestedPass` or
+_inside_ a render pass, or the reverse, is accepted, and `dispatch` checks no
+scope at all. The null recorder rejects every one of those as `NestedPass` or
 `OutsidePass`.
 
-This may be deliberate: the seam says a backend **may assume** the scoping rules
-hold, which makes the null backend the strict reference and `crcbl-vk` the
-permissive one. So no behaviour was changed and no test asserts the absence of a
-check — that would pin a gap in place. Recorded because it is the second place
-the mock is stricter than the backend it models, after the cross-instance
-surface bug, and that pattern is worth watching rather than rediscovering.
+That asymmetry is what `CommandEncoder`'s own documentation asks for. It lists
+the scoping rules — including "passes do not nest" — and then says a backend
+**may assume** they hold, naming `crcbl_hal::null` as the one that checks them
+so the graph's unit suite can catch a violation without a GPU. `crcbl-vk` is
+conformant; `null` is the reference.
+
+The checking half is guarded: `crcbl-hal`'s `null::tests` asserts `NestedPass`
+for a compute pass opened inside another, and `OutsidePass` at three more sites.
+No test asserts the _absence_ of a check in `crcbl-vk` — that would pin a gap in
+place if the design ever changed.
+
+Recorded because it is the second place the mock is stricter than the backend it
+models, after the cross-instance surface bug, and that pattern is worth watching
+rather than rediscovering.
 
 The illegal _commands_ are still caught by the validation layer at record time.
 The illegal _pass bookkeeping_ is caught nowhere.
