@@ -3099,22 +3099,24 @@ where everything was refused cannot pass as coverage of the accepting path.
 Measured: radv serves `D32FloatS8Uint` and refuses `D24UnormS8Uint`, wgpu the
 exact reverse, lavapipe both.
 
-**`crcbl-dx12` and `crcbl-mtl` make no per-format query either**, read on
-2026-08-20 — but whether that is a _bug_ there is genuinely unknown, and the
-distinction is the whole point. The Vulkan defect was not the missing query; it
-was that `vkCreateImage` **returns success anyway**. `CreateCommittedResource`
-and `newTextureWithDescriptor:` may well fail on their own for a format the
-device cannot serve, in which case those backends refuse correctly without ever
-asking.
+**Answered on 2026-08-20 by the new contract test, and the two answers differ.**
+`a_created_image_is_one_the_device_can_serve` ran on both platforms in CI:
 
-What reading establishes: `crcbl-dx12`'s `create_image` says so in its own
-comment — "a per-format query this backend does not make" — and validates only
-extent and mips; `crcbl-mtl`'s validates ten things, none of them format
-support, and its only format-adjacent query is `supportsTextureSampleCount` in
-`adapter.rs`, for the sample ceiling rather than per image. What reading cannot
-establish is what either creation call does with a bad format. The cheap way to
-find out is one throwaway test per backend, on its own CI job, asking for
-`D24UnormS8Uint` as a depth-stencil attachment and printing the outcome.
+- **`crcbl-mtl` refuses, and helpfully** — "Format::D24UnormS8Uint is not
+  supported by this device — Apple silicon reports no; use Format::D32Float,
+  which the seam already prefers". So it validates format support already, by a
+  different route than a per-format query, and never had this bug. **Proven
+  clean**: the refusal path is the one that ran.
+- **`crcbl-dx12` on WARP serves both formats — 2 of 2 — so its refusal path did
+  not run at all.** That is _not_ a clean bill of health, and the distinction is
+  the same one that hid the parity suite's missing half: a branch the
+  environment cannot reach is not covered however green the run. What dx12 does
+  with a format WARP cannot serve is still unknown.
+
+Closing that last gap needs a format WARP genuinely refuses, which means finding
+one rather than guessing — `D3D12_FEATURE_FORMAT_SUPPORT` on the WARP job would
+name one, and `crcbl-dx12/src/adapter.rs` already makes that query for its own
+capability reporting.
 
 What remains a decision is only whether the seam grows the query.
 

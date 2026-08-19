@@ -815,6 +815,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `D32FloatS8Uint` and refuses `D24UnormS8Uint`, wgpu the exact reverse, and
   lavapipe serves both.
 
+  On CI it settled a question reading could not: **`crcbl-mtl` already
+  refuses**, and helpfully — "Apple silicon reports no; use Format::D32Float,
+  which the seam already prefers". **`crcbl-dx12` on WARP serves both**, so its
+  refusal path did not run and dx12 is not proven clean; a branch the
+  environment cannot reach is not covered however green the run.
+
 - **`crcbl-vk::create_image` refuses a format the device cannot serve.** It did
   not ask: `vkCreateImage` is not required to fail for an unsupported
   format/usage pair, and radv returns success for `D24UnormS8Uint` as a
