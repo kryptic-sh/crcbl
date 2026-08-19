@@ -1386,6 +1386,49 @@ So the decision:
 - **(b) Keep both rows withheld** until a hardware Windows GPU can run them.
   Honest, costs two blockers that may never close on the hardware this project
   has, and matches how Metal's four unprovable rows are already treated.
+- **(d) Give the runner a newer WARP — researched 2026-08-20, untried here.**
+  Microsoft ships WARP as a NuGet redistributable,
+  [`Microsoft.Direct3D.WARP`](https://www.nuget.org/packages/Microsoft.Direct3D.WARP)
+  (1.0.20, 28 May 2026), precisely so a developer can "try out changes or
+  improvements to WARP without having to fully update your Windows operating
+  system". **Two of its release notes land on this symptom:**
+  - **1.0.12 — "Fix mesh shaders on Win11 retail D3D12."** The retail OS D3D12
+    stack had a mesh-shader defect that the redistributable fixes. Our dx12 jobs
+    run the OS WARP.
+  - **1.0.20 — "Don't remove the device on free-threaded DDI failures."** A
+    device-removal fix, and device removal with no debug-layer error and no DRED
+    breadcrumb is exactly measurement (2) above.
+
+  Earlier notes also mention fixes for root-signature visibility for
+  amplification and mesh shaders, and for uninitialized memory affecting
+  amplification shaders. Measurement (3) — the small mesh probe passes while the
+  renderer's larger mesh path kills the device — is the shape a root-signature
+  or uninitialized-memory bug would take.
+
+  **The mechanism is cheap**: per Microsoft's WARP guide, "simply place
+  `D3d10warp.dll` next to your application .exe file". No Agility SDK, no code
+  change, no `EnumWarpAdapter` change. The practical wrinkle is that cargo runs
+  test binaries out of `target/<profile>/deps/`, so the copy has to land beside
+  whichever executable the job runs, not beside the crate.
+
+  **The constraint, stated because it is a real one:** the same guide says these
+  DLLs "cannot be redistributed, as there is no guarantee that future versions
+  of Windows will maintain compatibility with them". Fetching one in CI for
+  testing is the documented use; shipping it to users is not, and nothing here
+  would.
+
+  **Why this dominates (a) if it works.** Option (a)'s price is reporting a
+  capability _no CI job can ever exercise_. If a newer WARP survives the mesh
+  path, both rows close **and** CI exercises them — and `MeshShading` and
+  `TaskShaderStage` become drivable in `tests/hal_seam_e2e.rs`, taking its
+  coverage from 21 of 24 to 23. If it does **not** survive, that is (c)'s answer
+  arriving for the price of one CI run: a bug reproducing on the newest WARP
+  Microsoft ships is far more likely to be ours than theirs.
+
+  **Untried.** Nothing here can run it — this project has no Windows machine,
+  and every dx12 job is CI. It is one workflow change and one CI round trip,
+  which is cheaper than (c) by a large margin and should be tried before it.
+
 - **(c) Narrow it first.** Build a smaller repro on WARP — the amplification
   dispatch alone, then with the DAG descent, then with the real bind groups —
   until one of them removes the device. That would say whose bug it is, which is
