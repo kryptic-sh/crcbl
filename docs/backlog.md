@@ -874,7 +874,7 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
-### DECISION — `Limits::timestamp_period_ns` is what keeps Metal's query rows open
+### DECIDED — the seam returns nanoseconds; `timestamp_period_ns` goes
 
 Metal's `TimestampQuery` and `PipelineStatisticsQuery` are the last two
 `Unclassified` rows in `REVIEWED_BLOCKERS`, and reading why says the divergence
@@ -918,9 +918,17 @@ The four APIs:
    fixed rate". Smaller change, but it pushes the conversion onto every caller
    and each one has to get the Metal case right, which is the argument against.
 
-**My reading is (2), and the evidence is that WebGPU already had to fake it.**
-When a portable seam forces one backend to invent a number and another to refuse
-outright, the seam is the thing that is wrong.
+**Decided: (2).** The instruction is general and worth quoting, because it
+settles more than this row: _"for changes that are on the seam we should
+refactor anything that can't work on all the backends, our seam needs to be
+fully backend agnostic."_
+
+So `Limits::timestamp_period_ns` is removed from the public contract and the
+seam returns nanoseconds, each backend converting where it knows how. The
+evidence that this is right was already in the tree: WebGPU had to invent a
+sentinel and Metal had to refuse outright. When a portable seam forces one
+backend to fake a number and another to decline, the seam is the thing that is
+wrong.
 
 **It does not close the rows on its own.** Metal would still need the
 `MTLCounterSampleBuffer` written, and the CI Mac advertises **no
