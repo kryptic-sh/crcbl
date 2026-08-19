@@ -35,7 +35,7 @@ use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Fea
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::sel;
 use objc2_foundation::{NSProcessInfo, NSUInteger};
-use objc2_metal::{MTLArgumentBuffersTier, MTLDevice, MTLDeviceLocation, MTLGPUFamily};
+use objc2_metal::{MTLDevice, MTLDeviceLocation, MTLGPUFamily};
 
 /// Sample counts to probe, coarsest first.
 ///
@@ -251,10 +251,8 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   `crcbl_mtl::binding` now honours a `VARIABLE_COUNT` slot as an argument
 ///   buffer of `MTLBuffer::gpuAddress` values, so the flag is earned again —
 ///   and the two queries behind it are the two things that construction needs
-///   rather than a proxy for it. `argumentBuffersSupport` must be
-///   `MTLArgumentBuffersTier::Tier2`, which is where an argument buffer may
-///   hold a dynamically indexed array at all; and the device must respond to
-///   `gpuAddress`, because that is the value the table is filled with.
+///   rather than a proxy for it: the device must respond to `gpuAddress`,
+///   because that is the value the table is filled with.
 ///
 ///   **The second gate used to be `MTLGPUFamily::Metal3` and that was wrong.**
 ///   It read as reasonable — `gpuAddress` arrived with Metal 3 — but it
@@ -326,8 +324,26 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     // `respondsToSelector:` asks the question the code actually depends on, and
     // keeps the property the family query was there for: the macOS 13 selector
     // is never sent to a system that lacks it.
+    //
+    // **And not the tier either, which is the second correction this gate has
+    // needed.** `Tier2` was required on the reading that a dynamically indexed
+    // argument buffer needs it. Two probes on CI's `Apple Paravirtual device`
+    // say otherwise, and that device answers
+    // `argumentBuffersSupport = Tier1`: `crate::binding`'s bindless kernel
+    // indexes a `constant`-addressed `array<uint device*, N>` by thread group
+    // and reads every word correctly, and this module's
+    // `a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes`
+    // reaches an `MTLIndirectCommandBuffer` through a Metal 3 argument buffer
+    // holding a `gpuResourceID`. Both ran with Metal API **and** GPU validation
+    // enabled and produced exact values.
+    //
+    // The tier describes argument buffers in Metal's *resource-binding* sense —
+    // `[[id(n)]]` slots, resource arrays, heaps. A table of raw device
+    // addresses or resource IDs bypasses that machinery, and is the Metal 3
+    // idiom, so the tier was never the question. Keeping it meant the
+    // capability read closed while being exercised on no machine at all.
     let addressable = device.respondsToSelector(sel!(gpuAddress));
-    if addressable && device.argumentBuffersSupport() == MTLArgumentBuffersTier::Tier2 {
+    if addressable {
         out |= Features::DESCRIPTOR_INDEXING;
     }
     if device.supportsBCTextureCompression() {

@@ -1175,9 +1175,9 @@ impl Device for MetalDevice {
             // reads the flag off.
             Capability::BindlessDescriptorArray => gated(
                 Features::DESCRIPTOR_INDEXING,
-                "this device reports no DESCRIPTOR_INDEXING; crcbl_mtl::adapter reports it only \
-                 for argument buffers at MTLArgumentBuffersTier::Tier2 on an MTLGPUFamily::Metal3 \
-                 device, which is what MTLBuffer::gpuAddress needs",
+                "this device reports no DESCRIPTOR_INDEXING; crcbl_mtl::adapter reports it \
+                 for any device that responds to MTLBuffer::gpuAddress, which is the value the \
+                 argument-buffer table is filled with",
             ),
             Capability::StorageImageBinding => Support::Yes,
             Capability::PolygonModeLine => gated(

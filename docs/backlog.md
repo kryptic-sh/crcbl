@@ -63,47 +63,39 @@ reason for existing, and was **not** re-tested when the probe was written. It
 was measured earlier in this project's life; if it is ever revisited, measure
 again rather than citing the comment.
 
-### Metal bindless is implemented and STILL not exercised on CI
+### Metal's bindless gate was wrong twice, and the tier was the second
 
-The capability was closed and the row removed from `REVIEWED_BLOCKERS`, but the
-`mtl e2e` run says:
+Both halves of `DESCRIPTOR_INDEXING`'s gate turned out to be the wrong question,
+and each was settled by measurement rather than argument.
 
-```text
-BindlessDescriptorArray (this device withheld Features(DESCRIPTOR_INDEXING), so metal was never asked)
-capability coverage on metal: 20 driven, 6 unexercised of 26
-```
+- **`supportsFamily(Metal3)`** confuses a family feature set with an API's
+  availability. CI's `Apple Paravirtual device` answers `Metal3 = false` and
+  returns usable `gpuAddress` values anyway. Replaced with
+  `respondsToSelector:`.
+- **`argumentBuffersSupport() == Tier2`** was the reading that a dynamically
+  indexed argument buffer needs Tier 2. That device answers **`Tier1`** — now
+  printed by the ICB probe rather than inferred — and two independent
+  constructions work on it under Metal API _and_ GPU validation: the bindless
+  kernel indexing `array<uint device*, N>` by thread group, and a
+  `gpuResourceID` handle read out of an argument buffer. The tier describes
+  argument buffers in the _resource-binding_ sense — `[[id(n)]]` slots, resource
+  arrays, heaps — while a table of raw addresses or resource IDs bypasses that
+  machinery.
 
-So the parity list reads nine while this row is exercised on **no machine
-anywhere** — the exact failure the mechanism exists to prevent, and it is green.
+Between them, the capability read **closed while running on no machine at all**,
+which is the failure the parity mechanism exists to prevent, and it was green
+the whole time. The gate is now `respondsToSelector(gpuAddress)` alone.
 
-**The `supportsFamily(Metal3)` fix was necessary and not sufficient.** The gate
-is `respondsToSelector(gpuAddress) && argumentBuffersSupport() == Tier2`, and
-the selector half is certainly true — the probe calls `gpuAddress` on this
-device and gets four usable addresses. So the **`Tier2` half** is what withholds
-it, meaning CI's `Apple Paravirtual device` reports `Tier1`.
+**The residual risk, stated plainly:** the evidence is two measurements on one
+device class. A Metal 3-capable device that genuinely cannot serve a raw-address
+table would now be told it can. That is judged the lesser risk against a
+capability nothing exercises, but it is a judgement, not a proof. The next
+`mtl e2e` run is the first that actually drives this path — if the construction
+is wrong, that run says so, which is the whole point of turning it on.
 
-**That is inference, not measurement, and closing it starts there.** Nothing
-prints `argumentBuffersSupport()`, so the next step is to have
-`crcbl_mtl::adapter`'s probe print the tier and the selector answer, so one run
-says which half fails instead of leaving it to reasoning.
-
-**Then a real question follows.** The probe's kernel — a `constant`-addressed
-struct holding `array<uint device*, N>`, dynamically indexed by `SV_GroupID` —
-**ran correctly on this device with Metal API _and_ GPU Validation enabled**. If
-the device is `Tier1`, then either the construction does not need `Tier2` at
-all, or it is undefined behaviour that happened to work.
-
-There is a principled reason to think the former: `Tier2` governs _argument
-buffers_ in Metal's resource-binding sense — `[[id(n)]]` slots, unbounded
-resource arrays, heaps — whereas a table of `gpuAddress` values is raw pointer
-arithmetic that bypasses that machinery entirely, and is the Metal 3 bindless
-idiom Apple documents. It would make `Tier2` the wrong question here for the
-same reason `supportsFamily(Metal3)` was.
-
-But that must not be acted on from reasoning alone, given this backend has now
-been wrong twice about which query gates this feature. Measure the tier first;
-if it is `Tier1`, the case for dropping that half is strong and should be
-written down with Apple's own wording before the gate moves again.
+Note `crcbl_mtl::device`'s sampler path still keys on `Tier2`, correctly: that
+is a real argument-buffer question about `setSupportArgumentBuffers`, not about
+pointer tables.
 
 ### `Features::BUFFER_DEVICE_ADDRESS` on Metal rides a query that is wrong
 
