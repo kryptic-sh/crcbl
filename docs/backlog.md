@@ -8099,45 +8099,6 @@ records six crates as drifted below the prose-sentence-name convention —
 `orbit_cue_changes_over_time` now names a fixture the file is no longer named
 after. Renaming the functions is a separate task and stays unclaimed.
 
-### Stale test-name references left behind by the backend-qualifier rename
-
-`docs/plan/12-testing.md`'s "a test that exists on more than one backend names
-the backend or its API" rule has now been applied to `crcbl-vk`, `crcbl-mtl`,
-`crcbl-dx12` and `crcbl-wgpu`: 26 verbatim-identical names across two or three
-of those crates are gone, along with 12 near-identical pairs whose only
-divergence was cosmetic. The rename touched test function names and their doc
-comments only — no production code, no signature, no behaviour — plus the three
-places a test name is a string outside a test body (`.github/workflows/ci.yml`'s
-Metal job comments and `crates/crcbl-mtl/tests/run-mtl-e2e.sh`'s usage example).
-`crates/crcbl-dx12/tests/run-dx12-e2e.sh` needed no change:
-`the_pinned_adapter_opens_a_device_and_names_itself` and
-`a_fresh_device_says_whether_it_is_validated_and_is_not_already_removed` were
-never duplicates, and `.github/workflows/ci.yml`'s
-`not test(a_layer_swapchain_acquires_a_drawable_and_presents_it)` filter names a
-test that is unique to `crcbl-mtl` and was likewise untouched.
-
-Prose in two files still names the old identifiers, and neither was in the
-rename's paths:
-
-- `docs/plan/12-testing.md`'s naming section argues the rule by citing
-  `a_device_outlives_the_instance_that_made_it` and
-  `a_compute_dispatch_writes_the_values_it_was_asked_for` as names existing "in
-  three each", and gives a count of twenty-six. Both citations and the count are
-  now historical. The paragraph wants rewriting to describe the convention as
-  held rather than as owed. **Do not reach for the old three-way examples**: the
-  per-backend copies of `device_outlives_the_instance_that_made_it`, the compute
-  and indirect dispatch pair, the render-pass clear, the foreign handle, the
-  destroyed handle and mtl's swapchain refusals were deleted once
-  `crates/crcbl/tests/hal_seam_e2e.rs` covered them on all four backends in CI.
-  A behaviour every backend owes now has exactly one name, in that file — which
-  is the convention arriving rather than being described. `docs/backlog.md`'s
-  own stale identifiers are fixed. One of them did not go the way this entry
-  predicted: `a_render_pass_clear_reads_back_the_exact_texels` was not given a
-  backend word at all. It is
-  `a_render_pass_clear_reaches_memory_with_the_colour_it_was_given` in
-  `crates/crcbl/tests/hal_seam_e2e.rs` — the agnostic suite absorbed it, which
-  is the outcome the paragraph above calls the convention arriving.
-
 ### Exact test-name collisions still open between non-backend crates
 
 Measured over every crate under `crates/` with the same detector used for the
