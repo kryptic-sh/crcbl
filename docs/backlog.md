@@ -3,6 +3,31 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Declined: extending the citation gate from paths to symbols
+
+`tools/check-doc-citations.sh` resolves the paths a doc cites and nothing else.
+Extending it to the identifiers docs quote was measured on 2026-08-20 and
+declined, because the question it would ask is not decidable by grep.
+
+The candidate shape was a backtick-quoted `snake_case` identifier with four or
+more underscores — the shape a test name has. There are 169 of those across the
+tracked markdown, and 17 do not exist as a `fn` anywhere. But most of those 17
+are not meant to: `min_storage_buffer_offset_alignment` and
+`optimal_buffer_copy_offset_alignment` are Vulkan limit fields,
+`unsafe_op_in_unsafe_fn` is a rustc lint, `wp_commit_timing_manager_v1` is a
+Wayland protocol, and `insert_barriers_from_device_tracker` belongs to `wgpu`.
+Two more were correct quotations of a name in a sentence explaining what it was
+renamed _from_.
+
+So the gate would need an allow-list about as long as its findings, and an
+allow-list that large stops being a record of exceptions and becomes the check
+itself. Two genuinely stale names came out of the exercise and were fixed by
+hand; that is the right cost for this, not a standing gate.
+
+**What would change the answer:** a rule that docs quote a test name only in a
+form the tree can confirm — say, always with its module path. That is a writing
+convention, and worth proposing only if this rots again.
+
 ### Only two backends report a leak at device teardown
 
 `crcbl-vk` has always warned about objects a caller never destroyed, and on
@@ -8113,24 +8138,20 @@ rename's paths:
   `crates/crcbl/tests/hal_seam_e2e.rs` — the agnostic suite absorbed it, which
   is the outcome the paragraph above calls the convention arriving.
 
-### Two backend test-name pairs deliberately left diverging
+### One backend test name still says nothing about its backend
 
-Both are cases where renaming would break something outside the rename's paths,
-not cases where the convention was judged not to apply:
+Both pairs this entry used to hold as deliberately diverging have since been
+renamed, and `docs/plan/12-testing.md` was updated with them rather than
+stranded — which was the reason given for leaving them alone. Metal's limits
+test says `metal` now, and its indirect-stride test carries `a_metal_`.
 
-- `an_indirect_calls_stride_is_only_checked_when_it_is_used` (`crcbl-dx12`,
-  `src/draw.rs`) against
-  `an_indirect_draws_stride_is_only_checked_when_it_is_used` (`crcbl-mtl`,
-  `src/draw.rs`). They differ by one word — `calls` against `draws` — so a grep
-  for either misses the other. The Metal name is quoted in
-  `docs/plan/12-testing.md` as an exemplar of the prose-sentence rule, so
-  renaming it strands that citation.
-- `reported_limits_come_from_d3d12_and_agree_with_the_features` against
-  `reported_limits_come_from_the_device_and_agree_with_the_features`
-  (`crcbl-mtl`). The Metal side never says "Metal". `docs/plan/12-testing.md`
-  presents this exact pair as an example of the convention being followed, so it
-  is left as the doc describes it; the honest reading is that the D3D12 side
-  names its API and the Metal side does not.
+What is left is one half. `crcbl-dx12`'s
+`an_indirect_calls_stride_is_only_checked_when_it_is_used` (`src/draw.rs`) names
+neither D3D12 nor the verb its Metal counterpart uses, so a grep for one still
+misses the other. Whether that matters depends on something not checked here:
+whether the two assert the same obligation, in which case the convention wants
+both to name their API, or different ones, in which case the verbs are doing
+real work and the pair is not a pair.
 
 ### Exact test-name collisions still open between non-backend crates
 
