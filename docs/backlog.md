@@ -1603,8 +1603,16 @@ the golden comparisons no longer need it.** One wrinkle to make that checkable:
 `fillBuffer:range:value:` takes a byte, nor on WebGPU. The workable reading is
 **`parity_blockers()` empty** — which excludes `ApiAbsence` by construction and
 is already the query the snapshot test guards — **plus** the separate condition
-that `cross-backend-e2e` no longer needs wgpu as its comparison oracle. Nothing
-measures that second half today, and it is now half the bar.
+that `cross-backend-e2e` no longer needs wgpu as its comparison oracle.
+
+**That second half is measured now.** `web/run-cross-backend-e2e.sh` compares
+the browser against vk (`--reference vk`, two scenes excused by name with
+`--expect-fail ssr,ui`) and runs in `pages.yml`, so a replacement oracle exists
+and is exercised. The old vk↔wgpu comparison still runs from `ci.yml`; retiring
+it is the mechanical part. What is left of the bar is the first half —
+`parity_blockers()` is not empty, and its rows are dx12's two mesh rows and
+Metal's four, none of which "measured unprovable" empties, because the decided
+bar asks for empty rather than for explained.
 
 ### `DivergenceKind::Declined` is gone too, and can come back
 
