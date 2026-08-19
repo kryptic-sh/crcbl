@@ -1082,6 +1082,24 @@ non-monotonicity, `PolygonMode::Line`, `DepthClamp`, `SamplerAnisotropy`, and
 the no-op present verbs (decided deliberately, with the caller handed a feature
 bit to check).
 
+### The nanosecond refactor is validated on every backend CI can run
+
+Worth recording because the change was landed with a "dx12 and Metal are
+type-checked only" caveat, and CI settled it in one run: `mtl e2e`, `dx12 e2e`,
+`wgpu e2e` and the cross-backend image compare all passed on the first attempt.
+
+The strongest single piece of evidence is dx12's
+`d3d12_timestamps_advance_and_both_read_paths_report_the_same_ticks`, which
+**passed on WARP**. It holds `resolve_query_set`'s GPU-side tick copy against
+`query::timestamp_nanos` of the `query_results` read — so it fails both a path
+reaching a different heap, range or stride _and_ a `query_results` that forgot
+to convert. That is exactly the asymmetry the refactor introduced, checked on a
+real device rather than reasoned about.
+
+So the caveat is retired: the only unexercised half is Metal's, and that is
+because Metal still refuses timestamp query sets entirely, not because the
+conversion is unproven there.
+
 ### Metal's query rows: one of the two reasons is now retired
 
 `Limits::timestamp_period_ns` is gone — the seam returns nanoseconds and each
