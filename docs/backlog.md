@@ -2033,6 +2033,42 @@ call.
 untextured material cannot exercise: a seam in an attribute the decimator does
 not carry is invisible to a position-only comparison like this one.
 
+### What the withheld-features pass still reports, and on which backends
+
+`CRCBL_SEAM_WITHHOLD=all` opens the seam suite's device with no optional
+feature, so every capability a backend gates moves to the refusal side and the
+half of the parity contract a capable device cannot reach gets exercised. It
+found and closed three `crcbl-vk` mis-declarations on 2026-08-20. What it still
+reports:
+
+**Two tests legitimately fail on a narrow device and are scoped out of the CI
+step**, because they describe the _capable_ configuration rather than the
+contract's two directions:
+
+- `the_parity_report_matches_the_reviewed_divergence_list` — thirteen rows
+  become `NotOnThisDevice` with no `DIVERGENCES` entry, which is correct for
+  that device and not what `REVIEWED_BLOCKERS` is a snapshot of.
+- `a_pipeline_layout_at_every_reported_ceiling_is_served_or_refused_by_name` —
+  the ceilings move with the features.
+
+Whether either could be made to hold under both asks is unexamined. The CI step
+runs `-E 'test(every_declared_capability_behaves_the_way_it_was_declared)'`.
+
+**`crcbl-wgpu` fails the narrow pass and was deliberately not fixed.**
+`Capability::PolygonModeLine` is declared supported unconditionally, and on a
+device opened without `POLYGON_MODE_LINE` the pipeline creation comes back as a
+raw wgpu validation error — "Features … are required but not enabled on the
+device" — rather than `HalError::Unsupported`. The suite's own message says why
+that matters: "a caller branching on that variant to pick a fallback would miss
+this refusal entirely". Left alone because that crate is slated for deletion; if
+the deletion is ever abandoned, this is a real defect in it.
+
+**`crcbl-dx12`, `crcbl-mtl` and `crcbl-webgpu` have not been run this way at
+all** — the first two only on their own CI jobs, and the third is a browser
+backend the native suite cannot open. Each is one CI step away, and on the
+evidence from `crcbl-vk` — three mis-declarations on the first backend tried —
+it is worth expecting them to find something.
+
 ### DECISION NEEDED — occlusion queries: finish them, refuse them, or delete them
 
 The seam audit recorded in one line that `Capability::OcclusionQuery` "is

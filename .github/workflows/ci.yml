@@ -1068,6 +1068,30 @@ jobs:
       # The runner refuses a run whose substance skipped: `CRCBL_GPU=null`
       # passes all nine tests and it still exits non-zero, because no frame
       # reported a per-cluster cut.
+      # **The other direction of the parity contract, which a capable device
+      # cannot exercise.** With everything asked for, `crcbl-vk` declares all 24
+      # capabilities supported — so the step above runs "declared supported must
+      # work" 24 times and "declared unsupported must refuse" not once.
+      # Thirteen of those capabilities are gated on a device feature, so opening
+      # the device with none of them puts them on the refusal side and makes
+      # that arm run.
+      #
+      # Scoped to the one test on purpose. The reviewed-divergence snapshot and
+      # the pipeline-layout ceiling describe the *capable* configuration and
+      # legitimately do not hold on a device opened with nothing; they are the
+      # wide run's to assert.
+      #
+      # It found three real mis-declarations in `crcbl-vk` the day it was
+      # written — see that commit — which is the argument for keeping it.
+      - name: Check the refusal half of the parity contract on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_SEAM_WITHHOLD: all
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: >
+          crates/crcbl/tests/run-hal-seam-e2e.sh -E
+          'test(every_declared_capability_behaves_the_way_it_was_declared)'
+
       - name: Measure the quarry sample on lavapipe
         env:
           CRCBL_GPU: vk

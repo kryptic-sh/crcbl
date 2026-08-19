@@ -826,6 +826,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The seam suite can now exercise the half of the parity contract a capable
+  device hides — and it found three mis-declarations in `crcbl-vk`.** With every
+  optional feature asked for, that backend declares **all 24** capabilities
+  supported, so "declared supported must work" ran 24 times and "declared
+  unsupported must refuse" ran **never**. Thirteen are gated on a device
+  feature, so `CRCBL_SEAM_WITHHOLD=all` opens the device with none of them and
+  puts those thirteen on the refusal side.
+
+  What that found, none of it visible on any device CI opens:
+  - **`create_semaphore` built a timeline on a device opened without
+    `Features::TIMELINE_SEMAPHORE`**, while `supports` declared it unsupported —
+    the backend performing what it said it would refuse. It now refuses, which
+    is what makes the declaration true.
+  - **`TimelineWaitBeforeSignal` answered `Support::Yes` unconditionally** for
+    something meaningless without a timeline. Gated with the rest.
+  - **`UpdateBindGroup` answered `Support::Yes` unconditionally**, while this
+    backend's `update_bind_group` refuses a layout without `UPDATE_AFTER_BIND` —
+    and the `descriptor_binding_*_update_after_bind` bits all come from
+    `Features::DESCRIPTOR_INDEXING`. Gated on it.
+
+  A CI step on the lavapipe job runs the narrow pass, scoped to the one test:
+  the reviewed-divergence snapshot and the pipeline-layout ceiling describe the
+  capable configuration and legitimately do not hold on a device opened with
+  nothing.
+
 - **`Capability::SamplerAnisotropy` is driven by the agnostic seam suite**, so
   its capability coverage goes 20 of 24 to **21 of 24**. It had been unexercised
   on the reasoning that "the observable is a filtered texel", needing a shader

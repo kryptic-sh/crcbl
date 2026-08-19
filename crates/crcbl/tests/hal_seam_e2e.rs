@@ -89,6 +89,37 @@ const CLEAR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
 /// that nothing was copied over it.
 const POISON: u8 = 0xA5;
 
+/// The optional features `CRCBL_SEAM_WITHHOLD` asks this run not to request.
+///
+/// **This exists to make the refusal half of the parity contract run.** See
+/// [`Headless::open_with_every_optional_feature`], which is its only caller and
+/// where the reasoning lives.
+///
+/// The only accepted value is `all`, which asks for no optional feature at all.
+/// A list of individual names would need this file to carry a name-to-flag
+/// table, which is knowledge `crcbl-hal` already owns and this crate cannot
+/// reach — `bitflags` is not among its dependencies and one flag parser is not
+/// worth becoming one. `all` is also the value that does the job: every
+/// capability a backend gates on a feature moves to the refusal side at once.
+///
+/// Anything else is a panic rather than a silent empty set, because a value
+/// that quietly withheld nothing would report the wide run's answers under this
+/// run's name.
+fn withheld_features() -> Features {
+    match std::env::var(WITHHOLD_ENV_VAR) {
+        Err(_) => Features::empty(),
+        Ok(value) if value.eq_ignore_ascii_case("all") => Features::all(),
+        Ok(value) => panic!(
+            "{WITHHOLD_ENV_VAR}={value} is not a value this suite accepts; the only one is `all`. \
+             Withholding nothing would report the wide run's answers under this run's name, so \
+             this refuses instead."
+        ),
+    }
+}
+
+/// The variable [`withheld_features`] reads.
+const WITHHOLD_ENV_VAR: &str = "CRCBL_SEAM_WITHHOLD";
+
 /// The optional features [`Headless::open`] asks for.
 ///
 /// The set a renderer actually wants, so the fixture exercises the device a
@@ -210,7 +241,8 @@ impl Headless {
         Self::open_full(extent, image_count, DEFAULT_OPTIONAL)
     }
 
-    /// The fixture with **every** optional feature asked for.
+    /// The fixture with **every** optional feature asked for, minus whatever
+    /// `CRCBL_SEAM_WITHHOLD` names.
     ///
     /// What the capability tests open, and the distinction matters there and
     /// nowhere else: a device is granted the intersection of what the adapter
@@ -219,8 +251,24 @@ impl Headless {
     /// wants the narrow ask, because it is the ask a renderer makes; the parity
     /// report wants the wide one, or it reports this fixture's shopping list as
     /// though it were the hardware's limits.
+    ///
+    /// # Why the ask can be narrowed on purpose
+    ///
+    /// **The parity contract has two directions and only one of them runs on a
+    /// capable device.** On an RX 7900 XTX with everything asked for, `crcbl-vk`
+    /// declares all 24 capabilities supported — so "declared supported must
+    /// work" is exercised 24 times and "declared unsupported must refuse" is
+    /// exercised **never**. Thirteen of those capabilities are gated on a
+    /// device feature, so withholding the features puts them on the other side
+    /// of the table and makes the refusal arm run on a real backend.
+    ///
+    /// Set `CRCBL_SEAM_WITHHOLD=all` to ask for no optional feature at all:
+    ///
+    /// ```text
+    /// CRCBL_SEAM_WITHHOLD=all CRCBL_GPU=vk crates/crcbl/tests/run-hal-seam-e2e.sh
+    /// ```
     fn open_with_every_optional_feature() -> Self {
-        Self::open_full(EXTENT, 2, Features::all())
+        Self::open_full(EXTENT, 2, Features::all().difference(withheld_features()))
     }
 
     fn open_full(extent: (u32, u32), image_count: u32, optional_features: Features) -> Self {

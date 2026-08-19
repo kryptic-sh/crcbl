@@ -1584,7 +1584,19 @@ impl Device for VkDevice {
             // Refused per *layout*, on the UPDATE_AFTER_BIND flag the caller
             // built it with — writing a set a pending command buffer might
             // reference is otherwise undefined behaviour. The operation exists.
-            Capability::UpdateBindGroup => Support::Yes,
+            // **Gated on descriptor indexing, because this backend's rewrite
+            // needs the flag that rides with it.** `update_bind_group` refuses a
+            // layout without `UPDATE_AFTER_BIND`, and the
+            // `descriptor_binding_*_update_after_bind` bits this device is
+            // opened with all come from `Features::DESCRIPTOR_INDEXING` — so
+            // without it there is no layout this call will take. Answering `Yes`
+            // unconditionally was true on every device CI opens and false on a
+            // lesser one; `CRCBL_SEAM_WITHHOLD=all` is what found it.
+            Capability::UpdateBindGroup => gated(
+                Features::DESCRIPTOR_INDEXING,
+                "this device reports no DESCRIPTOR_INDEXING, so no layout carries \
+                 UPDATE_AFTER_BIND and update_bind_group has nothing it will take",
+            ),
             Capability::PushConstants => gated(
                 Features::PUSH_CONSTANTS,
                 "this device reports no PUSH_CONSTANTS",
@@ -1638,8 +1650,16 @@ impl Device for VkDevice {
             ),
             Capability::BinarySemaphore => Support::Yes,
             // A real `VkSemaphore` blocks until somebody signals it, so a wait
-            // may be recorded or submitted before the signal exists.
-            Capability::TimelineWaitBeforeSignal => Support::Yes,
+            // may be recorded or submitted before the signal exists — but only
+            // where there is a timeline to wait on at all, which is why this
+            // rides the same gate the timeline rows do rather than answering
+            // `Yes` unconditionally. Found by `CRCBL_SEAM_WITHHOLD=all`: on a
+            // device opened without the feature this declared support and then
+            // refused, because `create_semaphore` now honours the declaration.
+            Capability::TimelineWaitBeforeSignal => gated(
+                Features::TIMELINE_SEMAPHORE,
+                "this device reports no TIMELINE_SEMAPHORE, so there is no timeline to wait on",
+            ),
         }
     }
 
@@ -2293,6 +2313,26 @@ impl Device for VkDevice {
 
     fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
         let timeline = matches!(desc.kind, SemaphoreKind::Timeline { .. });
+        // **The declaration has to be true, and until now it was not.** `supports`
+        // answers `Capability::TimelineSemaphore` through `Features::TIMELINE_SEMAPHORE`,
+        // so a device opened without it declares timelines unsupported — and this
+        // call built one anyway, because `vkCreateSemaphore` with a
+        // `TIMELINE` type does not consult what the device was opened with.
+        //
+        // Found by running the seam suite with `CRCBL_SEAM_WITHHOLD=all`, which
+        // is the only configuration where the two disagree: every device CI
+        // opens has the feature, so the wide run cannot reach this.
+        if timeline
+            && !self
+                .inner
+                .caps
+                .features
+                .contains(Features::TIMELINE_SEMAPHORE)
+        {
+            return Err(not_yet(
+                "a timeline semaphore on a device opened without Features::TIMELINE_SEMAPHORE",
+            ));
+        }
         let initial = match desc.kind {
             SemaphoreKind::Timeline { initial_value } => initial_value,
             SemaphoreKind::Binary => 0,
