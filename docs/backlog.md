@@ -757,10 +757,10 @@ there. What it does not do, and why:
   view needs this, and the shape is a zoom that scales `half_height` while
   `frame` fits `radius * FRAME_MARGIN` into it with no distance term at all.
   Deferred because nothing has an orthographic viewport yet.
-- **No app consumes it.** By design — V-F5 (opening a file) is where the viewer
-  gets both its file and its camera, and wiring a controller to a window with
-  nothing to look at would have been a second slice's decisions taken early.
-  Nothing outside the crate has therefore exercised it against a real pointer.
+- **An app consumes it now.** `apps/viewer`'s `controls.rs` takes
+  `&mut OrbitCamera` in its drag and wheel handlers, so it is exercised against
+  a real pointer. This bullet used to say the opposite, and read as a design
+  decision rather than a gap that would close on its own.
 - **No sensitivity, damping or inertia.** It takes raw deltas and applies them
   immediately. Smoothing is a frame-rate-dependent filter over the same deltas
   and belongs to whatever owns the frame clock, not to the arithmetic;
@@ -982,9 +982,10 @@ report from a user cannot say which GPU produced it.
   these through `crcbl_wgpu::errors` and `crcbl::web`'s `gpu error`, which is
   better than silence — but the engine keeps running for minutes with invalid
   textures and empty bind groups, rendering nothing. An unrecoverable device
-  error at start-up should stop and say so. Worth carrying into `crcbl-webgpu`,
-  where `WebGpuDevice::take_error` is still a documented `None` stub, so the
-  same failure there would be entirely silent.
+  error at start-up should stop and say so. `crcbl-webgpu` no longer shares the
+  gap: `WebGpuDevice::take_error` drains a real queue fed by the browser's
+  `uncapturederror`, and `Gpu::acquire` calls it each frame and stops recording
+  once it answers.
 
 **Not the bug:** the `MaxListenersExceededWarning`, `ObjectMultiplex`,
 `app-init-liveness` / `background-liveness` and `Extension context invalidated`
