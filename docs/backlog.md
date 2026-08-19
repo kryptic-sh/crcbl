@@ -3170,11 +3170,13 @@ Both rows' `why` in `crates/crcbl-hal/src/capability.rs` now carry the
 measurement, so the parity report says it rather than leaving the next reader to
 rediscover it.
 
-**It also bounds the deletion-bar decision.** Of Metal's six blockers, **four**
-are now measured unprovable on available hardware — the two mesh rows here and
-the two counter-sampled query rows — which is the concrete content behind option
-(2) in "what bar the deletion clears": every row either closed or _measured_
-unprovable, with `Support::NotOnThisDevice` already able to say so.
+**It also bounds the deletion-bar decision.** **Every** Metal blocker in
+`REVIEWED_BLOCKERS` is now measured unprovable on available hardware — the two
+mesh rows here and the two counter-sampled query rows, which is the whole set.
+This said "four of six" until the other two shipped, which is the concrete
+content behind option (2) in "what bar the deletion clears": every row either
+closed or _measured_ unprovable, with `Support::NotOnThisDevice` already able to
+say so.
 
 ### A measurement test must not read a truthful zero as a broken apparatus
 
