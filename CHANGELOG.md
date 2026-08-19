@@ -799,6 +799,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk::create_image` refuses a format the device cannot serve.** It did
+  not ask: `vkCreateImage` is not required to fail for an unsupported
+  format/usage pair, and radv returns success for `D24UnormS8Uint` as a
+  depth-stencil attachment while the validation layer reports
+  `VK_ERROR_FORMAT_NOT_SUPPORTED` from
+  `vkGetPhysicalDeviceImageFormatProperties2` and two more VUIDs at view and
+  pipeline creation. So a caller got a live-looking handle and found out much
+  later — the seam suite's own raster fixture passed on undefined behaviour once
+  before the layer output was read.
+
+  It now asks that query before creating, and refuses with
+  `HalError::Unsupported` rather than `InvalidDescriptor`: the descriptor is
+  well formed and another device would serve it, which is the distinction the
+  seam draws between the two.
+
+  Measured both ways by forcing the fixture to try `D24UnormS8Uint` first —
+  without the change `create_image` returns `Ok` and the fixture builds a pass
+  on it; with it the call is refused and the negotiation falls through to
+  `D32FloatS8Uint`. It refuses nothing in use: 130-odd tests across the vk,
+  seam, render, forward, mesh, sprite, draw-gen, tiling and quarry suites all
+  pass on radv.
+
 - **The three browser drivers share one launch budget.** They run the same
   launch-and-poll loop in three copies, and raising the timeout in two of them
   left the third — `browser-e2e.mjs`, which had it as an unnamed `30_000`

@@ -1973,6 +1973,53 @@ impl Device for VkDevice {
                 "ImageDesc::usage is empty, so the image could never be used".to_string(),
             ));
         }
+        // **Ask the device whether it can serve this format at all**, which
+        // nothing here did. `vkCreateImage` is not required to fail for a
+        // format/usage pair the implementation does not support — radv returns
+        // success for `D24UnormS8Uint` as a depth-stencil attachment and the
+        // validation layer reports `VK_ERROR_FORMAT_NOT_SUPPORTED` from this
+        // very query, then two more VUIDs at view and pipeline creation. So a
+        // caller got a live-looking handle and found out much later, or not at
+        // all: the seam suite's raster fixture passed on undefined behaviour
+        // once before the layer output was read.
+        //
+        // Refused as `Unsupported` rather than `InvalidDescriptor`: the
+        // descriptor is well formed and another device would serve it, which is
+        // exactly the distinction the seam draws between the two.
+        let format_info = vk::PhysicalDeviceImageFormatInfo2::default()
+            .format(conv::format(desc.format))
+            .ty(conv::image_type(desc.image_type))
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(conv::image_usage(desc.usage))
+            .flags(vk::ImageCreateFlags::empty());
+        let mut properties = vk::ImageFormatProperties2::default();
+        // SAFETY: `format_info` borrows only locals that outlive the call, and
+        // `properties` is a fresh output struct with its `sType` set by
+        // `default()`.
+        if let Err(error) = unsafe {
+            self.inner
+                .instance
+                .raw
+                .get_physical_device_image_format_properties2(
+                    self.inner.physical,
+                    &format_info,
+                    &mut properties,
+                )
+        } {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Vulkan,
+                what: "an image of this format, type and usage — the device does not serve the \
+                       combination",
+            })
+            .inspect_err(|_| {
+                crcbl_core::log::debug!(
+                    "crcbl-vk: {:?} as {:?} with {:?} is not a servable image here ({error})",
+                    desc.format,
+                    desc.image_type,
+                    desc.usage,
+                );
+            });
+        }
         let extent = vk::Extent3D {
             width: desc.extent.width,
             height: desc.extent.height,

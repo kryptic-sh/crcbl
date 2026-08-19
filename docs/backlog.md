@@ -3078,10 +3078,21 @@ backend-agnostic way to ask. The second is cheaper.
 
 **But they are not really alternatives, and treating them as one question hid
 that.** A backend returning `Ok` for an image it cannot create is a correctness
-bug on its own terms: the handle looks live, the validation layer reports
-`VK_ERROR_FORMAT_NOT_SUPPORTED`, and the caller finds out at view or pipeline
-creation, or not at all. That fix should land whichever way the query question
-goes. What is genuinely a decision is only whether the seam grows the query.
+bug on its own terms, and **`crcbl-vk`'s half is fixed**: `create_image` now
+calls `vkGetPhysicalDeviceImageFormatProperties2` before creating and refuses
+with `HalError::Unsupported`. Measured both ways by forcing the raster fixture
+to try `D24UnormS8Uint` first — it returned `Ok` before and is refused now — and
+it refuses nothing in use across every suite on radv.
+
+**`crcbl-wgpu`'s half is not fixed** and is left for the deletion: its
+`create_image` is not wrapped in `checked()`, unlike `create_graphics_pipeline`
+beside it, so a format the device did not enable arrives through the
+uncaptured-error handler and a live-looking handle comes back anyway. Whether
+`crcbl-dx12` and `crcbl-mtl` have the same gap is **unexamined** — neither can
+be run here, and unlike the timeline row this one is not visible by reading a
+declaration.
+
+What remains a decision is only whether the seam grows the query.
 
 **Not currently reachable by our own code**, which is why it is not urgent: the
 seam suite's raster fixture negotiates — it tries `D32FloatS8Uint`, then
