@@ -2103,11 +2103,27 @@ has a different defect in the same family — `PolygonModeLine` refusing through
 raw validation error rather than `HalError::Unsupported`, left alone for the
 deletion.
 
-**What a browser equivalent would take**, recorded so it is not re-derived: a
-probe group that opens the device without an optional feature and asserts the
-capability it gates now refuses. `web/tools/probe-groups.mjs` is where groups
-live, and AE/AF are the two that already hold this backend's query claims to a
-value.
+**What a browser equivalent would take is smaller than the native one**, and the
+first sizing of it here was wrong in a way worth correcting: it said "open the
+device without an optional feature", which is the expensive half and covers the
+_minority_ of the rows. Counted from `crcbl-webgpu`'s `supports`:
+
+- **Nine rows are unconditional `Support::No`** — the timeline group, the
+  statistics query, and the rest. Those need no special device at all. A probe
+  group asserting that each of the nine operations refuses with
+  `HalError::Unsupported` on the ordinary device is the whole check, and it is
+  the same claim the native driver makes with
+  `(Support::No, Exercise::Refused)`.
+- **Three rows are feature-gated** — `DepthClamp`, `SamplerAnisotropy`,
+  `TimestampQuery`. Only these need the harder thing: a device requested without
+  the feature, which the probe plumbing does not do today (the replayer opens
+  one device from a `DeviceDesc`).
+
+So the cheap nine and the expensive three are separable, and the nine are worth
+doing first. `web/tools/probe-groups.mjs` is where groups live; AE and AF
+already hold this backend's query claims to a value, and a new group would need
+a `__crcbl_web_*` export from `crcbl-webgpu/src/probe.rs` linked into the wasm —
+see the note about exports failing `check-exports` until the crate is linked.
 
 ### DECISION NEEDED — occlusion queries: finish them, refuse them, or delete them
 
