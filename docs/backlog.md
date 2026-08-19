@@ -149,12 +149,23 @@ module's docs name its own omission; this is the list in one place.
   drawing into a different format needs a second one. That matches the tonemap
   pipeline's existing assumption rather than adding a new limit.
 
-- **Milestone 2's remainder** — the wireframe and normals views, and the
-  exposure slider. The listing panel landed (`I`), so what is left are the two
-  renderer modes and the slider. `crate::gpu` has a `UiRenderer` pass now, so
-  the blocker is no longer the pass: it is that none of those listings has been
-  written, and the wireframe and normals views are renderer modes `crcbl-render`
-  does not expose.
+- **Milestone 2's remainder** — the normals view and the exposure slider. The
+  listing panel landed (`I`) and the wireframe view landed (`W`), so what is
+  left is one renderer mode and the slider.
+
+  Three things the wireframe left behind. Its **pixel proof runs only with a
+  backend pinned** and was measured here on RADV through the _mesh-shader_ path;
+  CI's lavapipe takes the indirect path, which is the arm nobody has measured —
+  which is why its overlap bar is a simple majority rather than "nearly all".
+  The **wireframe pipeline is never released until `destroy`**, so a session
+  that pressed `W` once carries a pipeline it may never use again. And
+  **wgpu/web is untested end to end**: the designed behaviour is
+  `supports_wireframe` false, one line at start-up, and a warning per press,
+  whose renderer half is tested but which no browser run confirms. `crate::gpu`
+  has a `UiRenderer` pass now, so the blocker is no longer the pass: it is that
+  none of those listings has been written, and the wireframe and normals views
+  are renderer modes `crcbl-render` does not expose.
+
 - **Milestone 3, hot reload** (V-F4) and the **browser drop target** (the other
   half of V-F5). The drop target needs an `AssetSource` over a file a browser
   handed the page, which stage 10 owns.

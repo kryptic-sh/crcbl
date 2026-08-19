@@ -61,6 +61,10 @@ CONTROLS:
     I                    Listing panel — what the document holds, and every
                          feature the conversion could not bring in. Off to
                          begin with.
+    W                    Wireframe — draw the model's triangles as lines. Off to
+                         begin with. Needs a device with a line fill mode, which
+                         a browser has not got; the debug panel's 'wireframe' row
+                         is what the frame is actually drawn with.
     ESC                  Open the menu — the only way to reach the two below
                          without a keyboard
     F11                  Fullscreen

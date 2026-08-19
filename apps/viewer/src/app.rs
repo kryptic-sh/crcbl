@@ -8,10 +8,11 @@
 //!     ──────────────────────────────→ Viewer::button_event   (pan press)
 //!     ──────────────────────────────→ Viewer::wheel_event    (zoom)
 //!     ──────────────────────────────→ Viewer::pointer_event  (orbit press, drag)
-//!     ──────────────────────────────→ Viewer::key_event      (F, I)
+//!     ──────────────────────────────→ Viewer::key_event      (F, I, W)
 //!   run_ticks  ─────────────────────→ Viewer::tick           (nothing at all)
 //!   draw_list.clear()
 //!     ──────────────────────────────→ Viewer::draw           (re-frame, camera,
+//!                                                             wireframe,
 //!                                                             listing panel)
 //!     menu, debug overlay             ← the engine's
 //!   gpu.frame()
@@ -62,8 +63,9 @@ use crate::model::{self, LoadError, Model};
 
 /// Frames the model again, fitting it in the view from wherever the camera is.
 ///
-/// One of the two keys this application binds. Neither is one of the loop's, so
-/// both arrive through [`HostedGame::key_event`] like any other game's.
+/// One of the three keys this application binds. None of them is one of the
+/// loop's, so all three arrive through [`HostedGame::key_event`] like any other
+/// game's.
 pub const REFRAME_KEY: KeyCode = KeyCode::KeyF;
 
 /// Shows or hides [`crate::listing`]'s panel. Off to begin with.
@@ -78,6 +80,17 @@ pub const REFRAME_KEY: KeyCode = KeyCode::KeyF;
 /// showing, and this application already binds [`REFRAME_KEY`]. `I` is none of
 /// those, and `no_two_bindings_claim_the_same_key` is what keeps that true.
 pub const LISTING_KEY: KeyCode = KeyCode::KeyI;
+
+/// Draws the document's triangles as lines instead of filling them. Off to
+/// begin with.
+///
+/// `W` for wireframe, and it is free on [`LISTING_KEY`]'s terms: it is none of
+/// the three keys the loop reserves, none of the three it arbitrates while a
+/// menu is showing, and neither of the two this application already binds. This
+/// viewer has no keyboard movement — the turntable is a pointer gesture, see
+/// [`crate::controls`] — so `W` is not the half of a `WASD` set the way it would
+/// be in a game.
+pub const WIREFRAME_KEY: KeyCode = KeyCode::KeyW;
 
 /// What a finished run reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +218,23 @@ pub struct Viewer {
     /// above exists: the loop forwards auto-repeats as further presses, and a
     /// panel that toggled on every one would strobe under a resting finger.
     listing_held: bool,
+    /// What the frame is drawn with: lines, or filled triangles.
+    ///
+    /// **The state actually in force, not the one asked for.** [`Viewer::draw`]
+    /// writes back whatever [`Gpu::set_wireframe`](crate::gpu::Gpu::set_wireframe)
+    /// answered, so a device with no line fill mode leaves this `false` and the
+    /// debug panel's row says so — rather than claiming a wireframe over a solid
+    /// frame.
+    wireframe: bool,
+    /// [`WIREFRAME_KEY`] was pressed since the last frame drew.
+    ///
+    /// Deferred to [`Viewer::draw`] on `reframe`'s terms: switching the view on
+    /// builds a pipeline, and a hosted game is handed the GPU only in `tick` and
+    /// `draw`. Applied on the edge alone rather than once a frame, so a device
+    /// that refuses logs a line per press instead of one per frame.
+    wireframe_pending: bool,
+    /// Whether [`WIREFRAME_KEY`] is currently held, for `listing_held`'s reason.
+    wireframe_held: bool,
     /// `docs/plan/sample/05-viewer.md` milestone 2's listing — see
     /// [`crate::listing`]. Hidden until [`LISTING_KEY`] is pressed.
     listing: Listing,
@@ -316,6 +346,9 @@ pub fn with_shell<S: Shell + ?Sized>(
             reframe: false,
             reframe_held: false,
             listing_held: false,
+            wireframe: false,
+            wireframe_pending: false,
+            wireframe_held: false,
             listing,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
@@ -362,10 +395,12 @@ impl HostedGame for Viewer {
     /// be filled in: there is no state here to advance.
     fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {}
 
-    /// `F` frames the model again and `I` shows the listing, once per press.
+    /// `F` frames the model again, `I` shows the listing and `W` draws it as
+    /// lines — each once per press.
     ///
-    /// Framing is deferred to [`Viewer::draw`] because it needs the window's
-    /// aspect; the panel needs nothing, so it flips here.
+    /// Framing and the wireframe are deferred to [`Viewer::draw`], which is
+    /// where this application is handed the aspect and the GPU; the panel needs
+    /// neither, so it flips here.
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
         match key {
             REFRAME_KEY => {
@@ -377,6 +412,13 @@ impl HostedGame for Viewer {
                     self.listing.toggle();
                 }
                 self.listing_held = pressed;
+            }
+            WIREFRAME_KEY => {
+                if pressed && !self.wireframe_held {
+                    self.wireframe = !self.wireframe;
+                    self.wireframe_pending = true;
+                }
+                self.wireframe_held = pressed;
             }
             _ => {}
         }
@@ -424,6 +466,12 @@ impl HostedGame for Viewer {
         self.extent = gpu.extent();
         if std::mem::take(&mut self.reframe) {
             self.orbit.frame(self.bounds, aspect_of(self.extent));
+        }
+        // The answer, not the request — see [`Viewer::wireframe`]. A device that
+        // has no line fill mode leaves this `false`, and the debug row below
+        // reports the frame that is actually drawn.
+        if std::mem::take(&mut self.wireframe_pending) {
+            self.wireframe = gpu.set_wireframe(self.wireframe);
         }
         gpu.set_camera(self.orbit.camera());
         // Laid out against the same extent, and with the atlas the UI pass will
@@ -475,12 +523,21 @@ impl HostedGame for Viewer {
 /// refused, and how far away the camera has ended up — which is what says
 /// "nothing is on screen because you zoomed past it" rather than "nothing is on
 /// screen because the file is empty".
+///
+/// The fourth row is the wireframe, and it reports the frame that was **drawn**:
+/// the field behind it holds what the device answered rather than what
+/// [`WIREFRAME_KEY`] asked for, so a press that could not be honoured leaves
+/// this saying `off` instead of quietly disagreeing with the picture.
 impl DebugModule for Viewer {
     fn debug_section(&self, out: &mut DebugSection) {
         out.set_title("viewer");
         out.row("instances", format_args!("{}", self.instances));
         out.row("skipped", format_args!("{}", self.skipped));
         out.row("dist", format_args!("{:.2}", self.orbit.distance()));
+        out.row(
+            "wireframe",
+            format_args!("{}", if self.wireframe { "on" } else { "off" }),
+        );
     }
 }
 
@@ -1140,10 +1197,83 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **A held `W` toggles the wireframe once, not once a frame** — and the
+    /// panel reports what the device answered.
+    ///
+    /// `a_held_listing_key_toggles_the_panel_once_not_once_a_frame`'s claim for
+    /// the second binding that needs an edge, and this one needs it more: every
+    /// press reaches the seam, so a strobing toggle is a pipeline swap a frame.
+    /// Two repeats rather than one, so a guard that only ignored the *first*
+    /// would still fail.
+    ///
+    /// The row is the observable rather than a field, because the row is what a
+    /// user reads: [`Viewer::wireframe`] holds the state the GPU answered with,
+    /// so a device that refused would leave this saying `off` and the assertion
+    /// would name that rather than a flag agreeing with itself.
+    #[test]
+    fn a_held_wireframe_key_toggles_the_view_once_not_once_a_frame() {
+        let (_dir, mut options) = model_at(&fixture::quad_glb(Vec3::ZERO), 24);
+        options.common.debug_overlay = Some(true);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert!(
+            engine.gpu().wireframe_supported(),
+            "the null device is asked for the line fill mode and has it, so a refusal here is \
+             this sample's request going missing rather than the device",
+        );
+        assert_eq!(
+            row_value(&ui_text(&engine), "wireframe"),
+            "off",
+            "the view is off until it is asked for",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, WIREFRAME_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "wireframe"),
+            "on",
+            "the press never reached the renderer, so the repeats below prove nothing",
+        );
+
+        for _ in 0..2 {
+            engine
+                .shell_mut()
+                .key_repeat(window, WIREFRAME_KEY)
+                .expect("the window is live");
+            engine.frame().expect("a frame");
+            assert_eq!(
+                row_value(&ui_text(&engine), "wireframe"),
+                "on",
+                "a repeat switched the view back off",
+            );
+        }
+
+        engine
+            .shell_mut()
+            .key_release(window, WIREFRAME_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "wireframe"),
+            "on",
+            "letting go switched it off",
+        );
+
+        // And the next real press still works, which is what says the guard
+        // released rather than latched.
+        tap(&mut engine, window, WIREFRAME_KEY);
+        assert_eq!(row_value(&ui_text(&engine), "wireframe"), "off");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// **No two bindings claim the same key.**
     ///
     /// Three of these are the loop's reserved keys and three more are the ones
-    /// it arbitrates for a menu that is showing; the other two are this
+    /// it arbitrates for a menu that is showing; the other three are this
     /// application's. A collision is silent — the loop would swallow the key
     /// and the viewer's half would simply never run — so it is checked rather
     /// than argued about in a comment.
@@ -1152,6 +1282,7 @@ mod tests {
         let bound = [
             ("reframe", REFRAME_KEY),
             ("listing", LISTING_KEY),
+            ("wireframe", WIREFRAME_KEY),
             ("pause", PAUSE_KEY),
             ("debug overlay", DEBUG_OVERLAY_KEY),
             ("fullscreen", FULLSCREEN_KEY),

@@ -676,6 +676,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/viewer` draws a wireframe.** `W` toggles it, off by default.
+  `ForwardRenderer` gained `set_wireframe`, `wireframe` and the associated
+  `supports_wireframe`, so an application can ask before it offers the view.
+
+  **Only the colour pass changes fill mode.** The depth prepass stays filled, so
+  SSAO and SSR keep reading solid depth — depth drawn as lines is depth with
+  holes in it. One consequence worth knowing: the lines are then shaded with
+  occlusion from surfaces that are not drawn.
+
+  A device without `Features::POLYGON_MODE_LINE` gets a refusal from
+  `set_wireframe` rather than a silently filled frame, and the viewer reports
+  the state **actually in force** in its debug panel rather than what was asked
+  for. WebGPU has no line fill mode, so this is the ordinary case on the web
+  rather than an error path.
+
 - **`apps/viewer` lists what it loaded.** `I` toggles a panel naming the
   document, its mesh, vertex, index, material and texture counts, the page
   extent its textures were resampled to, the instances placed, the bounds the

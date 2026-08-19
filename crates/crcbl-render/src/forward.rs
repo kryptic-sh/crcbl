@@ -138,12 +138,13 @@ use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ColorTargetState, CullMode, DepthStencilState, Device, DrawIndirect,
-    DrawIndirectCount, FilterMode, Format, GeometryPath, GraphicsPipelineDesc,
+    DrawIndirectCount, Features, FilterMode, Format, GeometryPath, GraphicsPipelineDesc,
     GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType,
     ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
-    MeshPipelineDesc, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
-    QueueHandle, Rect2d, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, Viewport, check_portable_storage_buffers,
+    MeshPipelineDesc, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode,
+    PrimitiveState, QueueHandle, Rect2d, ResourceState, SampleType, SamplerAddressMode,
+    SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
+    StoreOp, Viewport, check_portable_storage_buffers,
 };
 use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao, ssr};
 use glam::{Mat4, Quat, Vec3};
@@ -707,6 +708,22 @@ pub struct ForwardRenderer {
     mesh_layout: BindGroupLayoutHandle,
     mesh_pipeline_layout: PipelineLayoutHandle,
     mesh_pipeline: GraphicsPipelineHandle,
+    /// [`ForwardRenderer::mesh_pipeline`] again in
+    /// [`PolygonMode::Line`](crcbl_hal::PolygonMode::Line), for
+    /// [`set_wireframe`](ForwardRenderer::set_wireframe).
+    ///
+    /// [`None`] until a caller first switches the view on — the ground grid's
+    /// arrangement exactly, and for its reason: a second pipeline compiled at
+    /// build would be paid for by every sample, golden and headless run that
+    /// never asks for a wireframe, which is all of them. Once built it is kept,
+    /// because switching the view off is
+    /// [`ForwardRenderer::wireframe_on`] and not a release.
+    wireframe_pipeline: Option<GraphicsPipelineHandle>,
+    /// Whether [`add_passes`](ForwardRenderer::add_passes) drives the forward
+    /// pass through [`ForwardRenderer::wireframe_pipeline`]. **`false` by
+    /// default**: a wireframe is a tool's view of a document, and every sample
+    /// and every golden image predates it.
+    wireframe_on: bool,
 
     /// Topic 18's shadow atlas: one `D32Float` image holding
     /// [`shadow::TILES`] square tiles in a fixed grid — the sun's cascades
@@ -3041,178 +3058,15 @@ impl ForwardRenderer {
         })?;
         rollback.pipeline_layouts.push(mesh_pipeline_layout);
 
-        // Entry points resolved before the module exists: a manifest that
-        // disagreed with the SPIR-V would otherwise fail inside the descriptor
-        // literal, with the module already created and nothing holding it.
-        let mesh_vertex = entry(&MESH, Stage::Vertex)?;
-        let mesh_fragment = entry(&MESH, Stage::Fragment)?;
-        let mesh_module = device.create_shader_module(&ShaderModuleDesc {
-            label: Some("mesh.slang"),
-            spirv: MESH.spirv(),
-            wgsl: MESH.wgsl(),
-            msl: MESH.msl(),
-            // **Both containers, and still one module.** A DXIL container holds
-            // exactly one entry point, so this is a list where its three
-            // neighbours are single artifacts; the backend that consumes it
-            // picks the container named by the stage it is building. Nothing
-            // here branches on a backend, and the three that ignore DXIL see
-            // the same module they always did.
-            dxil: &MESH.dxil_containers(),
-        })?;
-        // **Two targets, one fragment stage.** `mesh.slang`'s `FragmentOutput`
-        // writes the shaded colour at 0 and
-        // `docs/plan/18-render-features.md`'s reflectivity channel at 1, and
-        // both pipeline shapes below name that same entry point — so the second
-        // target is one element of this array and not a third pipeline, a
-        // second entry point or a new interpolant. The refusal the AO section
-        // records was about the depth prepass, which has no fragment stage and
-        // no colour target at all; it does not reach this array.
-        let mesh_targets = [
-            ColorTargetState::opaque(Format::Rgba16Float),
-            ColorTargetState::opaque(Format::Rgba8Unorm),
-        ];
-        // Shared by both pipeline shapes, because the only thing that differs
-        // is which stage produces the geometry.
-        //
-        // Back-face culling is on from the first mesh. The cube's winding is
-        // asserted by `crcbl-shaders`' own tests, so a face that vanished would
-        // be a *test* failure rather than a debugging session — and a mesh
-        // drawn without culling would let a winding mistake survive into P7's
-        // geometry pool. The mesh stage emits its corner triples in the index
-        // buffer's own order, so the winding it produces is the same one.
-        let primitive = PrimitiveState {
-            cull_mode: CullMode::Back,
-            ..PrimitiveState::default()
-        };
-        // Milestone 3's depth test, and the seam's default is already
-        // reversed-Z: `Greater` against `D32Float`, writes on. The clear value
-        // that agrees with it comes from the graph (`PassBuilder::clear_depth`),
-        // and the projection matrix that agrees with *both* comes from
-        // `crate::camera`.
-        let depth_stencil = Some(DepthStencilState::default());
-        // The depth-only twin, built beside the colour pipeline out of the same
-        // modules and the same layout, differing in exactly two things: no
-        // fragment stage and no colour target.
-        //
-        // **The geometry stage is identical, and that is the design.** Topic 18
-        // asks for a shadow pass "identical on every `GeometryPath` — depth pass
-        // plus whatever emit tail the device selected", and the way to get that
-        // without a second transform path is to leave `vertexMain` and
-        // `meshMain` alone and hand them a frame block whose `view_proj` is the
-        // cascade's matrix. A cascade that disagreed with the colour pass about
-        // where a vertex is would produce shadows that do not line up with their
-        // casters, which is indistinguishable from a bias problem.
-        let (shadow_pipeline_result, mesh_pipeline, cluster_module) = if emit.is_mesh() {
-            // **The mesh stage's module is `mesh_cluster.slang`; the fragment
-            // stage's is still `mesh.slang`'s.** A pipeline takes a module per
-            // stage, so the shading — Lambert, Blinn, the material row, the
-            // page sample — is the same code both paths run rather than a copy
-            // that agrees today. `mesh_cluster.slang`'s header carries the
-            // argument, and its `VertexOutput` is what the two agree through.
-            // **Named rather than looked up by stage**, because the module has
-            // two mesh entry points and a stage lookup would refuse an
-            // ambiguous one — see `named_entry`. Which of the two this builds
-            // is the whole of the amplification decision.
-            let cluster_entry = named_entry(
-                &MESH_CLUSTER,
-                if culls_clusters {
-                    "amplifiedMeshMain"
-                } else {
-                    "meshMain"
-                },
-                Stage::Mesh,
-            )?;
-            let task_entry = culls_clusters
-                .then(|| named_entry(&MESH_CLUSTER, "taskMain", Stage::Task))
-                .transpose()?;
-            let cluster_module = device.create_shader_module(&ShaderModuleDesc {
-                label: Some("mesh_cluster.slang"),
-                spirv: MESH_CLUSTER.spirv(),
-                // `None`, and it is the whole reason this is a second file:
-                // WGSL cannot express a mesh stage at all.
-                wgsl: MESH_CLUSTER.wgsl(),
-                msl: MESH_CLUSTER.msl(),
-                dxil: &MESH_CLUSTER.dxil_containers(),
-            })?;
-            let pipeline = device.create_mesh_pipeline(&MeshPipelineDesc {
-                label: Some("forward mesh cluster"),
-                layout: mesh_pipeline_layout,
-                // §3.5's per-cluster cull, where the device has the stage to
-                // run it in. `None` is not a degradation: `meshMain` draws the
-                // same picture out of the same clusters, having rejected none
-                // of them, which is what a device with `Features::MESH_SHADER`
-                // and no `Features::TASK_SHADER` gets.
-                task: task_entry.map(|entry_point| ShaderEntry {
-                    module: cluster_module,
-                    entry_point,
-                }),
-                mesh: ShaderEntry {
-                    module: cluster_module,
-                    entry_point: cluster_entry,
-                },
-                fragment: Some(ShaderEntry {
-                    module: mesh_module,
-                    entry_point: mesh_fragment,
-                }),
-                primitive,
-                depth_stencil,
-                multisample: MultisampleState::default(),
-                color_targets: &mesh_targets,
-            });
-            let shadow = device.create_mesh_pipeline(&MeshPipelineDesc {
-                label: Some("shadow cascade mesh cluster"),
-                layout: mesh_pipeline_layout,
-                task: task_entry.map(|entry_point| ShaderEntry {
-                    module: cluster_module,
-                    entry_point,
-                }),
-                mesh: ShaderEntry {
-                    module: cluster_module,
-                    entry_point: cluster_entry,
-                },
-                fragment: None,
-                primitive,
-                depth_stencil,
-                multisample: MultisampleState::default(),
-                color_targets: &[],
-            });
-            (shadow, pipeline, Some(cluster_module))
-        } else {
-            let pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
-                label: Some("forward mesh"),
-                layout: mesh_pipeline_layout,
-                vertex: ShaderEntry {
-                    module: mesh_module,
-                    entry_point: mesh_vertex,
-                },
-                fragment: Some(ShaderEntry {
-                    module: mesh_module,
-                    entry_point: mesh_fragment,
-                }),
-                primitive,
-                depth_stencil,
-                multisample: MultisampleState::default(),
-                color_targets: &mesh_targets,
-            });
-            let shadow = device.create_graphics_pipeline(&GraphicsPipelineDesc {
-                label: Some("shadow cascade"),
-                layout: mesh_pipeline_layout,
-                vertex: ShaderEntry {
-                    module: mesh_module,
-                    entry_point: mesh_vertex,
-                },
-                fragment: None,
-                primitive,
-                depth_stencil,
-                multisample: MultisampleState::default(),
-                color_targets: &[],
-            });
-            (shadow, pipeline, None)
-        };
-        device.destroy_shader_module(mesh_module);
-        if let Some(module) = cluster_module {
-            device.destroy_shader_module(module);
-        }
+        // The colour pass's pipeline and its depth-only twin, out of one set of
+        // modules — see [`MeshModules`], which is where the two shapes and the
+        // reasons for them live. Both are created before either is unwrapped and
+        // the modules are released between, so a failing creation leaks nothing.
+        let modules = MeshModules::new(device, emit, culls_clusters)?;
+        let mesh_pipeline =
+            modules.color_pipeline(device, mesh_pipeline_layout, PolygonMode::Fill, "forward");
+        let shadow_pipeline_result = modules.depth_pipeline(device, mesh_pipeline_layout);
+        modules.destroy(device);
         let mesh_pipeline = mesh_pipeline?;
         rollback.pipelines.push(mesh_pipeline);
         let shadow_pipeline = shadow_pipeline_result?;
@@ -3400,6 +3254,11 @@ impl ForwardRenderer {
             mesh_layout,
             mesh_pipeline_layout,
             mesh_pipeline,
+            // Off, and unbuilt, on the ground grid's terms below: the wireframe
+            // view is opt-in, so a caller that never asks for one draws the
+            // frame it drew before `set_wireframe` existed.
+            wireframe_pipeline: None,
+            wireframe_on: false,
             shadow_atlas,
             shadow_atlas_view,
             shadow_placeholder,
@@ -4590,7 +4449,19 @@ impl ForwardRenderer {
         let group = self.mesh_groups[self.frame];
         let emit = self.emit;
         let bucket_draws = BucketDraws {
-            pipeline: self.mesh_pipeline,
+            // The wireframe twin where a caller switched the view on, and the
+            // filled pipeline everywhere else — see `set_wireframe`. Written on
+            // `ground_grid`'s terms, and the `filter` is what keeps "switched
+            // on" from outrunning "built": the field is only `Some` after a
+            // build that succeeded.
+            //
+            // The depth prepass below takes `shadow_pipeline` and is untouched
+            // by this, which is the half that makes a wireframe frame legible:
+            // the occlusion pair still reads solid depth.
+            pipeline: self
+                .wireframe_pipeline
+                .filter(|_| self.wireframe_on)
+                .unwrap_or(self.mesh_pipeline),
             layout: self.mesh_pipeline_layout,
             indices: self.pool.index_buffer(),
             emit,
@@ -5303,6 +5174,98 @@ impl ForwardRenderer {
             .map(GroundGrid::style)
     }
 
+    /// Whether `device` can draw the wireframe view at all.
+    ///
+    /// The question [`set_wireframe`](Self::set_wireframe) answers with an
+    /// error, asked **before** anything is switched on — so an application can
+    /// tell its user that this device has no wireframe rather than binding a key
+    /// that fails, and can say so once at start-up instead of on every press.
+    /// WebGPU has no line fill mode at all, so the browser is the case this
+    /// exists for and not a hypothetical.
+    ///
+    /// An associated function rather than a method: it is a fact about the
+    /// device, and a caller wants it before it has decided anything.
+    #[must_use]
+    pub fn supports_wireframe(device: &dyn Device) -> bool {
+        device.caps().supports(Features::POLYGON_MODE_LINE)
+    }
+
+    /// Draws the scene's triangles as lines, or goes back to filling them.
+    ///
+    /// **Off by default.** Every sample and every golden image predates the
+    /// view, so a renderer nobody has called this on records exactly the frame
+    /// it always did.
+    ///
+    /// # What it is, and what it is not
+    ///
+    /// The **colour pass** alone changes fill mode. The depth prepass and the
+    /// shadow cascades keep drawing filled triangles, because they are what the
+    /// occlusion pair and the shadow lookups read and depth drawn as lines is
+    /// depth with holes in it. So a wireframe frame is the same geometry, the
+    /// same shading and the same lights, rasterised as edges: what was inside a
+    /// triangle becomes the clear colour, and what was on its edge stays lit.
+    ///
+    /// # It is built on the first `true`
+    ///
+    /// The pipeline is compiled here rather than beside the filled one at
+    /// [`with_scene`](Self::with_scene), and that is the trade this
+    /// call makes: one pipeline compile on the first press — a hitch, in a view
+    /// the user just asked for — against a second compile in the start-up of
+    /// every sample, golden run and headless test that never asks for one. Later
+    /// calls only flip the switch, and a `false` leaves the pipeline built, for
+    /// [`set_ground_grid`](Self::set_ground_grid)'s reason: releasing something
+    /// the frames in flight may still be recording against is what
+    /// [`destroy`](Self::destroy) — which already requires an idle device — is
+    /// for.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::UnsupportedFeatures`] naming
+    /// [`Features::POLYGON_MODE_LINE`](crcbl_hal::Features::POLYGON_MODE_LINE)
+    /// when `on` is `true` on a device that has not got it — ask
+    /// [`supports_wireframe`](Self::supports_wireframe) first. Refused rather
+    /// than quietly filled: a caller who asked for a wireframe and got a solid
+    /// frame back with no error has no way to tell that from a wireframe of a
+    /// solid-looking model.
+    ///
+    /// [`HalError`] from the pipeline otherwise. **Nothing is left switched on
+    /// when either happens**: the view stays as it was.
+    pub fn set_wireframe(&mut self, device: &dyn Device, on: bool) -> Result<(), HalError> {
+        if !on {
+            self.wireframe_on = false;
+            return Ok(());
+        }
+        if self.wireframe_pipeline.is_none() {
+            if !Self::supports_wireframe(device) {
+                return Err(HalError::UnsupportedFeatures {
+                    missing: Features::POLYGON_MODE_LINE,
+                });
+            }
+            let modules = MeshModules::new(device, self.emit, self.culls_clusters)?;
+            let pipeline = modules.color_pipeline(
+                device,
+                self.mesh_pipeline_layout,
+                PolygonMode::Line,
+                "wireframe",
+            );
+            modules.destroy(device);
+            self.wireframe_pipeline = Some(pipeline?);
+        }
+        self.wireframe_on = true;
+        Ok(())
+    }
+
+    /// Whether the colour pass draws lines instead of filled triangles.
+    ///
+    /// The read-back half of [`set_wireframe`](Self::set_wireframe), and the
+    /// observable a test asking "is this frame a wireframe" wants: a renderer
+    /// that built the pipeline and then switched it off answers `false`, because
+    /// what it draws is what the question is about.
+    #[must_use]
+    pub const fn wireframe(&self) -> bool {
+        self.wireframe_on
+    }
+
     /// The cull and draw-argument passes, and the buffers they produce.
     ///
     /// What a caller reads the culling statistics out of — topic 03 §3.6's
@@ -5601,6 +5564,12 @@ impl ForwardRenderer {
         self.ambient_occlusion_placeholder.destroy(device);
 
         device.destroy_graphics_pipeline(self.mesh_pipeline);
+        // The one place the wireframe twin is released — `set_wireframe(.., false)`
+        // deliberately is not, because this call is the one that requires an
+        // idle device.
+        if let Some(pipeline) = self.wireframe_pipeline {
+            device.destroy_graphics_pipeline(pipeline);
+        }
         device.destroy_pipeline_layout(self.mesh_pipeline_layout);
         for group in self
             .mesh_groups
@@ -5640,6 +5609,287 @@ impl ForwardRenderer {
         self.materials.destroy(device);
         self.instances.destroy(device);
         self.pool.destroy(device);
+    }
+}
+
+/// The shader modules a mesh pipeline is built from, with its entry points
+/// already resolved.
+///
+/// **A type rather than a run of locals in `build`** because there are now two
+/// callers: `build`, which makes the colour pipeline and its depth-only twin,
+/// and [`ForwardRenderer::set_wireframe`], which makes the colour pipeline again
+/// in [`PolygonMode::Line`] long after `build` released its modules. The
+/// alternative was a second copy of a descriptor that names two modules, three
+/// entry points, two colour targets and a depth state — the pair that drifts.
+///
+/// Short-lived: created, used to build pipelines, and [`MeshModules::destroy`]ed
+/// in the same function. A module is not needed once the pipeline exists.
+struct MeshModules {
+    /// `mesh.slang`'s module — the vertex stage on the indirect path, and the
+    /// fragment stage on both.
+    mesh: ShaderModuleHandle,
+    /// `vertexMain`, unused on the mesh-shader path.
+    vertex: &'static str,
+    fragment: &'static str,
+    /// `mesh_cluster.slang`'s, on the mesh-shader path alone.
+    cluster: Option<ClusterStages>,
+}
+
+/// The geometry half of a mesh-shader pipeline: `mesh_cluster.slang`'s module
+/// and the stages taken out of it.
+struct ClusterStages {
+    module: ShaderModuleHandle,
+    /// Which of the module's two mesh entry points this path builds — the
+    /// amplified one where the device has a task stage to feed it.
+    mesh: &'static str,
+    /// §3.5's per-cluster cull, where the device has the stage to run it in.
+    /// [`None`] is not a degradation: `meshMain` draws the same picture out of
+    /// the same clusters, having rejected none of them, which is what a device
+    /// with [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER) and no
+    /// [`Features::TASK_SHADER`](crcbl_hal::Features::TASK_SHADER) gets.
+    task: Option<&'static str>,
+}
+
+impl MeshModules {
+    /// **Two targets, one fragment stage.** `mesh.slang`'s `FragmentOutput`
+    /// writes the shaded colour at 0 and `docs/plan/18-render-features.md`'s
+    /// reflectivity channel at 1, and both pipeline shapes name that same entry
+    /// point — so the second target is one element of this array and not a third
+    /// pipeline, a second entry point or a new interpolant. The refusal the AO
+    /// section records was about the depth prepass, which has no fragment stage
+    /// and no colour target at all; it does not reach this array.
+    const COLOR_TARGETS: [ColorTargetState; 2] = [
+        ColorTargetState::opaque(Format::Rgba16Float),
+        ColorTargetState::opaque(Format::Rgba8Unorm),
+    ];
+
+    /// Loads whichever modules `emit` needs and resolves their entry points.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::ShaderCompilation`] if the committed manifest names no such
+    /// entry point, and [`HalError`] from either module. A failure after the
+    /// first module was created releases it rather than leaking it.
+    fn new(device: &dyn Device, emit: EmitTail, culls_clusters: bool) -> Result<Self, HalError> {
+        // Entry points resolved before the module exists: a manifest that
+        // disagreed with the SPIR-V would otherwise fail inside the descriptor
+        // literal, with the module already created and nothing holding it.
+        let vertex = entry(&MESH, Stage::Vertex)?;
+        let fragment = entry(&MESH, Stage::Fragment)?;
+        // **Named rather than looked up by stage**, because the module has two
+        // mesh entry points and a stage lookup would refuse an ambiguous one —
+        // see `named_entry`. Which of the two this names is the whole of the
+        // amplification decision.
+        let cluster_stages = emit
+            .is_mesh()
+            .then(|| {
+                let mesh = named_entry(
+                    &MESH_CLUSTER,
+                    if culls_clusters {
+                        "amplifiedMeshMain"
+                    } else {
+                        "meshMain"
+                    },
+                    Stage::Mesh,
+                )?;
+                let task = culls_clusters
+                    .then(|| named_entry(&MESH_CLUSTER, "taskMain", Stage::Task))
+                    .transpose()?;
+                Ok::<_, HalError>((mesh, task))
+            })
+            .transpose()?;
+
+        let mesh = device.create_shader_module(&ShaderModuleDesc {
+            label: Some("mesh.slang"),
+            spirv: MESH.spirv(),
+            wgsl: MESH.wgsl(),
+            msl: MESH.msl(),
+            // **Both containers, and still one module.** A DXIL container holds
+            // exactly one entry point, so this is a list where its three
+            // neighbours are single artifacts; the backend that consumes it
+            // picks the container named by the stage it is building. Nothing
+            // here branches on a backend, and the three that ignore DXIL see
+            // the same module they always did.
+            dxil: &MESH.dxil_containers(),
+        })?;
+        let cluster = match cluster_stages {
+            None => None,
+            Some((cluster_mesh, task)) => {
+                // **The mesh stage's module is `mesh_cluster.slang`; the
+                // fragment stage's is still `mesh.slang`'s.** A pipeline takes a
+                // module per stage, so the shading — Lambert, Blinn, the
+                // material row, the page sample — is the same code both paths
+                // run rather than a copy that agrees today.
+                // `mesh_cluster.slang`'s header carries the argument, and its
+                // `VertexOutput` is what the two agree through.
+                let module = match device.create_shader_module(&ShaderModuleDesc {
+                    label: Some("mesh_cluster.slang"),
+                    spirv: MESH_CLUSTER.spirv(),
+                    // `None`, and it is the whole reason this is a second file:
+                    // WGSL cannot express a mesh stage at all.
+                    wgsl: MESH_CLUSTER.wgsl(),
+                    msl: MESH_CLUSTER.msl(),
+                    dxil: &MESH_CLUSTER.dxil_containers(),
+                }) {
+                    Ok(module) => module,
+                    Err(error) => {
+                        device.destroy_shader_module(mesh);
+                        return Err(error);
+                    }
+                };
+                Some(ClusterStages {
+                    module,
+                    mesh: cluster_mesh,
+                    task,
+                })
+            }
+        };
+        Ok(Self {
+            mesh,
+            vertex,
+            fragment,
+            cluster,
+        })
+    }
+
+    /// The rasteriser state both pipeline shapes share, because the only thing
+    /// that differs between them is which stage produces the geometry.
+    ///
+    /// Back-face culling is on from the first mesh. The cube's winding is
+    /// asserted by `crcbl-shaders`' own tests, so a face that vanished would be a
+    /// *test* failure rather than a debugging session — and a mesh drawn without
+    /// culling would let a winding mistake survive into P7's geometry pool. The
+    /// mesh stage emits its corner triples in the index buffer's own order, so
+    /// the winding it produces is the same one.
+    fn primitive(polygon_mode: PolygonMode) -> PrimitiveState {
+        PrimitiveState {
+            cull_mode: CullMode::Back,
+            polygon_mode,
+            ..PrimitiveState::default()
+        }
+    }
+
+    /// Milestone 3's depth test, and the seam's default is already reversed-Z:
+    /// `Greater` against `D32Float`, writes on. The clear value that agrees with
+    /// it comes from the graph (`PassBuilder::clear_depth`), and the projection
+    /// matrix that agrees with **both** comes from [`crate::camera`].
+    fn depth_stencil() -> Option<DepthStencilState> {
+        Some(DepthStencilState::default())
+    }
+
+    /// The colour pass's pipeline, filled or wireframe.
+    ///
+    /// `label` names the caller — `"forward"` for the frame's own, `"wireframe"`
+    /// for [`ForwardRenderer::set_wireframe`]'s — so a capture tells the two
+    /// apart.
+    fn color_pipeline(
+        &self,
+        device: &dyn Device,
+        layout: PipelineLayoutHandle,
+        polygon_mode: PolygonMode,
+        label: &str,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        let primitive = Self::primitive(polygon_mode);
+        let fragment = Some(ShaderEntry {
+            module: self.mesh,
+            entry_point: self.fragment,
+        });
+        match self.cluster.as_ref() {
+            Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
+                label: Some(&format!("{label} mesh cluster")),
+                layout,
+                task: cluster.task.map(|entry_point| ShaderEntry {
+                    module: cluster.module,
+                    entry_point,
+                }),
+                mesh: ShaderEntry {
+                    module: cluster.module,
+                    entry_point: cluster.mesh,
+                },
+                fragment,
+                primitive,
+                depth_stencil: Self::depth_stencil(),
+                multisample: MultisampleState::default(),
+                color_targets: &Self::COLOR_TARGETS,
+            }),
+            None => device.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some(&format!("{label} mesh")),
+                layout,
+                vertex: ShaderEntry {
+                    module: self.mesh,
+                    entry_point: self.vertex,
+                },
+                fragment,
+                primitive,
+                depth_stencil: Self::depth_stencil(),
+                multisample: MultisampleState::default(),
+                color_targets: &Self::COLOR_TARGETS,
+            }),
+        }
+    }
+
+    /// The depth-only twin of [`MeshModules::color_pipeline`], built out of the
+    /// same modules and the same layout and differing in exactly two things: no
+    /// fragment stage and no colour target.
+    ///
+    /// **The geometry stage is identical, and that is the design.** Topic 18 asks
+    /// for a shadow pass "identical on every `GeometryPath` — depth pass plus
+    /// whatever emit tail the device selected", and the way to get that without a
+    /// second transform path is to leave `vertexMain` and `meshMain` alone and
+    /// hand them a frame block whose `view_proj` is the cascade's matrix. A
+    /// cascade that disagreed with the colour pass about where a vertex is would
+    /// produce shadows that do not line up with their casters, which is
+    /// indistinguishable from a bias problem.
+    ///
+    /// Always [`PolygonMode::Fill`]: it fills the shadow atlas and the depth
+    /// prepass, and depth drawn as lines is depth with holes in it — which the
+    /// occlusion pair would read as geometry that is not there.
+    fn depth_pipeline(
+        &self,
+        device: &dyn Device,
+        layout: PipelineLayoutHandle,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        let primitive = Self::primitive(PolygonMode::Fill);
+        match self.cluster.as_ref() {
+            Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
+                label: Some("shadow cascade mesh cluster"),
+                layout,
+                task: cluster.task.map(|entry_point| ShaderEntry {
+                    module: cluster.module,
+                    entry_point,
+                }),
+                mesh: ShaderEntry {
+                    module: cluster.module,
+                    entry_point: cluster.mesh,
+                },
+                fragment: None,
+                primitive,
+                depth_stencil: Self::depth_stencil(),
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            }),
+            None => device.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("shadow cascade"),
+                layout,
+                vertex: ShaderEntry {
+                    module: self.mesh,
+                    entry_point: self.vertex,
+                },
+                fragment: None,
+                primitive,
+                depth_stencil: Self::depth_stencil(),
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            }),
+        }
+    }
+
+    /// Releases both modules. The pipelines built from them stay valid.
+    fn destroy(self, device: &dyn Device) {
+        device.destroy_shader_module(self.mesh);
+        if let Some(cluster) = self.cluster {
+            device.destroy_shader_module(cluster.module);
+        }
     }
 }
 
@@ -5698,11 +5948,27 @@ mod tests {
     use crcbl_hal::{DeviceDesc, Features, Instance, QueueKind};
 
     fn open() -> (Recorder, Box<dyn Device>, QueueHandle) {
+        open_with(DeviceDesc::for_adapter(crcbl_hal::AdapterId(0)).optional_features)
+    }
+
+    /// [`open`] asking for `optional_features` instead of
+    /// [`DeviceDesc::for_adapter`]'s.
+    ///
+    /// The null preset *has* more than the default request asks for, and a
+    /// granted feature set is the intersection of the two — so this is how a test
+    /// reaches a device with something the ordinary one lacks. What it exists for
+    /// is [`Features::POLYGON_MODE_LINE`]: with the default request, `open`'s
+    /// device has no line fill mode, which is the other half of the wireframe
+    /// pair of tests below.
+    fn open_with(optional_features: Features) -> (Recorder, Box<dyn Device>, QueueHandle) {
         let recorder = Recorder::new();
         let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
-            .create_device(&DeviceDesc::for_adapter(adapter.id))
+            .create_device(&DeviceDesc {
+                optional_features,
+                ..DeviceDesc::for_adapter(adapter.id)
+            })
             .expect("the null backend always opens");
         let queue = device.queue(QueueKind::Graphics).expect("always present");
         (recorder, device, queue)
@@ -8403,6 +8669,180 @@ mod tests {
         pool.destroy(device);
         device.destroy_image_view(imported.view);
         device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The wireframe view swaps the colour pass's pipeline and nothing else.**
+    ///
+    /// The mechanism, at the level a null device can observe it: which pipeline
+    /// handle each pass of the recorded stream binds. A field on the renderer
+    /// would say only that a flag moved — this says the *frame* moved, and says
+    /// which part of it did.
+    ///
+    /// Four claims, and each rules out a different way of passing wrongly:
+    ///
+    /// * the filled pipeline is bound on a frame nobody asked, and the wireframe
+    ///   one does not exist;
+    /// * switching on **removes** the filled pipeline from the stream — a second
+    ///   pipeline that was built and never bound would still leave it there;
+    /// * every other pipeline the frame binds is unchanged, so the depth prepass
+    ///   and the shadow cascades are still filling triangles;
+    /// * and switching off puts the stream back exactly, so the view is a toggle
+    ///   rather than a one-way door.
+    #[test]
+    fn the_wireframe_view_swaps_the_colour_passs_pipeline_and_no_other() {
+        use crcbl_hal::null::Command;
+
+        let (recorder, device, queue) =
+            open_with(Features::GPU_DRIVEN | Features::POLYGON_MODE_LINE);
+        let device = device.as_ref();
+        assert!(
+            ForwardRenderer::supports_wireframe(device),
+            "this test needs the line fill mode, and asked the device for it",
+        );
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        place_demo(&mut renderer, DEMO_CUBE, DEMO_UNTINTED, Mat4::IDENTITY);
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+
+        // The pipelines one frame binds, in record order. Cumulative recorder,
+        // so each call takes the tail its own frame added.
+        let mut seen = 0usize;
+        let mut pipelines_in_a_frame = |renderer: &mut ForwardRenderer, pool: &mut _| {
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    (64, 48),
+                )
+                .expect("write");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, target, (64, 48));
+            let compiled = graph.compile(pool).expect("a legal frame");
+            let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("wireframe lap"),
+                queue,
+            });
+            compiled
+                .execute(device, pool, encoder.as_mut(), None)
+                .expect("the graph executed");
+            encoder.finish().expect("recording succeeded");
+            let commands = recorder.commands();
+            let bound: Vec<GraphicsPipelineHandle> = commands[seen..]
+                .iter()
+                .filter_map(|command| match command {
+                    Command::BindGraphicsPipeline(handle) => Some(*handle),
+                    _ => None,
+                })
+                .collect();
+            seen = commands.len();
+            bound
+        };
+
+        let filled = renderer.mesh_pipeline;
+        let off = pipelines_in_a_frame(&mut renderer, &mut pool);
+        assert!(
+            off.contains(&filled),
+            "a frame nobody asked has to bind the filled pipeline: {off:?}",
+        );
+        assert!(!renderer.wireframe());
+        assert!(
+            renderer.wireframe_pipeline.is_none(),
+            "the wireframe pipeline must not be built until it is asked for",
+        );
+
+        renderer
+            .set_wireframe(device, true)
+            .expect("a device with the line fill mode builds it");
+        assert!(renderer.wireframe());
+        let lines = renderer
+            .wireframe_pipeline
+            .expect("switching on is what builds it");
+        let on = pipelines_in_a_frame(&mut renderer, &mut pool);
+        assert!(
+            !on.contains(&filled),
+            "the colour pass still bound the filled pipeline: {on:?}",
+        );
+        assert_eq!(
+            on.iter().filter(|handle| **handle == lines).count(),
+            1,
+            "the wireframe pipeline has to be bound exactly once — by the colour pass: {on:?}",
+        );
+        let substituted: Vec<GraphicsPipelineHandle> = on
+            .iter()
+            .map(|handle| if *handle == lines { filled } else { *handle })
+            .collect();
+        assert_eq!(
+            substituted, off,
+            "the frame gained or lost a pipeline bind beyond the colour pass's: {on:?} against \
+             {off:?}",
+        );
+
+        renderer
+            .set_wireframe(device, false)
+            .expect("switching off builds nothing");
+        assert!(!renderer.wireframe());
+        assert_eq!(
+            pipelines_in_a_frame(&mut renderer, &mut pool),
+            off,
+            "switching the view off has to put the filled pipeline back, not just stop reporting \
+             it",
+        );
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **A device with no line fill mode is refused, not quietly filled.**
+    ///
+    /// The failure this rules out is the silent one: a caller who binds a key to
+    /// this, presses it, and gets the solid frame back with nothing anywhere
+    /// saying why — which on a model whose silhouette hides its interior is
+    /// indistinguishable from a wireframe that worked. WebGPU is the real device
+    /// this happens on; `open`'s null device stands in for it, because
+    /// [`DeviceDesc::for_adapter`] asks for
+    /// [`Features::GPU_DRIVEN`] and nothing else.
+    #[test]
+    fn a_device_without_the_line_fill_mode_refuses_the_wireframe_rather_than_filling_it() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        assert!(
+            !ForwardRenderer::supports_wireframe(device),
+            "this device was not asked for the line fill mode, so it must not report it",
+        );
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+
+        let refused = renderer
+            .set_wireframe(device, true)
+            .expect_err("a device without the feature has to say so");
+        assert!(
+            matches!(
+                refused,
+                HalError::UnsupportedFeatures { missing } if missing == Features::POLYGON_MODE_LINE
+            ),
+            "the refusal has to name the feature to go and look up, and is {refused:?}",
+        );
+        assert!(
+            !renderer.wireframe(),
+            "a refused request must leave the view off rather than half on",
+        );
+        assert!(
+            renderer.wireframe_pipeline.is_none(),
+            "nothing may be left behind by a refusal",
+        );
+        // And switching *off* is still fine on such a device: it builds nothing.
+        renderer
+            .set_wireframe(device, false)
+            .expect("switching off asks the device for nothing");
+
+        renderer.destroy(device);
         recorder.assert_valid();
     }
 

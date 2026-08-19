@@ -39,7 +39,7 @@
 //! the three-quarter key every DCC viewport opens with. See [`key_light`].
 
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions};
-use crcbl::hal::CommandEncoderDesc;
+use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
@@ -105,6 +105,14 @@ pub struct Gpu {
     /// `None` on a device without timestamp queries — the debug panel's GPU
     /// section degrades, the frame does not.
     timers: Option<PassTimers>,
+    /// Whether this adapter has [`Features::POLYGON_MODE_LINE`], read once at
+    /// open.
+    ///
+    /// Asked before anything is switched on so the answer can be *reported* —
+    /// see [`Gpu::set_wireframe`]. A key that quietly did nothing on a browser,
+    /// which has no line fill mode at all, is the failure this field exists to
+    /// prevent.
+    wireframe_supported: bool,
     /// Whether the graph dump has been logged since the graph last changed
     /// shape. Once per shape rather than once per frame, because a dump every
     /// frame is a log nobody reads.
@@ -122,10 +130,23 @@ pub struct Gpu {
 /// One value rather than two copies, for the reason every sample gives: two
 /// paths that open different devices differ in a way nobody sees until the
 /// other one runs.
+///
+/// # The one feature this sample asks for beyond the engine's own
+///
+/// [`Features::POLYGON_MODE_LINE`] — the wireframe view's, and the engine's
+/// default set has no reason to carry it because no other sample has a
+/// wireframe. Added to whatever the engine asks for rather than spelled out
+/// beside it, so this list cannot go stale the way a hand-written copy does;
+/// `the_features_this_sample_asks_for_are_the_engines_own_plus_the_wireframes`
+/// is what keeps that true. It is **optional**: an adapter without it opens
+/// exactly as before and the viewer reports that the view is unavailable rather
+/// than refusing to start.
 fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
+    let base = GpuContextDesc::from(gpu);
     GpuContextDesc {
         label: "viewer",
-        ..GpuContextDesc::from(gpu)
+        optional_features: base.optional_features | Features::POLYGON_MODE_LINE,
+        ..base
     }
 }
 
@@ -212,6 +233,16 @@ impl Gpu {
         if timers.is_none() {
             crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
         }
+        // Reported at start-up rather than on the first press, on the timers'
+        // terms above: a person who cannot get a wireframe out of this build
+        // should be told why by the log they already have, not by a key that
+        // does nothing.
+        let wireframe_supported = ForwardRenderer::supports_wireframe(ctx.device());
+        if !wireframe_supported {
+            crcbl::log::info!(
+                "viewer: no line fill mode on this device; the wireframe view is unavailable"
+            );
+        }
 
         Ok(Self {
             ctx,
@@ -223,10 +254,37 @@ impl Gpu {
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
             timers,
+            wireframe_supported,
             dumped: false,
             #[cfg(test)]
             last_dump: String::new(),
         })
+    }
+
+    /// Draws the document's triangles as lines instead of filling them.
+    ///
+    /// **Returns the state actually in force**, which is what the caller must
+    /// keep: `false` however often it is asked on a device with no line fill
+    /// mode, and `false` if the pipeline would not build. A caller that stored
+    /// what it *asked* for would show a wireframe in the debug panel while the
+    /// frame was solid, which is the silence
+    /// [`ForwardRenderer::set_wireframe`] refuses at the seam and this must not
+    /// re-introduce a level up.
+    ///
+    /// Meant to be called on the key's edge and not once a frame: a refusal logs
+    /// a line, and a line a frame is a log nobody reads.
+    pub fn set_wireframe(&mut self, on: bool) -> bool {
+        if let Err(error) = self.renderer.set_wireframe(self.ctx.device(), on) {
+            crcbl::log::warn!("viewer: the wireframe view is not available here: {error}");
+        }
+        self.renderer.wireframe()
+    }
+
+    /// Whether this device can draw the wireframe view at all — see
+    /// [`Gpu::set_wireframe`].
+    #[must_use]
+    pub const fn wireframe_supported(&self) -> bool {
+        self.wireframe_supported
     }
 
     /// The extent the swapchain is currently configured at.
@@ -610,15 +668,167 @@ mod tests {
 
     /// The bundle asks for the engine's own feature set rather than a subset
     /// spelled out here — the check every other sample carries, since one of
-    /// them shipped a hand-written list that went stale.
+    /// them shipped a hand-written list that went stale — **plus the one feature
+    /// this sample has a use for that no other sample does**.
+    ///
+    /// Written as the engine's set with a bit added rather than as a list, which
+    /// is what keeps the anti-staleness property the original assertion had: a
+    /// feature the engine starts or stops asking for moves both sides of this.
     #[test]
-    fn the_features_this_sample_asks_for_are_the_engines_own() {
+    fn the_features_this_sample_asks_for_are_the_engines_own_plus_the_wireframes() {
         let asked = desc(GpuOptions::default());
         assert_eq!(asked.label, "viewer");
         assert_eq!(
             asked.optional_features,
-            GpuContextDesc::default().optional_features,
+            GpuContextDesc::default().optional_features | Features::POLYGON_MODE_LINE,
             "a subset spelled out here is a copy, and a copy goes stale",
+        );
+        assert!(
+            !GpuContextDesc::default()
+                .optional_features
+                .contains(Features::POLYGON_MODE_LINE),
+            "the engine started asking for the line fill mode itself, so this sample no longer \
+             needs to — fold the addition away rather than leaving two places asking",
+        );
+    }
+
+    /// One frame of a single cube, filled or as lines, read back off the GPU.
+    ///
+    /// [`ForwardRenderer::new`]'s demo scene with **one** instance in it, because
+    /// the claim below is about which texels a triangle's interior owns: with one
+    /// convex solid on screen the covered region is a silhouette, and a wireframe
+    /// of it has to be a small fraction of that silhouette rather than all of it.
+    ///
+    /// The light is this application's own [`key_light`], so the cube is lit from
+    /// wherever the camera stands and no face of it can come out equal to the
+    /// clear colour by accident.
+    fn wireframe_proof_frame(on: bool) -> (u32, u32, Vec<u8>) {
+        let camera = Camera {
+            eye: Vec3::new(2.6, 2.0, 3.4),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            projection: Projection::Perspective {
+                fov_y: std::f32::consts::FRAC_PI_3,
+                near: 0.01,
+            },
+        };
+        let mut setup = OffscreenSetup::open_forward_with(
+            PROOF_EXTENT.0,
+            PROOF_EXTENT.1,
+            // The harness's own list plus the wireframe's, for the reason
+            // [`desc`] gives: a device is granted the intersection of what it
+            // has and what it was asked for, so a setup that did not ask would
+            // refuse the view on hardware that can do it.
+            OffscreenSetup::OPTIONAL_FEATURES | Features::POLYGON_MODE_LINE,
+            move |device, queue, format| {
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer
+                    .add_instance(&InstanceDesc {
+                        mesh: crcbl::render::scene::DEMO_CUBE,
+                        material: crcbl::render::scene::DEMO_UNTINTED,
+                        transform: crcbl::math::Mat4::IDENTITY,
+                    })
+                    .expect("one instance fits in any pool");
+                if on {
+                    renderer.set_wireframe(device, true)?;
+                }
+                Ok(ForwardScene {
+                    camera,
+                    sun: key_light(&camera),
+                    renderer: Box::new(renderer),
+                })
+            },
+        )
+        .expect("the pinned backend opens");
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame lands");
+        setup.finish().expect("teardown");
+        (width, height, pixels)
+    }
+
+    /// **The wireframe view draws edges where the filled frame drew a solid.**
+    ///
+    /// The claim that separates "a second pipeline was bound" from "the picture
+    /// is a wireframe", and only the bytes can make it. `crate::app`'s toggle
+    /// test says the state reaches the renderer; this says what the rasteriser
+    /// then did with it.
+    ///
+    /// Every assertion is against the **clear colour**, taken from a corner of
+    /// the filled frame that the cube's silhouette cannot reach — so "covered"
+    /// means "some fragment shaded here" without anything being assumed about
+    /// what colour it came out.
+    ///
+    /// Four claims, and each rules out a different way of passing wrongly:
+    ///
+    /// * the filled frame covers a real share of the target — otherwise the cube
+    ///   missed the camera and every comparison below is between two empty
+    ///   frames;
+    /// * the wireframe frame covers far less of it — the interior texels became
+    ///   background, which is what a wireframe *is* and what a solid frame drawn
+    ///   through a differently-labelled pipeline would not do;
+    /// * it covers something — lines, not a frame the pipeline swap emptied;
+    /// * and nearly every texel it does cover was covered in the filled frame
+    ///   too — the edges stayed lit and in place, rather than the geometry having
+    ///   moved.
+    #[test]
+    fn the_wireframe_view_empties_the_interior_and_keeps_the_edges() {
+        if !a_driver_is_pinned() {
+            return;
+        }
+        let (width, height, filled) = wireframe_proof_frame(false);
+        let (line_width, line_height, lines) = wireframe_proof_frame(true);
+        assert_eq!((width, height), (line_width, line_height));
+        assert_eq!(filled.len(), lines.len());
+
+        // The clear colour, read off the frame rather than written down: the
+        // tonemap and the swapchain's encode both stand between `SCENE_CLEAR`
+        // and a byte, and this test is not about either of them.
+        let background: [u8; 4] = filled[..4].try_into().expect("a frame has a first pixel");
+        assert_eq!(
+            &lines[..4],
+            &background,
+            "the two frames disagree about the corner the cube cannot reach, so `background` is \
+             not a background",
+        );
+
+        let covered = |frame: &[u8]| {
+            frame
+                .chunks_exact(4)
+                .filter(|texel| *texel != background)
+                .count()
+        };
+        let total = filled.len() / 4;
+        let filled_covered = covered(&filled);
+        let line_covered = covered(&lines);
+        assert!(
+            filled_covered > total / 50,
+            "only {filled_covered} of {total} texels are the cube, so it is not on screen",
+        );
+        assert!(
+            line_covered * 2 < filled_covered,
+            "the wireframe covers {line_covered} texels against the solid's {filled_covered}, \
+             which is not an emptied interior",
+        );
+        assert!(
+            line_covered > 0,
+            "the wireframe covers nothing at all, which is an emptied frame rather than lines",
+        );
+
+        // **A majority, not nearly all**, and the slack is line rasterisation's:
+        // an edge on the silhouette is drawn along the boundary of the region the
+        // solid filled, so which side of it a texel lands on is the driver's
+        // diamond-exit rule and differs between them. A bar that assumed the
+        // outer edges landed inside would be a test about one rasteriser. What it
+        // still rules out is the geometry having moved, which would leave the two
+        // sets nearly disjoint.
+        let kept = filled
+            .chunks_exact(4)
+            .zip(lines.chunks_exact(4))
+            .filter(|(solid, line)| *line != background && *solid != background)
+            .count();
+        assert!(
+            kept * 2 > line_covered,
+            "only {kept} of the wireframe's {line_covered} covered texels were covered by the \
+             solid too, so the lines are not on the model's own edges",
         );
     }
 }
