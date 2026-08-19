@@ -899,7 +899,7 @@ work has to touch browser discovery and the Xvfb branch in every driver anyway,
 and doing both at once means changing the plumbing in one place instead of
 three, and then again three more times per platform.
 
-### The browser lost its WebGL2 fallback with wgpu
+### DECISION NEEDED — the browser's WebGL2 fallback dies with `crcbl-wgpu`
 
 Un-linking `crcbl-wgpu` from the wasm dropped a capability nobody has decided
 about: **a browser without WebGPU now has no fallback at all.** The WebGL2 path
@@ -923,6 +923,13 @@ rather than an oversight:
   chooses. Note this option **dies with `crcbl-wgpu`**: once that crate is
   deleted there is no WebGL2 path left to build, so choosing it later means
   reviving a deleted backend, not re-enabling a flag.
+
+**This is why it is titled as a decision rather than left as a note.** It was
+recorded as an observation, which made it invisible to anyone looking for what
+still needs a call — and it is the one open question the `crcbl-wgpu` deletion
+_forecloses_ rather than merely postpones. Every other blocker on that deletion
+can be revisited afterwards; this one cannot. It should be answered before the
+crate goes, not discovered after.
 
 **Recommendation stands: accept it, and revisit only if someone reports a
 browser that needs it.** Nothing in the samples requires WebGL2, and no
@@ -1833,6 +1840,12 @@ than building a subsystem; the overlay is the exception.
 Re-derived from the tree on 2026-08-19, so the deletion is a reviewed change
 rather than a grep. Two halves: what actually references the crate, and what its
 removal does to `parity_blockers`.
+
+**One question the deletion forecloses, and it is not on the bar.** See
+"DECISION NEEDED — the browser's WebGL2 fallback dies with `crcbl-wgpu`". Every
+other item gating this deletion can be revisited afterwards; that one cannot,
+because deleting the crate deletes the only WebGL2 path there is to build. It
+should be answered before the crate goes rather than discovered after.
 
 **The code surface is five files and two manifests.** Everything else that names
 `wgpu` names it in prose. Counting only lines that are not comments:
