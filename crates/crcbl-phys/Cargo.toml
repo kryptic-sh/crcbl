@@ -7,14 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `crcbl_core::bounds` for the `NaN`-safe lane-wise fold `Aabb::union` needs.
+# This used to be a dev-dependency, on the reasoning that the crate reached core
+# through the ECS and needed nothing of its own; that stopped being true when the
+# BVH's fold was found to discard its accumulator against a `NaN`. It adds no
+# crate to the graph, since the ECS already pulls core in.
+crcbl-core = { workspace = true }
 crcbl-ecs = { workspace = true }
 glam = { workspace = true }
-
-# Tests only: the churn suite drives its operations from an index hash, which is
-# `crcbl-core`'s. The crate itself does not need it — it reaches the ECS, and the
-# ECS reaches core.
-[dev-dependencies]
-crcbl-core = { workspace = true }
 
 [lints]
 workspace = true

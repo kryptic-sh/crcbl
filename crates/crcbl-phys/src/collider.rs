@@ -9,6 +9,7 @@
 //! deterministic tick loop. Downcasting to `f32` happens only at the render
 //! boundary (camera-relative transforms).
 
+use crcbl_core::bounds::{max_lanes_d, min_lanes_d};
 use glam::DVec3;
 
 // ---------------------------------------------------------------------------
@@ -122,9 +123,18 @@ impl Aabb {
         if self.is_empty() {
             return other;
         }
+        // Not `DVec3::min`/`DVec3::max`: glam writes those as a bare `<` per
+        // lane, which is false against a `NaN` and so yields the *incoming*
+        // box, discarding the accumulator. `Bvh::build_rec` folds this over a
+        // range, so one `NaN` body position followed by one finite body left a
+        // parent node that came back finite and no longer contained its
+        // children — and overlap and ray queries silently miss those pairs.
+        // The `is_empty` guards above do not catch it either: `is_empty` is
+        // `min.x > max.x`, and `>` is false on a `NaN`, so a poisoned box reads
+        // as non-empty. See `crcbl_core::bounds`.
         Self {
-            min: self.min.min(other.min),
-            max: self.max.max(other.max),
+            min: min_lanes_d(self.min, other.min),
+            max: max_lanes_d(self.max, other.max),
         }
     }
 
@@ -374,6 +384,47 @@ mod tests {
     use super::*;
 
     // -- Aabb ----------------------------------------------------------------
+
+    /// **A `NaN` box does not eat the union it is folded into.**
+    ///
+    /// `Bvh::build_rec` folds `union` over a range of items, so this is the
+    /// shape that matters rather than the pairwise call. glam's `DVec3::min` is
+    /// a bare `<` per lane, false against a `NaN`, so it used to yield the
+    /// incoming box and throw the accumulator away — and then the *next* finite
+    /// box threw the `NaN` away, leaving a node that was finite and no longer
+    /// contained its children. A parent that does not contain its children is a
+    /// BVH that silently misses overlaps.
+    ///
+    /// The `is_empty` early-outs do not save it: `is_empty` is `min.x > max.x`,
+    /// and every comparison against a `NaN` is false, so a poisoned box reads as
+    /// non-empty and goes down the folding path.
+    #[test]
+    fn a_nan_box_does_not_shrink_the_union_it_is_folded_into() {
+        let low = Aabb::from_centre_half(DVec3::splat(-2.0), DVec3::splat(1.0));
+        let high = Aabb::from_centre_half(DVec3::splat(2.0), DVec3::splat(1.0));
+        let nan = Aabb {
+            min: DVec3::new(f64::NAN, 0.0, 0.0),
+            max: DVec3::new(f64::NAN, 0.0, 0.0),
+        };
+
+        assert!(
+            !nan.is_empty(),
+            "a NaN box reads as non-empty, which is why the early-outs above do not catch it"
+        );
+
+        // The damaging order: a finite box after the NaN restores finiteness
+        // while the extent gathered before it would be gone.
+        let folded = [low, high, nan, low]
+            .into_iter()
+            .fold(Aabb::EMPTY, Aabb::union);
+
+        assert!(
+            folded.min.x <= low.min.x && folded.max.x >= high.max.x,
+            "the union came back as {:?}..{:?}, which does not contain the boxes it was folded              from — a BVH node like this misses every pair in the part it dropped",
+            folded.min,
+            folded.max
+        );
+    }
 
     #[test]
     fn empty_aabb_is_empty() {

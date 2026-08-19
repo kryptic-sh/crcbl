@@ -47,7 +47,6 @@
 //! records and simplified levels. Pool upload, textures and mip generation are
 //! the second half of step 3 and belong to the crate that owns the pools.
 
-mod bounds;
 pub mod cluster_dag;
 pub mod gltf_check;
 #[cfg(test)]

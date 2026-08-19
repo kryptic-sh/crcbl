@@ -306,10 +306,19 @@ impl Bvh {
             2
         };
 
+        // `total_cmp`, not `partial_cmp().unwrap_or(Equal)`. The old form
+        // neither panicked nor broke `sort_by`'s contract, but a `NaN` centroid
+        // made the comparator non-transitive — `NaN` compares Equal to
+        // everything while the finite keys still order among themselves — and a
+        // non-transitive comparator turns this spatial median split into an
+        // arbitrary partition. `total_cmp` is a total order over every `f64`
+        // including `NaN`, so the split degrades to "the NaN sorts to one end"
+        // rather than to nothing. `crcbl_render::shadow` and
+        // `crcbl_scene::simplify` already choose it for the same reason.
         items[range_start..range_end].sort_by(|a, b| {
             let ka = a.0.centre().to_array()[axis];
             let kb = b.0.centre().to_array()[axis];
-            ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+            ka.total_cmp(&kb)
         });
 
         let mid = range_start + count / 2;

@@ -2,7 +2,7 @@
 //!
 //! # Why this exists rather than `Vec3::min`
 //!
-//! glam implements `Vec3::min`/`Vec3::max` (and the `DVec3` pair) as a bare
+//! glam implements `Vec3::min`/`Vec3::max` — and the `DVec3` pair — as a bare
 //! comparison per lane:
 //!
 //! ```text
@@ -12,33 +12,29 @@
 //! Every comparison against `NaN` is false, so the expression yields **`rhs`**
 //! whenever either side is unusable. In an accumulating fold — `acc =
 //! acc.min(point)`, which is what a bounding box is — one `NaN` replaces the
-//! whole accumulator, and the next finite point replaces the `NaN`. The extent
+//! whole accumulator and the next finite point replaces the `NaN`. The extent
 //! gathered before the bad value is silently discarded and the result comes back
 //! **finite**, so nothing downstream can tell.
 //!
 //! `f32::min`/`f32::max` return the other operand instead, which is the
 //! behaviour a bounding box wants: an unusable coordinate is skipped and every
 //! finite point stays enclosed. A lane with no finite value at all still comes
-//! out `NaN`, so wholly degenerate geometry is still visible as degenerate.
+//! out `NaN`, so wholly degenerate input is still visible as degenerate.
 //!
-//! # Why it matters here specifically
+//! # This is one piece of knowledge, and it was wrong in three places
 //!
-//! Nothing validates a `POSITION` accessor for finiteness. `gltf_check` never
-//! looks at a float's value, and [`crate::meshlet::build_meshlets`] lists a
-//! partial triangle and an out-of-range index as its preconditions. A downloaded
-//! document with one `NaN` vertex reaches the cluster builder directly, and a
-//! cluster sphere that does not contain its cluster culls geometry that is on
-//! screen — the direction `crcbl_render::cull` documents a cull must never err
-//! in.
-//!
-//! `crcbl_render::cull::Aabb::from_points` had the same defect and folds the
-//! same way now; it is a separate crate rather than a shared call because the
-//! two sit on opposite sides of the host/render split this workspace keeps.
+//! It lives here because three crates fold boxes and each had the defect
+//! independently: `crcbl_render::cull::Aabb::from_points`, which culled geometry
+//! that was on screen; `crcbl_scene::meshlet::cluster_bounds`, which put a
+//! cluster's sphere off its own geometry; and `crcbl_phys`'s BVH, whose parent
+//! nodes stopped containing their children. Three copies of a rule is three
+//! chances to fix two of them.
 
 use glam::{DVec3, Vec3};
 
 /// The lane-wise minimum, skipping a lane where either side is `NaN`.
-pub(crate) fn min_lanes(accumulator: Vec3, point: Vec3) -> Vec3 {
+#[must_use]
+pub fn min_lanes(accumulator: Vec3, point: Vec3) -> Vec3 {
     Vec3::new(
         accumulator.x.min(point.x),
         accumulator.y.min(point.y),
@@ -47,7 +43,8 @@ pub(crate) fn min_lanes(accumulator: Vec3, point: Vec3) -> Vec3 {
 }
 
 /// The lane-wise maximum, skipping a lane where either side is `NaN`.
-pub(crate) fn max_lanes(accumulator: Vec3, point: Vec3) -> Vec3 {
+#[must_use]
+pub fn max_lanes(accumulator: Vec3, point: Vec3) -> Vec3 {
     Vec3::new(
         accumulator.x.max(point.x),
         accumulator.y.max(point.y),
@@ -56,7 +53,8 @@ pub(crate) fn max_lanes(accumulator: Vec3, point: Vec3) -> Vec3 {
 }
 
 /// [`min_lanes`] at double width.
-pub(crate) fn min_lanes_d(accumulator: DVec3, point: DVec3) -> DVec3 {
+#[must_use]
+pub fn min_lanes_d(accumulator: DVec3, point: DVec3) -> DVec3 {
     DVec3::new(
         accumulator.x.min(point.x),
         accumulator.y.min(point.y),
@@ -65,7 +63,8 @@ pub(crate) fn min_lanes_d(accumulator: DVec3, point: DVec3) -> DVec3 {
 }
 
 /// [`max_lanes`] at double width.
-pub(crate) fn max_lanes_d(accumulator: DVec3, point: DVec3) -> DVec3 {
+#[must_use]
+pub fn max_lanes_d(accumulator: DVec3, point: DVec3) -> DVec3 {
     DVec3::new(
         accumulator.x.max(point.x),
         accumulator.y.max(point.y),
@@ -77,16 +76,17 @@ pub(crate) fn max_lanes_d(accumulator: DVec3, point: DVec3) -> DVec3 {
 mod tests {
     use super::*;
 
-    /// The property the whole module exists for, at every position a `NaN` can
-    /// take in a fold — because the defect it replaces was positional.
+    /// The property the module exists for, at every position a `NaN` can take.
     ///
-    /// Folding with glam's operators instead fails this: the `middle` case
-    /// returns a box that no longer contains `high`.
+    /// Every position, because the defect it replaces was positional: the bare
+    /// comparison yields the incoming point, so a `NaN` anywhere but last threw
+    /// away the extent gathered before it and still came back finite. Folding
+    /// with glam's operators instead fails the `middle` case.
     #[test]
     fn a_nan_is_skipped_from_any_position_in_a_fold() {
         let nan = Vec3::new(f32::NAN, 0.0, 0.0);
-        let low = Vec3::new(-1.0, -1.0, -1.0);
-        let high = Vec3::new(1.0, 1.0, 1.0);
+        let low = Vec3::splat(-1.0);
+        let high = Vec3::splat(1.0);
 
         for (label, points) in [
             ("leading", vec![nan, low, high]),
@@ -104,22 +104,20 @@ mod tests {
         }
     }
 
-    /// An infinity has a defined ordering, so it is data rather than a hole and
-    /// is kept — the distinction that makes an infinite corner still reportable.
+    /// An infinity orders normally, so it is data and is kept — the distinction
+    /// that leaves an infinite corner reportable while a `NaN` is skipped.
     #[test]
     fn an_infinity_is_kept_where_a_nan_is_skipped() {
-        let seed = Vec3::splat(f32::INFINITY);
         let infinite = Vec3::new(f32::INFINITY, 0.0, 0.0);
         assert_eq!(max_lanes(Vec3::ZERO, infinite).x, f32::INFINITY);
         assert_eq!(
-            min_lanes(seed, Vec3::new(f32::NAN, 2.0, 2.0)),
+            min_lanes(Vec3::splat(f32::INFINITY), Vec3::new(f32::NAN, 2.0, 2.0)),
             Vec3::new(f32::INFINITY, 2.0, 2.0),
             "the NaN lane keeps the seed, which is what leaves a wholly NaN lane detectable"
         );
     }
 
-    /// The double-width pair is the same rule, and is folded by
-    /// [`crate::cluster_dag`] over group spheres.
+    /// The double-width pair is the same rule, and is what `crcbl-phys` folds.
     #[test]
     fn the_double_width_pair_skips_a_nan_the_same_way() {
         let nan = DVec3::new(f64::NAN, 0.0, 0.0);

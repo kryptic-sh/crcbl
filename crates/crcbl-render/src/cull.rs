@@ -61,6 +61,7 @@
 //! planes over exactly as extracted, and this module's
 //! `the_infinite_far_plane_is_degenerate_and_rejects_nothing` is what says so.
 
+use crcbl_core::bounds::{max_lanes, min_lanes};
 use crcbl_shaders::mesh::{GpuInstance, GpuMesh};
 use crcbl_shaders::meshlet::ClusterBounds;
 use glam::{Mat3, Mat4, Vec3, Vec4};
@@ -119,25 +120,8 @@ impl Aabb {
             max: first,
         };
         for point in points {
-            // Per lane through `f32::min`/`f32::max` rather than `Vec3::min`/
-            // `Vec3::max`. glam writes those as a bare `if self.x < rhs.x`,
-            // which is false whenever either side is `NaN` and so yields the
-            // *incoming* point — discarding everything accumulated so far. One
-            // `NaN` vertex followed by one finite vertex therefore produced a
-            // finite box that did not contain the geometry, which culls what is
-            // on screen. `f32::min`/`f32::max` return the other operand instead,
-            // so an unusable coordinate is skipped and the box still contains
-            // every finite point.
-            bounds.min = Vec3::new(
-                bounds.min.x.min(point.x),
-                bounds.min.y.min(point.y),
-                bounds.min.z.min(point.z),
-            );
-            bounds.max = Vec3::new(
-                bounds.max.x.max(point.x),
-                bounds.max.y.max(point.y),
-                bounds.max.z.max(point.z),
-            );
+            bounds.min = min_lanes(bounds.min, point);
+            bounds.max = max_lanes(bounds.max, point);
         }
         Some(bounds)
     }

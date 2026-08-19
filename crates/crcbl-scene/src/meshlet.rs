@@ -88,8 +88,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crcbl_shaders::meshlet::MeshClusters;
 use glam::Vec3;
 
-use crate::bounds::{max_lanes, min_lanes};
 use crate::simplify::undirected;
+use crcbl_core::bounds::{max_lanes, min_lanes};
 
 pub use crcbl_shaders::meshlet::{
     ClusterBounds, MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES, MESHLET_STRIDE, Meshlet,

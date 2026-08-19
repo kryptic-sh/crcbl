@@ -122,9 +122,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{DVec3, Vec3};
 
-use crate::bounds::{max_lanes_d, min_lanes_d};
 use crate::meshlet::{MeshletBuild, MeshletError, build_meshlets};
 use crate::simplify::{SimplifyError, simplify_with_locked_edges, undirected};
+use crcbl_core::bounds::{max_lanes_d, min_lanes_d};
 
 /// How many clusters one group aims to hold.
 ///

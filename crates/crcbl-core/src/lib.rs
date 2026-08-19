@@ -32,6 +32,7 @@
 //!   for the dependency argument.
 
 pub mod alloc;
+pub mod bounds;
 pub mod handle;
 pub mod input;
 pub mod log;
