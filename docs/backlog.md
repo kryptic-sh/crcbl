@@ -3077,7 +3077,7 @@ every probe pipeline sets it false; `BinarySemaphore` — unprovable by
 construction and honestly declared so; and `SamplerAnisotropy`, whose `Yes` arm
 is **unreachable** because the limit is pinned to 1.
 
-### MEASURED — the same image descriptor is refused on vk and served on wgpu
+### DECISION NEEDED — the seam's two attachment usages, which three of five backends fold
 
 Found on 2026-08-20 by the impossible case in
 `a_created_image_is_one_the_device_can_serve`: ask for `Format::Rgba8Unorm` with
