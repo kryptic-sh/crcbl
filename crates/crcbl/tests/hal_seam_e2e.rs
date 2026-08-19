@@ -1969,6 +1969,118 @@ fn presenting_a_swapchain_without_an_acquire_is_refused() {
     headless.finish();
 }
 
+/// A pipeline layout asking for **every reported ceiling at once** is served or
+/// refused by name, and never quietly cut down.
+///
+/// # The claim this makes, which is not the one `Limits` used to imply
+///
+/// [`crcbl::hal::Limits`] bounds each quantity on its own, and three backends
+/// spend several of them out of one budget the seam has no field for: a D3D12
+/// root signature costs at most `D3D12_MAX_ROOT_COST` DWORDs for the whole
+/// thing, with every set's tables *and* the push-constant range coming out of
+/// it; Metal lowers the push-constant block to a buffer argument competing with
+/// the sets for one per-stage argument table; WebGPU caps binding counts per
+/// shader stage, which `Limits` has no field for at all. So
+/// `max_bind_groups` sets **and** `max_push_constant_size` bytes — the one
+/// request that takes every field as independently reachable — is legal to ask
+/// for and legal to refuse, and the seam's promise is about the *shape* of the
+/// answer rather than which answer arrives.
+///
+/// **Both arms are the assertion, and neither alone would be one.** Success
+/// alone is what Vulkan gives and says nothing about D3D12, where this layout
+/// genuinely does not fit; a refusal alone is what no backend here gives. What
+/// is forbidden is every third answer: another [`HalError`] variant, a panic out
+/// of the backend, or an `Ok` covering a layout the API underneath rejected —
+/// which is what [`Headless::finish`]'s
+/// [`take_error`](crcbl::hal::Device::take_error) check catches, since on wgpu
+/// and WebGPU that is where such an acceptance surfaces.
+///
+/// # Why the wide fixture, and why the numbers are printed
+///
+/// `max_push_constant_size` is `0` on a device without
+/// [`Features::PUSH_CONSTANTS`], and the narrow ask does not request them — so
+/// [`Headless::open`] would make the push-constant half of this vacuous on
+/// hardware that has them, while still passing. The ceilings actually reached
+/// are printed for the same reason: a run says which numbers it asked for
+/// instead of leaving that to be assumed from a green tick.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_pipeline_layout_at_every_reported_ceiling_is_served_or_refused_by_name() {
+    let headless = Headless::open_with_every_optional_feature();
+    let device = headless.device.as_ref();
+    let limits = device.caps().limits;
+
+    // One non-dynamic uniform buffer per set: the cheapest set that still costs
+    // something, which on D3D12 is one descriptor table and so one DWORD of the
+    // signature. Sets holding nothing would cost nothing there and the joint
+    // budget would never be reached.
+    let entries = [crcbl::hal::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: crcbl::hal::ShaderStages::COMPUTE,
+        kind: crcbl::hal::BindingKind::UniformBuffer { dynamic: false },
+        count: 1,
+        flags: crcbl::hal::BindingFlags::empty(),
+    }];
+    let set_layouts: Vec<crcbl::hal::BindGroupLayoutHandle> = (0..limits.max_bind_groups)
+        .map(|set| {
+            device
+                .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
+                    label: Some("ceiling set"),
+                    entries: &entries,
+                })
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "set {set} of the {} this device reports as max_bind_groups could not be \
+                         created at all — {error}. One uniform buffer is the smallest layout \
+                         there is, so this is not the joint-budget refusal under test.",
+                        limits.max_bind_groups
+                    )
+                })
+        })
+        .collect();
+
+    // `0` is what a device without push constants reports, and an empty range is
+    // not a range — `None` is what asking for the whole of that ceiling means.
+    let push_constants =
+        (limits.max_push_constant_size > 0).then_some(crcbl::hal::PushConstantRange {
+            stages: crcbl::hal::ShaderStages::COMPUTE,
+            offset: 0,
+            size: limits.max_push_constant_size,
+        });
+    eprintln!(
+        "crcbl hal seam e2e: a pipeline layout at max_bind_groups={} sets and \
+         max_push_constant_size={} bytes",
+        limits.max_bind_groups, limits.max_push_constant_size,
+    );
+
+    match device.create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
+        label: Some("every ceiling at once"),
+        bind_group_layouts: &set_layouts,
+        push_constants,
+    }) {
+        Ok(layout) => {
+            eprintln!(
+                "crcbl hal seam e2e:   served, so this backend's fields are jointly reachable"
+            );
+            device.destroy_pipeline_layout(layout);
+        }
+        Err(HalError::InvalidDescriptor(reason)) => {
+            eprintln!("crcbl hal seam e2e:   refused: {reason}");
+        }
+        Err(error) => panic!(
+            "a layout inside every reported limit was refused with {error}. A budget this seam \
+             has no field for is the caller's descriptor being too large for the backend, which \
+             is InvalidDescriptor with the arithmetic in it — Unsupported would say the device \
+             lacks a capability, and InvalidHandle would say these layouts are not live."
+        ),
+    }
+
+    for layout in set_layouts {
+        device.destroy_bind_group_layout(layout);
+    }
+    headless.finish();
+}
+
 // --- the timeline ----------------------------------------------------------
 
 /// How long the timeline test waits before calling the signal lost.

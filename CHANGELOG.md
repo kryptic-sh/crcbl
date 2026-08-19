@@ -2159,6 +2159,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-wgpu` accepted a pipeline layout with too many bind groups and handed
+  back a poisoned one.** It checked the push-constant range but had no
+  `max_bind_groups` guard, so an over-count reached `wgpu`, which files a
+  validation error and **still returns an object** — the caller got `Ok` and a
+  layout that could not be used. It now refuses with
+  `HalError::InvalidDescriptor` like every other backend.
+
 - **A `NaN` vertex moved a meshlet cluster's bounding sphere off its geometry.**
   `crcbl_scene::meshlet::cluster_bounds` folded the cluster's centre with glam's
   `Vec3::min`/`Vec3::max`, which discard the accumulator on a `NaN` — while the

@@ -787,6 +787,28 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
 
     /// Creates a pipeline layout.
     ///
+    /// # A layout inside every limit may still be refused
+    ///
+    /// [`Limits`](crate::Limits) bounds each quantity on its own, and D3D12 and
+    /// Metal each spend more than one of them out of a single budget the seam
+    /// has no field for — a root signature's DWORD cost and a per-stage buffer
+    /// argument table respectively, both described on
+    /// [`Limits`](crate::Limits). So
+    /// [`max_bind_groups`](crate::Limits::max_bind_groups) sets *and*
+    /// [`max_push_constant_size`](crate::Limits::max_push_constant_size) bytes
+    /// is a legal request that a device may refuse, and the caller's answer is
+    /// to attempt the creation and handle the refusal rather than to pre-check
+    /// arithmetic that is not the seam's.
+    ///
+    /// **That refusal happens here**, with `InvalidDescriptor` and both sides of
+    /// the arithmetic in the message, rather than at the pipeline that would
+    /// have been built on it or at the draw that would have bound nothing.
+    /// `crcbl-webgpu` is the one backend where it does not: its
+    /// implementation encodes onto a command stream and returns before a browser
+    /// has seen the layout, so it refuses nothing itself and every failure —
+    /// WebGPU's own per-stage binding caps included — arrives later through
+    /// [`take_error`](Device::take_error).
+    ///
     /// # Errors
     ///
     /// [`HalError::InvalidHandle`], or [`HalError::Unsupported`] if it declares
@@ -796,6 +818,13 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`PushConstantRange::stages`](crate::PushConstantRange::stages) names a
     /// mesh or task stage the device does not report, per
     /// [`ShaderStages::check_supported`](crate::ShaderStages::check_supported).
+    ///
+    /// [`HalError::InvalidDescriptor`] for more bind-group layouts than
+    /// [`Limits::max_bind_groups`](crate::Limits::max_bind_groups), for a range
+    /// ending past
+    /// [`Limits::max_push_constant_size`](crate::Limits::max_push_constant_size),
+    /// and for a layout inside both of those that the backend's own shared
+    /// budget cannot hold.
     fn create_pipeline_layout(
         &self,
         desc: &PipelineLayoutDesc<'_>,

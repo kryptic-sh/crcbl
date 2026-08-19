@@ -354,9 +354,52 @@ bitflags::bitflags! {
 
 /// Numeric device limits.
 ///
-/// Every field is a hard ceiling the backend guarantees; exceeding one is a
-/// [`HalError`](crate::HalError), not undefined behaviour. Fields are named
-/// after the thing they bound, not after any one API's spelling of it.
+/// Every field is a hard ceiling on **the one quantity it names**: a descriptor
+/// exceeding that quantity is a [`HalError`](crate::HalError), not undefined
+/// behaviour. Fields are named after the thing they bound, not after any one
+/// API's spelling of it.
+///
+/// # These are not a set of independent budgets
+///
+/// A descriptor respecting *every* field may still be refused. Three of the
+/// backends here spend several of these quantities out of one budget this struct
+/// has no field for, so the reading where each ceiling can be taken up to at the
+/// same time as every other holds on Vulkan and on nothing else:
+///
+/// * **D3D12** — one root signature costs at most `D3D12_MAX_ROOT_COST` DWORDs
+///   *in total*, and the sets and the push-constant range both spend out of it:
+///   a descriptor table costs one DWORD, a dynamic-offset binding two (it
+///   becomes a root descriptor carrying a 64-bit address), and a push-constant
+///   range one per 32-bit value. `crcbl-dx12` reports
+///   [`max_push_constant_size`](Self::max_push_constant_size) as that entire
+///   budget in bytes — reachable only by a layout with no sets at all — and
+///   reports [`max_bind_groups`](Self::max_bind_groups) at
+///   [`minimum`](Self::minimum)'s floor rather than as a count D3D12 has,
+///   because whether that many sets fit depends on what they hold.
+/// * **Metal** — a push-constant block is lowered to an ordinary buffer
+///   argument, so it competes with every set's buffer bindings for the same
+///   per-stage argument table. A layout whose sets fill that table has nowhere
+///   to put a block, whatever `max_push_constant_size` says.
+/// * **WebGPU** — binding counts are capped **per shader stage**, which this
+///   struct has no field for at all. `crcbl-webgpu` opens its device asking for
+///   the adapter's own ceilings rather than the specification's defaults, since
+///   the defaults are below what the engine's own layouts bind and there is no
+///   field here a caller could have asked with; a layout still over what the
+///   adapter offers is refused by the browser.
+///
+/// # What a caller does about it
+///
+/// **Attempt the creation and handle the refusal.** Nothing here predicts it —
+/// the cost model is each backend's own, and there is no field to pre-check
+/// against. A budget overrun, as opposed to a missing capability, arrives as
+/// [`HalError::InvalidDescriptor`](crate::HalError::InvalidDescriptor) from
+/// [`Device::create_pipeline_layout`](crate::Device::create_pipeline_layout)
+/// with the arithmetic in the message, so a caller holding a smaller fallback
+/// layout tries that one and a caller without one reports what it was told.
+/// `crcbl-webgpu` is the exception on *where* it arrives rather than on what it
+/// says: its `create_pipeline_layout` encodes onto a command stream and returns
+/// before a browser has seen the layout, so every refusal on that backend
+/// surfaces through [`Device::take_error`](crate::Device::take_error).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Limits {
     /// Largest width/height of a 2D image.
@@ -370,11 +413,20 @@ pub struct Limits {
     /// Largest bindable range of a uniform buffer, in bytes.
     pub max_uniform_buffer_range: u64,
     /// Bind groups (descriptor sets) bindable simultaneously.
+    ///
+    /// Not jointly satisfiable with
+    /// [`max_push_constant_size`](Self::max_push_constant_size) on every
+    /// backend — see the type's own docs.
     pub max_bind_groups: u32,
     /// Descriptors in one bindless array. `0` when
     /// [`Features::DESCRIPTOR_INDEXING`] is absent.
     pub max_bindless_descriptors: u32,
     /// Push-constant bytes. `0` when [`Features::PUSH_CONSTANTS`] is absent.
+    ///
+    /// Not jointly satisfiable with
+    /// [`max_bind_groups`](Self::max_bind_groups) on every backend — see the
+    /// type's own docs. On D3D12 it is the whole root signature's budget, and on
+    /// Metal a block needs an argument-table entry the sets have not taken.
     pub max_push_constant_size: u32,
     /// Colour attachments in one render pass.
     pub max_color_attachments: u32,

@@ -980,16 +980,40 @@ which is exactly the class `capability.rs` says every variant was derived from.
 Either add the capability row, or make "every sample" the only portable value —
 nothing in `crcbl-render` sets it to anything else.
 
-**3. `Limits::max_bind_groups` with `max_push_constant_size` — ceilings that
-cannot both be spent.** `Limits` documents each field as "a hard ceiling the
-backend guarantees". That is Vulkan's model. D3D12 leaves `max_bind_groups` at
-the floor of 4 because the number does not exist there — `D3D12_MAX_ROOT_COST`
-bounds the whole signature, and what a set spends depends on its contents —
-while reporting the _entire_ root signature as `max_push_constant_size`. A
-layout inside both reported limits can still be refused by `root::place`. Metal
-has its own shared budget in `argument::plan`, and WebGPU caps per-stage binding
-counts, which the seam has no field for at all. Vulkan is the only backend where
-the independence assumption holds.
+**3. `Limits::max_bind_groups` with `max_push_constant_size` — ADDRESSED, and it
+turned up a real bug.** The contract now says what is actually promised: each
+field bounds the one quantity it names, and a descriptor respecting every field
+may still be refused because three backends spend several of them from one
+budget — D3D12's root cost, Metal's argument table, WebGPU's per-stage caps. The
+numbers were deliberately **not** made conservative: a caller using no
+descriptor tables really can spend D3D12's whole root signature on push
+constants, and under-reporting would take that away to make a sentence true.
+
+`a_pipeline_layout_at_every_reported_ceiling_is_served_or_refused_by_name` in
+the seam suite now asks every backend for a layout at its own ceilings and
+accepts only success or `InvalidDescriptor` — never a panic, another variant, or
+a silent acceptance the API underneath rejected.
+
+**The bug it found:** `crcbl-wgpu` had no `max_bind_groups` guard at all, so an
+over-count reached `wgpu`, which files a validation error and still returns an
+object — `Ok` plus a poisoned layout. Fixed.
+
+**Still open, and it is a seam-shape call rather than a fix:** a caller cannot
+ask "will this layout fit" without building it, so a renderer wanting a fallback
+must construct both. A `Device::can_create_pipeline_layout` verb or a cost model
+would answer it; neither was built. Also note the new wgpu guard has no standing
+test of its own — the seam test only exercises its non-refusing side, and its
+reachability was shown by a temporary edit rather than by a check that stays.
+
+Original finding: `Limits` documents each field as "a hard ceiling the backend
+guarantees". That is Vulkan's model. D3D12 leaves `max_bind_groups` at the floor
+of 4 because the number does not exist there — `D3D12_MAX_ROOT_COST` bounds the
+whole signature, and what a set spends depends on its contents — while reporting
+the _entire_ root signature as `max_push_constant_size`. A layout inside both
+reported limits can still be refused by `root::place`. Metal has its own shared
+budget in `argument::plan`, and WebGPU caps per-stage binding counts, which the
+seam has no field for at all. Vulkan is the only backend where the independence
+assumption holds.
 
 **4. `Limits::max_bindless_descriptors` — FIXED.** D3D12 now reports
 `crcbl_dx12::binding::VIEW_DESCRIPTORS`, the heap it actually allocates, rather

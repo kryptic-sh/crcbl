@@ -1050,6 +1050,19 @@ impl Device for WgpuDevice {
         &self,
         desc: &PipelineLayoutDesc<'_>,
     ) -> Result<PipelineLayoutHandle, HalError> {
+        // Every backend that validates locally refuses an over-count by name —
+        // vk, dx12, mtl and the null device all check it here — and wgpu did
+        // not: the descriptor reached `wgpu::Device::create_pipeline_layout`,
+        // which reports validation failures to the error handler and still
+        // hands back an object, so the seam got `Ok` and a poisoned layout
+        // whose only symptom was a failure in whichever pipeline used it.
+        let ceiling = self.caps.limits.max_bind_groups as usize;
+        if desc.bind_group_layouts.len() > ceiling {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} bind groups exceeds max_bind_groups {ceiling}",
+                desc.bind_group_layouts.len()
+            )));
+        }
         // The seam requires this to fail loudly rather than have
         // `push_constants` drop the writes later.
         let immediate_size = match desc.push_constants {
