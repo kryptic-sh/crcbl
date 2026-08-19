@@ -124,8 +124,15 @@ runs:
           exit 0
         fi
         echo "install against the image's package lists failed; refreshing them"
-        if timeout 30 sudo apt-get update \
-          && timeout 90 sudo apt-get install -y --no-install-recommends $PACKAGES; then
+        # The refresh is best-effort and **must not gate the retry**. Chaining
+        # them with `&&` meant a slow `update` consumed its timeout and
+        # short-circuited, so the second install never ran at all — which is how
+        # the wayland job failed 30s after the refresh began, having attempted
+        # the packages exactly once. A stale index is a reason to refresh, not a
+        # reason to skip the attempt.
+        timeout 30 sudo apt-get update || \
+          echo "the refresh did not finish; retrying the install against the lists we have"
+        if timeout 90 sudo apt-get install -y --no-install-recommends $PACKAGES; then
           exit 0
         fi
         echo "::error::apt-get could not install '${PACKAGES}' — the runner's mirror is unreachable, or too slow to deliver them inside the 450s this step has, which is not a fault in this repository"

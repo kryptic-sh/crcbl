@@ -901,6 +901,18 @@ a large package needs the time and the retry is cheap —
 `Keep-Downloaded- Packages` means whatever arrived is still on disk and a second
 attempt resumes. Worst case 450s, inside the eight-minute cap.
 
+**A third correction, and the same lesson twice.** The retry was written as
+`update && install`, so when a slow `apt-get update` used its whole timeout the
+`&&` short-circuited and **the retry install never ran** — the wayland job
+failed thirty seconds after the refresh began, having attempted the packages
+exactly once. The refresh is best-effort now (`|| echo …`): a stale index is a
+reason to refresh, not a reason to skip the attempt.
+
+Both this and the 100s regression before it are the same mistake — treating a
+_slow_ mirror as if it were an _absent_ one. Timeouts here should be generous on
+the thing that transfers bytes and never allowed to eat the attempt that
+follows.
+
 **Done, because the rate stayed high — five jobs in one session.** The `.deb`
 files are cached and tried **first**, with `--no-download`, which forbids the
 network outright: a job whose packages were fetched on an earlier run installs
