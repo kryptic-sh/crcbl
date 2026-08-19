@@ -799,6 +799,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`ForwardRenderer::with_scene` refuses a cluster array that would read
+  outside itself**, through a new `MeshClusters::check` in `crcbl-shaders`. A
+  cluster's two runs must lie inside the arrays they index, its vertex run must
+  name only vertices the mesh actually has, its corners must name only entries
+  of its own run, and it must be inside `MAX_CLUSTER_VERTICES` and
+  `MAX_CLUSTER_TRIANGLES`. The new `ClustersInvalid` names the first cluster
+  that is wrong and, through `ClusterFault`, which read it is and the numbers
+  that make it one.
+
+  **This was found by a red-check that came back green.** `apps/quarry`'s
+  residency test claimed to catch "a cluster naming a vertex past the end";
+  setting one to `u32::MAX` and re-running produced a pass. Nothing below the
+  seam reports it either — the mesh stage indexes these arrays unchecked,
+  because it cannot check them — so the failure mode was a wrong frame or a lost
+  device with nothing anywhere saying why. The runs are widened to `u64` before
+  they are added, so a run that wraps `uint` is refused rather than passing as a
+  short one.
+
 - **`apps/quarry` exists, and generates its scene.**
   `docs/plan/sample/14-quarry.md`'s S4C sample — the geometry acceptance fixture
   — begins with its content: `face::quarry_face` builds a dense heightfield
@@ -826,7 +844,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   Nothing renders yet. The binary opens no device and reports the counts and the
   reservation, because those halves of the sample's "counts per path" exit
-  criterion need no GPU and the draw counts arrive with the renderer.
+  criterion need no GPU and the draw counts arrive with the renderer. What is
+  asserted is residency: `tests/residency.rs` hands the generated face to a real
+  `ForwardRenderer` and adds an instance, on `Null` by default and on whatever
+  `CRCBL_GPU` names otherwise, which is where the pools, the clusters and the
+  vertex stride are all judged by something that would reject them.
 
 - **`apps/viewer` reloads the document when it is written again.**
   `docs/plan/sample/05-viewer.md` milestone 3's artist loop: re-export from

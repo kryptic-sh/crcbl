@@ -485,6 +485,201 @@ pub struct MeshClusters {
     pub corners: Vec<u8>,
 }
 
+/// What is wrong with one cluster, and the numbers that say so.
+///
+/// Every variant is a read the mesh stage would make outside an array. They are
+/// separate because the numbers differ, not because a caller branches on them:
+/// [`ClustersInvalid`] is a diagnostic, and the only thing anyone does with one
+/// is print it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClusterFault {
+    /// The cluster's run in [`MeshClusters::vertices`] runs off the end.
+    VertexRun {
+        /// [`Meshlet::vertex_offset`].
+        offset: u32,
+        /// [`Meshlet::vertex_count`].
+        count: u32,
+        /// How long the array actually is.
+        len: usize,
+    },
+    /// The cluster's run in [`MeshClusters::corners`] runs off the end. Its
+    /// length is three times [`Meshlet::triangle_count`].
+    CornerRun {
+        /// [`Meshlet::triangle_offset`], counted in corners.
+        offset: u32,
+        /// Corners, so three per triangle.
+        count: u32,
+        /// How long the array actually is.
+        len: usize,
+    },
+    /// The cluster holds more vertices than [`MAX_CLUSTER_VERTICES`], which is
+    /// what the mesh stage's per-cluster arrays are sized for.
+    TooManyVertices {
+        /// [`Meshlet::vertex_count`].
+        count: u32,
+    },
+    /// The cluster holds more triangles than [`MAX_CLUSTER_TRIANGLES`], on
+    /// [`TooManyVertices`](Self::TooManyVertices)' terms.
+    TooManyTriangles {
+        /// [`Meshlet::triangle_count`].
+        count: u32,
+    },
+    /// An entry of the cluster's vertex run names a vertex the mesh has not
+    /// got. **Mesh-relative**, so it is compared against the mesh's own vertex
+    /// count and not against the pool's.
+    VertexIndex {
+        /// Which entry of the cluster's own run, from zero.
+        at: u32,
+        /// What it names.
+        index: u32,
+        /// How many vertices the mesh has.
+        vertices: usize,
+    },
+    /// A corner names an entry past the end of its own cluster's vertex run.
+    Corner {
+        /// Which corner of the cluster's own run, from zero.
+        at: u32,
+        /// What it names.
+        corner: u8,
+        /// [`Meshlet::vertex_count`], which is what bounds it.
+        count: u32,
+    },
+}
+
+impl std::fmt::Display for ClusterFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::VertexRun { offset, count, len } => write!(
+                f,
+                "takes vertices {offset}..{} of an array of {len}",
+                u64::from(offset) + u64::from(count)
+            ),
+            Self::CornerRun { offset, count, len } => write!(
+                f,
+                "takes corners {offset}..{} of an array of {len}",
+                u64::from(offset) + u64::from(count)
+            ),
+            Self::TooManyVertices { count } => write!(
+                f,
+                "holds {count} vertices, and a cluster holds at most {MAX_CLUSTER_VERTICES}"
+            ),
+            Self::TooManyTriangles { count } => write!(
+                f,
+                "holds {count} triangles, and a cluster holds at most {MAX_CLUSTER_TRIANGLES}"
+            ),
+            Self::VertexIndex {
+                at,
+                index,
+                vertices,
+            } => write!(
+                f,
+                "names vertex {index} at entry {at} of its run, and the mesh has {vertices}"
+            ),
+            Self::Corner { at, corner, count } => write!(
+                f,
+                "has corner {at} naming entry {corner} of a run of {count}"
+            ),
+        }
+    }
+}
+
+/// A cluster array that would read outside itself, and which cluster does it.
+///
+/// Returned by [`MeshClusters::check`]; see there for why this is worth a type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClustersInvalid {
+    /// Which cluster, indexing [`MeshClusters::clusters`].
+    pub cluster: usize,
+    /// What is wrong with it.
+    pub fault: ClusterFault,
+}
+
+impl std::fmt::Display for ClustersInvalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cluster {} {}", self.cluster, self.fault)
+    }
+}
+
+impl std::error::Error for ClustersInvalid {}
+
+impl MeshClusters {
+    /// **Every read a mesh stage makes from these arrays lands inside them.**
+    ///
+    /// The mesh shader indexes `vertices` by a cluster's run, `corners` by the
+    /// same, and the mesh's vertex buffer by whatever `vertices` holds — none of
+    /// it bounds-checked, because none of it can be. A cluster naming a vertex
+    /// the mesh has not got is an out-of-bounds device read that no layer below
+    /// reports: the draw succeeds, the frame is wrong or the device is lost, and
+    /// nothing says which. So it is refused on the host, where the arrays are
+    /// still `Vec`s and the answer is a sentence.
+    ///
+    /// `vertices` is the mesh's **own** vertex count, mesh-relative like the
+    /// index buffer — the pool's base vertex is added by whoever reads it and is
+    /// not this type's business.
+    ///
+    /// # Errors
+    ///
+    /// [`ClustersInvalid`] naming the first cluster that is wrong and what is
+    /// wrong with it. First rather than all of them because the arrays are
+    /// generated: one fault is a builder bug, and the second is the same bug.
+    pub fn check(&self, vertices: usize) -> Result<(), ClustersInvalid> {
+        for (cluster, meshlet) in self.clusters.iter().enumerate() {
+            let fault = |fault| Err(ClustersInvalid { cluster, fault });
+            if meshlet.vertex_count as usize > MAX_CLUSTER_VERTICES {
+                return fault(ClusterFault::TooManyVertices {
+                    count: meshlet.vertex_count,
+                });
+            }
+            if meshlet.triangle_count as usize > MAX_CLUSTER_TRIANGLES {
+                return fault(ClusterFault::TooManyTriangles {
+                    count: meshlet.triangle_count,
+                });
+            }
+            // Widened before adding: both are what the device reads as `uint`,
+            // and a run that wraps `u32` would otherwise pass as a short one.
+            let vertex_end = u64::from(meshlet.vertex_offset) + u64::from(meshlet.vertex_count);
+            if vertex_end > self.vertices.len() as u64 {
+                return fault(ClusterFault::VertexRun {
+                    offset: meshlet.vertex_offset,
+                    count: meshlet.vertex_count,
+                    len: self.vertices.len(),
+                });
+            }
+            let corners = meshlet.triangle_count * 3;
+            let corner_end = u64::from(meshlet.triangle_offset) + u64::from(corners);
+            if corner_end > self.corners.len() as u64 {
+                return fault(ClusterFault::CornerRun {
+                    offset: meshlet.triangle_offset,
+                    count: corners,
+                    len: self.corners.len(),
+                });
+            }
+
+            let run = meshlet.vertex_offset as usize..vertex_end as usize;
+            for (at, &index) in self.vertices[run].iter().enumerate() {
+                if index as usize >= vertices {
+                    return fault(ClusterFault::VertexIndex {
+                        at: at as u32,
+                        index,
+                        vertices,
+                    });
+                }
+            }
+            let run = meshlet.triangle_offset as usize..corner_end as usize;
+            for (at, &corner) in self.corners[run].iter().enumerate() {
+                if u32::from(corner) >= meshlet.vertex_count {
+                    return fault(ClusterFault::Corner {
+                        at: at as u32,
+                        corner,
+                        count: meshlet.vertex_count,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The cube's clusters — **one**, because 24 vertices and 12 triangles are
 /// inside both bounds with room to spare.
 ///
@@ -944,6 +1139,188 @@ mod tests {
             // D3D12's mesh-shader output cap, and the `maxMeshOutputPrimitives`
             // every driver here reports.
             assert!(MAX_CLUSTER_TRIANGLES <= 126);
+        }
+    }
+
+    mod clusters_check {
+        use super::super::*;
+
+        /// One legal cluster over `vertices` mesh vertices and `triangles`
+        /// triangles, with both runs starting at zero. Every test below breaks
+        /// exactly one thing about this.
+        fn sound(vertices: u32, triangles: u32) -> MeshClusters {
+            MeshClusters {
+                clusters: vec![Meshlet {
+                    vertex_offset: 0,
+                    vertex_count: vertices,
+                    triangle_offset: 0,
+                    triangle_count: triangles,
+                    bounds: ClusterBounds::default(),
+                }],
+                vertices: (0..vertices).collect(),
+                corners: (0..triangles * 3).map(|c| (c % vertices) as u8).collect(),
+            }
+        }
+
+        /// **The builder's own output passes.** Without this the whole check
+        /// could be rejecting everything and the tests below would not notice —
+        /// each of them only asserts that something is refused.
+        #[test]
+        fn the_cooked_clusters_are_sound() {
+            for (what, clusters, vertices) in [
+                ("cube", cube_clusters(), crate::mesh::CUBE_VERTEX_COUNT),
+                (
+                    "pyramid",
+                    pyramid_clusters(),
+                    crate::mesh::PYRAMID_VERTEX_COUNT,
+                ),
+            ] {
+                assert_eq!(clusters.check(vertices), Ok(()), "{what}");
+            }
+        }
+
+        #[test]
+        fn a_sound_cluster_passes() {
+            assert_eq!(sound(8, 4).check(8), Ok(()));
+        }
+
+        /// A mesh-relative index past the mesh's own vertices — the fault that
+        /// prompted this check, found by a red-check that came back green.
+        #[test]
+        fn a_run_naming_a_vertex_the_mesh_has_not_got_is_refused() {
+            let mut clusters = sound(8, 4);
+            clusters.vertices[3] = 8;
+            assert_eq!(
+                clusters.check(8),
+                Err(ClustersInvalid {
+                    cluster: 0,
+                    fault: ClusterFault::VertexIndex {
+                        at: 3,
+                        index: 8,
+                        vertices: 8
+                    }
+                })
+            );
+        }
+
+        #[test]
+        fn a_corner_past_its_own_run_is_refused() {
+            let mut clusters = sound(8, 4);
+            clusters.corners[5] = 8;
+            assert_eq!(
+                clusters.check(8),
+                Err(ClustersInvalid {
+                    cluster: 0,
+                    fault: ClusterFault::Corner {
+                        at: 5,
+                        corner: 8,
+                        count: 8
+                    }
+                })
+            );
+        }
+
+        #[test]
+        fn a_vertex_run_off_the_end_is_refused() {
+            let mut clusters = sound(8, 4);
+            clusters.clusters[0].vertex_count = 9;
+            assert_eq!(
+                clusters.check(8),
+                Err(ClustersInvalid {
+                    cluster: 0,
+                    fault: ClusterFault::VertexRun {
+                        offset: 0,
+                        count: 9,
+                        len: 8
+                    }
+                })
+            );
+        }
+
+        #[test]
+        fn a_corner_run_off_the_end_is_refused() {
+            let mut clusters = sound(8, 4);
+            clusters.clusters[0].triangle_offset = 1;
+            assert_eq!(
+                clusters.check(8),
+                Err(ClustersInvalid {
+                    cluster: 0,
+                    fault: ClusterFault::CornerRun {
+                        offset: 1,
+                        count: 12,
+                        len: 12
+                    }
+                })
+            );
+        }
+
+        /// A run that wraps `u32` rather than running off the end. The device
+        /// reads both as `uint`, so an addition done in `u32` would wrap to a
+        /// small number and pass.
+        #[test]
+        fn a_run_that_wraps_is_refused() {
+            let mut clusters = sound(8, 4);
+            clusters.clusters[0].vertex_offset = u32::MAX - 3;
+            clusters.clusters[0].vertex_count = 8;
+            assert_eq!(
+                clusters.check(8),
+                Err(ClustersInvalid {
+                    cluster: 0,
+                    fault: ClusterFault::VertexRun {
+                        offset: u32::MAX - 3,
+                        count: 8,
+                        len: 8
+                    }
+                })
+            );
+        }
+
+        /// The bound the mesh stage's per-cluster arrays are sized by, so
+        /// exceeding it is an out-of-bounds write inside the shader rather than
+        /// a bad read out of these arrays.
+        #[test]
+        fn a_cluster_over_the_shader_bounds_is_refused() {
+            let mut clusters = sound(8, 4);
+            clusters.clusters[0].vertex_count = MAX_CLUSTER_VERTICES as u32 + 1;
+            assert_eq!(
+                clusters.check(8),
+                Err(ClustersInvalid {
+                    cluster: 0,
+                    fault: ClusterFault::TooManyVertices {
+                        count: MAX_CLUSTER_VERTICES as u32 + 1
+                    }
+                })
+            );
+            let mut clusters = sound(8, 4);
+            clusters.clusters[0].triangle_count = MAX_CLUSTER_TRIANGLES as u32 + 1;
+            assert_eq!(
+                clusters.check(8),
+                Err(ClustersInvalid {
+                    cluster: 0,
+                    fault: ClusterFault::TooManyTriangles {
+                        count: MAX_CLUSTER_TRIANGLES as u32 + 1
+                    }
+                })
+            );
+        }
+
+        /// The cluster index is the caller's only way to find the bad one, so a
+        /// fault in the second cluster must not be reported as the first's.
+        #[test]
+        fn the_reported_cluster_is_the_one_that_is_wrong() {
+            let mut clusters = sound(8, 4);
+            let second = clusters.clusters[0];
+            clusters.clusters.push(Meshlet {
+                vertex_offset: 8,
+                ..second
+            });
+            clusters.vertices.extend(0..8);
+            clusters.vertices[11] = 8;
+            assert_eq!(
+                clusters.check(8).unwrap_err().cluster,
+                1,
+                "entry 3 of cluster 1's run is entry 11 of the array"
+            );
         }
     }
 }

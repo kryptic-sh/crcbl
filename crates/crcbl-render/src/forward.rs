@@ -146,6 +146,7 @@ use crcbl_hal::{
     SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
     StoreOp, Viewport, check_portable_storage_buffers,
 };
+use crcbl_shaders::meshlet::MeshClusters;
 use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao, ssr, tonemap};
 use glam::{Mat4, Quat, Vec3};
 
@@ -1717,8 +1718,9 @@ impl ForwardRenderer {
     /// resident as written: a page layer that is not the extent's worth of RGBA8, a page
     /// whose layer 0 is not opaque white, a material row naming a layer the page
     /// has not got, a DAG carrying a vertex array for anything but each of its
-    /// levels, or more vertices, indices, mesh table entries or material rows
-    /// than [`SceneDesc::capacities`] reserves — that last naming the pool, the
+    /// levels, a cluster array with a read outside itself in it (see
+    /// [`MeshClusters::check`]), or more vertices, indices, mesh table entries or
+    /// material rows than [`SceneDesc::capacities`] reserves — that last naming the pool, the
     /// capacity and what the description needs, because the answer to it is to
     /// raise the number. Every one of those is settled **before the first device
     /// object exists**, so a refusal leaks nothing.
@@ -1807,6 +1809,32 @@ impl ForwardRenderer {
                         desc.label,
                         bytes.len(),
                         level.positions.len()
+                    ));
+                }
+            }
+        }
+
+        // **Every read the mesh stage makes from a cluster array lands inside
+        // it.** Checked by the type that owns the arrays, on `PageDesc::check`'s
+        // terms exactly — see `MeshClusters::check`, which is where the reason
+        // it cannot be checked below the seam is argued. Both variants carry
+        // the same type beside a vertex count, so both are checked the same way.
+        for (index, desc) in scene.meshes.iter().enumerate() {
+            let levels: Vec<(usize, &MeshClusters)> = match &desc.geometry {
+                Geometry::Flat {
+                    vertices, clusters, ..
+                } => vec![(vertices.len() / mesh::VERTEX_STRIDE, clusters)],
+                Geometry::Dag { dag, .. } => dag
+                    .levels
+                    .iter()
+                    .map(|level| (level.positions.len(), &level.clusters))
+                    .collect(),
+            };
+            for (depth, (vertices, clusters)) in levels.into_iter().enumerate() {
+                if let Err(fault) = clusters.check(vertices) {
+                    return refuse(format!(
+                        "mesh {index} ({}) level {depth} {fault}",
+                        desc.label
                     ));
                 }
             }
