@@ -3065,6 +3065,30 @@ whether a texture can be a depth attachment is decided by its **format**, not by
 a usage bit. So the caller's distinction is lost in the mapping, and what comes
 back is a perfectly good colour render target that cannot be a depth attachment.
 
+**This is inherent to WebGPU, not a `crcbl-wgpu` quirk, so it survives the
+deletion.** `gpu-replay.js` folds the same two flags for the same reason and
+says so at length: "`COLOR_ATTACHMENT` and `DEPTH_STENCIL_ATTACHMENT` are both
+`RENDER_ATTACHMENT`: WebGPU has one attachment usage and reads _which kind_ off
+the format". So `crcbl-webgpu` — the backend that outlives `crcbl-wgpu` —
+behaves the same way, and this divergence is permanent unless the seam closes
+it.
+
+**That comment argues the fold is lossless, and it is right about the texture
+and incomplete about the descriptor.** Its claim — "the seam's two flags carry
+the same information twice over … so nothing is dropped by folding them" — holds
+for what gets _created_: the format decides the kind, and there is no way to end
+up with a texture that is the wrong one. What the fold does drop is the
+**contradiction**. A caller who writes `Rgba8Unorm` with
+`DEPTH_STENCIL_ATTACHMENT` has said two incompatible things, and folding
+discards the disagreement instead of reporting it. Vulkan catches that through
+the format query; WebGPU structurally cannot, because there is nothing left to
+disagree with.
+
+**Which sharpens the fix rather than changing it.** Only the seam can catch this
+one, on any browser backend, ever — so if it is worth catching, it is worth
+catching there. That is a stronger argument for a seam-level check than the
+original measurement gave, and it applies after `crcbl-wgpu` is gone.
+
 **The parity mechanism cannot see this**, and that is the interesting part. It
 is not a capability — no `Capability` names it, both backends would answer the
 same for every row — it is a _validation_ difference on an identical descriptor.
