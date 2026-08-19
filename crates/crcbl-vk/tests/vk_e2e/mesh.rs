@@ -1855,6 +1855,7 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
         );
     }
 
+    pool.destroy(headless.device.as_ref());
     renderer.destroy(headless.device.as_ref());
     headless.finish();
 }
@@ -2090,6 +2091,7 @@ fn the_shadow_cascades_select_coarser_than_the_camera() {
     });
     eprintln!("vk e2e: shadow bias — shadow cut has {interfaces} interface edge(s)");
 
+    pool.destroy(headless.device.as_ref());
     renderer.destroy(headless.device.as_ref());
     headless.finish();
 }

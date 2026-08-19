@@ -3,55 +3,6 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### Two vk e2e mesh tests leak 7 images and 7 image views each
-
-Found on 2026-08-19, the moment `crcbl-vk`'s teardown warning started naming
-kinds instead of counting. `crcbl-vk::vk_e2e` is 48/48 green and prints:
-
-```text
-mesh::the_shadow_cascades_select_coarser_than_the_camera
-  14 object(s) still alive at device teardown (7 image, 7 image view),
-  and 314 still parked in the deletion queue
-mesh::the_gpu_descends_the_dag_to_the_cut_the_host_rule_says
-  14 object(s) still alive at device teardown (7 image, 7 image view),
-  and 320 still parked in the deletion queue
-```
-
-**The formats identify them**, now that the warning prints those too:
-
-```text
-1 image D32Float, 2 image R8Unorm, 3 image Rgba16Float, 1 image Rgba8Unorm
-(and one image view of each)
-```
-
-That is the shape of a `ForwardRenderer` target set — a depth buffer, an HDR
-scene target with SSR and its blur, SSAO and its blur, and an LDR output — not a
-stray allocation.
-
-**What has been ruled out.** Both tests call `renderer.destroy` and
-`headless.finish`, so it is not a missing teardown in the test. It is not
-`Headless::open_for_mesh_with`: eight tests in `mesh.rs` use it and only these
-two leak. `ForwardRenderer::destroy` does call `self.ssr.destroy` and
-`self.ssao.destroy`, which should cover four of the seven. And it is **not the
-harness's offscreen ring**, which opens `Rgba8UnormSrgb` while the leaked one is
-`Rgba8Unorm`.
-
-**The contradiction to resolve first.** If `ForwardRenderer` leaked its targets,
-every one of the 48 vk e2e tests that builds one would leak, and 46 do not. So
-either these two reach a target set the others never allocate, or something
-about their teardown order differs. Believing any fix before that is explained
-would be guessing.
-
-**The cheapest next step is object labels.** `ImageDesc` carries a `label` and
-`crcbl-vk` drops it; storing it in `ImageEntry` would let the warning name the
-objects rather than their format. Per-image allocation is the only cost, and
-`cfg(debug_assertions)` removes even that from release builds — tests run in
-debug, which is where the warning is read.
-
-The seam suite's own two leaks (a command buffer and a pipeline layout) were
-found the same way and are fixed; `hal_seam_e2e` and `render_e2e` are both clean
-now.
-
 ### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
 
 Checked on 2026-08-19, because the obvious assumption is wrong. `apps/quarry`
