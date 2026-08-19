@@ -1,4 +1,5 @@
-//! The generated face on a device: made resident, then drawn.
+//! The fixture every quarry device test opens with, and the two readbacks
+//! they measure a frame by.
 //!
 //! `docs/plan/sample/14-quarry.md`'s milestone 1 is "meshlet bake +
 //! `MeshShader` path rendering the scene". Both halves are asserted here
@@ -42,19 +43,19 @@ use crcbl_quarry::{dag, face, scene};
 /// Quads per side. Smaller than the binary's 256: these assert that the scene
 /// is *acceptable* and that it draws, neither of which a face four times the
 /// area exercises more of, while it would cost every job the generation time.
-const CELLS: u32 = 64;
+pub(crate) const CELLS: u32 = 64;
 
 /// The offscreen ring's size, and `crates/crcbl/tests/gpu_scene`'s for its
 /// stated reason — a smaller frame gives a structural comparison too few 8×8
 /// blocks to average over, and 256 pixels of RGBA8 satisfy the 256-byte copy
 /// pitch D3D12 and WebGPU enforce without padding.
-const EXTENT: (u32, u32) = (256, 192);
+pub(crate) const EXTENT: (u32, u32) = (256, 192);
 
 /// The pixel budget every frame here renders at unless it is the subject.
 ///
 /// `ForwardRenderer`'s own default, restated so the frames that are *not* about
 /// selection say which budget they took rather than inheriting one silently.
-const DEFAULT_BUDGET: f32 = 1.0;
+pub(crate) const DEFAULT_BUDGET: f32 = 1.0;
 
 /// The budget the mixing assertion is read at.
 ///
@@ -64,17 +65,17 @@ const DEFAULT_BUDGET: f32 = 1.0;
 /// carry a substantial share and the base is gone entirely, which is the point
 /// furthest from either extreme — and the extremes are asserted below, which is
 /// what shows this assertion can fail.
-const MIXING_BUDGET: f32 = 16.0;
+pub(crate) const MIXING_BUDGET: f32 = 16.0;
 
 /// The share of a cut one level holds before it counts as dominating it.
 ///
 /// Four fifths. The two cuts this separates are `[100, 2, …]` at one pixel —
 /// 98% — and `[0, 30, 18, …]` at [`MIXING_BUDGET`], which is 63%.
-const DOMINATED: f32 = 0.8;
+pub(crate) const DOMINATED: f32 = 0.8;
 
 /// A budget no group's projected error can exceed from this camera, so the
 /// descent stops at the top of the DAG.
-const COARSE_BUDGET: f32 = 4096.0;
+pub(crate) const COARSE_BUDGET: f32 = 4096.0;
 
 /// How long the frame readback polls before it declares the copy lost. The
 /// engine's own suites use the same bound.
@@ -99,15 +100,15 @@ fn backend() -> GpuBackend {
 }
 
 /// An offscreen context with the quarry face resident in a renderer.
-struct Quarry {
-    ctx: GpuContext,
-    renderer: ForwardRenderer,
-    triangles: usize,
+pub(crate) struct Quarry {
+    pub(crate) ctx: GpuContext,
+    pub(crate) renderer: ForwardRenderer,
+    pub(crate) triangles: usize,
 }
 
 /// Which description of the same face to make resident.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Levels {
+pub(crate) enum Levels {
     /// One flat mesh, drawn at full detail from every camera —
     /// [`crcbl_quarry::scene`].
     Flat,
@@ -117,7 +118,7 @@ enum Levels {
 
 impl Quarry {
     /// Opens the ring, generates the face and makes it resident.
-    fn open(levels: Levels, budget: f32) -> Self {
+    pub(crate) fn open(levels: Levels, budget: f32) -> Self {
         crcbl::core::log::init_logging();
         let ctx = GpuContext::open_offscreen(
             EXTENT,
@@ -168,55 +169,14 @@ impl Quarry {
 
     /// Unwinds in reverse order of creation. Nothing here has a `Drop`, and a
     /// leaked pipeline is what `crcbl-vk`'s teardown warning reports.
-    fn finish(mut self) {
+    pub(crate) fn finish(mut self) {
         self.ctx.drain().expect("the queue drains");
         self.renderer.destroy(self.ctx.device());
         self.ctx.destroy().expect("teardown is clean");
     }
 }
-
-/// **The quarry face is a scene a `ForwardRenderer` accepts.**
-///
-/// The premise the frame below and every later milestone stand on. `with_scene`
-/// is where a pool too small, a cluster reading outside its own arrays or a
-/// vertex stride disagreeing with the shader is refused — so this failing means
-/// the *content* is wrong rather than the drawing, which is why it is worth
-/// asserting apart from a picture.
-#[test]
-fn the_face_is_a_scene_the_renderer_makes_resident() {
-    let quarry = Quarry::open(Levels::Flat, DEFAULT_BUDGET);
-    assert!(
-        quarry.triangles > 0,
-        "a face with no triangles would make every assertion here vacuous"
-    );
-    quarry.finish();
-}
-
-/// **A frame of the quarry face records, and on a device it draws.**
-///
-/// The milestone-1 proof. The frame goes through the real
-/// [`ForwardRenderer::add_passes`] and the real graph, so what is exercised is
-/// the path the sample will ship on rather than a rehearsal of it.
-#[test]
-fn the_face_draws() {
-    draw_and_measure(Levels::Flat, DEFAULT_BUDGET);
-}
-
-/// **The levelled face draws, and draws the same face.**
-///
-/// Milestone 2's first half. `Geometry::Dag` is a different residency path —
-/// one mesh-table row per level, a vertex array per level, and cluster runs the
-/// selection pass reads — so a hierarchy that made a picture on the flat path
-/// says nothing about this one. Held to the same coverage as the flat mesh
-/// because it is the same wall: a hierarchy that drew a *different* amount of
-/// the frame would be selecting wrongly rather than selecting.
-#[test]
-fn the_levelled_face_draws() {
-    draw_and_measure(Levels::Dag, DEFAULT_BUDGET);
-}
-
 /// Renders one frame of `levels` and asserts what came out.
-fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>> {
+pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>> {
     let mut quarry = Quarry::open(levels, budget);
     let (width, height) = EXTENT;
     let bytes = u64::from(width) * u64::from(height) * 4;
@@ -419,7 +379,7 @@ fn readback(
 ///
 /// Answers with how many clusters each level contributed, finest first, or
 /// `None` where the device has no amplification stage to record a cut.
-fn read_the_cut(quarry: &Quarry) -> Option<Vec<usize>> {
+pub(crate) fn read_the_cut(quarry: &Quarry) -> Option<Vec<usize>> {
     let selection = match quarry.renderer.cluster_selection(quarry.renderer.frame()) {
         Some(selection) => selection,
         None => {
@@ -523,56 +483,4 @@ fn read_the_cut(quarry: &Quarry) -> Option<Vec<usize>> {
          this is reading the wrong buffer rather than an empty cut"
     );
     Some(drawn)
-}
-
-/// **The face is drawn from more than one level at once.**
-///
-/// Milestone 2's point, and the thing a golden cannot show: a frame whose every
-/// cluster came from one level is a plausible picture. The face recedes 180
-/// metres, so its near clusters and its far clusters sit at screen-space errors
-/// an order of magnitude apart and no single level serves both.
-///
-/// The two extremes are asserted beside it, because a mixing assertion that
-/// held at every budget would be measuring nothing: at one pixel the base
-/// dominates, and at [`COARSE_BUDGET`] nothing of the base is drawn at all.
-#[test]
-fn the_cut_mixes_levels_across_the_receding_face() {
-    let Some(mixed) = draw_and_measure(Levels::Dag, MIXING_BUDGET) else {
-        eprintln!(
-            "quarry: this device records no per-cluster cut, so there is nothing to mix — see \
-             read_the_cut"
-        );
-        return;
-    };
-    // **A share, not a count of non-empty levels.** At one pixel the cut is
-    // `[100, 2, …]`, which has two levels in it and is a uniform cut with a
-    // rounding error on the end — so "more than one level drew" is a bar the
-    // thing this test exists to distinguish already clears. What separates them
-    // is whether any single level *dominates*.
-    let share = |cut: &[usize]| {
-        let total: usize = cut.iter().sum();
-        cut.iter().copied().max().unwrap_or(0) as f32 / total as f32
-    };
-    assert!(
-        share(&mixed) < DOMINATED,
-        "at a {MIXING_BUDGET}px budget one level holds {:.0}% of the {} cluster(s) drawn \
-         ({mixed:?}), which is a uniform cut wearing per-cluster selection's shape",
-        share(&mixed) * 100.0,
-        mixed.iter().sum::<usize>(),
-    );
-
-    let fine = draw_and_measure(Levels::Dag, DEFAULT_BUDGET).expect("the same device");
-    assert!(
-        share(&fine) >= DOMINATED,
-        "a {DEFAULT_BUDGET}px budget spread the cut across levels too ({fine:?}), so the budget \
-         is not what decides the descent and the assertion above is measuring something else",
-    );
-
-    let coarse = draw_and_measure(Levels::Dag, COARSE_BUDGET).expect("the same device");
-    assert_eq!(
-        coarse[0], 0,
-        "a {COARSE_BUDGET}px budget still drew {} cluster(s) of the base ({coarse:?}), so the \
-         descent is not stopping",
-        coarse[0],
-    );
 }
