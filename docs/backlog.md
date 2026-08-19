@@ -726,14 +726,53 @@ the Khronos glTF-Sample-Models suite loads without crashing, unsupported
 features log actionable skip messages, and the Blender re-export loop updates
 live.
 
-**None of those three has been measured.** The skip messages are asserted by
-`app::tests`' `skip_report` cases, which is the message's _shape_ and not a
-claim about any real document; the ≥90% figure needs the suite fetched and run
-in bulk, which nothing does; and the Blender loop has been exercised with
-`std::fs::write` and one manual `cp`, never with Blender. The suite is ~2 GB, so
-the shape this wants is a script that fetches it, runs
-`viewer --headless --frames 1` over every `.glb`, and reports the pass rate — a
-slice of its own.
+**The first has now been measured: 94.1%, which clears the bar.** On 2026-08-19
+all 118 models in `KhronosGroup/glTF-Sample-Assets` that ship a `glTF-Binary`
+variant (of 148 in `model-index.json`) were run through
+`viewer --headless --frames 1 --backend vk` on an RX 7900 XTX. **111 loaded and
+drew, 7 did not.** Not automated — a shell loop over a scratch download — so the
+number is a measurement rather than a gate. A script that keeps it honest is
+still worth having and is not written.
+
+The seven are three different things:
+
+- **`AnimatedColorsCube` is an outright defect.** It declares
+  `KHR_animation_pointer` in `extensionsUsed` and requires **nothing**, so the
+  spec says it must load. It is refused with
+  `missing field 'node' at line 1 column 750`: `gltf_json::animation::Target`
+  makes `node` mandatory, under `KHR_animation_pointer` the target carries a
+  pointer instead, so deserializing `Root` fails and the whole document goes
+  with it. The bitter part is that `gltf_import` **already skips every
+  animation**, with a warning that says so — a document is being refused over a
+  feature the importer had decided to ignore.
+- **Four are refused for a defensible reason with an indefensible message.**
+  `AnimationPointerUVs`, `CubeVisibility`, `LightVisibility` and
+  `PotOfCoalsAnimationPointer` each list extensions in `extensionsRequired`
+  (`KHR_node_visibility`, `KHR_lights_punctual`, `KHR_materials_*`,
+  `KHR_texture_transform`) that this importer does not implement, so refusing is
+  correct — but they get the same serde error about a missing `node`, which
+  names neither the extension nor the reason. That is the sample's **second**
+  exit criterion failing: "unsupported features log actionable skip messages
+  (file, feature, skip reason)".
+- **`SheenWoodLeatherSofa` requires `EXT_texture_webp`** and is refused with
+  `texture 0 names image 4294967295, and there are 13` — `u32::MAX` standing in
+  for an absent `source`, an internal sentinel leaking into a user's error.
+- **`Unicode❤♻Test` was not really tested.** Its name percent-encodes to
+  non-ASCII and `crate::args::USAGE` already says an asset key holds only
+  letters, digits, `.`, `_` and `-`. Whether that restriction should stand is a
+  separate question; this run says nothing about the document.
+
+So the actionable work is **check `extensionsRequired` before parsing and refuse
+by name**, and **stop an animation the importer already ignores from killing the
+parse**. The first turns five useless serde errors into the messages the exit
+criterion asks for; the second is the only one of the seven that is a true
+loading failure.
+
+**The other two exit criteria are still unmeasured.** The skip messages are
+asserted by `app::tests`' `skip_report` cases, which is the message's _shape_
+and not a claim about any real document — and the run above shows what real
+documents actually get. The Blender loop has been exercised with
+`std::fs::write` and one manual `cp`, never with Blender.
 
 Two things the plan settles that are easy to get wrong: the viewer is the one
 sanctioned exception to the server-authoritative rule (it is a tool and
