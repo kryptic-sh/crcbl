@@ -2265,6 +2265,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A glTF that needs an extension this importer lacks now says so.** Every
+  entry in `extensionsRequired` and `extensionsUsed` that `crcbl-scene` does not
+  implement is named in a warning against the document's key — required loudly
+  ("it is drawn without them, so what is on screen is not what the file
+  describes") and optional quietly. `MSFT_lod`, the one extension the importer
+  does implement, is excluded.
+
+  **Eighteen of the 116 Khronos sample models that load declare a required
+  extension**, and every one of them was previously drawn without it in silence
+  — a `KHR_materials_sheen` sofa rendered with no sheen and the only clue was
+  that the picture looked wrong. This is `docs/plan/sample/05-viewer.md`'s
+  second exit criterion: file, feature, reason.
+
+  **Reported rather than refused**, which is a deliberate reading of a SHOULD
+  NOT in the specification: a viewer exists to open the file somebody is
+  holding, and refusing outright tells them less about their asset than drawing
+  it and naming what is missing. `docs/backlog.md` carries the trade, because
+  the honest answer may yet be a flag.
+
 - **A glTF is no longer refused over an animation the importer already
   discards.** `gltf_json::animation::Target` makes `node` a required field and
   `KHR_animation_pointer` replaces it with a pointer, so `serde` failed on the

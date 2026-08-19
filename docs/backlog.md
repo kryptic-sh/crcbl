@@ -744,18 +744,21 @@ The seven are three different things:
   design. `parse_without_animations` retries with the array removed. **The rate
   is now 116/118, 98.3%.**
 
-  What that leaves open is a **decision, not a defect**. Four of those five list
-  extensions in `extensionsRequired` — `KHR_node_visibility`,
-  `KHR_lights_punctual`, `KHR_materials_*`, `KHR_texture_transform` — that this
-  importer does not implement, and they now **load anyway**, drawing the base
-  document without them. The specification says a client SHOULD NOT load an
-  asset whose required extension it lacks; for a viewer whose whole job is
-  "point it at a file and see", degrading is arguably the better answer. But it
-  is currently **silent**, and that is not defensible either way: nothing names
-  the extension that was ignored. The sample's second exit criterion asks for
-  "file, feature, skip reason", so the next slice is to read
-  `extensionsRequired` and report every entry the importer does not implement —
-  whichever way the load/refuse question is settled.
+  What that leaves is a **decision, not a defect, and it is now at least loud**.
+  Those documents load and draw the base document without the extensions they
+  require. `warn_unsupported_extensions` names every one — and it turns out **18
+  of the 116 models that load** declare a required extension this importer
+  lacks, not the four the failures exposed. All 18 were previously silent.
+
+  **The open question is whether loading them is right at all.** The
+  specification says a client SHOULD NOT load an asset whose required extension
+  it lacks. This importer does, on the argument that a viewer exists to open the
+  file somebody is holding and that refusing tells them less than drawing it and
+  naming what is missing. The counter-argument is that a silently wrong picture
+  is what a modeller screenshots and sends to somebody else. **Needs a call**,
+  and the options are: keep loading and reporting (today); refuse a required
+  extension outright; or a `--strict` flag defaulting to today's behaviour. The
+  third costs a flag in `crate::args` and a bool threaded through `import_gltf`.
 
 - **`SheenWoodLeatherSofa` requires `EXT_texture_webp`** and is refused with
   `texture 0 names image 4294967295, and there are 13` — `u32::MAX` standing in

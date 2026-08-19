@@ -804,6 +804,71 @@ fn warn_dropped_features(document: &gltf::Document, key: &Path) {
             );
         }
     }
+    warn_unsupported_extensions(root, key);
+}
+
+/// The one glTF extension this importer implements.
+///
+/// `lod_resolve` reads it. Everything else a document declares is ignored, so
+/// this list is what [`warn_unsupported_extensions`] measures against — and it
+/// is a list rather than a constant so that adding the second one is a line
+/// here instead of a rewrite.
+const IMPLEMENTED_EXTENSIONS: &[&str] = &["MSFT_lod"];
+
+/// Name every extension the document declares and this importer does not
+/// implement, `extensionsRequired` louder than `extensionsUsed`.
+///
+/// **The file, the feature and the reason**, which is what
+/// `docs/plan/sample/05-viewer.md`'s exit criteria ask of a document that did
+/// not arrive whole. Before this, a `KHR_materials_sheen` sofa loaded and drew
+/// with no sheen and said nothing at all, and the only clue was that the
+/// picture looked wrong.
+///
+/// # A required extension is reported, not refused
+///
+/// The specification says a client SHOULD NOT load an asset whose
+/// `extensionsRequired` it cannot honour. This importer loads it anyway and
+/// says so, because the alternative is worse for the one application that
+/// consumes it: a viewer exists to open the file somebody is holding, and
+/// refusing `PotOfCoalsAnimationPointer` outright tells them less about their
+/// asset than drawing it without its specular extension does.
+///
+/// **That trade only holds while the report is loud**, which is what this
+/// function is for. `docs/backlog.md` carries the decision, because the honest
+/// answer may yet be a flag.
+fn warn_unsupported_extensions(root: &gltf::json::Root, key: &Path) {
+    let unsupported = |names: &[String]| -> Vec<String> {
+        names
+            .iter()
+            .filter(|name| !IMPLEMENTED_EXTENSIONS.contains(&name.as_str()))
+            .cloned()
+            .collect()
+    };
+
+    let required = unsupported(&root.extensions_required);
+    if !required.is_empty() {
+        crcbl_core::log::warn!(
+            "{}: this document REQUIRES {}, which this importer does not implement — it is \
+             drawn without them, so what is on screen is not what the file describes",
+            key.display(),
+            required.join(", "),
+        );
+    }
+
+    // Everything used but not required, and not already named above: the
+    // document itself says these are optional, so the line is quieter.
+    let optional: Vec<String> = unsupported(&root.extensions_used)
+        .into_iter()
+        .filter(|name| !required.contains(name))
+        .collect();
+    if !optional.is_empty() {
+        crcbl_core::log::warn!(
+            "{}: ignoring {}, which this importer does not implement — the document lists them \
+             as optional, so the rest of it is unaffected",
+            key.display(),
+            optional.join(", "),
+        );
+    }
 }
 
 /// The encoded bytes of every image the document names, in order.
@@ -1128,6 +1193,96 @@ mod tests {
             !message.contains("animation"),
             "the retry's own failure was reported instead of the document's: {message}",
         );
+    }
+
+    /// Every warning `warn_dropped_features` emitted while importing `json`.
+    fn import_warnings(json: &str) -> Vec<String> {
+        let logs = crcbl_core::log::capture();
+        import_glb(json).expect("the fixture imports");
+        logs.records()
+            .into_iter()
+            .filter(|record| record.target.contains("gltf_import"))
+            .map(|record| record.message)
+            .collect()
+    }
+
+    /// The fixture with `extensionsUsed`/`extensionsRequired` spliced in.
+    fn with_extensions(used: &str, required: &str) -> String {
+        replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            r#""asset": {"#,
+            &format!(
+                r#""extensionsUsed": [{used}], "extensionsRequired": [{required}], "asset": {{"#
+            ),
+        )
+    }
+
+    /// **A required extension this importer cannot honour is named, not
+    /// swallowed.**
+    ///
+    /// `docs/plan/sample/05-viewer.md`'s exit criterion asks for the file, the
+    /// feature and the reason. `SheenWoodLeatherSofa` and three others from the
+    /// Khronos suite used to load and draw wrong in silence — the only clue was
+    /// that the picture looked off.
+    #[test]
+    fn a_required_extension_the_importer_lacks_is_named_in_a_warning() {
+        let warnings = import_warnings(&with_extensions("", r#""KHR_materials_sheen""#));
+        let named = warnings
+            .iter()
+            .find(|line| line.contains("REQUIRES"))
+            .unwrap_or_else(|| panic!("no line named the required extension: {warnings:#?}"));
+        assert!(
+            named.contains("KHR_materials_sheen"),
+            "the line does not name the extension: {named}",
+        );
+    }
+
+    /// An extension the document itself calls optional gets the quieter line,
+    /// and is not reported as required — the two say different things about
+    /// whether what is on screen is the file.
+    #[test]
+    fn an_optional_extension_is_reported_separately_from_a_required_one() {
+        let warnings = import_warnings(&with_extensions(r#""KHR_animation_pointer""#, ""));
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("ignoring") && line.contains("KHR_animation_pointer")),
+            "the optional extension was not reported: {warnings:#?}",
+        );
+        assert!(
+            !warnings.iter().any(|line| line.contains("REQUIRES")),
+            "an optional extension was reported as required: {warnings:#?}",
+        );
+    }
+
+    /// **An extension the importer *does* implement is not reported at all.**
+    ///
+    /// The guard that keeps this list honest: without it the warning fires for
+    /// `MSFT_lod`, which `lod_resolve` reads, and every document using it would
+    /// carry a line saying its levels were ignored while they were being
+    /// resolved.
+    #[test]
+    fn an_extension_this_importer_implements_is_not_reported() {
+        let warnings = import_warnings(&with_extensions(r#""MSFT_lod""#, r#""MSFT_lod""#));
+        assert!(
+            !warnings
+                .iter()
+                .any(|line| line.contains("MSFT_lod") || line.contains("REQUIRES")),
+            "an implemented extension was reported as unsupported: {warnings:#?}",
+        );
+    }
+
+    /// An extension in both lists is named once, as required. Listing it twice
+    /// would read as two different problems with the same document.
+    #[test]
+    fn an_extension_in_both_lists_is_named_once() {
+        let name = r#""KHR_texture_transform""#;
+        let warnings = import_warnings(&with_extensions(name, name));
+        let mentions = warnings
+            .iter()
+            .filter(|line| line.contains("KHR_texture_transform"))
+            .count();
+        assert_eq!(mentions, 1, "named more than once: {warnings:#?}");
     }
 
     #[test]
