@@ -1778,15 +1778,38 @@ which is the property the old vk↔wgpu job was kept for:
 `sprite` being byte-identical between radv and Chromium-on-SwiftShader is worth
 recording on its own: two unrelated rasterisers, one number.
 
-**What this does not do.** It compares eleven scenes at one size, where the
-current job compares three at two. It needs a browser, so it belongs in
-`pages.yml`'s `render-harness` job rather than in a native one — and that job
-installs no Vulkan ICD today, so wiring it means adding lavapipe there. Neither
-is an obstacle, and neither has been done yet: **the measurement is taken, the
-gate is not built.**
+**The gate is built**: `web/run-cross-backend-e2e.sh`, wired into `pages.yml`'s
+`render-harness` job after the golden comparison, reusing that step's readbacks
+so the wasm build and the browser run happen once. It renders each scene through
+`CRCBL_GPU=vk` on lavapipe and compares. Verified locally against **both**
+reference drivers — radv and lavapipe — with the same 9/11 verdict either way,
+which is what says the gate measures the browser backend rather than the
+reference's rasteriser.
+
+**What it does not do.** It compares eleven scenes at one size, where the job it
+replaces compares three at two. Nothing has been deleted yet: the vk↔wgpu job
+stays until `crcbl-wgpu` goes, and this runs beside it.
 
 The remaining half of the deletion bar is the parity blockers, which are four
 rows of hardware nobody here has — see "The numbers, restated".
+
+### CI does not shellcheck `web/*.sh`
+
+`ci.yml`'s lint step covers `tools/*.sh`, `crates/*/tests/*.sh` and (since
+2026-08-19) `apps/*/tests/*.sh`. It does not cover `web/`, which holds five
+harnesses including the two browser gates.
+
+**Not widened in the same slice, and the reason is measurable:**
+`shellcheck -x web/*.sh` reports two SC2001s today —
+`echo "$NEWER" | sed 's|^|  |'` in `run-browser-e2e.sh` line 222 and
+`run-probe-e2e.sh` line 152, both indenting a multi-line variable. Adding the
+glob without fixing them turns CI red on files the change did not touch, and the
+fix is not the `${var//search/replace}` the message suggests — that does not
+prefix every line — so it is a restructure of two unrelated scripts rather than
+a one-liner.
+
+`web/run-cross-backend-e2e.sh` was written clean and checked by hand. What is
+owed is the two fixes and the glob, together.
 
 ### DECISION NEEDED — should quarry place several faces?
 

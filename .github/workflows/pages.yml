@@ -574,11 +574,16 @@ jobs:
       # workspace reaches `cpal` through `crcbl-audio`, so it links ALSA. This
       # job's first CI run failed there rather than on any golden — all eleven
       # scenes rendered, and then `alsa-sys` could not find its headers.
-      - name: Install the ALSA headers cpal links against
+      # `libasound2-dev` because `alsa-sys` links against it and this job's first
+      # CI run failed there rather than on any golden. `mesa-vulkan-drivers` and
+      # `libvulkan1` are the second comparison's: the cross-backend step below
+      # renders each scene through `CRCBL_GPU=vk` on lavapipe, and this job had
+      # no Vulkan at all.
+      - name: Install the ALSA headers and a Vulkan driver
         timeout-minutes: 8
         uses: ./.github/actions/apt-packages
         with:
-          packages: libasound2-dev
+          packages: libasound2-dev libvulkan1 mesa-vulkan-drivers
 
       - name: Check the browser gate's assumptions
         run: |
@@ -592,6 +597,28 @@ jobs:
 
       - name: Compare every golden scene rendered in a browser
         run: ./web/run-render-harness-e2e.sh --expect-fail ssr,ui
+
+      # **The same readbacks, held against a native backend instead of a
+      # committed image.** The step above asks "does the browser draw the
+      # golden"; this asks "does the browser draw what vk draws, right now",
+      # with no reference between them that could have drifted with both.
+      #
+      # That is what `crates/crcbl/tests/run-cross-backend-e2e.sh` does for vk
+      # against wgpu, and it is the one thing `crcbl-wgpu` is still kept for —
+      # so this is its replacement, and a wider one: eleven scenes rather than
+      # three, against a genuinely separate implementation rather than a second
+      # abstraction over the same Vulkan driver.
+      #
+      # It reuses the readbacks the step above produced, so the wasm build and
+      # the browser run are not repeated. Measured on radv against
+      # Chromium-on-SwiftShader: nine of eleven match, `sprite` byte-identical,
+      # and the two that do not are the same `ssr` and `ui` — tighter than the
+      # golden comparison rather than looser, `ssr` differing in 1355 pixels
+      # here against 25611 there.
+      - name: Hold the browser's pixels against vk's
+        env:
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: ./web/run-cross-backend-e2e.sh --reference vk --expect-fail ssr,ui
 
       # The rendered frame, the golden and the diff, for every scene that did
       # not match — including the two excused ones, whose numbers are the record

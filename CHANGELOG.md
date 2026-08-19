@@ -799,6 +799,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The browser's pixels are held against a native backend's, directly.** New
+  `web/run-cross-backend-e2e.sh`, wired into `pages.yml`'s `render-harness` job
+  after the golden comparison: it renders each of the eleven golden scenes
+  through `CRCBL_GPU=vk` and compares the readbacks that step already produced
+  against them, so the wasm build and the browser run happen once.
+
+  **This is what `crcbl-wgpu` was still being kept for.**
+  `crates/crcbl/tests/run-cross-backend-e2e.sh` compares vk against wgpu, which
+  on Linux is a second abstraction over the same Vulkan driver; this compares vk
+  against a genuinely separate implementation, over eleven scenes rather than
+  three. Measured, radv against Chromium-on-SwiftShader: nine of eleven match,
+  `sprite` is byte-identical, and the two that do not are the same `ssr` and
+  `ui` the golden gate already excuses. It is _tighter_ than the golden
+  comparison, not looser — `ssr` differs in 1355 pixels here against 25,611
+  there. The same 9/11 verdict comes out with lavapipe as the reference, which
+  is what says the gate measures the browser rather than the reference's
+  rasteriser.
+
+  Nothing is deleted yet: the vk↔wgpu job stays until `crcbl-wgpu` goes.
+
 - **quarry's device suite runs in CI, on lavapipe.** It ran only on a
   developer's GPU before: under a bare `cargo test` it opens the `Null` backend,
   where every assertion about a picture reports itself skipped — honest, and
