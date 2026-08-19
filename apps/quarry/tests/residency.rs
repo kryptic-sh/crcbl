@@ -37,7 +37,7 @@ use crcbl::hal::{
 };
 use crcbl::render::scene::InstanceDesc;
 use crcbl::render::{Camera, ForwardRenderer, ImportedImage, RenderGraph, TransientPool};
-use crcbl_quarry::{face, scene};
+use crcbl_quarry::{dag, face, scene};
 
 /// Quads per side. Smaller than the binary's 256: these assert that the scene
 /// is *acceptable* and that it draws, neither of which a face four times the
@@ -79,9 +79,19 @@ struct Quarry {
     triangles: usize,
 }
 
+/// Which description of the same face to make resident.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Levels {
+    /// One flat mesh, drawn at full detail from every camera —
+    /// [`crcbl_quarry::scene`].
+    Flat,
+    /// The cluster hierarchy — [`crcbl_quarry::dag`].
+    Dag,
+}
+
 impl Quarry {
     /// Opens the ring, generates the face and makes it resident.
-    fn open() -> Self {
+    fn open(levels: Levels) -> Self {
         crcbl::core::log::init_logging();
         let ctx = GpuContext::open_offscreen(
             EXTENT,
@@ -99,7 +109,10 @@ impl Quarry {
         .expect("an offscreen context opens");
 
         let face = face::quarry_face(CELLS);
-        let desc = scene::quarry_scene(&face).expect("the face partitions into meshlets");
+        let desc = match levels {
+            Levels::Flat => scene::quarry_scene(&face).expect("the face partitions into meshlets"),
+            Levels::Dag => dag::dag_scene(&face).expect("the face coarsens"),
+        };
         let mut renderer =
             ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &desc)
                 .expect("the renderer makes the quarry scene resident");
@@ -111,7 +124,7 @@ impl Quarry {
             })
             .expect("one instance fits the reservation this scene asked for");
         eprintln!(
-            "quarry: {} triangles, geometry path {:?}, format {:?}",
+            "quarry: {levels:?}, {} triangles, geometry path {:?}, format {:?}",
             face.triangles(),
             ctx.device().caps().geometry_path(),
             ctx.format(),
@@ -141,7 +154,7 @@ impl Quarry {
 /// asserting apart from a picture.
 #[test]
 fn the_face_is_a_scene_the_renderer_makes_resident() {
-    let quarry = Quarry::open();
+    let quarry = Quarry::open(Levels::Flat);
     assert!(
         quarry.triangles > 0,
         "a face with no triangles would make every assertion here vacuous"
@@ -156,7 +169,25 @@ fn the_face_is_a_scene_the_renderer_makes_resident() {
 /// the path the sample will ship on rather than a rehearsal of it.
 #[test]
 fn the_face_draws() {
-    let mut quarry = Quarry::open();
+    draw_and_measure(Levels::Flat);
+}
+
+/// **The levelled face draws, and draws the same face.**
+///
+/// Milestone 2's first half. `Geometry::Dag` is a different residency path —
+/// one mesh-table row per level, a vertex array per level, and cluster runs the
+/// selection pass reads — so a hierarchy that made a picture on the flat path
+/// says nothing about this one. Held to the same coverage as the flat mesh
+/// because it is the same wall: a hierarchy that drew a *different* amount of
+/// the frame would be selecting wrongly rather than selecting.
+#[test]
+fn the_levelled_face_draws() {
+    draw_and_measure(Levels::Dag);
+}
+
+/// Renders one frame of `levels` and asserts what came out.
+fn draw_and_measure(levels: Levels) {
+    let mut quarry = Quarry::open(levels);
     let (width, height) = EXTENT;
     let bytes = u64::from(width) * u64::from(height) * 4;
 

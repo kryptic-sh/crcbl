@@ -208,7 +208,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// leans the result towards whichever side happened to be tessellated finer.
 /// The cross product's length *is* twice the triangle's area, so weighting is
 /// what you get by not normalising before summing.
-fn normals_of(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+pub(crate) fn normals_of(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut sums = vec![Vec3::ZERO; positions.len()];
     for triangle in indices.chunks_exact(3) {
         let [a, b, c] =

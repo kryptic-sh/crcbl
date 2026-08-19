@@ -799,6 +799,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/quarry`'s face is a cluster hierarchy too.** The new
+  `crcbl_quarry::dag` builds the QEM DAG over the same content through
+  `crcbl_scene::build_cluster_dag` and describes it as a `Geometry::Dag` scene —
+  `docs/plan/sample/14-quarry.md`'s milestone 2, first half. On an RX 7900 XTX
+  the levelled face draws on the `MeshShader` path and covers 58.6% of a 256×192
+  frame against the flat mesh's 57.6%, which is the same wall.
+
+  **Each level's normals are recomputed from its own triangles**, because
+  `crcbl_scene::simplify` is position-only and a coarse vertex belongs to no
+  vertex below it. The dunes patch's alternative — evaluate the analytic height
+  field and take its gradient — was not taken: that is the _fine_ surface's
+  normal, every ripple the decimator just removed shaded back on, which would
+  make a level look unlike its own silhouette.
+
+  The pools reserve every level summed, not the base mesh's counts, since a DAG
+  is resident all at once and selection only decides what is drawn.
+
 - **`GpuContext::open_offscreen` renders with no window behind it.** Same
   context, same `acquire` / `submit_and_present` frame loop, built on
   `SurfaceTarget::Offscreen` — a target every backend implements and none of

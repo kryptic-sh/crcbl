@@ -31,7 +31,7 @@ use crate::face::Face;
 /// Rough and fully dielectric, so the surface reads by its geometry rather than
 /// by a highlight — this sample's subject is the mesh, and a glossy face would
 /// hide the thing it exists to show.
-const ROCK: GpuMaterial = GpuMaterial {
+pub(crate) const ROCK: GpuMaterial = GpuMaterial {
     base_color: [0.42, 0.39, 0.35, 1.0],
     metallic: 0.0,
     roughness: 0.9,
@@ -41,7 +41,7 @@ const ROCK: GpuMaterial = GpuMaterial {
 /// Texels a side of the page. One, because nothing here samples a texture: the
 /// page exists because a material table indexes one, and the smallest legal
 /// page is the honest size for a scene with no images.
-const PAGE_EXTENT: u32 = 1;
+pub(crate) const PAGE_EXTENT: u32 = 1;
 
 /// Headroom over the exact counts, as a multiplier.
 ///
@@ -50,7 +50,7 @@ const PAGE_EXTENT: u32 = 1;
 /// milestone 4 adds. A quarter is enough for that and small enough that the
 /// reservation still tracks the content rather than a round number somebody
 /// picked.
-const HEADROOM: f32 = 1.25;
+pub(crate) const HEADROOM: f32 = 1.25;
 
 /// The face as a scene of one mesh and one instance's worth of room.
 ///
@@ -61,7 +61,7 @@ const HEADROOM: f32 = 1.25;
 /// than a limit being hit.
 pub fn quarry_scene(face: &Face) -> Result<SceneDesc<'static>, MeshletError> {
     let clusters = build_meshlets(&face.positions, &face.indices)?.into_clusters();
-    let vertices = vertex_bytes(face);
+    let vertices = vertex_bytes(&face.positions, &face.normals);
 
     Ok(SceneDesc {
         meshes: vec![MeshDesc {
@@ -113,14 +113,28 @@ pub fn capacities_for(face: &Face) -> Capacities {
     }
 }
 
-/// The face's vertices in [`MeshVertex`] order, little-endian.
+/// Positions and normals in [`MeshVertex`] order, little-endian.
 ///
 /// The same packing `crcbl_scene::gltf_render` does, and it is written out
 /// rather than shared because that one is private to a crate whose subject is
 /// glTF — this sample has no document.
-fn vertex_bytes(face: &Face) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(face.positions.len() * VERTEX_STRIDE);
-    for (position, normal) in face.positions.iter().zip(&face.normals) {
+///
+/// Takes the two arrays rather than a [`Face`] because [`crate::dag`] packs a
+/// *level*, whose positions came out of the decimator and belong to no face.
+///
+/// # Panics
+///
+/// If the two arrays are different lengths, which would otherwise pack a short
+/// vertex buffer and be refused a level later with the pool named instead of
+/// the mistake.
+pub(crate) fn vertex_bytes(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<u8> {
+    assert_eq!(
+        positions.len(),
+        normals.len(),
+        "a vertex needs both a position and a normal"
+    );
+    let mut bytes = Vec::with_capacity(positions.len() * VERTEX_STRIDE);
+    for (position, normal) in positions.iter().zip(normals) {
         let vertex = MeshVertex {
             position: [position[0], position[1], position[2], 1.0],
             normal: [normal[0], normal[1], normal[2], 0.0],
@@ -227,7 +241,7 @@ mod tests {
     #[test]
     fn the_first_vertex_round_trips_through_the_packing() {
         let face = quarry_face(SMALL);
-        let bytes = vertex_bytes(&face);
+        let bytes = vertex_bytes(&face.positions, &face.normals);
         let word = |at: usize| {
             f32::from_le_bytes(bytes[at * 4..at * 4 + 4].try_into().expect("four bytes"))
         };

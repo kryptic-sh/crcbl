@@ -11,16 +11,18 @@
 //!
 //! # What is here so far
 //!
-//! Milestone 1 of four, and only its first half: [`face`] generates the
-//! content. Nothing renders yet. The generator is separable from the renderer
-//! and is what every later milestone stands on, so it is worth having proved on
-//! its own — including that `crcbl_scene::build_meshlets` accepts it, which is
-//! the whole premise of the sample.
+//! Milestone 1, and the first half of milestone 2. [`face`] generates the
+//! content, [`scene`] describes it as one flat mesh and [`dag`] as a cluster
+//! hierarchy, and `tests/residency.rs` draws both through the real renderer on
+//! an offscreen context — so the `MeshShader` path rendering the scene is
+//! asserted rather than looked at.
 //!
-//! Still owed, from that document's milestones: the `MeshShader` path drawing
-//! it, the QEM cluster hierarchy with per-cluster selection and hysteresis, the
-//! two indirect paths and the forced-path comparison, and the skinned and
-//! tiling cases with a Pages demo.
+//! Still owed, from that document's milestones: per-cluster selection and
+//! hysteresis over the hierarchy [`dag`] builds, with the LOD tint and heatmap
+//! overlays; the two indirect paths and the forced-path comparison; and the
+//! skinned and tiling cases with a Pages demo. There is no window and no dolly
+//! yet, so there are no golden frames.
 
+pub mod dag;
 pub mod face;
 pub mod scene;
