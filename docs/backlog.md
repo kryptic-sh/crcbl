@@ -1709,22 +1709,79 @@ What would make it worth doing: a fourth copy. Two fixtures with different
 requirements are a resemblance; a third caller needing the same extras is
 duplicated knowledge.
 
-### quarry (S4C): milestone 1 is done, and the gate is reachable on Vulkan alone
+### quarry (S4C): milestones 1 to 3 are done; what is left is a window and goldens
 
 The phase table's S4C row asks for "meshlet clusters, QEM cluster LOD, and all
 three `GeometryPath` values on one dense scene", gated by "golden frames per
 `GeometryPath`; three-way comparison recorded; no LOD popping on any path".
 
-**Milestone 1 shipped.** `apps/quarry` generates the face, bakes it into meshlet
-clusters and draws it: `tests/residency.rs` records a frame through the real
-`ForwardRenderer` and the real graph on an offscreen context, and on an RX 7900
-XTX the face selects `GeometryPath::MeshShader` and covers 57.6% of a 256×192
-frame. What is **not** there yet is a window, a dolly, and any golden.
+**Milestones 1, 2 and 3 shipped**, all measured in `apps/quarry/tests/device/`
+on an offscreen context — the face bakes into meshlet clusters and draws; it
+coarsens into a QEM DAG whose cut mixes levels; the fixed dolly shows detail
+arriving as the camera closes without popping; and all three geometry paths draw
+it, forced by subtracting features from one adapter.
+
+**What is left, and it is what makes the gate rather than the milestones:**
+
+- **No window and no goldens.** The exit criteria want "golden frames per
+  `GeometryPath` from the fixed dolly, and the human-reviewed three-way
+  comparison recorded here". The frames exist and are measured; nothing blesses
+  or commits an image. This is the largest remaining piece and it needs a
+  decision — see the entry below.
+- **No LOD tint or heatmap overlay** (milestone 2's last item). It needs a debug
+  view mode in the forward shader, which is engine work rather than quarry's,
+  and nothing in the engine has one today — `set_normals_view` is the nearest
+  thing and it is a different axis.
+- **Milestone 4 untouched**: the skinned and tiling cases, and the Pages demo
+  with a recorded browser budget.
+- **The draw-count split is not recorded.** The criteria ask "how much of the
+  reduction is instance culling and how much is cluster culling, because a
+  single total hides which one is working". What quarry records today is the
+  cluster cut on the mesh path and the drawn level plus triangle count on the
+  indirect ones — the two halves separately, never attributed against a common
+  denominator.
 
 **The engine work for what remains is largely already there.** `crcbl-scene`
 carries `meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
-`lod_resolve.rs`, and `crcbl-hal` defines all three paths. Milestones 2 to 4 are
-mostly assembling and gating what exists rather than building a subsystem.
+`lod_resolve.rs`. Milestone 4 is mostly assembling and gating what exists rather
+than building a subsystem; the overlay is the exception.
+
+### DECISION NEEDED — does quarry commit goldens, and per what?
+
+`apps/quarry`'s exit criteria ask for "golden frames per `GeometryPath` from the
+fixed dolly". Everything needed to produce them exists — the dolly, the three
+forced paths, the offscreen readback — and the question is what to commit, which
+is a scope call rather than a technical one.
+
+**The problem is that the three paths do not draw the same pixels**, by design.
+Measured: at a one-pixel budget all three cover an identical 28,650 of 49,152
+pixels, but at sixteen the mesh path draws levels 1 and 2 per cluster while the
+other two select one level per instance, and they land four pixels apart. So a
+single golden cannot serve all three, and three goldens per dolly stop is 9 × 3
+images for one sample.
+
+The options:
+
+1. **One golden per path at one dolly stop** — three images. Cheapest, and it
+   catches a path that breaks outright. It does not catch a path that breaks
+   partway down the dolly, which is where LOD lives.
+2. **One golden per path at the ends of the dolly** — six images. Covers the
+   coarse and fine extremes, which is where the cut differs most.
+3. **No goldens; keep the measured assertions.** What quarry asserts today —
+   coverage, the per-cluster cut, the uniform cut's walk, the triangle counts —
+   is stronger than an image comparison for everything except _what the face
+   looks like_, and weaker for exactly that. The engine already has 27 goldens
+   under `crates/crcbl/tests/golden/`, none of which is quarry's content.
+
+**The measured argument for (2):** the numbers quarry records are all counts,
+and every one of them would be unchanged by a shading bug — a face lit from the
+wrong side covers the same pixels, walks the same rungs and draws the same
+triangles. That is precisely the gap a golden closes and no counter can.
+
+Also unresolved either way: goldens are compared on a runner with a software
+rasteriser, and quarry's frames here come off an RX 7900 XTX. The engine's own
+goldens are shared across backends with a tolerance, so the mechanism exists;
+whether this content passes it on lavapipe is unmeasured.
 
 **`MeshShading` being `Unwritten` on dx12 and Metal does not block the gate**,
 which is the thing worth writing down. The paths are not one-per-backend: they
@@ -1746,11 +1803,6 @@ whose three arms name all three paths and which opens its device without
 `DRAW_INDIRECT_COUNT` on purpose, because no adapter that suite can see would
 ever select the floor path. A three-way quarry gate would follow `draw_gen.rs`'s
 shape, not `render_e2e.rs`'s.
-
-**Next, in order:** the QEM cluster hierarchy over the face and per-cluster
-selection with hysteresis (milestone 2), then the forced-path three-way
-comparison on `draw_gen.rs`'s shape (milestone 3). The golden frames the gate
-wants come with milestone 3, because a golden per path needs all three paths.
 
 **Which sample came next was decided** — quarry, over `breakout-as-wasm` (P6A, a
 `wasmtime` `WasmHost` seam), lumen's second half (S4B, blocked on P7C's ray
