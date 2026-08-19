@@ -408,15 +408,13 @@ counts and the per-kind breakdown, and they went stale inside a day — twice.
 `cargo test -p crcbl-hal` computes them: `parity_blockers()` answers what is
 left, and `the_parity_blockers_are_exactly_the_reviewed_list` fails when that
 set changes, so `REVIEWED_BLOCKERS` in `crates/crcbl-hal/src/capability.rs` is
-always the current answer. Read it there. (The blocker total is quoted below
-because the decision turns on it, and it is checked whenever it is touched.)
+always the current answer. Read it there.
 
 **Every row carries a kind.** `Divergence` has a `DivergenceKind`: `ApiAbsence`
 (the API cannot express it — its reason must carry the evidence), `Unwritten`
-and `Declined`. There was a fourth, `Unclassified`, for rows that could not be
-settled without hardware nobody here has; it emptied on 2026-08-19 when the
-Metal counter-sampling probe's output settled its last two rows, and it was
-removed. See its own entry above — reintroducing it is three small edits.
+and nothing else. Two more kinds have come and gone — `Unclassified`, for rows
+that could not be settled without hardware nobody here has, and `Declined` —
+each with its own entry below saying what would bring it back.
 
 `parity_blockers()` is the query — a row on vk, dx12, Metal or WebGPU whose kind
 is anything but `ApiAbsence` — and `crcbl-wgpu` is excluded **by construction**
@@ -424,12 +422,12 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Eight blockers: dx12 4, Metal 4, WebGPU 0** — six `Unwritten`, two `Declined`,
-counted out of `REVIEWED_BLOCKERS` on 2026-08-19 rather than remembered. That is
-what stands between here and the deletion, and it can be asked rather than
-re-derived. This entry said nine for long enough to prove its own point about
-restating numbers: `DrawIndirectCount` on Metal closed when
-`crcbl_mtl::indirect_count` landed, and nothing here noticed.
+**The blockers are `REVIEWED_BLOCKERS`, and this entry no longer restates
+them.** That list is what stands between here and the deletion, and reading it
+is the only way to get it right. This entry said nine, then eight; the code says
+neither. `DrawIndirectCount` on Metal closed when `crcbl_mtl::indirect_count`
+landed and nothing here noticed, and the `Declined` rows left the same way — so
+the count has now been wrong twice for the same reason the entry itself names.
 
 **Five contradictions were settled against the installed interfaces**, not
 recall — and two of them had been recorded in this file the wrong way round:
