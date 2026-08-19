@@ -32,7 +32,8 @@
 //! when it landed.
 
 use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::sel;
 use objc2_foundation::{NSProcessInfo, NSUInteger};
 use objc2_metal::{MTLArgumentBuffersTier, MTLDevice, MTLDeviceLocation, MTLGPUFamily};
 
@@ -252,13 +253,26 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   and the two queries behind it are the two things that construction needs
 ///   rather than a proxy for it. `argumentBuffersSupport` must be
 ///   `MTLArgumentBuffersTier::Tier2`, which is where an argument buffer may
-///   hold a dynamically indexed array at all; and `MTLGPUFamily::Metal3` must
-///   be supported, because `gpuAddress` is a Metal 3 property and there would
-///   be no address to write. That second gate is the same one
-///   [`Features::BUFFER_DEVICE_ADDRESS`] rides on, and it is also what keeps
-///   this module inside the macOS floor above: `supportsFamily:` answers
-///   `false` for a family the system does not know, so the macOS 13 selector is
-///   only ever sent to a system that has it.
+///   hold a dynamically indexed array at all; and the device must respond to
+///   `gpuAddress`, because that is the value the table is filled with.
+///
+///   **The second gate used to be `MTLGPUFamily::Metal3` and that was wrong.**
+///   It read as reasonable — `gpuAddress` arrived with Metal 3 — but it
+///   confuses the family *feature set* with the API's *availability*. CI's
+///   `Apple Paravirtual device` answers `supportsFamily(Metal3) = false` and
+///   returns perfectly usable addresses, which `crate::binding`'s probe
+///   measured: four non-zero values, every one dereferenced correctly by a
+///   kernel. So the family gate switched this capability off on the only device
+///   that had ever proven it, and would have left it reported closed and
+///   exercised nowhere. `respondsToSelector:` asks what the code depends on and
+///   keeps what the family query was protecting — a macOS 13 selector is never
+///   sent to a system without it.
+///
+///   [`Features::BUFFER_DEVICE_ADDRESS`] still rides on `Metal3` and rests on
+///   the same mistaken reasoning, but it is left alone deliberately: nothing on
+///   this backend exercises `BufferUsage::DEVICE_ADDRESS`, so widening it would
+///   turn on an unproven path rather than fix a measured defect. See
+///   `docs/backlog.md`.
 ///
 /// # Absent, with the reason for each
 ///
@@ -295,10 +309,25 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
         out |= Features::BUFFER_DEVICE_ADDRESS;
     }
     // Both halves are device queries and both are load-bearing: the tier is
-    // what makes a dynamically indexed argument buffer legal, and Metal 3 is
-    // what makes `MTLBuffer::gpuAddress` — the value `crcbl_mtl::binding` fills
-    // the table with — exist at all. See the doc comment.
-    if metal3 && device.argumentBuffersSupport() == MTLArgumentBuffersTier::Tier2 {
+    // what makes a dynamically indexed argument buffer legal, and the selector
+    // check is what says `MTLBuffer::gpuAddress` — the value
+    // `crcbl_mtl::binding` fills the table with — can be sent at all.
+    //
+    // **Not `supportsFamily(Metal3)`, and that was measured rather than
+    // reasoned.** This gate read `metal3` on the theory that `gpuAddress` is a
+    // Metal 3 property, which conflates the family feature set with the API's
+    // availability. CI's `Apple Paravirtual device` answers
+    // `supportsFamily(Metal3) = false` and *still* returns usable addresses:
+    // `crate::binding`'s probe read four non-zero `gpuAddress` values on it and
+    // a kernel dereferenced every one correctly. Gating on the family therefore
+    // switched this path off on the one device it is proven to work on, which
+    // would have left the capability closed and never exercised anywhere.
+    //
+    // `respondsToSelector:` asks the question the code actually depends on, and
+    // keeps the property the family query was there for: the macOS 13 selector
+    // is never sent to a system that lacks it.
+    let addressable = device.respondsToSelector(sel!(gpuAddress));
+    if addressable && device.argumentBuffersSupport() == MTLArgumentBuffersTier::Tier2 {
         out |= Features::DESCRIPTOR_INDEXING;
     }
     if device.supportsBCTextureCompression() {

@@ -25,6 +25,30 @@ Not a defect to fix so much as a shape to know. If it is ever worth changing,
 the options are to run the render step first, or to give it its own job so the
 two failures cannot mask each other.
 
+### `Features::BUFFER_DEVICE_ADDRESS` on Metal rides a query that is wrong
+
+`crcbl_mtl::adapter::features_of` reports it from
+`supportsFamily(MTLGPUFamily::Metal3)`, on the reasoning that `gpuAddress` is a
+Metal 3 property. That reasoning is **measurably false**: CI's
+`Apple Paravirtual device` answers `supportsFamily(Metal3) = false` and returns
+usable `gpuAddress` values anyway — `crcbl_mtl::binding`'s bindless probe read
+four non-zero addresses on it and a kernel dereferenced every one. The family
+query describes a feature set; the selector's availability is a macOS version
+question, and they are not the same.
+
+`Features::DESCRIPTOR_INDEXING` had the same gate and was fixed, because leaving
+it would have reported the bindless capability closed while switching it off on
+the one device that had proven it. **`BUFFER_DEVICE_ADDRESS` was deliberately
+left alone**: nothing on this backend exercises `BufferUsage::DEVICE_ADDRESS`,
+so correcting the gate would turn on a path no test covers — adding unproven
+surface rather than fixing a measured defect. The honest fix, when something
+needs it, is `respondsToSelector:` on `gpuAddress`, which is what
+`DESCRIPTOR_INDEXING` uses now.
+
+Worth knowing generally: **`supportsFamily:` is not an availability check.** Any
+other capability here gated on a family as a proxy for "this selector exists" is
+wrong the same way.
+
 ### `crcbl-phys`'s BVH folds AABBs the way the NaN bug did
 
 The same defect as `Aabb::from_points` and `meshlet::cluster_bounds`, in the one
