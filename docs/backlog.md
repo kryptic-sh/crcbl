@@ -2182,42 +2182,47 @@ rather than a matter of taste.** Its six rows split three ways, all measured:
 | `BindlessDescriptorArray`                   | writable — Metal's argument buffers do carry resource arrays; this backend binds flat tables |
 | `DrawIndirectCount`                         | writable, and now fully de-risked — the device creates _and executes_ ICBs                   |
 
-**`BindlessDescriptorArray` on Metal: measured, and the answer moved twice.**
-`shaders/bindless_probe.slang` declares its array as
-`StructuredBuffer<uint> sources[] : register(t0, space0)`, and that annotation —
-load-bearing for the DXIL space assignment — makes `slangc -target metal` exit
-**0** while emitting a binding index of `18446744073709551615`, which is
-`(uint64)-1`, and an entry-point parameter with no attribute at all. Recast as a
-`ParameterBlock<Sources>` the same compiler emits a real argument buffer.
+**`BindlessDescriptorArray` on Metal WORKS, and the remaining question is the
+shader, not the device.** The probe in `crcbl_mtl::binding` ran on CI's
+`Apple Paravirtual device` with Metal API and GPU Validation both on, and read
+all sixteen words back exactly: `0xBD0000..3`, `0xBD0100..3`, `0xBD0200..3`,
+`0xBD0300..3`. So on that device an argument buffer written directly as a table
+of `MTLBuffer::gpuAddress` values works, `gpuAddress` answers non-zero, and
+`useResource:usage:` residency is enough for the kernel to read through it.
 
-**But an unbounded array still does not compile**, and CI is what said so. The
-probe in `crcbl_mtl::binding` ran on the `Apple Paravirtual device` and Metal's
-own front end refused it:
+Getting there took two corrections, both from measurement:
 
-```text
-program_source:7:19: error: flexible array members are a C99 feature
-```
+- `StructuredBuffer<uint> sources[] : register(t0, space0)` — the current
+  `bindless_probe.slang` — makes `slangc -target metal` **exit 0** while
+  emitting a binding index of `(uint64)-1` and an unattributed entry-point
+  parameter.
+- Recast as a `ParameterBlock` with an **unbounded** array, Metal's own front
+  end refused it:
+  `program_source:7:19: error: flexible array members are a C99 feature`. Slang
+  lowers `items[]` to a C99 flexible array member, which MSL does not define.
+- A **bounded** array in a `ParameterBlock` lowers to
+  `array<uint device*, int(64)>` — an ordinary `metal::array` — and that is what
+  runs.
 
-`StructuredBuffer<uint> items[]` lowers to `uint device* items_0[]`, a C99
-flexible array member, which MSL does not define. **A fixed length lowers to
-`array<uint device*, int(64)>`** — an ordinary `metal::array` of device pointers
-— and the probe now asks about that instead. Nothing is given up by bounding it:
-a bindless table is a capacity declared once with a count chosen per bind, which
-is how Vulkan's `VARIABLE_DESCRIPTOR_COUNT` and D3D12's heap-bounded arrays are
-used too. Whether Metal accepts the bounded form, and whether `gpuAddress` works
-on the paravirtual device, is what the next `mtl e2e` run answers.
+**The cost is a descriptor-set move, and it is measured.** `ParameterBlock` is a
+descriptor set in SPIR-V, so the array goes from set 0 / binding 1 to **set 1 /
+binding 0**, with `destination` left in set 0. Bounding the array _without_
+`ParameterBlock` keeps both in set 0 but hands Metal an entry-point parameter
+with no `[[buffer]]` attribute — invalid MSL again. So `ParameterBlock` is not
+optional if Metal is to have an artifact at all.
 
-**The reusable lesson is the exit code, and this is the third instance.**
-`slangc -target metal` has now silently dropped an ICB parameter, emitted a `-1`
-binding index, and emitted a flexible array member no Metal compiler accepts —
-each at exit 0. A zero exit from that target is not evidence the shader is
-usable; read the artifact or ask a device.
+That move is arguably the right layout rather than a concession: a bindless
+table is bound once per frame while other sets change per draw, which is why
+engines give it its own set. But it does mean recasting `bindless_probe.slang`
+changes the bind groups `crcbl-vk` and `crcbl-dx12` build for it, and those pass
+today.
 
-**Recasting the shared shader is still not done, and should not be until the
-bounded probe passes.** `ParameterBlock` maps to a descriptor set in SPIR-V and
-a space in HLSL, so rewriting `bindless_probe.slang` moves bind-group layouts
-`crcbl-vk` and `crcbl-dx12` already pass. The alternatives are a Metal-only
-second source or leaving that shader with no Metal artifact.
+**So the row is now ordinary work with a known shape**, no longer blocked on
+anything unknown: recast the shader to a bounded `ParameterBlock`, add `msl` to
+its target line, update the vk and dx12 sides for the second set, then implement
+`variable_count` in `crcbl_mtl::binding` — which currently refuses it outright —
+using the argument-buffer construction the probe already proves. The probe's
+test name still says "unbounded" and should be renamed when that lands.
 
 So **four of six can never go green on the hardware this project has**, whatever
 anyone writes. "Metal fully closed" is not reachable by working harder; it is
