@@ -2371,11 +2371,26 @@ CI job hashes each source against its artifacts.
 **So `DrawIndirectCount` on Metal is not "unwritten" in the ordinary sense.** It
 is blocked on something outside this repo, and the honest options are:
 
-1. **Hand-write one `.metal` kernel as a standing exception.** It is the only
-   shader in the tree with no `.slang` source, so the artifact-hash job needs an
-   exception mechanism it does not have, and the file can never be regenerated
-   by the pipeline that produces every other artifact. Small in lines, permanent
-   in cost.
+1. **Hand-write one MSL kernel.** The stated cost here was that "the
+   artifact-hash job needs an exception mechanism it does not have" — **and that
+   is wrong.** `crcbl-mtl` compiles MSL through
+   `newLibraryWithSource:options:error:`, so MSL is _source at runtime_, not a
+   precompiled artifact; and `tools/compile-shaders.sh` is source-driven,
+   walking `shaders/*.slang` and emitting each one's declared targets, then
+   refusing orphans **inside `msl/`**. A kernel that never lives in `msl/` is
+   invisible to it, with no exception mechanism required.
+
+   The precedent already shipped and is green: `crcbl_mtl::binding`'s bindless
+   probe carried its whole kernel as a `const BINDLESS_MSL: &str` in Rust. Note
+   what that precedent is and is not — it is about _where_ MSL may live, not
+   about hand-authoring it; that text was slangc's own output with a test tying
+   it to its source.
+
+   So the real cost is the honest half of the original objection: a hand-written
+   kernel has no `.slang` to regenerate from, and nothing checks it against a
+   source because there is none. That is a maintenance cost, not a CI-mechanism
+   problem, which makes this option materially cheaper than recorded.
+
 2. **Wait for Slang.** Out of our control and unscheduled; the row stays open
    indefinitely and the deferral refactor sits with no consumer.
 3. **Take MoltenVK's route** — read the count back and loop on the CPU. Correct
