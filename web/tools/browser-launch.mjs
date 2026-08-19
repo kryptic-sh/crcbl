@@ -124,6 +124,31 @@ function candidates() {
  * @param {string} portFile
  * @returns {{port: string, path: string} | null}
  */
+/**
+ * How long to wait for Chrome to write `DevToolsActivePort` before giving up.
+ *
+ * **Here rather than in each driver, because the three of them disagreed.** All
+ * three run the same launch-and-poll loop — see this repository's backlog entry
+ * on the three copies of the Chromium plumbing — and on 2026-08-20 two of them
+ * were raised from thirty seconds and the third was not, which is precisely the
+ * failure mode duplication produces. They import this file for
+ * {@link readDevToolsPort} already, so the budget lives beside the thing it
+ * bounds.
+ *
+ * **Two minutes, and it was thirty seconds.** Three of the last eight
+ * non-cancelled Pages runs on `main` failed at this deadline, and the failing
+ * run's own stderr says the browser was still starting rather than wedged: it
+ * reached dbus initialisation 22 seconds in and had not written the port file at
+ * 30. Every caller's loop separately reports a browser that *exited*, so this
+ * deadline is only ever reached by one that is alive and has not got there yet.
+ *
+ * For scale, a healthy runner drives a whole gate — launch, eleven scenes and
+ * every readback — in 14 to 19 seconds. A launch alone approaching thirty is
+ * already pathological, so this is headroom for a runner having a bad minute and
+ * it is spent only on the path that would otherwise fail.
+ */
+export const LAUNCH_TIMEOUT_MS = 120_000;
+
 export function readDevToolsPort(portFile) {
   let contents;
   try {

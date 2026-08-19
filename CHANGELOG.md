@@ -799,6 +799,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The three browser drivers share one launch budget.** They run the same
+  launch-and-poll loop in three copies, and raising the timeout in two of them
+  left the third — `browser-e2e.mjs`, which had it as an unnamed `30_000`
+  literal — disagreeing with the other two. `LAUNCH_TIMEOUT_MS` now lives in
+  `browser-launch.mjs`, which all three already import from, beside the
+  `readDevToolsPort` it bounds.
+
 - **CI shellchecks the browser harnesses too.** The lint step's glob was
   `tools/*.sh crates/*/tests/*.sh`, which reads like "every harness" and left
   `web/`'s five scripts — both browser gates among them — and the samples' own

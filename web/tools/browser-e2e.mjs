@@ -87,6 +87,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  LAUNCH_TIMEOUT_MS,
   browserFlags,
   findBrowser,
   readDevToolsPort,
@@ -849,7 +850,7 @@ async function launch(binary, mode) {
   running.add(browser);
 
   const portFile = join(profile, 'DevToolsActivePort');
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (exited) {
       console.error(stderr.join('\n'));
