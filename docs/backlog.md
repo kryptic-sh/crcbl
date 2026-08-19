@@ -3087,10 +3087,24 @@ it refuses nothing in use across every suite on radv.
 **`crcbl-wgpu`'s half is not fixed** and is left for the deletion: its
 `create_image` is not wrapped in `checked()`, unlike `create_graphics_pipeline`
 beside it, so a format the device did not enable arrives through the
-uncaptured-error handler and a live-looking handle comes back anyway. Whether
-`crcbl-dx12` and `crcbl-mtl` have the same gap is **unexamined** — neither can
-be run here, and unlike the timeline row this one is not visible by reading a
-declaration.
+uncaptured-error handler and a live-looking handle comes back anyway.
+
+**`crcbl-dx12` and `crcbl-mtl` make no per-format query either**, read on
+2026-08-20 — but whether that is a _bug_ there is genuinely unknown, and the
+distinction is the whole point. The Vulkan defect was not the missing query; it
+was that `vkCreateImage` **returns success anyway**. `CreateCommittedResource`
+and `newTextureWithDescriptor:` may well fail on their own for a format the
+device cannot serve, in which case those backends refuse correctly without ever
+asking.
+
+What reading establishes: `crcbl-dx12`'s `create_image` says so in its own
+comment — "a per-format query this backend does not make" — and validates only
+extent and mips; `crcbl-mtl`'s validates ten things, none of them format
+support, and its only format-adjacent query is `supportsTextureSampleCount` in
+`adapter.rs`, for the sample ceiling rather than per image. What reading cannot
+establish is what either creation call does with a bad format. The cheap way to
+find out is one throwaway test per backend, on its own CI job, asking for
+`D24UnormS8Uint` as a depth-stencil attachment and printing the outcome.
 
 What remains a decision is only whether the seam grows the query.
 
