@@ -86,6 +86,14 @@ Between them, the capability read **closed while running on no machine at all**,
 which is the failure the parity mechanism exists to prevent, and it was green
 the whole time. The gate is now `respondsToSelector(gpuAddress)` alone.
 
+**The gate has now been wrong three times, and the seam caught every one** with
+the same line — "this device withheld Features(DESCRIPTOR_INDEXING), so metal
+was never asked". After the family query and the tier came a third:
+`respondsToSelector(sel!(gpuAddress))` sent to the **`MTLDevice`**, when
+`gpuAddress` is a property of `MTLBuffer`. A device never responds to it, so
+that gate was false everywhere. It is now an `NSProcessInfo` macOS-13 check,
+which is the system question all three forms were reaching for.
+
 **The residual risk, stated plainly:** the evidence is two measurements on one
 device class. A Metal 3-capable device that genuinely cannot serve a raw-address
 table would now be told it can. That is judged the lesser risk against a
@@ -128,47 +136,6 @@ they are `Support::No` with "this backend builds no
 `MTLMeshRenderPipelineDescriptor`", which is honestly unwritten work. The
 runner's `Metal3 = false` is why writing them could not be _verified_ here, not
 why they are reported unsupported today, and those are different claims.
-
-### `crcbl-phys`'s BVH folds AABBs the way the NaN bug did
-
-The same defect as `Aabb::from_points` and `meshlet::cluster_bounds`, in the one
-crate not yet fixed. `collider.rs`'s `Aabb::union` uses glam's `DVec3::min`/
-`DVec3::max`, and `broadphase.rs`'s `Bvh::build_rec` **folds** it over a range
-of items — so one `NaN` body position replaces the accumulator, the next item
-replaces the `NaN`, and the node comes back finite without containing its
-children. Overlap and ray queries then silently miss pairs.
-
-**The `is_empty()` early-outs do not save it**, which is the part worth knowing:
-`is_empty` is `self.min.x > self.max.x || …`, and `>` is false on `NaN`, so a
-`NaN` box reads as _non-empty_ and goes down the glam path. The same holds for
-the poisoned accumulator. The refit paths and `insert`'s sibling union have the
-shape too.
-
-**Not fixed here because its input provenance is different and the fix should be
-argued on its own.** Vertex data is ordinary hostile input — a downloaded glTF
-can hold a `NaN` and nothing in `crcbl-scene` checks — whereas a `NaN` body
-position means the simulation has already gone wrong, so the honest question is
-whether the BVH should tolerate it or the integrator should refuse to produce
-it. `components.rs`'s `Transform::decode` already gates the **network** path and
-its doc says why: "A NaN or infinite position poisons every AABB it reaches and,
-through them, the whole BVH." Locally integrated positions — a divide by a zero
-mass, an unbounded force — never pass that gate. Fixing the fold is a few lines;
-deciding where the invariant belongs is the actual work.
-
-Found by a sweep after the `crcbl-render`/`crcbl-scene` fixes, and read rather
-than grepped. Everything else in the workspace came back clean: `crcbl-shaders`,
-`crcbl-sprite`, `crcbl-greybox`, `apps/lumen` and the backends fold over
-integers or already use `f32::min`/`f32::max` or `total_cmp`.
-
-### `crcbl-phys`'s BVH median split uses `partial_cmp().unwrap_or(Equal)`
-
-In `broadphase.rs`'s `build_rec`, beside the entry above. It neither panics nor
-violates `sort_by`'s contract, but a `NaN` centroid makes the comparator
-non-transitive, so the spatial median split degrades to an arbitrary partition —
-worse tree shape, not a wrong answer. `f32::total_cmp` fixes it for free and is
-what `crcbl-render`'s `shadow.rs` and `crcbl-scene`'s `simplify.rs` already use.
-Left with the entry above because both are the same `NaN`-reaches-the-sim
-question and should be decided together.
 
 ### What `apps/viewer` still owes sample 05
 
