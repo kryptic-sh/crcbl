@@ -2187,10 +2187,20 @@ jobs:
       # other — which is what happened.
       - name: Install the pinned spirv-tools
         run: |
-          curl -sSfL -o /tmp/spirv-tools.deb \
+          # Bounded and retried, because an unwrapped fetch here took a green
+          # board down: this step hung twenty minutes on a stalled connection
+          # and the job hit its own timeout, which GitHub reports as
+          # **cancelled** — indistinguishable from somebody pushing over the
+          # run. `.github/actions/apt-packages` makes this argument at length;
+          # these fetches were simply never given the same treatment.
+          curl -sSfL --retry 3 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 120 -o /tmp/spirv-tools.deb \
             "http://archive.ubuntu.com/ubuntu/pool/universe/s/spirv-tools/spirv-tools_${SPIRV_TOOLS_VERSION}_amd64.deb"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends /tmp/spirv-tools.deb
+          # Best-effort, and deliberately not chained to the install: a refresh
+          # that uses its whole timeout must not consume the attempt after it.
+          timeout 120 sudo apt-get update \
+            || echo "the refresh did not finish; installing against the lists we have"
+          timeout 180 sudo apt-get install -y --no-install-recommends /tmp/spirv-tools.deb
           # A validator that is not the pin is what this step exists to prevent,
           # so it is checked rather than trusted.
           FOUND="$(spirv-val --version | head -1)"
@@ -2210,7 +2220,8 @@ jobs:
       # failure mode this whole design exists to avoid.
       - name: Install the pinned slangc
         run: |
-          curl -fsSL -o slang.tar.gz \
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 180 -o slang.tar.gz \
             "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-linux-x86_64-glibc-2.27.tar.gz"
           mkdir -p "${RUNNER_TEMP}/slang"
           tar xzf slang.tar.gz -C "${RUNNER_TEMP}/slang"
@@ -2228,7 +2239,8 @@ jobs:
       # file it generates.
       - name: Install the pinned dxc
         run: |
-          curl -fsSL -o dxc.tar.gz \
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 180 -o dxc.tar.gz \
             "https://github.com/microsoft/DirectXShaderCompiler/releases/download/${DXC_RELEASE}/${DXC_ASSET}"
           mkdir -p "${RUNNER_TEMP}/dxc"
           # `--strip-components=1` because the archive wraps everything in a

@@ -874,6 +874,30 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
+### A hung fetch reports as "cancelled", and that is what the mystery runs were
+
+Two runs today finished `cancelled` with **no newer push to supersede them**,
+which reads like somebody pushed over the board. Neither was. Both were the
+`shaders` job hanging on **"Install the pinned spirv-tools"** — one run sat
+there from 07:49:47 to 08:10:05, twenty minutes, until the job's own
+`timeout-minutes` fired. GitHub reports a job killed by its timeout as
+_cancelled_, not _failed_, so nothing in the summary says a fetch stalled.
+
+The cause was three unwrapped network operations in one step: a bare `curl` with
+no `--max-time` and no retry, and two bare `apt-get` calls. `slangc` and `dxc`
+had the same bare `curl`. All three are now bounded and retried, and the
+`apt-get update` beside them is best-effort rather than chained to the install
+that follows.
+
+**This is the same argument `.github/actions/apt-packages` already makes** — "a
+hang is not a failure, and never returns to be retried" — applied to the fetches
+nobody had given it to. Worth checking the rest of the workflow for any other
+network call without a bound; these three were found by grepping `curl` for the
+absence of `--max-time`.
+
+**And the diagnostic lesson**: a run that reads `cancelled` with nothing after
+it is not noise. Three of them today were a real hang wearing the wrong label.
+
 ### The runner's apt mirror goes down, and now says so
 
 Three jobs failed on it in one session — `x11 e2e`, `wayland e2e`, `cli e2e` —
