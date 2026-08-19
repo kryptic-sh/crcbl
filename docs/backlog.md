@@ -29,161 +29,29 @@ fires, and on what, comes from the `dx12 e2e (software adapter)` job. Given
 `crcbl-vk`'s suites had four leaks between them, the expectation is that it will
 find some.
 
-### Fixing the apt cache exposed a 30-second timeout that killed dpkg
+### The apt cache is fixed and demonstrated, end to end
 
-The restore permission bug is genuinely fixed — `22871f0`'s run and every one
-since logs `Cache restored successfully` where every previous run logged
-`Cannot open: Permission denied` for each file. But making the cache work made a
-latent bug reachable, and `4c69938` went red on it in two jobs:
+Closed on 2026-08-19. Both bugs are gone and the thing they existed to provide
+has now been seen working, so this is here only to save the next reader the
+archaeology.
 
-```text
-the cache reported a hit and restored 1 .deb file(s)
-Selecting previously unselected package libasound2-dev:amd64.
-(Reading database ... 80%
-the cached archive did not satisfy 'libasound2-dev'; asking the mirror
-E: Could not get lock /var/lib/dpkg/lock. It is held by process 2487 (dpkg)
-```
+The restore permission bug — `actions/cache` extracting as the runner user into
+root-owned `/var/cache/apt/archives`, failing with
+`Cannot open: Permission denied` on every file and then printing
+`Cache not found` — meant the cache had **never once** been used. The 30-second
+timeout on the cached-install branch was harmless only while that was true; with
+an archive to install from it killed `apt-get` mid-dpkg, and a killed dpkg keeps
+`/var/lib/dpkg/lock`, so both mirror attempts after it failed on the lock.
 
-The cached install was **working**. `timeout 30` killed it at 80% of dpkg's
-database read, and a killed dpkg keeps `/var/lib/dpkg/lock`, so both mirror
-attempts after it died on the lock rather than on the mirror. The 30s was
-harmless for as long as the cache never restored, because the branch exited
-instantly with nothing to install from.
+`9e57c51` is green with **27 successful restores**, and **nine jobs installed
+from the cache without asking the mirror at all** — `clippy (linux)`,
+`test (linux)`, `rustdoc`, `coverage`, `cli e2e`, `decoder fuzz`, `x11 e2e`,
+`wgpu e2e` and `cross-backend`. `vk e2e` and `wayland e2e` still went to the
+mirror on that run, which is the expected shape while their entries fill.
 
-Fixed by giving that branch 180s — it touches no network and cannot hang on a
-mirror, so its timeout is a runaway guard rather than a budget — by skipping it
-when no `.deb` was restored, and by running `dpkg --configure -a` before the
-mirror attempts so a half-finished transaction cannot poison them.
-
-**The stale figure that hid the headroom.** The action's own comment said the
-tightest caller cap was eight minutes, and the budget was squeezed to 450s to
-fit it. No job that uses the action is capped below **twenty** minutes; the
-eight-minute jobs install nothing. That is why the first attempt could be
-lengthened without shortening the mirror's, which the backlog already records as
-a regression once made.
-
-### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
-
-Checked on 2026-08-19, because the obvious assumption is wrong. `apps/quarry`
-does not exist; the phase table's S4C row asks for "meshlet clusters, QEM
-cluster LOD, and all three `GeometryPath` values on one dense scene", gated by
-"golden frames per `GeometryPath`; three-way comparison recorded; no LOD popping
-on any path".
-
-**The engine work is largely already there.** `crcbl-scene` carries
-`meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
-`lod_resolve.rs`, and `crcbl-hal` defines all three paths. quarry is mostly
-assembling and gating what exists rather than building a subsystem.
-
-**`MeshShading` being `Unwritten` on dx12 and Metal does not block the gate**,
-which is the thing worth writing down. The paths are not one-per-backend: they
-are reached by **subtracting features from a single capable adapter**.
-`crates/crcbl/tests/render_e2e.rs` does exactly that, and it passes here on an
-RX 7900 XTX — eleven `..._draws_the_same_frame_on_every_geometry_path` tests,
-with the harness printing
-
-```text
-asked for MESH_SHADER: true,  adapter has it: true, drew through MeshShader
-asked for MESH_SHADER: false, adapter has it: true, drew through IndirectCount
-spot_shadow on MeshShader against IndirectCount — 0 channel(s) differ, budget 0
-```
-
-So Vulkan reaches `MeshShader` and `IndirectCount` on one device and compares
-them pixel-for-pixel. The **third** path, `IndirectPerBatch`, is not in that
-cross-backend suite — it is covered by `crcbl-vk`'s own `vk_e2e/draw_gen.rs`,
-whose three arms name all three paths and which opens its device without
-`DRAW_INDIRECT_COUNT` on purpose, because no adapter that suite can see would
-ever select the floor path. A three-way quarry gate would follow `draw_gen.rs`'s
-shape, not `render_e2e.rs`'s.
-
-**The decision this needs** is only whether quarry is the right next sample at
-all, against the alternatives: `breakout-as-wasm` (P6A, a `wasmtime` `WasmHost`
-seam — self-contained, no renderer work, no new demo), lumen's second half (S4B,
-blocked on P7C's ray tracing), and orbit (S5, the roadmap's own "flashiest web
-demo", behind three physics phases: P6, P8, P11). quarry is the only one whose
-prerequisites are already built.
-
-### `DivergenceKind::Unclassified` is gone, and can come back
-
-Removed on 2026-08-19. It held exactly two rows — Metal's `TimestampQuery` and
-`PipelineStatisticsQuery` — and its whole meaning was "which of the other three
-this is cannot be settled from here, and the reason says what measurement would
-settle it". `crcbl_mtl::adapter`'s counter-sampling probe has now taken that
-measurement on CI, so both rows are classified and the variant held nothing.
-`every_kind_describes_at_least_one_real_row` is the test that forces the issue:
-a kind with no row is vocabulary rather than classification.
-
-**The concept was good and may be wanted again**, so the reasoning is kept here
-rather than only in `git log`. It was an admission about evidence rather than a
-fourth kind of divergence: a property of a device this workspace cannot open,
-where "a guess written into the data would read exactly like the classifications
-that were checked". It blocked parity, because "nobody has looked" is not
-"done". Reintroducing it is a variant, an arm in `blocks_parity`, and an entry
-in that test's list.
-
-**What settled the two rows**, from the `mtl e2e (macos-latest)` job:
-
-```text
-crcbl-mtl counters: supportsCounterSampling AtStageBoundary = false
-crcbl-mtl counters: supportsCounterSampling AtDrawBoundary = true
-crcbl-mtl counters: supportsCounterSampling AtDispatchBoundary = true
-crcbl-mtl counters: supportsCounterSampling AtBlitBoundary = true
-crcbl-mtl counters: counterSets = 0
-crcbl-mtl counters: sampleTimestamps ... did not move across a 50ms sleep
-```
-
-Metal expresses both features — `MTLCounterSampleBuffer`,
-`MTLCommonCounterSetStatistic` — so neither is an `ApiAbsence`; the code is
-unwritten, which is `Unwritten`. **The blocker count did not move**, and that is
-the point: reclassifying an unanswered question as unwritten work is honesty
-about what is owed, not progress against it. It is still eight.
-
-`counterSets = 0` on the CI Mac is a separate fact from the classification: no
-`MTLCounterSampleBuffer` can be built there at all, so that device could not run
-the feature however it were written. `AtStageBoundary = false` says the same
-thing about the pass-boundary shape `PassTimestampWrites` asks for — though
-`AtDrawBoundary` being true means an encoder-level sample would serve, on a Mac
-that advertised a set. **Whether any Mac available to this project advertises
-one is still unknown**, and that is the residual.
-
-`PipelineStatisticsQuery` also owes a seam change the timestamp row does not: an
-`MTLCounterResultStatistic` is eight `u64`s and `query_results` reads one per
-query, so whoever writes it decides whether the seam grows a shape for the other
-seven or this backend reports one of the eight.
-
-### The apt cache never restored once, and the log called it a miss
-
-Fixed on 2026-08-19, and recorded here until a CI run confirms it, because the
-half that matters cannot be tested anywhere but on a runner.
-
-`.github/actions/apt-packages` cached `/var/cache/apt/archives/*.deb`. The save
-worked — a 17 MB entry, downloaded at 86 MB/s on every job. The **restore never
-did**: `actions/cache` extracts as the runner user and that directory is
-`root:root`, so `tar` reported `Cannot open: Permission denied` for every file,
-`actions/cache` downgraded it to a warning, and the next line said
-`Cache not found for input keys`. Which reads exactly like an ordinary miss.
-
-So the protection the action was written for — "a mirror that is down cannot
-stop a job whose packages were fetched on an earlier run" — has never once been
-in force, and every apt outage has been fatal. Three consecutive red boards on
-`main` were this: `x11 e2e` and `vk e2e` on `2a99fc3`, `wgpu e2e` on `01baf56`.
-
-The fix caches `~/.cache/crcbl-apt-archives`, which the runner owns, and copies
-`.deb` files into and out of `/var/cache/apt/archives` around an otherwise
-untouched `apt-get`. Redirecting apt with `Dir::Cache::archives` would be tidier
-and changes how apt itself runs, which nothing here can exercise off a runner.
-
-**What was verified locally**: the YAML parses, every shell block passes
-`bash -n` and `shellcheck`, and the seed/harvest logic was run against temp
-directories for all five branches — both empty, archive only, apt only, both,
-and a name collision where the runner image's copy must win. **What was not**:
-that `actions/cache` restores a `$HOME` path successfully, which is the whole
-point. It is the ubiquitous pattern — every Rust and npm cache does it — but it
-is a claim about a runner.
-
-Note the **first** run after this lands is a guaranteed cold miss: the key
-includes `hashFiles` of the action, so editing it abandons every existing entry.
-A red apt step on that run says nothing; the run after it is the evidence.
+**One thing to know before editing the action**: its own `hashFiles` is in the
+cache key, so every change to it abandons every entry. The run that lands a
+change is always cold and says nothing about whether the cache works.
 
 ### `render_e2e` never runs against dx12's own e2e job, and that hid a step
 
