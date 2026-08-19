@@ -32,8 +32,7 @@
 //! when it landed.
 
 use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
-use objc2::runtime::{NSObjectProtocol, ProtocolObject};
-use objc2::sel;
+use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSProcessInfo, NSUInteger};
 use objc2_metal::{MTLDevice, MTLDeviceLocation, MTLGPUFamily};
 
@@ -134,6 +133,28 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
     }
     // Built-in, its own memory: the discrete GPU in a dual-GPU Intel Mac.
     DeviceType::Discrete
+}
+
+/// Whether `MTLBuffer::gpuAddress` can be sent on this system.
+///
+/// macOS 13 is where it arrives, and the question is a **system** one rather
+/// than a device one — which is the whole history of this gate.
+///
+/// It was `supportsFamily(MTLGPUFamily::Metal3)` first, which confuses a family
+/// feature set with an API's availability: CI's `Apple Paravirtual device`
+/// answers `Metal3 = false` and returns usable addresses anyway. Then it was
+/// `respondsToSelector(sel!(gpuAddress))` **sent to the `MTLDevice`**, which is
+/// simply the wrong receiver — `gpuAddress` belongs to `MTLBuffer`, so a device
+/// never responds to it and the gate was false everywhere. Both were caught by
+/// the seam reporting the capability as never asked for.
+///
+/// The version check is what the other two were reaching for. It is also how
+/// [`driver_string`] already reads the system, so this adds no dependency.
+fn gpu_address_is_available() -> bool {
+    NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion
+        >= 13
 }
 
 /// The seam features this adapter can answer for, and only those.
@@ -262,9 +283,9 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   measured: four non-zero values, every one dereferenced correctly by a
 ///   kernel. So the family gate switched this capability off on the only device
 ///   that had ever proven it, and would have left it reported closed and
-///   exercised nowhere. `respondsToSelector:` asks what the code depends on and
-///   keeps what the family query was protecting — a macOS 13 selector is never
-///   sent to a system without it.
+///   exercised nowhere. [`gpu_address_is_available`] asks what the code depends
+///   on — the macOS version the selector arrives in — and keeps what the family
+///   query was protecting.
 ///
 ///   [`Features::BUFFER_DEVICE_ADDRESS`] still rides on `Metal3` and rests on
 ///   the same mistaken reasoning, but it is left alone deliberately: nothing on
@@ -321,9 +342,11 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     // switched this path off on the one device it is proven to work on, which
     // would have left the capability closed and never exercised anywhere.
     //
-    // `respondsToSelector:` asks the question the code actually depends on, and
-    // keeps the property the family query was there for: the macOS 13 selector
-    // is never sent to a system that lacks it.
+    // `gpu_address_is_available` asks the question the code actually depends on
+    // and keeps the property the family query was there for: the macOS 13
+    // selector is never sent to a system that lacks it. Its own doc carries the
+    // two wrong forms this gate had before, including a `respondsToSelector:`
+    // sent to the device rather than to a buffer.
     //
     // **And not the tier either, which is the second correction this gate has
     // needed.** `Tier2` was required on the reading that a dynamically indexed
@@ -342,8 +365,7 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     // addresses or resource IDs bypasses that machinery, and is the Metal 3
     // idiom, so the tier was never the question. Keeping it meant the
     // capability read closed while being exercised on no machine at all.
-    let addressable = device.respondsToSelector(sel!(gpuAddress));
-    if addressable {
+    if gpu_address_is_available() {
         out |= Features::DESCRIPTOR_INDEXING;
     }
     if device.supportsBCTextureCompression() {
