@@ -25,43 +25,35 @@ Not a defect to fix so much as a shape to know. If it is ever worth changing,
 the options are to run the render step first, or to give it its own job so the
 two failures cannot mask each other.
 
-### The GPU-encoded ICB probe is written and has never run
+### The GPU-encoded ICB probe ran, and every answer was yes
 
 `crcbl_mtl::device`'s
-`a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes` asks the
-one question `Capability::DrawIndirectCount` on Metal is blocked on: can a
-**compute kernel encode** into an `MTLIndirectCommandBuffer`? The existing ICB
-evidence only covers _executing_ one the CPU encoded, which is a different
-capability.
+`a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes` passed
+on CI's `Apple Paravirtual device`:
 
-The kernel is hand-written MSL (`command_buffer` / `render_command`), because
-Slang's Metal target cannot express it. That is now a cheap shape rather than an
-expensive one — see the correction above about the artifact-hash job.
+```text
+icb-kernel: device="Apple Paravirtual device" argumentBuffersSupport=MTLArgumentBuffersTier(1)
+            supportsFamily Metal3=false Apple3=true Mac2=true
+icb-kernel: gpuResourceID=MTLResourceID { _impl: 90194771968 } size=1
+icb-kernel: centre=[40, 80, C0, FF]  corner=[11, 22, 33, FF]
+```
 
-**Four things only the `mtl e2e` run can settle**, recorded so they are not
-re-derived:
+`centre` is the ink and `corner` the untouched prime, so the four open questions
+are all answered:
 
-1. Whether Metal's front end accepts `command_buffer`/`render_command` at all on
-   the runner's MSL version. This is the outcome that prints rather than fails.
-2. Whether a Metal 3 argument buffer reads a `command_buffer` member as the
-   `MTLResourceID` that `MTLIndirectCommandBuffer::gpuResourceID` hands out. The
-   probe takes that route because `objc2-metal` 0.3.2 exposes **no**
-   `setIndirectCommandBuffer:` on the compute encoder — the only such binding is
-   `MTLArgumentEncoder::setIndirectCommandBuffer:atIndex:`. **If it fails, the
-   fallback is enabling the `MTLArgumentEncoder` feature and using that**, which
-   is what Apple's own GPU-encoding sample does. Do not re-derive this.
-3. Whether the paravirtual device is `Tier2` and on a family permitting GPU-side
-   ICB encoding — the probe prints `argumentBuffersSupport()`, which also
-   answers the bindless question in the entry above.
-4. Whether `useResource:usage:` covers the blit-reset-to-kernel-write hazard
-   there, and whether `optimizeIndirectCommandBuffer:withRange:` — omitted as
-   performance-only — turns out to be load-bearing.
+1. **Metal's front end accepts hand-written `command_buffer`/`render_command`
+   MSL** on that runner's MSL version.
+2. **A Metal 3 argument buffer does read a `command_buffer` member as the
+   `MTLResourceID` `gpuResourceID` hands out** — the `MTLArgumentEncoder`
+   fallback was not needed.
+3. **The device is `Tier1`** and encodes anyway, which is also what proved the
+   bindless gate's tier half wrong.
+4. **`useResource:usage:` covered the blit-reset-to-kernel-write hazard**, and
+   `optimizeIndirectCommandBuffer:withRange:` was not needed to make it work.
 
-One premise was taken on trust and is worth flagging: that Slang silently drops
-a `command_buffer` parameter is written into the probe's doc comment as its
-reason for existing, and was **not** re-tested when the probe was written. It
-was measured earlier in this project's life; if it is ever revisited, measure
-again rather than citing the comment.
+So GPU-side ICB encoding is a proven mechanism on the only Mac this project has.
+What it does **not** prove is a whole frame's worth: the slice built on it hung
+the GPU, and the diagnosis is in its own entry below.
 
 ### A capability gate is a proxy until you check it — four in one day
 
@@ -216,27 +208,6 @@ game cannot reach the shell, and there is no `HostedGame` hook or `LoopConfig`
 field that says "grab the pointer while the menu is down". That is the design
 question, not the shell work. Its docs referenced this entry before it existed;
 it exists now.
-
-### A viewer frame now reaches a driver in CI, through the tests
-
-Closed, and by none of the three options this entry proposed — no `crcbl-cli`
-subcommand, no `#[ignore]`d integration test with its own runner, no widening of
-`gltf_fixture`. The crate's tests already assemble a `.glb` and drive import →
-convert → frame → draw → debug panel; they just hardcoded `GpuBackend::Null`.
-They now take it from `CRCBL_GPU`, and `ci.yml` runs
-`cargo test --package viewer` with `CRCBL_GPU=vk` against lavapipe beside the
-other samples' steps.
-
-**An unparseable `CRCBL_GPU` panics rather than falling back to `Null`.** That
-is the whole reason this is trustworthy: a step that quietly substituted the
-null backend would be a green CI job that is evidence about a backend nobody
-named — the trap `hal_seam_e2e`'s backend pin exists for. Red-checked with
-`CRCBL_GPU=nonsense`.
-
-What is still true: the viewer's _binary_ has no CI step, because it takes a
-required model path and the repository carries no glTF document by choice. If
-one is ever wanted — for a windowed or golden run — a `crcbl-cli` subcommand
-that writes a document is still the option that adds no second fixture builder.
 
 ### The viewer frames the document's geometry, not the geometry it draws
 
