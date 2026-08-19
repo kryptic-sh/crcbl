@@ -1793,6 +1793,31 @@ stays until `crcbl-wgpu` goes, and this runs beside it.
 The remaining half of the deletion bar is the parity blockers, which are four
 rows of hardware nobody here has — see "The numbers, restated".
 
+### The viewer's suite segfaulted once on lavapipe, and did not again
+
+On 2026-08-19 the `vk e2e (lavapipe)` job's "Run the viewer's suite against
+lavapipe" step died with `signal: 11, SIGSEGV` after `running 71 tests`. Every
+other step in that job passed, including the quarry step added in the same
+commit, and the only non-CI change in it was an additive `GpuContext::adapter`
+the viewer never calls.
+
+**Re-running the job passed.** So did ten local runs of
+`cargo test -p viewer --lib -- --test-threads=16` against lavapipe with both
+validation layers on. It is also the **only** failure in the last thirty CI runs
+on `main` — every other non-success there is a concurrency cancellation.
+
+**The candidate mechanism, unproven:** the viewer's lib tests open real devices
+through `HeadlessShell`, and 71 of them run at `cargo test`'s default
+parallelism. Concurrent device creation and teardown in one process is where
+lavapipe crashes if it is going to. That is a hypothesis from the shape of the
+failure, not a diagnosis — nothing here has reproduced it.
+
+**What would settle it**, in order of cost: run that step under a loop in a
+scratch branch until it fires; or serialise the device-opening viewer tests and
+see whether the class disappears. Neither is worth doing for one occurrence, and
+both are worth doing at the second — which is what this entry exists to make
+recognisable.
+
 ### CI does not shellcheck `web/*.sh`
 
 `ci.yml`'s lint step covers `tools/*.sh`, `crates/*/tests/*.sh` and (since
