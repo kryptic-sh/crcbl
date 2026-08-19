@@ -1690,17 +1690,47 @@ Closing it costs either `ALLOW_UNORDERED_ACCESS` on every device-local buffer or
 a fill that works only on `STORAGE` ones, and the reason's own line is that a
 capability which works only sometimes is worse than a clean no.
 
-**The third option: take `BufferFillWord` off the seam.** Nothing in the
-workspace calls `fill_buffer` outside the backends and their tests, and the seam
-rule is that anything which cannot work on all the backends gets refactored. It
-is `ApiAbsence` on two of four and can never be otherwise, so removing the verb
-closes the dx12 blocker by deleting the divergence rather than implementing it —
-eight blockers to seven, no dx12 work. It does not apply to
-`BufferFillRepeatedByte`, which vk and Metal both perform and which is genuinely
-implementable on three of four.
+**The third option: take the two valued fills off the seam.** The case is
+stronger than "dx12 declines them", and it is written down in
+`clear_counters.slang`'s own header.
 
-Still the owner's call: implement both, keep both declined, or drop
-`BufferFillWord` from the seam and judge the other on its own merits.
+`fill_buffer`'s documented headline use is zeroing an indirect count buffer at
+the top of a frame. **The engine hit exactly that need and could not use it** —
+dx12 refuses, Metal repeats a byte, wgpu clears only to zero — so
+`clear_counters.slang` was written instead. Its comment says as much: the fill
+"is what this would be if the four backends could all record one".
+
+**And the dispatch turned out to be the better answer, for reasons unrelated to
+parity.** A fill is legal only _outside_ a pass, and a render-graph frame is
+passes end to end, so a fill cannot go where the zeroing is needed at all.
+Landing inside the graph is what let the three counters become **device-local**;
+they had been `HostUpload` purely so the CPU could zero them before the frame,
+and D3D12 has no unordered-access view of an upload-heap resource. The zero also
+has to complete and be visible before the first atomic add, which is a barrier
+and therefore its own pass regardless — so a fill would not have saved the
+dispatch even if every backend could record one.
+
+**Every caller of `fill_buffer` in the workspace is a backend or a test.**
+`crcbl-render`, `crcbl-scene` and every app call it zero times.
+
+So the seam carries a verb and three capabilities that no production code uses,
+whose headline case was solved better another way, and two of whose variants
+cost two of the eight parity blockers. What the valued fills would still enable
+is real — a non-zero sentinel outside a pass, `0xFFFF_FFFF` for a min-reduction
+or an "empty" marker in a hash or visibility buffer — but each of those, when
+wanted per frame inside the graph, hits the same outside-a-pass rule and becomes
+a dispatch again.
+
+**Recommendation: drop `BufferFillRepeatedByte` and `BufferFillWord`, keep
+`BufferFillZero`.** That takes the blockers from eight to **six** by deleting
+divergence rather than implementing it, and keeps the one variant all five
+backends perform, which is still a cheap one-off zero for setup paths outside a
+frame. The alternatives remain: implement both on dx12 at the cost of
+`ALLOW_UNORDERED_ACCESS` on every device-local buffer, keep both declined, or
+drop only `BufferFillWord` (eight to seven) on the narrower `ApiAbsence`
+argument.
+
+Owner's call.
 
 ### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
 
