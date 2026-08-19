@@ -2803,6 +2803,30 @@ does not make the deletion wait on Metal's mesh support, which nothing in the
 engine uses on that backend today. But it is a scope call, not a technical one,
 and it is the last thing standing between here and goal 3.
 
+## The numbers, restated — the eight rows and what each would take
+
+The list is **eight**, down from eleven, and it is worth seeing that only two of
+the eight are work anybody could do today:
+
+| rows                                              | what they are                                                                               | what closes them                                                                                     |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| dx12 `BufferFillRepeatedByte`, `BufferFillWord`   | **Declined, reviewed.** `ClearUnorderedAccessViewUint` needs a UAV of every fillable buffer | a decision to pay `ALLOW_UNORDERED_ACCESS` everywhere, which was judged worse than a clean `No`      |
+| dx12 `MeshShading`, `TaskShaderStage`             | the WARP device removal                                                                     | **a Windows session.** Three hypotheses eliminated by reading; the branch that reproduces it is kept |
+| Metal `MeshShading`, `TaskShaderStage`            | the runner answers `Metal3 = false`                                                         | **hardware.** Unprovable here whatever anyone writes                                                 |
+| Metal `TimestampQuery`, `PipelineStatisticsQuery` | no `MTLCounterSampleBuffer` is built, and the runner advertises no `counterSets`            | writable, but **unverifiable here** — it would land as `NotOnThisDevice`                             |
+
+So under bar (2), the reachable end state is **six rows**, not zero: writing
+Metal's counter sample buffer moves two rows to `NotOnThisDevice`, and the other
+six need either hardware or a decision already taken. Under bar (3) the deletion
+happens now.
+
+**What is no longer an argument either way:** every seam-audit finding is
+closed, so `crcbl-wgpu` is not holding any contract honest that the other
+backends do not. It caught one real bug this session — a missing
+`max_bind_groups` guard that returned `Ok` plus a poisoned layout — which is a
+point _for_ its coverage, and that guard now exists and would survive its
+deletion.
+
 **What has changed since this was written, and it sharpens the question rather
 than answering it.** `crcbl-webgpu` now has **zero** divergences —
 `REVIEWED_BLOCKERS` does not name it at all, after `StorageImageBinding` gained
