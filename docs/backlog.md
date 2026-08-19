@@ -874,57 +874,35 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
-### Metal indirect count: stop trying to make an ICB work, patch the args
+### The Metal ICB line of attack, and why it is closed
 
-**Three attempts, three identical hangs.** `crcbl_mtl::icb` is written and works
-in isolation, and hangs the GPU in a frame every time. Branch
-`try/mtl-icb-indirect-range` holds the whole line of attack; **it should not be
-continued as it stands.**
+Kept because it cost four CI runs and the conclusion is worth not re-deriving.
+`Capability::DrawIndirectCount` on Metal was attempted three times as an
+**indirect command buffer** and hung the GPU every time — the same three
+`render_e2e` goldens, with every encoder reporting `completed` and no API
+violation in 8 MB of validation log:
 
-| attempt | change                                                         | result                           |
-| ------- | -------------------------------------------------------------- | -------------------------------- |
-| 1       | `executeCommandsInBuffer:withRange:`                           | Hang, 3 `render_e2e` goldens     |
-| 2       | execution range read from GPU memory                           | Hang, same three                 |
-| 3       | + blit `optimizeIndirectCommandBuffer` between kernel and pass | Hang, same three, and ~3x slower |
+| attempt | change                                                         | result           |
+| ------- | -------------------------------------------------------------- | ---------------- |
+| 1       | `executeCommandsInBuffer:withRange:`                           | Hang             |
+| 2       | execution range read from GPU memory                           | Hang             |
+| 3       | + blit `optimizeIndirectCommandBuffer` between kernel and pass | Hang, ~3x slower |
 
-What holds across all three: the isolated probes pass — a kernel encodes an ICB
-and the ICB executes, verified on this exact device — while any full frame
-hangs. The fault report names every encoder `completed` and Metal API validation
-logs no violation in 8 MB, so nothing localises it further. Attempt 3 in
-particular refutes the "kernel-write and execute in one command buffer needs the
-optimise" theory, which was the last structural difference between probe and
-frame.
+The isolated ICB probes pass on that exact device — a kernel encodes an ICB and
+the ICB executes — so the mechanism works and something about a full frame does
+not. **Nothing ever localised it**, which is why the branch
+`try/mtl-icb-indirect-range` is kept rather than deleted: it is the reproduction
+if anyone wants it.
 
-**The design that avoids the whole problem, and it reuses machinery already
-proven on this device.** `crcbl_mtl::command` **already issues plain indirect
-draws** — `drawPrimitives:indirectBuffer:indirectBufferOffset:` and its indexed
-twin — and that is the `IndirectPerBatch` path which passes on this runner
-today. A GPU-side count does not need an indirect command buffer at all:
+**What shipped instead needs no ICB at all**, and that is the lesson: the
+backend already issued plain indirect draws on a path that passed on this
+runner, and a GPU-side count only needs the surplus draws to become no-ops.
+`crcbl_mtl:: indirect_count` packs the arguments and zeroes the instance counts
+past the count; the pass issues ordinary draws. It went green on the first CI
+run, including the goldens that had hung three times.
 
-1. A small kernel reads the count and **zeroes `instanceCount` in the argument
-   structures at or beyond it**. A draw of zero instances renders nothing; that
-   is defined behaviour, not a trick.
-2. The pass then issues `max_draw_count` ordinary indirect draws,
-   unconditionally.
-
-The properties are better on every axis. **Correct**: a zero-instance draw is a
-no-op by specification. **Robust**: it uses only the two calls this backend
-already makes and this device already runs, with no ICB, no argument buffer, no
-`gpuResourceID` and no `supportIndirectCommandBuffers` on every pipeline.
-**Performant**: `max_draw_count` is **1** in `crcbl_render::forward` and 2 in
-the seam, so this is one or two draw calls and a kernel touching a handful of
-words — against the roughly forty ICB allocations per frame the validation log
-implies for the ao scene.
-
-The cost it does carry: it issues `max_draw_count` draws where a true
-draw-indirect-count issues `count`, so it is only sensible while that bound is
-small. It is 1 and 2 here. A seam caller that asked for thousands would want the
-ICB path back, and nothing asks.
-
-**What to keep from the reverted work if this is written:** the honest
-`max_draw_indirect_count` derived by creating a real descriptor, the two
-assertions pinning feature-to-limit against the seam's `can_multi_draw`, and the
-requirement that the row end up _exercised_ rather than merely closed.
+Look for what the backend already does successfully before building new
+machinery on top of it.
 
 ### DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
 

@@ -676,6 +676,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Capability::DrawIndirectCount` works on the Metal backend**, taking the
+  parity blocker list from nine rows to eight — and it also unblocks
+  `Capability::IndirectArgumentPaddedStride`, which the seam had been declining
+  on Metal only because the draw-count ceiling was one. Metal's exercised
+  capability coverage goes from 20 of 26 to 22.
+
+  Metal has no GPU-side draw count and **no indirect command buffer is used**. A
+  compute kernel packs the argument structures into a backend buffer and zeroes
+  the instance count of every structure at or beyond the count the GPU wrote;
+  the pass then issues that many ordinary indirect draws. A draw of zero
+  instances emits no vertices by definition, so the surplus draws are no-ops.
+
+  It packs rather than editing the caller's arguments: zeroing in place would
+  leave the zeroes behind, and a later frame with a **larger** count would then
+  draw nothing for every structure an earlier smaller count had reached.
+
+  `max_draw_indirect_count` is 8. It is a deliberate bound rather than a device
+  answer, because this design issues that many draws whatever the GPU count says
+  — so raising it far is what would make it wrong.
+
 - **`apps/viewer` draws a wireframe.** `W` toggles it, off by default.
   `ForwardRenderer` gained `set_wireframe`, `wireframe` and the associated
   `supports_wireframe`, so an application can ask before it offers the view.
