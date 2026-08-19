@@ -730,6 +730,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/viewer` reloads the document when it is written again.**
+  `docs/plan/sample/05-viewer.md` milestone 3's artist loop: re-export from
+  Blender and the frame becomes the new file, with no window reopened. The new
+  `crate::watch` module polls the path four times a second and needs a
+  modification time and length to stand still across two looks before it offers
+  a reload — an exporter writes a `.glb` progressively, so a load in the middle
+  of one is a parse error about a file that is about to be fine.
+
+  `Gpu::reload` builds the whole new renderer, grid and instance list before it
+  releases the live one, so **every failure keeps the frame already on screen**:
+  a document too large for its pools, one caught mid-write, one that converts to
+  nothing. The exposure and the wireframe are carried across, since they are the
+  renderer's state and the renderer is what gets replaced. The camera is
+  deliberately not re-framed — an artist who has just placed the view does not
+  want it moved because they saved; `F` re-frames when they do.
+
+  `--tick-hz` now paces something: the tick was empty, and the poll is what it
+  does. The look itself is on a fixed interval, so the rate a save is noticed at
+  does not move with the flag. The debug panel gained a `reloads` row, which is
+  the only way to tell a reload that ran from one that was never offered when a
+  re-export changes nothing visible.
+
 - **`crcbl-ui` menus carry sliders, and `apps/viewer`'s panel has one for the
   exposure.** `MenuItem` gained a `kind` — `MenuItemKind::Action` for the button
   every row was until now, or `MenuItemKind::Slider`, a value in `0.0..=1.0` the

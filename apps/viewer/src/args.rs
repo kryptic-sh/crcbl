@@ -107,9 +107,11 @@ OPTIONS:
                          debug build, hidden in a release build'
     -h, --help           Print this help
 
-This milestone simulates nothing, so --tick-hz sets a clock that steps an empty
-tick; it is in docs/backlog.md. The shared block is printed whole rather than
-edited, so that what it says about a flag is what the engine says about it.";
+This sample simulates nothing, so --tick-hz paces the only thing its tick does:
+looking at the document on disk, so a re-export is picked up. The look itself is
+on a fixed interval, so the rate a save is noticed at does not move with the
+flag. The shared block is printed whole rather than edited, so that what it says
+about a flag is what the engine says about it.";
 
 /// What the command line asked for.
 pub type Invocation = crcbl::args::Invocation<Options>;

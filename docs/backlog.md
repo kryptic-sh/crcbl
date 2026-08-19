@@ -190,14 +190,41 @@ module's docs name its own omission; this is the list in one place.
   means teaching `ssr.slang` about the debug view, which is a second uniform and
   a second shader for a defect nobody can see.
 
-- **Milestone 3, hot reload** (V-F4) and the **browser drop target** (the other
-  half of V-F5). The drop target needs an `AssetSource` over a file a browser
-  handed the page, which stage 10 owns.
-- **`--tick-hz` sets a clock that steps an empty `Viewer::tick`.** The viewer is
-  the sanctioned client-only sample and simulates nothing, so the flag paces
-  ticks nobody uses. `crate::args::USAGE` says so. Removing it would mean a
-  sample-specific `Common` parser, which is a worse trade than a flag that
-  honestly does nothing.
+- **The browser drop target**, the other half of V-F5. It needs an `AssetSource`
+  over a file a browser handed the page, which stage 10 owns.
+
+- **Hot reload has landed and leaves four.** `crate::watch` plus `Gpu::reload`,
+  driven from `Viewer::tick`.
+
+  **It stops while the `ESC` panel is up.** `FrameInfo::ticks` is zero while the
+  loop calls itself paused, so no tick runs and nothing is polled — an artist
+  who re-exports with the panel open sees the new file when they close it. The
+  fix is a clock the frame carries rather than the tick: `FrameInfo` has
+  `tick_dt` and `ticks` and no wall-clock delta at all, so a viewer polling in
+  `draw` has nothing to advance a timer by. Adding one is an engine change every
+  sample would see.
+
+  **Verified against written files, not against Blender.** The tests write a
+  `.glb` with `std::fs::write`, which is one `open`/`write`/`close`. A real
+  exporter's write pattern — a temporary file and a rename, or a long
+  progressive write — is what the settle is _for_, and no test reproduces it.
+  `watch::tests::a_file_still_growing_is_never_offered` is the closest and is
+  still a synthetic sequence.
+
+  **A rename onto the path is a stamp change and would be picked up**, which is
+  the common exporter pattern and is fine, but nothing here proves it: the
+  `stat` follows the path, so the new inode's stamp is what the next poll sees.
+  Untested.
+
+  **`load_and_report`'s `drew_nothing` branch is unreachable.** `model::load`
+  computes the bounds from the primitives the conversion would draw, so a
+  document with nothing to draw is already a `LoadError::NoGeometry` from
+  `load`. The branch after it can therefore never run, and its
+  `LoadError::NoGeometry(options.model.clone())` is dead. Found while writing
+  the reload path — `Viewer::tick` has the same shape and says in a comment why
+  it passes the flag on rather than hard-coding it. Not removed: it is start-up
+  behaviour this slice had no reason to touch, and the belt-and-braces reading
+  is defensible if `world_bounds` ever counts something the conversion skips.
 
 ### The hosted seam carries no modifiers
 

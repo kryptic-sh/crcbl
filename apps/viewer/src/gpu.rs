@@ -261,6 +261,84 @@ impl Gpu {
         })
     }
 
+    /// Replaces the resident scene with a freshly converted document.
+    ///
+    /// `docs/plan/sample/05-viewer.md` V-F4's GPU half: an artist re-exports and
+    /// the frame becomes the new file, with no window reopened and no device
+    /// lost.
+    ///
+    /// # The live renderer is only released once the new one exists
+    ///
+    /// A [`ForwardRenderer`] is built *for* a scene — its pools are sized by the
+    /// description — so a swap is a new renderer rather than an edit to this
+    /// one. Which means an error has somewhere useful to go: the whole of the
+    /// new one is built, filled and checked before the old one is touched, so a
+    /// document that is too large for its pools, or that was caught mid-write
+    /// and parsed into nonsense, leaves the viewer drawing exactly what it was
+    /// drawing. Nothing here can leave the caller with no renderer at all.
+    ///
+    /// The cost is that both are resident for the length of this call. That is
+    /// the same peak a second viewer would need, on a machine already holding
+    /// the document twice while it converts.
+    ///
+    /// # What carries over, and what the caller still owes
+    ///
+    /// The exposure and the wireframe are the renderer's own state, so they are
+    /// re-applied here — a re-export that reset the picture's brightness would
+    /// be a reload the artist has to undo. Everything the frame pushes anyway
+    /// (the camera, the normals view) needs nothing: `crate::app::Viewer`'s
+    /// `draw` writes those every frame.
+    ///
+    /// **The camera is deliberately not re-framed.** An artist who has just
+    /// placed the view to look at one corner of a model does not want it moved
+    /// because they saved; `F` re-frames when they do.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] if the renderer refused the description, the grid or an
+    /// instance. The live scene is unchanged in every one of those cases.
+    pub fn reload(
+        &mut self,
+        scene: &crcbl::render::scene::SceneDesc<'_>,
+        instances: &[InstanceDesc],
+        grid_extent: f32,
+    ) -> Result<(), HalError> {
+        let device = self.ctx.device();
+        let mut next =
+            ForwardRenderer::with_scene(device, self.ctx.queue(), self.ctx.format(), scene)?;
+
+        // Unwound by hand from here down, for `Gpu::open`'s reason: a `?` would
+        // drop the half-built renderer without releasing a pipeline of it.
+        if let Err(error) = next.set_ground_grid(device, Some(GridStyle::for_extent(grid_extent))) {
+            next.destroy(device);
+            return Err(error);
+        }
+        for instance in instances {
+            if let Err(error) = next.add_instance(instance) {
+                next.destroy(device);
+                return Err(error.into());
+            }
+        }
+
+        next.set_exposure(self.renderer.exposure());
+        // Through the renderer rather than through `Gpu::set_wireframe`, which
+        // logs: a device that refused the view once has already said so, and a
+        // line per re-export is a log nobody reads. The answer is what the
+        // caller was already holding, so nothing here can disagree with it.
+        if self.renderer.wireframe()
+            && let Err(error) = next.set_wireframe(device, true)
+        {
+            crcbl::log::warn!("viewer: the wireframe view did not survive the reload: {error}");
+        }
+
+        let previous = core::mem::replace(&mut self.renderer, next);
+        previous.destroy(device);
+        // The graph's shape is a function of the scene, so the dump the log
+        // already carries is about a document that is no longer on screen.
+        self.dumped = false;
+        Ok(())
+    }
+
     /// Draws the document's triangles as lines instead of filling them.
     ///
     /// **Returns the state actually in force**, which is what the caller must

@@ -60,6 +60,7 @@ use crate::gpu::Gpu;
 use crate::listing::Listing;
 use crate::menu::{MenuKind, Menus};
 use crate::model::{self, LoadError, Model};
+use crate::watch::Watch;
 
 /// Frames the model again, fitting it in the view from wherever the camera is.
 ///
@@ -333,6 +334,16 @@ pub struct Viewer {
     /// `docs/plan/sample/05-viewer.md` milestone 2's listing — see
     /// [`crate::listing`]. Hidden until [`LISTING_KEY`] is pressed.
     listing: Listing,
+    /// Milestone 3's re-export loop — see [`crate::watch`] and [`Viewer::tick`].
+    watch: Watch,
+    /// How many times the document has been read again since the window opened.
+    ///
+    /// The debug panel's observable for the reload path, and the only one there
+    /// is: a re-export that changes nothing a person can see — the same
+    /// geometry moved by a millimetre — leaves every other row where it was, so
+    /// without this there is no way to tell a reload that ran from one that was
+    /// never offered.
+    reloads: u64,
     instances: usize,
     skipped: usize,
 }
@@ -454,6 +465,8 @@ pub fn with_shell<S: Shell + ?Sized>(
             exposure,
             exposure_pending: None,
             exposure_handle: crate::menu::handle_at(exposure),
+            watch: Watch::new(&options.model),
+            reloads: 0,
             listing,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
@@ -498,7 +511,80 @@ impl HostedGame for Viewer {
     /// Nothing is simulated, so nothing steps. See the [module docs](self) for
     /// why that is a charter exception rather than an empty call site waiting to
     /// be filled in: there is no state here to advance.
-    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {}
+    /// **The re-export loop**: notices that the document has been written
+    /// again, converts it, and swaps it into the frame.
+    ///
+    /// `docs/plan/sample/05-viewer.md` V-F4. This sample steps no simulation —
+    /// it is the doc's sanctioned exception to rule 2, see [`crate`] — so the
+    /// tick had an empty body and `--tick-hz` paced nothing. It now paces the
+    /// only clock this application has: [`Watch::poll`] takes the tick's own
+    /// `dt` and looks at the file on a fixed interval of its own, so the rate a
+    /// document is noticed at does not move with the flag.
+    ///
+    /// **Every failure keeps the frame that is already on screen** and says so
+    /// once. A `.glb` caught mid-write, a document too large for the pools it
+    /// asks for, an export that converted to nothing — all of them are things
+    /// the next save fixes, and a viewer that went blank at the first bad one
+    /// would be a worse tool than one that kept drawing. The skips are printed
+    /// to stderr as they are at start-up, for `load_and_report`'s reason: the
+    /// person who just re-exported is the one who needs to read them.
+    fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
+        if !self.watch.poll(tick_dt) {
+            return;
+        }
+        let path = self.watch.path();
+        let model = match model::load(path) {
+            Ok(model) => model,
+            Err(error) => {
+                crcbl::log::warn!(
+                    "viewer: {} was written again and could not be read, so the document already \
+                     on screen was kept: {error}",
+                    path.display(),
+                );
+                return;
+            }
+        };
+        let key = model.key.display().to_string();
+        // `drew_nothing` is false by construction: `model::load` computes the
+        // bounds from the primitives the conversion would draw, so a document
+        // with nothing to draw has no bounds and was refused above as a
+        // `LoadError::NoGeometry`. Passed anyway rather than hard-coded, so
+        // that a `world_bounds` which one day counts something the conversion
+        // skips reports it here instead of printing a skip list with no verdict
+        // under it.
+        for line in skip_report(&key, model.skipped(), model.render.instances.is_empty()) {
+            eprintln!("{line}");
+        }
+        if let Err(error) = gpu.reload(
+            &model.render.scene,
+            &model.render.instances,
+            // The same extent `crate::app::with_shell` opened with, and for the
+            // same reason — see `crate::gpu`.
+            model.bounds.half_extent().max_element() * 2.0,
+        ) {
+            crcbl::log::warn!(
+                "viewer: {key} was re-read but the renderer refused it, so the document already \
+                 on screen was kept: {error}",
+            );
+            return;
+        }
+
+        self.bounds = model.bounds;
+        self.instances = model.render.instances.len();
+        self.skipped = model.skipped().len();
+        // Rebuilt rather than edited row by row, because every row is the
+        // document's; the panel's own visibility is the one thing that is not,
+        // so it is the one thing carried across.
+        let showing = self.listing.is_visible();
+        self.listing = Listing::of(&model);
+        self.listing.set_visible(showing);
+        self.reloads += 1;
+        crcbl::log::info!(
+            "viewer: {key} reloaded — {} instance(s), {} skipped",
+            self.instances,
+            self.skipped,
+        );
+    }
 
     /// `F` frames the model again, `I` shows the listing, `W` draws it as lines
     /// and `N` draws its normals — each once per press — and `-`/`=` step the
@@ -726,6 +812,7 @@ impl DebugModule for Viewer {
         out.row("instances", format_args!("{}", self.instances));
         out.row("skipped", format_args!("{}", self.skipped));
         out.row("dist", format_args!("{:.2}", self.orbit.distance()));
+        out.row("reloads", format_args!("{}", self.reloads));
         out.row(
             "wireframe",
             format_args!("{}", if self.wireframe { "on" } else { "off" }),
@@ -1769,6 +1856,186 @@ mod tests {
             "a stop moved the handle from {before} to {after}",
         );
 
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A re-export is picked up, and the frame becomes the new document.**
+    ///
+    /// V-F4 end to end: the file on disk is written again, the watch settles it,
+    /// the conversion runs, the renderer swaps its scene, and the viewer's own
+    /// state — the bounds the camera frames against, the listing panel's rows —
+    /// is the new file's.
+    ///
+    /// The bounds are the observable rather than the reload counter alone: a
+    /// counter says the path ran and nothing about what it produced, and this
+    /// fixture's two documents differ only in where the node puts the quad, so
+    /// a reload that swapped the renderer and forgot everything else would move
+    /// the counter and leave the camera framing the old corner of the world.
+    #[test]
+    fn a_re_export_is_picked_up_and_replaces_the_document() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4096);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        assert_eq!(engine.game().reloads, 0, "nothing was written yet");
+        assert_eq!(engine.game().bounds.center(), Vec3::ZERO);
+        assert_eq!(engine.game().instances, 1);
+        let window = engine.window();
+        tap(&mut engine, window, LISTING_KEY);
+        assert_eq!(row_value(&ui_text(&engine), "instances"), "1");
+
+        // A second quad three metres along: a different instance count, a
+        // different centre, and a different length on disk — so every number
+        // below can move, and the watch can tell the two files apart on a
+        // filesystem with a coarse modification time.
+        std::fs::write(&options.model, fixture::two_quads_glb()).expect("the re-export");
+
+        // `Watch` looks at the file four times a second and needs two agreeing
+        // looks, so half a second of ticks. Bounded rather than open, so a
+        // reload that never happens fails here instead of hanging.
+        let ticks_per_second = f64::from(crate::args::DEFAULT_TICK_HZ);
+        let frames = (ticks_per_second * 2.0).ceil() as usize;
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+            if engine.game().reloads > 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.game().reloads,
+            1,
+            "two seconds of ticks did not pick the re-export up",
+        );
+        assert_eq!(
+            engine.game().instances,
+            2,
+            "the scene was swapped and the instance count was not",
+        );
+        assert_eq!(
+            engine.game().bounds.center(),
+            Vec3::new(1.5, 0.0, 0.0),
+            "the scene was swapped but the bounds are still the old document's",
+        );
+        assert_eq!(
+            row_value(&ui_text(&engine), "instances"),
+            "2",
+            "the listing panel is still describing the document that was replaced",
+        );
+        assert!(
+            engine.game().listing.is_visible(),
+            "the reload closed a panel the user had opened",
+        );
+
+        // And it settles: the same file, unchanged, is not read again.
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+        }
+        assert_eq!(
+            engine.game().reloads,
+            1,
+            "a document nobody touched was reloaded again",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A document that cannot be read leaves the frame alone.**
+    ///
+    /// The case the artist loop actually produces: a `.glb` caught mid-write, or
+    /// an export that failed. A viewer that blanked at the first bad read would
+    /// be a worse tool than one that kept drawing the last good document, so the
+    /// reload is refused and everything stays where it was.
+    #[test]
+    fn a_broken_re_export_keeps_the_document_already_on_screen() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4096);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+
+        std::fs::write(
+            &options.model,
+            b"not a glb at all, and not the right length either",
+        )
+        .expect("the bad write");
+        let frames = (f64::from(crate::args::DEFAULT_TICK_HZ) * 2.0).ceil() as usize;
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+        }
+        assert_eq!(
+            engine.game().reloads,
+            0,
+            "a document that will not parse was loaded"
+        );
+        assert_eq!(
+            engine.game().bounds.center(),
+            Vec3::ZERO,
+            "the frame lost the document it had",
+        );
+        assert_eq!(engine.game().instances, 1, "the instance count moved");
+
+        // **A document that parses but has nothing to draw is refused too.** A
+        // point list is legal glTF that this renderer does not draw, so the
+        // conversion skips it and `model::load` reports `NoGeometry` — a
+        // different refusal from the parse failure above, and the one an
+        // artist actually produces by exporting the wrong collection.
+        std::fs::write(&options.model, fixture::points_glb()).expect("the points write");
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+        }
+        assert_eq!(
+            engine.game().reloads,
+            0,
+            "a document nothing could be made of was loaded",
+        );
+        assert_eq!(engine.game().instances, 1, "the frame lost its geometry");
+
+        // And the next good write still lands, so the refusal is not a latch.
+        let moved = Vec3::new(12.5, 0.0, 0.0);
+        std::fs::write(&options.model, fixture::quad_glb(moved)).expect("the re-export");
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+            if engine.game().reloads > 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.game().bounds.center(),
+            moved,
+            "the recovery never happened"
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A reload keeps the exposure.** It is the renderer's state and the
+    /// renderer is replaced, so without `Gpu::reload` carrying it across, every
+    /// save would reset the artist's brightness to the default.
+    #[test]
+    fn a_reload_keeps_the_exposure() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4096);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        for _ in 0..3 {
+            tap(&mut engine, window, EXPOSURE_UP_KEY);
+        }
+        let raised = engine.gpu().exposure();
+        assert!(
+            (raised - 2.0).abs() < 1e-4,
+            "the key did not move it: {raised}"
+        );
+
+        std::fs::write(&options.model, fixture::quad_glb(Vec3::new(12.5, 0.0, 0.0)))
+            .expect("the re-export");
+        let frames = (f64::from(crate::args::DEFAULT_TICK_HZ) * 2.0).ceil() as usize;
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+            if engine.game().reloads > 0 {
+                break;
+            }
+        }
+        assert_eq!(engine.game().reloads, 1, "the re-export was not picked up");
+        assert!(
+            (engine.gpu().exposure() - raised).abs() < 1e-4,
+            "the reload reset the exposure to {}",
+            engine.gpu().exposure(),
+        );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

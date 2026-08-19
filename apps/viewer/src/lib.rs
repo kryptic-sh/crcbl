@@ -19,18 +19,14 @@
 //! document holds — and what the conversion could not bring in — on screen
 //! behind `I`. See [`listing`]. `W` draws it in wireframe and `N` in
 //! world-space normals; `-` and `=` step the exposure, and so does the slider
-//! on the `ESC` panel — see [`menu`].
+//! on the `ESC` panel — see [`menu`]. Re-export the file and the frame becomes
+//! the new document, which is milestone 3's artist loop — see [`watch`].
 //!
-//! What it deliberately does not do, each because it needs something this slice
-//! does not build:
-//!
-//! * **No hot reload.** Milestone 3, and the whole of the artist loop the
-//!   sample doc's V-F4 describes.
-//! * **No drop target.** V-F5 is "path argument natively, drop target in the
-//!   browser", and this is the native half. The browser half needs an asset
-//!   source over a dropped file, which stage 10 owns.
-//!
-//! Every one of those is in `docs/backlog.md` with what it is waiting on.
+//! What it deliberately does not do, because it needs something this slice does
+//! not build: **no drop target**. V-F5 is "path argument natively, drop target
+//! in the browser", and this is the native half. The browser half needs an
+//! asset source over a dropped file, which stage 10 owns — it is in
+//! `docs/backlog.md` with what it is waiting on.
 //!
 //! # Two rules this sample is exempt from, and neither is an oversight
 //!
@@ -59,6 +55,7 @@ pub mod gpu;
 pub mod listing;
 pub mod menu;
 pub mod model;
+pub mod watch;
 
 /// The `.glb` documents this crate's own tests open.
 ///

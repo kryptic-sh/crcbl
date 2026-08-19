@@ -52,6 +52,28 @@ pub fn empty_glb() -> Vec<u8> {
     document(&node_clause(Vec3::ZERO, false, Vec3::ONE), POSITIONS)
 }
 
+/// A `.glb` whose one primitive is drawn as `POINTS`.
+///
+/// **A document that loads and converts to nothing.** The positions are there,
+/// so the bounding box is finite and [`crate::model::load`] is happy with it;
+/// `build_render_scene` draws no point lists, so it skips the primitive and
+/// hands back no instances at all. That gap between "has geometry" and "has
+/// something to draw" is the one `crate::app`'s reload refuses on, and nothing
+/// else in this module reaches it — [`empty_glb`] is refused a step earlier,
+/// at the bounds.
+#[must_use]
+pub fn points_glb() -> Vec<u8> {
+    document_with(
+        std::slice::from_ref(&node_clause(Vec3::ZERO, true, Vec3::ONE)),
+        POSITIONS,
+        POINTS_MODE,
+    )
+}
+
+/// glTF's `mode` for a point list — table 24 of the specification. The default
+/// is `4`, triangles, which is what every other document here leaves out.
+const POINTS_MODE: &str = r#""mode": 0, "#;
+
 /// A `.glb` whose one node scales its axes unequally.
 ///
 /// **A document that loads, draws, and still lost something.** The conversion
@@ -96,6 +118,24 @@ pub fn nan_glb() -> Vec<u8> {
     document(&node_clause(Vec3::ZERO, true, Vec3::ONE), positions)
 }
 
+/// A `.glb` whose scene places the same mesh twice.
+///
+/// **The one fixture here with an instance count other than one.** A reload
+/// that swapped the renderer's scene and left every count behind would agree
+/// with a one-instance document at both ends; this is what makes the numbers on
+/// the listing panel and the debug row observable at all.
+#[must_use]
+pub fn two_quads_glb() -> Vec<u8> {
+    document_with(
+        &[
+            node_clause(Vec3::ZERO, true, Vec3::ONE),
+            node_clause(Vec3::new(3.0, 0.0, 0.0), true, Vec3::ONE),
+        ],
+        POSITIONS,
+        "",
+    )
+}
+
 /// The document's one node: translated to `at`, scaled by `scale`, drawing the
 /// mesh or not.
 fn node_clause(at: Vec3, draws: bool, scale: Vec3) -> String {
@@ -109,6 +149,12 @@ fn node_clause(at: Vec3, draws: bool, scale: Vec3) -> String {
 /// The whole document, with `node` as its single node and `positions` as its
 /// `POSITION` accessor's contents.
 fn document(node: &str, positions: [[f32; 3]; 4]) -> Vec<u8> {
+    document_with(std::slice::from_ref(&node.to_string()), positions, "")
+}
+
+/// [`document`], with every node in `nodes` in one scene and `mode` spliced
+/// into the mesh's one primitive.
+fn document_with(nodes: &[String], positions: [[f32; 3]; 4], mode: &str) -> Vec<u8> {
     let mut bin = Vec::new();
     for value in positions.iter().chain(NORMALS.iter()).flatten() {
         bin.extend_from_slice(&value.to_le_bytes());
@@ -122,16 +168,21 @@ fn document(node: &str, positions: [[f32; 3]; 4]) -> Vec<u8> {
     // `crates/crcbl/tests/gltf_e2e.rs` gives: glTF defaults a material to a
     // fully rough *conductor*, which has no diffuse lobe at all, so a fixture
     // that left it out would be nearly black in any frame drawn from it.
+    let scene = (0..nodes.len())
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let node = nodes.join(", ");
     let json = format!(
         r#"{{
   "asset": {{ "version": "2.0" }},
   "scene": 0,
-  "scenes": [{{ "nodes": [0] }}],
+  "scenes": [{{ "nodes": [{scene}] }}],
   "nodes": [{node}],
   "meshes": [{{
     "name": "panel",
     "primitives": [{{
-      "attributes": {{ "POSITION": 0, "NORMAL": 1 }},
+      {mode}"attributes": {{ "POSITION": 0, "NORMAL": 1 }},
       "indices": 2,
       "material": 0
     }}]
