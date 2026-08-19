@@ -848,6 +848,62 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
+### DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
+
+Three measurements now bracket this, and together they turn it from "our mesh
+path is broken" into a question about what to report.
+
+1. **The renderer's mesh path is correct on real hardware.**
+   `CRCBL_GPU=vk crates/crcbl/tests/run-render-e2e.sh` on an AMD RX 7900 XTX
+   (RADV NAVI31) passes 26/26, and
+   `the_cube_scene_draws_the_same_frame_on_every_geometry_path` reports
+   `cube on MeshShader against IndirectCount — 0 channel(s) differ, worst by 0`.
+   So the amplification stage descending the cluster DAG, its bind groups and
+   its indirect dispatch extents all produce a byte-identical frame through the
+   mesh path on a real GPU.
+2. **WARP reports `MeshShaderTier = TIER_1` and then loses the device** on that
+   same path, with **zero debug-layer errors** — so it is not an API misuse the
+   validation layer can see — and **zero DRED breadcrumbs**, so nothing names
+   the operation.
+3. **`crcbl-dx12`'s own mesh probe passes on that same WARP runner**, drawing
+   through a mesh pipeline and an amplification stage and reading the attachment
+   back. So D3D12-on-WARP can run _a_ mesh pipeline; it is the renderer's larger
+   use of one that kills it.
+
+**What is still not proven** is whose defect it is. (1) is Vulkan, not D3D12, so
+nothing has run `crcbl-render`'s mesh path through `crcbl-dx12` on a
+**hardware** D3D12 GPU. WARP failing where hardware succeeds is the likeliest
+reading, but a dx12-specific bug that only a software rasteriser exposes fits
+the evidence just as well.
+
+So the decision:
+
+- **(a) Withhold `MESH_SHADER` on software adapters and report it on hardware.**
+  Exactly the shape `crcbl_mtl::quirk` already uses — that module's rule is that
+  a quirk needs a measurement contradicting an unconditional API guarantee, and
+  says what was measured, on which device, and what every other device does. It
+  closes two blockers (ten rows to eight). The price: CI would report a
+  capability **no CI job can ever exercise**, since every dx12 job is WARP. That
+  is a real loss — it is the failure mode the parity mechanism exists to prevent
+  — and it should be a deliberate choice, not a side effect.
+- **(b) Keep both rows withheld** until a hardware Windows GPU can run them.
+  Honest, costs two blockers that may never close on the hardware this project
+  has, and matches how Metal's four unprovable rows are already treated.
+- **(c) Narrow it first.** Build a smaller repro on WARP — the amplification
+  dispatch alone, then with the DAG descent, then with the real bind groups —
+  until one of them removes the device. That would say whose bug it is, which is
+  what actually decides between (a) and (b). Costs a Windows debugging session
+  measured in CI round trips rather than minutes, since nothing local can run
+  it.
+
+My reading is (c) then (a) or (b) on what it finds, because (a) taken now is
+reporting a capability on the strength of a _different backend's_ evidence.
+
+The two hypotheses eliminated by reading are unchanged and still worth not
+re-testing: the indirect argument size is right (`IndirectKind::DispatchMesh`
+reports the 12 bytes `D3D12_DISPATCH_MESH_ARGUMENTS` wants), and the asymmetric
+resource states on the mesh path are deliberate, not a bug.
+
 ### Reporting dx12 mesh shading removes the WARP device — measured, then reverted
 
 **This was attempted and reverted, and the reason is a real defect rather than a
@@ -923,55 +979,37 @@ assertion, and the seam exercise are all written and reviewed; the revert is
 `6fe2d41` and they can be recovered from it rather than rewritten. The blocking
 question is only the device removal.
 
-### DRED is written and has never run
+### DRED has now run, and WARP records nothing
 
-`crcbl_dx12::dred` enables auto-breadcrumbs and page-fault reporting before the
-first `D3D12CreateDevice` and reads them back off a removed device. **No part of
-the Windows-only half has ever executed.** This box is Linux; the only compiler
-that sees that code is `cargo clippy --target x86_64-pc-windows-msvc`, which
-type-checks it and runs nothing. What is actually asserted on Linux is the
-portable half — `op_name`, `allocation_type_name`, `op_window`,
-`Breadcrumbs`/`Allocations` record-and-cap, and every `lines` formatter — and
-the `const` assertions tying `BREADCRUMB_OPS` and `ALLOCATION_TYPES` to the
-D3D12 constants, which the msvc build evaluates.
+Settled by a throwaway branch that re-reported `Features::MESH_SHADER` and let
+one CI run reach the removal. Three of this entry's four open questions are
+answered:
 
-Unverified, in the order a Windows run would settle them:
+- **`D3D12GetDebugInterface` does answer for
+  `ID3D12DeviceRemovedExtendedDataSettings` on a stock `windows-latest` runner
+  with no Graphics Tools feature.** `crcbl_dx12::dred` logged "DRED
+  auto-breadcrumbs and page-fault reporting are on". The module docs' argument
+  for enabling it unconditionally rather than behind `CRCBL_DX12_VALIDATION`
+  holds.
+- **Breadcrumbs are NOT populated on WARP.** The report reads
+  `DRED auto-breadcrumbs: 0 command list(s) with recorded work` on a genuinely
+  removed device. This was listed here as the thing worth finding out, and the
+  answer closes the avenue: DRED cannot name the failing operation on a software
+  adapter. It costs nothing and stays enabled — on a hardware Windows GPU it is
+  still the right tool.
+- **The walk survives**: it ran against a real removed device and returned a
+  report rather than faulting, though with an empty history it dereferenced
+  little.
 
-- **That `D3D12GetDebugInterface` answers for
-  `ID3D12DeviceRemovedExtendedDataSettings` on a runner with no Graphics Tools
-  feature.** The whole "always on, not behind `CRCBL_DX12_VALIDATION`" argument
-  in the module docs rests on Microsoft documenting DRED as part of the D3D12
-  runtime rather than of the debug layer. That is read from documentation, not
-  measured. If it turns out to need Graphics Tools, `enable` already warns and
-  the engine still runs — but the argument for the default would be wrong and
-  the docs would need correcting, not the code.
-- **That breadcrumbs are actually populated on WARP.** A software rasteriser is
-  free to write no command history at all, in which case a removal prints
-  `Breadcrumbs` with `recorded: 0` and the report says so — honest, but no more
-  use than the `HRESULT` was. Running the reverted mesh commit (`6fe2d41`) is
-  the cheapest way to find out, and is the reason this was built.
-- **That the walk survives real driver memory.** Every loop is bounded and every
-  pointer null-checked, and `the_breadcrumb_walk_stops_at_its_limit_and_says_so`
-  proves the bound terminates — but no pointer this code dereferences has ever
-  been a real one.
-- **The `IN FLIGHT` marker's meaning.** It reads `*pLastBreadcrumbValue` as "the
-  number of operations completed", so the operation _at_ that index is the one
-  in flight. That is D3D12's documented meaning of the field; whether a given
-  driver is off by one from it has not been checked against a known failure.
+Still unknown: the `IN FLIGHT` marker's off-by-one, which needs a driver that
+actually writes breadcrumbs.
 
-Deliberately not done, with reasons:
-
-- **`ID3D12DeviceRemovedExtendedDataSettings1`/`…Data1` and breadcrumb
-  contexts.** The `1` interfaces add PIX context strings per breadcrumb, which
-  are only there if something calls `SetBreadcrumbContext`; this backend sets
-  none, so the extra interface would buy an empty column and a narrower minimum
-  Windows version. Worth revisiting if this crate ever emits PIX markers.
-- **`SetWatsonDumpEnablement`.** It routes DRED into a Windows Error Reporting
-  crash dump, which nothing in this project collects.
-- **An environment variable to switch DRED off.** Adding one would be a knob
-  nobody can test here and a second way for the diagnostic to be absent exactly
-  when it is needed. If DRED's per-operation cost ever shows up in a profile,
-  that measurement is the thing that should introduce the flag.
+**What the run also fixed.** The diagnosis never reached the caller: a readback
+`Map` failure raised a bare `HalError::Backend`, and `debug::diagnosis` was
+attached only to `Signal`, the fence waits and the submit paths. A `Map` is
+where a removal surfaces, since it is the first call touching memory the GPU was
+writing. All three `Map` sites now carry it. That is why the first two
+diagnostic runs printed nothing but `0x887A0005`.
 
 ### dx12 mesh shading: the calls exist, the flag does not
 
