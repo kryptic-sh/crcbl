@@ -25,6 +25,48 @@ Not a defect to fix so much as a shape to know. If it is ever worth changing,
 the options are to run the render step first, or to give it its own job so the
 two failures cannot mask each other.
 
+### Metal bindless is implemented and STILL not exercised on CI
+
+The capability was closed and the row removed from `REVIEWED_BLOCKERS`, but the
+`mtl e2e` run says:
+
+```text
+BindlessDescriptorArray (this device withheld Features(DESCRIPTOR_INDEXING), so metal was never asked)
+capability coverage on metal: 20 driven, 6 unexercised of 26
+```
+
+So the parity list reads nine while this row is exercised on **no machine
+anywhere** — the exact failure the mechanism exists to prevent, and it is green.
+
+**The `supportsFamily(Metal3)` fix was necessary and not sufficient.** The gate
+is `respondsToSelector(gpuAddress) && argumentBuffersSupport() == Tier2`, and
+the selector half is certainly true — the probe calls `gpuAddress` on this
+device and gets four usable addresses. So the **`Tier2` half** is what withholds
+it, meaning CI's `Apple Paravirtual device` reports `Tier1`.
+
+**That is inference, not measurement, and closing it starts there.** Nothing
+prints `argumentBuffersSupport()`, so the next step is to have
+`crcbl_mtl::adapter`'s probe print the tier and the selector answer, so one run
+says which half fails instead of leaving it to reasoning.
+
+**Then a real question follows.** The probe's kernel — a `constant`-addressed
+struct holding `array<uint device*, N>`, dynamically indexed by `SV_GroupID` —
+**ran correctly on this device with Metal API _and_ GPU Validation enabled**. If
+the device is `Tier1`, then either the construction does not need `Tier2` at
+all, or it is undefined behaviour that happened to work.
+
+There is a principled reason to think the former: `Tier2` governs _argument
+buffers_ in Metal's resource-binding sense — `[[id(n)]]` slots, unbounded
+resource arrays, heaps — whereas a table of `gpuAddress` values is raw pointer
+arithmetic that bypasses that machinery entirely, and is the Metal 3 bindless
+idiom Apple documents. It would make `Tier2` the wrong question here for the
+same reason `supportsFamily(Metal3)` was.
+
+But that must not be acted on from reasoning alone, given this backend has now
+been wrong twice about which query gates this feature. Measure the tier first;
+if it is `Tier1`, the case for dropping that half is strong and should be
+written down with Apple's own wording before the gate moves again.
+
 ### `Features::BUFFER_DEVICE_ADDRESS` on Metal rides a query that is wrong
 
 `crcbl_mtl::adapter::features_of` reports it from
