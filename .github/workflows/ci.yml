@@ -753,6 +753,36 @@ jobs:
       # optional feature fails this job loudly instead of passing while checking
       # nothing; `CRCBL_DX12_VALIDATION=0` is the one way to run it there, and
       # the log then says the run checked no validation.
+      # DIAGNOSTIC BRANCH — option (d) of the dx12 mesh-shading decision in
+      # `docs/backlog.md`. The OS ships its own WARP, and this gives the runner
+      # a newer one. Microsoft publishes `Microsoft.Direct3D.WARP` exactly so a
+      # defect can be tested without updating Windows, and two of its release
+      # notes land on the symptom this branch provokes: 1.0.12 "Fix mesh shaders
+      # on Win11 retail D3D12", and 1.0.20 "Don't remove the device on
+      # free-threaded DDI failures" — a device removal with no debug-layer error
+      # and no DRED breadcrumb, which is what was measured.
+      #
+      # D3D12 loads `d3d10warp.dll` from beside the running executable, and
+      # cargo runs test binaries out of `target/<profile>/deps`, so it is copied
+      # to both that and `target/debug`. The DLL is fetched for this test only:
+      # Microsoft's guide says these builds cannot be redistributed, and nothing
+      # here ships one.
+      - name: Give the runner a newer WARP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = '1.0.20'
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.warp/$v/microsoft.direct3d.warp.$v.nupkg"
+          Invoke-WebRequest -Uri $url -OutFile warp.zip
+          Expand-Archive -Path warp.zip -DestinationPath warp -Force
+          $dll = 'warp/build/native/bin/x64/d3d10warp.dll'
+          if (-not (Test-Path $dll)) { throw "the redistributable did not carry $dll" }
+          New-Item -ItemType Directory -Force -Path target/debug/deps | Out-Null
+          Copy-Item $dll target/debug/
+          Copy-Item $dll target/debug/deps/
+          Get-Item target/debug/d3d10warp.dll, target/debug/deps/d3d10warp.dll |
+            Select-Object FullName, Length, @{n='Version';e={$_.VersionInfo.FileVersion}}
+
       - name: Drive a D3D12 device pinned to WARP
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh

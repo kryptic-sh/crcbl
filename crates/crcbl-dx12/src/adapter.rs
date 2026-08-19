@@ -664,6 +664,12 @@ fn features_of(raw: &RawCaps) -> Features {
         | Features::TIMESTAMP_QUERY
         | Features::OCCLUSION_QUERY
         | Features::PIPELINE_STATISTICS_QUERY;
+    // DIAGNOSTIC ONLY — DO NOT MERGE. Reporting these is what removed the WARP
+    // device. This branch pairs the flag flip with a newer WARP from the
+    // `Microsoft.Direct3D.WARP` redistributable, to answer option (d) in
+    // `docs/backlog.md`'s dx12 mesh-shading decision: whether the removal is
+    // the OS WARP's known mesh-shader defect or ours.
+    out |= Features::MESH_SHADER | Features::TASK_SHADER;
     out
 }
 
