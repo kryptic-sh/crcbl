@@ -1660,16 +1660,31 @@ Two consequences worth keeping:
 ### The doc gate does not cover private items
 
 CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding
-`--document-private-items` to that same command fails with 104 diagnostic lines
-on the Linux target, measured today — 20 of them in `crcbl-webgpu/src/probe.rs`,
-then `crcbl-audio`'s `qoa.rs` with 3, and a long tail of one or two across
-`crcbl-vk`, `crcbl-render`, `crcbl-webgpu` and `crcbl-rand`.
+`--document-private-items` to that same command still exits 0 but emits **139
+diagnostics** on the Linux target, re-measured 2026-08-19 — it was 104 when this
+entry was written, and the tree has grown since.
 
-Not a regression and not currently a failure: these are private-item links and
-sections nothing has ever checked. Worth knowing before anyone proposes turning
-the flag on as a "small hardening" — it is a real cleanup, and the count is
-target-dependent besides, since `crcbl-dx12`'s Windows-gated modules document
-nothing on Linux and add their own diagnostics under
+Where they are: `crcbl-shell` 33, `crcbl-webgpu` 29, `crcbl-vk` 7,
+`crcbl-render` 6, `apps/horde` 6, `crcbl-hal` 4, `apps/breakout` 4,
+`crcbl-audio` 3, then ones and twos across `crcbl-rand`, `apps/flappy` and
+others.
+
+**The split is what makes it startable**, and it is not one job:
+
+- **48 are `redundant explicit link target`** — ``[`Foo`](Foo)`` where the
+  target repeats the text. Mechanical and safe, and the only reason not to do
+  them today is that fixing 48 doc comments ships nothing on its own: the gate
+  cannot be turned on until the other 91 are gone too.
+- **72 are `unresolved link`** — each needs judgement about whether the target
+  moved, was renamed, or never existed. These are the real cleanup, and the ones
+  a reader following a link actually hits.
+- The rest are `is both a function and a module` ambiguities and the per-crate
+  summary lines.
+
+Still not a regression and still not a failure. Worth knowing before anyone
+proposes turning the flag on as a "small hardening": it is two sessions of work,
+not an afternoon, and **the count is target-dependent** — `crcbl-dx12`'s
+Windows-gated modules document nothing on Linux and add their own under
 `--target x86_64-pc-windows-msvc`.
 
 ### What is still declared but not driven
