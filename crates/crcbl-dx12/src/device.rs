@@ -2088,7 +2088,7 @@ impl Device for Dx12Device {
         };
         // The two valued fills take their sentence from `crcbl-hal` itself:
         // `DX12_NO_VALUED_FILL` is the same string this backend's `DIVERGENCES`
-        // rows carry, shared for the reason the Metal indirect-count note was —
+        // rows carry, shared for the reason `METAL_NO_DRAW_INDIRECT_COUNT` is —
         // the declaration a caller reads and the parity record a reviewer reads
         // drifted apart last time they were written twice.
         // One sentence for both mesh rows, for the same reason: the amplification

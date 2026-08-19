@@ -220,8 +220,9 @@ pub mod sync;
 pub mod threading;
 
 pub use capability::{
-    Capability, DIVERGENCES, DX12_NO_VALUED_FILL, Divergence, DivergenceKind, ParityVerdict,
-    Support, WEBGPU_BIND_GROUPS_ARE_IMMUTABLE, divergence, parity_blockers, parity_verdict,
+    Capability, DIVERGENCES, DX12_NO_VALUED_FILL, Divergence, DivergenceKind,
+    METAL_NO_DRAW_INDIRECT_COUNT, ParityVerdict, Support, WEBGPU_BIND_GROUPS_ARE_IMMUTABLE,
+    divergence, parity_blockers, parity_verdict,
 };
 pub use caps::{
     AdapterId, AdapterInfo, BackendKind, BindingModel, DeviceCaps, DeviceType, Downgrade,

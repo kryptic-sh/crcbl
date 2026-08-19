@@ -1996,20 +1996,6 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`Capability::DrawIndirectCount` works on the Metal backend**, taking the
-  parity blocker list from nine rows to eight. Metal has no GPU-side draw count,
-  so `crcbl_mtl::icb` builds one: a compute kernel encodes an
-  `MTLIndirectCommandBuffer` from the count the GPU wrote, and the render pass
-  executes it. The kernel runs on a compute encoder opened **before** the render
-  encoder, which is the consumer the deferred render-pass recording was written
-  for.
-
-  **Metal also reports a real `max_draw_indirect_count` now.** It was never
-  assigned and so sat at the portability floor of one, which silently kept the
-  seam's two indirect exercises from running at all. It is now measured by
-  creating the exact descriptor the path uses, so a device that cannot serve it
-  withholds the feature rather than promising it.
-
 - **`Capability::BindlessDescriptorArray` works on the Metal backend**, taking
   the parity blocker list from ten rows to nine. `crcbl_mtl::binding` binds a
   descriptor array as a Metal argument buffer — a table of

@@ -435,22 +435,6 @@ pub(crate) struct DeviceInner {
     /// nothing for a lazy path to decide, and the one message send belongs
     /// where its failure can still be reported as device creation failing.
     pub(crate) default_depth_stencil: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
-    /// The kernels that encode an indirect command buffer, or `None` on a
-    /// device that cannot hold one.
-    ///
-    /// **`Some` exactly when [`Features::DRAW_INDIRECT_COUNT`] is reported**,
-    /// which is what makes the flag a promise rather than a hope: the adapter
-    /// grants it only after `crcbl_mtl::icb`'s probe watched this device return
-    /// a live ICB, and [`MetalDevice::open`] fails outright if the kernel that
-    /// fills one will not compile. So `crcbl_mtl::command`'s `indirect_count`
-    /// finding `None` here means the device refused the buffer, and never that
-    /// a shader is missing.
-    ///
-    /// Eager for the reason [`Self::default_depth_stencil`] is, and lazy would
-    /// be worse for a sharper one: a compile failure has to arrive as device
-    /// creation failing, not as a draw refusing in the middle of a frame on a
-    /// device that already advertised the feature.
-    pub(crate) icb: Option<crate::icb::Kernels>,
     pub(crate) caps: DeviceCaps,
     /// Says, once, that a present wait actually reached a drawable.
     ///
@@ -808,24 +792,12 @@ impl MetalDevice {
         // what `DeviceDesc::optional_features` documents ("check `Device::caps`
         // afterwards to find out").
         let caps = record.info.caps;
-        // Before any command encoder exists, and for the reason
-        // `default_depth_stencil` is built above: the adapter has already
-        // reported `DRAW_INDIRECT_COUNT` on the strength of this device holding
-        // an indirect command buffer, and a kernel that will not compile has to
-        // fail here — where it is device creation failing — rather than at the
-        // first `draw_indirect_count` of the first frame.
-        let icb = if caps.features.contains(Features::DRAW_INDIRECT_COUNT) {
-            Some(crate::icb::Kernels::compile(&raw)?)
-        } else {
-            None
-        };
         let id = next_owner_id();
         let inner = Arc::new(DeviceInner {
             instance,
             raw,
             queue,
             default_depth_stencil,
-            icb,
             caps,
             first_present_wait: Once::new(),
             id,
@@ -1169,18 +1141,10 @@ impl Device for MetalDevice {
             // and a `MTLStoreAction` that resolves.
             Capability::MsaaResolveAttachment => Support::Yes,
             Capability::StencilReference => Support::Yes,
-            // A compute kernel writes an `MTLIndirectCommandBuffer` before the
-            // render encoder opens, and the encoder executes it; the commands
-            // past the GPU-written count are reset, so a reset command is what
-            // "fewer draws than the ceiling" means here. `crcbl_mtl::icb` holds
-            // the construction. Gated rather than unconditional because a
-            // device that refuses to create an ICB gets neither this nor the
-            // flag — the one arm of this match that a *device* can decide.
-            Capability::DrawIndirectCount => gated(
-                Features::DRAW_INDIRECT_COUNT,
-                "this device refused an MTLIndirectCommandBuffer, which is Metal's only \
-                 GPU-counted execution",
-            ),
+            // The sentence `crcbl_hal::DIVERGENCES` carries for this pair, so
+            // the declaration and the parity record cannot drift apart — they
+            // had, and the constant is what settles it.
+            Capability::DrawIndirectCount => Support::No(crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT),
             // A multi-draw is a loop over the argument structures, so a stride
             // larger than one of them is exactly what the loop steps by.
             Capability::IndirectArgumentPaddedStride => Support::Yes,
@@ -5272,13 +5236,11 @@ using namespace metal;\n\
     /// Every slice that has not arrived still refuses, by name — so none of
     /// them can be half-implemented without this saying so.
     ///
-    /// **The binding, dispatch and ICB slices emptied this list down to one
-    /// thing**, and it is not "a slice nobody has written": the two
-    /// **counter-sampled** query kinds, whose obstacle is a device that
-    /// advertises no counter set. The indirect-count draws left when
-    /// `crcbl_mtl::icb` landed, and
-    /// [`the_icb_slice_replaced_the_indirect_count_refusals_with_real_errors`]
-    /// is where they went. The occlusion kind is
+    /// **The binding and dispatch slices emptied most of this list**, and what
+    /// is left is the two things that are not "a slice nobody has written": the
+    /// two **counter-sampled** query kinds, whose obstacle is a device that
+    /// advertises no counter set, and the indirect-count draws, whose obstacle is
+    /// named in `crcbl_mtl::command`'s `indirect_count`. The occlusion kind is
     /// not among them any more — `Device::create_query_set` builds it, and
     /// `crates/crcbl/tests/hal_seam_e2e.rs`'s `exercise_query_set_creation` is
     /// what drives it. The calls that stopped refusing are asserted in
@@ -5326,9 +5288,55 @@ using namespace metal;\n\
             );
         }
 
+        // Recording works now, so the encoder's refusals moved to the commands
+        // that still need a pipeline. `create_command_encoder` returns a bare
+        // `Box`, so a draw has nowhere to report itself and `finish` carries it.
         let queue = device
             .queue(QueueKind::Graphics)
             .expect("the graphics queue exists");
+        /// One recording call that still has to refuse, and the name it must
+        /// refuse under.
+        type Refused = (&'static str, fn(&mut dyn CommandEncoder));
+
+        fn count(encoder: &mut dyn CommandEncoder, indexed: bool) {
+            let draw = crcbl_hal::DrawIndirectCount {
+                args: Handle::from_bits(1 << 32).expect("generation 1"),
+                args_offset: 0,
+                count_buffer: Handle::from_bits(1 << 32).expect("generation 1"),
+                count_offset: 0,
+                max_draw_count: 1,
+                stride: 20,
+            };
+            if indexed {
+                encoder.draw_indexed_indirect_count(&draw);
+            } else {
+                encoder.draw_indirect_count(&draw);
+            }
+        }
+        let recording: &[Refused] = &[
+            ("indirect-count draws", |encoder| count(encoder, false)),
+            ("indexed indirect-count draws", |encoder| {
+                count(encoder, true)
+            }),
+        ];
+        assert!(!recording.is_empty(), "nothing to check");
+        for (what, record) in recording {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully, so the encoder reported a lie");
+            };
+            assert!(
+                matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Metal),
+                "{what}: {error:?}"
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains("metal") && text.contains("Metal") && text.contains("slice"),
+                "{what}: {text}"
+            );
+        }
 
         // An empty submission is legal now and does nothing, which is the only
         // honest answer: there is no work to run and nothing to signal.
@@ -5359,90 +5367,6 @@ using namespace metal;\n\
             matches!(error, HalError::InvalidHandle { kind, .. } if kind == "queue"),
             "{error:?}"
         );
-    }
-
-    /// The two indirect-count draws stopped refusing, and the four answers that
-    /// have to agree about it do.
-    ///
-    /// `crcbl_mtl::icb` is what closed them: a compute kernel writes an
-    /// `MTLIndirectCommandBuffer` before the render encoder opens, and
-    /// `executeCommandsInBuffer:withRange:` runs it. Four separate places
-    /// record that — the adapter's ICB probe, the feature bit, the limit and
-    /// `Device::supports` — and a slice that moved one without the others is
-    /// exactly the shape a capability model exists to catch.
-    ///
-    /// **What turns it red.**
-    ///
-    /// * `supports` disagreeing with the feature bit, in either direction —
-    ///   the first assertion, which is the one that would go red if the
-    ///   capability arm were pinned to `Yes` or left at `No`.
-    /// * The limit staying at the seam's floor of one while the feature is
-    ///   reported. That is not a cosmetic mismatch: `crates/crcbl/tests/
-    ///   hal_seam_e2e.rs`'s `can_multi_draw` reads exactly this field, and both
-    ///   its indirect exercises decline a device that answers one — so a floor
-    ///   here is two capabilities silently unexercised on the whole backend.
-    /// * Either verb regressing to [`HalError::Unsupported`] on a device that
-    ///   has the feature, or succeeding outside a render pass — where the seam
-    ///   forbids a draw and Metal has no encoder to put one on.
-    ///
-    /// The device half is conditional because it is a device's answer rather
-    /// than this backend's: a Mac that refuses an indirect command buffer is a
-    /// result, and the first assertion is what still holds there.
-    #[test]
-    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn the_icb_slice_replaced_the_indirect_count_refusals_with_real_errors() {
-        let (_instance, device) = open_device();
-        let caps = device.caps();
-        let granted = caps.features.contains(Features::DRAW_INDIRECT_COUNT);
-        println!(
-            "crcbl-mtl icb-slice: DRAW_INDIRECT_COUNT={granted} max_draw_indirect_count={} \
-             supports={:?}",
-            caps.limits.max_draw_indirect_count,
-            device.supports(Capability::DrawIndirectCount),
-        );
-        assert_eq!(
-            device.supports(Capability::DrawIndirectCount) == Support::Yes,
-            granted,
-            "the capability and the feature bit disagree about this device"
-        );
-        if !granted {
-            return;
-        }
-        assert!(
-            caps.limits.max_draw_indirect_count > 1,
-            "DRAW_INDIRECT_COUNT is reported and max_draw_indirect_count is {}, which is the \
-             seam's floor — the agnostic suite's indirect exercises decline a device that answers \
-             one, so both would go unexercised",
-            caps.limits.max_draw_indirect_count
-        );
-
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .expect("the graphics queue exists");
-        for indexed in [false, true] {
-            let mut encoder =
-                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
-            let draw = crcbl_hal::DrawIndirectCount {
-                args: Handle::from_bits(1 << 32).expect("generation 1"),
-                args_offset: 0,
-                count_buffer: Handle::from_bits(1 << 32).expect("generation 1"),
-                count_offset: 0,
-                max_draw_count: 1,
-                stride: 20,
-            };
-            if indexed {
-                encoder.draw_indexed_indirect_count(&draw);
-            } else {
-                encoder.draw_indirect_count(&draw);
-            }
-            let Err(error) = encoder.finish() else {
-                panic!("indexed={indexed}: a draw outside a render pass recorded successfully");
-            };
-            assert!(
-                matches!(error, HalError::InvalidDescriptor(_)),
-                "indexed={indexed}: {error:?}"
-            );
-        }
     }
 
     /// The calls the binding slice took off the refusal list now fail for the
@@ -6167,12 +6091,10 @@ using namespace metal;\n\
     /// [`create_graphics_pipeline`](crcbl_hal::Device::create_graphics_pipeline),
     /// for one reason**: an ICB command that sets a pipeline state raises unless
     /// that state was created from a descriptor with
-    /// `supportIndirectCommandBuffers` set, and `create_graphics_pipeline` sets
-    /// it only on a device that reports [`Features::DRAW_INDIRECT_COUNT`] —
-    /// which is a device question this test would then be answering by
-    /// accident. Building the descriptor here keeps the two probes below about
-    /// ICBs rather than about the adapter. The flag is read back off both the
-    /// descriptor and the finished
+    /// `supportIndirectCommandBuffers` set, and this backend's descriptor path
+    /// never sets it — nothing it ships encodes into an ICB, so advertising the
+    /// capability on every pipeline would cost residency for a path with no
+    /// caller. The flag is read back off both the descriptor and the finished
     /// state before anything encodes with it, so a device that quietly dropped
     /// it fails an assertion here instead of raising an Objective-C exception
     /// two calls later — which would kill the test process rather than fail the
@@ -6385,12 +6307,11 @@ using namespace metal;\n\
     ///
     /// `indirectRenderCommandAtIndex:` writes the command from the CPU, which is
     /// the *simple* half. Metal's count-from-memory execution needs commands a
-    /// **compute kernel** wrote, which is what `crcbl_mtl::icb` now does and
-    /// what closed the `DrawIndirectCount` row. Proving the execution path runs
-    /// at all is what this rung buys, and it is kept because it is the only
-    /// thing in the crate that isolates *execution* from *encoding*: a blank
-    /// canvas here says the ICB never ran, while a blank one in the sibling
-    /// says the kernel never wrote it.
+    /// **compute kernel** wrote — that restructuring is what
+    /// `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` names and what the
+    /// `DrawIndirectCount` row is still blocked on. Proving the execution path
+    /// runs at all is what this rung buys; it moves no capability row and
+    /// reports no feature.
     ///
     /// The ICB therefore inherits **neither** buffers nor pipeline state: the
     /// command names its own pipeline, and the shader reads nothing. A real
@@ -6612,25 +6533,22 @@ struct EncodeTarget {
     /// `MTLIndirectCommandBuffer` on this device** — and whether the render
     /// pass then executes what the kernel wrote.
     ///
-    /// # Why this question, and what it is now
+    /// # Why this question, and why it is only a measurement
     ///
-    /// It was the probe that decided whether `crcbl_mtl::icb` was buildable at
-    /// all: Metal has no count-from-memory draw, so the count has to be
-    /// consumed by a **compute kernel that writes the ICB before the render
-    /// encoder opens**, and nothing said whether this device would run one.
-    /// Two other rungs answer the neighbouring questions and are not
-    /// re-measured here — [`crate::adapter`]'s probe watched this device create
-    /// ICBs up to a `maxCommandCount` of 1048576, and
+    /// [`Capability::DrawIndirectCount`] is the one row Metal cannot fill, and
+    /// `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` names the reason: Metal has no
+    /// count-from-memory draw, so the count would have to be consumed by a
+    /// **compute kernel that writes the ICB before the render encoder opens**.
+    /// Two rungs of that are already answered and are not re-measured here —
+    /// [`crate::adapter`]'s probe watched this device create ICBs up to a
+    /// `maxCommandCount` of 1048576, and
     /// [`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`]
-    /// watched one execute and paint the same texels a direct draw paints,
-    /// both encoding **from the CPU**, which is the easy half.
+    /// watched one execute and paint the same texels a direct draw paints.
     ///
-    /// **It is kept now that the slice has landed, and it is not redundant with
-    /// it.** `crcbl_mtl::icb`'s kernel is parameterised — three entry points, a
-    /// count buffer, a stride, a runtime primitive switch — and this one is the
-    /// smallest kernel that encodes anything at all. When both go red the
-    /// device or the front end is the suspect; when only the slice does, the
-    /// parameters are. It still reports no feature and moves no row on its own.
+    /// Both of those encode the ICB **from the CPU**, which is the easy half.
+    /// This is the half that decides whether the design is buildable at all,
+    /// and it is a measurement: nothing here implements `draw_indirect_count`,
+    /// touches [`Features::DRAW_INDIRECT_COUNT`] or moves a capability row.
     ///
     /// # The construction
     ///

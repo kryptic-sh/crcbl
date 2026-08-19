@@ -130,10 +130,10 @@
 //! assert_eq!(permanent.kind, DivergenceKind::ApiAbsence);
 //! assert!(!permanent.kind.blocks_parity());
 //!
-//! // D3D12's mesh stage is owed rather than absent, so it is one of the rows
-//! // standing between crcbl and its end state.
+//! // Metal's GPU-side draw count is owed rather than absent, so it is one of
+//! // the rows standing between crcbl and its end state.
 //! assert!(parity_blockers().any(|entry| {
-//!     entry.capability == Capability::MeshShading && entry.backend == BackendKind::Dx12
+//!     entry.capability == Capability::DrawIndirectCount && entry.backend == BackendKind::Metal
 //! }));
 //!
 //! // Every entry names a backend that actually drives a GPU.
@@ -286,8 +286,8 @@ capabilities! {
     /// [`Features::DRAW_INDIRECT_COUNT`](crate::Features::DRAW_INDIRECT_COUNT)
     /// is the flag a caller requests; this is the backend's answer about the two
     /// encoder methods, which is not the same claim — a backend can report the
-    /// flag without having wired the calls up, which is why the two are asked
-    /// separately at all.
+    /// flag without having wired the calls up, and Metal reports it clear *and*
+    /// refuses the calls for a reason that is not about any one device.
     DrawIndirectCount,
 
     /// [`DrawIndirect::stride`](crate::DrawIndirect::stride) larger than the
@@ -712,12 +712,31 @@ pub struct Divergence {
     pub why: &'static str,
 }
 
-/// The browser's answer for [`Capability::UpdateBindGroup`], in the parity
-/// record and in `crcbl-webgpu`'s own declaration alike.
+/// Metal's answer for [`Capability::DrawIndirectCount`], in the parity record
+/// and in the backend's own declaration alike.
 ///
 /// **One sentence in two places on purpose**, the shape a backend uses when a
 /// refusal has to survive the trip from `Device::supports` to the error a
-/// caller reads. This list used to say the stream "has no
+/// caller reads. The two used to disagree — this list called the count
+/// "absent from the API rather than unwritten" while `MetalDevice::supports`
+/// ended its refusal with "(the Metal ICB slice)", which is this workspace's
+/// idiom for work that is owed. The API settles it: `MTLRenderCommandEncoder`
+/// has no `countBuffer:` draw, but
+/// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` reads its
+/// execution range from GPU memory, so the count *is* expressible and what is
+/// missing is the encoding. Sharing the constant is what stops them drifting
+/// apart again.
+pub const METAL_NO_DRAW_INDIRECT_COUNT: &str = "Metal has no countBuffer: draw. Its GPU-side \
+     count is executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:, which reads an \
+     MTLIndirectCommandBufferExecutionRange the GPU wrote — so the work is a compute kernel that \
+     encodes the seam's DrawIndirect structs into an MTLIndirectCommandBuffer (the Metal ICB \
+     slice)";
+
+/// The browser's answer for [`Capability::UpdateBindGroup`], in the parity
+/// record and in `crcbl-webgpu`'s own declaration alike.
+///
+/// The second sentence that had drifted, and the same treatment as
+/// [`METAL_NO_DRAW_INDIRECT_COUNT`]. This list used to say the stream "has no
 /// update_bind_group command **yet**", which reads as schedulable work, while
 /// the backend said a bind group is immutable and the stream "could not carry
 /// one that worked". WebGPU settles it: `GPUBindGroup` exposes a label and
@@ -729,9 +748,9 @@ pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immut
 /// D3D12's answer for the two *valued* fills, in the parity record and in
 /// `crcbl-dx12`'s own declaration alike.
 ///
-/// The same treatment as [`WEBGPU_BIND_GROUPS_ARE_IMMUTABLE`] — and here one
-/// obstacle declines two capabilities, so two paraphrases would read like two
-/// obstacles and would drift.
+/// The third sentence to be shared, and the same treatment as
+/// [`METAL_NO_DRAW_INDIRECT_COUNT`] — one obstacle declining two capabilities,
+/// so two paraphrases would read like two obstacles and would drift.
 ///
 /// It replaces two claims that were **wrong**. The list used to say this backend
 /// had "no buffer fill at all" — it has one, for zero — and the reason before
@@ -833,14 +852,12 @@ pub const DIVERGENCES: &[Divergence] = &[
         why: DX12_NO_VALUED_FILL,
     },
     // --- draws ---
-    //
-    // `DrawIndirectCount` on Metal is not here, and its absence is what the
-    // list is for: the row left because the work landed. Metal still has no
-    // `countBuffer:` draw — the API fact the row used to record — but
-    // `crcbl_mtl::icb` now writes the draws into an `MTLIndirectCommandBuffer`
-    // from a compute kernel and executes it with `executeCommandsInBuffer:`,
-    // so the count really does come from GPU memory and the CPU really does not
-    // learn it.
+    Divergence {
+        capability: Capability::DrawIndirectCount,
+        backend: BackendKind::Metal,
+        kind: DivergenceKind::Unwritten,
+        why: METAL_NO_DRAW_INDIRECT_COUNT,
+    },
     Divergence {
         capability: Capability::DrawIndirectCount,
         backend: BackendKind::WebGpu,
@@ -1541,10 +1558,15 @@ mod tests {
         );
         // A backend refusal the list names: reviewed.
         assert_eq!(
-            parity_verdict(Capability::BufferFillWord, BackendKind::Metal, refused, all),
+            parity_verdict(
+                Capability::DrawIndirectCount,
+                BackendKind::Metal,
+                refused,
+                all
+            ),
             ParityVerdict::Reviewed(
-                divergence(Capability::BufferFillWord, BackendKind::Metal)
-                    .expect("Metal's byte-wide fill is on the list")
+                divergence(Capability::DrawIndirectCount, BackendKind::Metal)
+                    .expect("Metal's GPU-side draw count is on the list")
             )
         );
         // The device withheld the gate: this run proves nothing either way, and
@@ -1713,12 +1735,14 @@ mod tests {
         ),
         // Metal: the byte-wide fill is the API and is not here, and neither is
         // the occlusion query — that pool is a plain MTLBuffer and `crcbl-mtl`
-        // builds it. `DrawIndirectCount` was a fifth Metal row and left the way
-        // a row is meant to: `crcbl_mtl::icb` writes the draws into an
-        // `MTLIndirectCommandBuffer` from a compute kernel and the render
-        // encoder executes it. The two counter-sampled query rows are
-        // unclassified because settling them needs a Mac that advertises a
-        // counter set, which the one in CI does not.
+        // builds it. The two counter-sampled query rows are unclassified because
+        // settling them needs a Mac that advertises a counter set, which the one
+        // in CI does not.
+        (
+            Capability::DrawIndirectCount,
+            BackendKind::Metal,
+            DivergenceKind::Unwritten,
+        ),
         (
             Capability::MeshShading,
             BackendKind::Metal,
@@ -1843,20 +1867,12 @@ mod tests {
     #[test]
     fn a_shared_reason_is_the_reason_its_row_carries() {
         assert_eq!(
+            divergence(Capability::DrawIndirectCount, BackendKind::Metal).map(|entry| entry.why),
+            Some(METAL_NO_DRAW_INDIRECT_COUNT)
+        );
+        assert_eq!(
             divergence(Capability::UpdateBindGroup, BackendKind::WebGpu).map(|entry| entry.why),
             Some(WEBGPU_BIND_GROUPS_ARE_IMMUTABLE)
         );
-        // The one shared by *two* rows, which is the case a per-row literal
-        // would let drift apart one row at a time.
-        for capability in [
-            Capability::BufferFillRepeatedByte,
-            Capability::BufferFillWord,
-        ] {
-            assert_eq!(
-                divergence(capability, BackendKind::Dx12).map(|entry| entry.why),
-                Some(DX12_NO_VALUED_FILL),
-                "{capability}"
-            );
-        }
     }
 }

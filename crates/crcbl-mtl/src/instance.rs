@@ -519,19 +519,12 @@ pub(crate) mod tests {
     /// outright over `DRAW_INDIRECT_COUNT`, a flag absent from the API rather
     /// than unimplemented, while having the rest of the set.
     ///
-    /// **The gap is closed, and this test is what records where the answer now
-    /// sits.** [`Features::MULTI_DRAW_INDIRECT`] is reported because
-    /// `crcbl_mtl::draw`'s loop is the call behind it, and
-    /// [`Features::DRAW_INDIRECT_COUNT`] is reported on any device that holds
-    /// an `MTLIndirectCommandBuffer`, because `crcbl_mtl::icb` writes one from
-    /// a compute kernel and the render encoder executes it.
-    ///
-    /// The second is a **device** answer, so it is asserted as a pairing rather
-    /// than pinned: whichever way this Mac answers, the
-    /// [`GeometryPath`] derived from the flag must agree with it. That is what
-    /// fails if the flag stops being reported *or* if it is reported while the
-    /// selector says otherwise — the same shape
-    /// [`Features::DESCRIPTOR_INDEXING`] gets below and for the same reason.
+    /// **The gap is now reported rather than refused, and this test is what
+    /// records where it sits.** [`Features::MULTI_DRAW_INDIRECT`] is reported,
+    /// because `crcbl_mtl::draw`'s loop is the call behind it; and
+    /// [`Features::DRAW_INDIRECT_COUNT`] was never reported and still cannot
+    /// be. Both are asserted rather than only the absent one, so a change in
+    /// either direction fails here.
     ///
     /// [`Features::DESCRIPTOR_INDEXING`] is asserted differently, because it is
     /// the one flag here whose answer is the *device's*: `crcbl_mtl::adapter`
@@ -559,17 +552,14 @@ pub(crate) mod tests {
 
         let caps = device.caps();
         assert!(
+            !caps.supports(Features::DRAW_INDIRECT_COUNT),
+            "a GPU-side draw count is what Metal cannot express at all: {:?}",
+            caps.features
+        );
+        assert!(
             caps.supports(Features::MULTI_DRAW_INDIRECT),
             "the indirect loop earns this one: {:?}",
             caps.features
-        );
-        // Printed for the reason `DESCRIPTOR_INDEXING` is below: which of the
-        // two this device is decides the geometry path, and a reader of the log
-        // should not have to derive it.
-        let counted = caps.supports(Features::DRAW_INDIRECT_COUNT);
-        println!(
-            "crcbl-mtl: DRAW_INDIRECT_COUNT={counted} max_draw_indirect_count={} on {:?}",
-            caps.limits.max_draw_indirect_count, caps.features
         );
         // Printed, because which of the two this device is decides the binding
         // model below and a reader of the log should not have to derive it.
@@ -581,16 +571,7 @@ pub(crate) mod tests {
 
         // The paths those features select, named rather than implied: this is
         // what the renderer would record on this device today.
-        assert_eq!(
-            caps.geometry_path(),
-            if counted {
-                GeometryPath::IndirectCount
-            } else {
-                GeometryPath::IndirectPerBatch
-            },
-            "the geometry path is derived from DRAW_INDIRECT_COUNT, so the two cannot disagree \
-             unless one of them stopped being read"
-        );
+        assert_eq!(caps.geometry_path(), GeometryPath::IndirectPerBatch);
         assert_eq!(
             caps.binding_model(),
             if bindless {

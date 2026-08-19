@@ -70,10 +70,9 @@ fn teardown(headless: Headless, renderer: ForwardRenderer, mut pool: TransientPo
 /// call.
 ///
 /// **Two of the three arms have to be asked for by subtraction**, because this
-/// adapter reports everything. `IndirectPerBatch` is what a device with
-/// multi-draw-indirect and no GPU-side count selects — Metal was the example
-/// until `crcbl_mtl::icb` gave it one — so its device is opened without
-/// [`Features::DRAW_INDIRECT_COUNT`]; `IndirectCount` is what a device
+/// adapter reports everything. `IndirectPerBatch` is what Metal is on — its API
+/// has multi-draw-indirect and no GPU-side count — so its device is opened
+/// without [`Features::DRAW_INDIRECT_COUNT`]; `IndirectCount` is what a device
 /// with no mesh shaders selects, so its device is opened without
 /// [`Features::MESH_SHADER`]. Without those subtractions two of the three arms
 /// would be code no machine here runs.
