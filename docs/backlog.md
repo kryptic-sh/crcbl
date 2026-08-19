@@ -1259,11 +1259,30 @@ pipeline is not broken in general. What removes the device is `crcbl-render`'s
 mesh path specifically — the amplification stage descending the cluster DAG, its
 bind groups, and its dispatch sizes — none of which the probe exercises.
 
-Untested hypotheses, in the order worth trying: a `DispatchMesh` group count
-past what TIER_1 permits (the per-dimension ceiling is a spec limit, and
-`crcbl-render` derives its counts from cluster counts rather than clamping); a
-payload larger than the amplification-stage limit. Confirming either needs a
-Windows machine, which nothing here has.
+**Both of the hypotheses this entry used to list are now eliminated by reading,
+and so is a third**, which matters because each would otherwise cost a Windows
+session:
+
+- **A `DispatchMesh` group count past TIER_1's ceiling.** The extents are
+  `draw_gen.slang`'s: `MESH_ARG_GROUP_X` is `bucket_clusters(index)`,
+  `MESH_ARG_GROUP_Y` is the surviving-instance count, `MESH_ARG_GROUP_Z` is `1`.
+  D3D12 allows 65535 per dimension and 2^22 as a product; the ao and cube
+  fixtures have single-digit clusters and instances. Not close.
+- **A payload larger than the amplification-stage limit.** `ClusterPayload` is
+  **two `uint`s — eight bytes** — against D3D12's 16 KB. The struct exists
+  precisely so the mesh stage re-reads from buffers rather than copying a
+  record, which is why it is this small.
+- **A stale or uninitialised Y extent.** Plausible, since `GROUP_Y` is
+  accumulated by atomic add and would be last frame's value if nothing reset it.
+  `clear_counters.slang` does zero it every frame, and says so where it does.
+
+So the remaining space is narrower and nastier than "some limit is exceeded":
+whatever removes the device is not a count, a size, or an uninitialised word.
+`crcbl-dx12`'s own mesh probe passing on the same WARP runner already said the
+mesh _pipeline_ is fine, so what is left is the interaction — the amplification
+stage descending the cluster DAG, its bind groups, and the indirect dispatch —
+none of which the probe exercises. Confirming any of that needs a Windows
+machine, which nothing here has.
 
 **Two hypotheses have been eliminated by reading, so nobody spends a Windows
 session on them:**
