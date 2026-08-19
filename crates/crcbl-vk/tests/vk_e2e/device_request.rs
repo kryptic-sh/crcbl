@@ -261,10 +261,10 @@ fn the_selected_paths_agree_with_the_reported_features() {
                 caps.missing(Features::GPU_DRIVEN)
             );
         }
-        if caps.features.contains(Features::TIMESTAMP_QUERY) {
-            assert!(caps.limits.timestamp_period_ns > 0.0, "{}", adapter.name);
-        } else {
-            assert_eq!(caps.limits.timestamp_period_ns, 0.0, "{}", adapter.name);
-        }
+        // `Features::TIMESTAMP_QUERY` has no limit beside it to be consistent
+        // with: a timestamp's scale never reaches the seam, because
+        // `Device::query_results` reports nanoseconds and this backend converts.
+        // What there is to check is the number a device hands back, and
+        // `queries.rs` checks it against a clock.
     }
 }

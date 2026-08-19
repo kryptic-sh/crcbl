@@ -188,11 +188,13 @@ reads as though the work is done:
 The D3D12 column moved because `crcbl-dx12`'s `adapter.rs` now reports those
 flags — descriptor indexing on binding tier 3, and the rest unconditionally,
 each with its reason written on `features_of`. Its remaining `owed` cells are
-withheld deliberately and argued in the same place: timestamp query needs a
-`Limits::timestamp_period_ns` that only a queue can answer, push constants need
-the root-signature design to fix the budget, and mesh shaders are reported clear
-outright. **A withheld flag is not an oversight there, it is the rule of this
-document applied to a backend mid-build.**
+withheld deliberately and argued in the same place: push constants need the
+root-signature design to fix the budget, and mesh shaders are reported clear
+outright. The timestamp-query entry that stood here is retired twice over —
+`crcbl-dx12` reports the flag, and the `Limits::timestamp_period_ns` it was said
+to need no longer exists, the seam returning nanoseconds and each backend
+converting where it knows how. **A withheld flag is not an oversight there, it
+is the rule of this document applied to a backend mid-build.**
 
 Vulkan's mesh-shader cell moved for the whole feature, not just the report:
 `crcbl-vk` reads `PhysicalDeviceMeshShaderFeaturesEXT`, `create_mesh_pipeline`

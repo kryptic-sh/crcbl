@@ -991,6 +991,14 @@ impl Device for WebGpuDevice {
     /// failed read is answered with ambiguous. See
     /// [`Command::QueryResults`](crate::Command::QueryResults).
     ///
+    /// **The values cross unconverted, and that is the conversion.** The seam
+    /// reports a [`QueryKind::Timestamp`] in
+    /// nanoseconds and WebGPU's `GPUQuerySet` results are specified in
+    /// nanoseconds already, so this backend is the one with nothing to multiply
+    /// by — where `crcbl-vk` spends a tick period and `crcbl-dx12` a queue
+    /// frequency. It is worth saying rather than leaving to be inferred from an
+    /// absence: a pass-through and a forgotten conversion look identical here.
+    ///
     /// # Errors
     ///
     /// [`HalError::InvalidHandle`] for a set this device did not create or has

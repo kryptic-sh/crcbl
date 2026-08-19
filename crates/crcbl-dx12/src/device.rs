@@ -73,6 +73,7 @@
 //! those either, and [`Device::destroy_command_buffer`] may arrive while the
 //! list is still running.
 
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -544,6 +545,17 @@ pub(crate) struct DeviceInner {
     /// lock and this device already has exactly one.
     fence: ID3D12Fence,
     pub(crate) caps: DeviceCaps,
+    /// Ticks per second of the timestamp clock behind [`DeviceInner::queue`],
+    /// from `ID3D12CommandQueue::GetTimestampFrequency`. Never zero — see
+    /// [`query::timestamp_frequency`].
+    ///
+    /// **Not in [`DeviceInner::caps`], because the seam has no field for it and
+    /// should not.** D3D12 describes a timestamp as a frequency and Vulkan as
+    /// its reciprocal, while Metal has no fixed period at all and WebGPU
+    /// reports nanoseconds outright — so the number stays inside the backend
+    /// that has it, and [`Device::query_results`] spends it turning a read into
+    /// the nanoseconds the seam asks for.
+    timestamp_frequency: NonZeroU64,
     /// [`ZERO_SOURCE_BYTES`] of zeroes on the default heap: the source every
     /// zero `fill_buffer` copies out of.
     ///
@@ -1616,14 +1628,15 @@ impl Dx12Device {
         // construction, which is exactly what `DeviceDesc::optional_features`
         // documents ("check `Device::caps` afterwards to find out").
         //
-        // **One field is amended, and it is the one no adapter can answer.**
-        // `Features::TIMESTAMP_QUERY` obliges a `Limits::timestamp_period_ns`,
-        // and the period is `1e9 / ID3D12CommandQueue::GetTimestampFrequency()`
-        // — a *queue* call, and `crate::adapter` computes its caps before any
-        // device or queue exists. So the flag is reported there, where
-        // `DeviceDesc::required_features` is checked against it, and the number
-        // is filled in here, where there is finally something to ask.
-        let mut caps = record.info.caps;
+        let caps = record.info.caps;
+        // **The timestamp clock's rate is a *queue* question**, and
+        // `crate::adapter` computes its caps before any device or queue exists.
+        // So `Features::TIMESTAMP_QUERY` is reported there, where
+        // `DeviceDesc::required_features` is checked against it, and the rate is
+        // read here, where there is finally something to ask. It does not reach
+        // the seam at all — `Device::query_results` spends it converting a tick
+        // to the nanoseconds the seam reports.
+        //
         // SAFETY: `queue` is the live `ID3D12CommandQueue` created immediately
         // above. `GetTimestampFrequency` takes no pointer of ours and writes the
         // `u64` it returns.
@@ -1633,7 +1646,7 @@ impl Dx12Device {
                 debug::diagnosis(&raw)
             ))
         })?;
-        caps.limits.timestamp_period_ns = query::timestamp_period_ns(frequency)?;
+        let timestamp_frequency = query::timestamp_frequency(frequency)?;
         let owner = Owner::new(next_owner_id());
         let state = DeviceState {
             buffers: Pool::new(),
@@ -1663,6 +1676,7 @@ impl Dx12Device {
             queue,
             fence,
             caps,
+            timestamp_frequency,
             zero,
             owner,
             state: Mutex::new(state),
@@ -3701,6 +3715,17 @@ impl Device for Dx12Device {
         // call wrote nothing.
         unsafe {
             resolve.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+        }
+        // The seam reports a timestamp in nanoseconds and D3D12 resolves ticks,
+        // so the queue's frequency is spent here — the one place that knows it.
+        // An occlusion count is a count and has no unit to convert.
+        // `resolve_query_set` writes the raw ticks instead, which its own seam
+        // documentation says and which this backend cannot change:
+        // `ResolveQueryData` never reaches the CPU.
+        if kind == QueryKind::Timestamp {
+            for value in out.iter_mut() {
+                *value = query::timestamp_nanos(*value, self.inner.timestamp_frequency);
+            }
         }
         Ok(())
     }
@@ -7140,13 +7165,10 @@ pub(crate) mod tests {
     /// so a device that reported less than its adapter would be lying about
     /// hardware it can use.
     ///
-    /// **`timestamp_period_ns` is the one exception, and it is asserted rather
-    /// than excluded.** It is `1e9 / GetTimestampFrequency()`, which needs the
-    /// queue an adapter does not have, so `crate::adapter` leaves it at the
-    /// floor's `0.0` and `Dx12Device::open` fills it in. Comparing the limits
-    /// with that field normalised would let the field go missing entirely, so it
-    /// is checked on both sides by name: zero on the adapter, positive on the
-    /// device.
+    /// **Every limit, with nothing normalised.** The timestamp clock's rate used
+    /// to be the one exception — an adapter has no queue to ask
+    /// `GetTimestampFrequency` — and it no longer crosses the seam at all, so
+    /// there is no field to exclude and this compares the whole struct.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn d3d12_device_caps_match_the_adapter_they_came_from() {
@@ -7163,23 +7185,11 @@ pub(crate) mod tests {
         assert_eq!(device.caps().features, info.caps.features);
         assert!(
             info.caps.features.contains(Features::TIMESTAMP_QUERY),
-            "the exception below only means anything while the flag is reported: {:?}",
+            "an adapter that stopped reporting timestamps would make every timestamp \
+             assertion in this suite vacuous: {:?}",
             info.caps.features
         );
-        assert_eq!(
-            info.caps.limits.timestamp_period_ns, 0.0,
-            "an adapter has no queue to ask GetTimestampFrequency"
-        );
-        assert!(
-            device.caps().limits.timestamp_period_ns > 0.0,
-            "the device reports TIMESTAMP_QUERY and a period of {}, so every duration derived \
-             from a timestamp delta is zero",
-            device.caps().limits.timestamp_period_ns
-        );
-        // Every other limit is the adapter's verbatim.
-        let mut expected = info.caps.limits;
-        expected.timestamp_period_ns = device.caps().limits.timestamp_period_ns;
-        assert_eq!(device.caps().limits, expected);
+        assert_eq!(device.caps().limits, info.caps.limits);
     }
 
     /// A buffer of every memory location creates and destroys, and a destroyed
@@ -8976,16 +8986,20 @@ pub(crate) mod tests {
     /// really dispatches,
     /// [`Device::query_results`] reads them through its own resolve and
     /// submission, and `resolve_query_set` reads the *same two queries* into a
-    /// buffer this test maps. What that second read must produce is not a
-    /// plausible pair but the pair already returned, so a backend where one path
-    /// reaches a different heap, range or stride cannot be green.
+    /// buffer this test maps.
+    ///
+    /// **The two reads are in different units, and that is the claim.**
+    /// `query_results` reports nanoseconds — the seam's unit, converted here
+    /// from `GetTimestampFrequency` — while `resolve_query_set` is a GPU-side
+    /// copy that writes the device's own ticks and has nothing to convert with.
+    /// So the second read is held to `query::timestamp_nanos` of the first,
+    /// which is both halves at once: a path reaching a different heap, range or
+    /// stride fails it, and so does a `query_results` that forgot to convert.
     ///
     /// The failures it cannot pass through: a pass whose `timestamp_writes`
     /// were accepted and dropped reads back two zeros, a counter that is not running reads the
     /// same value twice, and a resolve that wrote nothing leaves
-    /// [`QUERY_POISON`] behind. The period is asserted too, because it is the
-    /// other half of the claim — a period of zero turns every measured duration
-    /// into zero however long the frame took.
+    /// [`QUERY_POISON`] behind.
     ///
     /// **The resolve goes straight into a readback-heap buffer**, which is the
     /// same assumption `Device::query_results` is built on: such a resource is
@@ -9032,11 +9046,11 @@ pub(crate) mod tests {
             "the timed pass really dispatched",
         );
 
-        let mut ticks = [0u64; TIMED_QUERIES as usize];
+        let mut nanos = [0u64; TIMED_QUERIES as usize];
         device
-            .query_results(set, 0, &mut ticks)
+            .query_results(set, 0, &mut nanos)
             .expect("reading the range this set was created with");
-        let [start, end] = ticks;
+        let [start, end] = nanos;
         assert!(
             start != 0 || end != 0,
             "both timestamps read back as zero, which is what a pass whose timestampWrites were \
@@ -9045,14 +9059,8 @@ pub(crate) mod tests {
         assert!(
             end > start,
             "the timestamps bracketing the dispatched compute pass came back as {start} then \
-             {end}; a clock that ran cannot report the closing write at or before the opening one"
-        );
-        let period = device.caps().limits.timestamp_period_ns;
-        assert!(
-            period > 0.0,
-            "this device declares timestamp queries and reports {period} ns per tick, so every \
-             duration derived from the {} ticks it just measured is zero",
-            end - start
+             {end} nanoseconds; a clock that ran cannot report the closing write at or before \
+             the opening one"
         );
         // The other half of the pair: the read above is only evidence beside a
         // read that is refused, since `Ok` is what an implementation doing
@@ -9091,11 +9099,22 @@ pub(crate) mod tests {
             vec![QUERY_POISON; TIMED_QUERIES as usize],
             "resolve_query_set left the destination untouched"
         );
+        // The resolve wrote ticks and `query_results` returned nanoseconds, so
+        // the comparison runs through the same conversion the read did. Exact,
+        // not approximate: both sides are the identical queries, already
+        // available, so nothing but the unit separates them.
+        let converted: Vec<u64> = words
+            .iter()
+            .map(|ticks| query::timestamp_nanos(*ticks, device.inner.timestamp_frequency))
+            .collect();
         assert_eq!(
-            words.as_slice(),
-            ticks.as_slice(),
-            "resolve_query_set wrote {words:?} for the same two queries query_results had just \
-             read as {ticks:?}; one of the two paths is reaching a different heap, range or stride"
+            converted.as_slice(),
+            nanos.as_slice(),
+            "resolve_query_set wrote {words:?} ticks for the same two queries query_results had \
+             just read as {nanos:?} nanoseconds, which is {converted:?} once converted at this \
+             queue's {} ticks per second; either one path is reaching a different heap, range or \
+             stride, or query_results is handing the seam raw ticks",
+            device.inner.timestamp_frequency
         );
 
         device.destroy_buffer(resolved);

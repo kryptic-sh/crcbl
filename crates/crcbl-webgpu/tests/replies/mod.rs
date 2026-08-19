@@ -70,7 +70,6 @@ fn every_limit() -> Limits {
         min_storage_buffer_offset_alignment: 128,
         optimal_buffer_copy_offset_alignment: 512,
         max_sampler_anisotropy: 1.0,
-        timestamp_period_ns: 1.0,
     }
 }
 
@@ -275,7 +274,6 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                     features: DEVICE_GRANTED,
                     limits: Limits {
                         max_image_2d: 8192,
-                        timestamp_period_ns: 0.0,
                         ..every_limit()
                     },
                 },

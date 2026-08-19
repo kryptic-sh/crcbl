@@ -286,7 +286,6 @@ const FEATURE_MAP = Object.freeze({
  * @property {bigint} minStorageBufferOffsetAlignment
  * @property {bigint} optimalBufferCopyOffsetAlignment
  * @property {number} maxSamplerAnisotropy
- * @property {number} timestampPeriodNs
  */
 
 /**
@@ -1879,7 +1878,7 @@ export function webgpuBindingLayoutFor(kind) {
  * an optional feature the caller did not ask for is not granted — and any device
  * opened with a different descriptor differs on both.
  *
- * Four of the nineteen have no `GPUSupportedLimits` member behind them, and each
+ * A few of the fields have no `GPUSupportedLimits` member behind them, and each
  * is a value the specification fixes rather than a number invented to fill a
  * gap: two are `0` because the feature they bound is absent — which is what
  * `crcbl_hal::Limits` documents `max_bindless_descriptors` and
@@ -1900,7 +1899,6 @@ export function webgpuBindingLayoutFor(kind) {
  */
 export function halLimitsFor(source) {
   const limits = source.limits ?? {};
-  const timestamps = Boolean(source.features?.has('timestamp-query'));
   /**
    * One `GPUSupportedLimits` member as the `BigInt` the seam wants, naming it
    * if the browser had no number there. `BigInt(undefined)` throws a `TypeError`
@@ -1955,10 +1953,6 @@ export function halLimitsFor(source) {
     ),
     optimalBufferCopyOffsetAlignment: COPY_BYTES_PER_ROW_ALIGNMENT,
     maxSamplerAnisotropy: 1,
-    // WebGPU's timestamps are specified in nanoseconds, so one tick is one
-    // nanosecond — and `0` is what `Limits` documents for a device with no
-    // timestamp queries to have a period for.
-    timestampPeriodNs: timestamps ? 1 : 0,
   };
 }
 

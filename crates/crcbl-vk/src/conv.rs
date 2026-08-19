@@ -707,6 +707,60 @@ pub fn state_masks(state: ResourceState) -> StateMasks {
     }
 }
 
+/// Fractional bits [`timestamp_nanos`] holds `timestampPeriod` in.
+///
+/// Thirty-two puts the period's rounding error below 2⁻³² ns — far under any
+/// clock's accuracy — while leaving a `u128` product room for the whole `u64`
+/// tick range times any period a driver has ever reported.
+const TIMESTAMP_FRACTION_BITS: u32 = 32;
+
+/// A raw Vulkan timestamp in nanoseconds, which is what
+/// [`Device::query_results`](crcbl_hal::Device::query_results) reports.
+///
+/// `period_ns` is `VkPhysicalDeviceLimits::timestampPeriod`, nanoseconds per
+/// tick — 10.0 on radv's Navi 31, 1.0 on NVIDIA, 83.333 on Intel — so the
+/// arithmetic is a multiply and the only real question is what to do with the
+/// fraction.
+///
+/// # Fixed point rather than `f64`, and the size of the difference
+///
+/// The obvious spelling is `(ticks as f64 * period).round() as u64`, and it is
+/// wrong in a way that only shows up on a machine that has been running a
+/// while: an `f64` carries 53 bits of mantissa and a Vulkan timestamp is a full
+/// `u64` off a free-running counter, so once a product passes 2⁵³ ns — about
+/// 104 days of GPU uptime at a 1 ns period — the result is quantised to 2 ns,
+/// then 4, and a delta of a few hundred nanoseconds starts arriving in steps.
+/// The fix is to never leave the integers: the period is rounded once into a
+/// [`TIMESTAMP_FRACTION_BITS`]-bit fixed-point multiplier and the scaling is
+/// `u128` arithmetic, which is exact across the whole input range. This is the
+/// mult/shift form the Linux kernel scales a clocksource's cycles with, for the
+/// same reason.
+///
+/// Rounding is to nearest, applied once here rather than by each caller: the
+/// seam's contract is a nanosecond count, so the fraction has to go somewhere,
+/// and one rule at the source is the only way two readers agree.
+///
+/// A `period_ns` of zero — the device has no timestamps, see
+/// `adapter::timestamp_period_of` — converts every tick to zero, which is the
+/// same answer the seam already documents for a device that cannot time
+/// anything.
+#[must_use]
+pub fn timestamp_nanos(ticks: u64, period_ns: f32) -> u64 {
+    // A period is a small positive number, so the scaled value is at most ~2^40
+    // for any clock that exists and the cast is exact well before that. A
+    // negative or NaN period is not a period; `max(0.0)` makes it zero ticks
+    // rather than a wrapped multiplier.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let multiplier =
+        (f64::from(period_ns).max(0.0) * f64::exp2(f64::from(TIMESTAMP_FRACTION_BITS))) as u128;
+    let half = 1u128 << (TIMESTAMP_FRACTION_BITS - 1);
+    let nanos = (u128::from(ticks) * multiplier + half) >> TIMESTAMP_FRACTION_BITS;
+    // Saturating rather than wrapping: a count so large it leaves `u64` is a
+    // broken clock, and `u64::MAX` says "past anything" where a wrap would say
+    // "just after boot".
+    u64::try_from(nanos).unwrap_or(u64::MAX)
+}
+
 /// Turns a `VkResult` failure into the seam's error vocabulary.
 ///
 /// Out-of-memory and device-lost get their own variants because callers act on
@@ -1528,5 +1582,57 @@ mod tests {
             polygon_mode(crcbl_hal::PolygonMode::Line),
             vk::PolygonMode::LINE
         );
+    }
+
+    /// **The seam reports nanoseconds, so the period has to be spent here.**
+    ///
+    /// Red if `timestamp_nanos` returns its ticks unscaled, which is the
+    /// mistake that reads correctly on the 1.0 ns period NVIDIA reports and is
+    /// out by a factor of ten on the radv Navi 31 this workspace tests against.
+    #[test]
+    fn a_timestamp_is_scaled_by_the_devices_period() {
+        // radv on Navi 31: a 100 MHz counter, measured.
+        assert_eq!(timestamp_nanos(744, 10.0), 7_440);
+        // NVIDIA's, where the conversion is the identity and therefore proves
+        // nothing on its own — which is why it is not the only case here.
+        assert_eq!(timestamp_nanos(744, 1.0), 744);
+        assert_eq!(timestamp_nanos(0, 10.0), 0);
+        // No timestamps, no duration: the seam's documented degrade.
+        assert_eq!(timestamp_nanos(744, 0.0), 0);
+    }
+
+    /// The fraction is rounded to nearest, once, rather than truncated.
+    ///
+    /// Red on a `>>` with no rounding term: Intel's 83.333 ns period turns
+    /// three ticks into 249 rather than 250, and every reader that re-derived
+    /// the number would land somewhere else.
+    #[test]
+    fn a_fractional_period_rounds_to_nearest() {
+        assert_eq!(timestamp_nanos(1, 2.5), 3, "half rounds up, not down");
+        assert_eq!(timestamp_nanos(3, 2.5), 8, "7.5 rounds up too");
+        assert_eq!(timestamp_nanos(1, 2.4), 2);
+        // 1/12 GHz, the period Intel's drivers report.
+        assert_eq!(timestamp_nanos(3, 1_000.0 / 12.0), 250);
+    }
+
+    /// **The whole `u64` tick range converts without the `f64` cliff**, which
+    /// is the reason this is fixed-point arithmetic rather than a multiply.
+    ///
+    /// Red on `(ticks as f64 * period).round() as u64`: past 2⁵³ an `f64`
+    /// cannot hold consecutive integers, so a tick counter that has been
+    /// running for months reports two different readings as the same instant
+    /// and a delta of a few hundred nanoseconds arrives as zero.
+    #[test]
+    fn a_counter_past_the_f64_mantissa_still_resolves_single_nanoseconds() {
+        let past_the_mantissa = (1u64 << 53) + 8;
+        assert_eq!(timestamp_nanos(past_the_mantissa, 1.0), past_the_mantissa);
+        assert_eq!(
+            timestamp_nanos(past_the_mantissa + 1, 1.0) - timestamp_nanos(past_the_mantissa, 1.0),
+            1,
+            "one tick of a 1 ns clock is one nanosecond however long the GPU has been up"
+        );
+        // And a count no clock could reach saturates rather than wrapping into
+        // a plausible-looking instant just after boot.
+        assert_eq!(timestamp_nanos(u64::MAX, 10.0), u64::MAX);
     }
 }

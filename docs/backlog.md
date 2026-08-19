@@ -1082,70 +1082,30 @@ non-monotonicity, `PolygonMode::Line`, `DepthClamp`, `SamplerAnisotropy`, and
 the no-op present verbs (decided deliberately, with the caller handed a feature
 bit to check).
 
-### DECIDED — the seam returns nanoseconds; `timestamp_period_ns` goes
+### Metal's query rows: one of the two reasons is now retired
 
-Metal's `TimestampQuery` and `PipelineStatisticsQuery` are the last two
-`Unclassified` rows in `REVIEWED_BLOCKERS`, and reading why says the divergence
-is **the seam's shape rather than Metal's**.
+`Limits::timestamp_period_ns` is gone — the seam returns nanoseconds and each
+backend converts. That **retires one of the two reasons** `crcbl-mtl` gave for
+refusing `TimestampQuery`: reporting the flag no longer obliges a tick period
+Metal cannot produce, since an implementation would correlate at read time and
+owe the seam nothing it cannot measure.
 
-`crcbl_mtl::device`'s own reason: building the query set needs an
-`MTLCounterSampleBuffer`, which is unwritten — but the deeper obstacle is that
-**reporting the feature obliges a `Limits::timestamp_period_ns`, and Metal has
-no fixed tick period.** Its GPU clock is correlated to the host at sample time
-(`sampleTimestamps:gpuTimestamp:`) rather than ticking at a constant rate, so
-there is no honest number to put in that field.
+What remains is real and unchanged: this backend builds **no
+`MTLCounterSampleBuffer` at all**, and the CI Mac advertises **no
+`MTLDevice::counterSets`** to build one from. So the rows stay, and no
+capability was flipped inside the refactor — deliberately, because quietly
+closing a parity row inside unrelated work is how four rows came to read closed
+while running nowhere earlier today.
 
-**One backend is already papering over the same mismatch.** `crcbl-webgpu`
-reports `timestamp_period_ns = 1.0` — not a measurement, but a sentinel meaning
-"the results are already nanoseconds", which is what WebGPU's timestamp queries
-return. So the field is a Vulkan-shaped concept that two of four backends cannot
-answer truthfully.
+**What would close them**: write the counter sample buffer, then the rows become
+`NotOnThisDevice` here rather than divergences — eight rows to six. It cannot be
+verified on the hardware this project has, which is the whole of the remaining
+argument.
 
-The four APIs:
-
-| backend | what it gives                                               |
-| ------- | ----------------------------------------------------------- |
-| Vulkan  | ticks + `timestampPeriod` (ns per tick)                     |
-| D3D12   | ticks + `GetTimestampFrequency` (ticks per second)          |
-| WebGPU  | **nanoseconds directly**                                    |
-| Metal   | a GPU timestamp correlated to the host clock at sample time |
-
-**The options:**
-
-1. **Leave it.** Metal's two rows stay divergent permanently and WebGPU keeps
-   reporting a sentinel. Costs nothing now; the parity claim carries two rows
-   that no work can ever close, for a reason nobody reading the enum would
-   guess.
-2. **Return nanoseconds from the seam** and drop the period from the public
-   contract. Each backend converts in the one place that knows how: Vulkan
-   multiplies by its period, D3D12 divides by its frequency, WebGPU passes
-   through, Metal correlates. Every backend can then serve the capability, and
-   the sentinel disappears. Breaking, pre-1.0 so permitted, and it touches four
-   backends plus every caller that reads a timestamp.
-3. **Make the period optional** — `Option<f32>` — so a backend can say "not a
-   fixed rate". Smaller change, but it pushes the conversion onto every caller
-   and each one has to get the Metal case right, which is the argument against.
-
-**Decided: (2).** The instruction is general and worth quoting, because it
-settles more than this row: _"for changes that are on the seam we should
-refactor anything that can't work on all the backends, our seam needs to be
-fully backend agnostic."_
-
-So `Limits::timestamp_period_ns` is removed from the public contract and the
-seam returns nanoseconds, each backend converting where it knows how. The
-evidence that this is right was already in the tree: WebGPU had to invent a
-sentinel and Metal had to refuse outright. When a portable seam forces one
-backend to fake a number and another to decline, the seam is the thing that is
-wrong.
-
-**It does not close the rows on its own.** Metal would still need the
-`MTLCounterSampleBuffer` written, and the CI Mac advertises **no
-`MTLDevice::counterSets` at all** — so even a complete implementation is
-`NotOnThisDevice` here, which the parity mechanism does not count as a
-divergence. That is still progress: eight rows to six, honestly.
-
-Recorded rather than taken because it is a breaking change to the seam's public
-contract, which is a bigger call than a backend fix.
+One asymmetry the removal forced into the open and left there:
+`resolve_query_set` copies ticks GPU-side with nothing to multiply by, so its
+destination holds device units while `query_results` returns nanoseconds. Both
+calls now say so. A seam that wanted symmetry would have to convert in a shader.
 
 ### The Metal ICB line of attack, and why it is closed
 

@@ -1063,12 +1063,15 @@ pub const DIVERGENCES: &[Divergence] = &[
               Metal objects: a visibility-result buffer is a plain MTLBuffer, while a timestamp \
               needs an MTLCounterSampleBuffer. crcbl_mtl::create_query_set refuses on the query \
               kind alone and never reads MTLDevice.counterSets, so the refusal is the same on \
-              every Mac, and the reason it is the same is the one adapter::features_of gives for \
-              withholding the flag: reporting it obliges a Limits::timestamp_period_ns, and Metal \
-              correlates the GPU clock to the host at sample time rather than ticking at a fixed \
-              period. The Mac CI runs this backend on advertises no counterSets either, so it \
-              cannot measure the period it would need. Which kind of divergence that is stays \
-              unsettled, though the seam's verb is no longer part of what leaves it unsettled: \
+              every Mac. One of the two reasons this used to give has been retired rather than \
+              answered: reporting the flag obliged a Limits::timestamp_period_ns, which Metal \
+              could not produce because it correlates the GPU clock to the host at sample time \
+              rather than ticking at a fixed period — and that field is gone, the seam returning \
+              nanoseconds and each backend converting where it knows how. What remains is that \
+              this backend builds no MTLCounterSampleBuffer at all, and that the Mac CI runs on \
+              advertises no counterSets to build one from. Which kind of divergence that is stays \
+              unsettled, though neither the seam's verb nor its units are part of what leaves it \
+              unsettled: \
               PassTimestampWrites asks only for a sample where an encoder opens and closes, \
               which is what Metal's sampleBufferAttachments express, so the open questions are \
               the counter set and the period rather than where the sample would go — \

@@ -163,7 +163,6 @@ function everyLimit() {
     minStorageBufferOffsetAlignment: 128n,
     optimalBufferCopyOffsetAlignment: 512n,
     maxSamplerAnisotropy: 1,
-    timestampPeriodNs: 1,
   };
 }
 
@@ -242,7 +241,6 @@ function encodeCanonicalReplies(replies) {
       minStorageBufferOffsetAlignment: 256n,
       optimalBufferCopyOffsetAlignment: 256n,
       maxSamplerAnisotropy: 1,
-      timestampPeriodNs: 0,
     },
   });
   replies.readbackPending(17n, handle(51, 52));
@@ -292,7 +290,6 @@ function encodeCanonicalReplies(replies) {
     limits: {
       ...everyLimit(),
       maxImage2d: 8192,
-      timestampPeriodNs: 0,
     },
   });
   replies.device(19n, {
@@ -317,7 +314,6 @@ function encodeCanonicalReplies(replies) {
       minStorageBufferOffsetAlignment: 256n,
       optimalBufferCopyOffsetAlignment: 256n,
       maxSamplerAnisotropy: 1,
-      timestampPeriodNs: 0,
     },
   });
   // The refusal, with the gap. `TIMELINE_SEMAPHORE` is bit 9 — the flag
@@ -596,8 +592,8 @@ async function main() {
       (info) => delete info.limits.maxComputeWorkgroupSize,
     ],
     [
-      'limits.timestampPeriodNs',
-      (info) => delete info.limits.timestampPeriodNs,
+      'limits.maxSamplerAnisotropy',
+      (info) => delete info.limits.maxSamplerAnisotropy,
     ],
   ]) {
     checkRefused(

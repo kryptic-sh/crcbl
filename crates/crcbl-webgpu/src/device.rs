@@ -407,7 +407,6 @@ mod tests {
             features: Features::COMPUTE | Features::TEXTURE_COMPRESSION_BC,
             limits: Limits {
                 max_image_2d: 4096,
-                timestamp_period_ns: 0.0,
                 ..Limits::minimum()
             },
         };

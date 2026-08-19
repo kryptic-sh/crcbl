@@ -900,9 +900,33 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
 
     /// Reads query results directly, without a resolve-to-buffer round trip.
     ///
-    /// `out.len()` results are read starting at `first_query`. Timestamp values
-    /// are raw ticks; multiply differences by
-    /// [`Limits::timestamp_period_ns`](crate::Limits::timestamp_period_ns).
+    /// `out.len()` results are read starting at `first_query`.
+    ///
+    /// # A [`QueryKind::Timestamp`](crate::QueryKind::Timestamp) result is **nanoseconds**
+    ///
+    /// Not a tick, and not a tick plus a scale factor the caller has to know
+    /// about. The scale is a different thing in every API — Vulkan reports
+    /// nanoseconds per tick (`VkPhysicalDeviceLimits::timestampPeriod`), D3D12
+    /// reports its reciprocal (`ID3D12CommandQueue::GetTimestampFrequency`),
+    /// WebGPU's `GPUQuerySet` results are already nanoseconds, and Metal has no
+    /// fixed period at all because `MTLDevice`'s
+    /// `sampleTimestamps:gpuTimestamp:` correlates the GPU clock to the host at
+    /// the moment of sampling — so a seam that carried one backend's spelling
+    /// of it would have two backends inventing a number to fill the field with.
+    /// The unit is the seam's; each backend converts where the factor is
+    /// something it actually knows.
+    ///
+    /// The value is **rounded to the nearest nanosecond, once, at the source**,
+    /// so every caller reads the same number rather than each rounding a
+    /// tick-times-float product its own way.
+    ///
+    /// **[`resolve_query_set`](crate::CommandEncoder::resolve_query_set) is the
+    /// other read path and it does *not* convert** — it is a GPU-side copy, and
+    /// there is nothing on that side to multiply with. Its destination holds
+    /// whatever the device writes. See its own documentation.
+    ///
+    /// The other kinds count things — samples, invocations, primitives — and
+    /// have no unit to convert: they come back as the device wrote them.
     ///
     /// Returns zeros on a device without
     /// [`Features::TIMESTAMP_QUERY`] rather than failing — the profiler HUD

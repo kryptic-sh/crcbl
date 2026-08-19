@@ -16,6 +16,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **Timestamp query results are nanoseconds, and `Limits::timestamp_period_ns`
+  is gone.** The field asked for nanoseconds per GPU tick, which is Vulkan's
+  model: D3D12 has the reciprocal, WebGPU returns nanoseconds already and so
+  reported a `1.0` sentinel, and **Metal has no fixed tick period at all** — it
+  correlates the GPU clock to the host at sample time. Two of four backends
+  could not answer it truthfully.
+
+  Each backend now converts where the factor is known. Vulkan scales through a
+  fixed-point multiplier rather than `f64`, which stops distinguishing single
+  nanoseconds past 2^53; D3D12 divides by its integer frequency exactly, with no
+  float at all; WebGPU passes through.
+
+  **`resolve_query_set` deliberately does not convert** — it is a GPU-side copy
+  with nothing to multiply by, so its destination holds the device's own units.
+  That asymmetry is now stated on both calls.
+
+  The reply format drops the field, so `REPLY_VERSION` goes 2 → 3. The command
+  stream is untouched; the two are versioned separately.
+
 - **`MultisampleState::mask` is gone.** Vulkan, D3D12 and WebGPU all carry a
   per-pipeline sample mask; **Metal has none at all**, so `crcbl-mtl` refused
   any non-full value outright — and no `Capability` or `DIVERGENCES` row

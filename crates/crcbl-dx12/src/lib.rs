@@ -240,17 +240,19 @@
 //! shader register that parameter takes, which is read off the committed DXIL
 //! rather than chosen here.
 //!
-//! **The query flags are also the one place an adapter and a device from it
-//! report different caps.**
-//! [`TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) obliges a
-//! [`Limits::timestamp_period_ns`](crcbl_hal::Limits::timestamp_period_ns), and
-//! the period is `1e9 / ID3D12CommandQueue::GetTimestampFrequency()` — a queue
-//! call, with no queue in sight when `crcbl_dx12::adapter` fills its caps in. So
-//! the *flag* is reported at the adapter, because
+//! **A device reports exactly the caps of the adapter it came from**, which is
+//! worth saying because it was once nearly untrue. The timestamp clock's rate
+//! is `ID3D12CommandQueue::GetTimestampFrequency()` — a queue call, with no
+//! queue in sight when `crcbl_dx12::adapter` fills its caps in — so a seam that
+//! carried the rate would have had one limit an adapter could not answer. It
+//! does not: [`Device::query_results`](crcbl_hal::Device::query_results) reports
+//! nanoseconds and this backend converts, so the frequency is read once by
+//! `Dx12Device::open`, kept in `DeviceInner`, and never reaches the seam.
+//! [`TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) is reported at the
+//! adapter, where
 //! [`DeviceDesc::required_features`](crcbl_hal::DeviceDesc::required_features)
-//! is checked against the adapter and a flag that first appeared at device open
-//! could never be required, and the *number* is filled in by `Dx12Device::open`
-//! once its queue exists.
+//! is checked against it — a flag that first appeared at device open could never
+//! be required by a caller.
 //!
 //! # `Dx12Instance` exists only on Windows, and is unlinked here on purpose
 //!

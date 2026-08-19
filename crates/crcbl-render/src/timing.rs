@@ -222,7 +222,6 @@ pub struct PassTimers {
     /// [`PassTimers::pass_writes`] as the graph walks the same list.
     pairs: Vec<Option<u32>>,
     capacity: u32,
-    period_ns: f32,
     frames: u64,
     latest: FrameTimings,
     /// Whether a frame with more passes than [`PassTimers::capacity`] has
@@ -262,7 +261,6 @@ impl PassTimers {
             );
             return None;
         };
-        let period_ns = device.caps().limits.timestamp_period_ns;
         // One more than the frames in flight, so the slot about to be reused is
         // always one whose submission has completed.
         let count = frames_in_flight + 1;
@@ -295,7 +293,6 @@ impl PassTimers {
             current: 0,
             pairs: Vec::new(),
             capacity: max_passes,
-            period_ns,
             frames: 0,
             latest: FrameTimings::default(),
             warned: false,
@@ -389,8 +386,10 @@ impl PassTimers {
         if slot.labels.is_empty() {
             return;
         }
-        let mut raw = vec![0u64; slot.labels.len() * 2];
-        if let Err(error) = device.query_results(slot.set, 0, &mut raw) {
+        // Nanoseconds, not ticks: `Device::query_results` converts inside the
+        // backend, where the scale is something the API actually reports.
+        let mut nanos = vec![0u64; slot.labels.len() * 2];
+        if let Err(error) = device.query_results(slot.set, 0, &mut nanos) {
             crcbl_core::log::debug!(
                 "graph: timestamp read failed ({error}); dropping this frame's timing"
             );
@@ -404,11 +403,9 @@ impl PassTimers {
                 // `saturating_sub` rather than an assert: a device whose
                 // timestamps are unsupported writes zeros, and a zero-length
                 // pass is a more useful report than a panic in a profiler.
-                let ticks = raw[index * 2 + 1].saturating_sub(raw[index * 2]);
                 PassTiming {
                     label: label.clone(),
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    gpu_nanos: (ticks as f64 * f64::from(self.period_ns)) as u64,
+                    gpu_nanos: nanos[index * 2 + 1].saturating_sub(nanos[index * 2]),
                 }
             })
             .collect();

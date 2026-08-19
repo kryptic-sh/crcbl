@@ -85,11 +85,24 @@ pub const REPLY_MAGIC: &[u8; 8] = b"CRCBLRPL";
 /// [`STREAM_VERSION`]: the two formats change for different reasons, and a
 /// shared number would force one half to be re-blessed for the other's edit.
 ///
-/// `2` since [`Reply::Adapter`](crate::Reply::Adapter) stopped being an id and a
-/// name and became the whole of [`AdapterInfo`](crcbl_hal::AdapterInfo). That is
-/// what the version word is *for*: the two halves ship as separate artifacts and
-/// are cached independently, so a page holding yesterday's JavaScript against
-/// today's wasm would otherwise read a name's length prefix as a vendor id.
+/// `3` since the [`Limits`](crcbl_hal::Limits) record lost its trailing
+/// `timestamp_period_ns` `f32`: the seam stopped carrying a nanoseconds-per-tick
+/// scale — [`Device::query_results`](crcbl_hal::Device::query_results) reports
+/// nanoseconds and each backend converts — so the field had nowhere to be
+/// decoded into. It is exactly the edit a version word exists for: the record
+/// is four bytes shorter, so an older `gpu-reply.js` writing the longer one
+/// leaves four bytes the reader takes as the head of the *next* field, and a
+/// `DeviceCaps` at the end of an `Adapter` reply then runs off the buffer or,
+/// worse, is followed by another reply that decodes as garbage. A `0.0` in that
+/// slot would not have helped either: no tag moved, so nothing would have
+/// refused it.
+///
+/// It went to `2` when [`Reply::Adapter`](crate::Reply::Adapter) stopped being
+/// an id and a name and became the whole of
+/// [`AdapterInfo`](crcbl_hal::AdapterInfo). That is what the version word is
+/// *for*: the two halves ship as separate artifacts and are cached
+/// independently, so a page holding yesterday's JavaScript against today's wasm
+/// would otherwise read a name's length prefix as a vendor id.
 ///
 /// # A new tag is not a new version, and the difference is the failure mode
 ///
@@ -104,7 +117,7 @@ pub const REPLY_MAGIC: &[u8; 8] = b"CRCBLRPL";
 /// perfectly.
 ///
 /// [`DecodeError::UnknownTag`]: crate::DecodeError::UnknownTag
-pub const REPLY_VERSION: u16 = 2;
+pub const REPLY_VERSION: u16 = 3;
 
 /// Bytes before the first reply: [`REPLY_MAGIC`] and [`REPLY_VERSION`].
 ///

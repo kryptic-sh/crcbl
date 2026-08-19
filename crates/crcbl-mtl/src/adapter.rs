@@ -313,15 +313,22 @@ fn gpu_address_is_available() -> bool {
 ///
 /// * [`Features::TIMESTAMP_QUERY`] and
 ///   [`Features::PIPELINE_STATISTICS_QUERY`] — `supportsCounterSampling:` would
-///   answer both, but reporting them obliges a
-///   [`Limits::timestamp_period_ns`], and Metal has no fixed tick period to
-///   report: the GPU clock is correlated to the host's through
-///   `sampleTimestamps:gpuTimestamp:` at sample time. A fabricated period is
-///   exactly the number this workspace refuses to write down, so the feature
-///   waits for the slice that can measure it — and this module's
+///   answer both, but this backend builds no `MTLCounterSampleBuffer` on any
+///   device, so nothing would ever be sampled into one and the flags would be a
+///   claim with no measurement behind them. `crcbl_mtl::device`'s
+///   `NO_COUNTER_SAMPLED_SET` is the one sentence this and the refusal share;
+///   this module's
 ///   `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
-///   is that measurement, printing the period alongside every
-///   `supportsCounterSampling:` answer rather than asserting either.
+///   is the probe that prints what each device would offer, rather than
+///   asserting either.
+///
+///   The *unit* used to be a second reason — reporting the feature obliged a
+///   nanoseconds-per-tick limit, and Metal has no fixed tick period at all,
+///   since the GPU clock is correlated to the host's through
+///   `sampleTimestamps:gpuTimestamp:` at sample time. That reason is gone:
+///   [`Device::query_results`](crcbl_hal::Device::query_results) reports
+///   nanoseconds and each backend converts, so an implementation here would
+///   correlate at read time and owe the seam nothing it cannot measure.
 /// * [`Features::ASYNC_COMPUTE_QUEUE`] and [`Features::TRANSFER_QUEUE`] —
 ///   Metal has one `MTLCommandQueue` type and no queue families at all, which
 ///   `crcbl_hal::QueueKind` already records as the reason it is not named
@@ -893,7 +900,7 @@ mod tests {
         }
         if gpu_delta > 0 {
             println!(
-                "crcbl-mtl counters: timestamp_period_ns = {} by the wall clock, {} by \
+                "crcbl-mtl counters: nanoseconds per GPU tick = {} by the wall clock, {} by \
                  Metal's cpu timestamp",
                 wall_ns as f64 / gpu_delta as f64,
                 cpu_delta as f64 / gpu_delta as f64

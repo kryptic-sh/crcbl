@@ -9760,16 +9760,8 @@ async function main() {
         optimalBufferCopyOffsetAlignment: 256n,
         // The floor, because WebGPU reports no anisotropy ceiling to promise.
         maxSamplerAnisotropy: 1,
-        // No timestamp queries on this stub, so no tick period.
-        timestampPeriodNs: 0,
       },
       'every GPUSupportedLimits member lands in the seam field that names it'
-    );
-
-    checkEqual(
-      halLimitsFor(stubAdapter({}, ['timestamp-query'])).timestampPeriodNs,
-      1,
-      "a browser's timestamps are nanoseconds, so the period is 1 once they exist"
     );
 
     // **The same table read backwards**, which is what a device request needs.

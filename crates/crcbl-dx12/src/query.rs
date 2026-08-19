@@ -28,6 +28,8 @@
 //! structure's own `size_of`, so the literal here cannot drift from the ABI, and
 //! everything derived from it is checked on a machine with no D3D12 at all.
 
+use std::num::NonZeroU64;
+
 use crcbl_hal::{HalError, QueryKind};
 
 /// Counters `D3D12_QUERY_DATA_PIPELINE_STATISTICS` holds.
@@ -155,38 +157,58 @@ pub(crate) fn check_destination(
     Ok(())
 }
 
-/// Nanoseconds one timestamp tick is worth, from
-/// `ID3D12CommandQueue::GetTimestampFrequency`.
-///
-/// The reciprocal in nanoseconds, which is
-/// [`Limits::timestamp_period_ns`](crcbl_hal::Limits::timestamp_period_ns)'s
-/// definition and what `wgpu-hal`'s `dx12` backend computes in
-/// `Queue::get_timestamp_period`.
+/// Nanoseconds in the second `ID3D12CommandQueue::GetTimestampFrequency` counts
+/// ticks per.
+const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+/// The timestamp clock's rate, checked to be a rate.
 ///
 /// # Errors
 ///
-/// [`HalError::Backend`] for a frequency of zero. A tick worth infinitely many
-/// nanoseconds is not a period, and the seam reserves `0.0` for a device without
-/// [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) — so
-/// there is no value to report here that would not be read as one of those two
-/// claims. A queue that answered zero is broken, and saying so at device open is
-/// the only place a caller can act on it.
-pub(crate) fn timestamp_period_ns(frequency: u64) -> Result<f32, HalError> {
-    /// Nanoseconds in the second `GetTimestampFrequency` counts ticks per.
-    const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
-
-    if frequency == 0 {
-        return Err(HalError::Backend(
+/// [`HalError::Backend`] for a frequency of zero. A clock that ticks zero times
+/// a second has no duration to convert a tick to, and every timestamp read
+/// through it would be a division by zero. A queue that answered zero is broken,
+/// and device open is the only place a caller can act on it — which is why this
+/// returns a [`NonZeroU64`] rather than leaving the check to be repeated at
+/// every read.
+pub(crate) fn timestamp_frequency(frequency: u64) -> Result<NonZeroU64, HalError> {
+    NonZeroU64::new(frequency).ok_or_else(|| {
+        HalError::Backend(
             "ID3D12CommandQueue::GetTimestampFrequency reported zero ticks per second, so a \
              timestamp delta has no duration to convert to"
                 .to_string(),
-        ));
-    }
-    // A frequency is a tick rate in the low billions, so the `u64` -> `f64`
-    // conversion is exact, and the period is a small positive number the `f32`
-    // the seam carries holds to more digits than any clock is accurate to.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    Ok((NANOS_PER_SECOND / frequency as f64) as f32)
+        )
+    })
+}
+
+/// A raw D3D12 timestamp in nanoseconds, which is what
+/// [`Device::query_results`](crcbl_hal::Device::query_results) reports.
+///
+/// D3D12 states its clock as a *rate* — `GetTimestampFrequency` answers ticks
+/// per second — where Vulkan states the reciprocal, so this divides where
+/// `crcbl_vk::conv::timestamp_nanos` multiplies. That is the whole reason the
+/// seam carries neither number: they are two APIs' spellings of a thing Metal
+/// and WebGPU do not express at all.
+///
+/// # Exact, because the frequency makes it exact
+///
+/// `ticks * 1e9 / frequency` is a rational with an integer numerator and an
+/// integer denominator, so there is no float anywhere in it: the product is
+/// taken in `u128`, which holds a full `u64` tick count times a billion with
+/// room to spare, and the division rounds to nearest by adding half the divisor
+/// first. Nothing here quantises the way a `f64` multiply would once a
+/// free-running counter passes 2⁵³.
+///
+/// Rounding is to nearest, applied once here rather than by each caller: the
+/// seam's contract is a nanosecond count, so the fraction has to go somewhere,
+/// and one rule at the source is the only way two readers agree.
+pub(crate) fn timestamp_nanos(ticks: u64, frequency: NonZeroU64) -> u64 {
+    let divisor = u128::from(frequency.get());
+    let nanos = (u128::from(ticks) * NANOS_PER_SECOND + divisor / 2) / divisor;
+    // Saturating rather than wrapping: a reading so large it leaves `u64` is a
+    // broken clock, and `u64::MAX` says "past anything" where a wrap would say
+    // "just after boot".
+    u64::try_from(nanos).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -300,30 +322,66 @@ mod tests {
         assert!(check_destination(QueryKind::Timestamp, u64::MAX - 7, 2, u64::MAX).is_err());
     }
 
-    /// The period is the reciprocal in nanoseconds, and zero is refused.
-    ///
-    /// Red if the division is inverted: a frequency of 1 GHz would report a
-    /// billion nanoseconds per tick rather than one, and every duration derived
-    /// from a delta would be out by eighteen orders of magnitude while still
-    /// being a positive number the seam suite accepts.
+    /// A stopped clock is refused at device open rather than divided by.
     #[test]
-    fn a_timestamp_period_is_nanoseconds_per_tick_and_never_zero() {
-        assert!(
-            (timestamp_period_ns(1_000_000_000).expect("a 1 GHz counter") - 1.0).abs()
-                < f32::EPSILON
+    fn a_timestamp_frequency_of_zero_is_refused() {
+        assert_eq!(
+            timestamp_frequency(1_000_000_000)
+                .expect("a 1 GHz counter")
+                .get(),
+            1_000_000_000
         );
-        assert!(
-            (timestamp_period_ns(100_000_000).expect("a 100 MHz counter") - 10.0).abs()
-                < f32::EPSILON
-        );
-        // A slower counter has a longer tick, which is the direction the
-        // inverted division gets backwards.
-        assert!(
-            timestamp_period_ns(1_000_000).expect("1 MHz")
-                > timestamp_period_ns(1_000_000_000).expect("1 GHz")
-        );
-
-        let error = timestamp_period_ns(0).expect_err("a stopped clock has no period");
+        let error = timestamp_frequency(0).expect_err("a stopped clock has no rate");
         assert!(matches!(error, HalError::Backend(_)), "{error:?}");
+    }
+
+    /// **The seam reports nanoseconds, so the frequency has to be spent here.**
+    ///
+    /// Red if `timestamp_nanos` returns its ticks unscaled, which is the
+    /// mistake that reads correctly on the 1 GHz counter where a tick happens
+    /// to be a nanosecond and is out by a factor of ten on a 100 MHz one. Red
+    /// too if the division is inverted — a 1 GHz counter would then report a
+    /// billion nanoseconds per tick, out by eighteen orders of magnitude while
+    /// still being a positive number every "it moved" assertion accepts.
+    #[test]
+    fn a_timestamp_is_scaled_by_the_queues_frequency() {
+        let ghz = timestamp_frequency(1_000_000_000).expect("1 GHz");
+        let hundred_mhz = timestamp_frequency(100_000_000).expect("100 MHz");
+        assert_eq!(timestamp_nanos(744, ghz), 744);
+        assert_eq!(timestamp_nanos(744, hundred_mhz), 7_440);
+        assert_eq!(timestamp_nanos(0, hundred_mhz), 0);
+        // A slower counter makes a longer tick, which is the direction an
+        // inverted division gets backwards.
+        assert!(timestamp_nanos(1, hundred_mhz) > timestamp_nanos(1, ghz));
+    }
+
+    /// The fraction rounds to nearest, and the whole `u64` tick range converts
+    /// without the `f64` cliff.
+    ///
+    /// Red on truncation: a 3 GHz counter turns two ticks into `0` rather than
+    /// `1`. Red on `(ticks as f64 * period).round() as u64`: past 2⁵³ an `f64`
+    /// cannot hold consecutive integers, so a counter that has been running for
+    /// months reports two readings as the same instant and a delta of a few
+    /// hundred nanoseconds arrives as zero.
+    #[test]
+    fn a_timestamp_rounds_to_nearest_and_survives_a_long_running_counter() {
+        let three_ghz = timestamp_frequency(3_000_000_000).expect("3 GHz");
+        assert_eq!(timestamp_nanos(2, three_ghz), 1, "0.667 ns rounds to 1");
+        assert_eq!(timestamp_nanos(1, three_ghz), 0, "0.333 ns rounds to 0");
+
+        let ghz = timestamp_frequency(1_000_000_000).expect("1 GHz");
+        let past_the_mantissa = (1u64 << 53) + 8;
+        assert_eq!(timestamp_nanos(past_the_mantissa, ghz), past_the_mantissa);
+        assert_eq!(
+            timestamp_nanos(past_the_mantissa + 1, ghz) - timestamp_nanos(past_the_mantissa, ghz),
+            1,
+            "one tick of a 1 GHz clock is one nanosecond however long the GPU has been up"
+        );
+        // And a reading no clock could reach saturates rather than wrapping into
+        // a plausible-looking instant just after boot.
+        assert_eq!(
+            timestamp_nanos(u64::MAX, timestamp_frequency(1_000).expect("1 kHz")),
+            u64::MAX
+        );
     }
 }

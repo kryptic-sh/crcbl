@@ -885,7 +885,21 @@ pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`PassTimestampWrites`] for why the seam has no free-standing timestamp.
     fn reset_query_set(&mut self, set: QuerySetHandle, range: Range<u32>);
 
-    /// Copies query results into a buffer.
+    /// Copies query results into a buffer, **as the device wrote them**.
+    ///
+    /// The counterpart of [`Device::query_results`](crate::Device::query_results)
+    /// and the one place the two read paths differ: that one reports a
+    /// [`QueryKind::Timestamp`](crate::QueryKind::Timestamp) in nanoseconds, and
+    /// this one cannot. It records a GPU-side copy — `vkCmdCopyQueryPoolResults`,
+    /// `ResolveQueryData`, `GPUCommandEncoder.resolveQuerySet` — so the values
+    /// never pass through the CPU and there is nowhere to apply a scale. A
+    /// caller reading the destination gets the device's own clock units, and
+    /// what those are worth is a question only the backend can answer.
+    ///
+    /// So this is for feeding a delta back to the GPU — a shader that compares
+    /// two readings, which needs no unit — and
+    /// [`Device::query_results`](crate::Device::query_results) is for a number a
+    /// human or a HUD is going to read.
     fn resolve_query_set(
         &mut self,
         set: QuerySetHandle,

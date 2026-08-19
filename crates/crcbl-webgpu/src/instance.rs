@@ -511,7 +511,6 @@ mod tests {
         let mut info = granted("timestamping");
         info.caps.features = Features::COMPUTE | Features::TIMESTAMP_QUERY;
         info.caps.limits.max_image_2d = 16384;
-        info.caps.limits.timestamp_period_ns = 1.0;
         assert!(probe.absorb(&[(sequence, Reply::Adapter { info: info.clone() })]));
 
         let adapters = probe.adapters();

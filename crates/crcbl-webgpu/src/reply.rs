@@ -173,8 +173,8 @@ impl ByteWriter {
     ///
     /// Every field, not a subset the engine happens to read today: the fields
     /// are read from all over — `crcbl-render` reads
-    /// `optimal_buffer_copy_offset_alignment`, `max_image_2d`,
-    /// `min_uniform_buffer_offset_alignment` and `timestamp_period_ns`, while
+    /// `optimal_buffer_copy_offset_alignment`, `max_image_2d` and
+    /// `min_uniform_buffer_offset_alignment`, while
     /// `crcbl-hal`'s own descriptor validation reads `max_sample_count`,
     /// `max_compute_workgroup_size`, `max_bindless_descriptors`,
     /// `max_image_array_layers`, `max_color_attachments`, `max_bind_groups`,
@@ -202,7 +202,6 @@ impl ByteWriter {
         self.put_u64(limits.min_storage_buffer_offset_alignment);
         self.put_u64(limits.optimal_buffer_copy_offset_alignment);
         self.put_f32(limits.max_sampler_anisotropy);
-        self.put_f32(limits.timestamp_period_ns);
     }
 
     /// [`DeviceCaps`]: the feature bits, then the limits.
@@ -301,7 +300,6 @@ impl ByteReader<'_> {
             min_storage_buffer_offset_alignment: self.read_u64()?,
             optimal_buffer_copy_offset_alignment: self.read_u64()?,
             max_sampler_anisotropy: self.read_f32()?,
-            timestamp_period_ns: self.read_f32()?,
         })
     }
 

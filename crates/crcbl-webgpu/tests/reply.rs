@@ -416,10 +416,9 @@ fn each_limits_field_survives_a_round_trip_on_its_own() {
         ("max_sampler_anisotropy", |l| {
             l.max_sampler_anisotropy = 16.0
         }),
-        ("timestamp_period_ns", |l| l.timestamp_period_ns = 0.5),
     ];
     // One row per field, plus two more for the other two axes of the array.
-    assert_eq!(mutations.len(), 21, "a Limits field has no row here");
+    assert_eq!(mutations.len(), 20, "a Limits field has no row here");
 
     for (what, mutate) in mutations {
         let mut limits = base;
@@ -537,7 +536,6 @@ fn a_device_reply_carries_the_capabilities_it_was_given_and_is_not_an_adapter() 
         features: Features::COMPUTE | Features::DEBUG_MARKERS,
         limits: Limits {
             max_image_2d: 8192,
-            timestamp_period_ns: 0.0,
             ..Limits::desktop()
         },
     };

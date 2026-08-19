@@ -6298,6 +6298,16 @@ const TIMED_CLEAR_EXTENT: u32 = 1024;
 const TIMED_CLEAR_BYTES: u64 =
     TIMED_CLEAR_EXTENT as u64 * TIMED_CLEAR_EXTENT as u64 * size_of::<u32>() as u64;
 
+/// Longest a clear of [`TIMED_CLEAR_BYTES`] may be reported to have taken.
+///
+/// One second, which is not a performance bound — the software rasterisers this
+/// suite runs on in CI are entitled to be slow, and a loaded machine slower
+/// still. It is a **unit** bound, and enormously loose on purpose: the mistakes
+/// it exists to catch are off by six orders of magnitude or more (a period
+/// applied as a frequency, a microsecond count reported as nanoseconds), so a
+/// number a real device could reach cannot also be one of them.
+const TIMED_CLEAR_CEILING_NANOS: u64 = 1_000_000_000;
+
 /// How many queries the creation-only exercise asks a set to hold.
 ///
 /// More than one, so that reading one past the end has an in-range read beside
@@ -6318,8 +6328,10 @@ const CREATED_QUERIES: u32 = 2;
 /// `ID3D12CommandQueue::GetTimestampFrequency`, Metal's
 /// `MTLCounterSampleBuffer` records an `MTLTimestamp`, and WebGPU's
 /// `timestampWrites` records nanoseconds outright — four units, one shared
-/// property. A magic number would be a different assertion on every device;
-/// this is the same assertion on all of them.
+/// property, and [`Device::query_results`] reports all four in the same unit —
+/// **nanoseconds** — because each backend converts. A magic number would be a
+/// different assertion on every device; this is the same assertion on all of
+/// them.
 ///
 /// Three failures it cannot be green through. Timestamp writes accepted and
 /// dropped — which the seam explicitly permits on a device *without*
@@ -6333,10 +6345,23 @@ const CREATED_QUERIES: u32 = 2;
 /// adjacent writes, which a device with a coarse counter is entitled to report
 /// as the same tick; a pass that writes [`TIMED_CLEAR_BYTES`] is not.
 ///
-/// The period is checked too, because it is half the claim: a backend
-/// reporting `timestamp_period_ns` of zero turns every delta into zero
-/// nanoseconds, and the profiler those queries exist for then reads zero
-/// however long the frame took.
+/// **The magnitude is checked too, because the unit is half the claim**, and
+/// only in one direction — which is worth saying plainly. The seam reports
+/// nanoseconds, so [`TIMED_CLEAR_CEILING_NANOS`] catches a conversion that went
+/// the wrong way: `crcbl-dx12` multiplying by `GetTimestampFrequency` instead of
+/// dividing puts a 4 MiB clear at eighteen orders of magnitude too long, and
+/// nothing about "the clock moved" would notice.
+///
+/// There is **no cross-backend floor**, and there cannot be one here. A backend
+/// that forgot to convert and handed the seam its raw ticks under-reports by
+/// exactly its period — ten on the radv Navi 31 this workspace tests against,
+/// and *one* on a device whose tick already is a nanosecond, where the two are
+/// the same number. So no bound this exercise can state distinguishes them on
+/// every device. What does is a suite that knows the device:
+/// `crcbl-vk`'s `per_pass_gpu_timers_report_real_numbers` holds a real frame to
+/// a floor, and `crcbl-dx12`'s
+/// `d3d12_timestamps_advance_and_both_read_paths_report_the_same_ticks` converts
+/// the resolve's ticks itself and demands the read match.
 ///
 /// # Why the results are read before they are resolved
 ///
@@ -6447,11 +6472,11 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
             // so zero is not the sentinel it looks like. `QUERY_POISON` is a
             // value no clock produces, which makes "this query was never
             // written" distinguishable from "this query holds a tick".
-            let mut ticks = [QUERY_POISON; TIMESTAMP_QUERIES as usize];
+            let mut nanos = [QUERY_POISON; TIMESTAMP_QUERIES as usize];
             device
-                .query_results(set, 0, &mut ticks)
+                .query_results(set, 0, &mut nanos)
                 .expect("reading a set this exercise created, over the range it created it with");
-            let [start, end, compute_start, compute_end] = ticks;
+            let [start, end, compute_start, compute_end] = nanos;
             if start == 0 && end == 0 {
                 // The documented degrade for a device without the feature, and
                 // therefore what a wrong `Support::Yes` produces.
@@ -6464,19 +6489,16 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
                      write at or before the opening one, so either the writes did not land where \
                      they were asked to or the counter behind them is not moving."
                 );
-                let period = f64::from(device.caps().limits.timestamp_period_ns);
+                let elapsed = end - start;
                 assert!(
-                    period > 0.0,
-                    "this device declares timestamp queries and reports a period of {period} \
-                     nanoseconds per tick, so every elapsed time derived from the {} ticks it \
-                     just measured is zero",
-                    end - start
+                    elapsed < TIMED_CLEAR_CEILING_NANOS,
+                    "clearing {TIMED_CLEAR_BYTES} bytes is reported as {elapsed} nanoseconds. \
+                     The seam's unit is nanoseconds and no device is that slow, so this is a \
+                     conversion applied the wrong way round rather than a slow machine."
                 );
                 eprintln!(
-                    "crcbl hal seam e2e: the timed clear took {ticks_elapsed} ticks, {micros:.3} \
-                     µs at {period} ns/tick",
-                    ticks_elapsed = end - start,
-                    micros = (end - start) as f64 * period / 1_000.0,
+                    "crcbl hal seam e2e: the timed clear took {micros:.3} µs",
+                    micros = elapsed as f64 / 1_000.0,
                 );
 
                 // The compute pass's pair, held to the same claim as the render
@@ -6511,7 +6533,7 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
                      empty and two writes with nothing between them may share a tick."
                 );
                 eprintln!(
-                    "crcbl hal seam e2e: the empty compute pass spanned {} tick(s)",
+                    "crcbl hal seam e2e: the empty compute pass spanned {} ns",
                     compute_end - compute_start,
                 );
                 // The refusal that keeps the pair meaningful, on a backend that
@@ -6553,7 +6575,7 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
                     refusal.map(|_| "recorded successfully")
                 );
 
-                exercise_timestamp_resolve(headless, set, ticks)
+                exercise_timestamp_resolve(headless, set, nanos)
             }
         }
     };
@@ -6569,18 +6591,30 @@ fn exercise_timestamp_query(headless: &Headless) -> Exercise {
 ///
 /// The destination is primed with [`QUERY_POISON`] first, so a resolve that was
 /// accepted and dropped is `SilentlyIgnored` rather than an unexplained
-/// mismatch. What it must produce is not a plausible range but the *same two
-/// numbers* [`Device::query_results`] already returned — same pool, same
-/// indices, already available — so the two read paths hold each other to one
-/// answer and a backend where one of them reads a different pool, a different
-/// range or a different stride cannot be green.
+/// mismatch.
 ///
-/// This cannot block: `ticks` is only non-`None` because the queries have
-/// already been observed as available.
+/// # The two paths are in different units, so they are held to a *ratio*
+///
+/// [`Device::query_results`] reports nanoseconds and `resolve_query_set` writes
+/// the device's own values — it is a GPU-side copy with nothing to convert
+/// with, which the seam documents on both calls. So the second read cannot be
+/// compared to `nanos` for equality, and it is not compared to a plausible
+/// range either: one scale relates every pair, so
+/// `nanos[i] * raw[j] == nanos[j] * raw[i]` for all of them, whatever that
+/// scale is. That is what a backend reading a different pool, a different range
+/// or a different stride cannot produce — its numbers have no scale relating
+/// them to the ones already returned — and it holds identically on a backend
+/// where the scale is one.
+///
+/// The products are taken in `u128`: a timestamp is a full `u64` off a
+/// free-running counter, so two of them multiplied leave `u64` at once.
+///
+/// This cannot block: `nanos` is only reached because the queries have already
+/// been observed as available.
 fn exercise_timestamp_resolve(
     headless: &Headless,
     set: QuerySetHandle,
-    ticks: [u64; TIMESTAMP_QUERIES as usize],
+    nanos: [u64; TIMESTAMP_QUERIES as usize],
 ) -> Exercise {
     const BYTES: u64 = TIMESTAMP_QUERIES as u64 * QUERY_RESULT_BYTES;
     let device = headless.device.as_ref();
@@ -6687,13 +6721,30 @@ fn exercise_timestamp_resolve(
             if words.iter().all(|word| *word == QUERY_POISON) {
                 Exercise::SilentlyIgnored
             } else {
-                assert_eq!(
-                    words.as_slice(),
-                    ticks.as_slice(),
-                    "resolve_query_set wrote {words:?} for the same two queries \
-                     Device::query_results had just read as {ticks:?}. One of the two read paths \
-                     is reaching a different pool, a different range or a different stride."
-                );
+                // The anchor is the query with the largest raw reading, so the
+                // cross-multiplication is never against a zero — a pair where
+                // both sides are zero relates to everything and would make this
+                // vacuous.
+                let anchor = (0..words.len())
+                    .max_by_key(|index| words[*index])
+                    .expect("the resolve wrote at least one word");
+                for index in 0..words.len() {
+                    // `nanos[i] = round(raw[i] * scale)` on both sides, so the
+                    // cross products differ by at most half a nanosecond of raw
+                    // on each — hence the tolerance, which is the two readings
+                    // themselves rather than a number picked to fit.
+                    let left = u128::from(nanos[anchor]) * u128::from(words[index]);
+                    let right = u128::from(nanos[index]) * u128::from(words[anchor]);
+                    let slack = u128::from(words[anchor]) + u128::from(words[index]);
+                    assert!(
+                        left.abs_diff(right) <= slack,
+                        "resolve_query_set wrote {words:?} for the same four queries \
+                         Device::query_results had just read as {nanos:?} nanoseconds. Query \
+                         {index} does not sit on the same scale as query {anchor}, so one of the \
+                         two read paths is reaching a different pool, a different range or a \
+                         different stride."
+                    );
+                }
                 Exercise::Worked
             }
         }

@@ -312,8 +312,6 @@ pub(crate) fn hal_limits_for(limits: &wgpu::Limits, features: wgpu::Features) ->
         optimal_buffer_copy_offset_alignment: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
         // `SamplerDescriptor::anisotropy_clamp` is a `u16` wgpu clamps to 16.
         max_sampler_anisotropy: 16.0,
-        // No timestamp queries, so no tick period to report.
-        timestamp_period_ns: 0.0,
     }
 }
 

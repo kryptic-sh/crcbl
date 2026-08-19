@@ -225,16 +225,31 @@ fn per_pass_gpu_timers_report_real_numbers() {
         "a real GPU took a measurable amount of time: {}",
         timings.report()
     );
-    // A loose ceiling on purpose. The failure this guards against is a *unit*
-    // mistake — raw ticks reported as nanoseconds, which on radv's 1.0 ns period
-    // would be invisible and on another device would be out by orders of
-    // magnitude — not slowness. A tight bound would instead be a load-dependent
-    // flake, and lavapipe's "GPU" time is CPU time on a machine that may be
-    // running thirty other things.
+    // **The bracket is a unit check, not a performance one**, and both ends are
+    // an order of magnitude clear of anything a device could produce. What it
+    // guards is `Device::query_results` reporting nanoseconds: this backend
+    // multiplies a raw tick by `VkPhysicalDeviceLimits::timestampPeriod` in
+    // `conv::timestamp_nanos`, and a read that skipped that step under-reports by
+    // exactly the period — a factor of ten on the radv Navi 31 this was measured
+    // on, and *invisible* on a device whose period is 1.0, which is why the
+    // conversion also has unit tests that do not need a GPU.
+    //
+    // That card reported this frame at 0.112 ms run alone and as little as
+    // 0.058 ms with the rest of the suite running beside it, and it is the
+    // fastest consumer GPU this suite has been run on; lavapipe, the driver CI
+    // uses, is orders of magnitude slower and clears the floor without trying.
+    // The floor sits near the geometric mean of that smallest measurement and
+    // what an unconverted read of it would have been, so it has about the same
+    // room on both sides — a third either way. Most of the time is per-pass
+    // overhead across the frame's passes rather than shading, so it does not
+    // shrink with the next card either. A tighter bound would be a
+    // load-dependent flake, and lavapipe's "GPU" time is CPU time on a machine
+    // that may be running thirty other things.
     assert!(
-        timings.total_nanos() < 10_000_000_000,
-        "a 256x192 frame reporting over ten seconds is a unit mistake, not a slow \
-         machine: {}",
+        (20_000..10_000_000_000).contains(&timings.total_nanos()),
+        "a 256x192 frame reporting {} ns is a unit mistake rather than a fast or \
+         a slow machine — the seam's timestamps are nanoseconds: {}",
+        timings.total_nanos(),
         timings.report()
     );
 

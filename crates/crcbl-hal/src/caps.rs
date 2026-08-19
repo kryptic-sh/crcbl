@@ -457,9 +457,6 @@ pub struct Limits {
     pub optimal_buffer_copy_offset_alignment: u64,
     /// Maximum anisotropy in [`SamplerDesc`](crate::SamplerDesc).
     pub max_sampler_anisotropy: f32,
-    /// Nanoseconds per timestamp-query tick. Multiply a timestamp delta by this
-    /// to get nanoseconds. `0.0` when [`Features::TIMESTAMP_QUERY`] is absent.
-    pub timestamp_period_ns: f32,
 }
 
 impl Limits {
@@ -492,7 +489,6 @@ impl Limits {
             min_storage_buffer_offset_alignment: 256,
             optimal_buffer_copy_offset_alignment: 256,
             max_sampler_anisotropy: 1.0,
-            timestamp_period_ns: 0.0,
         }
     }
 
@@ -522,7 +518,6 @@ impl Limits {
             min_storage_buffer_offset_alignment: 16,
             optimal_buffer_copy_offset_alignment: 4,
             max_sampler_anisotropy: 16.0,
-            timestamp_period_ns: 1.0,
         }
     }
 }
@@ -1039,7 +1034,6 @@ mod tests {
                 < desktop.max_compute_invocations_per_workgroup
         );
         assert!(min.max_sampler_anisotropy < desktop.max_sampler_anisotropy);
-        assert!(min.timestamp_period_ns < desktop.timestamp_period_ns);
 
         // The fields the two presets legitimately agree on. Listed rather than
         // omitted, so "the floor already matches a desktop device here" is a

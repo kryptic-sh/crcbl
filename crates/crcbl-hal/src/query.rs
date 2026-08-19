@@ -40,10 +40,15 @@ pub type QuerySetHandle = Handle<QuerySet>;
 /// What a query set measures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QueryKind {
-    /// A GPU clock tick, written at a pass boundary named by
-    /// [`PassTimestampWrites`](crate::PassTimestampWrites). Convert
-    /// deltas to nanoseconds with
-    /// [`Limits::timestamp_period_ns`](crate::Limits::timestamp_period_ns).
+    /// A GPU clock reading, taken at a pass boundary named by
+    /// [`PassTimestampWrites`](crate::PassTimestampWrites).
+    ///
+    /// [`Device::query_results`](crate::Device::query_results) reports it in
+    /// **nanoseconds** — the backend converts from whatever its API counts in,
+    /// because the conversion is the one part of a timestamp that has no
+    /// cross-API spelling. [`resolve_query_set`](crate::CommandEncoder::resolve_query_set)
+    /// writes the device's own values instead, unconverted; it is a GPU-side
+    /// copy with nothing to multiply by.
     Timestamp,
     /// Samples that passed the depth test between begin and end.
     ///

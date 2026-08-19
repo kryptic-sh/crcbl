@@ -106,30 +106,39 @@ pub(crate) const MAX_SAMPLER_ANISOTROPY: f32 = 16.0;
 /// is the same is the one `crate::adapter`'s `features_of` gives for withholding
 /// [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) and
 /// [`Features::PIPELINE_STATISTICS_QUERY`](crcbl_hal::Features::PIPELINE_STATISTICS_QUERY):
-/// reporting either obliges a
-/// [`Limits::timestamp_period_ns`](crcbl_hal::Limits::timestamp_period_ns), and
-/// Metal correlates the GPU clock to the host's through
-/// `sampleTimestamps:gpuTimestamp:` at sample time rather than ticking at a
-/// fixed period, so there is no honest number to report and this workspace will
-/// not fabricate one.
+/// **this backend builds no `MTLCounterSampleBuffer` on any device**, so a pass
+/// carrying [`PassTimestampWrites`](crcbl_hal::PassTimestampWrites) has nothing
+/// to sample into and a set has nothing to read from.
 ///
-/// The device-specific fact is the *second* obstacle and is why CI cannot even
-/// measure its way out: an `MTLCounterSampleBufferDescriptor` must name a set
-/// from `MTLDevice::counterSets`, and the paravirtual GPU this backend's CI runs
-/// on reports **zero** of them while answering `supportsCounterSampling:` yes at
+/// The device-specific fact is the *second* obstacle: an
+/// `MTLCounterSampleBufferDescriptor` must name a set from
+/// `MTLDevice::counterSets`, and the paravirtual GPU this backend's CI runs on
+/// reports **zero** of them while answering `supportsCounterSampling:` yes at
 /// three boundaries. `crate::adapter`'s
 /// `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
-/// is the probe that printed it, and it prints the correlated period too — it is
-/// the measurement the first obstacle waits on.
+/// is the probe that printed it.
+///
+/// # The seam-shaped obstacle is gone
+///
+/// There was a third reason, and it was the seam's rather than Metal's:
+/// reporting the feature obliged a nanoseconds-per-tick limit, which Metal
+/// cannot answer at all — it correlates the GPU clock to the host's through
+/// `sampleTimestamps:gpuTimestamp:` at sample time rather than ticking at a
+/// fixed period, so the field could only have been fabricated.
+/// [`Device::query_results`](crcbl_hal::Device::query_results) now reports
+/// nanoseconds and leaves the conversion to each backend, so an implementation
+/// here would correlate at read time — exactly what Metal's API is shaped for —
+/// and owe the seam no period. **That removes an argument, not the work**: the
+/// two obstacles above stand, and the feature stays absent until something
+/// actually samples.
 ///
 /// Said the other way round: another Mac advertising counter sets would still be
 /// refused here, so a message blaming only the CI device would be untrue on it.
 const NO_COUNTER_SAMPLED_SET: &str = "a timestamp or pipeline-statistics query set needs an \
-     MTLCounterSampleBuffer, and this backend builds neither on any device: reporting the \
-     features obliges a timestamp_period_ns, and Metal correlates the GPU clock to the host at \
-     sample time rather than ticking at a fixed period, so there is no honest period to report \
-     (the Metal timestamp slice). The GPU this backend's CI runs on additionally advertises no \
-     MTLDevice::counterSets. The occlusion kind is a plain MTLBuffer and is served";
+     MTLCounterSampleBuffer, and this backend builds neither on any device, so nothing would \
+     ever be sampled into one (the Metal timestamp slice). The GPU this backend's CI runs on \
+     additionally advertises no MTLDevice::counterSets. The occlusion kind is a plain MTLBuffer \
+     and is served";
 
 /// The refusal a pass carrying [`PassTimestampWrites`](crcbl_hal::PassTimestampWrites)
 /// gets, carrying [`NO_COUNTER_SAMPLED_SET`] so the pass, the set creation and
@@ -2199,16 +2208,21 @@ impl Device for MetalDevice {
     ///   — [`PassTimestampWrites`](crcbl_hal::PassTimestampWrites) — because
     ///   WebGPU's `timestampWrites` is the same shape and Metal's is the reason
     ///   both were narrowed to it. So a stage-boundary sample is precisely where
-    ///   the seam's timestamps go, and what is left open here is the counter set
-    ///   and the period, not the placement.
+    ///   the seam's timestamps go, and what is left open here is the counter
+    ///   set, not the placement.
     ///
     /// A half-built version would be worse than none: sampling only where the
     /// device happens to support a blit or dispatch boundary gives a profiler HUD
     /// that silently reports timings on some Macs and zeroes on others, which is
     /// the "not implemented arriving as passed" failure this workspace treats as
-    /// a defect. So [`Features::TIMESTAMP_QUERY`] stays absent — with it,
-    /// [`Limits::timestamp_period_ns`](crcbl_hal::Limits::timestamp_period_ns),
-    /// which Metal has no fixed answer for either.
+    /// a defect. So [`Features::TIMESTAMP_QUERY`] stays absent.
+    ///
+    /// **The unit is no longer one of the obstacles.**
+    /// [`Device::query_results`] reports nanoseconds and each backend converts,
+    /// so an implementation here would correlate the GPU clock to the host with
+    /// `sampleTimestamps:gpuTimestamp:` at read time and owe the seam no tick
+    /// period — the field that once had to be fabricated to report this feature
+    /// is gone. What remains is the counter set and the work.
     ///
     /// # Errors
     ///

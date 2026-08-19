@@ -579,11 +579,12 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   `ResolveQueryData`, and
 ///   `Device::query_results` reads a set back.
 ///
-///   **[`Limits::timestamp_period_ns`] is the half an adapter cannot answer**,
-///   because it is `1e9 / ID3D12CommandQueue::GetTimestampFrequency()` and there
-///   is no queue here — so [`limits_of`] leaves it at the floor and
-///   `Dx12Device::open` amends the caps once its queue exists. The flag is
-///   reported here all the same, and it has to be:
+///   **The clock's rate is the half an adapter cannot answer**, because
+///   `ID3D12CommandQueue::GetTimestampFrequency` needs a queue and there is
+///   none here. It never reaches the seam: `Device::query_results` reports
+///   nanoseconds and `Dx12Device::open` reads the frequency once, for its own
+///   use, so an adapter and a device from it report identical [`Limits`]. Only
+///   the flag is reported here, and it has to be:
 ///   [`DeviceDesc::required_features`](crcbl_hal::DeviceDesc::required_features)
 ///   is checked against the **adapter**, so a flag that first appeared at device
 ///   open could never be required by a caller.
@@ -717,13 +718,6 @@ fn features_of(raw: &RawCaps) -> Features {
 /// * `max_sample_count` — `CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS)`
 ///   answers it **per format**, so it needs a format table. The floor is
 ///   WebGPU's downlevel guarantee and D3D12 clears it everywhere.
-/// * `timestamp_period_ns` — **the one field an adapter genuinely cannot
-///   answer.** It is `1e9 / ID3D12CommandQueue::GetTimestampFrequency()`, and
-///   there is no queue until a device exists, so it stays at the floor's neutral
-///   value here and `Dx12Device::open` amends the caps it opens with. That makes
-///   this the one limit on which an adapter and a device from it differ, which
-///   `d3d12_device_caps_match_the_adapter_they_came_from` asserts by name rather
-///   than leaving to be discovered.
 ///
 /// The feature-keyed fields do move:
 ///

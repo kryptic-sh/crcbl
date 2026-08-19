@@ -42,6 +42,14 @@ pub(crate) struct AdapterRecord {
     /// separately from [`Features`] because the seam has no vocabulary for
     /// them: they are not optional capabilities, they are the backend's floor.
     pub(crate) core_1_3: Core13Support,
+    /// `VkPhysicalDeviceLimits::timestampPeriod`, or `0.0` on a device without
+    /// [`Features::TIMESTAMP_QUERY`]. See [`timestamp_period_of`].
+    ///
+    /// Not in [`AdapterInfo::caps`] because the seam has no field for it: a
+    /// tick period is Vulkan's and D3D12's way of describing a timestamp and
+    /// neither Metal nor WebGPU has one, so it stays inside this backend and
+    /// [`crate::device`] spends it converting a read to nanoseconds.
+    pub(crate) timestamp_period_ns: f32,
 }
 
 /// Which of the Vulkan 1.3 baseline features a device has.
@@ -474,11 +482,25 @@ pub(crate) fn limits_of(
         } else {
             1.0
         },
-        timestamp_period_ns: if features.contains(Features::TIMESTAMP_QUERY) {
-            limits.timestamp_period
-        } else {
-            0.0
-        },
+    }
+}
+
+/// Nanoseconds one of this device's timestamp ticks is worth, or `0.0` where
+/// there are no timestamps to scale.
+///
+/// `VkPhysicalDeviceLimits::timestampPeriod` is Vulkan's own spelling of the
+/// conversion, and it stops here: the seam reports a timestamp in nanoseconds
+/// (see [`Device::query_results`](crcbl_hal::Device::query_results)), so this
+/// number reaches [`crate::device`] through [`AdapterRecord`] and goes no
+/// further. Zeroed without [`Features::TIMESTAMP_QUERY`] so a period that was
+/// never meaningful cannot be mistaken for one that was — a device without the
+/// feature cannot create a timestamp set to read anyway.
+#[must_use]
+fn timestamp_period_of(limits: &vk::PhysicalDeviceLimits, features: Features) -> f32 {
+    if features.contains(Features::TIMESTAMP_QUERY) {
+        limits.timestamp_period
+    } else {
+        0.0
     }
 }
 
@@ -760,6 +782,7 @@ fn describe(
         },
         families,
         core_1_3,
+        timestamp_period_ns: timestamp_period_of(&properties.limits, features),
     }
 }
 
@@ -1172,9 +1195,9 @@ mod tests {
         );
     }
 
-    /// A device with no timestamp support must report a zero period, because
-    /// the profiler HUD multiplies by it and dividing a frame time by zero is a
-    /// worse failure than a blank readout.
+    /// A device with no timestamp support must report a zero period, so a
+    /// number that describes nothing cannot be mistaken for one this device
+    /// measures in — the case `timestamp_period_of` exists to answer.
     #[test]
     fn absent_capabilities_zero_the_limits_that_depend_on_them() {
         let raw = vk::PhysicalDeviceLimits {
@@ -1197,7 +1220,12 @@ mod tests {
             &vk::PhysicalDeviceVulkan12Properties::default(),
             features,
         );
-        assert_eq!(limits.timestamp_period_ns, 0.0);
+        assert_eq!(timestamp_period_of(&raw, features), 0.0);
+        assert_eq!(
+            timestamp_period_of(&raw, features | Features::TIMESTAMP_QUERY),
+            42.0,
+            "the feature is what zeroes the period, not the raw limit being absent"
+        );
         assert_eq!(limits.max_push_constant_size, 0);
         assert_eq!(limits.max_bindless_descriptors, 0);
         assert_eq!(limits.max_sampler_anisotropy, 1.0);

@@ -367,6 +367,17 @@ pub(crate) struct DeviceInner {
     first_present_wait: Once,
     pub(crate) debug_ext: Option<ext::debug_utils::Device>,
     pub(crate) caps: DeviceCaps,
+    /// `VkPhysicalDeviceLimits::timestampPeriod`, the nanoseconds one tick of
+    /// this device's clock is worth. `0.0` without
+    /// [`Features::TIMESTAMP_QUERY`], where there is no clock to describe.
+    ///
+    /// Kept here rather than in [`DeviceInner::caps`] because the seam's
+    /// [`Limits`](crcbl_hal::Limits) has no field for it and should not: it is
+    /// Vulkan's way of describing a timestamp, D3D12 describes the same thing
+    /// as a frequency, and Metal and WebGPU have no such number at all.
+    /// [`Device::query_results`](crcbl_hal::Device::query_results) spends it
+    /// here and reports nanoseconds, which is a unit every backend has.
+    timestamp_period_ns: f32,
     pub(crate) id: u64,
     /// This device's stamp on every handle it issues. See the handle-tagging
     /// section above; never zero.
@@ -896,6 +907,11 @@ impl VkDevice {
                 features: granted,
                 limits: record.info.caps.limits,
             },
+            // The adapter's, and zeroed there when the adapter had no
+            // timestamps — not re-derived from `granted`, because a caller that
+            // declined the optional feature still opened a device whose clock
+            // ticks at the rate the adapter reported.
+            timestamp_period_ns: record.timestamp_period_ns,
             id,
             tag: owner_tag(id),
             memory_properties,
@@ -2250,7 +2266,21 @@ impl Device for VkDevice {
             )
         };
         match result {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // The seam reports a timestamp in nanoseconds and Vulkan counts
+                // ticks, so the period is spent here — the one place that knows
+                // it. The other kinds count occurrences and have no unit to
+                // convert. `resolve_query_set` writes the raw ticks instead,
+                // which its own seam documentation says and which this backend
+                // cannot change: `vkCmdCopyQueryPoolResults` never reaches the
+                // CPU.
+                if entry.kind == QueryKind::Timestamp {
+                    for value in out.iter_mut() {
+                        *value = conv::timestamp_nanos(*value, self.inner.timestamp_period_ns);
+                    }
+                }
+                Ok(())
+            }
             // A query that has not been written yet is not an error: the seam
             // says the profiler HUD degrades rather than breaks.
             Err(vk::Result::NOT_READY) => {

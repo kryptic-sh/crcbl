@@ -52,13 +52,20 @@ const REPLY_MAGIC = new Uint8Array([
 /**
  * `tag::REPLY_VERSION`.
  *
- * `2` since an `Adapter` reply stopped being an id and a name and became the
- * whole of `AdapterInfo`. The word exists for exactly this: the two halves ship
- * as separate artifacts and are cached independently, so a page holding
- * yesterday's JavaScript against today's wasm has to be refused at the header
- * rather than read a name's length prefix as a vendor id.
+ * `3` since the `Limits` record lost its trailing `timestamp_period_ns` `f32`:
+ * the seam stopped carrying a nanoseconds-per-tick scale — `query_results`
+ * reports nanoseconds and each backend converts — so the field had nowhere to
+ * be decoded into. The record is four bytes shorter, so a page still running
+ * this file at version 2 would write four bytes today's wasm reads as the head
+ * of the next field, and everything after a `DeviceCaps` decodes as garbage.
+ *
+ * It went to `2` when an `Adapter` reply stopped being an id and a name and
+ * became the whole of `AdapterInfo`. The word exists for exactly this: the two
+ * halves ship as separate artifacts and are cached independently, so a page
+ * holding yesterday's JavaScript against today's wasm has to be refused at the
+ * header rather than read a name's length prefix as a vendor id.
  */
-const REPLY_VERSION = 2;
+const REPLY_VERSION = 3;
 
 // ── Caps ─────────────────────────────────────────────────────────────────────
 
@@ -696,7 +703,6 @@ class ByteWriter {
       'Limits::optimal_buffer_copy_offset_alignment'
     );
     this.putF32(limits.maxSamplerAnisotropy, 'Limits::max_sampler_anisotropy');
-    this.putF32(limits.timestampPeriodNs, 'Limits::timestamp_period_ns');
   }
 
   /**
