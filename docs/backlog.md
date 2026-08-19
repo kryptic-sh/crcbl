@@ -2219,12 +2219,21 @@ engines give it its own set. But it does mean recasting `bindless_probe.slang`
 changes the bind groups `crcbl-vk` and `crcbl-dx12` build for it, and those pass
 today.
 
-**So the row is now ordinary work with a known shape**, no longer blocked on
-anything unknown: recast the shader to a bounded `ParameterBlock`, add `msl` to
-its target line, update the vk and dx12 sides for the second set, then implement
-`variable_count` in `crcbl_mtl::binding` — which currently refuses it outright —
-using the argument-buffer construction the probe already proves. The probe's
-test name still says "unbounded" and should be renamed when that lands.
+**The shader half has landed.** `bindless_probe.slang` is a bounded
+`ParameterBlock` of `SOURCE_CAPACITY = 7` at set 1 / binding 0, ships
+`spirv, msl, dxil`, and the seam builds two bind groups for it — 17/17 on an RX
+7900 XTX. The capacity is not a taste: it must exceed `SOURCE_COUNT` or the
+layout's count stops being a ceiling, and Vulkan requires a sized array's layout
+to declare the whole array, so `PORTABLE_STORAGE_BUFFERS_PER_STAGE` (8) minus
+the destination caps it at 7.
+
+**What remains is `crcbl-mtl` alone**: `create_bind_group_layout` refuses
+`BindingFlags` outright, so the seam scores this `Refused` there. Implementing
+it means building the argument buffer the probe already proves — and the probe's
+own `BINDLESS_MSL` is pinned at capacity 64 while the committed artifact is 7,
+so the backend should drive `crcbl_shaders::BINDLESS_PROBE.msl()` and size the
+buffer from the layout's `count` rather than keep a second number. Its test name
+still says "unbounded" and should be renamed then.
 
 So **four of six can never go green on the hardware this project has**, whatever
 anyone writes. "Metal fully closed" is not reachable by working harder; it is

@@ -10,11 +10,13 @@ dxil-model = 6_6
 
 [bindless_probe]
 source = shaders/bindless_probe.slang
-source-sha256 = 32f26712800aa3344a9c28ecbcc9b6633949de2f31385d3a635f1a217ad8082a
-targets = spirv, dxil
+source-sha256 = 22f9ed7064cbd10a57ae206357db56c539e0a41f5d2ab542fff76441141baabf
+targets = spirv, msl, dxil
 spirv = spirv/bindless_probe.spv
-spirv-sha256 = 35c2e712cb0e1fd23695fbf871b982f3c3e5f92df791085e038670d5ac4e988f
-dxil = computeMain:dxil/bindless_probe.computeMain.dxil:38d94973a0ca8b6eae9f1d2018aeca7eeaa9eab61503d372220d07ddfbc8844e
+spirv-sha256 = 9814f370007e2d6e0959472072079c8326ea351f74ed36034c8d411e9e9b747a
+msl = msl/bindless_probe.metal
+msl-sha256 = 25b40367cecdf5445524b1e679ba6d3d01c39580cb40c6ce2358df42d52d0f14
+dxil = computeMain:dxil/bindless_probe.computeMain.dxil:fbd18c9982b39dc41929ba54f56f40ef9937196693c742aefe1f0d7f95fb0460
 entry-points = computeMain:glcompute
 
 [clear_counters]

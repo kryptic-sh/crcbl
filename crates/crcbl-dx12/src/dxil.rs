@@ -852,14 +852,20 @@ mod tests {
                 "bindless_probe",
                 &crcbl_shaders::BINDLESS_PROBE,
                 &["computeMain"],
-                // The written destination at binding 0 and the **unbounded**
-                // descriptor array at binding 1 — the one shipped source whose
-                // array has no compile-time length, and therefore the one whose
-                // `t0` covers the rest of the `t` file rather than a single
-                // register. It also earns its place in `resource_table`'s space
-                // assertion below: Slang moves an unbounded array into a space
-                // of its own unless the source pins it, and that source pins it
-                // precisely because this backend builds every range in space 0.
+                // The written destination in set 0 and the descriptor array in
+                // set 1 — the one shipped source that declares an array of
+                // descriptors, so its `t0` opens a range of
+                // `crcbl_shaders::bindless_probe::SOURCE_CAPACITY` registers
+                // rather than covering one. The class list is unaffected: a
+                // range is one resource record whatever its length, and this
+                // test reads each record's lower bound.
+                //
+                // It also earns its place in `resource_table`'s space assertion
+                // below. The array used to be unbounded and needed a `register`
+                // annotation to stay out of `space1`, because Slang keeps an
+                // unbounded range out of everything else's way; bounded and
+                // inside a `ParameterBlock` it lands in space 0 on its own, and
+                // that assertion is now the only thing holding it there.
                 &[Uav, Srv],
             ),
             (

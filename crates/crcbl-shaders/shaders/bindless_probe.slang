@@ -1,4 +1,4 @@
-// crcbl-targets: spirv, dxil
+// crcbl-targets: spirv, msl, dxil
 
 // The only shader here that declares an array of descriptors.
 //
@@ -6,13 +6,12 @@
 // variable_count`, `BindGroupEntry::array_index` and
 // `Capability::BindlessDescriptorArray`, and until this file no committed
 // artifact declared a resource array at all: every `Texture2DArray` in this
-// directory is one layered image rather than an array of descriptors, no
-// committed SPIR-V declares `RuntimeDescriptorArray`, and no WGSL contains
-// `binding_array`. So each backend's bindless path — Vulkan's
+// directory is one layered image rather than an array of descriptors, and no
+// WGSL contains `binding_array`. So each backend's bindless path — Vulkan's
 // `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT`, a D3D12 descriptor
-// range with an unbounded `NumDescriptors` — had no shader to be proved
-// against, and `Capability::BindlessDescriptorArray` was the one binding-model
-// capability the agnostic seam suite could not drive.
+// range, Metal's argument buffer — had no shader to be proved against, and
+// `Capability::BindlessDescriptorArray` was the one binding-model capability
+// the agnostic seam suite could not drive.
 //
 // # An array of buffers, not of textures
 //
@@ -20,19 +19,67 @@
 // make the readback depend on a sampler, a view type, a texel format and a
 // filtering rule, none of which this capability is about — every one of those
 // is a way for the test to fail while the descriptor array worked. Buffers have
-// none: a word read out of `sources[i]` is the word the caller wrote into the
-// buffer it bound at element `i`, exactly.
+// none: a word read out of `sources.buffers[i]` is the word the caller wrote
+// into the buffer it bound at element `i`, exactly.
 //
-// # The array is last, and it is the highest-numbered binding
+// # The array is a `ParameterBlock`, and it is bounded
 //
-// `crcbl_shaders`' `declaration_order` lint requires ascending `(set, binding)`
-// in declaration order, and `crcbl_hal::BindGroupLayoutDesc::check_entries`
-// requires a `VARIABLE_COUNT` entry to be **both** the last entry of its layout
-// and its highest binding number — Vulkan's rule is the second half, since a
-// runtime-sized array is only legal on the highest-numbered binding of a set.
-// `destination` at binding 0 and `sources` at binding 1 is the one order that
-// satisfies all of it, and it is why the written buffer is declared first here
-// where every other probe in this directory declares its inputs first.
+// Both halves are Metal's, and both were measured rather than assumed against
+// Slang 2026.14:
+//
+// * Declared as a bare `StructuredBuffer<uint> sources[]`, `slangc -target
+//   metal` **exits 0** and emits a binding index of `18446744073709551615`
+//   ((uint64)-1) on an entry-point parameter carrying no `[[buffer]]` attribute
+//   at all. Unusable, and silently so — which is why this file's MSL is read
+//   rather than its compiler's exit code believed.
+// * Bounding the array without wrapping it hands Metal the same unattributed
+//   parameter. So the `ParameterBlock` is what produces a `[[buffer(n)]]`, and
+//   it is not optional.
+// * Left **unbounded** inside the `ParameterBlock`, Metal's own front end
+//   refuses the emitted MSL: `error: flexible array members are a C99 feature`.
+//   So the length has to be a compile-time constant.
+//
+// A bounded array inside a `ParameterBlock` lowers to `array<uint device*,
+// int(SOURCE_CAPACITY)>` — an ordinary `metal::array` of device addresses — and
+// a kernel reading through it returns the right words on real hardware, which
+// `crcbl_mtl::binding`'s probe measured on an Apple Paravirtual device before
+// this file was recast.
+//
+// **The cost is a descriptor set, and it is the shape every consumer has to
+// carry.** A `ParameterBlock` is a set of its own: `destination` stays at set 0
+// binding 0 and `sources` moves to **set 1** binding 0, so a caller builds two
+// bind groups where it used to build one. That is the arrangement an engine
+// wants anyway — a descriptor table is bound once per frame while the sets
+// beside it change per draw — but it is a change of shape rather than of
+// spelling, and `crcbl_shaders::bindless_probe` records it per target.
+//
+// **What it also costs is the runtime array.** The SPIR-V now declares an
+// `OpTypeArray` of `SOURCE_CAPACITY` rather than an `OpTypeRuntimeArray` under
+// `OpCapability RuntimeDescriptorArray`, and the DXIL range is bounded rather
+// than open-ended. Neither is what `BindingFlags::VARIABLE_COUNT` needs: a
+// Vulkan binding's `descriptorCount` is the *upper bound* a set is allocated
+// under, `VkDescriptorSetVariableDescriptorCountAllocateInfo` chooses the
+// smaller length, and the Vulkan interface rule for a sized array is only that
+// "the size of the array must be no larger than the number of descriptors in
+// the binding". A capacity the layout declares room for and a length the group
+// chooses inside it is exactly that.
+//
+// # THERE IS NO `register` ANNOTATION, AND THERE MUST NOT BE ONE
+//
+// The unbounded form needed `: register(t0, space0)`, because Slang moves an
+// unbounded array into a register space of its own and `crcbl-dx12` builds
+// every descriptor range with `RegisterSpace: 0`. A bounded array is already in
+// space 0 — measured with `-target hlsl`, which emits `sources_buffers_0[int(7)]
+// : register(t0)` — so the annotation is now unnecessary, and it is worse than
+// unnecessary: adding it back **swaps Metal's buffer indices**. With it,
+// `slangc -target metal` puts `sources` at `[[buffer(0)]]` and `destination` at
+// `[[buffer(1)]]`, which is the reverse of the ascending-(set, binding) order
+// `crcbl-mtl` binds by and the exact failure `crcbl_shaders`' `declaration_order`
+// lint exists to stop. Measured, on this pair, with 2026.14.
+//
+// `crcbl_dx12::dxil`'s `resource_table` asserts space 0 over every committed
+// container, so a Slang release that moved this one is caught there rather than
+// pinned here.
 //
 // # The descriptor index is dynamically uniform, and that is not decoration
 //
@@ -47,17 +94,41 @@
 // uniform by construction instead, and the word index inside the buffer — which
 // is an ordinary load and has no such rule — is the divergent one.
 //
-// # No MSL and no WGSL
+// # No WGSL
 //
-// `crcbl-mtl` answers `Support::No` for this capability and refuses every
-// `BindingFlags` at `create_bind_group_layout`, because Metal binds flat
-// argument tables of a fixed size. `crcbl-webgpu` refuses it too. Neither
-// backend can reach a dispatch of this shader, so an MSL or WGSL artifact would
-// be bytes nothing loads — the same reasoning `push_constant_raster.slang` gives
-// for its own two-target declaration, arriving at a different pair.
+// `crcbl-webgpu` refuses this capability: WebGPU has no binding arrays at all,
+// and `crcbl-wgpu` refuses too because a wgpu binding array's length is its
+// layout's fixed count rather than something a group chooses. Neither backend
+// can reach a dispatch of this shader, so a WGSL artifact would be bytes
+// nothing loads. `push_constant_raster.slang` omits the same target for an
+// unrelated reason — WGSL has no push constants — so the two declarations read
+// alike and are not the same rule.
 
-/// Descriptors in the `sources` array — and workgroups one dispatch submits,
-/// since each group reads one element.
+/// Descriptors the `sources` block declares room for.
+///
+/// Matches `crcbl_shaders::bindless_probe::SOURCE_CAPACITY`. This is a
+/// **capacity**, not a length: the bind group binds [`SOURCE_COUNT`] of them and
+/// the layout above it declares this many, which is what
+/// `BindingFlags::VARIABLE_COUNT` means.
+///
+/// Seven, and the number is squeezed between two constraints rather than picked:
+///
+/// * It must exceed `SOURCE_COUNT`, or the ceiling is not a ceiling and a
+///   backend that ignored `BindGroupDesc::variable_count` and sized the array
+///   from its layout would pass the seam's exercise anyway.
+/// * Vulkan requires a sized array to be no larger than its binding's
+///   `descriptorCount`, so the layout has to declare all seven — and
+///   `crcbl_hal::PORTABLE_STORAGE_BUFFERS_PER_STAGE` is 8 storage buffers in
+///   one stage, summed across every set of a pipeline layout. With
+///   `destination` beside it, seven is the largest capacity that fits.
+///
+/// So the probe binds four descriptors into a table declared for seven, and
+/// nothing above it can grow without the portability check refusing the layout
+/// by name.
+static const uint SOURCE_CAPACITY = 7;
+
+/// Descriptors the bind group fills — and workgroups one dispatch submits, since
+/// each group reads one element.
 ///
 /// Matches `crcbl_shaders::bindless_probe::SOURCE_COUNT`. Four rather than two,
 /// so that a backend which bound the array's *first* descriptor for every index
@@ -73,38 +144,37 @@ static const uint SOURCE_COUNT = 4;
 /// four, where a buffer read at the wrong offset shifts within a block.
 static const uint WORDS_PER_SOURCE = 4;
 
-/// The written output, at binding 0 — declared first because the array below it
-/// must be both last and highest-numbered. See the header.
+/// The written output, at set 0 binding 0 — declared first because the block
+/// below it is set 1, and `crcbl_shaders`' `declaration_order` lint requires
+/// ascending `(set, binding)` in declaration order so that Slang's Metal target,
+/// which numbers its argument table in declaration order and ignores
+/// `[[vk::binding]]`, agrees with the index `crcbl-mtl` computes.
 [[vk::binding(0, 0)]]
 RWStructuredBuffer<uint> destination;
 
-/// The descriptor array, unbounded: its length is chosen when the bind group is
-/// created, which is what `BindGroupDesc::variable_count` names and what
-/// `BindingFlags::VARIABLE_COUNT` makes legal.
+/// The descriptor table's contents: [`SOURCE_CAPACITY`] read-only storage
+/// buffers, of which a bind group fills the first [`SOURCE_COUNT`].
 ///
-/// Unbounded rather than `sources[SOURCE_COUNT]`, and the difference is the
-/// whole capability. A fixed bound compiles to an ordinary array of four
-/// descriptors that a flat argument table can hold; `[]` compiles to a SPIR-V
-/// `OpTypeRuntimeArray` under the `RuntimeDescriptorArray` capability and to a
-/// D3D12 descriptor range whose `NumDescriptors` is unbounded, which is the
-/// declaration a backend either expresses or does not.
-///
-/// THE `register` ANNOTATION IS LOAD-BEARING, AND IT IS THE ONLY ONE IN THIS
-/// DIRECTORY.
-///
-/// Slang moves an **unbounded** array into a register space of its own —
-/// measured, not assumed: without it `dxc -dumpbin` reports this binding at
-/// `t0,space1`, because an unbounded range would otherwise consume the rest of
-/// its register class and Slang keeps it out of everything else's way.
-/// `crcbl-dx12` builds every descriptor range with `RegisterSpace: 0` (see that
-/// crate's `binding::ranges`), and its `dxil` module asserts space 0 over every
-/// committed container, so an artifact in space 1 names a range no root
-/// signature this engine builds describes. `[[vk::binding]]` governs the SPIR-V
-/// and `register` the HLSL, so pinning the second changes nothing above.
-[[vk::binding(1, 0)]]
-StructuredBuffer<uint> sources[] : register(t0, space0);
+/// A `struct` because `ParameterBlock` takes one, and one member because that
+/// member is the whole point — an argument buffer of nothing but device
+/// addresses is the shape `crcbl_mtl::binding`'s probe measured.
+struct Sources
+{
+    StructuredBuffer<uint> buffers[SOURCE_CAPACITY];
+};
 
-/// One workgroup per array element, copying that element's words into the
+/// The descriptor table, in a descriptor set of its own.
+///
+/// `ParameterBlock` rather than a bare array is what makes the MSL loadable at
+/// all, and it is what moves this to set 1; the header says why both, and what
+/// the move costs a caller. `[[vk::binding(0, 1)]]` states the set the block
+/// lands in rather than leaving it to be read out of the artifact — Slang picks
+/// the same set either way, measured, and the attribute is also what the
+/// `declaration_order` lint sorts on.
+[[vk::binding(0, 1)]]
+ParameterBlock<Sources> sources;
+
+/// One workgroup per bound descriptor, copying that element's words into the
 /// element's block of `destination`.
 ///
 /// The workgroup is wider than [`WORDS_PER_SOURCE`] on purpose, for
@@ -128,16 +198,15 @@ void computeMain(uint3 group: SV_GroupID, uint thread: SV_GroupIndex)
     // `SV_GroupID`. See the header on why that matters here and nowhere else in
     // this file.
     uint source = group.x;
-    // Bounds the *descriptor* index rather than the word index. The array is
-    // unbounded in the shader and its length is chosen at bind-group creation,
-    // so nothing in the type system stops a dispatch wider than SOURCE_COUNT
-    // groups from indexing past the descriptors that group holds — which is
-    // undefined behaviour rather than a wrong number, a fault instead of a
-    // failed assertion. The intended dispatch never takes this branch.
+    // Bounds the *descriptor* index against the length the bind group chose,
+    // which is `SOURCE_COUNT` and not `SOURCE_CAPACITY`. The elements between
+    // the two are declared and never written: reading one is undefined
+    // behaviour rather than a wrong number — a fault on Vulkan, a null device
+    // address on Metal. The intended dispatch never takes this branch.
     if (source >= SOURCE_COUNT)
     {
         return;
     }
 
-    destination[source * WORDS_PER_SOURCE + thread] = sources[source][thread];
+    destination[source * WORDS_PER_SOURCE + thread] = sources.buffers[source][thread];
 }

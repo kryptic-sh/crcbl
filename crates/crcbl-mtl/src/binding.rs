@@ -24,8 +24,15 @@
 //! `device Vertex*` there does not fail: the shader reads the descriptor words
 //! as vertex data. So argument buffers are not the harder-but-better option
 //! here — they are the option that silently draws garbage with the artifacts
-//! this engine actually ships. They become the right answer on the day
-//! `crcbl-shaders` emits `ParameterBlock`-shaped MSL, and not before.
+//! this engine actually ships for the *raster* shaders, whose parameters are
+//! plain per-stage bindings.
+//!
+//! **That day has now come for one shader.** `bindless_probe.slang` was recast
+//! as a bounded `ParameterBlock` and ships an MSL artifact declaring
+//! `array<uint device*, int(N)>`, and the probe below proves this device reads
+//! a table of `gpuAddress` values through it. So the argument-buffer road is
+//! open for the bindless layout specifically; the flat tables stay right for
+//! everything else.
 //!
 //! Two consequences follow, and both are stated rather than absorbed:
 //!
@@ -1988,8 +1995,9 @@ mod tests {
     //
     // A measurement, not a feature. Everything below is `#[cfg(mtl-e2e)]`d
     // because it makes the GPU execute a kernel, and none of it is reachable
-    // from the seam: `crcbl-shaders` emits no `ParameterBlock`, so there is no
-    // pipeline this backend could build that would read an argument buffer.
+    // from the seam: `create_bind_group_layout` still refuses the bindless
+    // layout, so no pipeline this backend builds reads an argument buffer yet —
+    // even though `bindless_probe.slang` now ships MSL that would.
 
     /// The MSL for an unbounded array of buffers, **verbatim from the pinned
     /// Slang** — nothing here was written by hand.
@@ -2165,12 +2173,13 @@ struct KernelContext_0
     /// This module's header takes flat argument tables over argument buffers,
     /// and [`MetalDevice::create_bind_group_impl`] refuses
     /// [`BindGroupDesc::variable_count`] because "this backend binds flat
-    /// argument tables". Both say the argument-buffer road becomes the right
-    /// one on the day `crcbl-shaders` emits `ParameterBlock`-shaped MSL — and
-    /// that day is what
+    /// argument tables". Both said the argument-buffer road becomes the right
+    /// one once `crcbl-shaders` emits `ParameterBlock`-shaped MSL, which it now
+    /// does — so what remains for
     /// [`Capability::BindlessDescriptorArray`](crcbl_hal::Capability::BindlessDescriptorArray)
-    /// is blocked on. Nothing here had ever asked the device whether the shape
-    /// is legal at all.
+    /// is this backend's own refusal at `create_bind_group_layout`, not the
+    /// toolchain. Nothing here had ever asked the device whether the shape is
+    /// legal at all.
     ///
     /// So this is `crcbl_mtl::device`'s
     /// `an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`

@@ -148,13 +148,22 @@
 //!
 //! # A third source declares fewer targets, and for an unrelated reason
 //!
-//! [`bindless_probe`] ships `spirv, dxil` alone. That is **not** the rule above
-//! — Slang's WGSL target has `binding_array` and would emit something naga
-//! accepts. It is that `crcbl-mtl` binds Metal's flat argument tables and
-//! `crcbl-webgpu` has no binding arrays at all, so both refuse the layout that
-//! shader needs at `create_bind_group_layout` and neither can ever dispatch it.
-//! The two omitted artifacts would be bytes nothing loads, which is the same
-//! outcome as the push-constant pair's and arrives by a different route.
+//! [`bindless_probe`] ships `spirv, msl, dxil` — everything but WGSL. That is
+//! **not** the rule above: Slang's WGSL target has `binding_array` and would
+//! emit something naga accepts. It is that `crcbl-webgpu` has no binding arrays
+//! at all, so it refuses that shader's layout at `create_bind_group_layout` and
+//! could never dispatch it; the artifact would be bytes nothing loads, the same
+//! outcome as the push-constant pair's by a different route.
+//!
+//! **Metal used to be in that sentence and no longer is.** The array was
+//! declared `StructuredBuffer<uint> sources[] : register(t0, space0)`, which
+//! Slang's Metal target lowers to a binding index of `(uint64)-1` at exit 0 —
+//! and, recast as an unbounded `ParameterBlock`, to a C99 flexible array member
+//! Metal's own front end refuses. A **bounded** `ParameterBlock` lowers to an
+//! ordinary `metal::array` of device pointers, which a kernel on an Apple
+//! Paravirtual device reads correctly. So the shader now has an MSL artifact,
+//! and what stops `crcbl-mtl` dispatching it is its own
+//! `create_bind_group_layout`, not the toolchain.
 //!
 //! # Nothing here knows a backend
 //!
@@ -761,11 +770,12 @@ mod tests {
     /// unqualified `vertexMain` compiles and then fails at pipeline creation.
     ///
     /// **Absence is legitimate and is checked elsewhere**, exactly as it is for
-    /// WGSL above: `bindless_probe.slang` declares no `msl` target because
-    /// `crcbl-mtl` binds flat argument tables and refuses its layout outright,
-    /// so demanding an artifact from every shader here would be demanding one
-    /// nothing could ever load. That a shader which *does* declare the target
-    /// has the artifact is [`manifest`]'s job.
+    /// WGSL above: a shader may decline `msl` when no Metal path could ever
+    /// load it, and demanding an artifact from every shader here would be
+    /// demanding one nothing loads. `bindless_probe.slang` was the example and
+    /// is no longer — it declares `msl` now — which is why this skips shaders
+    /// without the artifact rather than naming any. That a shader which *does*
+    /// declare the target has the artifact is [`manifest`]'s job.
     #[test]
     fn every_shipped_shader_has_msl_naming_the_same_entry_points() {
         let mut checked = 0_usize;
