@@ -569,6 +569,15 @@ failure.**
    Divergence stays possible — Metal genuinely has no GPU-side draw count — but
    it becomes deliberate and visible instead of accidental.
 
+**Where this stands: the mechanism is built and steps 1 to 3 are done.**
+`Capability`, `Support` and `DIVERGENCES` exist, every backend's `supports()`
+carries `#[deny(clippy::wildcard_enum_match_arm)]` so a new variant fails to
+compile until each answers, `crates/crcbl/tests/hal_seam_e2e.rs` drives the enum
+in both directions, and `REVIEWED_BLOCKERS` plus
+`the_parity_blockers_are_exactly_the_reviewed_list` is the reviewed exception
+list. What is left of step 4 is the six rows in "The numbers, restated" below —
+none of which can be finished on the hardware available here — and step 5.
+
 **Order of work:**
 
 1. Finish migrating the white-box tests to the agnostic suites, so all four
@@ -3113,20 +3122,25 @@ and it is the last thing standing between here and goal 3.
 
 ## The numbers, restated — the eight rows and what each would take
 
-The list is **eight**, down from eleven, and it is worth seeing that only two of
-the eight are work anybody could do today:
+The list is **six**, down from eleven, and it is worth seeing that **none** of
+the six is work anybody could finish here today:
 
-| rows                                              | what they are                                                                               | what closes them                                                                                     |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| dx12 `BufferFillRepeatedByte`, `BufferFillWord`   | **Declined, reviewed.** `ClearUnorderedAccessViewUint` needs a UAV of every fillable buffer | a decision to pay `ALLOW_UNORDERED_ACCESS` everywhere, which was judged worse than a clean `No`      |
-| dx12 `MeshShading`, `TaskShaderStage`             | the WARP device removal                                                                     | **a Windows session.** Three hypotheses eliminated by reading; the branch that reproduces it is kept |
-| Metal `MeshShading`, `TaskShaderStage`            | the runner answers `Metal3 = false`                                                         | **hardware.** Unprovable here whatever anyone writes                                                 |
-| Metal `TimestampQuery`, `PipelineStatisticsQuery` | no `MTLCounterSampleBuffer` is built, and the runner advertises no `counterSets`            | writable, but **unverifiable here** — it would land as `NotOnThisDevice`                             |
+| rows                                              | what they are                                                                    | what closes them                                                                                     |
+| ------------------------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| dx12 `MeshShading`, `TaskShaderStage`             | the WARP device removal                                                          | **a Windows session.** Three hypotheses eliminated by reading; the branch that reproduces it is kept |
+| Metal `MeshShading`, `TaskShaderStage`            | the runner answers `Metal3 = false`                                              | **hardware.** Unprovable here whatever anyone writes                                                 |
+| Metal `TimestampQuery`, `PipelineStatisticsQuery` | no `MTLCounterSampleBuffer` is built, and the runner advertises no `counterSets` | writable, but **unverifiable here** — it would land as `NotOnThisDevice`                             |
 
-So under bar (2), the reachable end state is **six rows**, not zero: writing
+So under bar (2), the reachable end state is **four rows**, not zero: writing
 Metal's counter sample buffer moves two rows to `NotOnThisDevice`, and the other
-six need either hardware or a decision already taken. Under bar (3) the deletion
-happens now.
+four need hardware nobody here has. Under bar (3) the deletion happens now.
+
+**The two dx12 fill rows left this table by being deleted from the seam rather
+than closed**, which is a third way a row can go and worth naming: the seam
+promised a repeating 32-bit value that Metal, WebGPU and wgpu could never keep,
+so `CommandEncoder::fill_buffer` became `clear_buffer` with no value and both
+capabilities went with the parameter. Nothing called it. That is what took the
+list from eight to six, and it is not progress against the four that remain.
 
 **What is no longer an argument either way:** every seam-audit finding is
 closed, so `crcbl-wgpu` is not holding any contract honest that the other
@@ -3156,31 +3170,6 @@ Position (1) and (2) are now really about **when parity is declared done**, not
 about whether the deletion is safe. They can be separated: nothing about
 deleting `crcbl-wgpu` makes dx12's mesh reporting or Metal's counter sets
 harder, and keeping the crate does not make either easier.
-
-### The two valued dx12 fills stay declined, and the zero one shipped
-
-The decision this entry asked for was taken: the middle position it named. The
-zero-buffer copy — one small zeroed device-local resource created with the
-device, then `CopyBufferRegion` over the range, which is what `wgpu-hal`'s dx12
-backend does — landed, so `BufferFillZero` reports supported and the blocker
-list went from eleven to ten.
-
-`BufferFillRepeatedByte` and `BufferFillWord` stay `Declined`, and the price is
-unchanged: `ClearUnorderedAccessViewUint` needs a UAV of the destination, so
-closing them costs `ALLOW_UNORDERED_ACCESS` on every device-local allocation or
-a fill that works only on `STORAGE` buffers — a capability that works only
-sometimes, which is worse than a clean `No`. The pattern-buffer route (an
-encoder-owned upload arena) remains the option if they are ever wanted; nothing
-asks for them.
-
-Their recorded reason was also wrong and is corrected in the parity record
-itself: the crate _does_ build shader-visible heaps in `crcbl_dx12::binding`, so
-the obstacle is descriptor provenance and lifetime rather than a missing heap.
-
-**Proven on WARP.** The seam suite ran it: `BufferFillZero supported`, 17/17,
-with the two declined rows printing the corrected reason and a non-zero fill
-refusing by name — so both directions of the parity contract are exercised, not
-just the supported one.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
@@ -3213,23 +3202,6 @@ just the supported one.
 - **The Pages deploy for the un-link commit never ran.** GitHub returned 503 on
   `actions/deploy-pages` during an outage; the _build_ job passed every gate.
   The site on Pages is therefore one commit behind until that deploy is re-run.
-
-### Non-zero `fill_buffer` is refused on the WebGPU backend
-
-`crates/crcbl-webgpu/src/command.rs`'s `Command::FillBuffer` and its
-`gpu-replay.js` `#fillBuffer` arm map `value == 0` to WebGPU's `clearBuffer` and
-route any other value to the device error queue — WebGPU offers no valued
-device-side fill, so this matches the `crcbl-wgpu` backend's `fill_buffer`
-(`crates/crcbl-wgpu/src/command.rs`, "wgpu only offers a zero fill").
-
-**The consequence for scenes.** If any `render_e2e` scene issues a non-zero
-`fill_buffer`, that scene cannot render on the WebGPU backend — the fill lands
-on the error queue and the buffer it meant to initialise keeps its previous
-contents. The parity gate (slice 10) is where that surfaces as a WebGPU/native
-divergence. **It is unverified whether any scene actually issues a non-zero
-fill**: the scenes were not audited for it in this slice. When slice 10 lands,
-check the scene set for non-zero `fill_buffer` calls before treating a WebGPU
-parity failure as a backend bug rather than an unsupported operation.
 
 ### The probe module-doc export table is missing the readback shims
 
