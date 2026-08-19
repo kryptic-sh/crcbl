@@ -40,21 +40,57 @@ runs:
         set -euo pipefail
         echo "id=${ImageOS:-$(. /etc/os-release && echo "${ID}${VERSION_ID}")}" \
           >> "$GITHUB_OUTPUT"
+    #
+    # THE ARCHIVE IS CACHED SOMEWHERE THE RUNNER USER OWNS, and that is a
+    # correction. This cached `/var/cache/apt/archives/*.deb` until 2026-08-19
+    # and **not one restore ever succeeded**: `actions/cache` extracts as the
+    # runner user, that directory is `root:root`, and `tar` reported
+    # `Cannot open: Permission denied` for every file in it. The action logs
+    # that as a warning and then prints `Cache not found`, so the step read as
+    # an ordinary miss — a green light wired to nothing. Every job asked the
+    # mirror on every run, which is why a slow mirror kept taking whole boards
+    # down while a 17 MB cache entry was downloaded and thrown away.
+    #
+    # `apt-get` still uses `/var/cache/apt/archives`, untouched: the packages
+    # are copied in before the install and back out after it. Redirecting apt
+    # at the cache directory with `Dir::Cache::archives` would be tidier and
+    # changes how apt itself runs, which is not something this repository can
+    # test anywhere but on a runner.
     - id: archive
       uses: actions/cache@v4
       with:
-        path: /var/cache/apt/archives/*.deb
+        path: ~/.cache/crcbl-apt-archives
         key:
           apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.id
           }}-${{ hashFiles('.github/actions/apt-packages/action.yml') }}-${{
           inputs.packages }}
     # `apt-get` deletes what it downloaded once a package is unpacked, so
     # without this the cache would save an empty directory every time.
+    #
+    # The directory is created **without** `sudo`, which is the whole point:
+    # `apt-get` runs as root and can write into a directory the runner owns,
+    # but `actions/cache` cannot restore into one root owns.
     - shell: bash
       run: |
         set -euo pipefail
         echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
           | sudo tee /etc/apt/apt.conf.d/99crcbl-keep-debs > /dev/null
+        mkdir -p "$HOME/.cache/crcbl-apt-archives"
+    # A hit that restores nothing is the failure this action spent its whole
+    # life not noticing, so it is now said out loud — and the count is printed
+    # either way, so "the cache worked" is a thing a log can be read for rather
+    # than assumed. A warning rather than an error: the cache is an
+    # optimisation and a broken one should not redden a board whose mirror is
+    # answering, but it must never again look like an ordinary miss.
+    - if: steps.archive.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        count=$(find "$HOME/.cache/crcbl-apt-archives" -name '*.deb' | wc -l)
+        echo "the cache reported a hit and restored ${count} .deb file(s)"
+        if [ "$count" -eq 0 ]; then
+          echo "::warning::the apt cache reported a hit and restored no .deb files; every job falls through to the mirror, which is the failure mode that makes an outage fatal"
+        fi
     # WHY THIS IS NOT TWO PLAIN apt-get LINES. Two runs in one session hung
     # here for twenty minutes and were killed by the job timeout, taking a
     # green board down and reporting it as "cancelled" — which reads like
@@ -88,6 +124,12 @@ runs:
         PACKAGES: ${{ inputs.packages }}
       run: |
         set -uo pipefail
+        ARCHIVES="$HOME/.cache/crcbl-apt-archives"
+        # Seed apt's own archive from the cache. `-n` so a file already there
+        # wins: the runner image may ship a newer `.deb` than the one cached.
+        if compgen -G "$ARCHIVES/*.deb" > /dev/null; then
+          sudo cp -n "$ARCHIVES"/*.deb /var/cache/apt/archives/ || true
+        fi
         # Unquoted on purpose: the input is a space-separated list and apt
         # takes them as separate arguments.
         # shellcheck disable=SC2086
@@ -137,3 +179,20 @@ runs:
         fi
         echo "::error::apt-get could not install '${PACKAGES}' — the runner's mirror is unreachable, or too slow to deliver them inside the 450s this step has, which is not a fault in this repository"
         exit 1
+    # Harvest whatever `apt-get` downloaded, so the post-run save has something
+    # to store and the *next* outage is survivable.
+    #
+    # `always()` because a failed install still leaves a partly filled archive,
+    # and keeping it is the difference between the next run needing nine
+    # packages and needing two. The `chown` is what makes the saved entry
+    # restorable: everything apt wrote is root-owned, and a root-owned tree is
+    # exactly what broke this before.
+    - if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        ARCHIVES="$HOME/.cache/crcbl-apt-archives"
+        mkdir -p "$ARCHIVES"
+        sudo cp -n /var/cache/apt/archives/*.deb "$ARCHIVES"/ 2> /dev/null || true
+        sudo chown -R "$(id -u):$(id -g)" "$ARCHIVES"
+        echo "the archive now holds $(find "$ARCHIVES" -name '*.deb' | wc -l) .deb file(s) for the next run"

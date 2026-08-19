@@ -3,6 +3,40 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The apt cache never restored once, and the log called it a miss
+
+Fixed on 2026-08-19, and recorded here until a CI run confirms it, because the
+half that matters cannot be tested anywhere but on a runner.
+
+`.github/actions/apt-packages` cached `/var/cache/apt/archives/*.deb`. The save
+worked — a 17 MB entry, downloaded at 86 MB/s on every job. The **restore never
+did**: `actions/cache` extracts as the runner user and that directory is
+`root:root`, so `tar` reported `Cannot open: Permission denied` for every file,
+`actions/cache` downgraded it to a warning, and the next line said
+`Cache not found for input keys`. Which reads exactly like an ordinary miss.
+
+So the protection the action was written for — "a mirror that is down cannot
+stop a job whose packages were fetched on an earlier run" — has never once been
+in force, and every apt outage has been fatal. Three consecutive red boards on
+`main` were this: `x11 e2e` and `vk e2e` on `2a99fc3`, `wgpu e2e` on `01baf56`.
+
+The fix caches `~/.cache/crcbl-apt-archives`, which the runner owns, and copies
+`.deb` files into and out of `/var/cache/apt/archives` around an otherwise
+untouched `apt-get`. Redirecting apt with `Dir::Cache::archives` would be tidier
+and changes how apt itself runs, which nothing here can exercise off a runner.
+
+**What was verified locally**: the YAML parses, every shell block passes
+`bash -n` and `shellcheck`, and the seed/harvest logic was run against temp
+directories for all five branches — both empty, archive only, apt only, both,
+and a name collision where the runner image's copy must win. **What was not**:
+that `actions/cache` restores a `$HOME` path successfully, which is the whole
+point. It is the ubiquitous pattern — every Rust and npm cache does it — but it
+is a claim about a runner.
+
+Note the **first** run after this lands is a guaranteed cold miss: the key
+includes `hashFiles` of the action, so editing it abandons every existing entry.
+A red apt step on that run says nothing; the run after it is the evidence.
+
 ### `render_e2e` never runs against dx12's own e2e job, and that hid a step
 
 Found while trying to reproduce the WARP device removal. The
