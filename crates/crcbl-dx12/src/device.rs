@@ -2419,8 +2419,22 @@ impl Device for Dx12Device {
         // above — and subresource 0 is the only one a buffer has. Both range
         // pointers name live locals, and `mapped` is a live pointer the call
         // writes through.
-        unsafe { entry.raw.Map(0, Some(&read_nothing), Some(&mut mapped)) }
-            .map_err(|error| HalError::Backend(format!("ID3D12Resource::Map failed: {error}")))?;
+        unsafe { entry.raw.Map(0, Some(&read_nothing), Some(&mut mapped)) }.map_err(|error| {
+            // A failed Map is where a removed device surfaces on this
+            // backend — the readback is the first call that touches
+            // memory the GPU was writing — so it is the one place the
+            // breadcrumbs are worth most. Without this the caller gets
+            // 0x887A0005 and no diagnosis, which is what a CI run
+            // reproducing a device removal actually printed.
+            // Still `Backend`, not `DeviceLost`: a Map can fail for reasons
+            // that are not a removal, and `debug::diagnosis` returns the
+            // empty string on a healthy device, so the variant must not be
+            // decided by the diagnostic being attached.
+            HalError::Backend(format!(
+                "ID3D12Resource::Map failed: {error}{}",
+                debug::diagnosis(&self.inner.raw)
+            ))
+        })?;
         if mapped.is_null() {
             return Err(HalError::Backend(
                 "ID3D12Resource::Map reported success and wrote no pointer".to_string(),
@@ -2593,8 +2607,22 @@ impl Device for Dx12Device {
         // SAFETY: `entry.raw` is a live buffer on the readback heap — checked at
         // request time and re-resolved above — and subresource 0 is the only one
         // a buffer has. Both pointers name live locals.
-        unsafe { entry.raw.Map(0, Some(&read), Some(&mut mapped)) }
-            .map_err(|error| HalError::Backend(format!("ID3D12Resource::Map failed: {error}")))?;
+        unsafe { entry.raw.Map(0, Some(&read), Some(&mut mapped)) }.map_err(|error| {
+            // A failed Map is where a removed device surfaces on this
+            // backend — the readback is the first call that touches
+            // memory the GPU was writing — so it is the one place the
+            // breadcrumbs are worth most. Without this the caller gets
+            // 0x887A0005 and no diagnosis, which is what a CI run
+            // reproducing a device removal actually printed.
+            // Still `Backend`, not `DeviceLost`: a Map can fail for reasons
+            // that are not a removal, and `debug::diagnosis` returns the
+            // empty string on a healthy device, so the variant must not be
+            // decided by the diagnostic being attached.
+            HalError::Backend(format!(
+                "ID3D12Resource::Map failed: {error}{}",
+                debug::diagnosis(&self.inner.raw)
+            ))
+        })?;
         if mapped.is_null() {
             return Err(HalError::Backend(
                 "ID3D12Resource::Map reported success and wrote no pointer".to_string(),
@@ -3630,8 +3658,22 @@ impl Device for Dx12Device {
         // SAFETY: `resolve` is a live buffer on the readback heap this device
         // created with the set, and subresource 0 is the only one a buffer has.
         // Both pointers name live locals.
-        unsafe { resolve.Map(0, Some(&read), Some(&mut mapped)) }
-            .map_err(|error| HalError::Backend(format!("ID3D12Resource::Map failed: {error}")))?;
+        unsafe { resolve.Map(0, Some(&read), Some(&mut mapped)) }.map_err(|error| {
+            // A failed Map is where a removed device surfaces on this
+            // backend — the readback is the first call that touches
+            // memory the GPU was writing — so it is the one place the
+            // breadcrumbs are worth most. Without this the caller gets
+            // 0x887A0005 and no diagnosis, which is what a CI run
+            // reproducing a device removal actually printed.
+            // Still `Backend`, not `DeviceLost`: a Map can fail for reasons
+            // that are not a removal, and `debug::diagnosis` returns the
+            // empty string on a healthy device, so the variant must not be
+            // decided by the diagnostic being attached.
+            HalError::Backend(format!(
+                "ID3D12Resource::Map failed: {error}{}",
+                debug::diagnosis(&self.inner.raw)
+            ))
+        })?;
         if mapped.is_null() {
             return Err(HalError::Backend(
                 "ID3D12Resource::Map reported success and wrote no pointer".to_string(),
