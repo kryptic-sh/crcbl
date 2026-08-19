@@ -2271,22 +2271,28 @@ CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding
 diagnostics** on the Linux target — 139 when re-measured on 2026-08-19, of which
 the 48 mechanical ones have since been fixed.
 
-Where they are: `crcbl-shell` 33, `crcbl-webgpu` 29, `crcbl-vk` 7,
-`crcbl-render` 6, `apps/horde` 6, `crcbl-hal` 4, `apps/breakout` 4,
-`crcbl-audio` 3, then ones and twos across `crcbl-rand`, `apps/flappy` and
-others.
+This entry used to list them per crate, and that breakdown rotted while the
+total stayed put — the crates traded places without the sum moving. Ask the
+command instead:
+
+```sh
+cargo doc --workspace --all-features --no-deps --document-private-items 2>&1 |
+  grep -oE 'unresolved link|redundant explicit link|both a function and a module' |
+  sort | uniq -c
+```
 
 **The split is what makes it startable**, and it is not one job:
 
 - **The 48 `redundant explicit link target` ones are done** — ``[`Foo`](Foo)``
   where the target repeated the label, across 23 files. The check that mattered
   was that removing a target cannot turn a redundant link into a broken one:
-  after the rewrite the private-items build reports **0 redundant and still
-  exactly 72 unresolved**, and CI's own
+  after the rewrite the private-items build reports **0 redundant** and the
+  unresolved count unchanged, and CI's own
   `cargo doc --workspace --all-features --no-deps` reports **zero warnings**.
-- **72 are `unresolved link`** — each needs judgement about whether the target
-  moved, was renamed, or never existed. These are the real cleanup, and the ones
-  a reader following a link actually hits.
+- **Most are `unresolved link`** — 73 of the 91 when this was last run on
+  2026-08-20 — each needs judgement about whether the target moved, was renamed,
+  or never existed. These are the real cleanup, and the ones a reader following
+  a link actually hits.
 - The rest are `is both a function and a module` ambiguities and the per-crate
   summary lines.
 
