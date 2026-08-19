@@ -1347,8 +1347,14 @@ machinery on top of it.
 
 ### DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
 
-Three measurements now bracket this, and together they turn it from "our mesh
-path is broken" into a question about what to report.
+**Read option (d) first.** Three measurements bracket this and three options
+came out of them, but all three assume the runner's WARP is the only WARP. A
+fourth — give it a newer one — was researched on 2026-08-20 and is untried: if
+it works it dominates the others, and if it fails it answers (c) for the price
+of one CI run.
+
+Together the measurements turn this from "our mesh path is broken" into a
+question about what to report.
 
 1. **The renderer's mesh path is correct on real hardware.**
    `CRCBL_GPU=vk crates/crcbl/tests/run-render-e2e.sh` on an AMD RX 7900 XTX
