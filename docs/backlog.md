@@ -1956,24 +1956,6 @@ see whether the class disappears. Neither is worth doing for one occurrence, and
 both are worth doing at the second — which is what this entry exists to make
 recognisable.
 
-### CI does not shellcheck `web/*.sh`
-
-`ci.yml`'s lint step covers `tools/*.sh`, `crates/*/tests/*.sh` and (since
-2026-08-19) `apps/*/tests/*.sh`. It does not cover `web/`, which holds five
-harnesses including the two browser gates.
-
-**Not widened in the same slice, and the reason is measurable:**
-`shellcheck -x web/*.sh` reports two SC2001s today —
-`echo "$NEWER" | sed 's|^|  |'` in `run-browser-e2e.sh` line 222 and
-`run-probe-e2e.sh` line 152, both indenting a multi-line variable. Adding the
-glob without fixing them turns CI red on files the change did not touch, and the
-fix is not the `${var//search/replace}` the message suggests — that does not
-prefix every line — so it is a restructure of two unrelated scripts rather than
-a one-liner.
-
-`web/run-cross-backend-e2e.sh` was written clean and checked by hand. What is
-owed is the two fixes and the glob, together.
-
 ### DECISION NEEDED — should quarry place several faces?
 
 `docs/plan/sample/14-quarry.md`'s exit criteria ask for the reduction to be

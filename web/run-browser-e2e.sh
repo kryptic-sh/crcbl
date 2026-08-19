@@ -219,7 +219,14 @@ else
             \( -name '*.js' -o -name '*.mjs' \) -newer "$STAMP")"
         if [ -n "$NEWER" ]; then
             echo "crcbl web e2e: WARNING — $SITE is older than these sources, so this run does not test them:" >&2
-            echo "$NEWER" | sed 's|^|  |' >&2
+            # Indented with a read loop rather than `sed 's|^|  |'`, which is
+            # what SC2001 asks for. `printf '  %s\n' "$NEWER"` is the obvious
+            # rewrite and is **wrong**: it indents the first line only, because
+            # the whole variable arrives as one argument. Checked against the
+            # `sed` it replaces, on a multi-line list.
+            while IFS= read -r stale; do
+                printf '  %s\n' "$stale" >&2
+            done <<<"$NEWER"
             echo "crcbl web e2e: re-run with --build (or run ./web/build.sh) before believing the result" >&2
         fi
     fi

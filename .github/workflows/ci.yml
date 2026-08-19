@@ -80,13 +80,22 @@ jobs:
       # `sway-session.sh`) are where the cross-crate knowledge lives, and `-x`
       # alone would only ever see them through a caller.
       #
-      # **`apps/*/tests/` is in it too, and was not.** `crates/*/tests/*.sh`
-      # reads like "every harness" and is not: the samples have harnesses of
-      # their own, and `apps/quarry/tests/run-quarry-e2e.sh` was outside this
-      # glob on the day it was written. A pattern that silently matches less
-      # than its name claims is the shape this repo keeps removing.
+      # **`apps/*/tests/` and `web/` are in it too, and were not.**
+      # `crates/*/tests/*.sh` reads like "every harness" and is not: the samples
+      # have harnesses of their own, and so does the browser side — five scripts
+      # including both browser gates. `apps/quarry/tests/run-quarry-e2e.sh` was
+      # outside this glob on the day it was written. A pattern that silently
+      # matches less than its name claims is the shape this repo keeps removing.
+      #
+      # Widening it cost two real fixes rather than none: both browser runners
+      # indented a multi-line list with `sed 's|^|  |'`, which SC2001 flags. They
+      # use a read loop now, checked byte-for-byte against the `sed` — the
+      # obvious `printf '  %s\n' "$NEWER"` rewrite is wrong, and indents only the
+      # first line.
       - name: Lint every harness and the helpers they share
-        run: shellcheck -x tools/*.sh crates/*/tests/*.sh apps/*/tests/*.sh
+        run:
+          shellcheck -x tools/*.sh crates/*/tests/*.sh apps/*/tests/*.sh
+          web/*.sh
       - name: The summary guard rejects the runs it is there to reject
         run: ./tools/nextest-summary-test.sh
 
