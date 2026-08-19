@@ -2062,30 +2062,37 @@ The seam suite drives most of `Capability::ALL` with real GPU work; the tally it
 prints on every run is the current answer and this entry does not restate it —
 earlier versions did, and were wrong within a day.
 
-**This is the practical ceiling, not a to-do list.** Of the four left, two wait
-on work that is itself blocked (the dx12 mesh reporting slice, blocked on a
-device removal only a Windows session can diagnose) and **two have no robust
-observable at all** — they are not waiting on effort:
+**Three are left, and two wait on work that is itself blocked** — the dx12 mesh
+reporting slice, blocked on a device removal only a Windows session can
+diagnose. The third has no robust observable at all and is not waiting on
+effort:
 
-- `SamplerAnisotropy` — a conformant implementation may legally take fewer
-  samples than `maxAnisotropy` asks for, so "the anisotropic image differs from
-  the isotropic one" is not guaranteed even on a device that honestly reports
-  the feature. A test asserting the difference would report a false
-  `SilentlyIgnored`; one accepting either outcome asserts nothing.
 - `BinarySemaphore` — the claim is ordering between two submissions, and
   demonstrating it requires the unordered case to actually lose a race. A test
   that depends on losing a race passes when it should fail, which is worse than
-  the gap.
+  the gap. Considered and declined on those grounds rather than left undone, and
+  the shader toolchain being available locally (`slangc` 2026.14, `dxc` 1.9)
+  does not change it — the obstacle is the observable, not the artifact.
 
-Both were considered and declined on those grounds rather than left undone, and
-the shader toolchain being available locally (`slangc` 2026.14, `dxc` 1.9) does
-not change either — the obstacle is the observable, not the artifact.
+**`SamplerAnisotropy` left this list on 2026-08-19**, and how it left is worth
+keeping. What was declined here was a _filtering_ test — "the anisotropic image
+differs from the isotropic one" — and that decline was right and still stands: a
+conformant implementation may legally take fewer samples than `maxAnisotropy`
+asks for, so the difference is not guaranteed even on an honest device, and a
+test asserting it would report a false `SilentlyIgnored`.
 
-**Four remain unexercised, for three different reasons:**
+But the capability is not defined as filtering quality. It is "a `SamplerDesc`
+with anisotropy above `1.0`", and `exercise_sampler_anisotropy` drives exactly
+that: the descriptor is created at the device's own
+`Limits::max_sampler_anisotropy`, and a backend declaring support while capping
+that limit at `1.0` — the value that _disables_ anisotropy — is reported as
+`SilentlyIgnored` and fails. Two seam surfaces held against each other, with the
+Vulkan validation layers as the observer for the accepting case. **Same
+correction as `StorageImageBinding`: the reason argued against a wider
+capability than the enum defines.**
 
-- **A fixture that does not exist yet.** `SamplerAnisotropy` needs a shader that
-  samples a minified texture at a grazing angle and a second to compare against;
-  the committed raster artifact samples nothing.
+**Three remain unexercised, for two different reasons:**
+
 - **An observable the seam cannot reach.** `BinarySemaphore`'s claim is ordering
   between two submissions, and on a one-queue backend a dropped binary semaphore
   is indistinguishable from an honoured one.
@@ -2338,14 +2345,11 @@ closed** — `MsaaResolveAttachment`, `IndirectArgumentPaddedStride`,
 `UpdateBindGroup` and `StencilReference` are all driven now, three of them by
 exercises written specifically because the claim rested on nothing.
 
-**Two survive**, and they are the ones a wrong `Yes` would reach a user through.
-`StorageImageBinding` was the third and is now driven by
-`exercise_storage_image_binding` in `tests/hal_seam_e2e.rs`, on every backend
-and in both directions:
+**One survives**, and it is the one a wrong `Yes` would reach a user through.
+`StorageImageBinding` and `SamplerAnisotropy` were the other two and are now
+driven — by `exercise_storage_image_binding` and `exercise_sampler_anisotropy`
+in `tests/hal_seam_e2e.rs`, on every backend and in both directions:
 
-- **`SamplerAnisotropy`** — answered from a device flag and never set against a
-  device. The one anisotropy test asserts a _limit refusal_, not a working
-  anisotropic sampler.
 - **`BinarySemaphore` on WebGPU** — self-declared unverifiable in the backend
   itself: `acquire_next_frame` answers `None` for both kinds, so nothing
   observes it.

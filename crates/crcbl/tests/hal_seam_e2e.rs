@@ -63,8 +63,8 @@ use crcbl::hal::{
     ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
     ImageViewType, Instance, LoadOp, MemoryLocation, Offset3d, PolygonMode, PresentInfo,
     PresentMode, PrimitiveState, QueryKind, QuerySetDesc, QuerySetHandle, ReadbackDesc,
-    ReadbackState, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceError,
-    SwapchainDesc,
+    ReadbackState, Rect2d, RenderPassDesc, ResourceState, SamplerDesc, StoreOp, SubmitInfo,
+    SurfaceError, SwapchainDesc,
 };
 
 /// The size every offscreen test in this file renders at.
@@ -7510,6 +7510,73 @@ fn exercise_storage_image_binding(headless: &Headless) -> Exercise {
     outcome
 }
 
+/// **A `SamplerDesc` with anisotropy above `1.0`** — which is what
+/// [`Capability::SamplerAnisotropy`](crcbl::hal::Capability::SamplerAnisotropy)
+/// says it is, and the whole of it.
+///
+/// # This is narrower than it looks, and that is the point
+///
+/// It was unexercised for a long time on the reasoning that "the observable is a
+/// filtered texel", needing a shader that samples a minified texture at a
+/// grazing angle. That argues against a *different* capability — one about
+/// filtering quality — and the enum does not define this one that way. It is the
+/// same correction [`exercise_storage_image_binding`] came out of: the row was
+/// about the layout, not about a shader reading it.
+///
+/// # What actually makes this a check rather than "a handle came back"
+///
+/// Three things, and none of them needs a texel:
+///
+/// * **The limit has to agree with the claim.** A backend declaring support must
+///   report a [`Limits::max_sampler_anisotropy`](crcbl::hal::Limits) above
+///   `1.0`; one is the value that *disables* anisotropy, so a device claiming the
+///   capability and capping it at one has claimed something it cannot do. That
+///   is a disagreement between two seam surfaces, and it is exactly the shape a
+///   backend gets wrong by reporting a feature bit it never wired to a limit.
+/// * **Validation is the observer for the accepting case.** This suite runs
+///   under the Vulkan validation layers in CI, where creating a sampler with
+///   `anisotropyEnable` on a device that did not enable `samplerAnisotropy` is
+///   an error rather than a silent pass — so a backend that shrugs and hands back
+///   a handle it should have refused is caught by the layer, not by an
+///   assertion here that could not see it.
+/// * **The refusing case is checked in full.** A backend declaring no support
+///   must refuse the descriptor, and the driver holds it to
+///   [`HalError::Unsupported`] like every other row.
+///
+/// What it still does not assert is that the sampler *filters* anisotropically.
+/// That is a golden's job and it is one no backend-agnostic suite can do without
+/// a committed texture-sampling artifact per backend; see the module header.
+fn exercise_sampler_anisotropy(headless: &Headless) -> Exercise {
+    let device = headless.device.as_ref();
+    let limit = device.caps().limits.max_sampler_anisotropy;
+
+    // Asked for at the device's own cap rather than at a number written here: the
+    // descriptor documents itself as capped by that limit, so a constant would be
+    // testing this suite's guess about the hardware on any device that reports
+    // less.
+    let sampler = match device.create_sampler(&SamplerDesc {
+        label: Some("anisotropy exercise"),
+        anisotropy: limit,
+        ..SamplerDesc::default()
+    }) {
+        Ok(sampler) => sampler,
+        Err(error) => return Exercise::Refused(error),
+    };
+    device.destroy_sampler(sampler);
+
+    // The cross-check, and it runs only on the accepting path because a backend
+    // that refused has already answered.
+    if limit <= 1.0 {
+        eprintln!(
+            "crcbl hal seam e2e: the sampler was created, but this device caps anisotropy at \
+             {limit}, and 1.0 is the value that disables it — so nothing above 1.0 was actually \
+             asked for"
+        );
+        return Exercise::SilentlyIgnored;
+    }
+    Exercise::Worked
+}
+
 /// Drives `capability` against this device, or says why it cannot be.
 ///
 /// **Exhaustive with no wildcard arm**, so a capability added to
@@ -7524,10 +7591,6 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
     // Every reason below names what an exercise would need, not merely that
     // there isn't one — an unexercised capability is a coverage gap, and a gap
     // nobody can act on is worse than one nobody wrote down.
-    const NEEDS_TEXTURE_SAMPLING: &str = "the observable is a filtered texel, so it needs a shader that samples a minified \
-         texture at a grazing angle and a second one to compare against; the committed raster \
-         artifact this suite drives — triangle.slang — samples nothing, and creating a sampler \
-         and getting a handle back asserts that a handle came back and nothing about anisotropy";
     const NEEDS_MESH_ARTIFACTS: &str = "needs committed mesh/task shader artifacts per backend, which crcbl-vk and crcbl-dx12 \
          have and crcbl-mtl and crcbl-webgpu do not. But the obstacle is no longer only the \
          artifacts: crcbl-dx12 creates the pipeline and records both draws — it is drawn on WARP \
@@ -7567,7 +7630,7 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
         C::DepthClamp => exercise_depth_clamp(headless),
         // The one rasteriser capability the raster fixture does not reach, and
         // it is a shader gap rather than a pipeline one.
-        C::SamplerAnisotropy => Exercise::Unexercised(NEEDS_TEXTURE_SAMPLING),
+        C::SamplerAnisotropy => exercise_sampler_anisotropy(headless),
         C::TimestampQuery => exercise_timestamp_query(headless),
         // Creation and refusal only, and `exercise_query_set_creation` says at
         // length why there is no count to assert: the seam has no begin/end

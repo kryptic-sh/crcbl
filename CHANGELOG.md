@@ -799,6 +799,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Capability::SamplerAnisotropy` is driven by the agnostic seam suite**, so
+  its capability coverage goes 20 of 24 to **21 of 24**. It had been unexercised
+  on the reasoning that "the observable is a filtered texel", needing a shader
+  that samples a minified texture at a grazing angle — an argument against a
+  capability the enum does not define. This one is "a `SamplerDesc` with
+  anisotropy above `1.0`", and `exercise_sampler_anisotropy` drives that: the
+  descriptor is created at the device's own `Limits::max_sampler_anisotropy`,
+  and a backend declaring support while capping that limit at `1.0` — the value
+  that _disables_ anisotropy — is reported as silently ignoring the call and
+  fails. Same correction `StorageImageBinding` came out of.
+
+  The filtering test stays declined, and for its own good reason: a conformant
+  implementation may legally take fewer samples than asked for, so "the
+  anisotropic image differs from the isotropic one" is not guaranteed even on an
+  honest device.
+
 - **The browser's pixels are held against a native backend's, directly.** New
   `web/run-cross-backend-e2e.sh`, wired into `pages.yml`'s `render-harness` job
   after the golden comparison: it renders each of the eleven golden scenes
