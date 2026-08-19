@@ -16,6 +16,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`StencilState::reference` is gone; `set_stencil_reference` is the only
+  channel.** It was honoured by two backends and dropped by two, so the same
+  recorded command stream drew differently depending on the backend: `crcbl-vk`
+  declares the state dynamic unconditionally and `crcbl-webgpu` drops the field,
+  so an earlier `set_stencil_reference` survived a pipeline bind — while
+  `crcbl-dx12` and `crcbl-mtl` re-applied the pipeline's value at every bind and
+  overwrote it. `Capability::StencilReference` reported supported on all four,
+  so the parity report was green and blind to it.
+
+  The seam now **states the rule** rather than leaving it to each backend: a
+  pass opens holding `crcbl_hal::stencil::INITIAL_REFERENCE`, and binding a
+  pipeline does not disturb the current reference. Every backend sets that value
+  as a pass opens, since Vulkan's is otherwise undefined and D3D12's outlives a
+  pass.
+
+  The WebGPU command stream drops the word, so `STREAM_VERSION` goes 2 → 3 — an
+  older decoder would have read four bytes of depth bias as a reference.
+
 - **`CommandEncoder::write_timestamp` is gone; a pass takes its timestamps in
   its descriptor.** `RenderPassDesc` and `ComputePassDesc` gained
   `timestamp_writes: Option<PassTimestampWrites>`, naming a query set and the

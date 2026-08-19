@@ -6474,7 +6474,7 @@ async function main() {
     // vertex stage carries an empty `buffers` array (vertex pulling has no
     // vertex-buffer layout), the fragment is present with its two targets, the
     // depth-stencil carries `stencilFront`/`stencilBack` but no `stencilReference`
-    // — that is a per-pass value, dropped like the workgroup size — and the
+    // — that is a per-pass value, and nothing on the wire carries one — and the
     // multisample count is the 4 the corpus asked for.
     const { replayer, device } = await rasterReady();
     rasterFrame(replayer);
@@ -6500,9 +6500,10 @@ async function main() {
         ? 'a CreateGraphicsPipeline reaches the device with its layout and two shader stages resolved, and vertex.buffers empty'
         : `the built render pipeline is not what was asked for (${JSON.stringify(pd, (_, v) => (typeof v === 'bigint' ? String(v) : v))})`
     );
-    // **The stencil reference is carried in Rust but not passed to WebGPU** — it
-    // belongs to the pass. Asserted on the descriptor: the depth-stencil has
-    // stencil faces but no `stencilReference` and no bare `reference` anywhere.
+    // **No stencil reference reaches WebGPU, and none is on the wire either** —
+    // it belongs to the pass, on the seam as in WebGPU. Asserted on the
+    // descriptor: the depth-stencil has stencil faces but no `stencilReference`
+    // and no bare `reference` anywhere.
     const referenceDropped =
       pd.depthStencil !== undefined &&
       pd.depthStencil.stencilFront !== undefined &&
@@ -6513,7 +6514,7 @@ async function main() {
     check(
       referenceDropped,
       referenceDropped
-        ? 'the stencil reference is carried on the wire and dropped rather than passed to createRenderPipeline (it is a per-pass value)'
+        ? 'no stencil reference reaches createRenderPipeline (it is a per-pass value, and the wire carries none)'
         : `a stencil reference reached the descriptor (${JSON.stringify(pd.depthStencil)})`
     );
     check(

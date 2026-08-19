@@ -995,8 +995,13 @@ fn create_rendering_pipeline(
         .logic_op_enable(false)
         .attachments(&attachments);
 
-    // `STENCIL_REFERENCE` because the encoder has `set_stencil_reference`,
-    // and a pipeline that baked it would make that call a no-op.
+    // `STENCIL_REFERENCE` because the reference is pass state on the seam —
+    // `set_stencil_reference` is the only channel, `StencilState` has no field
+    // to bake, and a pipeline that baked one would make that call a no-op. It
+    // is declared on *every* pipeline, stencil or not, so the encoder never has
+    // to know which pipelines would honour the call. `begin_render_pass` sets
+    // `stencil::INITIAL_REFERENCE` in exchange: with this dynamic state
+    // declared, the value is undefined until something sets it.
     let dynamic_states = [
         vk::DynamicState::VIEWPORT,
         vk::DynamicState::SCISSOR,

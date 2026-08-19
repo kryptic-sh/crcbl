@@ -701,14 +701,13 @@ pub(crate) struct BoundPipeline {
     /// `None` for a mesh pipeline; see
     /// [`GraphicsPipelineEntry::topology`](crate::pipeline::GraphicsPipelineEntry::topology).
     pub(crate) topology: Option<D3D_PRIMITIVE_TOPOLOGY>,
-    pub(crate) stencil_reference: Option<u32>,
 }
 
 /// A compute pipeline resolved to what the command list must be told.
 ///
-/// The same pair as [`BoundPipeline`] and for the same reason, minus the two
-/// pieces of graphics state D3D12 keeps outside a pipeline state object: a
-/// dispatch has no topology and no stencil reference.
+/// The same pair as [`BoundPipeline`] and for the same reason, minus the piece
+/// of graphics state D3D12 keeps outside a pipeline state object: a dispatch has
+/// no topology.
 #[derive(Debug)]
 pub(crate) struct BoundCompute {
     pub(crate) raw: ID3D12PipelineState,
@@ -1002,7 +1001,6 @@ impl DeviceInner {
             raw: entry.raw.clone(),
             root_signature: entry.root_signature.clone(),
             topology: entry.topology,
-            stencil_reference: entry.stencil_reference,
         })
     }
 

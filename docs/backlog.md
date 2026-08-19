@@ -904,18 +904,32 @@ rule was stated: anything on the seam that cannot work on all backends gets
 refactored. Each entry below was checked in at least two backends' code. Ranked
 by how badly it misleads.
 
-**1. `StencilState::reference` — a silent 2-versus-2 divergence, and parity
-cannot see it.** `crcbl-vk` declares `STENCIL_REFERENCE` dynamic
-_unconditionally_ ("a pipeline that baked it would make that call a no-op"), so
-the pipeline's value is dead and an earlier `set_stencil_reference` survives a
-bind. `crcbl-webgpu` drops the field in its writer, same result. But
-`crcbl-dx12` re-applies `OMSetStencilRef` at every bind from
-`GraphicsPipelineEntry::stencil_reference`, and `crcbl-mtl` calls
-`setStencilReferenceValue` the same way — both _overwriting_ what the encoder
-set. So `set_stencil_reference(0x80)` followed by binding a pipeline declaring
-`reference: 0` **draws with 0x80 on two backends and 0 on the other two**, and
-`Capability::StencilReference` is `Support::Yes` on all four, so the parity
-report is green. Verified by reading all four.
+**1. `StencilState::reference` — FIXED, and the exercise that missed it is the
+lesson.** The field is off the seam and `set_stencil_reference` is the only
+channel. What is worth keeping: `exercise_stencil_reference` **already read back
+the reference that took effect** — it just bound the pipeline _first_, so a
+bind-time clobber was invisible and every backend passed. One moved line makes
+it catch the divergence. A guard can be present, correct in what it asserts, and
+still ordered so it cannot fail.
+
+Still unobserved: the _initial_ half of the rule — that a pass which never calls
+`set_stencil_reference` draws against `INITIAL_REFERENCE`. It needs a second
+pass in one command buffer with the plane cleared to that value and no call at
+all, which `Raster::render` cannot express because it opens the pass itself.
+
+Original finding, for the record:
+
+**A silent 2-versus-2 divergence, and parity could not see it.** `crcbl-vk`
+declares `STENCIL_REFERENCE` dynamic _unconditionally_ ("a pipeline that baked
+it would make that call a no-op"), so the pipeline's value is dead and an
+earlier `set_stencil_reference` survives a bind. `crcbl-webgpu` drops the field
+in its writer, same result. But `crcbl-dx12` re-applies `OMSetStencilRef` at
+every bind from `GraphicsPipelineEntry::stencil_reference`, and `crcbl-mtl`
+calls `setStencilReferenceValue` the same way — both _overwriting_ what the
+encoder set. So `set_stencil_reference(0x80)` followed by binding a pipeline
+declaring `reference: 0` **draws with 0x80 on two backends and 0 on the other
+two**, and `Capability::StencilReference` is `Support::Yes` on all four, so the
+parity report is green. Verified by reading all four.
 
 The fix follows the rule: `StencilState::reference` is a Vulkan/D3D12
 static-state artefact — WebGPU and Metal have no such pipeline field — so it

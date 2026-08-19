@@ -2459,12 +2459,14 @@ export async function runProbeGroups({
   //
   // WHAT IT DOES: wasm records a `depth24plus-stencil8` plane cleared to 0x2A, an
   // `Rgba8Unorm` target cleared to a background colour, and a pipeline that
-  // compares the plane `Equal` against a *baked* pipeline-side reference of 0x33
-  // — which matches nothing, and which WebGPU has no pipeline field for anyway.
-  // Two draws follow in one pass, each preceded by its own `setStencilReference`:
-  // 0x2A, which the plane holds, then the first triangle; 0x11, which it does
-  // not, then the second. The page loop replays it and the 16384 texels that come
-  // back say which draws survived.
+  // compares the plane `Equal` against whatever the pass last set — the seam has
+  // no pipeline-side reference, and WebGPU has no field for one either. Two draws
+  // follow in one pass, each preceded by its own `setStencilReference`: 0x2A,
+  // which the plane holds, then the first triangle; 0x11, which it does not, then
+  // the second. The first of the two is recorded *before* the pipeline bind, so a
+  // replayer that reset the reference on a bind lands on the background reading.
+  // The page loop replays it and the 16384 texels that come back say which draws
+  // survived.
   //
   // **THE OBSERVABLE IS A VALUE, NOT A SURVIVED CALL**, which is the whole design
   // constraint: a `setStencilReference` that is dropped raises no error, the draw
@@ -2476,8 +2478,9 @@ export async function runProbeGroups({
   //   the second colour  the SECOND reference never took effect, so the draw that
   //                      should have been discarded drew over the first. That is
   //                      a dropped call, or a stencil test not enabled at all.
-  //   the background     the FIRST reference never took effect either, which is
-  //                      what the pipeline's own baked 0x33 produces.
+  //   the background     the FIRST reference never took effect either, so both
+  //                      draws were tested against the 0 a pass opens holding —
+  //                      a dropped call, or a pipeline bind that reset it.
   //
   // The order of the two draws is not free to reverse: with the rejected
   // reference first, "the test is not enabled" and "both references were applied"
@@ -2597,7 +2600,7 @@ export async function runProbeGroups({
           `${stencil.firstCount} first, ${stencil.secondCount} second ` +
           '(the second setStencilReference changed nothing), ' +
           `${stencil.backgroundCount} background ` +
-          '(neither did the first, so the pipeline’s baked 0x33 decided both), ' +
+          '(neither did the first, so the pass’s initial 0 decided both), ' +
           `${stencil.otherCount} some other colour; first wrong at byte ${stencil.firstWrong} ` +
           `(sample ${JSON.stringify(stencil.sample)})` +
           `${stencil.error ? ` — ${stencil.error}` : ''}`

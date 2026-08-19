@@ -813,7 +813,6 @@ pub fn every_command() -> Vec<Command> {
                     },
                     read_mask: 0x0F,
                     write_mask: 0xF0,
-                    reference: 0x2A,
                 }),
                 bias: DepthBias {
                     constant: -2.0,

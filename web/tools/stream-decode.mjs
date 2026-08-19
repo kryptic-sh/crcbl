@@ -839,7 +839,6 @@ const EXPECTED = [
         },
         readMask: 0x0f,
         writeMask: 0xf0,
-        reference: 0x2a,
       },
       // `slopeScale` is the nearest f32 to 0.1 — the bit pattern the wire carries
       // — computed with `Math.fround` rather than written as `0.1`, which is a
@@ -2370,12 +2369,13 @@ async function main() {
   );
   // The version is a `u16` at offset 8, so its low byte alone says 1 — the
   // version this format spoke before both pass commands grew a
-  // `timestampWrites`, and exactly the buffer an older wasm would send. The two
-  // halves ship as separate artifacts and are cached independently, which is
-  // what makes this reachable at all.
+  // `timestampWrites` and before the stencil block lost its `reference` word,
+  // and exactly the buffer an older wasm would send. The two halves ship as
+  // separate artifacts and are cached independently, which is what makes this
+  // reachable at all.
   checkRefused(
     withByte(fixture, 8, 1),
-    { kind: 'UnsupportedVersion', found: 1, expected: 2 },
+    { kind: 'UnsupportedVersion', found: 1, expected: 3 },
     'a stream from a build that speaks another version is refused'
   );
 

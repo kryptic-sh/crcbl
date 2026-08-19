@@ -96,6 +96,27 @@ pub mod depth {
     pub const CLEAR: f32 = FAR;
 }
 
+/// Stencil constants the seam guarantees rather than inherits.
+///
+/// ```
+/// use crcbl_hal::stencil;
+///
+/// assert_eq!(stencil::INITIAL_REFERENCE, 0);
+/// ```
+pub mod stencil {
+    /// The reference value a render pass starts with, before any
+    /// [`set_stencil_reference`](crate::CommandEncoder::set_stencil_reference).
+    ///
+    /// **Zero, and stated here because it is a promise rather than an
+    /// observation.** WebGPU and Metal both start an encoder at zero on their
+    /// own; D3D12's `OMSetStencilRef` is command-list state that outlives a
+    /// pass, and Vulkan's reference is *undefined* until
+    /// `vkCmdSetStencilReference` is called, since `crcbl-vk` declares
+    /// `VK_DYNAMIC_STATE_STENCIL_REFERENCE` on every pipeline. Those two
+    /// backends set this value as their passes open so that all four agree.
+    pub const INITIAL_REFERENCE: u32 = 0;
+}
+
 /// What to do with an attachment's existing contents at the start of a pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LoadOp {
@@ -692,7 +713,22 @@ pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Sets the scissor rectangle.
     fn set_scissor(&mut self, rect: &Rect2d);
 
-    /// Sets the stencil reference value for subsequent draws.
+    /// Sets the stencil reference value for subsequent draws — the value each
+    /// [`StencilFaceState::compare`](crate::StencilFaceState::compare) tests
+    /// against and [`StencilOp::Replace`](crate::StencilOp::Replace) writes.
+    ///
+    /// **The only channel there is.** [`StencilState`](crate::StencilState)
+    /// carries no reference of its own, because two of the APIs behind this
+    /// seam have no pipeline field to put one in. The rule every backend
+    /// implements, and which
+    /// [`Capability::StencilReference`](crate::Capability::StencilReference)
+    /// stands for:
+    ///
+    /// * The reference is **pass state**: a pass opens holding
+    ///   [`stencil::INITIAL_REFERENCE`] and
+    ///   keeps whatever this call last set until it ends.
+    /// * **Binding a graphics pipeline does not disturb it.** A call made
+    ///   before a bind is still in force for the draws after it.
     fn set_stencil_reference(&mut self, reference: u32);
 
     /// Binds a graphics pipeline.

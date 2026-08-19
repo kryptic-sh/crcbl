@@ -1471,8 +1471,10 @@ export function stencilStateName(state) {
  * {@link startDrawProbe}'s masked sibling, and the only gate anywhere that shows
  * a `setStencilReference` deciding which fragments survive. The pass clears a
  * `depth24plus-stencil8` plane to a known value and the pipeline compares
- * `Equal` against a *baked* reference that never matches, so the colour that
- * comes back says which of the two per-pass references took effect.
+ * `Equal` against whatever the pass last set — there is no pipeline-side
+ * reference on this seam — so the colour that comes back says which of the two
+ * per-pass references took effect. The first of them is set *before* the
+ * pipeline is bound, so a bind that reset it would show up too.
  * {@link pollStencilProbe} drives the poll and {@link readStencilProbe} reads the
  * bytes when they land. Its answer is *data* and it needs a **device**, so
  * `false` before one has opened is ordering rather than failure — wait for

@@ -60,14 +60,18 @@ const STREAM_MAGIC = new Uint8Array([
 /**
  * `tag::STREAM_VERSION`.
  *
- * `2` since both pass commands grew a trailing `timestampWrites`. That is a
- * *changed record* rather than a new tag: an older decoder would read the new
- * presence byte as the next command's tag and carry on, decoding a stream that
- * still parses and means something else — which is the one defect a version
- * word exists to catch, and the reason this half and `crcbl-webgpu`'s
+ * `3` since `CreateGraphicsPipeline`'s stencil block lost its trailing
+ * `reference` word — the seam dropped the pipeline-side reference, leaving
+ * `SetStencilReference` as the only thing that carries one. It went to `2` for
+ * the trailing `timestampWrites` both pass commands grew.
+ *
+ * Both are *changed records* rather than new tags: an older decoder would read
+ * four bytes of depth bias as a stencil reference and carry on, decoding a
+ * stream that still parses and means something else — which is the one defect a
+ * version word exists to catch, and the reason this half and `crcbl-webgpu`'s
  * `tag::STREAM_VERSION` move together in one commit.
  */
-const STREAM_VERSION = 2;
+const STREAM_VERSION = 3;
 
 // ── Caps ─────────────────────────────────────────────────────────────────────
 
@@ -1450,11 +1454,10 @@ class ByteReader {
    *
    * The stencil rides a presence byte and, when present, its `front` and `back`
    * faces come in that order — distinct in the fixture so a front/back swap goes
-   * red — followed by the three masks. `reference` is decoded here even though it
-   * is not a WebGPU pipeline field: it is per-pass state, so `gpu-replay.js`
-   * drops it and takes what a draw compares against from the pass's own
-   * `SetStencilReference` command instead. It round-trips but does not reach
-   * `createRenderPipeline`. The three bias floats close it out.
+   * red — followed by the two masks. **There is no `reference` word**: the value
+   * a draw compares against is pass state on the seam as it is in WebGPU, and
+   * the pass's own `SetStencilReference` command is the only thing that carries
+   * one. The three bias floats close it out, immediately after `writeMask`.
    *
    * @returns {{ format: string, depthWrite: boolean, depthCompare: string,
    *   stencil: object | null, bias: { constant: number, slopeScale: number, clamp: number } }}
@@ -1473,7 +1476,6 @@ class ByteReader {
         back: this.readStencilFaceState(),
         readMask: this.readU32(),
         writeMask: this.readU32(),
-        reference: this.readU32(),
       };
     }
     return {

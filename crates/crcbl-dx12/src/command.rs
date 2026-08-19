@@ -1824,11 +1824,18 @@ impl CommandEncoder for Dx12CommandEncoder {
             MinDepth: 0.0,
             MaxDepth: 1.0,
         };
+        // The stencil reference is the same shape of problem as the viewport,
+        // one step worse: `OMSetStencilRef` is command-list state, so a second
+        // pass on the same list would inherit whatever the first one set. The
+        // seam promises every pass opens at `stencil::INITIAL_REFERENCE`.
+        //
         // SAFETY: `list` is live and recording; both arrays are live locals
-        // borrowed for the duration of their calls.
+        // borrowed for the duration of their calls, and `OMSetStencilRef` takes
+        // a scalar.
         unsafe {
             list.RSSetViewports(&[viewport]);
             list.RSSetScissorRects(&[area]);
+            list.OMSetStencilRef(crcbl_hal::stencil::INITIAL_REFERENCE);
         }
         self.open_pass_timestamps("begin_render_pass", desc.timestamp_writes);
         self.in_render_pass = true;
@@ -1922,9 +1929,15 @@ impl CommandEncoder for Dx12CommandEncoder {
             }
         };
         let Some(list) = self.list() else { return };
+        // **No `OMSetStencilRef` here.** The stencil reference is pass state on
+        // the seam and a pipeline carries none, so a bind must leave whatever
+        // `set_stencil_reference` last put on the list — see
+        // `crcbl_hal::StencilState`. Re-applying a pipeline-side value here is
+        // what made the same stream draw differently on D3D12 and Vulkan.
+        //
         // SAFETY: `list` is a live command list in the recording state, and each
         // interface is one this encoder holds a reference to for the duration of
-        // the call. `IASetPrimitiveTopology` and `OMSetStencilRef` take scalars.
+        // the call. `IASetPrimitiveTopology` takes a scalar.
         unsafe {
             list.SetGraphicsRootSignature(&bound.root_signature);
             list.SetPipelineState(&bound.raw);
@@ -1933,9 +1946,6 @@ impl CommandEncoder for Dx12CommandEncoder {
             // a debug-layer error rather than the no-op it looks like.
             if let Some(topology) = bound.topology {
                 list.IASetPrimitiveTopology(topology);
-            }
-            if let Some(reference) = bound.stencil_reference {
-                list.OMSetStencilRef(reference);
             }
         }
         self.pipeline = Some(bound);

@@ -3483,22 +3483,14 @@ const STENCIL_CLEARED: u32 = 0x2A;
 /// The reference the second draw sets, which the cleared plane must reject.
 const STENCIL_MISS: u32 = 0x11;
 
-/// The reference the *pipeline* carries.
-///
-/// A third value, and one the cleared plane rejects: a backend that baked this
-/// into the pipeline state instead of taking
-/// [`set_stencil_reference`](crcbl::hal::CommandEncoder::set_stencil_reference)'s
-/// draws nothing at all, which is a distinct reading from taking only the first
-/// call. Vulkan cannot land here — `crcbl-vk` declares
-/// `VK_DYNAMIC_STATE_STENCIL_REFERENCE`, so this field is ignored there — but
-/// Metal and D3D12 both hold a pipeline-side reference that a missing
-/// `set_stencil_reference` would leave in force.
-const STENCIL_BAKED: u32 = 0x33;
-
-// The three references must differ, or the exercise cannot separate a reference
-// that was applied from one that was not.
+// The two references must differ, or the exercise cannot separate a reference
+// that was applied from one that was not…
 const _: () = assert!(STENCIL_CLEARED != STENCIL_MISS);
-const _: () = assert!(STENCIL_CLEARED != STENCIL_BAKED);
+// …and neither may be the value a pass opens holding, or a backend that dropped
+// `set_stencil_reference` entirely would draw the same picture as one that
+// honoured it.
+const _: () = assert!(STENCIL_CLEARED != crcbl::hal::stencil::INITIAL_REFERENCE);
+const _: () = assert!(STENCIL_MISS != crcbl::hal::stencil::INITIAL_REFERENCE);
 
 /// Bits the stencil comparison reads: all of them.
 const STENCIL_READ_MASK: u32 = 0xFF;
@@ -4312,7 +4304,7 @@ fn staged_buffer(
 
 /// Drives [`Capability::StencilReference`] and reports whether the value
 /// [`set_stencil_reference`](crcbl::hal::CommandEncoder::set_stencil_reference)
-/// carried decided which draw survived.
+/// carried decided which draw survived — **including across a pipeline bind**.
 ///
 /// # What is asserted, and why a backend that does nothing cannot pass it
 ///
@@ -4331,13 +4323,28 @@ fn staged_buffer(
 /// [`RASTER_SECOND`] means the second reference never took effect — either the
 /// call was dropped or the test is not enabled at all, and the draw that should
 /// have been discarded drew over the first. [`RASTER_BACKGROUND`] means the
-/// *first* reference never took effect either, which is what a pipeline-side
-/// [`STENCIL_BAKED`] produces. Both are [`Exercise::SilentlyIgnored`]: the
-/// reference was accepted and changed nothing observable.
+/// *first* reference was not in force when the first draw ran, so both draws
+/// were tested against something the plane does not hold. Both are
+/// [`Exercise::SilentlyIgnored`]: the reference was accepted and changed nothing
+/// observable.
 ///
-/// The order matters and is not free to reverse. Drawing the rejected reference
-/// first would make "the stencil test is not enabled" and "both references were
-/// applied" produce the same texel, because the last draw would win either way.
+/// # Two orderings carry the whole claim
+///
+/// **The first `set_stencil_reference` comes before
+/// [`bind_graphics_pipeline`](crcbl::hal::CommandEncoder::bind_graphics_pipeline),
+/// deliberately.** The seam states that binding a pipeline does not disturb the
+/// current reference (see
+/// [`StencilState`](crcbl::hal::StencilState)), and D3D12 and Metal both hold a
+/// per-pipeline `OMSetStencilRef`/`setStencilReferenceValue:` that a backend is
+/// free to re-apply at every bind — which is what they used to do, from a
+/// pipeline field the seam has since dropped. With the call before the bind, a
+/// backend that re-applies anything lands on [`RASTER_BACKGROUND`]; with it
+/// after, the clobber is invisible and every backend passes.
+///
+/// **The matching reference draws first**, and that is not free to reverse
+/// either: with the rejected reference first, "the stencil test is not enabled"
+/// and "both references were applied" produce the same texel, because the last
+/// draw would win either way.
 fn exercise_stencil_reference(headless: &Headless) -> Exercise {
     let device = headless.device.as_ref();
     let Some(target) = StencilTarget::open(device) else {
@@ -4365,7 +4372,6 @@ fn exercise_stencil_reference(headless: &Headless) -> Exercise {
             // Nothing writes the plane, so the second draw is tested against the
             // same value the first was.
             write_mask: 0,
-            reference: STENCIL_BAKED,
         }),
         bias: crcbl::hal::DepthBias::default(),
     };
@@ -4379,9 +4385,10 @@ fn exercise_stencil_reference(headless: &Headless) -> Exercise {
         Err(error) => Exercise::Refused(error),
         Ok(pipeline) => {
             let read = raster.render(headless, "stencil reference", Some(&target), |encoder| {
+                // Before the bind, not after it: see the doc comment.
+                encoder.set_stencil_reference(STENCIL_CLEARED);
                 encoder.bind_graphics_pipeline(pipeline);
                 encoder.bind_group(0, raster.pair_group, &[], raster.pipeline_layout);
-                encoder.set_stencil_reference(STENCIL_CLEARED);
                 encoder.draw(0..RASTER_TRIANGLE_VERTICES, 0..1);
                 encoder.set_stencil_reference(STENCIL_MISS);
                 encoder.draw(0..RASTER_TRIANGLE_VERTICES * 2, 0..1);
@@ -4400,9 +4407,9 @@ fn exercise_stencil_reference(headless: &Headless) -> Exercise {
                 }
                 Ok(read) if read.is(RASTER_BACKGROUND) => {
                     eprintln!(
-                        "crcbl hal seam e2e: neither draw survived, so the first \
-                         set_stencil_reference changed nothing and the pipeline's own \
-                         {STENCIL_BAKED:#04x} decided both — {}",
+                        "crcbl hal seam e2e: neither draw survived, so the \
+                         set_stencil_reference at {STENCIL_CLEARED:#04x} was not in force at the \
+                         first draw — it was dropped, or binding the pipeline replaced it — {}",
                         read.diagnosis()
                     );
                     Exercise::SilentlyIgnored

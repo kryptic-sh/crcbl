@@ -293,12 +293,13 @@ impl ByteWriter {
     /// three floats cross as bit patterns through [`f32::to_le_bytes`], as every
     /// float on this stream does.
     ///
-    /// **The stencil `reference` crosses whole**, even though it is not a WebGPU
-    /// pipeline field — it is per-pass state, so the replayer drops it here the
-    /// way `workgroup_size` is dropped and takes the value a draw compares
-    /// against from [`set_stencil_reference`](Self::set_stencil_reference)
-    /// instead. Carrying it keeps the HAL struct round-tripping and lets a
-    /// transposition among the three masks be caught.
+    /// **There is no stencil `reference` on the wire.** WebGPU has no such
+    /// pipeline member and neither does the seam — the value a draw compares
+    /// against is pass state, and
+    /// [`set_stencil_reference`](Self::set_stencil_reference) is the only thing
+    /// that carries it. The stencil block therefore ends at `write_mask`, and
+    /// the bias floats follow immediately; see
+    /// [`STREAM_VERSION`](tag::STREAM_VERSION), which this moved.
     fn put_depth_stencil_state(&mut self, state: &DepthStencilState) {
         self.put_u8(tag::format_code(state.format));
         self.put_bool(state.depth_write);
@@ -311,7 +312,6 @@ impl ByteWriter {
                 self.put_stencil_face_state(&stencil.back);
                 self.put_u32(stencil.read_mask);
                 self.put_u32(stencil.write_mask);
-                self.put_u32(stencil.reference);
             }
         }
         self.put_f32(state.bias.constant);
@@ -891,8 +891,7 @@ impl StreamWriter {
     /// A [`PolygonMode::Line`](crcbl_hal::PolygonMode::Line), a
     /// [`depth_clamp`](crcbl_hal::PrimitiveState::depth_clamp) the device cannot
     /// serve, a `samples` count WebGPU forbids, a fractional
-    /// [`DepthBias.constant`](crcbl_hal::DepthBias::constant), the stencil
-    /// [`reference`](crcbl_hal::StencilState::reference) WebGPU sets per-pass — all
+    /// [`DepthBias.constant`](crcbl_hal::DepthBias::constant) — all
     /// cross verbatim, because each is a value the wire form claims and the
     /// replayer is the half that faces WebGPU. See
     /// [`Command::CreateGraphicsPipeline`](crate::Command::CreateGraphicsPipeline).

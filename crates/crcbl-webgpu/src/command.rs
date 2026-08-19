@@ -495,12 +495,10 @@ pub enum Command {
     /// nor `4`, a fractional
     /// [`DepthBias.constant`](crcbl_hal::DepthBias::constant), a feature-gated
     /// [`format`](crcbl_hal::ColorTargetState) — are the replayer's, because only
-    /// it faces WebGPU, and each is a value the wire form claims. The stencil
-    /// [`reference`](crcbl_hal::StencilState::reference) crosses too and the
-    /// replayer drops it: it is not a pipeline field in WebGPU but a per-pass one,
-    /// so it is dropped like `workgroup_size` rather than lost, and
-    /// [`SetStencilReference`](Self::SetStencilReference) is the command that
-    /// carries the value the draws actually compare against. See
+    /// it faces WebGPU, and each is a value the wire form claims. **No stencil
+    /// reference crosses**: it is pass state on the seam as it is in WebGPU, and
+    /// [`SetStencilReference`](Self::SetStencilReference) is the only command
+    /// that carries the value the draws compare against. See
     /// `web/engine/gpu-replay.js`.
     CreateGraphicsPipeline {
         /// Id the replayer stores the new object at.
@@ -795,10 +793,13 @@ pub enum Command {
     /// decides which of its bits the comparison sees.
     ///
     /// It is a *pass* state and not a pipeline field, which is why
-    /// [`CreateGraphicsPipeline`](Self::CreateGraphicsPipeline) carries a
-    /// `reference` the replayer drops: a pipeline built once serves passes that
-    /// compare against different values, so the value has to arrive per pass.
-    /// WebGPU's initial value for a fresh pass is `0`, so a pass that never
+    /// [`CreateGraphicsPipeline`](Self::CreateGraphicsPipeline) carries no
+    /// reference at all: a pipeline built once serves passes that compare
+    /// against different values, so the value has to arrive per pass, and a
+    /// pipeline that baked one would make this command a no-op on the backends
+    /// that could honour it. WebGPU's initial value for a fresh pass is `0` —
+    /// [`stencil::INITIAL_REFERENCE`](crcbl_hal::stencil::INITIAL_REFERENCE),
+    /// which the seam promises across every backend — so a pass that never
     /// records this compares against zero rather than against whatever the last
     /// pass set.
     SetStencilReference {

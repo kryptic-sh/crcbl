@@ -48,13 +48,20 @@ pub const STREAM_MAGIC: &[u8; 8] = b"CRCBLGPU";
 
 /// Current stream format version.
 ///
-/// `2` since both pass commands grew a trailing `timestamp_writes` — see
-/// [`REPLY_VERSION`] for the rule this follows. That edit is a **changed
-/// record**, the kind a decoder cannot notice: an older `gpu-stream.js` reads
-/// the new presence byte as the next command's tag and carries on, decoding a
+/// `3` since `CreateGraphicsPipeline`'s stencil block lost its trailing
+/// `reference` word: the seam dropped
+/// [`StencilState::reference`](crcbl_hal::StencilState) because two of the four
+/// backends had no pipeline member to put it in, leaving
+/// [`Command::SetStencilReference`](crate::Command::SetStencilReference) as the
+/// only channel.
+///
+/// It went to `2` for the trailing `timestamp_writes` both pass commands grew —
+/// see [`REPLY_VERSION`] for the rule this follows. Both edits are **changed
+/// records**, the kind a decoder cannot notice: an older `gpu-stream.js` reads
+/// four bytes of depth bias as a stencil reference and carries on, decoding a
 /// stream that still parses and means something else. A new tag would not have
 /// moved this word.
-pub const STREAM_VERSION: u16 = 2;
+pub const STREAM_VERSION: u16 = 3;
 
 /// Bytes before the first command: [`STREAM_MAGIC`], [`STREAM_VERSION`], and the
 /// sequence number of the first command in the buffer.

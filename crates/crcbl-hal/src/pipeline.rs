@@ -715,7 +715,8 @@ pub enum StencilOp {
     Keep,
     /// Write zero.
     Zero,
-    /// Write the reference value.
+    /// Write the reference value the pass last set with
+    /// [`set_stencil_reference`](crate::CommandEncoder::set_stencil_reference).
     Replace,
     /// Bitwise invert.
     Invert,
@@ -732,7 +733,8 @@ pub enum StencilOp {
 /// Stencil state for one facing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct StencilFaceState {
-    /// Comparison against the reference value.
+    /// Comparison against the reference value the pass last set with
+    /// [`set_stencil_reference`](crate::CommandEncoder::set_stencil_reference).
     pub compare: CompareOp,
     /// Applied when the stencil test fails.
     pub fail_op: StencilOp,
@@ -743,6 +745,28 @@ pub struct StencilFaceState {
 }
 
 /// Stencil state.
+///
+/// # There is no reference value here, deliberately
+///
+/// The value [`StencilFaceState::compare`] tests against — and the value
+/// [`StencilOp::Replace`] writes — is **pass state**, set with
+/// [`set_stencil_reference`](crate::CommandEncoder::set_stencil_reference).
+/// This struct carries no field for it, because two of the four APIs behind
+/// this seam have no pipeline member to fill: WebGPU sets the reference on the
+/// render pass encoder and Metal on the command encoder. A pipeline field would
+/// therefore be honoured by D3D12 and Vulkan and dropped by the other two, and
+/// the same recorded command stream would draw differently depending on which
+/// backend replayed it.
+///
+/// The rule every backend implements instead:
+///
+/// * A render pass opens holding
+///   [`stencil::INITIAL_REFERENCE`](crate::stencil::INITIAL_REFERENCE).
+/// * **Binding a graphics pipeline does not disturb the current reference** — a
+///   `set_stencil_reference` before a bind is still in force after it.
+///
+/// [`Capability::StencilReference`](crate::Capability::StencilReference) is the
+/// backend's declaration that it does both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct StencilState {
     /// Front-facing primitives.
@@ -753,8 +777,6 @@ pub struct StencilState {
     pub read_mask: u32,
     /// Bits the operations may write.
     pub write_mask: u32,
-    /// Value compared against.
-    pub reference: u32,
 }
 
 /// Polygon depth offset.

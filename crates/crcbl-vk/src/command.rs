@@ -794,6 +794,14 @@ impl CommandEncoder for VkCommandEncoder {
         // — which the seam makes the caller's responsibility explicitly.
         unsafe { self.device.raw.cmd_begin_rendering(self.raw, &info) };
         self.in_render_pass = true;
+        // Every pipeline this backend builds declares
+        // `VK_DYNAMIC_STATE_STENCIL_REFERENCE` (see `crcbl_vk::pipeline`), which
+        // leaves the reference *undefined* until something sets it — so a pass
+        // that never calls `set_stencil_reference` would draw against whatever
+        // the command buffer happened to hold. The seam promises
+        // `stencil::INITIAL_REFERENCE` instead, which the other three backends
+        // get from their own pass defaults, and this is where Vulkan earns it.
+        self.set_stencil_reference(crcbl_hal::stencil::INITIAL_REFERENCE);
     }
 
     fn end_render_pass(&mut self) {

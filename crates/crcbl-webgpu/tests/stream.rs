@@ -2424,7 +2424,6 @@ fn rich_graphics_pipeline() -> GraphicsPipelineDesc<'static> {
                 },
                 read_mask: 0x0F,
                 write_mask: 0xF0,
-                reference: 0x2A,
             }),
             bias: DepthBias {
                 constant: -2.0,
@@ -2681,7 +2680,7 @@ fn every_nested_graphics_pipeline_enum_refuses_an_unclaimed_code() {
     // multisample is samples(4) + mask(4) + alpha_to_coverage(1); then the u32
     // target count; then target 0: format(1), blend presence(1), blend body
     // (6 bytes), write_mask(4); then target 1.
-    let stencil_body = 1 + (1 + 3) * 2 + 4 + 4 + 4; // present + two faces + 3 masks
+    let stencil_body = 1 + (1 + 3) * 2 + 4 + 4; // present + two faces + two masks
     let bias = 4 + 4 + 4;
     let ms_at = stencil_present_at + stencil_body + bias;
     let target_count_at = ms_at + 4 + 4 + 1;
@@ -2732,27 +2731,54 @@ fn every_nested_graphics_pipeline_enum_refuses_an_unclaimed_code() {
     ));
 }
 
-/// **The stencil `reference` is carried on the wire and round-trips**, even
-/// though it is not a WebGPU pipeline field — it is per-pass state, so the
-/// replayer drops it here and takes what a draw compares against from the pass's
-/// own [`Command::SetStencilReference`]. A writer that resolved it away would
-/// still decode, so this pins it to the byte: the value survives.
+/// **No stencil reference sits between the masks and the bias.**
+///
+/// The reference is pass state on the seam — `StencilState` has no field for it
+/// and [`Command::SetStencilReference`] is the only channel — so the stencil
+/// block ends at `write_mask` and the bias floats follow immediately. A round
+/// trip cannot see this: a writer that put a word there and a reader that took
+/// one back out would agree with each other and disagree with
+/// `web/engine/gpu-stream.js`. So this reads the byte the bias starts at and
+/// checks it is the bias.
+///
+/// The offsets are the same walk
+/// [`every_nested_graphics_pipeline_enum_refuses_an_unclaimed_code`] does, up to
+/// the stencil's two faces and two masks.
 #[test]
-fn a_graphics_pipelines_stencil_reference_is_carried_rather_than_resolved() {
+fn no_stencil_reference_word_sits_between_the_masks_and_the_bias() {
     let desc = rich_graphics_pipeline();
     let mut stream = StreamWriter::new();
     stream.create_graphics_pipeline(handle(1, 1), &desc);
+    let whole = stream.bytes().to_vec();
 
-    match decode_stream(stream.bytes()).expect("decodes").remove(0) {
-        Command::CreateGraphicsPipeline { depth_stencil, .. } => {
-            let reference = depth_stencil
-                .and_then(|ds| ds.stencil)
-                .map(|s| s.reference)
-                .expect("the rich pipeline has a stencil");
-            assert_eq!(reference, 0x2A, "the reference crossed verbatim");
-        }
-        other => panic!("expected CreateGraphicsPipeline, got {}", other.name()),
-    }
+    let mut at = tag::HEADER_BYTES + 1; // past the opcode
+    at += 8; // pipeline handle
+    at += 1 + 4 + "gbuffer".len(); // present label
+    at += 8; // layout
+    at += 8; // vertex module
+    at += 4 + "vertexMain".len(); // vertex entry point
+    at += 1 + 8 + 4 + "fragmentMain".len(); // fragment presence, module, entry
+    at += 4; // topology, front face, cull mode, polygon mode
+    at += 1; // depth_clamp presence byte
+    at += 1 + 1 + 1 + 1; // depth-stencil presence, format, depth_write, compare
+    at += 1; // stencil presence byte
+    at += (1 + 3) * 2; // front and back face states
+    at += 4 + 4; // read_mask, write_mask — and nothing after them
+    let bias_at = at;
+
+    let constant = f32::from_le_bytes(
+        whole[bias_at..bias_at + 4]
+            .try_into()
+            .expect("four bytes of bias constant"),
+    );
+    assert_eq!(
+        constant,
+        desc.depth_stencil
+            .expect("the rich pipeline has depth-stencil state")
+            .bias
+            .constant,
+        "the bias must start right after write_mask: a reference word here would push it out",
+    );
 }
 
 // ── Host→buffer uploads ───────────────────────────────────────────────────────

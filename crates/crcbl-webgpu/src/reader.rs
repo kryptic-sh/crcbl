@@ -627,9 +627,11 @@ impl ByteReader<'_> {
     /// One [`DepthStencilState`] — the deepest optional chain on the seam.
     ///
     /// The stencil is behind a presence byte, and its `front` and `back` are read
-    /// in that order so a front/back swap is visible; the three masks and the
-    /// three bias floats follow. `reference` is read here — it round-trips in Rust
-    /// — even though it is a per-pass value the WebGPU replayer drops.
+    /// in that order so a front/back swap is visible; the two masks and the
+    /// three bias floats follow. **No reference:** the value a draw compares
+    /// against is pass state on the seam, carried by
+    /// [`Command::SetStencilReference`](crate::Command::SetStencilReference) and
+    /// by nothing else.
     fn read_depth_stencil_state(&mut self) -> Result<DepthStencilState, DecodeError> {
         let format = self.read_format("DepthStencilState::format")?;
         let depth_write = self.read_bool("DepthStencilState::depth_write")?;
@@ -639,13 +641,11 @@ impl ByteReader<'_> {
             let back = self.read_stencil_face_state()?;
             let read_mask = self.read_u32()?;
             let write_mask = self.read_u32()?;
-            let reference = self.read_u32()?;
             Some(StencilState {
                 front,
                 back,
                 read_mask,
                 write_mask,
-                reference,
             })
         } else {
             None

@@ -97,7 +97,7 @@
 //! | [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) | `() -> i32` | Drain, and answer one of the `DEPTH_*` codes. |
 //! | [`__crcbl_web_gpu_probe_depth_bytes_ptr`](shim::__crcbl_web_gpu_probe_depth_bytes_ptr) | `() -> i32` | Where the depth plane starts, once [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) answers [`DEPTH_READY`]. |
 //! | [`__crcbl_web_gpu_probe_depth_bytes_len`](shim::__crcbl_web_gpu_probe_depth_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the depth probe has not answered. |
-//! | [`__crcbl_web_gpu_probe_stencil`](shim::__crcbl_web_gpu_probe_stencil) | `() -> i32` | Encode one frame — an `Rgba8Unorm` target and a [`Format::D24UnormS8Uint`] one, a pipeline comparing the stencil plane [`CompareOp::Equal`] against [`PROBE_STENCIL_BAKED`], a pass that clears the plane to [`PROBE_STENCIL_CLEARED`] and draws twice with `set_stencil_reference` before each, the copy, and a `request_readback` against [`PROBE_STENCIL_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_stencil`](shim::__crcbl_web_gpu_probe_stencil) | `() -> i32` | Encode one frame — an `Rgba8Unorm` target and a [`Format::D24UnormS8Uint`] one, a pipeline comparing the stencil plane [`CompareOp::Equal`] against whatever the pass last set, a pass that clears the plane to [`PROBE_STENCIL_CLEARED`] and draws twice with `set_stencil_reference` before each, the copy, and a `request_readback` against [`PROBE_STENCIL_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_stencil_poll`](shim::__crcbl_web_gpu_probe_stencil_poll) | `() -> i32` | Poll the stencil readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_stencil_state`](shim::__crcbl_web_gpu_probe_stencil_state) | `() -> i32` | Drain, and answer one of the `STENCIL_*` codes. |
 //! | [`__crcbl_web_gpu_probe_stencil_bytes_ptr`](shim::__crcbl_web_gpu_probe_stencil_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_stencil_state`](shim::__crcbl_web_gpu_probe_stencil_state) answers [`STENCIL_READY`]. |
@@ -675,8 +675,8 @@ pub const DEPTH_UNDECODABLE: u32 = 5;
 pub const STENCIL_UNASKED: u32 = 0;
 /// The setup frame — a colour target and a [`Format::D24UnormS8Uint`]
 /// depth-stencil target, a pipeline that compares the stencil plane
-/// [`CompareOp::Equal`] against [`PROBE_STENCIL_BAKED`], a pass that clears the
-/// plane to [`PROBE_STENCIL_CLEARED`] and draws twice with a
+/// [`CompareOp::Equal`] against whatever the pass last set, a pass that clears
+/// the plane to [`PROBE_STENCIL_CLEARED`] and draws twice with a
 /// `set_stencil_reference` before each, the copy, the submit and the request —
 /// is on the stream, and no poll has been issued.
 pub const STENCIL_REQUESTED: u32 = 1;
@@ -3488,25 +3488,15 @@ pub const fn probe_depth_copy() -> BufferImageCopy {
 /// The stencil value the probe's pass clears its plane to, and the value the
 /// first draw's reference matches.
 ///
-/// **Not `0`**, which is WebGPU's own initial reference for a fresh pass and the
-/// value a `stencilClearValue` that never crossed would leave: a probe that
-/// cleared to zero could not tell "the reference arrived" from "nothing
-/// happened and both defaults agreed".
+/// **Not [`stencil::INITIAL_REFERENCE`](crcbl_hal::stencil::INITIAL_REFERENCE)**,
+/// which is what a fresh pass holds and the value a `stencilClearValue` that
+/// never crossed would leave: a probe that cleared to zero could not tell "the
+/// reference arrived" from "nothing happened and both defaults agreed".
 pub const PROBE_STENCIL_CLEARED: u32 = 0x2A;
 
 /// The reference the second draw is given — a value the cleared plane does not
 /// hold, so every one of its fragments must be discarded.
 pub const PROBE_STENCIL_MISS: u32 = 0x11;
-
-/// The reference baked into the pipeline's
-/// [`StencilState::reference`](crcbl_hal::StencilState::reference).
-///
-/// **It matches nothing.** WebGPU has no pipeline-side reference at all, so the
-/// replayer drops this field — and a backend that did honour it instead of the
-/// per-pass value would discard *both* draws, which is the third reading the gate
-/// distinguishes. Distinct from [`PROBE_STENCIL_CLEARED`] and
-/// [`PROBE_STENCIL_MISS`] so it can never be mistaken for either.
-pub const PROBE_STENCIL_BAKED: u32 = 0x33;
 
 /// The stencil read mask the comparison sees through — every bit, so the mask is
 /// not a second reason a reference could fail to match.
@@ -3527,8 +3517,9 @@ const fn unorm8(byte: u8) -> f32 {
 
 /// The colour the pass clears its target to, as the bytes a `Rgba8Unorm` texel
 /// holds. **The reading that means the *first* reference never took effect**:
-/// neither draw survived, so the pipeline's own [`PROBE_STENCIL_BAKED`] decided
-/// both.
+/// neither draw survived, so both were tested against the pass's initial
+/// [`stencil::INITIAL_REFERENCE`](crcbl_hal::stencil::INITIAL_REFERENCE), which
+/// [`PROBE_STENCIL_CLEARED`] is deliberately not.
 ///
 /// The three colours here are pairwise distinct as multisets, not merely as
 /// tuples: no two of them are a channel permutation of each other, so a path that
@@ -3857,8 +3848,9 @@ const PROBE_STENCIL_FACE: crcbl_hal::StencilFaceState = crcbl_hal::StencilFaceSt
 /// * [`PROBE_STENCIL_SECOND_BYTES`] means the second reference never took effect,
 ///   so the draw that should have been discarded drew over the first;
 /// * [`PROBE_STENCIL_BACKGROUND_BYTES`] means the *first* reference never took
-///   effect either, which is what the pipeline's own [`PROBE_STENCIL_BAKED`]
-///   produces.
+///   effect either, so both draws were tested against the pass's initial
+///   [`stencil::INITIAL_REFERENCE`](crcbl_hal::stencil::INITIAL_REFERENCE) — the
+///   reading a browser that ignored `setStencilReference` outright produces.
 ///
 /// **The order is not free to reverse.** Drawing the rejected reference first
 /// would make "the stencil test is not enabled" and "both references were
@@ -3895,7 +3887,6 @@ pub const fn probe_stencil_pipeline_desc() -> GraphicsPipelineDesc<'static> {
                 back: PROBE_STENCIL_FACE,
                 read_mask: PROBE_STENCIL_READ_MASK,
                 write_mask: 0,
-                reference: PROBE_STENCIL_BAKED,
             }),
             bias: DepthBias {
                 constant: 0.0,
@@ -7032,8 +7023,12 @@ impl Probe {
                     render_area: Rect2d::from_size(PROBE_STENCIL_SIZE, PROBE_STENCIL_SIZE),
                     timestamp_writes: None,
                 });
-                stream.bind_graphics_pipeline(PROBE_STENCIL_PIPELINE);
+                // The first reference is set **before** the bind, which is the
+                // seam's other claim about it: a pipeline bind does not disturb
+                // the current reference. A replayer that reset it here would
+                // discard both draws and come back as the background colour.
                 stream.set_stencil_reference(PROBE_STENCIL_CLEARED);
+                stream.bind_graphics_pipeline(PROBE_STENCIL_PIPELINE);
                 stream.draw(0..3, 0..1);
                 stream.set_stencil_reference(PROBE_STENCIL_MISS);
                 stream.draw(3..6, 0..1);
@@ -12749,14 +12744,17 @@ mod tests {
         assert_ne!(PROBE_STENCIL_IMAGE.to_bits(), PROBE_DEPTH_IMAGE.to_bits());
     }
 
-    /// **The pipeline compares `Equal` against a baked reference that matches
-    /// nothing, and writes no stencil back.**
+    /// **The pipeline compares `Equal`, writes no stencil back, and carries no
+    /// reference of its own to compete with the pass's.**
     ///
     /// Each of those is load-bearing: a comparison other than `Equal` would let
-    /// the miss through, a baked reference equal to the cleared value would make
-    /// "the reference arrived" indistinguishable from "the pipeline decided", and
-    /// a non-zero write mask would let the first draw change the plane the second
-    /// is tested against.
+    /// the miss through, and a non-zero write mask would let the first draw
+    /// change the plane the second is tested against. The reference is absent by
+    /// construction — `StencilState` has no such field — so what is checkable
+    /// here is the other half: both of the probe's values differ from
+    /// [`stencil::INITIAL_REFERENCE`](crcbl_hal::stencil::INITIAL_REFERENCE),
+    /// which is what a pass whose `setStencilReference` never arrived would
+    /// compare against.
     #[test]
     fn the_stencil_pipeline_can_only_be_satisfied_by_the_per_pass_reference() {
         let stencil = probe_stencil_pipeline_desc()
@@ -12767,21 +12765,19 @@ mod tests {
         assert_eq!(stencil.front.compare, CompareOp::Equal);
         assert_eq!(stencil.write_mask, 0, "nothing writes the plane back");
         assert_eq!(stencil.read_mask, PROBE_STENCIL_READ_MASK);
-        assert_eq!(stencil.reference, PROBE_STENCIL_BAKED);
-        // The three values are pairwise distinct, so each of the gate's three
-        // readings has exactly one cause.
-        assert_ne!(PROBE_STENCIL_BAKED, PROBE_STENCIL_CLEARED);
-        assert_ne!(PROBE_STENCIL_BAKED, PROBE_STENCIL_MISS);
+        // The two values are distinct, so each of the gate's three readings has
+        // exactly one cause.
         assert_ne!(PROBE_STENCIL_CLEARED, PROBE_STENCIL_MISS);
-        // And `0` is none of them: it is WebGPU's own initial reference for a
-        // fresh pass, so a probe that used it could not tell a reference that
-        // arrived from one that never did.
-        assert_ne!(PROBE_STENCIL_CLEARED, 0);
-        assert_ne!(PROBE_STENCIL_MISS, 0);
+        // And neither is the initial reference a fresh pass holds, so a probe
+        // whose references never arrived cannot look like one whose did.
+        assert_ne!(PROBE_STENCIL_CLEARED, crcbl_hal::stencil::INITIAL_REFERENCE);
+        assert_ne!(PROBE_STENCIL_MISS, crcbl_hal::stencil::INITIAL_REFERENCE);
     }
 
     /// The stencil half: **one export, a whole frame** whose two draws are each
-    /// preceded by a `SetStencilReference`, in that order.
+    /// preceded by a `SetStencilReference`, in that order — and whose first one
+    /// comes before the pipeline bind, so a replayer that reset the reference on
+    /// a bind would show up in the readback.
     #[test]
     fn the_stencil_export_encodes_a_reference_before_each_draw() {
         open_device();
@@ -12801,8 +12797,8 @@ mod tests {
                 "CreateGraphicsPipeline",
                 "CreateCommandEncoder",
                 "BeginRenderPass",
-                "BindGraphicsPipeline",
                 "SetStencilReference",
+                "BindGraphicsPipeline",
                 "Draw",
                 "SetStencilReference",
                 "Draw",

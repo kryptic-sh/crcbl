@@ -281,6 +281,13 @@ capabilities! {
 
     /// [`set_stencil_reference`](crate::CommandEncoder::set_stencil_reference) —
     /// the dynamic stencil reference value subsequent draws compare against.
+    ///
+    /// **The claim is the whole rule, not just that the call is wired.** A
+    /// backend declaring this says the reference is pass state that survives a
+    /// pipeline bind, and that a pass which never calls it draws against
+    /// [`stencil::INITIAL_REFERENCE`](crate::stencil::INITIAL_REFERENCE); see
+    /// [`StencilState`](crate::StencilState) on why there is no pipeline-side
+    /// reference to compete with it.
     StencilReference,
 
     // --- draws ---

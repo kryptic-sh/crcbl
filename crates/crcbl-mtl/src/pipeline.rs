@@ -143,10 +143,6 @@ pub(crate) struct RasterState {
     /// `setDepthBias:slopeScale:clamp:`, in that order. Zeroes when the
     /// pipeline has no depth state, which is what Metal's own default is.
     pub(crate) bias: [f32; 3],
-    /// `setStencilReferenceValue:`, or `None` when the pipeline declares no
-    /// stencil state. `Some(0)` and `None` are different: the first overwrites
-    /// whatever an earlier `set_stencil_reference` left, the second leaves it.
-    pub(crate) stencil_reference: Option<u32>,
 }
 
 /// A graphics pipeline: the Metal object, plus the state Metal would not take.
@@ -483,10 +479,6 @@ impl MetalDevice {
                             state.bias.clamp,
                         ]
                     }),
-                    stencil_reference: desc
-                        .depth_stencil
-                        .and_then(|state| state.stencil)
-                        .map(|stencil| stencil.reference),
                 },
             });
         Ok(self.stamp(handle))

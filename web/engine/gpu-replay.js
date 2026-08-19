@@ -5335,12 +5335,12 @@ export class Replayer {
    *     needs `depth-clip-control`; a device that did not enable it refuses `true`,
    *     the way {@link webgpuTextureFormatFor} refuses a gated format against the
    *     device's own features. `false` proceeds and sets nothing.
-   *   * **The stencil `reference` is DROPPED, not lost.** WebGPU has no
-   *     `stencilReference` in the pipeline — it is per-pass state — so it is
-   *     dropped here the way `workgroupSize` is, and
-   *     {@link Replayer#setStencilReference} is what carries the value a draw
-   *     actually compares against. Its round trip in Rust is what keeps the
-   *     pipeline field carried.
+   *   * **There is no stencil `reference` to drop.** WebGPU has no
+   *     `stencilReference` in the pipeline — it is per-pass state — and neither
+   *     does the seam, so nothing on the wire carries one and
+   *     {@link Replayer#setStencilReference} is the only thing that decides what
+   *     a draw compares against. Binding a pipeline must therefore leave the
+   *     pass's current reference alone, which on WebGPU it cannot help doing.
    *   * **`DepthBias.constant` is `f32` on the seam and `GPUDepthBias` is an
    *     integer.** A non-integer (or out-of-`i32`) value would make WebIDL's
    *     `[EnforceRange] long` conversion throw synchronously, so it is refused by
@@ -5468,10 +5468,9 @@ export class Replayer {
         depthBiasClamp: ds.bias.clamp,
       };
       if (ds.stencil !== null) {
-        // One GPUStencilFaceState per facing. `reference` is NOT a pipeline field
-        // in WebGPU — it is set per-pass via setStencilReference — so it is
-        // dropped here, the way workgroupSize is, and named as belonging to the
-        // pass.
+        // One GPUStencilFaceState per facing. There is no `reference` to set:
+        // it is not a pipeline field in WebGPU and not one on the seam either —
+        // setStencilReference on the open pass is the only channel.
         const faceToGpu = (face) => ({
           compare: SAMPLER_COMPARE_FUNCTION[face.compare],
           failOp: STENCIL_OPERATION[face.failOp],

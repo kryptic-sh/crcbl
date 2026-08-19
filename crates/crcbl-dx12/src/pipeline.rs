@@ -92,7 +92,11 @@
 //! and the command list takes the exact topology, so [`GraphicsPipelineEntry`]
 //! carries the second value and
 //! [`bind_graphics_pipeline`](crcbl_hal::CommandEncoder::bind_graphics_pipeline)
-//! replays it. The stencil reference is the other, and travels the same way.
+//! replays it. The stencil reference is *not* a second one: D3D12 does keep it
+//! on the command list, but the seam has no pipeline field to carry — it is
+//! pass state, set only by
+//! [`set_stencil_reference`](crcbl_hal::CommandEncoder::set_stencil_reference)
+//! — so a bind must leave the list's current value alone.
 //!
 //! **There is no input layout, and that is the architecture.** The seam has no
 //! vertex-buffer layout and no `bind_vertex_buffer` — geometry is pulled from
@@ -199,17 +203,13 @@ pub(crate) struct GraphicsPipelineEntry {
     /// and `IASetPrimitiveTopology(UNDEFINED)` is a debug-layer error rather
     /// than a no-op, so the absence has to be a value the encoder can read.
     pub(crate) topology: Option<D3D_PRIMITIVE_TOPOLOGY>,
-    /// `OMSetStencilRef`, or `None` for a pipeline that declares no stencil
-    /// state. `Some(0)` and `None` differ: the first overwrites whatever an
-    /// earlier `set_stencil_reference` left, the second leaves it.
-    pub(crate) stencil_reference: Option<u32>,
 }
 
 /// A compute pipeline: the state object and the signature it was built against.
 ///
-/// No topology and no stencil reference, which is the whole difference from
-/// [`GraphicsPipelineEntry`]: D3D12 leaves nothing about a dispatch on the
-/// command list except the root arguments every pipeline needs.
+/// No topology, which is the whole difference from [`GraphicsPipelineEntry`]:
+/// D3D12 leaves nothing about a dispatch on the command list except the root
+/// arguments every pipeline needs.
 #[derive(Debug)]
 pub(crate) struct ComputePipelineEntry {
     pub(crate) owner: u64,
@@ -592,10 +592,6 @@ pub(crate) fn graphics(
         raw,
         root_signature: layout.raw.clone(),
         topology: Some(conv::primitive_topology(desc.primitive.topology)),
-        stencil_reference: desc
-            .depth_stencil
-            .and_then(|state| state.stencil)
-            .map(|stencil| stencil.reference),
     })
 }
 
@@ -918,10 +914,6 @@ pub(crate) fn mesh(
         // A mesh pipeline has no input assembly to set a topology on; see the
         // doc comment.
         topology: None,
-        stencil_reference: desc
-            .depth_stencil
-            .and_then(|state| state.stencil)
-            .map(|stencil| stencil.reference),
     })
 }
 

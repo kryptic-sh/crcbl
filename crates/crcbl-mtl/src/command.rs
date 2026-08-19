@@ -434,9 +434,11 @@ fn replay(encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>, command: &Rende
             // `default_depth_stencil_state` has the bisect and the no-op
             // argument.
             encoder.setDepthStencilState(Some(&bound.depth_stencil));
-            if let Some(reference) = bound.raster.stencil_reference {
-                encoder.setStencilReferenceValue(reference);
-            }
+            // **No `setStencilReferenceValue:` here.** The reference is pass
+            // state on the seam and a pipeline carries none, so a bind leaves
+            // whatever `set_stencil_reference` last set — see
+            // `crcbl_hal::StencilState`. `encode_render_pass` sets the seam's
+            // initial value once, as the encoder opens.
         }
         RenderCommand::BindGroup(bindings) => crate::binding::apply(bindings, encoder),
         RenderCommand::PushConstants {
@@ -810,6 +812,12 @@ impl MetalCommandEncoder {
         if let Some(scissor) = recording.scissor {
             encoder.setScissorRect(scissor);
         }
+        // The seam promises every pass opens at `stencil::INITIAL_REFERENCE`.
+        // A fresh `MTLRenderCommandEncoder` already starts there, so this is
+        // belt and braces rather than a fix — but the promise is the seam's,
+        // and stating it in code is what keeps it from resting on a default
+        // documented somewhere else.
+        encoder.setStencilReferenceValue(crcbl_hal::stencil::INITIAL_REFERENCE);
         for command in &recording.commands {
             replay(&encoder, command);
         }
@@ -1549,14 +1557,19 @@ impl CommandEncoder for MetalCommandEncoder {
     /// Sets the pipeline state, **and the rasteriser state Metal keeps on the
     /// encoder rather than in the pipeline object**.
     ///
-    /// Cull mode, winding, fill mode, depth clip, depth bias, the depth/stencil
-    /// test and the stencil reference are all encoder calls in Metal and all
-    /// fields of [`GraphicsPipelineDesc`](crcbl_hal::GraphicsPipelineDesc)
-    /// here, so binding replays every one of them from
-    /// `crcbl_mtl::pipeline`'s `RasterState`. Leaving any of them out would
-    /// make a pipeline draw with whatever the *previous* pipeline set, which is
-    /// the class of bug that shows up as one pass rendering correctly and the
-    /// next one inheriting its culling.
+    /// Cull mode, winding, fill mode, depth clip, depth bias and the
+    /// depth/stencil test are all encoder calls in Metal and all fields of
+    /// [`GraphicsPipelineDesc`](crcbl_hal::GraphicsPipelineDesc) here, so
+    /// binding replays every one of them from `crcbl_mtl::pipeline`'s
+    /// `RasterState`. Leaving any of them out would make a pipeline draw with
+    /// whatever the *previous* pipeline set, which is the class of bug that
+    /// shows up as one pass rendering correctly and the next one inheriting its
+    /// culling.
+    ///
+    /// **The stencil reference is the one encoder call a bind must not make.**
+    /// It is pass state on the seam, set only by
+    /// [`set_stencil_reference`](crcbl_hal::CommandEncoder::set_stencil_reference),
+    /// and `GraphicsPipelineDesc` carries no field for it to replay.
     ///
     /// Outside a render pass this is a caller error rather than a no-op: there
     /// is no Metal object to hold the state, so silently dropping it would mean

@@ -373,7 +373,12 @@ pub fn stencil_face(
         compare_op: compare_op(face.compare),
         compare_mask: state.read_mask,
         write_mask: state.write_mask,
-        reference: state.reference,
+        // The seam has no pipeline-side reference — it is pass state, and every
+        // pipeline this backend builds declares
+        // `VK_DYNAMIC_STATE_STENCIL_REFERENCE`, so whatever is written here is
+        // replaced before the first draw. Zero rather than a sentinel: a value
+        // that never reaches the GPU should not read as a choice.
+        reference: 0,
     }
 }
 
@@ -1036,10 +1041,14 @@ mod tests {
         }
     }
 
-    /// The masks and the reference live on `StencilState`, not per face, so the
-    /// two facings must receive the same ones while keeping their own ops. A
-    /// mapping that took the ops from one face for both is invisible until a
-    /// two-sided stencil effect.
+    /// The masks live on `StencilState`, not per face, so the two facings must
+    /// receive the same ones while keeping their own ops. A mapping that took
+    /// the ops from one face for both is invisible until a two-sided stencil
+    /// effect.
+    ///
+    /// The reference is the other half: the seam has none to map, and every
+    /// pipeline here declares `VK_DYNAMIC_STATE_STENCIL_REFERENCE`, so the
+    /// baked field must stay at zero rather than acquire a meaning.
     #[test]
     fn stencil_faces_keep_their_own_ops_and_share_the_masks() {
         use crcbl_hal::{CompareOp, StencilFaceState, StencilOp, StencilState};
@@ -1047,7 +1056,6 @@ mod tests {
         let state = StencilState {
             read_mask: 0x0F,
             write_mask: 0xF0,
-            reference: 7,
             ..StencilState::default()
         };
         let face = StencilFaceState {
@@ -1063,7 +1071,10 @@ mod tests {
         assert_eq!(mapped.compare_op, vk::CompareOp::EQUAL);
         assert_eq!(mapped.compare_mask, state.read_mask);
         assert_eq!(mapped.write_mask, state.write_mask);
-        assert_eq!(mapped.reference, state.reference);
+        assert_eq!(
+            mapped.reference, 0,
+            "the reference is dynamic state, so nothing may bake one into the pipeline"
+        );
         assert_ne!(
             mapped.compare_mask, mapped.write_mask,
             "the two masks are distinct fields, not one read twice"
