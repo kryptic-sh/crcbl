@@ -20,10 +20,13 @@
 //! Per-cluster selection over that hierarchy is asserted too: the face draws
 //! from more than one level at once, and no level dominates the cut.
 //!
-//! Still owed, from that document's milestones: hysteresis, and the LOD tint and
-//! heatmap overlays; the two indirect paths and the forced-path comparison; and
-//! the skinned and tiling cases with a Pages demo. There is no window and no
-//! dolly yet, so there are no golden frames.
+//! The fixed dolly runs too, on one renderer so that hysteresis is in play, and
+//! detail measurably arrives as the camera closes without the cut jumping.
+//!
+//! Still owed, from that document's milestones: the LOD tint and heatmap
+//! overlays; the two indirect paths and the forced-path comparison; and the
+//! skinned and tiling cases with a Pages demo. There is no window, so there are
+//! no golden frames yet.
 
 pub mod dag;
 pub mod face;

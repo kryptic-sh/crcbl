@@ -104,6 +104,56 @@ pub(crate) struct Quarry {
     pub(crate) ctx: GpuContext,
     pub(crate) renderer: ForwardRenderer,
     pub(crate) triangles: usize,
+    /// Which description was made resident, so a frame knows whether there is a
+    /// per-cluster cut to read at all.
+    levels: Levels,
+    /// **One pool across every frame**, which is the point of holding it here:
+    /// the graph compiles against the pool the last frame left, so barriers
+    /// open where that frame closed them rather than from `Undefined` each
+    /// time. A pool per frame would make every frame the first one.
+    pool: TransientPool,
+}
+
+/// What one frame came out as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Frame {
+    /// Pixels that are not the frame's most common colour — the face against
+    /// the clear.
+    pub(crate) covered: usize,
+    /// How many pixels there are, so `covered` reads as a share.
+    pub(crate) pixels: usize,
+    /// How many clusters each level contributed, finest first, or `None` where
+    /// the device records no per-cluster cut.
+    pub(crate) cut: Option<Vec<usize>>,
+}
+
+/// Where the dolly starts: outside the near edge, above the face.
+///
+/// The face occupies X ∈ ±`WIDTH_METRES`/2, Y ∈ 0..`HEIGHT_METRES` and Z ∈
+/// 0..`DEPTH_METRES`, and its winding is counter-clockwise seen from +Y — so a
+/// camera has to be above it and looking along +Z or it sees the back of every
+/// triangle, which is the difference between an empty frame and a picture.
+pub(crate) const DOLLY_START: f32 = 0.0;
+
+/// Where the dolly ends: most of the way down the face, so the near clusters
+/// have gone past the camera and the far ones have come close.
+pub(crate) const DOLLY_END: f32 = 1.0;
+
+/// The camera `at` along the dolly, `0.0` at [`DOLLY_START`] and `1.0` at
+/// [`DOLLY_END`].
+///
+/// A straight run down the face's own axis, which is the shape
+/// `docs/plan/sample/14-quarry.md` asks for: "the fixed dolly". It stays the
+/// same height throughout so that what changes between frames is distance and
+/// nothing else.
+pub(crate) fn dolly(at: f32) -> Camera {
+    let z = -30.0 + at * face::DEPTH_METRES * 0.5;
+    Camera {
+        eye: crcbl::math::Vec3::new(0.0, face::HEIGHT_METRES, z),
+        target: crcbl::math::Vec3::new(0.0, 0.0, z + face::DEPTH_METRES * 0.5),
+        up: crcbl::math::Vec3::Y,
+        projection: crcbl::render::Projection::default(),
+    }
 }
 
 /// Which description of the same face to make resident.
@@ -164,13 +214,26 @@ impl Quarry {
             ctx,
             renderer,
             triangles: face.triangles(),
+            levels,
+            pool: TransientPool::new(),
         }
+    }
+
+    /// Renders one frame from `at` along the dolly and measures what came out.
+    ///
+    /// **Frames accumulate.** `docs/plan/25-lod.md`'s hysteresis is device-local
+    /// state a shader writes once a frame, so a cut depends on every frame
+    /// before it on this renderer — which is what makes a dolly a different
+    /// measurement from the same positions rendered by fresh contexts.
+    pub(crate) fn frame(&mut self, at: f32) -> Frame {
+        frame_body(self, at)
     }
 
     /// Unwinds in reverse order of creation. Nothing here has a `Drop`, and a
     /// leaked pipeline is what `crcbl-vk`'s teardown warning reports.
     pub(crate) fn finish(mut self) {
         self.ctx.drain().expect("the queue drains");
+        self.pool.destroy(self.ctx.device());
         self.renderer.destroy(self.ctx.device());
         self.ctx.destroy().expect("teardown is clean");
     }
@@ -178,6 +241,13 @@ impl Quarry {
 /// Renders one frame of `levels` and asserts what came out.
 pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>> {
     let mut quarry = Quarry::open(levels, budget);
+    let cut = quarry.frame(DOLLY_START).cut;
+    quarry.finish();
+    cut
+}
+
+/// The body of one frame: renders at `at` along the dolly and measures it.
+fn frame_body(quarry: &mut Quarry, at: f32) -> Frame {
     let (width, height) = EXTENT;
     let bytes = u64::from(width) * u64::from(height) * 4;
 
@@ -191,8 +261,6 @@ pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>
             memory: MemoryLocation::HostReadback,
         })
         .expect("a readback buffer");
-    let mut pool = TransientPool::new();
-
     let acquired = quarry
         .ctx
         .acquire()
@@ -201,24 +269,11 @@ pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>
     assert_eq!(acquired.extent, EXTENT);
     let device = quarry.ctx.device();
 
-    // **Above the near edge, looking down the length of the face.** The face
-    // occupies X ∈ ±`WIDTH_METRES`/2, Y ∈ 0..`HEIGHT_METRES` and Z ∈
-    // 0..`DEPTH_METRES`, and its winding is counter-clockwise seen from +Y — so
-    // a camera has to be above it and looking along +Z or it sees the back of
-    // every triangle, which is the difference between an empty frame and a
-    // picture. Standing outside the near edge on −Z puts the whole run of it in
-    // shot, which is the shape the sample is for.
-    let camera = Camera {
-        eye: crcbl::math::Vec3::new(0.0, face::HEIGHT_METRES, -30.0),
-        target: crcbl::math::Vec3::new(0.0, 0.0, face::DEPTH_METRES * 0.5),
-        up: crcbl::math::Vec3::Y,
-        projection: crcbl::render::Projection::default(),
-    };
     quarry
         .renderer
         .begin_frame(
             device,
-            &camera,
+            &dolly(at),
             &crcbl::render::DirectionalLight::default(),
             EXTENT,
         )
@@ -245,11 +300,11 @@ pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>
             },
         );
         let _hdr = quarry.renderer.add_passes(&mut graph, target, EXTENT);
-        graph.compile(&pool).expect("a legal frame")
+        graph.compile(&quarry.pool).expect("a legal frame")
     };
     let dump = compiled.dump();
     compiled
-        .execute(device, &mut pool, encoder.as_mut(), None)
+        .execute(device, &mut quarry.pool, encoder.as_mut(), None)
         .expect("the graph executed");
     encoder.copy_image_to_buffer(&BufferImageCopy {
         buffer: staging,
@@ -281,6 +336,8 @@ pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>
     );
 
     // **Drawn, wherever there are pixels to read.**
+    let mut covered = 0usize;
+    let pixels = (width * height) as usize;
     if backend() == GpuBackend::Null {
         eprintln!(
             "quarry: the Null backend records and draws nothing, so this frame was asserted as a \
@@ -296,12 +353,11 @@ pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>
                 .entry([pixel[0], pixel[1], pixel[2], pixel[3]])
                 .or_default() += 1;
         }
-        let pixels = (width * height) as usize;
         let (background, count) = histogram
             .iter()
             .max_by_key(|(_, count)| **count)
             .expect("a frame has pixels in it");
-        let covered = pixels - count;
+        covered = pixels - count;
         eprintln!(
             "quarry: {} distinct colour(s), {covered} of {pixels} pixels ({:.1}%) are not the \
              most common one {background:?}",
@@ -320,15 +376,17 @@ pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>
         );
     }
 
-    let cut = (levels == Levels::Dag)
-        .then(|| read_the_cut(&quarry))
+    let cut = (quarry.levels == Levels::Dag)
+        .then(|| read_the_cut(quarry))
         .flatten();
 
     quarry.ctx.device().destroy_command_buffer(commands);
     quarry.ctx.device().destroy_buffer(staging);
-    pool.destroy(quarry.ctx.device());
-    quarry.finish();
-    cut
+    Frame {
+        covered,
+        pixels,
+        cut,
+    }
 }
 
 /// Reads `size` bytes of `staging` into `out`, polling with a deadline rather

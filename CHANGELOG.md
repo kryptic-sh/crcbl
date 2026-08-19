@@ -799,6 +799,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **quarry has its fixed dolly, and detail arrives as the camera closes.** One
+  straight run down the face's own axis, nine stops, all on **one renderer** —
+  which is what makes it a different measurement from the same positions
+  rendered by fresh contexts, since `docs/plan/25-lod.md`'s hysteresis is
+  device-local state a shader writes once a frame. Level 2's contribution falls
+  18 → 0 while level 0's rises 0 → 38, and the cut's mean level goes 1.375 →
+  0.513.
+
+  **Smoothness is asserted separately, and it is the "no LOD popping"
+  criterion.** A cut that reached the same end by jumping there would satisfy
+  the fall and would pop on screen, so each step is held to a tenth of a level
+  of rise; the measured worst is 0.013, once, at the last stop. Run backwards
+  the whole thing mirrors — the mean level climbs 0.558 → 1.220 as the camera
+  retreats — which is how the assertion was shown able to fail.
+
 - **quarry selects per cluster, and it is measured rather than looked at.** The
   amplification stage's cut comes out of `ForwardRenderer::cluster_selection` —
   one `u32` per resident cluster, which nothing in the frame reads — and
