@@ -3490,9 +3490,52 @@ impl Drop for DeviceInner {
                 .map(|(kind, count)| format!("{count} {kind}"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // Images and views carry a format and an ownership flag already, so
+            // saying which costs nothing and is usually the whole diagnosis: a
+            // depth format is a shadow or a prepass target, and a
+            // swapchain-owned one is the ring rather than anything a caller
+            // made. Only these two kinds get it because only these two have
+            // anything to say — a leaked pipeline layout is just a leaked
+            // pipeline layout.
+            let mut shapes: Vec<String> = Vec::new();
+            for (label, formats) in [
+                (
+                    "image",
+                    state
+                        .images
+                        .iter()
+                        .map(|(_, entry)| (entry.format, entry.swapchain_owned))
+                        .collect::<Vec<_>>(),
+                ),
+                (
+                    "image view",
+                    state
+                        .views
+                        .iter()
+                        .map(|(_, entry)| (entry.format, entry.swapchain_owned))
+                        .collect::<Vec<_>>(),
+                ),
+            ] {
+                let mut seen: Vec<((Format, bool), usize)> = Vec::new();
+                for key in formats {
+                    match seen.iter_mut().find(|(had, _)| *had == key) {
+                        Some((_, count)) => *count += 1,
+                        None => seen.push((key, 1)),
+                    }
+                }
+                for ((format, owned), count) in seen {
+                    let owner = if owned { ", swapchain-owned" } else { "" };
+                    shapes.push(format!("{count} {label} {format:?}{owner}"));
+                }
+            }
+            let shapes = if shapes.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", shapes.join(", "))
+            };
             crcbl_core::log::warn!(
                 "crcbl-vk: {live} object(s) still alive at device teardown \
-                 ({named}), and {} still parked in the deletion queue",
+                 ({named}{shapes}), and {} still parked in the deletion queue",
                 state.trash.pending()
             );
         }
