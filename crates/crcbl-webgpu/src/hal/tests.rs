@@ -1120,6 +1120,23 @@ fn a_capability_declared_unsupported_is_refused_by_its_own_call() {
          {statistics:?}"
     );
 
+    // `UpdateBindGroup`, which needs no bind group to reach: this backend
+    // refuses unconditionally and reads neither argument, because a
+    // `GPUBindGroup` exposes a label and nothing else. Recorded here as a
+    // *third* row that "needs a layout or a bind group built first" turned out
+    // not to need one — the claim was made about a category rather than checked
+    // per member.
+    let updated =
+        device.update_bind_group(Handle::from_bits((7 << 32) | 1).expect("a handle"), &[]);
+    assert!(
+        matches!(updated, Err(HalError::Unsupported { .. })),
+        "update_bind_group is declared unsupported and answered {updated:?}"
+    );
+    assert!(
+        matches!(device.supports(Capability::UpdateBindGroup), Support::No(_)),
+        "UpdateBindGroup is no longer declared unsupported"
+    );
+
     // **The accepting side, so this is not a test that passes by refusing
     // everything.** A binary semaphore and an occlusion set are both declared
     // supported, and both must still be served.

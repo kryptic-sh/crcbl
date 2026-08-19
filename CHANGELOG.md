@@ -898,9 +898,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   A sibling test covers the encoder's three: `draw_indirect_count`,
   `draw_indexed_indirect_count` and `draw_mesh_tasks` return nothing, so they
   record the refusal and surface it at `finish`, and reaching them needs no
-  pipeline at all. Eight of this backend's twelve unsupported rows are now
-  checked natively; the five that need a layout, bind group or pipeline first
-  are named in `docs/backlog.md` rather than left implied.
+  pipeline at all. Nine of this backend's twelve unsupported rows are now
+  checked natively — `update_bind_group` needed no bind group either, refusing
+  unconditionally without reading its arguments. The three that genuinely need a
+  layout, an argument buffer or a pipeline are named in `docs/backlog.md` rather
+  than left implied.
 
 - **The seam suite can now exercise the half of the parity contract a capable
   device hides — and it found three mis-declarations in `crcbl-vk`.** With every

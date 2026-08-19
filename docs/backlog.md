@@ -2181,11 +2181,19 @@ a bare encoder, one verb per encoder so the first recorded refusal cannot mask
 the others, and finishes a clean encoder too so it cannot pass on a backend that
 refused every command buffer.
 
-**What is genuinely still uncovered here**: `PushConstants`,
-`IndirectArgumentPaddedStride`, `UpdateBindGroup`, `BindlessDescriptorArray` and
-`PolygonModeLine` — these need a layout, a bind group or a pipeline first, which
-is the seam suite's `exercise_*` machinery and not worth a second copy in this
-crate. A browser probe group remains the honest route for them.
+**`UpdateBindGroup` did not need a bind group either**, which is the same
+mistake caught a second time: this backend refuses unconditionally and reads
+neither argument, because a `GPUBindGroup` exposes a label and nothing else. One
+call with a fabricated handle reaches it. **Nine of the twelve are now checked
+natively.**
+
+**What is genuinely still uncovered here — checked one at a time this time**:
+`PushConstants` and `BindlessDescriptorArray` are refused where a layout is
+built, `IndirectArgumentPaddedStride` where an indirect draw is recorded against
+a real argument buffer, and `PolygonModeLine` where a graphics pipeline is
+created. Those three shapes are the seam suite's `exercise_*` machinery and not
+worth a second copy in this crate; a browser probe group remains the honest
+route for them.
 
 So of the five backends the pattern was checked on: three had it (`crcbl-vk`,
 `crcbl-dx12`, `crcbl-mtl`, all fixed), `crcbl-webgpu` did not, and `crcbl-wgpu`
