@@ -870,6 +870,18 @@ it encodes which adapter Chromium picks and whether WebGPU is exposed at all, so
 two drivers disagreeing about it means two gates testing different things while
 both look green. A shared `web/tools/chromium.mjs` is the obvious shape.
 
+**The drift is no longer hypothetical, and it took one afternoon.** On
+2026-08-20 the launch timeout was raised from 30 seconds in two of the three
+drivers and not the third, which held it as an unnamed `30_000` literal — so for
+one commit the gates disagreed about how long a browser may take to start.
+`LAUNCH_TIMEOUT_MS` now lives in `browser-launch.mjs` and all three import it.
+
+That fixes the one value, not the pattern: `browserFlags`, `findBrowser`,
+`readDevToolsPort` and `stopBrowser` were already shared through that file, and
+what remains duplicated is the launch-and-poll loop itself and the CDP client.
+The loop is now three copies of the same six lines around one shared constant,
+which is the cheapest possible version of the problem and still a version of it.
+
 **Do this together with the cross-platform work below**, not before it: that
 work has to touch browser discovery and the Xvfb branch in every driver anyway,
 and doing both at once means changing the plumbing in one place instead of
