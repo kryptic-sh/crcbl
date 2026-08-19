@@ -73,28 +73,30 @@ grid**: a path argument, the load through `crcbl::assets::DirSource`, the
 conversion, frame-on-load, orbit/pan/zoom/`F`, and one directional light. Every
 module's docs name its own omission; this is the list in one place.
 
-- **The grid floor — the pass exists, nothing draws it.** `crcbl_render::grid`
-  landed: a screen-space infinite grid, plane reconstructed per fragment, line
-  width from `fwidth` so it is constant in pixels at any zoom, two scales, a
-  distance fade, and `SV_Depth` written so geometry occludes it. Verified on a
-  real RX 7900 XTX through the render graph — grid visible against a far depth
-  clear, **zero lit pixels** against a near one, so the occlusion is real.
+- **The grid floor is drawn, and its scale is fixed.** `crcbl_render::grid` is
+  wired into `ForwardRenderer` behind `set_ground_grid`, off by default, drawn
+  **after the tonemap** so it is not exposed and tonemapped like scene content —
+  a reference grid has to look the same at any exposure — and depth-tested
+  against the scene depth the forward pass already stores for SSR. `apps/viewer`
+  turns it on, which completes milestone 1.
 
-  What remains is **wiring**: nothing calls `Grid::add_pass`, so no sample shows
-  a grid and no golden covers it. The call site needs the colour target, the
-  depth image and the camera matrices, all of which `forward` already has.
+  **What is left is the scale.** The style is `GridStyle::default()`: 1 m cells,
+  coarse every 10, fade at 100 m. A document authored at a very different scale
+  gets a grid that is one line (a 5 cm model) or entirely faded (a 500 m one).
+  The viewer already computes the model's bounds for frame-on-load, so deriving
+  `spacing` and `fade_distance` from them is the obvious fix and was
+  deliberately left out of "turn it on". Until then the grid is only meaningful
+  for models around human scale.
 
-  Two things to settle when wiring it. `Grid::new` bakes `target_format` and
-  `depth_format` into its pipeline, so a caller drawing into a different pair
-  needs a second `Grid`. And `add_pass` takes only the inverse view-projection
-  and recovers the forward matrix with `Mat4::inverse()` each frame — the call
-  site has both, so passing both removes an inversion; left alone rather than
-  changing a signature with no caller to justify it.
+  **Verified on Vulkan only.** The wiring's pixel evidence is one RADV run; no
+  golden anywhere turns the grid on, so `run-render-e2e.sh`'s Metal, DX12 and
+  wgpu arms say nothing about it. The shader itself was checked on hardware in
+  the previous slice, but `SV_Depth` on Metal and WebGPU is still compiled-and-
+  read rather than executed.
 
-  Only the SPIR-V has ever executed. The WGSL, MSL and DXIL artifacts compile
-  and validate — naga over the WGSL, `spirv-val` over the SPIR-V, the MSL read
-  by eye for `[[depth(any)]]` and `discard_fragment()` — but `SV_Depth` on Metal
-  and WebGPU is unrun.
+  `Grid` bakes `target_format` into its pipeline at first use, so a caller
+  drawing into a different format needs a second one. That matches the tonemap
+  pipeline's existing assumption rather than adding a new limit.
 
 - **Milestone 2 in whole** — the mesh/material/texture panels, the wireframe and
   normals views, the exposure slider. `crate::gpu` has a `UiRenderer` pass now,

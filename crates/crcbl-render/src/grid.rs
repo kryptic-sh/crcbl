@@ -20,10 +20,18 @@
 //!
 //! # What this module is, and what it is not
 //!
-//! It is the pass and its pipeline. It does not add itself to a frame:
-//! [`crate::forward`] is untouched, and a caller wires [`Grid::add_pass`] in
-//! beside the passes it already adds. Nothing here reads a camera type either —
-//! the pass takes the inverse view-projection it needs and no more.
+//! It is the pass and its pipeline, and nothing here reads a camera type: the
+//! pass takes the two matrices it needs and no more.
+//!
+//! [`crate::forward`] is what puts it in a frame, behind an opt-in that is off
+//! by default — see [`ForwardRenderer::set_ground_grid`] — and it adds this pass
+//! **after** the tonemap rather than before it. The grid is reference chrome, so
+//! it is drawn in display space where its colour is the same at any exposure,
+//! which is what Blender's overlays do; drawn into the HDR target it would be
+//! tonemapped like geometry and shift with scene brightness. It still tests
+//! against the scene depth, so real geometry occludes it.
+//!
+//! [`ForwardRenderer::set_ground_grid`]: crate::forward::ForwardRenderer::set_ground_grid
 //!
 //! [`Grid`] is deliberately **not** re-exported at the crate root, unlike most
 //! of this crate's types: [`crate::light_grid::Grid`] already holds that name at
@@ -479,11 +487,16 @@ impl Grid {
     /// what is already there.
     ///
     /// `inv_view_proj` is the camera's inverse view-projection, which is the
-    /// only camera fact the shader reads: it unprojects two clip-space points
-    /// per pixel to build that pixel's view ray. Its inverse — the ordinary
-    /// view-projection — travels in the block beside it, because the fragment
-    /// stage has to project its plane hit back to the `SV_Depth` it is tested
-    /// at and no shader can invert a matrix.
+    /// camera fact the fragment stage builds its ray from: it unprojects two
+    /// clip-space points per pixel to get that pixel's view ray. `view_proj` is
+    /// the ordinary one, and it travels in the block beside it because the
+    /// fragment stage has to project its plane hit back to the `SV_Depth` it is
+    /// tested at — and no shader can invert a matrix.
+    ///
+    /// **Both are taken rather than one derived from the other.** Every caller
+    /// is drawing a frame it already has a view-projection for, and a
+    /// [`Mat4::inverse`] per frame to recover a matrix the caller was holding is
+    /// arithmetic for nothing.
     ///
     /// # Panics
     ///
@@ -494,13 +507,14 @@ impl Grid {
         frame: usize,
         target: ImageId,
         depth: ImageId,
+        view_proj: Mat4,
         inv_view_proj: Mat4,
     ) {
         let pipeline = self.pipeline;
         let pipeline_layout = self.pipeline_layout;
         let group = self.groups[frame];
         let uniforms = self.uniforms[frame];
-        let bytes = params_bytes(inv_view_proj, inv_view_proj.inverse(), &self.style);
+        let bytes = params_bytes(inv_view_proj, view_proj, &self.style);
 
         graph
             .add_render_pass("grid")
@@ -592,9 +606,10 @@ impl Rollback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_hal::null::NullInstance;
+    use crcbl_hal::null::{NullInstance, Recorder};
     use crcbl_hal::{
-        DeviceDesc, Features, ImageUsage, Instance, QueueHandle, QueueKind, ResourceState,
+        CommandEncoderDesc, DeviceDesc, Features, ImageUsage, Instance, QueueHandle, QueueKind,
+        ResourceState,
     };
 
     use crate::transient::{TransientImageDesc, TransientPool};
@@ -604,8 +619,9 @@ mod tests {
     /// the mirrors below are checked at all.
     const SOURCE: &str = include_str!("../../crcbl-shaders/shaders/grid.slang");
 
-    fn open() -> (Box<dyn Device>, QueueHandle) {
-        let instance = NullInstance::gpu_driven();
+    fn open() -> (Recorder, Box<dyn Device>, QueueHandle) {
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {
@@ -617,7 +633,7 @@ mod tests {
             })
             .expect("the null backend always opens");
         let queue = device.queue(QueueKind::Graphics).expect("always present");
-        (device, queue)
+        (recorder, device, queue)
     }
 
     // -----------------------------------------------------------------------
@@ -959,39 +975,101 @@ mod tests {
         assert_eq!(&bytes[172..176], &0.8f32.to_le_bytes(), "coarse_color.a");
     }
 
-    /// The matrix the shader projects its hit with is the inverse of the one
-    /// the caller hands over, to the precision a `f32` block can carry.
+    // -----------------------------------------------------------------------
+    // The pass
+    // -----------------------------------------------------------------------
+
+    /// **The pass writes the two matrices the way round its arguments say.**
+    ///
+    /// The block's own layout is [`the_block_is_two_matrices_and_three_rows`]'s
+    /// and the shader's is
+    /// [`the_uniform_block_matches_the_struct_grid_slang_declares`]'s; what
+    /// neither can see is the one line inside [`Grid::add_pass`] that hands them
+    /// to [`params_bytes`]. Swapped there, the grid is drawn through a camera
+    /// nobody is looking through — which is still a picture, and still passes
+    /// every other test in this file.
+    ///
+    /// So this runs the recorded pass body and reads the uniform buffer back off
+    /// the null recorder, which is the only place in the tree that keeps what a
+    /// host write put in one.
     #[test]
-    fn the_block_carries_the_inverse_of_the_matrix_add_pass_takes() {
-        // Shaped like a view-projection — a rotation, a non-uniform scale and a
-        // translation — rather than literally one, because `glam`'s projection
-        // constructors are deprecated in favour of per-API ones and the claim
-        // here is about the round trip, not about a camera.
+    fn the_pass_writes_the_inverse_first_and_the_forward_matrix_second() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let grid = Grid::new(device, 1, Format::Rgba16Float, Format::D32Float)
+            .expect("the null backend builds every pipeline");
+
+        // Two matrices that are each other's inverse and are plainly not equal,
+        // so reading one where the other belongs cannot pass by coincidence.
         let view_proj = Mat4::from_scale_rotation_translation(
             Vec3::new(1.5, 0.75, 2.0),
             glam::Quat::from_rotation_y(0.7),
             Vec3::new(3.0, -2.0, 11.0),
         );
-        let round_trip = view_proj.inverse().inverse();
-        for (wanted, got) in view_proj
-            .to_cols_array()
-            .into_iter()
-            .zip(round_trip.to_cols_array())
-        {
-            assert!((wanted - got).abs() < 1e-4, "{wanted} became {got}");
-        }
-    }
+        let inv_view_proj = view_proj.inverse();
 
-    // -----------------------------------------------------------------------
-    // The pass
-    // -----------------------------------------------------------------------
+        let mut pool = TransientPool::new();
+        let mut graph = RenderGraph::new(queue);
+        let color = graph.create_image(
+            "scene-color",
+            TransientImageDesc::new(
+                (64, 48),
+                Format::Rgba16Float,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            ),
+        );
+        let depth = graph.create_image(
+            "scene-depth",
+            TransientImageDesc::new(
+                (64, 48),
+                Format::D32Float,
+                ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+            ),
+        );
+        grid.add_pass(&mut graph, 0, color, depth, view_proj, inv_view_proj);
+
+        let compiled = graph.compile(&pool).expect("the graph compiles");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("grid block"),
+            queue,
+        });
+        compiled
+            .execute(device, &mut pool, encoder.as_mut(), None)
+            .expect("the graph executed");
+
+        let written = recorder
+            .buffer_bytes(grid.uniforms[0])
+            .expect("the pass body wrote the block");
+        assert_eq!(
+            &written[..64],
+            &inv_view_proj
+                .to_cols_array()
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()[..],
+            "the inverse view-projection is the block's first member",
+        );
+        assert_eq!(
+            &written[64..128],
+            &view_proj
+                .to_cols_array()
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()[..],
+            "the forward view-projection is the block's second member",
+        );
+
+        drop(encoder);
+        grid.destroy(device);
+        pool.destroy(device);
+    }
 
     /// The pass attaches the colour target and reads the depth without writing
     /// it — which is the whole of what "occluded by the scene, invisible to it"
     /// means at the graph level.
     #[test]
     fn the_pass_loads_its_target_and_only_reads_depth() {
-        let (device, queue) = open();
+        let (_recorder, device, queue) = open();
         let grid = Grid::new(device.as_ref(), 2, Format::Rgba16Float, Format::D32Float)
             .expect("the null backend builds every pipeline");
 
@@ -1013,7 +1091,7 @@ mod tests {
                 ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             ),
         );
-        grid.add_pass(&mut graph, 0, color, depth, Mat4::IDENTITY);
+        grid.add_pass(&mut graph, 0, color, depth, Mat4::IDENTITY, Mat4::IDENTITY);
 
         let compiled = graph.compile(&pool).expect("the graph compiles");
         assert_eq!(compiled.passes().len(), 1);
@@ -1041,7 +1119,7 @@ mod tests {
     /// flight cannot have last frame's camera overwritten under it.
     #[test]
     fn the_block_is_a_ring() {
-        let (device, _queue) = open();
+        let (_recorder, device, _queue) = open();
         let grid = Grid::new(device.as_ref(), 3, Format::Rgba16Float, Format::D32Float)
             .expect("the null backend builds every pipeline");
         assert_eq!(grid.uniforms.len(), 3);
@@ -1063,7 +1141,7 @@ mod tests {
     /// bytes rather than only in the field.
     #[test]
     fn the_style_reaches_the_block() {
-        let (device, _queue) = open();
+        let (_recorder, device, _queue) = open();
         let mut grid = Grid::new(device.as_ref(), 1, Format::Rgba16Float, Format::D32Float)
             .expect("the null backend builds every pipeline");
         assert_eq!(grid.style().spacing, 1.0);

@@ -156,6 +156,10 @@ use crate::cull_stats::CullStatsRing;
 use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 use crate::effects::{EffectRequest, RenderEffects};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, PassBuilder, RenderGraph};
+// Renamed on the way in, because [`crate::light_grid::Grid`] already holds the
+// bare name here and means the froxel grid — the collision [`crate::grid`]'s
+// header predicted.
+use crate::grid::{Grid as GroundGrid, GridStyle};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError};
 use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
@@ -180,6 +184,14 @@ pub const SCENE_CLEAR: [f32; 4] = [0.012, 0.016, 0.030, 1.0];
 /// How many frames of uniform buffers to keep. Matches the frame loop's
 /// frames-in-flight.
 pub const FRAMES_IN_FLIGHT: usize = 2;
+
+/// The format the frame's depth buffer is created with, taken from the
+/// description that creates it rather than written down a second time.
+///
+/// Read by [`ForwardRenderer::set_ground_grid`], whose pipeline is built for a
+/// depth attachment before there is a frame to ask. The extent is irrelevant to
+/// a format, which is why any is passed.
+const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).format;
 
 /// The bind-group slot the sun's shadow atlas is read through.
 ///
@@ -422,9 +434,9 @@ const fn shadow_cull(slot: usize) -> usize {
 }
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
-/// atlas's, the depth prepass, the forward pass, the tonemap and the
-/// culling-statistics copy — plus [`Ssao::PASSES`] and [`Ssr::PASSES`] beside
-/// them.
+/// atlas's, the depth prepass, the forward pass, the tonemap, the ground grid
+/// and the culling-statistics copy — plus [`Ssao::PASSES`] and [`Ssr::PASSES`]
+/// beside them.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
@@ -434,7 +446,12 @@ const fn shadow_cull(slot: usize) -> usize {
 /// of every frame. It is the **all-effects-on** count for the same reason: a
 /// frame that switched one off records fewer, and a bound that tracked the
 /// toggles would have to be re-sized whenever they moved.
-const RENDER_PASSES: u32 = 5 + Ssao::PASSES + Ssr::PASSES;
+///
+/// The ground grid is counted on the same terms, even though it is off by
+/// default and is not a [`RenderEffects`] bit: a caller that switches it on
+/// records one more pass, and a bound short of that would silently stop timing
+/// the last pass of every frame it drew.
+const RENDER_PASSES: u32 = 6 + Ssao::PASSES + Ssr::PASSES;
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
 ///
@@ -870,6 +887,30 @@ pub struct ForwardRenderer {
     /// rather than one buffer for every other per-frame resource's reason: the
     /// previous frame's submission may still be writing last frame's.
     prepass_stats: Vec<BufferHandle>,
+
+    /// The ground grid's pipeline and uniform ring — see [`crate::grid`].
+    ///
+    /// [`None`] until a caller first switches it on with
+    /// [`set_ground_grid`](ForwardRenderer::set_ground_grid), which is what
+    /// keeps a sample that never asks for a grid from building a pipeline and a
+    /// ring of blocks for a pass it does not record. Once built it is kept —
+    /// switching the grid off is [`ForwardRenderer::ground_grid_on`] and not a
+    /// release, because releasing a uniform ring the frames in flight may still
+    /// be reading is exactly what the ring exists to prevent.
+    ground_grid: Option<GroundGrid>,
+    /// Whether [`add_passes`](ForwardRenderer::add_passes) records the ground
+    /// grid's pass. **`false` by default**: the grid is a tool's chrome, and
+    /// every sample and every golden image predates it.
+    ground_grid_on: bool,
+
+    /// This frame's camera view-projection, as
+    /// [`begin_frame`](ForwardRenderer::begin_frame) computed it.
+    ///
+    /// Kept because the ground grid's pass needs it and `add_passes` has no
+    /// camera: recomputing it there would be a second `aspect` to get wrong, and
+    /// a grid drawn through a camera the frame is not drawn with lands on the
+    /// wrong pixels while still looking like a grid.
+    camera_view_proj: Mat4,
 
     /// `docs/plan/18-render-features.md`'s occlusion pair — see [`crate::ssao`].
     ssao: Ssao,
@@ -3390,6 +3431,13 @@ impl ForwardRenderer {
             ambient_occlusion_groups: vec![None; instance_buffers.len()],
             prepass_groups,
             prepass_stats,
+            // Off, and unbuilt: the grid is opt-in, so a caller that never asks
+            // for one draws the frame it drew before this module existed.
+            ground_grid: None,
+            ground_grid_on: false,
+            // Replaced by every `begin_frame`, which `add_passes` documents as
+            // having to run first.
+            camera_view_proj: Mat4::IDENTITY,
             ssao: rollback
                 .ssao
                 .take()
@@ -3720,6 +3768,9 @@ impl ForwardRenderer {
         // with — is invisible until something at the edge of the screen
         // disappears.
         let view_projection = camera.view_projection(aspect);
+        // The same matrix again for the ground grid, whose pass `add_passes`
+        // records and which has no camera to ask.
+        self.camera_view_proj = view_projection;
         // `docs/plan/25-lod.md`'s two selection numbers, from this frame's
         // viewport and this frame's camera. An orthographic projection has no
         // distance falloff for the metric to divide by, so it selects under a
@@ -4393,6 +4444,15 @@ impl ForwardRenderer {
     /// descriptor**, never a shader permutation: the shadow atlas keeps its
     /// reversed-Z clear and reads as fully lit, the occlusion binding falls back
     /// to the renderer's white 1×1, and the reflection pair simply is not there.
+    ///
+    /// # The ground grid comes last, and after the tonemap
+    ///
+    /// [`set_ground_grid`](Self::set_ground_grid) is what puts it in the frame,
+    /// and it is off by default. When it is on, its pass is added **after** the
+    /// tonemap and writes `target` rather than the HDR scene colour, depth-tested
+    /// against the scene depth: the grid is reference chrome, and a grid drawn
+    /// before the tonemap would be exposed and tonemapped like geometry, so its
+    /// colour would move with how bright the scene is. See [`crate::grid`].
     pub fn add_passes<'a>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
@@ -4558,7 +4618,14 @@ impl ForwardRenderer {
         // rather than the one before it — and off this frame's resolved effects
         // rather than off a constant, so a switched-off effect's triangle is not
         // counted as submitted.
-        self.recorded_fullscreen = fullscreen_passes(effects);
+        //
+        // The ground grid is added on top rather than folded into
+        // `fullscreen_passes`: it is not a [`RenderEffects`] bit and is not
+        // resolved by the toggle order — it is a caller's opt-in, off by
+        // default — so what decides it is the field and not this frame's
+        // effects.
+        self.recorded_fullscreen =
+            fullscreen_passes(effects) + u64::from(self.ground_grid().is_some());
         self.recorded_draws = shadow_draws
             + 2 * bucket_draws.calls.len() as u64
             + self.recorded_fullscreen * FULLSCREEN_DRAWS;
@@ -4872,6 +4939,44 @@ impl ForwardRenderer {
                 encoder.draw(0..3, 0..1);
             });
 
+        // --- the ground grid ---
+        //
+        // **After the tonemap, into the target the tonemap just wrote**, and
+        // that placement is the decision rather than an accident of ordering.
+        // The grid is reference chrome, not scene content: drawn into
+        // `scene_color` it would be exposed and tonemapped like geometry, so its
+        // colour would shift with how bright the scene happens to be — and a
+        // grid whose lines change with the exposure is no longer a reference.
+        // Blender draws its overlays the same way, in display space after the
+        // render.
+        //
+        // It still takes `scene_depth`, read-only, so geometry in front of the
+        // ground occludes it. That the depth survives this far is not luck: the
+        // forward pass stores it (`StoreOp::Store`) because the reflection march
+        // reads it, and the graph moves it from whatever state that left it in
+        // into `DepthStencilRead` for this pass.
+        //
+        // Nothing here is conditional on [`RenderEffects`]: the grid is a
+        // caller's opt-in, and a frame that never asked for one is the frame
+        // this renderer recorded before [`crate::grid`] existed — no pass, no
+        // pipeline, no block.
+        if let Some(grid) = self.ground_grid.as_ref()
+            && self.ground_grid_on
+        {
+            let view_proj = self.camera_view_proj;
+            grid.add_pass(
+                graph,
+                frame,
+                target,
+                scene_depth,
+                view_proj,
+                // The one inversion in the frame, and it is here rather than in
+                // the pass: `begin_frame` has no reason to compute it for a grid
+                // that is usually off.
+                view_proj.inverse(),
+            );
+        }
+
         // **Last, and that is the point.** Three passes add to the statistics
         // buffer — the cull dispatch, the light grid's overflow counter and the
         // amplification stage inside the forward pass — so a copy scheduled any
@@ -5133,6 +5238,69 @@ impl ForwardRenderer {
     #[must_use]
     pub const fn target_format(&self) -> Format {
         self.target_format
+    }
+
+    /// Switches the infinite ground grid on with `style`, or off with [`None`].
+    ///
+    /// **Off by default.** Every sample and every golden image predates the
+    /// grid, so a renderer nobody has called this on records exactly the passes
+    /// it always did — see [`crate::grid`] for what the pass is and
+    /// [`add_passes`](Self::add_passes) for where in the frame it lands.
+    ///
+    /// The first `Some` builds the pipeline and the uniform ring; later calls
+    /// only replace the style, and a `None` leaves both built. Releasing them
+    /// here would mean releasing blocks the frames in flight may still be
+    /// reading, so they are released by [`destroy`](Self::destroy) alone — the
+    /// one call that already requires an idle device.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] if the grid's pipeline or its blocks could not be created.
+    /// Nothing is left switched on when that happens: the grid stays as it was.
+    pub fn set_ground_grid(
+        &mut self,
+        device: &dyn Device,
+        style: Option<GridStyle>,
+    ) -> Result<(), HalError> {
+        let Some(style) = style else {
+            self.ground_grid_on = false;
+            return Ok(());
+        };
+        let grid = match self.ground_grid.as_mut() {
+            Some(grid) => grid,
+            None => {
+                // Built for the tonemap's target and the scene depth, because
+                // those are the two attachments the pass is given — see
+                // `add_passes`. Both are pipeline state, so a renderer whose
+                // target format changed would need a new `Grid`; nothing in this
+                // crate changes it after `build`, and `target_format` is kept
+                // for exactly that reason.
+                let grid = GroundGrid::new(
+                    device,
+                    self.uniforms.len(),
+                    self.target_format,
+                    SCENE_DEPTH_FORMAT,
+                )?;
+                self.ground_grid.insert(grid)
+            }
+        };
+        grid.set_style(style);
+        self.ground_grid_on = true;
+        Ok(())
+    }
+
+    /// How the ground grid is drawn, or [`None`] where it is switched off.
+    ///
+    /// The read-back half of [`set_ground_grid`](Self::set_ground_grid), and the
+    /// observable a test asking "is the grid on" wants: a renderer that built
+    /// the grid and then switched it off answers [`None`], because what it draws
+    /// is what the question is about.
+    #[must_use]
+    pub fn ground_grid(&self) -> Option<&GridStyle> {
+        self.ground_grid
+            .as_ref()
+            .filter(|_| self.ground_grid_on)
+            .map(GroundGrid::style)
     }
 
     /// The cull and draw-argument passes, and the buffers they produce.
@@ -5425,6 +5593,9 @@ impl ForwardRenderer {
         device.destroy_image_view(self.shadow_placeholder_view);
         device.destroy_image(self.shadow_placeholder);
 
+        if let Some(grid) = self.ground_grid {
+            grid.destroy(device);
+        }
         self.ssr.destroy(device);
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
@@ -8004,12 +8175,19 @@ mod tests {
     /// frame can run and so the widest frame there is — it must land exactly on
     /// the constant, and the frame with no shadowed light at all must be short
     /// of it by exactly the culls those slots would have added.
+    ///
+    /// The ground grid is switched on for **both** frames, because the widest
+    /// frame is the one that has it: it is off by default and not a
+    /// [`RenderEffects`] bit, so nothing else here would put its pass in.
     #[test]
     fn the_pass_bound_is_the_widest_frame_the_renderer_records() {
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut renderer =
             ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        renderer
+            .set_ground_grid(device, Some(GridStyle::default()))
+            .expect("the null backend builds every pipeline");
         let imported = swapchain_image(device);
         let mut pool = crate::TransientPool::new();
 
@@ -8149,6 +8327,119 @@ mod tests {
             from_the_atlas(&no_shadows),
             from_the_atlas(&all_on),
             "only the culls go: the atlas pass and everything after it are unchanged"
+        );
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The ground grid is off until a caller asks, and then it is the last
+    /// pass of the frame — after the tonemap.**
+    ///
+    /// Three claims and each is a separate way to get this wrong. Off by default
+    /// is what keeps every sample and every golden image where they were. *After
+    /// the tonemap* is the placement decision: added a line earlier it would
+    /// draw into the HDR scene colour and be tonemapped like geometry, which
+    /// compiles, draws a grid, and gives it a colour that moves with the
+    /// exposure. And switching it off again has to remove the pass, not merely
+    /// stop reporting it.
+    ///
+    /// The whole list is compared rather than its length, for the reason the
+    /// effect-toggle test gives: one more pass is satisfied by gaining the wrong
+    /// one.
+    #[test]
+    fn the_ground_grid_is_opt_in_and_lands_after_the_tonemap() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+
+        let off = passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        assert!(
+            renderer.ground_grid().is_none(),
+            "a renderer nobody asked has no grid"
+        );
+        assert!(
+            !off.contains(&"grid".to_string()),
+            "the grid must not be in a frame nobody asked for it in: {off:#?}"
+        );
+
+        renderer
+            .set_ground_grid(device, Some(GridStyle::default()))
+            .expect("the null backend builds every pipeline");
+        assert_eq!(renderer.ground_grid(), Some(&GridStyle::default()));
+        let on = passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+
+        let mut expected = off.clone();
+        // The statistics copy is added after every render pass and stays last —
+        // see `add_passes`. So the grid goes in front of it, which is directly
+        // after the tonemap.
+        let tonemap = expected
+            .iter()
+            .position(|label| label == "tonemap")
+            .expect("a frame has to reach the swapchain");
+        expected.insert(tonemap + 1, "grid".to_string());
+        assert_eq!(
+            on, expected,
+            "the grid must be the one pass gained, and it must sit after the tonemap"
+        );
+
+        renderer
+            .set_ground_grid(device, None)
+            .expect("switching off builds nothing");
+        assert!(renderer.ground_grid().is_none());
+        assert_eq!(
+            passes_in_a_frame(device, queue, &mut renderer, imported, &pool),
+            off,
+            "switching the grid off has to remove its pass, not just stop reporting it"
+        );
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// The grid's own full-screen triangle is counted as submitted, and only
+    /// while it is on.
+    ///
+    /// [`FrameCounters::instances`] is the "submitted" half of the debug panel's
+    /// row, and every full-screen pass in the frame contributes one — so a grid
+    /// that drew and was not counted makes that row disagree with the frame by
+    /// exactly one triangle, silently.
+    #[test]
+    fn the_grids_triangle_is_counted_only_while_it_is_on() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+
+        passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        let off = renderer.counters();
+
+        renderer
+            .set_ground_grid(device, Some(GridStyle::default()))
+            .expect("the null backend builds every pipeline");
+        passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        let on = renderer.counters();
+
+        assert_eq!(
+            on.draws - off.draws,
+            FULLSCREEN_DRAWS,
+            "the grid records exactly one draw"
+        );
+        assert_eq!(
+            on.instances - off.instances,
+            FULLSCREEN_DRAWS,
+            "and exactly one submitted instance"
         );
 
         renderer.destroy(device);

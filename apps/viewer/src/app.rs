@@ -954,6 +954,38 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **The grid floor is in the frame this application records, and after the
+    /// tonemap.**
+    ///
+    /// `docs/plan/sample/05-viewer.md` milestone 1's third item. The graph dump
+    /// is the observable rather than a field on the renderer, for the reason the
+    /// UI pass's assertion above gives: "switched on" and "in the frame" are
+    /// different claims, and only the second is the one milestone 1 makes.
+    ///
+    /// The order matters as much as the presence — see [`crate::gpu`]. A grid
+    /// recorded before the tonemap would be tonemapped like scene content, and
+    /// the dump is where that is visible without a pixel to look at.
+    #[test]
+    fn the_frame_carries_a_grid_floor_after_the_tonemap() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+
+        let dump = engine.gpu().last_dump().to_string();
+        let grid = dump
+            .find(r#"pass "grid""#)
+            .unwrap_or_else(|| panic!("no grid pass in the viewer's frame:\n{dump}"));
+        let tonemap = dump
+            .find(r#"pass "tonemap""#)
+            .expect("a frame has to reach the swapchain");
+        assert!(
+            tonemap < grid,
+            "the grid must be recorded after the tonemap, not before it:\n{dump}"
+        );
+
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// **Escape opens the one panel this sample has**, which is the only way to
     /// reach fullscreen and the debug panel with a pointer.
     #[test]

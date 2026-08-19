@@ -5,15 +5,21 @@
 //! and teardown — lives in [`crcbl::engine::GpuContext`], the same join every
 //! sample's `gpu.rs` uses.
 //!
-//! # The document, the menu and the panel — and what is deliberately not beside
-//! them
+//! # The document, the menu, the grid and the panel
 //!
 //! `docs/plan/sample/05-viewer.md`'s milestone 1 is "load + orbit + grid", and
-//! this is the load-and-orbit half. There is **no grid floor** — a grid is a
-//! second resident mesh and a second material row in a
-//! [`SceneDesc`](crcbl::render::scene::SceneDesc) the glTF
-//! conversion sized for the document alone, so it is a change to how the scene
-//! is assembled rather than a pass to add here; it is in `docs/backlog.md`.
+//! all three are here. The grid floor is
+//! [`crcbl::render::grid`]'s screen-space pass, switched on through
+//! [`ForwardRenderer::set_ground_grid`] — **not** a mesh in the scene. That
+//! matters for this sample in particular: the
+//! [`SceneDesc`](crcbl::render::scene::SceneDesc) is sized by the glTF
+//! conversion for the user's document alone, so a grid made of geometry would
+//! need a resident mesh and a material row that the document did not ask for,
+//! and its lines would change width with the zoom the turntable is at.
+//!
+//! It is drawn after the tonemap and depth-tested against the scene, so it sits
+//! *under* the model and keeps the same colour at any exposure — which is what
+//! makes it a reference rather than part of the picture.
 //!
 //! The menu and UI passes are here because this sample is hosted by
 //! [`crcbl::engine::Loop`] now and the loop draws through them — see
@@ -35,7 +41,8 @@ use crcbl::hal::CommandEncoderDesc;
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
-    MAX_TIMED_PASSES, MenuRenderer, PassTimers, TransientPool, UiRenderer, scene::InstanceDesc,
+    MAX_TIMED_PASSES, MenuRenderer, PassTimers, TransientPool, UiRenderer, grid::GridStyle,
+    scene::InstanceDesc,
 };
 use crcbl::shell::{Shell, WindowId};
 use crcbl::ui::draw_list::DrawList;
@@ -147,6 +154,20 @@ impl Gpu {
                     return Err(GpuError::Hal(error));
                 }
             };
+        // `docs/plan/sample/05-viewer.md` milestone 1's grid floor — see the
+        // [module docs](self) for why it is a pass rather than a mesh.
+        //
+        // [`GridStyle::default`] and not a style of this sample's own: its fine
+        // cell is one metre, which is the unit glTF is authored in and so the
+        // unit the documents this application opens are already in.
+        //
+        // Unwound by hand for the reason the loop below is.
+        if let Err(error) = renderer.set_ground_grid(ctx.device(), Some(GridStyle::default())) {
+            renderer.destroy(ctx.device());
+            ctx.destroy()?;
+            return Err(GpuError::Hal(error));
+        }
+
         // Unwound by hand, because `Gpu` has no `Drop`: a `?` here would leak
         // every pipeline and buffer the renderer just made.
         for instance in instances {
@@ -416,6 +437,128 @@ pub fn key_light(camera: &Camera) -> DirectionalLight {
 mod tests {
     use super::*;
     use crcbl::render::{OrbitCamera, Projection};
+    use crcbl::screenshot::{ForwardScene, OffscreenSetup};
+
+    /// The frame the grid proof below is drawn at.
+    ///
+    /// Small on purpose — the claim is about which pixels moved, not about how
+    /// many — but tall enough that "the top eighth of the frame" is several rows
+    /// rather than one.
+    const PROOF_EXTENT: (u32, u32) = (160, 120);
+
+    /// One frame of an otherwise **empty** scene, with the ground grid switched
+    /// on or off, read back off the GPU.
+    ///
+    /// Empty because the grid is the subject: with no instance placed, every
+    /// pixel that differs between the two frames is one the grid pass wrote, and
+    /// nothing has to be assumed about where a mesh landed.
+    ///
+    /// The camera stands two metres up looking **horizontally**, so the ground
+    /// plane fills the lower half of the frame and the horizon is across the
+    /// middle. That is what makes the top of the frame a control: a ray leaving
+    /// the upper half never reaches `y = 0`, so nothing the grid draws can land
+    /// there.
+    fn grid_proof_frame(on: bool) -> (u32, u32, Vec<u8>) {
+        let mut setup = OffscreenSetup::open_forward(
+            PROOF_EXTENT.0,
+            PROOF_EXTENT.1,
+            move |device, queue, format| {
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                if on {
+                    renderer.set_ground_grid(device, Some(GridStyle::default()))?;
+                }
+                Ok(ForwardScene {
+                    camera: Camera {
+                        eye: Vec3::new(0.0, 2.0, 8.0),
+                        target: Vec3::new(0.0, 2.0, 0.0),
+                        up: Vec3::Y,
+                        projection: Projection::Perspective {
+                            fov_y: std::f32::consts::FRAC_PI_3,
+                            near: 0.01,
+                        },
+                    },
+                    sun: DirectionalLight::default(),
+                    renderer: Box::new(renderer),
+                })
+            },
+        )
+        .expect("the pinned backend opens");
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame lands");
+        setup.finish().expect("teardown");
+        (width, height, pixels)
+    }
+
+    /// Whether this run has a driver pinned, which is what
+    /// [`grid_proof_frame`] needs and what `CRCBL_GPU=vk cargo test -p viewer`
+    /// supplies.
+    ///
+    /// The null backend reads back nothing a pixel claim could be made about, so
+    /// the proof below is skipped without a pin rather than made against zeroes.
+    /// CI pins it — see the workflow's "Run the viewer's suite against
+    /// lavapipe", which is the run this test exists for.
+    fn a_driver_is_pinned() -> bool {
+        match std::env::var(crcbl::backend::BACKEND_ENV_VAR) {
+            Err(_) => false,
+            Ok(name) => match GpuBackend::from_name(&name) {
+                None => panic!(
+                    "{} names {name:?}, which is not a backend",
+                    crcbl::backend::BACKEND_ENV_VAR
+                ),
+                Some(backend) => backend != GpuBackend::Null,
+            },
+        }
+    }
+
+    /// **The grid reaches pixels.** Two readbacks of the same frame, one with
+    /// the grid switched on and one without, and they are not the same picture.
+    ///
+    /// This is the claim `crate::app`'s dump assertion cannot make: a pass in
+    /// the graph that bound a pipeline and drew nothing produces exactly that
+    /// dump. Only the bytes can tell the two apart.
+    ///
+    /// Three assertions, and each rules out a different way of passing for the
+    /// wrong reason:
+    ///
+    /// * the **top eighth** of the frame is byte-identical — what the pass drew
+    ///   is a plane the camera's upper rays never reach, rather than something
+    ///   sprayed over the whole target;
+    /// * a real share of the lower half moved — the pass is not a no-op that
+    ///   bound a pipeline and drew nothing;
+    /// * and not *all* of the lower half moved — lines, not a flood fill.
+    #[test]
+    fn the_grid_draws_pixels_the_frame_does_not_have_without_it() {
+        if !a_driver_is_pinned() {
+            return;
+        }
+        let (width, height, off) = grid_proof_frame(false);
+        let (on_width, on_height, on) = grid_proof_frame(true);
+        assert_eq!((width, height), (on_width, on_height));
+        assert_eq!(off.len(), on.len());
+
+        let row = width as usize * 4;
+        let sky = (height / 8) as usize * row;
+        assert_eq!(
+            &off[..sky],
+            &on[..sky],
+            "the grid changed pixels above the horizon, where no ray reaches the ground plane",
+        );
+
+        let half = (height / 2) as usize * row;
+        let ground_pixels = (off.len() - half) / 4;
+        let moved = off[half..]
+            .chunks_exact(4)
+            .zip(on[half..].chunks_exact(4))
+            .filter(|(before, after)| before != after)
+            .count();
+        assert!(
+            moved > ground_pixels / 100,
+            "only {moved} of {ground_pixels} ground pixels moved, which is not a grid",
+        );
+        assert!(
+            moved < ground_pixels,
+            "every one of {ground_pixels} ground pixels moved, which is a wash rather than lines",
+        );
+    }
 
     /// **The light stays over the viewer's shoulder wherever the turntable
     /// goes.** A sun fixed in world space would put half of every orbit in

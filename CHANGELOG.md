@@ -2005,9 +2005,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   grid, Godot 4's and Unity's all use; a grid drawn as geometry cannot hold a
   constant screen width.
 
-  It is `docs/plan/sample/05-viewer.md` milestone 1's last missing piece.
-  **Nothing adds it to a frame yet** — that is the next slice — so the pass
-  exists and is tested but no sample shows a grid.
+  It is wired into `ForwardRenderer` behind `set_ground_grid`, **off by
+  default**, and drawn **after the tonemap** rather than with the scene: a
+  reference grid has to look the same at any exposure, so it must not be
+  tonemapped like scene content. It still depth-tests against the scene depth,
+  so geometry occludes it. `apps/viewer` turns it on, which completes
+  `docs/plan/sample/05-viewer.md` milestone 1.
+
+  The style is fixed at 1 m cells fading at 100 m, so a document authored at a
+  very different scale gets a grid that is one line or entirely faded; deriving
+  it from the model's bounds is recorded in `docs/backlog.md`.
 
 - **`CommandEncoder::fill_buffer` works on the D3D12 backend, for a value of
   zero.** `Capability::BufferFillZero` now reports supported on dx12, which
