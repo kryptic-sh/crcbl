@@ -65,6 +65,12 @@ CONTROLS:
                          begin with. Needs a device with a line fill mode, which
                          a browser has not got; the debug panel's 'wireframe' row
                          is what the frame is actually drawn with.
+    N                    Normals — colour each surface by its world-space normal
+                         instead of shading it, as n * 0.5 + 0.5: +X red, +Y
+                         green, +Z blue, and an inverted face reads as the
+                         complement of the colour it should have. World space, so
+                         a face keeps its colour while you orbit. Off to begin
+                         with; the debug panel's 'normals' row says which.
     - / =                Exposure down / up, a third of a stop a press. Held,
                          they keep going. The range is five stops either side of
                          1.00x; the listing panel's 'exposure' row is what the

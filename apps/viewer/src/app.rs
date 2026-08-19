@@ -92,6 +92,14 @@ pub const LISTING_KEY: KeyCode = KeyCode::KeyI;
 /// be in a game.
 pub const WIREFRAME_KEY: KeyCode = KeyCode::KeyW;
 
+/// Draws each surface's world-space normal as a colour instead of shading it.
+/// Off to begin with.
+///
+/// `N` for normals, and it is free on [`LISTING_KEY`]'s terms: it is none of the
+/// three keys the loop reserves, none of the three it arbitrates while a menu is
+/// showing, and none of the four this application already binds.
+pub const NORMALS_KEY: KeyCode = KeyCode::KeyN;
+
 /// Darkens the picture: one press divides the tonemap's exposure by
 /// [`exposure_step`].
 ///
@@ -274,6 +282,16 @@ pub struct Viewer {
     wireframe_pending: bool,
     /// Whether [`WIREFRAME_KEY`] is currently held, for `listing_held`'s reason.
     wireframe_held: bool,
+    /// Whether the frame is drawn as world-space normals rather than shaded.
+    ///
+    /// **No `_pending` twin beside it, unlike the wireframe**, because there is
+    /// nothing to defer to: the normals view builds no pipeline and cannot be
+    /// refused — see [`Gpu::set_normals_view`](crate::gpu::Gpu::set_normals_view)
+    /// — so this is both what was asked for and what is drawn, and
+    /// [`Viewer::draw`] pushes it at the renderer every frame beside the camera.
+    normals: bool,
+    /// Whether [`NORMALS_KEY`] is currently held, for `listing_held`'s reason.
+    normals_held: bool,
     /// Net presses of [`EXPOSURE_UP_KEY`] less [`EXPOSURE_DOWN_KEY`] since the
     /// last frame drew, applied in [`Viewer::draw`].
     ///
@@ -415,6 +433,8 @@ pub fn with_shell<S: Shell + ?Sized>(
             wireframe: false,
             wireframe_pending: false,
             wireframe_held: false,
+            normals: false,
+            normals_held: false,
             exposure_steps: 0,
             exposure,
             listing,
@@ -463,16 +483,17 @@ impl HostedGame for Viewer {
     /// be filled in: there is no state here to advance.
     fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {}
 
-    /// `F` frames the model again, `I` shows the listing and `W` draws it as
-    /// lines — each once per press — and `-`/`=` step the exposure, once per
-    /// press *and once per auto-repeat*.
+    /// `F` frames the model again, `I` shows the listing, `W` draws it as lines
+    /// and `N` draws its normals — each once per press — and `-`/`=` step the
+    /// exposure, once per press *and once per auto-repeat*.
     ///
     /// Framing, the wireframe and the exposure are deferred to [`Viewer::draw`],
     /// which is where this application is handed the aspect and the GPU; the
-    /// panel needs neither, so it flips here.
+    /// panel and the normals view need neither at the moment of the press, so
+    /// they flip here.
     ///
     /// **The exposure pair deliberately has no held guard.** The loop forwards
-    /// auto-repeats as further presses, which the three toggles fold away
+    /// auto-repeats as further presses, which the four toggles fold away
     /// because a switch flipped every frame is a strobe — and which the exposure
     /// *wants*, because holding a key to sweep a range is how a continuous value
     /// is driven from a keyboard. The presses are counted rather than flagged,
@@ -495,6 +516,12 @@ impl HostedGame for Viewer {
                     self.wireframe_pending = true;
                 }
                 self.wireframe_held = pressed;
+            }
+            NORMALS_KEY => {
+                if pressed && !self.normals_held {
+                    self.normals = !self.normals;
+                }
+                self.normals_held = pressed;
             }
             EXPOSURE_UP_KEY => self.exposure_steps += i32::from(pressed),
             EXPOSURE_DOWN_KEY => self.exposure_steps -= i32::from(pressed),
@@ -558,6 +585,10 @@ impl HostedGame for Viewer {
         if steps != 0 {
             self.exposure = gpu.scale_exposure(exposure_step().powi(steps));
         }
+        // Every frame rather than on the key's edge, because there is no answer
+        // to keep: the normals view builds nothing and cannot be refused, so the
+        // field is the state and pushing it is idempotent.
+        gpu.set_normals_view(self.normals);
         gpu.set_camera(self.orbit.camera());
         // Every frame rather than only on a step, so the row cannot disagree
         // with the frame after anything else moves the exposure.
@@ -612,10 +643,18 @@ impl HostedGame for Viewer {
 /// "nothing is on screen because you zoomed past it" rather than "nothing is on
 /// screen because the file is empty".
 ///
-/// The fourth row is the wireframe, and it reports the frame that was **drawn**:
-/// the field behind it holds what the device answered rather than what
-/// [`WIREFRAME_KEY`] asked for, so a press that could not be honoured leaves
-/// this saying `off` instead of quietly disagreeing with the picture.
+/// The last two rows are the debug views, and both report the frame that was
+/// **drawn**: the wireframe's field holds what the device answered rather than
+/// what [`WIREFRAME_KEY`] asked for, so a press that could not be honoured leaves
+/// it saying `off` instead of quietly disagreeing with the picture, and the
+/// normals view cannot be refused at all so its field is the same thing by
+/// construction.
+///
+/// The normals row also names the **space**, because `n * 0.5 + 0.5` is a
+/// convention two engines can hold in world or in view space and a picture does
+/// not say which: a face keeping its colour as the camera orbits is what makes
+/// `world` the answer to "is this face inverted", and a reader who does not know
+/// which they are looking at cannot use either.
 impl DebugModule for Viewer {
     fn debug_section(&self, out: &mut DebugSection) {
         out.set_title("viewer");
@@ -625,6 +664,10 @@ impl DebugModule for Viewer {
         out.row(
             "wireframe",
             format_args!("{}", if self.wireframe { "on" } else { "off" }),
+        );
+        out.row(
+            "normals",
+            format_args!("{}", if self.normals { "world" } else { "off" }),
         );
     }
 }
@@ -1358,6 +1401,73 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **A held `N` toggles the normals view once, not once a frame** — and the
+    /// panel names the space it is drawn in.
+    ///
+    /// `a_held_wireframe_key_toggles_the_view_once_not_once_a_frame`'s claim for
+    /// the third binding that needs an edge. It cannot be refused, so unlike the
+    /// wireframe there is nothing here about what the device answered — what this
+    /// says instead is that the row reads `world` and not merely `on`, because
+    /// `n * 0.5 + 0.5` is a convention two engines can hold in either space and a
+    /// reader who does not know which is looking at a picture they cannot use.
+    ///
+    /// `gpu::tests::the_normals_view_paints_each_face_the_encoding_of_its_world_normal`
+    /// is what says the frame really is that; this is the routing under it.
+    #[test]
+    fn a_held_normals_key_toggles_the_view_once_not_once_a_frame() {
+        let (_dir, mut options) = model_at(&fixture::quad_glb(Vec3::ZERO), 24);
+        options.common.debug_overlay = Some(true);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "normals"),
+            "off",
+            "the view is off until it is asked for",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, NORMALS_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "normals"),
+            "world",
+            "the press never reached the renderer, so the repeats below prove nothing",
+        );
+
+        for _ in 0..2 {
+            engine
+                .shell_mut()
+                .key_repeat(window, NORMALS_KEY)
+                .expect("the window is live");
+            engine.frame().expect("a frame");
+            assert_eq!(
+                row_value(&ui_text(&engine), "normals"),
+                "world",
+                "a repeat switched the view back off",
+            );
+        }
+
+        engine
+            .shell_mut()
+            .key_release(window, NORMALS_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "normals"),
+            "world",
+            "letting go switched it off",
+        );
+
+        // And the next real press still works, which is what says the guard
+        // released rather than latched.
+        tap(&mut engine, window, NORMALS_KEY);
+        assert_eq!(row_value(&ui_text(&engine), "normals"), "off");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// **`-` and `=` step the exposure through the loop, and the listing panel
     /// reports the value the renderer answered with.**
     ///
@@ -1466,6 +1576,7 @@ mod tests {
             ("reframe", REFRAME_KEY),
             ("listing", LISTING_KEY),
             ("wireframe", WIREFRAME_KEY),
+            ("normals", NORMALS_KEY),
             ("exposure down", EXPOSURE_DOWN_KEY),
             ("exposure up", EXPOSURE_UP_KEY),
             ("pause", PAUSE_KEY),

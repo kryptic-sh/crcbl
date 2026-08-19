@@ -200,7 +200,7 @@ pub struct FrameUniforms {
     pub view_proj: [f32; 16],
     /// World-space eye position in `xyz`.
     pub camera_position: [f32; 4],
-    /// Flat ambient term in `rgb`.
+    /// Flat ambient term in `rgb`, and the normals view's switch in `w`.
     ///
     /// **Not a light and not a row.** It stands in for the bounces the direct
     /// terms do not carry, so it has no position, no froxel and no shadow. The
@@ -208,6 +208,11 @@ pub struct FrameUniforms {
     /// `docs/plan/18-render-features.md`'s light list existed; it is
     /// [`GpuLight`](crate::light::GpuLight) row now, and the shader has no
     /// special case for it.
+    ///
+    /// `w` is [`NORMALS_VIEW_OFF`](Self::NORMALS_VIEW_OFF) or
+    /// [`NORMALS_VIEW_ON`](Self::NORMALS_VIEW_ON), and those two constants carry
+    /// the account of why the switch rides in this lane rather than in one of its
+    /// own.
     pub ambient: [f32; 4],
     /// World → cascade `i`'s shadow clip, column-major, one per cascade.
     ///
@@ -296,6 +301,40 @@ pub struct FrameUniforms {
 }
 
 impl FrameUniforms {
+    /// [`ambient`](Self::ambient)`.w` for the shaded picture — the ordinary
+    /// frame, and what every writer of this block carried before the normals
+    /// view existed.
+    ///
+    /// **Zero is why the switch is in this lane.** `mesh.slang`'s fragment stage
+    /// needed one spare scalar in a block that is already laid out, and the
+    /// alternatives each cost something this does not:
+    ///
+    /// * [`camera_position`](Self::camera_position)`.w` is the other lane the
+    ///   shader documents as unused, and every writer sets it to `1.0` — so a
+    ///   switch there would have turned the debug view on for every frame the
+    ///   engine has ever drawn.
+    /// * A `float4` of its own at the end of the block moves no existing
+    ///   member's offset, which is the precedent
+    ///   [`light_view_proj`](Self::light_view_proj) and [`probes`](Self::probes)
+    ///   set — but this struct is also built field-by-field, with no `..default`
+    ///   spread, by `crates/crcbl/tests/forward_e2e/depth_probe.rs`, and a new
+    ///   member stops that compiling.
+    ///
+    /// A lane every writer already leaves at exactly zero is the one change that
+    /// costs nothing at either end.
+    pub const NORMALS_VIEW_OFF: f32 = 0.0;
+
+    /// [`ambient`](Self::ambient)`.w` for the normals view: `mesh.slang`'s
+    /// fragment stage writes the **world-space** surface normal as
+    /// `n * 0.5 + 0.5` instead of shading, so +X reads red, +Y green and +Z blue
+    /// and an inverted face reads the complement of the colour it should have.
+    ///
+    /// The shader compares against half way between this and
+    /// [`NORMALS_VIEW_OFF`](Self::NORMALS_VIEW_OFF) rather than for equality —
+    /// see its `NORMALS_VIEW` — because a float lane is no place for an
+    /// `==`. `crcbl_render::ForwardRenderer::set_normals_view` is what writes it.
+    pub const NORMALS_VIEW_ON: f32 = 1.0;
+
     /// The bytes a uniform buffer holds, in `std140` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; FRAME_UNIFORMS_SIZE] {
@@ -1400,6 +1439,43 @@ mod tests {
                  with no cascades is not a shadow pass"
             );
         }
+    }
+
+    /// **The shader's normals-view threshold really separates the two values the
+    /// host writes**, and it is `ambient`'s `w` that it compares.
+    ///
+    /// A threshold outside the pair has no symptom on one side and is therefore
+    /// the drift worth a test: at or below
+    /// [`FrameUniforms::NORMALS_VIEW_OFF`] every frame the engine draws is the
+    /// debug view, and above [`FrameUniforms::NORMALS_VIEW_ON`] the key does
+    /// nothing and the renderer's own block test still passes, because that one
+    /// is about the bytes and this one is about what the shader does with them.
+    #[test]
+    fn the_normals_view_threshold_lies_between_the_two_values_the_host_writes() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let literal = mesh
+            .split_once("static const float NORMALS_VIEW = ")
+            .expect("mesh.slang declares the normals view's threshold")
+            .1
+            .split_once(';')
+            .expect("a declaration ends in a semicolon")
+            .0;
+        let threshold: f32 = literal
+            .parse()
+            .unwrap_or_else(|_| panic!("`{literal}` is not a float"));
+        assert!(
+            FrameUniforms::NORMALS_VIEW_OFF < threshold
+                && threshold < FrameUniforms::NORMALS_VIEW_ON,
+            "the shader switches at {threshold}, which does not separate \
+             {} from {}",
+            FrameUniforms::NORMALS_VIEW_OFF,
+            FrameUniforms::NORMALS_VIEW_ON,
+        );
+        assert!(
+            mesh.contains("if (frame.ambient.w >= NORMALS_VIEW)"),
+            "mesh.slang no longer compares the ambient's `w` against the threshold, so this crate \
+             is writing the switch into a lane nothing reads"
+        );
     }
 
     #[test]

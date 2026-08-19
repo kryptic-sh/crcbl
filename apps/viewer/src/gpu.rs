@@ -287,6 +287,20 @@ impl Gpu {
         self.wireframe_supported
     }
 
+    /// Draws each surface's world-space normal instead of shading it, so the
+    /// document's normals can be looked at directly.
+    ///
+    /// **No answer to keep, unlike [`Gpu::set_wireframe`]**, and the asymmetry is
+    /// the feature's rather than an oversight: the wireframe needs a second
+    /// pipeline and a device that can build one, where this is one lane of a
+    /// uniform block every device already reads — see
+    /// [`ForwardRenderer::set_normals_view`], which cannot fail and so has no
+    /// `supports_` probe beside it. There is nothing for a caller's state to
+    /// disagree with, so this may be called once a frame or on an edge.
+    pub const fn set_normals_view(&mut self, on: bool) {
+        self.renderer.set_normals_view(on);
+    }
+
     /// Multiplies the tonemap's exposure by `factor` and returns what is now in
     /// force.
     ///
@@ -1045,5 +1059,155 @@ mod tests {
             "only {kept} of the wireframe's {line_covered} covered texels were covered by the \
              solid too, so the lines are not on the model's own edges",
         );
+    }
+
+    /// One frame of a single cube seen **square on from `from`**, with the
+    /// normals view on or off, read back off the GPU.
+    ///
+    /// The camera stands on a face's own axis, which is what makes the claim
+    /// below a claim about one normal: the cube is back-face culled
+    /// (`ForwardRenderer::primitive` names [`CullMode::Back`]) and the other five
+    /// faces are edge-on or behind, so every texel the cube covers belongs to the
+    /// face pointing at the eye. `up` steps off `+Y` for the two vertical views,
+    /// where a look direction along `Y` leaves no basis to build.
+    ///
+    /// [`CullMode::Back`]: crcbl::hal::CullMode
+    fn normals_proof_frame(from: Vec3, on: bool) -> (u32, u32, Vec<u8>) {
+        let camera = Camera {
+            // Four metres out from a cube one metre across, which frames it with
+            // room to spare at the field of view below and leaves the corner this
+            // test reads its background from well clear of the silhouette.
+            eye: from * 4.0,
+            target: Vec3::ZERO,
+            up: if from.x == 0.0 && from.z == 0.0 {
+                Vec3::Z
+            } else {
+                Vec3::Y
+            },
+            projection: Projection::Perspective {
+                fov_y: std::f32::consts::FRAC_PI_3,
+                near: 0.01,
+            },
+        };
+        let mut setup = OffscreenSetup::open_forward(
+            PROOF_EXTENT.0,
+            PROOF_EXTENT.1,
+            move |device, queue, format| {
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer
+                    .add_instance(&InstanceDesc {
+                        mesh: crcbl::render::scene::DEMO_CUBE,
+                        material: crcbl::render::scene::DEMO_UNTINTED,
+                        transform: crcbl::math::Mat4::IDENTITY,
+                    })
+                    .expect("one instance fits in any pool");
+                renderer.set_normals_view(on);
+                Ok(ForwardScene {
+                    camera,
+                    sun: key_light(&camera),
+                    renderer: Box::new(renderer),
+                })
+            },
+        )
+        .expect("the pinned backend opens");
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame lands");
+        setup.finish().expect("teardown");
+        (width, height, pixels)
+    }
+
+    /// **The normals view draws each face's world-space normal, encoded
+    /// `n * 0.5 + 0.5`.**
+    ///
+    /// `crate::app`'s key test says the press reaches the renderer and
+    /// `crcbl_render::forward`'s block test says the switch reaches the buffer;
+    /// neither can tell a frame drawn from the normal from a frame that tinted
+    /// everything. Only the bytes can, and only if they are checked against the
+    /// **mapping** rather than against "something changed".
+    ///
+    /// The scene is [`crcbl_shaders::mesh::FACES`]' own cube, looked at square on
+    /// down each of the six axes in turn, so the claim is made once per face and
+    /// the expected colour comes from the same table the geometry does. Three
+    /// things fall out of that which no single frame could say:
+    ///
+    /// * **+X really is red, +Y green, +Z blue** — a mapping that permuted the
+    ///   channels would satisfy any one frame and fail across three;
+    /// * **an inverted face reads the complement** — `-X` is `(0, 0.5, 0.5)` where
+    ///   `+X` is `(1, 0.5, 0.5)`, which is the whole diagnostic this view exists
+    ///   for, and it is checked here rather than asserted in a doc comment;
+    /// * **the normals are in world space and not view space** — every one of
+    ///   these six frames looks straight down a face's normal, so a view-space
+    ///   encoding would paint all six the same colour.
+    ///
+    /// The bytes are decoded through [`linear_of`] before they are compared,
+    /// because the swapchain encodes sRGB on write and the mapping is a statement
+    /// about light and not about a byte. The tolerance is a byte's worth of
+    /// quantisation at the shallowest part of that curve, with room to spare.
+    #[test]
+    fn the_normals_view_paints_each_face_the_encoding_of_its_world_normal() {
+        if !a_driver_is_pinned() {
+            return;
+        }
+        // One byte either side of 0.5 linear is about 0.006 — see `linear_of`'s
+        // curve, which is shallowest in the middle. This is that with room, and
+        // still nowhere near half the 0.5 that separates two of the three values
+        // an axis-aligned normal can encode to.
+        const SLACK: f32 = 0.02;
+
+        for face in &crcbl::shaders::mesh::FACES {
+            let normal = Vec3::from_array(face.normal);
+            let (width, height, shaded) = normals_proof_frame(normal, false);
+            let (normals_width, normals_height, normals) = normals_proof_frame(normal, true);
+            assert_eq!((width, height), (normals_width, normals_height));
+
+            // The clear colour, read off the frame rather than written down, on
+            // `the_wireframe_view_empties_the_interior_and_keeps_the_edges`'
+            // terms: the tonemap and the swapchain's encode both stand between
+            // `SCENE_CLEAR` and a byte, and this test is not about either.
+            let background: [u8; 4] = shaded[..4].try_into().expect("a frame has a first pixel");
+            assert_eq!(
+                &normals[..4],
+                &background,
+                "the {} frames disagree about the corner the cube cannot reach, so `background` \
+                 is not a background",
+                face.name,
+            );
+
+            // What the face's normal encodes to, which is the claim.
+            let expected = normal * 0.5 + Vec3::splat(0.5);
+            let mut covered = 0usize;
+            for (at, (was, now)) in shaded
+                .chunks_exact(4)
+                .zip(normals.chunks_exact(4))
+                .enumerate()
+            {
+                if was == background {
+                    // Nothing was drawn here, so the normals frame must not have
+                    // drawn anything either — the geometry did not move.
+                    assert_eq!(
+                        now, background,
+                        "the {} normals frame covers texel {at}, which the shaded frame did not",
+                        face.name,
+                    );
+                    continue;
+                }
+                covered += 1;
+                let read = Vec3::new(linear_of(now[0]), linear_of(now[1]), linear_of(now[2]));
+                assert!(
+                    (read - expected).abs().max_element() < SLACK,
+                    "texel {at} of the {} face reads {read:?}, and its normal {normal:?} encodes \
+                     to {expected:?}",
+                    face.name,
+                );
+            }
+
+            // Without this the loop above is vacuous on a frame that missed the
+            // cube entirely, and every claim in it would hold over no texels.
+            let total = shaded.len() / 4;
+            assert!(
+                covered > total / 50,
+                "only {covered} of {total} texels are the {} face, so it is not on screen",
+                face.name,
+            );
+        }
     }
 }

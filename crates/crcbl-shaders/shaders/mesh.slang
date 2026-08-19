@@ -241,13 +241,24 @@ struct FrameUniforms
     float4x4 view_proj;
     /// World-space eye position in `xyz`; `w` unused.
     float4 camera_position;
-    /// Flat ambient term in `rgb`; `w` unused. The irradiance grid below is
-    /// **added** to it rather than replacing it.
+    /// Flat ambient term in `rgb`. The irradiance grid below is **added** to it
+    /// rather than replacing it.
     ///
     /// **Ambient is not a light and is not a row**: it stands in for every
     /// bounce the direct terms do not carry, so it has no position, no cluster
     /// and no shadow. The sun used to sit beside it here as a direction and a
     /// colour, and it is a row in `lights` now — see that binding.
+    ///
+    /// **`w` is the normals view's switch** — `NORMALS_VIEW` below — and this is
+    /// the lane it rides in because it is the only spare one every writer of this
+    /// block already leaves at exactly zero. `camera_position.w` is written `1.0`
+    /// by both of them, so a switch there would have turned the debug view on for
+    /// every frame the engine has ever drawn; a `float4` of its own at the end of
+    /// the block would move no offset either, and was not taken because the block
+    /// is constructed field-by-field by a test outside this crate's workspace
+    /// neighbourhood — `crates/crcbl/tests/forward_e2e/depth_probe.rs` — which a
+    /// new member breaks. A lane every writer already zeroes is the change that
+    /// costs nothing anywhere.
     float4 ambient;
     /// World → cascade `i`'s shadow clip, one matrix per cascade.
     ///
@@ -346,6 +357,17 @@ struct FrameUniforms
     /// exactly zero with no branch anywhere — see it.
     uint4 probe_counts;
 };
+
+/// What `FrameUniforms::ambient`'s `w` must reach for `fragmentMain` to draw the
+/// normals view instead of the shaded picture.
+///
+/// **A threshold rather than an equality**, because the switch rides in a float
+/// lane: `crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_ON` is the `1.0` the
+/// host writes and `..._OFF` is the `0.0` every other frame carries, and half way
+/// between them is the one comparison that cannot be decided differently by two
+/// targets' float rules. Off is the default everywhere — see the Rust constants,
+/// which is where the two values are named.
+static const float NORMALS_VIEW = 0.5;
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
 ///
@@ -1622,9 +1644,47 @@ float2 physical_tile_uv(float3 world_position, float3 normal, float tile_metres)
 [shader("fragment")]
 FragmentOutput fragmentMain(VertexOutput input)
 {
-    // Interpolation denormalises, so both of these are renormalised per
-    // fragment. Skipping it makes large triangles darken towards their centres.
+    // Interpolation denormalises, so this and `to_eye` below are renormalised per
+    // fragment. Skipping it makes large triangles darken towards their centres —
+    // and would make the normals view below read a shortened normal as a darker
+    // colour, which is a picture of the interpolation rather than of the surface.
     float3 normal = normalize(input.world_normal);
+
+    // **The normals view, and it is *world*-space normals.**
+    //
+    // The mapping is the conventional `n * 0.5 + 0.5`: +X is red, +Y green, +Z
+    // blue, and a face whose winding was inverted reads as the complement of the
+    // colour it should have — which is the whole diagnostic. Its usefulness rests
+    // on a face keeping one colour while the camera orbits, so that "this face is
+    // inverted" is a thing a modeller *sees* rather than infers from a picture
+    // that re-colours whenever they move. View-space normals answer the other
+    // question — is this normal smooth — by re-colouring on purpose, and they are
+    // not what this file could answer anyway: the block carries `view_proj` and
+    // no separate view matrix, so there is no rotation here to take a normal into
+    // eye space with.
+    //
+    // The branch is on a **uniform**, so it is wave-uniform on every target and
+    // returning before the texture fetch below costs no derivative anything else
+    // needs.
+    if (frame.ambient.w >= NORMALS_VIEW)
+    {
+        FragmentOutput normals;
+        // Straight into the `Rgba16Float` scene target, which the tonemap then
+        // resolves as `saturate(colour * exposure)` — the identity on `[0, 1]` at
+        // the default exposure, so the encoded normal reaches the swapchain
+        // exactly. A caller who has moved the exposure has asked for the picture
+        // to be scaled and gets that here too; the operator is monotonic per
+        // channel either way, so which channel dominates never changes.
+        normals.lit = float4(normal * 0.5 + 0.5, 1.0);
+        // Not reflective, so `ssr.slang` marches nothing off these pixels and
+        // `ssr_blur.slang` composites nothing onto them. A zero `F0` still leaves
+        // Schlick's grazing tail, so a renderer running `RenderEffects::REFLECTIONS`
+        // over a scene with probes in it adds a faint environment along the
+        // silhouette — the one place this view is not the encoded normal alone.
+        normals.reflectivity = float4(0.0, 0.0, 0.0, 0.0);
+        return normals;
+    }
+
     float3 to_eye = normalize(frame.camera_position.xyz - input.world_position);
     // The facet under the shading normal, taken once for the fragment and read
     // by the shadow biases alone — never by the shading, which is the authored

@@ -149,9 +149,10 @@ module's docs name its own omission; this is the list in one place.
   drawing into a different format needs a second one. That matches the tonemap
   pipeline's existing assumption rather than adding a new limit.
 
-- **Milestone 2's remainder** — the normals view and the exposure slider. The
-  listing panel landed (`I`) and the wireframe view landed (`W`), so what is
-  left is one renderer mode and the slider.
+- **Milestone 2's remainder** — the exposure _slider_. The listing panel landed
+  (`I`), the wireframe landed (`W`), runtime exposure landed on `-`/`=` and the
+  normals view landed on `N`, so what is left is a pointer-driven control where
+  today there is a key pair.
 
   Three things the wireframe left behind. Its **pixel proof runs only with a
   backend pinned** and was measured here on RADV through the _mesh-shader_ path;
@@ -163,8 +164,20 @@ module's docs name its own omission; this is the list in one place.
   `supports_wireframe` false, one line at start-up, and a warning per press,
   whose renderer half is tested but which no browser run confirms. `crate::gpu`
   has a `UiRenderer` pass now, so the blocker is no longer the pass: it is that
-  none of those listings has been written, and the wireframe and normals views
-  are renderer modes `crcbl-render` does not expose.
+  none of those listings has been written.
+
+  The normals view leaves two of its own. Its **pixel proof
+  (`gpu::tests::the_normals_view_paints_each_face_the_encoding_of_its_world_normal`)
+  also needs a pinned backend** and was measured here on RADV only; CI's
+  lavapipe runs it, but Metal, DX12 and wgpu have executed the branch nowhere —
+  the generated MSL and WGSL were read, not run. And
+  **`RenderEffects::REFLECTIONS` contaminates it at the silhouette**: the
+  fragment stage writes a zero `F0` in this view so `ssr.slang` marches nothing,
+  but Schlick's grazing tail is `(1 - F0) * (1 - N·V)^5`, which is not zero, so
+  a scene with an irradiance grid adds a faint environment along the edges. No
+  caller hits it — `apps/viewer` requests no effects — and fixing it properly
+  means teaching `ssr.slang` about the debug view, which is a second uniform and
+  a second shader for a defect nobody can see.
 
 - **Milestone 3, hot reload** (V-F4) and the **browser drop target** (the other
   half of V-F5). The drop target needs an `AssetSource` over a file a browser

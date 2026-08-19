@@ -730,6 +730,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/viewer` draws a normals view.** `N` toggles it, off by default. Each
+  surface is coloured by its **world-space** normal as `n * 0.5 + 0.5` — +X red,
+  +Y green, +Z blue — so an inverted face reads as the complement of the colour
+  it should have, and a missing or badly interpolated normal shows as itself
+  rather than as the plausible shading a light would have given it.
+  `ForwardRenderer` gained `set_normals_view`/`normals_view`, and the debug
+  panel's new `normals` row says `world` or `off`.
+
+  **World space rather than view space**, so a face keeps its colour while the
+  camera orbits and "is this face inverted" is something a modeller sees rather
+  than infers from a picture that re-colours whenever they move. View-space
+  normals answer the other question — is this normal smooth — and would need a
+  view matrix the frame's uniform block does not carry.
+
+  It builds no pipeline and adds no pass: the switch is one previously unused
+  lane of the frame block (`ambient.w`), read by a branch in the fragment stage,
+  so unlike the wireframe there is no device that can refuse it. Off writes the
+  value that lane always held, so no golden moved.
+
 - **Exposure is a runtime value, and `apps/viewer` can change it.** The
   tonemap's multiplier was a compile-time constant; it now arrives in a uniform
   block, with `ForwardRenderer::set_exposure`/`exposure` and a range of five

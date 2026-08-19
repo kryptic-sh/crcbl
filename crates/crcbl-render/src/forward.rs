@@ -750,6 +750,17 @@ pub struct ForwardRenderer {
     /// default**: a wireframe is a tool's view of a document, and every sample
     /// and every golden image predates it.
     wireframe_on: bool,
+    /// Whether [`begin_frame`](ForwardRenderer::begin_frame) writes
+    /// [`FrameUniforms::NORMALS_VIEW_ON`] into the frame block, which makes
+    /// `mesh.slang`'s fragment stage draw world-space normals instead of shading
+    /// — see [`set_normals_view`](ForwardRenderer::set_normals_view).
+    ///
+    /// **`false` by default**, on [`ForwardRenderer::wireframe_on`]'s terms
+    /// exactly: it is a tool's view of a document, and every sample and every
+    /// golden image predates it.
+    ///
+    /// [`FrameUniforms::NORMALS_VIEW_ON`]: crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_ON
+    normals_view: bool,
 
     /// Topic 18's shadow atlas: one `D32Float` image holding
     /// [`shadow::TILES`] square tiles in a fixed grid — the sun's cascades
@@ -3340,6 +3351,11 @@ impl ForwardRenderer {
             // frame it drew before `set_wireframe` existed.
             wireframe_pipeline: None,
             wireframe_on: false,
+            // Off, on the line above's terms: the normals view is opt-in, so a
+            // caller that never asks for one draws the frame it drew before
+            // `set_normals_view` existed. It builds nothing, so there is no
+            // second field here.
+            normals_view: false,
             shadow_atlas,
             shadow_atlas_view,
             shadow_placeholder,
@@ -3821,7 +3837,18 @@ impl ForwardRenderer {
         let uniforms = mesh::FrameUniforms {
             view_proj: view_projection.to_cols_array(),
             camera_position: camera.eye.extend(1.0).to_array(),
-            ambient: light.ambient.extend(0.0).to_array(),
+            // The ambient's `w` is the normals view's switch — see
+            // `set_normals_view` and the constants it names. A renderer nobody
+            // has called that on writes the `0.0` this line has always written,
+            // which is what makes every golden image untouched by the feature.
+            ambient: light
+                .ambient
+                .extend(if self.normals_view {
+                    mesh::FrameUniforms::NORMALS_VIEW_ON
+                } else {
+                    mesh::FrameUniforms::NORMALS_VIEW_OFF
+                })
+                .to_array(),
             shadow_view_proj,
             cascade_far: cascades.far,
             shadow_params: Cascades::params(),
@@ -3954,6 +3981,10 @@ impl ForwardRenderer {
         }
         let eye = [camera.eye.x, camera.eye.y, camera.eye.z];
         let write_view = |view: usize, view_proj: Mat4, from: Vec3| -> Result<(), HalError> {
+            // The spread carries the normals view's switch into these blocks too,
+            // and nothing reads it: `MeshModules::depth_pipeline` names no
+            // fragment stage at all, so the atlas is filled by the geometry
+            // stages alone whichever view the colour pass is drawing.
             let block = mesh::FrameUniforms {
                 view_proj: view_proj.to_cols_array(),
                 camera_position: from.extend(1.0).to_array(),
@@ -5408,6 +5439,64 @@ impl ForwardRenderer {
         self.wireframe_on
     }
 
+    /// Draws each surface's **world-space** normal instead of shading it, so a
+    /// modeller can see whether the normals a document carries are sane.
+    ///
+    /// **Off by default**, on [`set_wireframe`](Self::set_wireframe)'s terms: it
+    /// is a tool's view of a document, and every sample and every golden image
+    /// predates it. It takes effect on the next
+    /// [`begin_frame`](Self::begin_frame), which is what writes the block.
+    ///
+    /// # What the colours mean
+    ///
+    /// The conventional encoding, `n * 0.5 + 0.5` into RGB: +X reads red, +Y
+    /// green, +Z blue, and a face whose winding was inverted reads the
+    /// **complement** of the colour it should have. A missing or degenerate
+    /// normal reads as whatever the vertex data actually holds rather than as the
+    /// plausible shading a light would have given it, which is the point.
+    ///
+    /// # World space, not view space
+    ///
+    /// The two diagnose different things and this one is world space, so a face
+    /// keeps its colour while the camera orbits: "is this face inverted" is then
+    /// something a modeller *sees*, instead of inferring it from a picture that
+    /// re-colours whenever they move. View-space normals answer the other
+    /// question — is this normal smooth, is this seam split — by re-colouring on
+    /// purpose, and they are not a thing this block could express anyway: it
+    /// carries `view_proj` and no separate view matrix, so there is no rotation in
+    /// the shader to take a normal into eye space with.
+    ///
+    /// # It builds nothing and adds no pass
+    ///
+    /// Unlike the wireframe, which needs a second pipeline and so a device that
+    /// can build one: this is one lane of the frame's uniform block — see
+    /// [`FrameUniforms::NORMALS_VIEW_ON`] — read by a branch in the fragment
+    /// stage every device already runs. There is nothing to refuse and nothing to
+    /// release, which is why it cannot fail and there is no `supports_` probe
+    /// beside it.
+    ///
+    /// The tonemap still applies: at
+    /// [`DEFAULT_EXPOSURE`](crcbl_shaders::tonemap::DEFAULT_EXPOSURE) its operator
+    /// is the identity on `0..=1` and the encoded normal reaches the swapchain
+    /// exactly, and at any other exposure the picture is scaled per channel — so
+    /// which channel dominates a face never changes, but a caller reading exact
+    /// values wants [`set_exposure`](Self::set_exposure) left alone.
+    ///
+    /// [`FrameUniforms::NORMALS_VIEW_ON`]: crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_ON
+    pub const fn set_normals_view(&mut self, on: bool) {
+        self.normals_view = on;
+    }
+
+    /// Whether the colour pass draws world-space normals instead of shading.
+    ///
+    /// The read-back half of [`set_normals_view`](Self::set_normals_view), on
+    /// [`wireframe`](Self::wireframe)'s terms: what it draws is what the question
+    /// is about.
+    #[must_use]
+    pub const fn normals_view(&self) -> bool {
+        self.normals_view
+    }
+
     /// The cull and draw-argument passes, and the buffers they produce.
     ///
     /// What a caller reads the culling statistics out of — topic 03 §3.6's
@@ -6288,6 +6377,94 @@ mod tests {
                 renderer.exposure(),
             );
         }
+
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **The normals view moves one lane of the frame block and nothing else.**
+    ///
+    /// The mechanism, at the level a null device can observe it: which bytes of
+    /// the buffer `mesh.slang` reads changed. A field on the renderer would say
+    /// only that a flag moved; the block is what the shader actually branches on.
+    ///
+    /// Four claims, and each rules out a different way of passing wrongly:
+    ///
+    /// * an untouched renderer writes [`FrameUniforms::NORMALS_VIEW_OFF`] — which
+    ///   is what makes every golden image untouched by this feature;
+    /// * switching on writes [`FrameUniforms::NORMALS_VIEW_ON`] into the lane the
+    ///   shader reads, at the offset `std140` puts it at rather than at one this
+    ///   test picked;
+    /// * **those four bytes are the only ones that moved**, so the switch did not
+    ///   come at the cost of the ambient colour beside it or of any matrix;
+    /// * and switching off puts the block back exactly, so the view is a toggle
+    ///   rather than a one-way door.
+    ///
+    /// [`FrameUniforms::NORMALS_VIEW_OFF`]: crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_OFF
+    /// [`FrameUniforms::NORMALS_VIEW_ON`]: crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_ON
+    #[test]
+    fn the_normals_view_moves_the_ambients_last_lane_and_no_other_byte() {
+        // `w` of the second `float4` of the block: one `float4x4`, one `float4`,
+        // then three floats of ambient colour. Spelled as the sum rather than as
+        // `92` so that a member arriving before it is a compile-time question
+        // about `FrameUniforms`' own layout and not a silent read of a matrix.
+        const AMBIENT_W: usize = 64 + 16 + 12;
+
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        let camera = Camera::default();
+        let light = DirectionalLight::default();
+        let block = |renderer: &mut ForwardRenderer| -> Vec<u8> {
+            renderer
+                .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                .expect("write");
+            recorder
+                .buffer_bytes(renderer.uniforms[renderer.frame])
+                .expect("begin_frame wrote the block")
+        };
+
+        assert!(
+            !renderer.normals_view(),
+            "the normals view has to be off in a renderer nobody has asked",
+        );
+        let shaded = block(&mut renderer);
+        assert_eq!(
+            &shaded[AMBIENT_W..AMBIENT_W + 4],
+            &mesh::FrameUniforms::NORMALS_VIEW_OFF.to_le_bytes(),
+            "an untouched renderer must write the value every golden image was blessed with",
+        );
+
+        renderer.set_normals_view(true);
+        assert!(renderer.normals_view());
+        let normals = block(&mut renderer);
+        assert_eq!(
+            &normals[AMBIENT_W..AMBIENT_W + 4],
+            &mesh::FrameUniforms::NORMALS_VIEW_ON.to_le_bytes(),
+            "the switch has to reach the lane the fragment stage branches on",
+        );
+        // The bytes that moved, and they all have to be inside the lane — not
+        // *all* of the lane, because `0.0f` and `1.0f` share their two low bytes
+        // and an equality against the whole range would be a test about IEEE 754
+        // rather than about the block.
+        let outside: Vec<usize> = shaded
+            .iter()
+            .zip(normals.iter())
+            .enumerate()
+            .filter(|(at, (was, now))| was != now && !(AMBIENT_W..AMBIENT_W + 4).contains(at))
+            .map(|(at, _)| at)
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "the frame block changed at {outside:?}, which is outside the normals view's own lane",
+        );
+
+        renderer.set_normals_view(false);
+        assert!(!renderer.normals_view());
+        assert_eq!(
+            block(&mut renderer),
+            shaded,
+            "switching the view off has to put the block back, not just stop reporting it",
+        );
 
         renderer.destroy(device.as_ref());
     }
