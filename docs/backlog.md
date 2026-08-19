@@ -3380,163 +3380,40 @@ seam permits while command buffers referencing the group are still pending". It
 does not — it waits idle first, exactly as the new agnostic exercise does. So
 the pending case this capability is defined around is driven by nothing at all.
 
-### DECISION NEEDED — what "parity holds" has to mean before `crcbl-wgpu` goes
+### Metal's `DrawIndirectCount`: land the calls, withhold the flag, flip separately
 
-The stated order is: reach parity, then delete `crcbl-wgpu`. Goal 2 is done and
-gated. Parity is at **14 blockers**, down from 29, and the composition now
-matters more than the number — because **a strict reading of "all blockers
-closed" is not reachable with the hardware this project has.**
+What survives a 158-line entry that used to be titled "DECISION NEEDED — what
+parity holds has to mean before `crcbl-wgpu` goes". That decision was taken —
+see "DECIDED — the `crcbl-wgpu` deletion bar" — and almost everything else in it
+had landed. This is the part that still binds future work.
 
-Sorting the remaining rows by what actually stands in the way:
+**Read the entry below this one first: the work is blocked.** Slang cannot
+express the kernel that writes the `MTLIndirectCommandBuffer`, so none of the
+slicing here can start until that is resolved. What follows is how to cut it
+_when_ it can, and it is kept because that shape was expensively worked out and
+is not obvious.
 
-**Ordinary work.** Everything not named below — dx12's two mesh rows (now known
-provable, see the probe result above), Metal's remaining rows other than the
-four measured unprovable, and WebGPU's two. Both `PushConstants` rows have since
-closed, which is why this reads as a description rather than a count: the number
-moves every slice and the snapshot test is where it lives.
-
-**Measured unprovable on the only hardware available — 4 rows.** Metal's
-`TimestampQuery` and `PipelineStatisticsQuery`: CI's device reports three
-counter sampling points and **zero counter sets**, so no sample buffer can be
-built there at all. Metal's `MeshShading` and `TaskShaderStage`: the runner is
-`Apple Paravirtual device`, and `wgpu-hal`'s own gate excludes a device whose
-name says virtual. These can be _implemented_ and can never be _proved_ here.
-
-**~~Unknown~~ — settled, and favourably.** A probe now runs on the WARP job and
-answers: **`MeshShaderTier = TIER_1`**, shader model 6.6 offered (6.8 by
-descending probe), `ResourceBindingTier = 3`. So dx12's `MeshShading` and
-`TaskShaderStage` are **ordinary work and provable on this CI** — they move into
-the eight above, making it ten. The committed `ms_6_6` DXIL will load. Nothing
-in the blocker list is unknown any more.
-
-**Awaiting a decision already raised — 3 rows.** dx12's fills, below.
-
-**Metal's end state is now calculable, which makes the choice below concrete
-rather than a matter of taste.** Its six rows split three ways, all measured:
-
-| row                                         | state                                                                                        |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `MeshShading`, `TaskShaderStage`            | **unprovable here** — the runner answers `Metal3 = false`                                    |
-| `TimestampQuery`, `PipelineStatisticsQuery` | **unprovable here** — no `counterSets`, and no honest `timestamp_period_ns`                  |
-| `BindlessDescriptorArray`                   | writable — Metal's argument buffers do carry resource arrays; this backend binds flat tables |
-| `DrawIndirectCount`                         | writable, and now fully de-risked — the device creates _and executes_ ICBs                   |
-
-**`BindlessDescriptorArray` on Metal WORKS, and the remaining question is the
-shader, not the device.** The probe in `crcbl_mtl::binding` ran on CI's
-`Apple Paravirtual device` with Metal API and GPU Validation both on, and read
-all sixteen words back exactly: `0xBD0000..3`, `0xBD0100..3`, `0xBD0200..3`,
-`0xBD0300..3`. So on that device an argument buffer written directly as a table
-of `MTLBuffer::gpuAddress` values works, `gpuAddress` answers non-zero, and
-`useResource:usage:` residency is enough for the kernel to read through it.
-
-Getting there took two corrections, both from measurement:
-
-- `StructuredBuffer<uint> sources[] : register(t0, space0)` — the current
-  `bindless_probe.slang` — makes `slangc -target metal` **exit 0** while
-  emitting a binding index of `(uint64)-1` and an unattributed entry-point
-  parameter.
-- Recast as a `ParameterBlock` with an **unbounded** array, Metal's own front
-  end refused it:
-  `program_source:7:19: error: flexible array members are a C99 feature`. Slang
-  lowers `items[]` to a C99 flexible array member, which MSL does not define.
-- A **bounded** array in a `ParameterBlock` lowers to
-  `array<uint device*, int(64)>` — an ordinary `metal::array` — and that is what
-  runs.
-
-**The cost is a descriptor-set move, and it is measured.** `ParameterBlock` is a
-descriptor set in SPIR-V, so the array goes from set 0 / binding 1 to **set 1 /
-binding 0**, with `destination` left in set 0. Bounding the array _without_
-`ParameterBlock` keeps both in set 0 but hands Metal an entry-point parameter
-with no `[[buffer]]` attribute — invalid MSL again. So `ParameterBlock` is not
-optional if Metal is to have an artifact at all.
-
-That move is arguably the right layout rather than a concession: a bindless
-table is bound once per frame while other sets change per draw, which is why
-engines give it its own set. But it does mean recasting `bindless_probe.slang`
-changes the bind groups `crcbl-vk` and `crcbl-dx12` build for it, and those pass
-today.
-
-**Both halves have landed.** `bindless_probe.slang` is a bounded
-`ParameterBlock` of `SOURCE_CAPACITY = 7` at set 1 / binding 0 shipping
-`spirv, msl, dxil`, and `crcbl_mtl::binding` binds the table as a Metal argument
-buffer of `gpuAddress` values with `useResource` residency. The capability is
-`granted(DESCRIPTOR_INDEXING)`, reported when the device answers argument-buffer
-`Tier2` **and** `Metal3`, so a lesser Mac says `NotOnThisDevice` rather than the
-backend saying `No`. **The row is gone from `REVIEWED_BLOCKERS`** — which stood
-at nine rows, dx12 4 and Metal 5, on the day that landed. Read the current
-answer out of `REVIEWED_BLOCKERS`; it is eight now.
-
-The capacity is not a taste: it must exceed `SOURCE_COUNT` or the layout's count
-stops being a ceiling, and Vulkan requires a sized array's layout to declare the
-whole array, so `PORTABLE_STORAGE_BUFFERS_PER_STAGE` (8) minus the destination
-caps it at 7.
-
-**Nothing in `crcbl-mtl` has executed**, and the flip landed with the
-implementation rather than after it because the two cannot be separated: the
-capability is gated on `DESCRIPTOR_INDEXING`, and withholding the feature makes
-`check_entries` refuse the layout, so the split would be "nothing now,
-everything later". What only the `mtl e2e` run can settle: that the CI Mac
-reports `Tier2` and `Metal3` at all; that Metal takes the table at
-`[[buffer(1)]]` with the destination at `[[buffer(0)]]`, the reverse of the
-indices the probe proved; that `useResource` on the compute encoder covers
-buffers a preceding blit wrote in the same command buffer; and that a
-zero-filled tail passes GPU validation when never read. **The render-side
-`useResource:usage:stages:` arm is compiled and unproven anywhere** — the only
-bindless shader is compute-only.
-
-If it goes red, the revert is three hunks: restore the `Divergence` row and the
-`REVIEWED_BLOCKERS` tuple in `capability.rs`, and delete the `Tier2 && Metal3`
-block in `crcbl_mtl::adapter`'s `features_of`, which turns the path off at the
-gate without touching `binding.rs`.
-
-So **four of six can never go green on the hardware this project has**, whatever
-anyone writes. "Metal fully closed" is not reachable by working harder; it is
-reachable only by buying a Mac runner. That is the whole content of position (1)
-versus (2), and it is worth seeing before choosing between them.
-
-**And the two writable rows are not free.** `DrawIndirectCount` needs commands
-written by a kernel that must run before the render encoder opens. The backend
-can now express that ordering — see the deferral below, which has landed — so
-what is left is the kernel, the ICB and the flag rather than the encoding model.
-
-**It does split into safe slices, and an earlier note here said it did not.**
-That note reasoned that implementing without reporting would fail the seam suite
-as "declares unsupported and then performed it". It would not:
+**The slicing shape, which transfers from dx12.** Implementing without reporting
+does _not_ fail the seam suite as "declares unsupported and then performed it":
 `crcbl-vk::command`'s `indirect_count` refuses with `HalError::Unsupported`
 whenever `Features::DRAW_INDIRECT_COUNT` is absent from the device's own caps,
 and `crcbl-mtl` doing the same keeps the capability honestly `No` while the
 machinery exists underneath. The exercise sees `Refused`, which is what a `No`
-owes. So the dx12 shape — land the calls, withhold the flag, flip it in a
-separate revertible change — transfers exactly.
+owes. So: land the kernel, the ICB and the calls with the flag withheld, then
+flip the flag in a separate revertible change.
 
-**The flip is still the dangerous half**, and knowingly so: reporting
-`DRAW_INDIRECT_COUNT` moves every Metal adapter onto
-`GeometryPath::IndirectCount`, which is the same class of change that removed
-the WARP device when dx12 reported `MESH_SHADER` today.
+**The flip is the dangerous half, knowingly.** Reporting `DRAW_INDIRECT_COUNT`
+moves every Metal adapter onto `GeometryPath::IndirectCount` — the same class of
+change that removed the WARP device when dx12 reported `MESH_SHADER`. That is
+the whole argument for making it its own commit.
 
-**One real design decision sits inside the first slice**, and it should be made
-deliberately rather than discovered:
-
-1. **Defer render-pass encoding.** Record a pass's commands and encode them at
-   `end_render_pass`, so a compute encoder can be opened ahead of the render
-   encoder when the pass turns out to contain a `draw_indirect_count`. Correct
-   and costs nothing at run time, but it touches _every_ Metal draw — the whole
-   backend's encoding model — and is verifiable only on CI. **Done:**
-   `crcbl_mtl::command`'s `RenderCommand`/`RenderRecording` and the pure
-   `crcbl_mtl::pass`.
-2. **Split the pass at the call.** End the render encoder, run the kernel in a
-   compute encoder, reopen the render encoder with load actions preserving the
-   attachments, execute the ICB. Local to the one call and far smaller, but a
-   pass split stores and reloads every attachment, which is a real per-call cost
-   on a tiler, and it silently drops any in-pass memory guarantee across the
-   split.
-
-(1) is the performant answer and (2) is the cheap one; the seam calls
-`draw_indirect_count` once per bucket per frame, so (2)'s cost is not
-hypothetical. (1)'s free prerequisite — the deferral landing on its own as a
-pure refactor with no capability change at all — **has landed**, and the
-existing Metal e2e and render jobs are what prove it: nothing about it can be
-executed off a Mac, and the local gates only type-check it.
+**Its prerequisite has landed.** The render-pass deferral — recording a pass's
+commands and encoding them at `end_render_pass`, so a compute encoder can be
+opened ahead of the render encoder — is `crcbl_mtl::command`'s
+`RenderCommand`/`RenderRecording` and the pure `crcbl_mtl::pass`. The cheaper
+alternative was splitting the pass at the call, which stores and reloads every
+attachment on a tiler and drops any in-pass memory guarantee across the split;
+the deferral was taken instead and is the performant answer.
 
 ### BLOCKED ON THE SHADER TOOLCHAIN — Slang cannot write an ICB
 
