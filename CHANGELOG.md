@@ -799,6 +799,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **CI shellchecks the browser harnesses too.** The lint step's glob was
+  `tools/*.sh crates/*/tests/*.sh`, which reads like "every harness" and left
+  `web/`'s five scripts — both browser gates among them — and the samples' own
+  harnesses unchecked. It now covers `apps/*/tests/*.sh` and `web/*.sh`, and
+  widening it cost two real fixes: both browser runners indented a multi-line
+  list through `sed 's|^|  |'`, and use a read loop now.
+
 - **The browser gates wait two minutes for Chrome to start, not thirty
   seconds.** Three of the last eight non-cancelled Pages runs on `main` died
   with "the browser never wrote DevToolsActivePort", and the failing run's own
