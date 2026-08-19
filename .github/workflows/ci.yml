@@ -137,6 +137,25 @@ jobs:
       # to a workspace that always turns them all on.
       - run: cargo build --workspace --locked --no-default-features
 
+      # **The same check for the two backends this runner cannot build.**
+      # `crcbl-mtl` and `crcbl-dx12` compile only on their own platform jobs, and
+      # every one of those passes `--all-features` — so the configuration a
+      # developer gets by default was compiled nowhere, and a `use` that belongs
+      # behind a feature gate broke silently once already.
+      #
+      # It rides this Linux job rather than a macOS matrix entry, which is what
+      # made this look expensive: `cargo clippy --target` type-checks a platform
+      # backend without that platform. Compiling only, and only these two crates,
+      # so the cost is two target installs and two crate checks.
+      - name: Type-check the platform backends as a consumer gets them
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-pc-windows-msvc
+          cargo clippy -p crcbl-mtl --all-targets --locked --no-default-features \
+            --target aarch64-apple-darwin -- -D warnings
+          cargo clippy -p crcbl-dx12 --all-targets --locked --no-default-features \
+            --target x86_64-pc-windows-msvc -- -D warnings
+
   docs:
     name: rustdoc
     runs-on: ubuntu-latest

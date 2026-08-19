@@ -806,6 +806,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `browser-launch.mjs`, which all three already import from, beside the
   `readDevToolsPort` it bounds.
 
+- **CI type-checks `crcbl-mtl` and `crcbl-dx12` as a consumer gets them.** Both
+  compile only on their own platform jobs, and every one of those passes
+  `--all-features` — so the default configuration was compiled nowhere, and a
+  `use` that belonged behind a feature gate broke silently once already. The
+  Linux clippy job now runs `--no-default-features` for each against
+  `aarch64-apple-darwin` and `x86_64-pc-windows-msvc`.
+
+  **It rides the Linux job rather than a macOS matrix entry**, which is what
+  made this look expensive enough to be an open question:
+  `cargo clippy --target` type-checks a platform backend without that platform.
+  Two target installs and two crate checks. Red-checked by deleting a
+  `#[cfg(feature = "mtl-e2e")]` from an import block, which reproduces the
+  original break exactly.
+
 - **CI shellchecks the browser harnesses too.** The lint step's glob was
   `tools/*.sh crates/*/tests/*.sh`, which reads like "every harness" and left
   `web/`'s five scripts — both browser gates among them — and the samples' own
