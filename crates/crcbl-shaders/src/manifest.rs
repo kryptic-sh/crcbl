@@ -770,13 +770,21 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
             // One DXIL container per entry point, not one per shader — so the
             // count is the check. A generator that emitted only the first entry
             // point would leave every fragment stage unusable on D3D12, and a
-            // "there is a dxil column" assertion would pass.
+            // "there is a dxil column" assertion would pass. A shader that does
+            // not declare the target has none, which is the same biconditional
+            // the two columns above assert and not a weaker rule: zero is as
+            // exact a count as `entry_points.len()`.
             assert_eq!(
                 record.dxil.len(),
-                record.entry_points.len(),
-                "{}: {} entry points but {} DXIL containers",
+                if declares("dxil") {
+                    record.entry_points.len()
+                } else {
+                    0
+                },
+                "{}: {} entry points, declares dxil = {}, but {} DXIL containers",
                 record.name,
                 record.entry_points.len(),
+                declares("dxil"),
                 record.dxil.len()
             );
         }

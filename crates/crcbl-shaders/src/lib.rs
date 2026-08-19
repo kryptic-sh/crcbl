@@ -221,6 +221,10 @@ pub mod cull;
 /// layouts that shader declares.
 pub mod clear_counters;
 
+/// The workgroup size and uniform block `indirect_count_args.slang` declares,
+/// in the layout that shader declares.
+pub mod indirect_count_args;
+
 /// The workgroup size, uniform block and indirect-argument layout
 /// `draw_gen.slang` declares, in the layouts that shader declares.
 pub mod draw_gen;
@@ -873,11 +877,26 @@ mod tests {
     ///   otherwise be caught only by `CreateGraphicsPipelineState`.
     /// * The **declared container size** must be the file's, or the artifact is
     ///   truncated.
+    ///
+    /// **Absence is legitimate and is checked elsewhere**, exactly as it is for
+    /// WGSL and MSL above. `indirect_count_args.slang` declares no `dxil`
+    /// target because no D3D12 path could load it — `crcbl-dx12` issues a real
+    /// count-limited `ExecuteIndirect` and has nothing to emulate — so
+    /// demanding a container from every shader here would be demanding one
+    /// nothing loads. That a shader which *does* declare the target has a
+    /// container per entry point is [`manifest`]'s job, on every machine. The
+    /// skip is counted, so a change that stopped emitting DXIL everywhere would
+    /// empty this test rather than quietly pass it.
     #[test]
     fn every_shipped_shader_has_a_signed_dxil_container_per_entry_point() {
         assert!(!ALL.is_empty(), "the crate ships no shaders at all");
+        let mut checked = 0_usize;
         for shader in ALL {
+            if shader.dxil_containers().is_empty() {
+                continue;
+            }
             for entry in shader.entry_points() {
+                checked += 1;
                 let blob = shader
                     .dxil(entry.name())
                     .unwrap_or_else(|| panic!("{}: no DXIL for `{}`", shader.name(), entry.name()));
@@ -906,6 +925,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            checked > 0,
+            "no shader has a DXIL container, so this check covered nothing"
+        );
     }
 
     /// **The container list covers every entry point that has one, and pairs

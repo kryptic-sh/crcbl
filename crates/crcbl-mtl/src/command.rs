@@ -69,16 +69,19 @@
 //! `end_render_pass` instead of at `begin_render_pass`. Both are before
 //! [`finish`](CommandEncoder::finish), which is where the seam observes it.
 //!
-//! **Why defer at all**, since the straight-through form was simpler: Metal's
-//! only count-from-memory execution is
-//! `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
-//! `MTLIndirectCommandBuffer`, whose commands a *compute kernel* has to write —
-//! and that kernel must run **before** the render encoder the seam calls
-//! [`draw_indirect_count`](CommandEncoder::draw_indirect_count) inside was
-//! opened. A backend that has already opened the encoder cannot reach backwards
-//! to do that; one that has only a list of commands can. `indirect_count` still
-//! refuses, and `docs/backlog.md` holds the decision and the alternatives that
-//! lost.
+//! **Why defer at all**, since the straight-through form was simpler:
+//! [`draw_indirect_count`](CommandEncoder::draw_indirect_count) takes its count
+//! from GPU memory, and the only thing on this backend that can read one is a
+//! *compute kernel* — which must run **before** the render encoder the seam
+//! calls that verb inside was opened, because what it writes is what the pass
+//! then draws from. A backend that has already opened the encoder cannot reach
+//! backwards to do that; one that has only a list of commands can.
+//!
+//! That is what [`RenderRecording::prologue`] holds and what
+//! [`encode_render_pass`](MetalCommandEncoder::encode_render_pass) encodes
+//! first: a compute encoder, opened and ended, and only then the render
+//! encoder. `crcbl_mtl::indirect_count` carries the design and the three
+//! attempts at an indirect command buffer that lost to it.
 //!
 //! # A barrier is an encoder boundary
 //!
@@ -103,17 +106,32 @@ use std::sync::Arc;
 use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
-    DrawIndirectCount, GraphicsPipelineHandle, HalError, ImageCopy, ImageSubresourceLayers,
-    ImageType, IndexFormat, PassTimestampWrites, PipelineLayoutHandle, QuerySetHandle, Rect2d,
-    RenderPassDesc, ShaderStages, Viewport,
+    DrawIndirectCount, Features, GraphicsPipelineHandle, HalError, ImageCopy,
+    ImageSubresourceLayers, ImageType, IndexFormat, PassTimestampWrites, PipelineLayoutHandle,
+    QuerySetHandle, Rect2d, RenderPassDesc, ShaderStages, Viewport,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _,
-    MTLComputeCommandEncoder, MTLOrigin, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLScissorRect, MTLTexture, MTLViewport,
+    MTLBlitCommandEncoder,
+    MTLBuffer,
+    MTLCommandBuffer,
+    MTLCommandEncoder as _,
+    MTLComputeCommandEncoder,
+    // `newBufferWithLength:options:` for the buffer a count-limited draw's
+    // prologue packs into, which this module allocates because no seam call
+    // ever names it.
+    MTLDevice as _,
+    MTLOrigin,
+    MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor,
+    // `setLabel:` on the buffer a count-limited draw's prologue packs into,
+    // which is where a fault report reads a resource's name from.
+    MTLResource as _,
+    MTLScissorRect,
+    MTLTexture,
+    MTLViewport,
 };
 
 use crate::conv;
@@ -135,6 +153,26 @@ const UNLABELLED_RENDER_PASS: &str = "crcbl render pass";
 const UNLABELLED_COMPUTE_PASS: &str = "crcbl compute pass";
 /// See [`UNLABELLED_COMMAND_BUFFER`].
 const COPY_ENCODER: &str = "crcbl copies";
+/// The compute encoder a count-limited draw's prologue runs on. See
+/// [`UNLABELLED_COMMAND_BUFFER`] for why this backend's own encoders are named
+/// at all: a fault report identifies the culprit by its label, and this encoder
+/// belongs to no pass the caller ever named.
+const PACK_PASS: &str = "crcbl indirect-count args";
+/// The buffer that prologue packs into. See [`PACK_PASS`].
+const PACK_BUFFER: &str = "crcbl indirect-count packed args";
+
+/// The bound index buffer as the three arguments Metal takes at an indexed
+/// draw: the buffer, its index width, and the byte offset of index zero.
+///
+/// A named alias because it travels between three methods — resolved once by
+/// [`MetalCommandEncoder::indirect_index`], carried through
+/// [`MetalCommandEncoder::record_indirect_draws`], and recorded into every
+/// [`RenderCommand::DrawIndexedIndirect`] the loop emits.
+type IndexArguments = (
+    Retained<ProtocolObject<dyn MTLBuffer>>,
+    objc2_metal::MTLIndexType,
+    u64,
+);
 
 /// The one Metal encoder that may be open on the command buffer — or, for a
 /// render pass, the commands that will become one.
@@ -184,6 +222,15 @@ enum Target {
 /// pass begins, so it is an already-validated Objective-C object held here
 /// rather than a plan to be re-checked at replay.
 struct RenderRecording {
+    /// The dispatches that must run **before** the render encoder exists, in
+    /// the order the seam recorded the draws that need them.
+    ///
+    /// Empty for every pass but one that called
+    /// [`draw_indirect_count`](CommandEncoder::draw_indirect_count) or its
+    /// indexed sibling — this is the whole reason the pass is deferred, and the
+    /// module docs above say why. Each entry packs the argument structures one
+    /// count-limited draw will read; `crcbl_mtl::indirect_count` is the design.
+    prologue: Vec<PackDispatch>,
     descriptor: Retained<MTLRenderPassDescriptor>,
     /// `setLabel:`, which the fault reporter reads a faulting encoder back out
     /// by; see [`UNLABELLED_RENDER_PASS`].
@@ -193,6 +240,31 @@ struct RenderRecording {
     scissor: Option<MTLScissorRect>,
     /// The pass's commands, in the order the seam recorded them.
     commands: Vec<RenderCommand>,
+}
+
+/// One count-limited draw's packing dispatch, held until the render pass is
+/// encoded.
+///
+/// Retains what it references for [`RenderCommand`]'s reason, and one more
+/// besides: the buffer the kernel writes is created here rather than handed
+/// over by the seam, so nothing else is keeping it alive between the seam call
+/// and the replay.
+struct PackDispatch {
+    /// `crcbl_mtl::indirect_count`'s kernel, compiled once per device.
+    pipeline: Retained<ProtocolObject<dyn objc2_metal::MTLComputePipelineState>>,
+    /// The caller's count buffer, read at a word index the block carries.
+    count: Retained<ProtocolObject<dyn MTLBuffer>>,
+    /// The caller's argument buffer, **read and never written**; see
+    /// `crcbl_mtl::indirect_count` for why the kernel copies rather than
+    /// patching in place.
+    source: Retained<ProtocolObject<dyn MTLBuffer>>,
+    /// The packed copy the draws read, owned by this backend.
+    packed: Retained<ProtocolObject<dyn MTLBuffer>>,
+    /// The kernel's uniform block, sent inline with `setBytes:length:atIndex:`.
+    params: [u8; crate::indirect_count::PARAMS_SIZE],
+    /// Threadgroups to dispatch, which is one for every bound
+    /// `crcbl_mtl::indirect_count`'s ceiling permits.
+    groups: NSUInteger,
 }
 
 /// One render-pass command, holding everything its Metal call will need.
@@ -273,6 +345,62 @@ enum RenderCommand {
         args: Retained<ProtocolObject<dyn MTLBuffer>>,
         offset: NSUInteger,
     },
+}
+
+/// Dispatches one count-limited draw's packing kernel.
+///
+/// The argument-table indices are the ones the compiled MSL declares —
+/// `[[buffer(0)]]` through `[[buffer(3)]]`, in the order
+/// `indirect_count_args.slang` declares its bindings — and **not** anything
+/// `crcbl_mtl::binding` computed: this pipeline has no seam-side layout, no
+/// bind group and no push-constant block, so the flattening rule that module
+/// owns has nothing to say about it.
+///
+/// Both caller-owned buffers are bound at offset **zero**. Every offset the
+/// seam passed travels in the uniform block as a word index instead, which is
+/// what keeps this free of any question about what offset alignment a `device`
+/// buffer binding requires on the device it is running on.
+fn encode_pack(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, dispatch: &PackDispatch) {
+    encoder.setComputePipelineState(&dispatch.pipeline);
+    // SAFETY: `objc2` marks these unsafe because Metal bounds-checks neither
+    // the argument-table index nor the offset. The indices are the ones the
+    // compiled MSL declares — `crcbl_mtl::indirect_count`'s embedded artifact
+    // is the record of them, and its
+    // `the_embedded_kernel_is_the_committed_artifact` is what keeps that record
+    // true — and all three are far below the buffer table's capacity. The
+    // offset is zero on all three by construction: every offset the seam passed
+    // travels in the uniform block as a word index instead, and
+    // `plan_indirect_count` bounded each of those against the buffer it indexes.
+    // Every buffer is kept alive by the `Retained` this dispatch holds.
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(&dispatch.count), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(&dispatch.source), 0, 2);
+        encoder.setBuffer_offset_atIndex(Some(&dispatch.packed), 0, 3);
+    }
+    let length = to_ns(dispatch.params.len() as u64);
+    let source = NonNull::from(&dispatch.params).cast::<core::ffi::c_void>();
+    // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither the
+    // pointer nor the argument-table index. `source` points at `length`
+    // initialised bytes of an array this command owns and nothing mutates for
+    // the duration of the call, and Metal copies them before returning. Index
+    // `0` is the slot the compiled MSL puts the uniform block at, which
+    // `crcbl_mtl::indirect_count`'s embedded artifact is the record of.
+    unsafe { encoder.setBytes_length_atIndex(source, length, 0) };
+    // `groups` is at least one: `plan_indirect_count` answers `None` for a draw
+    // of nothing, so a recorded dispatch always has a structure to pack. Metal
+    // raises on a zero threadgroup count, and a raise aborts the process.
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(
+        objc2_metal::MTLSize {
+            width: dispatch.groups,
+            height: 1,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: to_ns(u64::from(crate::indirect_count::WORKGROUP_SIZE)),
+            height: 1,
+            depth: 1,
+        },
+    );
 }
 
 /// Makes one recorded command's Metal call.
@@ -630,21 +758,47 @@ impl MetalCommandEncoder {
     }
 
     /// Opens the render encoder a recorded pass has been waiting for, replays
-    /// the pass into it, and ends it.
+    /// the pass into it, and ends it — after running the pass's prologue.
     ///
     /// The order is the one a straight-through encoder produced: the label and
     /// the scissor rectangle `begin_render_pass` would have set on the fresh
     /// encoder, then every command in the order the seam recorded it, then
     /// `endEncoding`.
     ///
+    /// **What a straight-through encoder could not have produced is the
+    /// prologue**, and that is the whole reason for deferring. Every
+    /// [`PackDispatch`] runs on a compute encoder of its own, opened and ended
+    /// before the render encoder exists, so the arguments the pass draws from
+    /// are written before the pass is recorded onto the command buffer at all.
+    /// The hazard between the two is Metal's own: every buffer this backend
+    /// allocates is a tracked resource, and Metal orders a write on one encoder
+    /// against a read on the next without being told to.
+    ///
     /// This runs whether or not recording has failed, for the reason
     /// `end_render_pass` gives: the encoder must exist and be ended before
     /// `commit`, and a failed encoder's command buffer is thrown away
     /// regardless.
     fn encode_render_pass(&mut self, recording: &RenderRecording) {
-        let Some(raw) = self.raw.as_ref() else {
+        // Cloned rather than borrowed — one retain — because `fail` below needs
+        // `&mut self` and a borrow of `self.raw` held across it is a second one.
+        let Some(raw) = self.raw.clone() else {
             return;
         };
+        if !recording.prologue.is_empty() {
+            let Some(encoder) = raw.computeCommandEncoder() else {
+                self.fail(HalError::DeviceLost(
+                    "MTLCommandBuffer::computeCommandEncoder returned nil for a count-limited \
+                     draw's packing pass"
+                        .to_string(),
+                ));
+                return;
+            };
+            encoder.setLabel(Some(&NSString::from_str(PACK_PASS)));
+            for dispatch in &recording.prologue {
+                encode_pack(&encoder, dispatch);
+            }
+            encoder.endEncoding();
+        }
         let encoder = raw.renderCommandEncoderWithDescriptor(&recording.descriptor);
         let Some(encoder) = encoder else {
             self.fail(HalError::DeviceLost(
@@ -1325,6 +1479,7 @@ impl CommandEncoder for MetalCommandEncoder {
             });
         self.epoch += 1;
         self.open = Open::Render(RenderRecording {
+            prologue: Vec::new(),
             descriptor,
             label: NSString::from_str(desc.label.unwrap_or(UNLABELLED_RENDER_PASS)),
             scissor,
@@ -1720,12 +1875,18 @@ impl CommandEncoder for MetalCommandEncoder {
         self.indirect(draw, true);
     }
 
-    fn draw_indirect_count(&mut self, _draw: &DrawIndirectCount) {
-        self.fail(indirect_count());
+    /// The multi-draw loop above, with a **prologue** that reads the count.
+    ///
+    /// `crcbl_mtl::indirect_count` carries the design; the short of it is that
+    /// a compute kernel packs the argument structures this loop will read and
+    /// leaves every structure past the count with no instances, so the draws
+    /// past the count render nothing.
+    fn draw_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.indirect_count(draw, false);
     }
 
-    fn draw_indexed_indirect_count(&mut self, _draw: &DrawIndirectCount) {
-        self.fail(indirect_count());
+    fn draw_indexed_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.indirect_count(draw, true);
     }
 
     /// Refused for the same reason `create_mesh_pipeline` is: there is no mesh
@@ -2177,27 +2338,150 @@ impl MetalCommandEncoder {
                 return;
             }
         };
-        // Resolved before the loop so an indexed draw with nothing bound is one
-        // failure rather than `draw_count` of them.
-        let index = if indexed {
-            let Some(index) = self.index.as_ref() else {
-                self.fail(HalError::InvalidDescriptor(
-                    "draw_indexed_indirect with no index buffer bound: Metal takes the buffer as \
-                     an argument of the draw and has no nil to pass for it"
-                        .to_string(),
-                ));
-                return;
-            };
-            Some((index.raw.clone(), index.index_type(), index.offset))
+        let index = self.indirect_index("draw_indexed_indirect", indexed);
+        if !self.ok() {
+            return;
+        }
+        self.record_indirect_draws(
+            primitive,
+            &args,
+            index.as_ref(),
+            (0..plan.count).map(|structure| plan.offset(structure)),
+        );
+    }
+
+    /// The shared body of the two **count-limited** indirect draws.
+    ///
+    /// The same loop as [`indirect`](Self::indirect) with a prologue in front
+    /// of it: a compute dispatch that reads the count and packs the argument
+    /// structures the loop will draw from, leaving every structure at or past
+    /// the count with no instances. `crcbl_mtl::indirect_count` holds the
+    /// design, the ceiling and the reason the kernel copies rather than
+    /// patching the caller's arguments in place.
+    ///
+    /// **The refusal comes first and is the device's**, matching how
+    /// `crcbl-vk`'s own `indirect_count` refuses when
+    /// [`Features::DRAW_INDIRECT_COUNT`] is absent: `crcbl_mtl::adapter` is
+    /// where the flag is decided, and switching it off there is what turns this
+    /// whole slice off.
+    fn indirect_count(&mut self, draw: &DrawIndirectCount, indexed: bool) {
+        let what = if indexed {
+            "draw_indexed_indirect_count"
         } else {
-            None
+            "draw_indirect_count"
         };
-        // One recorded command per argument structure, because that is one
-        // Metal call per structure — the loop is the multi-draw, and deferring
-        // it must not fold it into anything smaller.
-        for structure in 0..plan.count {
-            let offset = to_ns(plan.offset(structure));
-            let command = match &index {
+        if !self.ok() {
+            return;
+        }
+        if !self
+            .device
+            .caps
+            .features
+            .contains(Features::DRAW_INDIRECT_COUNT)
+        {
+            self.fail(crate::MetalInstance::unsupported(
+                crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT,
+            ));
+            return;
+        }
+        let Some(primitive) = self.draw_target(what) else {
+            return;
+        };
+        let Some(args) = self.buffer(draw.args) else {
+            return;
+        };
+        let Some(count) = self.buffer(draw.count_buffer) else {
+            return;
+        };
+        let plan = match crate::indirect_count::plan_indirect_count(
+            draw,
+            indexed,
+            args.length() as u64,
+            count.length() as u64,
+        ) {
+            Ok(Some(plan)) => plan,
+            // A `max_draw_count` of zero: no structure to pack and no draw to
+            // issue, so the prologue is not recorded either.
+            Ok(None) => return,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let index = self.indirect_index(what, indexed);
+        if !self.ok() {
+            return;
+        }
+        let pipeline = match self.device.pack_pipeline() {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let Some(packed) = self.pack_buffer(plan.packed_bytes) else {
+            return;
+        };
+        self.record_pack(PackDispatch {
+            pipeline,
+            count,
+            source: args,
+            packed: packed.clone(),
+            params: plan.params,
+            groups: to_ns(u64::from(plan.groups)),
+        });
+        // **The draws read `packed`, not the caller's buffer.** Reading the
+        // caller's would draw the instance counts the kernel was there to
+        // override.
+        self.record_indirect_draws(
+            primitive,
+            &packed,
+            index.as_ref(),
+            (0..plan.draws).map(|structure| plan.offset(structure)),
+        );
+    }
+
+    /// The bound index buffer's three draw arguments, resolved once for a whole
+    /// multi-draw rather than once per structure.
+    ///
+    /// `None` is two things, and [`ok`](Self::ok) is what tells them apart — the
+    /// same arrangement every recording method here uses, because a failure has
+    /// nowhere to go until `finish`. Either the draw is not indexed, or it is
+    /// and nothing is bound, in which case the caller has been told: Metal takes
+    /// the index buffer as an argument of the draw and has no nil to pass for
+    /// it.
+    fn indirect_index(&mut self, what: &str, indexed: bool) -> Option<IndexArguments> {
+        if !indexed {
+            return None;
+        }
+        let Some(index) = self.index.as_ref() else {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} with no index buffer bound: Metal takes the buffer as an argument of the \
+                 draw and has no nil to pass for it"
+            )));
+            return None;
+        };
+        Some((index.raw.clone(), index.index_type(), index.offset))
+    }
+
+    /// Records one indirect draw per argument structure, which is one Metal
+    /// call per structure.
+    ///
+    /// **The loop *is* the multi-draw** — see `crcbl_mtl::draw` — so deferring
+    /// it must not fold it into anything smaller. It is shared by the plain and
+    /// the count-limited forms because the two differ only in which buffer the
+    /// structures are in and how their number was arrived at; a second copy is a
+    /// second place for the indexed arm to drift.
+    fn record_indirect_draws(
+        &mut self,
+        primitive: objc2_metal::MTLPrimitiveType,
+        args: &Retained<ProtocolObject<dyn MTLBuffer>>,
+        index: Option<&IndexArguments>,
+        offsets: impl Iterator<Item = u64>,
+    ) {
+        for offset in offsets {
+            let offset = to_ns(offset);
+            let command = match index {
                 Some((raw, index_type, index_offset)) => RenderCommand::DrawIndexedIndirect {
                     primitive,
                     index_type: *index_type,
@@ -2214,6 +2498,46 @@ impl MetalCommandEncoder {
             };
             self.record(command);
         }
+    }
+
+    /// Appends a packing dispatch to the open render pass's prologue.
+    ///
+    /// [`record`](Self::record)'s sibling, and silent for the same reason: every
+    /// caller has already established that a pass is open, because
+    /// [`draw_target`](Self::draw_target) said so with its own sentence.
+    fn record_pack(&mut self, dispatch: PackDispatch) {
+        if let Open::Render(recording) = &mut self.open {
+            recording.prologue.push(dispatch);
+        }
+    }
+
+    /// Allocates the buffer one count-limited draw's kernel packs into.
+    ///
+    /// **Private, and one per call.** Private because the CPU never reads it;
+    /// one per call because a buffer shared between two draws — or between two
+    /// frames — is a buffer one of them is still reading while the other packs
+    /// it, and this backend has no allocator to hand back a region that is
+    /// provably idle. `crcbl_mtl::indirect_count`'s ceiling is what keeps the
+    /// allocation trivially small: at most eight argument structures, which is
+    /// 160 bytes.
+    ///
+    /// It is released when the recording is dropped, and Metal keeps it alive
+    /// from there: `crcbl_mtl::fault`'s command buffer is created with
+    /// `retainedReferences` at its default of true, so the encoders that
+    /// reference a resource retain it until the buffer completes. Every
+    /// [`RenderCommand`] already depends on that.
+    fn pack_buffer(&mut self, bytes: u64) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
+        let Some(raw) = self.device.raw.newBufferWithLength_options(
+            to_ns(bytes),
+            conv::resource_options(crcbl_hal::MemoryLocation::DeviceLocal),
+        ) else {
+            // As `create_buffer`: nil is the allocation failing, and it is the
+            // one failure the seam has a name for here.
+            self.fail(HalError::OutOfDeviceMemory);
+            return None;
+        };
+        raw.setLabel(Some(&NSString::from_str(PACK_BUFFER)));
+        Some(raw)
     }
 
     /// Everything a buffer↔image copy needs, once every bound has been checked.
@@ -2331,26 +2655,6 @@ struct CopyPlan {
 /// Bytes an indirect dispatch reads: `MTLDispatchThreadgroupsIndirectArguments`
 /// is three `uint32_t`s, fixed by Metal's own header.
 const DISPATCH_ARGUMENTS: u64 = 12;
-
-/// The refusal for the one indirect shape Metal cannot express at all.
-///
-/// `drawPrimitives:indirectBuffer:indirectBufferOffset:` emits one draw and
-/// reads no count, and the multi-draw loop `crcbl_mtl::draw` builds on it works
-/// only because [`DrawIndirect::draw_count`] is a **CPU** value.
-/// [`DrawIndirectCount`] takes its count from GPU memory, and Metal's only
-/// count-from-memory execution —
-/// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
-/// `MTLIndirectCommandBuffer` — needs the commands to already exist, written by
-/// a compute kernel that would have to run before the render encoder this call
-/// happens inside was opened. So
-/// [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) stays off
-/// and this backend's derived tier stays B; see the crate docs.
-fn indirect_count() -> HalError {
-    crate::MetalInstance::not_yet(
-        "indirect-count draws: Metal's only GPU-side count is an MTLIndirectCommandBuffer whose \
-         commands a compute pass must encode before the render pass begins (the Metal ICB slice)",
-    )
-}
 
 impl Drop for MetalCommandEncoder {
     fn drop(&mut self) {

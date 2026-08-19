@@ -267,13 +267,26 @@
 //!   rather than an approximation of it: the draw count is a CPU value by
 //!   definition, so N calls emit exactly the N draws from N GPU-written
 //!   argument structures that the flag means.
-//! * [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) is still
-//!   **off**, and it is the one Metal cannot express through this seam's shape
-//!   at all. The count lives in GPU memory, Metal's only execution that reads
-//!   one is `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over
-//!   an `MTLIndirectCommandBuffer`, and filling that buffer from the seam's
-//!   argument structures needs a compute kernel running *before* the render
-//!   encoder the call happens inside was opened.
+//! * [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) is now
+//!   **on**, and it is the flag this crate spent longest without. It was
+//!   described here for three revisions as the one Metal cannot express at all:
+//!   the count lives in GPU memory, and Metal's only execution that reads one
+//!   is `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
+//!   `MTLIndirectCommandBuffer`. Both halves of that are still true and neither
+//!   turned out to be the question. A draw of **zero instances renders
+//!   nothing**, so `crcbl_mtl::indirect_count`'s kernel packs the argument
+//!   structures and leaves every one at or past the count with no instances,
+//!   and the pass then issues `max_draw_count` of the same indirect draws the
+//!   bullet above is about. The kernel runs before the render encoder exists
+//!   because `crcbl_mtl::command` defers the whole render pass, which is what
+//!   that deferral was built for.
+//!
+//!   [`Limits::max_draw_indirect_count`](crcbl_hal::Limits::max_draw_indirect_count)
+//!   is therefore a **choice** and not a measurement — there is no descriptor to
+//!   create and nothing to ask — and it is deliberately small, because the pass
+//!   issues that many draws whatever the GPU count turns out to be.
+//!   `crcbl_mtl::indirect_count`'s `MAX_DRAWS` is where the number and its cost
+//!   are argued.
 //! * [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) is
 //!   **back on**, and the round trip is the part worth knowing about. MTL1
 //!   reported it from `argumentBuffersSupport`, which is a true statement about
@@ -299,11 +312,11 @@
 //! [`Features::GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) optionally on top.
 //! Until topic 39 it demanded the whole bundle and this backend was refused
 //! with [`UnsupportedFeatures`](crcbl_hal::HalError::UnsupportedFeatures) over
-//! `DRAW_INDIRECT_COUNT`, a flag absent from Metal's API rather than
-//! unimplemented here — the case that argument was made from. The
-//! `the_default_device_desc_opens_and_the_rest_degrades` test is what keeps
-//! that from changing quietly, and it asserts all three flags above rather than
-//! only the absent ones.
+//! `DRAW_INDIRECT_COUNT` — the case that argument was made from, and one this
+//! backend no longer fails at all. The
+//! `the_default_device_desc_opens_and_the_rest_degrades` test is what keeps that
+//! from changing quietly, and it asserts all three flags above rather than only
+//! the absent ones.
 //!
 //! The one bundled feature that is still purely an adapter question —
 //! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) — is
@@ -356,6 +369,14 @@ mod device;
 mod draw;
 #[cfg(target_os = "macos")]
 mod fault;
+// The sixth, and the reason is the sharpest of the six: what a count-limited
+// draw tells its packing kernel is a set of *word indices* derived from the
+// caller's byte offsets, and Metal reports none of them wrong — an indirect
+// draw reading past its buffer raises, which aborts the process. So the
+// arithmetic, the ceiling and the embedded kernel are compiled in the test
+// build on every host and `cargo test` runs them without a Mac.
+#[cfg(any(target_os = "macos", test))]
+mod indirect_count;
 #[cfg(target_os = "macos")]
 mod instance;
 // The fifth, and for the reason the other four give: where a render pass's area

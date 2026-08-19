@@ -516,15 +516,21 @@ pub(crate) mod tests {
     /// **opens** on real hardware and everything else it asks for degrades.
     ///
     /// This is the case topic 39 was written for: Metal used to be refused
-    /// outright over `DRAW_INDIRECT_COUNT`, a flag absent from the API rather
-    /// than unimplemented, while having the rest of the set.
+    /// outright over `DRAW_INDIRECT_COUNT`, while having the rest of the set.
     ///
-    /// **The gap is now reported rather than refused, and this test is what
-    /// records where it sits.** [`Features::MULTI_DRAW_INDIRECT`] is reported,
-    /// because `crcbl_mtl::draw`'s loop is the call behind it; and
-    /// [`Features::DRAW_INDIRECT_COUNT`] was never reported and still cannot
-    /// be. Both are asserted rather than only the absent one, so a change in
-    /// either direction fails here.
+    /// **Both indirect flags are reported now, and this test is what records
+    /// it.** [`Features::MULTI_DRAW_INDIRECT`] is `crcbl_mtl::draw`'s loop, and
+    /// [`Features::DRAW_INDIRECT_COUNT`] is that loop with
+    /// `crcbl_mtl::indirect_count`'s packing kernel in front of it. The second
+    /// used to be asserted *absent* here, and the assertion below is the same
+    /// one turned over: a change in either direction still fails, and the
+    /// [`GeometryPath`] pinned further down is what the flag moved.
+    ///
+    /// The ceiling is asserted beside the flag on purpose. A device reporting
+    /// the feature with `max_draw_indirect_count` at the seam's floor of one
+    /// would pass every capability check and be declined by the agnostic seam
+    /// suite's `can_multi_draw`, which is the "closed but exercised nowhere"
+    /// state this slice was written to avoid.
     ///
     /// [`Features::DESCRIPTOR_INDEXING`] is asserted differently, because it is
     /// the one flag here whose answer is the *device's*: `crcbl_mtl::adapter`
@@ -552,9 +558,15 @@ pub(crate) mod tests {
 
         let caps = device.caps();
         assert!(
-            !caps.supports(Features::DRAW_INDIRECT_COUNT),
-            "a GPU-side draw count is what Metal cannot express at all: {:?}",
+            caps.supports(Features::DRAW_INDIRECT_COUNT),
+            "the packing kernel earns a GPU-side draw count: {:?}",
             caps.features
+        );
+        assert!(
+            caps.limits.max_draw_indirect_count >= 2,
+            "a ceiling of {} would leave the capability closed and exercised nowhere: the seam \
+             suite's indirect exercises need two argument structures out of one call",
+            caps.limits.max_draw_indirect_count
         );
         assert!(
             caps.supports(Features::MULTI_DRAW_INDIRECT),
@@ -570,8 +582,11 @@ pub(crate) mod tests {
         );
 
         // The paths those features select, named rather than implied: this is
-        // what the renderer would record on this device today.
-        assert_eq!(caps.geometry_path(), GeometryPath::IndirectPerBatch);
+        // what the renderer would record on this device today. The geometry
+        // path is the one the slice moved — `GeometryPath::from_features` reads
+        // `DRAW_INDIRECT_COUNT`, so `crcbl_render::forward` records a
+        // count-limited draw here now where it recorded one per batch before.
+        assert_eq!(caps.geometry_path(), GeometryPath::IndirectCount);
         assert_eq!(
             caps.binding_model(),
             if bindless {

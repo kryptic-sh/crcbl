@@ -85,6 +85,16 @@ dxil = vertexMain:dxil/grid.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff9
 dxil = fragmentMain:dxil/grid.fragmentMain.dxil:9ba86d7496dfef41a5bbd87a4feea99d18089a5dfa6f8834d57dc761252889c7
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[indirect_count_args]
+source = shaders/indirect_count_args.slang
+source-sha256 = 851fde0686d0f229dbc814798a530ad708661cc9f20ba512ee058ce7de1deba7
+targets = spirv, msl
+spirv = spirv/indirect_count_args.spv
+spirv-sha256 = 685cb82f26eef922fbebc97704d5ca9e6e1aec563423ed818332c05ea30ea852
+msl = msl/indirect_count_args.metal
+msl-sha256 = 7dda3e1b76e8235d944197d0c43ebb0e552a23072485180df338179335bd6186
+entry-points = computeMain:glcompute
+
 [light_cluster]
 source = shaders/light_cluster.slang
 source-sha256 = b522e072aaa779e7f1e69ef05d6d5bcd6a24d112e88a3ab2bb771c9fbc4cddde

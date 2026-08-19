@@ -39,17 +39,22 @@
 //!   That is what earns
 //!   [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT).
 //! * [`draw_indirect_count`](crcbl_hal::CommandEncoder::draw_indirect_count)
-//!   and its indexed sibling read the count from GPU memory, and **this slice
-//!   cannot implement them.** The reason is in `crcbl_mtl::command`'s refusal
-//!   and is worth stating once here too: Metal's only count-from-memory
-//!   execution is `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:`
-//!   over an `MTLIndirectCommandBuffer`, whose commands must already exist —
-//!   written either by the CPU, which does not know the GPU-side draw
-//!   arguments, or by a compute kernel, which would have to run *before* the
-//!   render encoder the seam calls this inside was opened. Emulating it by
-//!   issuing `max_draw_count` draws and hoping the unused argument structures
-//!   are zeroed is the silently-wrong version, since nothing in the seam
-//!   promises they are.
+//!   and its indexed sibling read the count from GPU memory, and they are the
+//!   same loop with a **prologue** in front of it. `crcbl_mtl::indirect_count`
+//!   is that module and carries the whole argument; the shape is that a compute
+//!   kernel packs the argument structures the loop will read and gives every
+//!   structure past the count no instances, so the draws past the count render
+//!   nothing.
+//!
+//!   This paragraph used to say the slice could not implement them, and named
+//!   `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
+//!   `MTLIndirectCommandBuffer` as the only count-from-memory execution Metal
+//!   has. That is still true of *executions* and is no longer the question: a
+//!   draw whose instance count is a GPU-written word needs no count-reading
+//!   call to render nothing. It also warned that "issuing `max_draw_count`
+//!   draws and hoping the unused argument structures are zeroed" was the
+//!   silently-wrong version — which it is, and which is why the kernel *makes*
+//!   them zero rather than hoping.
 //!
 //! # The argument structures are the same bytes on both APIs
 //!
@@ -71,21 +76,13 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLIndexType};
 
-/// Bytes of one `MTLDrawPrimitivesIndirectArguments`: four 32-bit fields.
-///
-/// Fixed by the API, and identical to Vulkan's `VkDrawIndirectCommand`; see the
-/// module docs.
-const DRAW_ARGS_BYTES: u64 = 16;
-
-/// Bytes of one `MTLDrawIndexedPrimitivesIndirectArguments`: five 32-bit
-/// fields. See [`DRAW_ARGS_BYTES`].
-const DRAW_INDEXED_ARGS_BYTES: u64 = 20;
-
-/// Alignment Metal requires of an indirect buffer offset.
-///
-/// The argument structures are `uint32_t` fields, and Metal's headers document
-/// `indirectBufferOffset` as a multiple of four.
-const INDIRECT_OFFSET_ALIGNMENT: u64 = 4;
+// The argument-structure geometry, which this module and
+// `crcbl_mtl::indirect_count` both step by — one buffer offset at a time here,
+// and one *word index* at a time there, because the packing kernel is told the
+// layout rather than declaring it. It lives in that module because it is
+// compiled on every host: these are numbers the API fixes, and a test that can
+// only run on a Mac is a test that runs on one machine in CI.
+use crate::indirect_count::{DRAW_ARGS_BYTES, DRAW_INDEXED_ARGS_BYTES, INDIRECT_OFFSET_ALIGNMENT};
 
 /// The index buffer a later draw will read, held because Metal takes it at the
 /// draw call. See the module docs.

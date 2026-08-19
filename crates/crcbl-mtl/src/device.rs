@@ -51,9 +51,27 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
-    MTLArgumentBuffersTier, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
-    MTLDepthStencilState, MTLDevice, MTLEvent, MTLResource, MTLSamplerDescriptor, MTLSamplerState,
-    MTLSharedEvent, MTLTexture, MTLTextureDescriptor,
+    MTLArgumentBuffersTier,
+    MTLBuffer,
+    MTLCommandBuffer,
+    MTLCommandBufferStatus,
+    MTLCommandQueue,
+    // The four `pack_pipeline` needs, and nothing else: this device compiles
+    // one internal kernel — `crcbl_mtl::indirect_count`'s — and every other
+    // pipeline in this backend is built by `crcbl_mtl::pipeline`.
+    MTLComputePipelineDescriptor,
+    MTLComputePipelineState,
+    MTLDepthStencilState,
+    MTLDevice,
+    MTLEvent,
+    MTLLibrary,
+    MTLPipelineOption,
+    MTLResource,
+    MTLSamplerDescriptor,
+    MTLSamplerState,
+    MTLSharedEvent,
+    MTLTexture,
+    MTLTextureDescriptor,
 };
 
 use crate::command::MetalCommandEncoder;
@@ -374,6 +392,22 @@ pub(crate) struct DeviceState {
     pub(crate) in_flight: Vec<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
     /// The ones that failed. See [`crate::fault::FaultLog`].
     pub(crate) faults: crate::fault::FaultLog,
+    /// `crcbl_mtl::indirect_count`'s packing kernel, compiled on first use.
+    ///
+    /// **Create-on-first-use rather than eager**, which is the opposite call to
+    /// [`DeviceInner::default_depth_stencil`] above and for the reason that
+    /// field states in reverse: this is a `newLibraryWithSource:` compile of a
+    /// whole MSL program rather than one message send, and a caller that never
+    /// records a count-limited draw — every offscreen probe and every test in
+    /// this crate that opens a device to ask it something — should not pay for
+    /// one at open. It is the same shape as `crcbl-dx12`'s
+    /// `indirect_signature`.
+    ///
+    /// `None` means "not built yet", never "cannot be built": a compile that
+    /// fails is reported to the caller that asked and nothing is cached, so the
+    /// next call tries again and reports again rather than silently doing
+    /// nothing.
+    pack_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
 impl DeviceState {
@@ -985,6 +1019,30 @@ impl DeviceInner {
         Ok(self.buffer_raw_locked(&self.state(), handle)?.0)
     }
 
+    /// The compute pipeline `crcbl_mtl::indirect_count`'s packing kernel runs
+    /// as, compiled on first use and kept for the device's life.
+    ///
+    /// See [`DeviceState::pack_pipeline`] for why it is lazy, and why a failure
+    /// caches nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::ShaderCompilation`] if Metal will not compile the embedded
+    /// MSL or the kernel is not in the library it produced, and
+    /// [`HalError::PipelineCreation`] if the pipeline state will not build or
+    /// the kernel's own `maxTotalThreadsPerThreadgroup` is below the workgroup
+    /// size the shader declares.
+    pub(crate) fn pack_pipeline(
+        &self,
+    ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, HalError> {
+        let mut state = self.state();
+        if let Some(pipeline) = state.pack_pipeline.as_ref() {
+            return Ok(pipeline.clone());
+        }
+        let pipeline = build_pack_pipeline(&self.raw)?;
+        Ok(state.pack_pipeline.insert(pipeline).clone())
+    }
+
     /// [`buffer_raw`](Self::buffer_raw) for a caller that already holds the
     /// lock, with the allocation's size beside the object.
     ///
@@ -1086,6 +1144,78 @@ pub(crate) fn to_ns(value: u64) -> NSUInteger {
     NSUInteger::try_from(value).unwrap_or(NSUInteger::MAX)
 }
 
+/// The label `crcbl_mtl::indirect_count`'s library and pipeline carry.
+///
+/// One string for both, because a GPU capture shows them together and "which
+/// object is this" is answered by the class beside the name.
+const PACK_LABEL: &str = "crcbl indirect-count args";
+
+/// Compiles [`crate::indirect_count::PACK_MSL`] into the pipeline
+/// [`DeviceInner::pack_pipeline`] caches.
+///
+/// **The descriptor form rather than `newComputePipelineStateWithFunction:`**,
+/// for `crcbl_mtl::pipeline`'s reason: only the descriptor carries a label, and
+/// this backend labels every object it can because a fault report names the
+/// culprit by its label.
+///
+/// The last check is the one the seam's own compute pipelines get and this one
+/// would otherwise skip: Metal derives a kernel's
+/// `maxTotalThreadsPerThreadgroup` from its register use, and a dispatch that
+/// exceeds it **raises** — which aborts the process rather than returning
+/// something a caller could handle. The shader's workgroup size is 64, so no
+/// device is expected to fail this; it is checked because "expected" is not
+/// "enforced" and the failure mode is a dead process.
+fn build_pack_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, HalError> {
+    let source = NSString::from_str(crate::indirect_count::PACK_MSL);
+    let library = device
+        .newLibraryWithSource_options_error(&source, None)
+        .map_err(|error| {
+            HalError::ShaderCompilation(format!(
+                "MTLDevice::newLibraryWithSource:options:error: rejected the indirect-count \
+                 packing kernel: {error}"
+            ))
+        })?;
+    library.setLabel(Some(&NSString::from_str(PACK_LABEL)));
+    let entry = crate::indirect_count::PACK_ENTRY;
+    let function = library
+        .newFunctionWithName(&NSString::from_str(entry))
+        .ok_or_else(|| {
+            HalError::ShaderCompilation(format!(
+                "the indirect-count packing library has no function named `{entry}`; Metal \
+                 resolves an entry point by name, and crcbl_mtl::indirect_count's own \
+                 the_embedded_kernel_is_the_committed_artifact is what pins that name to the \
+                 committed MSL"
+            ))
+        })?;
+    let descriptor = MTLComputePipelineDescriptor::new();
+    descriptor.setComputeFunction(Some(&function));
+    descriptor.setLabel(Some(&NSString::from_str(PACK_LABEL)));
+    let raw = device
+        .newComputePipelineStateWithDescriptor_options_reflection_error(
+            &descriptor,
+            MTLPipelineOption::None,
+            None,
+        )
+        .map_err(|error| {
+            HalError::PipelineCreation(format!(
+                "MTLDevice::newComputePipelineStateWithDescriptor:options:reflection:error: \
+                 rejected the indirect-count packing kernel: {error}"
+            ))
+        })?;
+    let declared = u64::from(crate::indirect_count::WORKGROUP_SIZE);
+    let allowed = raw.maxTotalThreadsPerThreadgroup() as u64;
+    if declared > allowed {
+        return Err(HalError::PipelineCreation(format!(
+            "the indirect-count packing kernel declares {declared} threads per threadgroup and \
+             this device's maxTotalThreadsPerThreadgroup for it is {allowed} — Metal raises at \
+             the dispatch rather than reporting it, and a raise aborts the process"
+        )));
+    }
+    Ok(raw)
+}
+
 impl Device for MetalDevice {
     fn backend(&self) -> BackendKind {
         BackendKind::Metal
@@ -1141,10 +1271,18 @@ impl Device for MetalDevice {
             // and a `MTLStoreAction` that resolves.
             Capability::MsaaResolveAttachment => Support::Yes,
             Capability::StencilReference => Support::Yes,
-            // The sentence `crcbl_hal::DIVERGENCES` carries for this pair, so
-            // the declaration and the parity record cannot drift apart — they
-            // had, and the constant is what settles it.
-            Capability::DrawIndirectCount => Support::No(crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT),
+            // **No longer this backend's refusal, which is why it goes through
+            // `gated`.** `crcbl_mtl::indirect_count` packs the argument
+            // structures with a compute kernel that runs before the render
+            // encoder opens and leaves every structure past the count with no
+            // instances, and `crcbl_mtl::command`'s `indirect_count` issues the
+            // draws. The flag is `crate::adapter`'s to decide and is on for
+            // every device; the shared sentence is what
+            // `command`'s refusal reports too, so the two cannot drift.
+            Capability::DrawIndirectCount => gated(
+                Features::DRAW_INDIRECT_COUNT,
+                crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT,
+            ),
             // A multi-draw is a loop over the argument structures, so a stride
             // larger than one of them is exactly what the loop steps by.
             Capability::IndirectArgumentPaddedStride => Support::Yes,
@@ -5236,17 +5374,21 @@ using namespace metal;\n\
     /// Every slice that has not arrived still refuses, by name — so none of
     /// them can be half-implemented without this saying so.
     ///
-    /// **The binding and dispatch slices emptied most of this list**, and what
-    /// is left is the two things that are not "a slice nobody has written": the
-    /// two **counter-sampled** query kinds, whose obstacle is a device that
-    /// advertises no counter set, and the indirect-count draws, whose obstacle is
-    /// named in `crcbl_mtl::command`'s `indirect_count`. The occlusion kind is
-    /// not among them any more — `Device::create_query_set` builds it, and
+    /// **The binding, dispatch and indirect-count slices emptied most of this
+    /// list.** What is left is the two **counter-sampled** query kinds, whose
+    /// obstacle is a device that advertises no counter set rather than a slice
+    /// nobody has written, and the two **mesh** draws, which are a slice nobody
+    /// has written. The occlusion kind is not among them any more —
+    /// `Device::create_query_set` builds it, and
     /// `crates/crcbl/tests/hal_seam_e2e.rs`'s `exercise_query_set_creation` is
-    /// what drives it. The calls that stopped refusing are asserted in
-    /// `the_binding_slice_replaced_refusals_with_real_errors` and in that same
-    /// suite's `a_compute_dispatch_writes_the_values_it_was_asked_for` rather
-    /// than merely dropped from here.
+    /// what drives it — and neither are the indirect-count draws, which
+    /// `crcbl_mtl::indirect_count` answers now. The calls that stopped refusing
+    /// are asserted in `the_binding_slice_replaced_refusals_with_real_errors`,
+    /// in `crcbl_mtl::instance`'s
+    /// `the_default_device_desc_opens_and_the_rest_degrades` for the flag the
+    /// count-limited draw earned, and in that same suite's
+    /// `a_compute_dispatch_writes_the_values_it_was_asked_for` — rather than
+    /// merely dropped from here.
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
@@ -5298,25 +5440,15 @@ using namespace metal;\n\
         /// refuse under.
         type Refused = (&'static str, fn(&mut dyn CommandEncoder));
 
-        fn count(encoder: &mut dyn CommandEncoder, indexed: bool) {
-            let draw = crcbl_hal::DrawIndirectCount {
-                args: Handle::from_bits(1 << 32).expect("generation 1"),
-                args_offset: 0,
-                count_buffer: Handle::from_bits(1 << 32).expect("generation 1"),
-                count_offset: 0,
-                max_draw_count: 1,
-                stride: 20,
-            };
-            if indexed {
-                encoder.draw_indexed_indirect_count(&draw);
-            } else {
-                encoder.draw_indirect_count(&draw);
-            }
-        }
         let recording: &[Refused] = &[
-            ("indirect-count draws", |encoder| count(encoder, false)),
-            ("indexed indirect-count draws", |encoder| {
-                count(encoder, true)
+            ("mesh draws", |encoder| encoder.draw_mesh_tasks(1, 1, 1)),
+            ("indirect mesh draws", |encoder| {
+                encoder.draw_mesh_tasks_indirect(&crcbl_hal::DrawIndirect {
+                    args: Handle::from_bits(1 << 32).expect("generation 1"),
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 12,
+                });
             }),
         ];
         assert!(!recording.is_empty(), "nothing to check");
@@ -6307,16 +6439,16 @@ using namespace metal;\n\
     ///
     /// `indirectRenderCommandAtIndex:` writes the command from the CPU, which is
     /// the *simple* half. Metal's count-from-memory execution needs commands a
-    /// **compute kernel** wrote — that restructuring is what
-    /// `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` names and what the
-    /// `DrawIndirectCount` row is still blocked on. Proving the execution path
-    /// runs at all is what this rung buys; it moves no capability row and
-    /// reports no feature.
+    /// **compute kernel** wrote, and that is the design this backend does
+    /// **not** ship: it was written three times and hung the GPU in a frame
+    /// every time, and `crcbl_mtl::indirect_count` is what took its place.
+    /// Proving the execution path runs at all is still what this rung buys; it
+    /// moves no capability row and reports no feature, and it is kept as
+    /// standing evidence about the device rather than as a step towards
+    /// anything.
     ///
     /// The ICB therefore inherits **neither** buffers nor pipeline state: the
-    /// command names its own pipeline, and the shader reads nothing. A real
-    /// `draw_indirect_count` would set both inheritance flags, which the adapter
-    /// probe already measured as creatable on this device.
+    /// command names its own pipeline, and the shader reads nothing.
     ///
     /// # What turns it red
     ///
@@ -6535,20 +6667,25 @@ struct EncodeTarget {
     ///
     /// # Why this question, and why it is only a measurement
     ///
-    /// [`Capability::DrawIndirectCount`] is the one row Metal cannot fill, and
-    /// `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` names the reason: Metal has no
-    /// count-from-memory draw, so the count would have to be consumed by a
-    /// **compute kernel that writes the ICB before the render encoder opens**.
-    /// Two rungs of that are already answered and are not re-measured here —
-    /// [`crate::adapter`]'s probe watched this device create ICBs up to a
-    /// `maxCommandCount` of 1048576, and
+    /// Metal has no count-from-memory draw, so a GPU-side count consumed
+    /// through an `MTLIndirectCommandBuffer` would need a **compute kernel that
+    /// writes the ICB before the render encoder opens**. Two rungs of that are
+    /// already answered and are not re-measured here — [`crate::adapter`]'s
+    /// probe watched this device create ICBs, and
     /// [`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`]
-    /// watched one execute and paint the same texels a direct draw paints.
+    /// watched one execute and paint the same texels a direct draw paints —
+    /// and both encode the ICB **from the CPU**, which is the easy half. This
+    /// is the hard one, in isolation.
     ///
-    /// Both of those encode the ICB **from the CPU**, which is the easy half.
-    /// This is the half that decides whether the design is buildable at all,
-    /// and it is a measurement: nothing here implements `draw_indirect_count`,
-    /// touches [`Features::DRAW_INDIRECT_COUNT`] or moves a capability row.
+    /// **It passes, and the design it isolates does not.** Every attempt to put
+    /// this construction inside a real frame hung the GPU while this probe went
+    /// on passing on the same device; `docs/backlog.md` has the table, and
+    /// `crcbl_mtl::indirect_count` is what
+    /// [`Capability::DrawIndirectCount`] is answered by instead. That is why
+    /// this stays a measurement: nothing here implements `draw_indirect_count`,
+    /// touches [`Features::DRAW_INDIRECT_COUNT`] or moves a capability row, and
+    /// **a passing run here is not evidence that the shipped path works** — the
+    /// two have nothing in common.
     ///
     /// # The construction
     ///
