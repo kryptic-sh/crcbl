@@ -111,7 +111,9 @@ use crcbl_hal::{
     SwapchainDesc, SwapchainHandle,
 };
 use crcbl_hal::{Device, Instance};
-use crcbl_shell::{CloseReply, DisplayMode, PhysicalSize, Shell, ShellError, ShellEvent, WindowId};
+use crcbl_shell::{
+    CloseReply, DisplayMode, PhysicalSize, PointerMode, Shell, ShellError, ShellEvent, WindowId,
+};
 
 use crate::backend::GpuBackend;
 
@@ -1980,9 +1982,8 @@ pub struct Pending {
     /// must use it: an absolute position is clamped at the edge of the display
     /// and has pointer acceleration already applied, so a look or an orbit
     /// driven by differencing positions stops working exactly when the cursor
-    /// runs out of screen. Under
-    /// [`PointerMode::Locked`](crcbl_shell::PointerMode::Locked) there is no
-    /// absolute position at all and this is the only signal there is.
+    /// runs out of screen. Under [`PointerMode::Locked`] there is no absolute
+    /// position at all and this is the only signal there is.
     ///
     /// Where the backend reports no `raw_delta` — the browser's, which does not
     /// set
@@ -2557,6 +2558,22 @@ impl ModeRequest {
     }
 }
 
+/// Whether a shell reporting `caps` can honour `mode`.
+///
+/// [`PointerMode::required_cap`] is the whole answer for every mode but the
+/// lock, where it is half of one:
+/// [`POINTER_LOCK`](crcbl_shell::ShellCaps::POINTER_LOCK) alone gets a backend
+/// that pins the pointer and then reports no relative motion, so the cursor
+/// disappears and the camera never turns.
+/// [`ShellCaps::has_mouselook`](crcbl_shell::ShellCaps::has_mouselook) is the
+/// pair, and it exists for exactly this check.
+const fn can_honour(caps: crcbl_shell::ShellCaps, mode: PointerMode) -> bool {
+    match mode {
+        PointerMode::Locked => caps.has_mouselook(),
+        other => caps.contains(other.required_cap()),
+    }
+}
+
 /// Everything the loop remembers about the pointer between frames.
 ///
 /// Two fields that every sample carried separately and resolved by hand: where
@@ -2670,8 +2687,8 @@ pub struct PointerUpdate {
     ///
     /// See [`Pending::motion`]: an absolute position is clamped at the edge of
     /// the display and carries pointer acceleration, and under
-    /// [`PointerMode::Locked`](crcbl_shell::PointerMode::Locked) there is none
-    /// at all. A frame under a lock therefore reports `at: None` and a `motion`
+    /// [`PointerMode::Locked`] there is none at all. A frame under a lock
+    /// therefore reports `at: None` and a `motion`
     /// — and is delivered, which is why the loop dispatches on this field too.
     pub motion: Option<glam::Vec2>,
     /// The primary button went down this frame, over no menu.
@@ -3953,6 +3970,49 @@ pub trait HostedGame: Sized {
         let _ = touch;
     }
 
+    /// Where the pointer should be allowed to go, as of this frame.
+    ///
+    /// **Polled, and reconciled by the loop.** This is asked once a frame and
+    /// [`Shell::set_pointer_mode`] is called only when the answer *changes*, so
+    /// a game returning the same value every frame costs one call here and no
+    /// shell traffic at all. That is what makes the hook declarative: a game
+    /// that answers [`Locked`](crcbl_shell::PointerMode::Locked) while a run is
+    /// live and [`Free`](crcbl_shell::PointerMode::Free) while its menu is up
+    /// has described the whole behaviour without tracking a single transition,
+    /// and there is no request queue to drain or edge to lose.
+    ///
+    /// Asked **after** [`menu_kind`](Self::menu_kind) and before the next
+    /// pump, so a frame that opened a panel frees the pointer on that same
+    /// frame rather than one later, and the mode is in force for the events the
+    /// next frame collects.
+    ///
+    /// # A lock the shell cannot honour is declined, not attempted
+    ///
+    /// [`Locked`](crcbl_shell::PointerMode::Locked) needs both halves of
+    /// [`ShellCaps::has_mouselook`](crcbl_shell::ShellCaps::has_mouselook), not
+    /// just [`PointerMode::required_cap`]:
+    /// a backend that locks the pointer and reports no relative motion hides
+    /// the cursor and then never turns the camera. The loop checks that before
+    /// it asks, leaves the pointer free where either half is missing, and logs
+    /// the refusal once rather than once a frame.
+    ///
+    /// **So a game must not assume it got what it asked for.** What it can rely
+    /// on instead is the shape of the frame: under a lock there is no absolute
+    /// position, so [`PointerUpdate`] arrives with `at: None` and a `motion` —
+    /// see [`PointerUpdate::motion`]. A camera bound to *that* turns only while
+    /// the pointer is really captured, which is the difference between a look
+    /// and a visible cursor being dragged out of the window onto whatever is
+    /// behind it.
+    ///
+    /// The [`Free`](crcbl_shell::PointerMode::Free) default carries the same
+    /// argument as [`pointer_event`](Self::pointer_event)'s empty body: nothing
+    /// is verified by this method, and a game that never overrides it is a game
+    /// the player keeps their cursor in — which is every game played with a
+    /// keyboard, a paddle or a finger.
+    fn pointer_mode(&self) -> PointerMode {
+        PointerMode::Free
+    }
+
     /// The game action a widget id names, or `None` for an id this game's menus
     /// do not use. Never asked about a reserved id — see [`FIRST_GAME_ID`].
     fn menu_action(id: crcbl_ui::WidgetId) -> Option<Self::MenuAction>;
@@ -4186,6 +4246,19 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// One at a time, like the pointer's single capture: first come, first
     /// served, which is the rule every other control here follows.
     menu_contact: Option<crcbl_core::input::ContactId>,
+    /// What [`HostedGame::pointer_mode`] answered on the last frame that
+    /// changed its mind.
+    ///
+    /// Kept beside [`Self::pointer_mode`] rather than folded into it because
+    /// the two disagree on a shell that cannot honour the request, and each is
+    /// load-bearing on its own: comparing only against what the *shell* was
+    /// told would re-log a declined lock every frame, and comparing only
+    /// against what the *game* asked would leave a refusal looking like it
+    /// landed.
+    pointer_asked: PointerMode,
+    /// What the shell was last told, which is the request clamped to what
+    /// [`Shell::caps`] says the backend can do.
+    pointer_mode: PointerMode,
     mode: ModeRequest,
     budget: FrameBudget,
     ticks: u64,
@@ -4240,6 +4313,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             live_contacts: Vec::new(),
             pointer_contact: None,
             menu_contact: None,
+            pointer_asked: PointerMode::Free,
+            pointer_mode: PointerMode::Free,
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
             ticks: 0,
@@ -4576,6 +4651,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.gpu.take_draw_list(&mut self.draw_list);
         drop(draw);
 
+        // After `draw_menu`, which is where the game was told whether a panel is
+        // up, so a frame that opened one frees the pointer on that frame rather
+        // than one later. Outside the draw span, because a shell round trip is
+        // not time the frame spent drawing.
+        self.reconcile_pointer_mode();
+
         let present = crcbl_core::trace::span(crate::perf::PRESENT_SPAN);
         let outcome = self.gpu.frame()?;
         drop(present);
@@ -4587,6 +4668,52 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
 
         self.budget.record(outcome)?;
         Ok(Flow::Continue)
+    }
+
+    /// Polls [`HostedGame::pointer_mode`] and tells the shell when the answer
+    /// changed.
+    ///
+    /// The whole of the loop's half of that hook: the game states where the
+    /// pointer should be allowed to go and this reconciles it, so a game that
+    /// answers the same thing every frame reaches the shell exactly never.
+    ///
+    /// # Not an error path
+    ///
+    /// Neither a capability the backend lacks nor a refusal at the call stops
+    /// the run, which is why this returns nothing. A camera grab is not
+    /// something a player asked for by pressing a key — unlike
+    /// [`ModeRequest::toggle`], whose `?` ends a frame — and a shell that
+    /// declines one leaves a game with a visible cursor rather than a game that
+    /// cannot run. Both outcomes are logged once per change of mind rather than
+    /// once a frame, for the reason [`ModeRequest::check`] is.
+    fn reconcile_pointer_mode(&mut self) {
+        let asked = self.game.pointer_mode();
+        if asked == self.pointer_asked {
+            return;
+        }
+        self.pointer_asked = asked;
+        let want = if can_honour(self.shell.caps(), asked) {
+            asked
+        } else {
+            log::warn!(
+                "shell: {} asked for {} and this backend has none, so the pointer stays free",
+                G::NAME,
+                asked.as_str(),
+            );
+            PointerMode::Free
+        };
+        if want == self.pointer_mode {
+            return;
+        }
+        if let Err(error) = self.shell.set_pointer_mode(self.window, want) {
+            // Left as it was, deliberately: the shell did not move, so neither
+            // does the loop's record of where it is. The game changing its mind
+            // again is what asks a second time.
+            log::warn!("shell: {} was refused: {error}", want.as_str());
+            return;
+        }
+        self.pointer_mode = want;
+        log::info!("shell: switched to {}", want.as_str());
     }
 
     /// Closes the trace's frame and feeds the debug panel's budget row.
@@ -8534,6 +8661,9 @@ mod tests {
         pending_limit: Option<FrameLimit>,
         /// A pause an on-screen control asked for, taken by the loop.
         pending_pause: bool,
+        /// What [`HostedGame::pointer_mode`] answers, so a test can change this
+        /// game's mind between frames.
+        wanted_pointer: PointerMode,
     }
 
     /// This game's own summary: the shared half, plus a count only it kept.
@@ -8595,6 +8725,10 @@ mod tests {
 
         fn wheel_event(&mut self, delta: crcbl_core::input::ScrollDelta) {
             self.scrolls.push(delta);
+        }
+
+        fn pointer_mode(&self) -> PointerMode {
+            self.wanted_pointer
         }
 
         /// Asserts rather than ignores: the loop promises never to ask about an
@@ -9275,6 +9409,127 @@ mod tests {
                 (PointerButton::Middle, false)
             ],
             "a pan drag survived the alt-tab",
+        );
+    }
+
+    /// The pointer mode the shell actually has this loop's window in.
+    ///
+    /// Read off the *shell*, never off the loop's own record of what it asked
+    /// for: the whole point of the reconcile is that the two can disagree.
+    fn shell_pointer_mode(engine: &mut Loop<crcbl_shell::HeadlessShell, FakeGame>) -> PointerMode {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .window_state(window)
+            .expect("the loop's window is live")
+            .pointer_mode
+    }
+
+    /// **The loop grabs the pointer when the game asks, and lets go when it
+    /// stops asking.**
+    ///
+    /// The mechanism, not the shape: the observable is the mode on the *window*,
+    /// which is not the loop's to invent and entirely the shell's to
+    /// record. A [`HostedGame::pointer_mode`] that was declared and never
+    /// polled leaves this at [`PointerMode::Free`] forever.
+    ///
+    /// The middle section is the other half of the contract — **only on a
+    /// change** — and it is asserted by moving the shell out from under the
+    /// loop: something else sets the window free while the game is still
+    /// answering `Locked`, and a loop that re-issued the request every frame
+    /// would put it straight back. It stays free, which is the only way to see
+    /// a call that did *not* happen.
+    #[test]
+    fn the_loop_locks_the_pointer_when_the_game_asks_and_only_when_the_answer_changes() {
+        let mut engine = hosted(None);
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            shell_pointer_mode(&mut engine),
+            PointerMode::Free,
+            "a game that never overrides the hook must not have its pointer taken",
+        );
+
+        engine.game_mut().wanted_pointer = PointerMode::Locked;
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            shell_pointer_mode(&mut engine),
+            PointerMode::Locked,
+            "the game asked for a lock and the loop never passed it on",
+        );
+
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .set_pointer_mode(window, PointerMode::Free)
+            .expect("the window is live");
+        for _ in 0..3 {
+            engine.frame().expect("the fake never fails");
+        }
+        assert_eq!(
+            shell_pointer_mode(&mut engine),
+            PointerMode::Free,
+            "an unchanged answer re-issued the request, so the poll is not idle",
+        );
+
+        // And a change of mind reaches the shell again, which is what says the
+        // silence above was the reconcile and not a hook that stopped working.
+        engine.game_mut().wanted_pointer = PointerMode::Confined;
+        engine.frame().expect("the fake never fails");
+        assert_eq!(shell_pointer_mode(&mut engine), PointerMode::Confined);
+
+        engine.game_mut().wanted_pointer = PointerMode::Free;
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            shell_pointer_mode(&mut engine),
+            PointerMode::Free,
+            "the game stopped asking and the pointer was not given back",
+        );
+    }
+
+    /// **A shell that cannot do mouselook is never asked for the lock.**
+    ///
+    /// [`ShellCaps::has_mouselook`](crcbl_shell::ShellCaps::has_mouselook), not
+    /// [`PointerMode::required_cap`]: this shell reports `POINTER_LOCK` and no
+    /// `RAW_POINTER_MOTION`, which is the combination that would *accept* the
+    /// request — `HeadlessShell::set_pointer_mode` checks `required_cap` and
+    /// nothing else — and then deliver a hidden cursor and no motion to turn
+    /// with. So a loop that checked only the mode's own capability would leave
+    /// this window `Locked` and this assertion is what says it does not.
+    #[test]
+    fn a_shell_without_relative_motion_is_not_asked_to_lock_the_pointer() {
+        use crcbl_shell::ShellCaps;
+
+        let caps = ShellCaps::DESKTOP - ShellCaps::RAW_POINTER_MOTION;
+        assert!(
+            caps.contains(PointerMode::Locked.required_cap()) && !caps.has_mouselook(),
+            "the point of this shell is that the two disagree",
+        );
+        let mut shell = crcbl_shell::HeadlessShell::new().with_caps(caps);
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut engine = Loop::new(
+            Booted {
+                shell: Box::new(shell),
+                window,
+                gpu: FakeGpu::at((640, 480)),
+                clock_source: Clock::new(true),
+                events: 0,
+            },
+            FakeGame {
+                wanted_pointer: PointerMode::Locked,
+                ..FakeGame::default()
+            },
+            hosted_config(None),
+        );
+
+        for _ in 0..3 {
+            engine.frame().expect("the fake never fails");
+        }
+        assert_eq!(
+            shell_pointer_mode(&mut engine),
+            PointerMode::Free,
+            "the loop locked a pointer it can get no motion from",
         );
     }
 

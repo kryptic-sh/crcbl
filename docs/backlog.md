@@ -193,22 +193,6 @@ stream beside the collapsed one, which is a second seam for a defect nobody has
 reported. Noted because `apps/viewer` is the first caller where it is observable
 at all — a game's paddle does not care, a turntable in principle could.
 
-### `apps/lumen` still has no mouse look, now for one reason instead of two
-
-`crcbl::engine::PointerUpdate` carries `motion` — the unaccelerated delta — as
-of the `apps/viewer` migration, so the objection `apps/lumen/src/camera.rs` used
-to state (a look driven by differencing clamped, accelerated positions stops
-turning at the edge of the display) no longer holds. What is left is the cursor:
-nothing in `apps/lumen` calls `Shell::set_pointer_mode`, so a look would drag a
-visible pointer out of the window and click on whatever is behind it.
-
-The pieces exist — `PointerMode::Locked`, `ShellCaps::POINTER_LOCK` and
-`ShellCaps::has_mouselook` — and the loop has no vocabulary for asking: a hosted
-game cannot reach the shell, and there is no `HostedGame` hook or `LoopConfig`
-field that says "grab the pointer while the menu is down". That is the design
-question, not the shell work. Its docs referenced this entry before it existed;
-it exists now.
-
 ### The viewer frames the document's geometry, not the geometry it draws
 
 `apps/viewer`'s `model::world_bounds` unions one `Aabb` per glTF primitive,

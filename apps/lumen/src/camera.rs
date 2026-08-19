@@ -13,21 +13,23 @@
 //! a different journey on every machine — and it makes a headless run's camera a
 //! function of the frame budget rather than of the clock.
 //!
-//! # Keyboard only, and that is a decision
+//! # The mouse and the arrow keys both turn it
 //!
-//! No pointer look, and the reason has moved. It used to be that the loop's own
-//! `PointerUpdate` carried a position and nothing else, so a mouse-look camera
-//! would have had to difference clamped, accelerated positions and would stop
-//! turning the moment the cursor reached the edge of the frame. It carries
-//! `motion` now — the unaccelerated delta, added so `apps/viewer` could be
-//! hosted — so that objection is gone and what is left is the cursor itself:
-//! nothing here asks for `PointerMode::Locked`, so a look would drag the visible
-//! pointer out of the window and onto whatever is behind it. The arrow keys turn
-//! instead, and `docs/backlog.md` carries the grab as the thing that would
-//! change this.
+//! [`Flyer::look`] is driven by `PointerUpdate::motion` — the unaccelerated
+//! delta — and never by differencing positions: an absolute position is clamped
+//! at the edge of the display and has pointer acceleration already applied, so a
+//! look built from one stops turning exactly when the cursor runs out of screen.
+//! The pointer is captured for it, which `crate::app`'s
+//! `HostedGame::pointer_mode` is what asks for; a look that turned while a
+//! *visible* cursor walked out of the window would click on whatever is behind
+//! it, so [`Flyer::look`] is called only on the frames that capture produces.
+//!
+//! The arrow keys stay, and are not a fallback: they are what a reviewer with no
+//! mouse hand free uses to nudge the framing a few degrees, and they are the
+//! only turn a shell without pointer lock has.
 
 use crcbl::core::input::KeyCode;
-use crcbl::math::Vec3;
+use crcbl::math::{Vec2, Vec3};
 use crcbl::render::Camera;
 
 /// How fast the camera walks, in metres a second.
@@ -39,6 +41,20 @@ pub const SPEED: f32 = 2.4;
 
 /// How fast the arrow keys turn it, in radians a second.
 pub const TURN: f32 = 1.6;
+
+/// How far the view turns per pixel of mouse movement, in radians.
+///
+/// A tenth of a degree a pixel, written as that arithmetic so the number and
+/// the sentence cannot drift apart. It is a *rate* rather than a scale: the
+/// units are `PointerUpdate::motion`'s — framebuffer pixels — so the same
+/// movement of the hand turns the same amount whatever size the window is, and
+/// no aspect ratio enters into it.
+///
+/// Where the value comes from: this is the low end of what a first-person game
+/// ships as its default, and a lighting fixture wants the slow end. A reviewer's
+/// job here is to hold a highlight in frame and walk around it, not to flick
+/// onto a target.
+pub const LOOK: f32 = 0.1 * (std::f32::consts::PI / 180.0);
 
 /// How far the pitch may go from level, in radians.
 ///
@@ -150,6 +166,31 @@ impl Flyer {
     /// walking into a wall for as long as the window is in the background.
     pub fn release_all(&mut self) {
         self.held = Held::default();
+    }
+
+    /// Turns by one frame's worth of mouse movement.
+    ///
+    /// `motion` is `PointerUpdate::motion`: framebuffer pixels, **Y down**.
+    /// That is why the pitch subtracts where the yaw adds — pushing the mouse
+    /// away from the hand is a *negative* Y and has to raise the view — and it
+    /// is the one sign in this file that no compiler can check.
+    ///
+    /// # Not on the fixed timestep, unlike [`advance`](Self::advance)
+    ///
+    /// A held key is a *rate* and has to be integrated against the clock or the
+    /// camera flies at a speed proportional to how fast the machine is. A mouse
+    /// delta is already a distance the hand moved: scaling it by `dt` would make
+    /// the same sweep turn a different amount on a slow frame, and running it
+    /// once per tick would apply one frame's movement two or three times over on
+    /// a frame that owed the clock several. So this lands where it arrives, in
+    /// the frame, exactly once.
+    pub fn look(&mut self, motion: Vec2) {
+        if motion == Vec2::ZERO {
+            return;
+        }
+        self.yaw += motion.x * LOOK;
+        self.pitch = (self.pitch - motion.y * LOOK).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        self.moved = true;
     }
 
     /// Advances by `dt` seconds of held input.
@@ -354,6 +395,95 @@ mod tests {
                 turned.dot(start) > 0.99,
                 "{key:?} swung {turned:?} from {start:?} in one step, which is too far for the \
                  sign above to mean what it says"
+            );
+        }
+    }
+
+    /// **The mouse swings the view the way the hand moved**, which is the same
+    /// claim [`the_turn_arrows_swing_the_view_toward_the_side_they_name`] makes
+    /// for the arrow keys and the same way of making it: against the camera's
+    /// own starting basis, so it holds at every yaw and says nothing about where
+    /// `room::fixed_camera` happens to point.
+    ///
+    /// Both axes, because a look with one sign right and the other inverted is
+    /// the ordinary shape of this bug — `motion` is **Y down** while the pitch
+    /// is measured positive up, so the two lines in [`Flyer::look`] must not
+    /// read the same way round.
+    #[test]
+    fn the_mouse_swings_the_view_the_way_it_moved() {
+        // Fifty pixels, which is five degrees: far enough that the sign is not
+        // floating-point noise, short enough that the view cannot swing past the
+        // perpendicular and make a wrong sign read as a right one.
+        let sweep = 50.0;
+        for (motion, toward_right, toward_up) in [
+            (Vec2::new(sweep, 0.0), 1.0f32, 0.0f32),
+            (Vec2::new(-sweep, 0.0), -1.0, 0.0),
+            // Y down, so a *negative* delta is the hand pushing away from the
+            // body, which raises the view.
+            (Vec2::new(0.0, -sweep), 0.0, 1.0),
+            (Vec2::new(0.0, sweep), 0.0, -1.0),
+        ] {
+            let mut flyer = Flyer::at(&room::fixed_camera());
+            let before = flyer.camera(room::fixed_camera().projection);
+            let start = (before.target - before.eye).normalize();
+            let right = start.cross(Vec3::Y).normalize();
+            let up = right.cross(start).normalize();
+
+            flyer.look(motion);
+
+            let after = flyer.camera(room::fixed_camera().projection);
+            let turned = (after.target - after.eye).normalize();
+            assert!(
+                turned.dot(right) * toward_right > 0.01 || toward_right == 0.0,
+                "{motion:?} leaned {} toward the camera's own right {right:?}",
+                turned.dot(right),
+            );
+            assert!(
+                turned.dot(up) * toward_up > 0.01 || toward_up == 0.0,
+                "{motion:?} leaned {} toward the camera's own up {up:?}",
+                turned.dot(up),
+            );
+            assert!(
+                turned.dot(start) > 0.99,
+                "{motion:?} swung {turned:?} from {start:?} in one step, which is too far for \
+                 the signs above to mean what they say"
+            );
+            assert!(flyer.has_moved(), "a look is a movement");
+        }
+
+        // And a frame that reported no movement is not one.
+        let mut still = Flyer::at(&room::fixed_camera());
+        still.look(Vec2::ZERO);
+        assert!(!still.has_moved());
+    }
+
+    /// The mouse cannot flip the view over the top either.
+    ///
+    /// [`the_pitch_stops_short_of_straight_up_and_straight_down`] makes this
+    /// claim for the keys, and the clamp is shared — but the *call* is not, and
+    /// a [`Flyer::look`] that assigned the pitch without going through
+    /// [`PITCH_LIMIT`] would pass every keyboard test in this file.
+    #[test]
+    fn the_mouse_pitch_stops_short_of_vertical_too() {
+        for sign in [1.0f32, -1.0] {
+            let mut flyer = Flyer::at(&room::fixed_camera());
+            // Far more than the limit is away, in one shove and then in many
+            // small ones, because a clamp applied to the delta rather than to
+            // the accumulated angle survives the first and not the second.
+            flyer.look(Vec2::new(0.0, -sign * 100_000.0));
+            for _ in 0..200 {
+                flyer.look(Vec2::new(0.0, -sign * 50.0));
+            }
+            let camera = flyer.camera(room::fixed_camera().projection);
+            let forward = (camera.target - camera.eye).normalize();
+            assert!(
+                forward.y * sign > 0.9 && forward.y.abs() < 1.0,
+                "the mouse reached {forward:?}, which is a degenerate view"
+            );
+            let level = Vec3::new(forward.x, 0.0, forward.z).length();
+            assert!(
+                level > 0.01,
+                "the mouse left no horizontal component at all"
             );
         }
     }

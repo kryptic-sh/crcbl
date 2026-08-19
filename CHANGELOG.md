@@ -676,6 +676,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/lumen` has mouse look.** Moving the mouse turns the view while flying;
+  the pause panel releases the pointer. The keyboard turn is unchanged.
+
+- **`HostedGame::pointer_mode` lets a hosted game ask for the pointer.** A
+  defaulted, polled hook returning `PointerMode`, so every existing game is
+  untouched: the loop reads it once a frame and calls `Shell::set_pointer_mode`
+  only when the answer changes, so a game that always wants the same thing costs
+  one virtual call and no shell traffic. The game states what it wants and the
+  loop reconciles, rather than issuing commands it cannot see the result of.
+
+  **A shell that cannot deliver relative motion is not asked to lock.**
+  `ShellCaps::POINTER_LOCK` alone would accept the request and then hand back a
+  hidden cursor and no motion, so the loop gates a lock on `has_mouselook()` —
+  both `POINTER_LOCK` and `RAW_POINTER_MOTION` — and leaves the pointer free
+  otherwise, logging once rather than every frame.
+
 - **`apps/viewer`** — `viewer <MODEL>` opens a `.gltf` or `.glb`, frames the
   camera on it, turns it under the mouse and draws it under a single directional
   light. `docs/plan/sample/05-viewer.md`'s milestone 1 without the grid floor;

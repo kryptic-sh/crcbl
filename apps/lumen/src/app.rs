@@ -34,11 +34,12 @@
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, open_window, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, open_window,
+    wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::render::{EffectRequest, RenderEffects};
-use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowDesc, WindowId};
+use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowDesc, WindowId};
 use crcbl::ui::draw_list::DrawList;
 
 use crate::args::Options;
@@ -120,6 +121,13 @@ pub struct Lumen {
     /// The values the pause panel was last built for — `None` until the first
     /// pause, so the panel is always rebuilt once with the real ones.
     shown: Option<(CameraMode, EffectRequest)>,
+    /// Whether the loop has the simulation stopped, recorded in
+    /// [`HostedGame::menu_kind`].
+    ///
+    /// The loop owns the pause and this is a *copy* of it, kept for one caller:
+    /// [`HostedGame::pointer_mode`] is asked with no argument and has to answer
+    /// "is a panel up", and `menu_kind` is the one place the loop says so.
+    paused: bool,
     /// Fixed steps run, for [`Lumen::log_heartbeat`]'s cadence.
     ticks: u64,
 }
@@ -142,6 +150,7 @@ impl Lumen {
             effect_request: effects,
             device_effects,
             shown: None,
+            paused: false,
             ticks: 0,
         }
     }
@@ -360,6 +369,45 @@ impl HostedGame for Lumen {
         self.flyer.key(key, pressed);
     }
 
+    /// The mouse look, and the one condition it is bound under.
+    ///
+    /// **`at.is_none()` is what says the pointer is really captured.**
+    /// [`PointerUpdate::motion`] states that shape: under
+    /// [`PointerMode::Locked`] there is no absolute position at all, so a locked
+    /// frame carries a motion and no `at`, and an unlocked one that moved
+    /// carries both. Binding the look to that rather than to the request
+    /// [`pointer_mode`](HostedGame::pointer_mode) makes is the whole point — a
+    /// request is not a grant, the loop declines the lock on a shell without
+    /// `ShellCaps::has_mouselook`, and a camera that turned anyway would swing
+    /// the view while a visible cursor walked out of the window and clicked on
+    /// whatever is behind it.
+    ///
+    /// It is also what makes the paused case correct on the frame the panel
+    /// opens rather than the one after: the pointer comes back the moment the
+    /// loop releases it, and the look stops on the same event.
+    fn pointer_event(&mut self, pointer: PointerUpdate) {
+        let Some(motion) = pointer.motion.filter(|_| pointer.at.is_none()) else {
+            return;
+        };
+        self.flyer.look(motion);
+    }
+
+    /// [`PointerMode::Locked`] while the room is being flown, free while the
+    /// pause panel is up.
+    ///
+    /// Answered from the pause alone — not from
+    /// [`CameraMode`] — because the free camera integrates whether or not it is
+    /// the one being drawn from, exactly as the keyboard's walk does: a reviewer
+    /// who looks around at the golden pose and then swaps to the free camera
+    /// arrives facing where they looked.
+    fn pointer_mode(&self) -> PointerMode {
+        if self.paused {
+            PointerMode::Free
+        } else {
+            PointerMode::Locked
+        }
+    }
+
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<LumenAction> {
         menu::action_for(id)
     }
@@ -390,6 +438,11 @@ impl HostedGame for Lumen {
     }
 
     fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> bool {
+        // Recorded for `pointer_mode`, which the loop polls immediately after
+        // this: a panel that went up on this frame must free the pointer on this
+        // frame, or the cursor comes back one frame into a menu the reviewer is
+        // already trying to click.
+        self.paused = paused;
         if paused && self.shown != Some((self.camera, self.effect_request)) {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a press
@@ -909,6 +962,130 @@ mod tests {
             RenderEffects::all().difference(RenderEffects::SHADOWS),
             "the summary reports the set the run ended on",
         );
+    }
+
+    /// Where the free camera is looking, whichever camera the frame is drawn
+    /// from.
+    fn flyer_forward(engine: &Loop<HeadlessShell>) -> crcbl::math::Vec3 {
+        let fixed = room::fixed_camera();
+        let camera = engine.game().flyer().camera(fixed.projection);
+        (camera.target - camera.eye).normalize()
+    }
+
+    /// The mode the shell actually has the window in — not what the fixture
+    /// asked for.
+    fn shell_pointer_mode(engine: &mut Loop<HeadlessShell>) -> PointerMode {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .window_state(window)
+            .expect("the loop's window is live")
+            .pointer_mode
+    }
+
+    /// **The pointer is grabbed while the room is being flown and given back
+    /// while the pause panel is up.**
+    ///
+    /// Read off the window rather than off [`Lumen::pointer_mode`], so what this
+    /// asserts is the whole path: the fixture's answer, the loop's poll, and the
+    /// shell call. A hook that returned the right value and was never polled
+    /// leaves this window free for the whole run.
+    ///
+    /// The pause half is the one that matters for the bug being avoided — a
+    /// captured cursor cannot press `RESUME` — and it is checked on the frame
+    /// the panel appears, not a frame later.
+    #[test]
+    fn the_pointer_is_locked_while_flying_and_free_while_the_panel_is_up() {
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(
+            shell_pointer_mode(&mut engine),
+            PointerMode::Locked,
+            "a fixture being flown must own the pointer",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+        assert_eq!(
+            shell_pointer_mode(&mut engine),
+            PointerMode::Free,
+            "the panel is up and the cursor is still captured",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(!engine.is_paused());
+        assert_eq!(
+            shell_pointer_mode(&mut engine),
+            PointerMode::Locked,
+            "resuming did not take the pointer back",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A captured pointer turns the camera, and a free one does not.**
+    ///
+    /// End to end, because every piece of this is a seam: `HeadlessShell` drops
+    /// the absolute position while the pointer is locked, exactly as a
+    /// compositor does; the loop delivers that as a `PointerUpdate` with a
+    /// `motion` and no `at`; and [`Lumen::pointer_event`] looks only on that
+    /// shape. The second half is what the gate is for — the same movement with a
+    /// visible cursor under it must move nothing, or a shell that refused the
+    /// lock would have the view swinging while the cursor walks off the window.
+    #[test]
+    fn a_locked_pointer_looks_and_a_free_one_does_not() {
+        use crcbl::shell::PhysicalPoint;
+
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(shell_pointer_mode(&mut engine), PointerMode::Locked);
+
+        let start = flyer_forward(&engine);
+        let right = start.cross(crcbl::math::Vec3::Y).normalize();
+        engine
+            .shell_mut()
+            .move_pointer(window, PhysicalPoint { x: 90.0, y: 40.0 }, (50.0, 0.0))
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+
+        let turned = flyer_forward(&engine);
+        assert!(
+            turned.dot(right) > 0.01,
+            "the mouse went right and the view leaned {} toward its own right {right:?}",
+            turned.dot(right),
+        );
+        assert!(engine.game().flyer().has_moved());
+
+        // Now with the panel up, which frees the pointer: the shell reports an
+        // absolute position again and the same delta must turn nothing.
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(shell_pointer_mode(&mut engine), PointerMode::Free);
+
+        let paused_at = flyer_forward(&engine);
+        engine
+            .shell_mut()
+            .move_pointer(window, PhysicalPoint { x: 140.0, y: 40.0 }, (50.0, 0.0))
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            flyer_forward(&engine),
+            paused_at,
+            "a visible cursor turned the camera",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     /// The lamp moves, and it moves on the **clock** rather than on the frame
