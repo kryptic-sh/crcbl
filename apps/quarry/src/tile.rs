@@ -165,16 +165,29 @@ mod tests {
             .collect()
     }
 
-    /// **Two tiles meet before anything is simplified.** The premise: if the
-    /// generator did not already agree at the seam, locking could not save it
-    /// and every assertion below would be about the wrong thing.
+    /// **Two tiles meet before anything is simplified**, along a seam that is not
+    /// flat.
+    ///
+    /// The premise, and the second half is what stops the first being vacuous: a
+    /// flat seam matches between *any* two tiles, including two that sampled the
+    /// height field wrongly, so the comparison would prove nothing. Measured, it
+    /// spans about 0.64 m of [`TILE_HEIGHT_METRES`].
     #[test]
     fn adjacent_tiles_share_their_seam_exactly() {
         let (left, right) = (quarry_tile(0), quarry_tile(1));
+        let seam: Vec<f32> = left.far_edge().iter().map(|p| p[1]).collect();
+        let low = seam.iter().copied().fold(f32::INFINITY, f32::min);
+        let high = seam.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            high - low > TILE_HEIGHT_METRES * 0.1,
+            "the shared seam spans {:.3} m of {TILE_HEIGHT_METRES}, flat enough that any two \
+             tiles would match along it and this comparison would prove nothing",
+            high - low,
+        );
         assert_eq!(
             keys(&left.far_edge()),
             keys(&right.near_edge()),
-            "tile 0's +X side and tile 1's -X side are the same places and must be the same \\
+            "tile 0's +X side and tile 1's -X side are the same places and must be the same \
              vertices, bit for bit"
         );
     }
@@ -249,7 +262,7 @@ mod tests {
         let thin = simplify_tile(&tile, TARGET).expect("the tile simplifies");
         assert!(
             thin.indices().len() / 3 < tile.triangles(),
-            "the tile came back with {} of its {} triangles, so locking the border stopped every \\
+            "the tile came back with {} of its {} triangles, so locking the border stopped every \
              collapse and the seam assertions are vacuous",
             thin.indices().len() / 3,
             tile.triangles(),

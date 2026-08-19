@@ -7536,7 +7536,8 @@ mod tests {
         for layer in [scene::PageDesc::UNTEXTURED_LAYER, scene::CHECKER_LAYER] {
             assert!(
                 (layer as usize) < page.layers().len(),
-                "layer {layer} is past the end of a {}-layer page, which is an out-of-range                  sample nothing below the seam would report",
+                "layer {layer} is past the end of a {}-layer page, which is an out-of-range \
+                 sample nothing below the seam would report",
                 page.layers().len()
             );
         }
