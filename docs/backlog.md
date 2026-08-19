@@ -862,64 +862,57 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
-### Metal's indirect-count slice hung the GPU, and the likely cause is named
+### Metal indirect count: stop trying to make an ICB work, patch the args
 
-`crcbl_mtl::icb` was written, landed and **reverted** (`fa4fd07`, reverted
-immediately after). It is worth re-attempting rather than rewriting: everything
-under it is proven, and the failure is specific.
+**Three attempts, three identical hangs.** `crcbl_mtl::icb` is written and works
+in isolation, and hangs the GPU in a frame every time. Branch
+`try/mtl-icb-indirect-range` holds the whole line of attack; **it should not be
+continued as it stands.**
 
-**What happened.** Reporting `DRAW_INDIRECT_COUNT` moved every Metal adapter
-onto `GeometryPath::IndirectCount`, so the blessed goldens drew through the new
-path and three `render_e2e` tests died with:
+| attempt | change                                                         | result                           |
+| ------- | -------------------------------------------------------------- | -------------------------------- |
+| 1       | `executeCommandsInBuffer:withRange:`                           | Hang, 3 `render_e2e` goldens     |
+| 2       | execution range read from GPU memory                           | Hang, same three                 |
+| 3       | + blit `optimizeIndirectCommandBuffer` between kernel and pass | Hang, same three, and ~3x slower |
 
-```text
-Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)
-```
+What holds across all three: the isolated probes pass — a kernel encodes an ICB
+and the ICB executes, verified on this exact device — while any full frame
+hangs. The fault report names every encoder `completed` and Metal API validation
+logs no violation in 8 MB, so nothing localises it further. Attempt 3 in
+particular refutes the "kernel-write and execute in one command buffer needs the
+optimise" theory, which was the last structural difference between probe and
+frame.
 
-**Every encoder in the recorded order reports `completed`** — including all
-three `crcbl indirect-count encoding` dispatches — so nothing failed to finish
-and the kernel is not obviously at fault. The command buffer as a whole hung.
+**The design that avoids the whole problem, and it reuses machinery already
+proven on this device.** `crcbl_mtl::command` **already issues plain indirect
+draws** — `drawPrimitives:indirectBuffer:indirectBufferOffset:` and its indexed
+twin — and that is the `IndirectPerBatch` path which passes on this runner
+today. A GPU-side count does not need an indirect command buffer at all:
 
-**The prime suspect is the execute, not the encode.**
-`RenderCommand::ExecuteIndirectCount` called
-`executeCommandsInBuffer:withRange:` over the ICB's **entire `maxCommandCount`**
-— 4096 commands per draw, of which all but the live ones were `reset()` no-ops.
-Executing four thousand commands per bucket per frame is a plausible hang on a
-paravirtual device even if every one is legal.
+1. A small kernel reads the count and **zeroes `instanceCount` in the argument
+   structures at or beyond it**. A draw of zero instances renders nothing; that
+   is defined behaviour, not a trick.
+2. The pass then issues `max_draw_count` ordinary indirect draws,
+   unconditionally.
 
-**Metal has the right API for this and it was not used:**
-`executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` takes the range
-from a **GPU buffer**, which is exactly the GPU-side count this whole slice
-exists to serve. The kernel already writes the count it clamped to; that value
-should drive the execute rather than the range being the whole allocation. Try
-that before anything else.
+The properties are better on every axis. **Correct**: a zero-instance draw is a
+no-op by specification. **Robust**: it uses only the two calls this backend
+already makes and this device already runs, with no ICB, no argument buffer, no
+`gpuResourceID` and no `supportIndirectCommandBuffers` on every pipeline.
+**Performant**: `max_draw_count` is **1** in `crcbl_render::forward` and 2 in
+the seam, so this is one or two draw calls and a kernel touching a handful of
+words — against the roughly forty ICB allocations per frame the validation log
+implies for the ao scene.
 
-**Two things the retry deliberately did not change**, so it stays a one-variable
-experiment, and both are the next levers if it is still red:
+The cost it does carry: it issues `max_draw_count` draws where a true
+draw-indirect-count issues `count`, so it is only sensible while that bound is
+small. It is 1 and 2 here. A seam caller that asked for thousands would want the
+ICB path back, and nothing asks.
 
-- **A blit `optimizeIndirectCommandBuffer:withRange:`** between the prologue and
-  the render encoder, which is what Apple's own GPU-encoding sample does. The
-  untested hazard is kernel-write → execute **in the same command buffer**; the
-  probe committed and waited between them.
-- **The per-call allocation.** Every `draw_indexed_indirect_count` allocates a
-  fresh ICB, an 8-byte handle table and now an 8-byte range buffer. Counting the
-  validation log's `redundant setComputePipelineState` notices puts that at
-  roughly **40 ICB allocations per frame** in the ao scene, not the three the
-  encoder list suggests — a real cost and a plausible contributor to a
-  paravirtual stall.
-
-The retry lives on branch `try/mtl-icb-indirect-range` rather than main, because
-this path has hung once and nothing local can execute Metal. Run it with
-`gh workflow run ci.yml --ref try/mtl-icb-indirect-range`.
-
-**Everything else about the slice held.** The parity snapshot moved to eight
-rows and back cleanly, the seam's `can_multi_draw` chain was verified to unblock
-both indirect exercises, and the hand-written kernel compiled on the runner —
-the device opened and every dispatch completed, which it could not have done had
-the MSL been refused.
-
-The revert restores `DrawIndirectCount`/metal as a blocker: **nine rows again**,
-which is the honest count.
+**What to keep from the reverted work if this is written:** the honest
+`max_draw_indirect_count` derived by creating a real descriptor, the two
+assertions pinning feature-to-limit against the seam's `can_multi_draw`, and the
+requirement that the row end up _exercised_ rather than merely closed.
 
 ### DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
 
