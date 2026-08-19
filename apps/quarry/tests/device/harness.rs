@@ -125,6 +125,21 @@ pub(crate) struct Frame {
     /// How many clusters each level contributed, finest first, or `None` where
     /// the device records no per-cluster cut.
     pub(crate) cut: Option<Vec<usize>>,
+    /// The one level a non-mesh path's uniform cut drew, and what it cost, or
+    /// `None` on the mesh path — where a mesh is one bucket and the level is
+    /// chosen per cluster instead.
+    pub(crate) uniform: Option<Uniform>,
+}
+
+/// What a uniform cut drew, read out of the indirect arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Uniform {
+    /// Which level, finest is zero — the bucket whose instance count came out
+    /// non-zero.
+    pub(crate) level: usize,
+    /// Triangles the draw actually asked for, which is what
+    /// `docs/plan/sample/14-quarry.md`'s "triangle count per path" means.
+    pub(crate) triangles: u32,
 }
 
 /// Where the dolly starts: outside the near edge, above the face.
@@ -414,6 +429,9 @@ fn frame_body(quarry: &mut Quarry, at: f32) -> Frame {
     let cut = (quarry.levels == Levels::Dag)
         .then(|| read_the_cut(quarry))
         .flatten();
+    let uniform = (quarry.levels == Levels::Dag)
+        .then(|| read_the_uniform_cut(quarry))
+        .flatten();
 
     quarry.ctx.device().destroy_command_buffer(commands);
     quarry.ctx.device().destroy_buffer(staging);
@@ -421,6 +439,7 @@ fn frame_body(quarry: &mut Quarry, at: f32) -> Frame {
         covered,
         pixels,
         cut,
+        uniform,
     }
 }
 
@@ -576,4 +595,117 @@ pub(crate) fn read_the_cut(quarry: &Quarry) -> Option<Vec<usize>> {
          this is reading the wrong buffer rather than an empty cut"
     );
     Some(drawn)
+}
+
+/// **Which single level a non-mesh path drew, and what it cost.**
+///
+/// The indirect paths' observable, and the counterpart to [`read_the_cut`].
+/// There is no second buffer recording an intention: `draw_gen.slang` scatters
+/// the instance into the bucket for the level it chose, so the bucket whose
+/// `instance_count` came out non-zero **is** the level, and its `index_count` is
+/// what the draw asked the device for.
+///
+/// `None` on the mesh path, where a mesh is one bucket and the level is chosen
+/// per cluster — see [`read_the_cut`], which is that path's observable.
+fn read_the_uniform_cut(quarry: &Quarry) -> Option<Uniform> {
+    use crcbl::shaders::draw_gen::{DRAW_ARGS_SIZE, DrawIndexedArgs};
+
+    let buckets = quarry.renderer.level_buckets(0);
+    if buckets.is_empty() {
+        return None;
+    }
+    let device = quarry.ctx.device();
+    let args = quarry.renderer.draw_args(quarry.renderer.frame());
+    let bytes = DRAW_ARGS_SIZE as u64 * u64::from(buckets[buckets.len() - 1] + 1);
+
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("quarry draw args readback"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+    let mut encoder = device.create_command_encoder(&crcbl::hal::CommandEncoderDesc {
+        label: Some("quarry draw args copy"),
+        queue: quarry.ctx.queue(),
+    });
+    // The graph leaves the argument buffer in `IndirectArgument`, which is where
+    // the next frame on this slot expects it — so this moves it out and puts it
+    // straight back.
+    let barrier = |from, to| {
+        [crcbl::hal::BufferBarrier {
+            buffer: args,
+            from,
+            to,
+            queue_transfer: None,
+        }]
+    };
+    let out = barrier(ResourceState::IndirectArgument, ResourceState::TransferSrc);
+    let back = barrier(ResourceState::TransferSrc, ResourceState::IndirectArgument);
+    encoder.pipeline_barrier(&crcbl::hal::Barriers {
+        buffers: &out,
+        ..crcbl::hal::Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+        src: args,
+        src_offset: 0,
+        dst: staging,
+        dst_offset: 0,
+        size: bytes,
+    });
+    encoder.pipeline_barrier(&crcbl::hal::Barriers {
+        buffers: &back,
+        ..crcbl::hal::Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(
+            quarry.ctx.queue(),
+            &crcbl::hal::SubmitInfo::new(&[commands]),
+        )
+        .expect("submit");
+
+    let mut words = vec![POISON; bytes as usize];
+    readback(device, staging, bytes, &mut words);
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
+
+    let mut drew = None;
+    for (level, bucket) in buckets.iter().enumerate() {
+        let at = *bucket as usize * DRAW_ARGS_SIZE;
+        let args = DrawIndexedArgs::from_bytes(
+            words[at..at + DRAW_ARGS_SIZE]
+                .try_into()
+                .expect("one argument structure"),
+        );
+        if args.instance_count == 0 {
+            continue;
+        }
+        assert!(
+            drew.is_none(),
+            "two of this mesh's level buckets drew, and a uniform cut is one level"
+        );
+        drew = Some(Uniform {
+            level,
+            triangles: args.index_count / 3 * args.instance_count,
+        });
+    }
+    // **The recording backend routes nothing, because it draws nothing**, so an
+    // empty argument buffer is the honest answer there rather than a failure.
+    // Everywhere else it is one: the frame drew, so a cut that picked a level
+    // and failed to route it would leave every bucket at zero and be reported
+    // here rather than shown as an empty frame.
+    if backend() == GpuBackend::Null {
+        return drew;
+    }
+    let drew = drew.expect(
+        "every level bucket came out with no instances, so the cut picked a level and failed to \
+         route it — the frame drew, so this is not an empty scene",
+    );
+    eprintln!(
+        "quarry: uniform cut drew level {} — {} triangle(s)",
+        drew.level, drew.triangles
+    );
+    Some(drew)
 }

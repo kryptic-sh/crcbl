@@ -799,6 +799,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The dolly runs on every path, and quarry records its triangle counts.** The
+  sample's exit criteria ask for no LOD popping on _any_ path and a triangle
+  count per path, and the two indirect paths needed their own observable: a
+  uniform cut picks one level for the whole mesh, so the bucket whose
+  `instance_count` came out non-zero **is** the level and its `index_count` is
+  what the draw asked the device for. Level 0 draws 8192 triangles, halving per
+  rung.
+
+  Down the dolly at a 256-pixel budget the cut walks 2 → 1 → 0, a stop on each
+  rung, and both indirect paths agree exactly. **At 1024 pixels it skips 2 → 0,
+  and that is the camera rather than a defect** — a stop is about 17 metres and
+  a uniform cut moves the whole mesh at once, so a coarse enough budget makes
+  one step of the dolly worth more than one rung. Recorded because it bounds
+  what the assertion means.
+
 - **quarry draws the same face on all three geometry paths.**
   `docs/plan/sample/14-quarry.md`'s milestone 3, reached by subtracting features
   from one capable adapter rather than by needing three machines: withholding
