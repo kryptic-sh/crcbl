@@ -2169,12 +2169,23 @@ through `create_query_set` — asserts each is `HalError::Unsupported`
 specifically, and checks the accepting side too so it cannot pass by refusing
 everything.
 
-**What is still uncovered on this backend**: `PushConstants`, `MeshShading`,
-`DrawIndirectCount`, `IndirectArgumentPaddedStride`, `UpdateBindGroup`,
-`BindlessDescriptorArray` and `PolygonModeLine`, each of which needs a pipeline
-or a layout built first. That is the seam suite's `exercise_*` machinery and is
-not worth a second copy in this crate; a browser probe group remains the honest
-route for them.
+**Three more are covered by a sibling test**, and the sentence that used to sit
+here — "each of which needs a pipeline or a layout built first" — was a blanket
+claim made about seven rows without checking them one at a time. It was wrong
+for three. `CommandEncoder`'s verbs return nothing, so `draw_indirect_count`,
+`draw_indexed_indirect_count` and `draw_mesh_tasks` record the refusal and
+surface it at `finish`; `record_unsupported` sets a field, reads no pass state
+and needs no pipeline.
+`an_encoder_verb_declared_unsupported_is_refused_at_finish` drives all three on
+a bare encoder, one verb per encoder so the first recorded refusal cannot mask
+the others, and finishes a clean encoder too so it cannot pass on a backend that
+refused every command buffer.
+
+**What is genuinely still uncovered here**: `PushConstants`,
+`IndirectArgumentPaddedStride`, `UpdateBindGroup`, `BindlessDescriptorArray` and
+`PolygonModeLine` — these need a layout, a bind group or a pipeline first, which
+is the seam suite's `exercise_*` machinery and not worth a second copy in this
+crate. A browser probe group remains the honest route for them.
 
 So of the five backends the pattern was checked on: three had it (`crcbl-vk`,
 `crcbl-dx12`, `crcbl-mtl`, all fixed), `crcbl-webgpu` did not, and `crcbl-wgpu`

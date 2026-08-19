@@ -1138,6 +1138,85 @@ fn a_capability_declared_unsupported_is_refused_by_its_own_call() {
         .expect("an occlusion set is declared supported");
 }
 
+/// **The encoder's refusals too**, for the three capabilities whose call is
+/// recorded rather than returned.
+///
+/// A sibling of
+/// [`a_capability_declared_unsupported_is_refused_by_its_own_call`], and split
+/// from it because the channel differs: `CommandEncoder`'s verbs return nothing,
+/// so a refusal is recorded and surfaces at `finish`. A caller who never called
+/// `finish` would never see it, which is worth asserting in its own right.
+///
+/// **These three were recorded as needing "a pipeline or a layout built first"
+/// and do not.** `record_unsupported` sets a field; it reads no pass state and
+/// needs no pipeline, so an encoder and one call reach all three. That claim was
+/// made about all seven uncovered rows at once without checking them
+/// individually — the four that genuinely do need a pipeline or a bind group are
+/// `PushConstants`, `UpdateBindGroup`, `BindlessDescriptorArray` and
+/// `PolygonModeLine`.
+#[test]
+fn an_encoder_verb_declared_unsupported_is_refused_at_finish() {
+    use crcbl_hal::{Capability, DrawIndirectCount, Support};
+
+    let (_channel, device) = device_on_fresh_channel();
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("the graphics queue");
+
+    for capability in [
+        Capability::DrawIndirectCount,
+        Capability::MeshShading,
+        Capability::TaskShaderStage,
+    ] {
+        assert!(
+            matches!(device.supports(capability), Support::No(_)),
+            "{capability:?} is no longer declared unsupported, so this test asserts a refusal the \
+             seam no longer promises"
+        );
+    }
+
+    let count = DrawIndirectCount {
+        args: Handle::from_bits((3 << 32) | 1).expect("a real handle"),
+        args_offset: 0,
+        count_buffer: Handle::from_bits((3 << 32) | 2).expect("a real handle"),
+        count_offset: 0,
+        max_draw_count: 1,
+        stride: 16,
+    };
+
+    // Each verb on its own encoder, so one refusal cannot mask another: the
+    // recorder keeps the *first* it is given and drops the rest.
+    for (what, record) in [
+        ("draw_indirect_count", 0),
+        ("draw_indexed_indirect_count", 1),
+        ("draw_mesh_tasks", 2),
+    ] {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        match record {
+            0 => encoder.draw_indirect_count(&count),
+            1 => encoder.draw_indexed_indirect_count(&count),
+            _ => encoder.draw_mesh_tasks(1, 1, 1),
+        }
+        let finished = encoder.finish();
+        assert!(
+            matches!(finished, Err(HalError::Unsupported { .. })),
+            "{what} is declared unsupported and finish answered {finished:?}. The seam documents \
+             Unsupported, and a caller branching on that variant to pick a fallback would miss \
+             any other error"
+        );
+    }
+
+    // **An encoder that recorded nothing must still finish**, or the assertions
+    // above would pass on a backend that refused every command buffer.
+    let clean = device
+        .create_command_encoder(&CommandEncoderDesc { label: None, queue })
+        .finish();
+    assert!(
+        clean.is_ok(),
+        "an encoder with no unsupported verb in it failed to finish: {clean:?}"
+    );
+}
+
 #[test]
 fn the_occlusion_query_spine_reaches_the_stream() {
     use crcbl_hal::{BufferHandle, QueryKind, QuerySetDesc};

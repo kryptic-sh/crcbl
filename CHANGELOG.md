@@ -895,6 +895,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   specifically, and checks the accepting side so it cannot pass by refusing
   everything.
 
+  A sibling test covers the encoder's three: `draw_indirect_count`,
+  `draw_indexed_indirect_count` and `draw_mesh_tasks` return nothing, so they
+  record the refusal and surface it at `finish`, and reaching them needs no
+  pipeline at all. Eight of this backend's twelve unsupported rows are now
+  checked natively; the five that need a layout, bind group or pipeline first
+  are named in `docs/backlog.md` rather than left implied.
+
 - **The seam suite can now exercise the half of the parity contract a capable
   device hides — and it found three mis-declarations in `crcbl-vk`.** With every
   optional feature asked for, that backend declares **all 24** capabilities
