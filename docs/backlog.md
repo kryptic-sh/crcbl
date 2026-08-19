@@ -891,11 +891,20 @@ to prevent. The worst case is now `100 + 2x(40 + 100) + 30 = 410s`, and a real
 outage prints
 `the runner's mirror is unreachable, which is not a fault in this repository`.
 
-**Not done, and a real option if this keeps happening:** caching the `.deb`
-files so a job does not depend on the mirror at all. It is more machinery than
-it sounds — the cache still has to be populated, and the package set differs per
-job — which is why the cheap legibility fix came first. If the outage rate stays
-this high, that is the next step.
+**Done, because the rate stayed high — five jobs in one session.** The `.deb`
+files are cached and tried **first**, with `--no-download`, which forbids the
+network outright: a job whose packages were fetched on an earlier run installs
+from disk without asking the mirror at all. A miss falls through to the retry
+loop, which then repopulates the cache.
+
+Two things about the key are deliberate. It includes the package list, so jobs
+wanting different sets do not fight over one entry, and the runner image,
+because a `.deb` built for one release is not what another resolves to. There
+are **no `restore-keys`**: a near-miss here would be the wrong package set, not
+a slightly stale one.
+
+What it does not fix: the very first run after a cache eviction still needs the
+mirror. The cache narrows the window rather than closing it.
 
 ### The seam audit — five places the seam is not backend agnostic
 
