@@ -2437,10 +2437,10 @@ Their recorded reason was also wrong and is corrected in the parity record
 itself: the crate _does_ build shader-visible heaps in `crcbl_dx12::binding`, so
 the obstacle is descriptor provenance and lifetime rather than a missing heap.
 
-**Still unproven:** nothing has executed. `exercise_fill` on WARP, in the dx12
-e2e job's render step, is the first run that observes bytes — and note that step
-runs _after_ the crate's own suite, so a failure there hides it (see the entry
-on that above).
+**Proven on WARP.** The seam suite ran it: `BufferFillZero supported`, 17/17,
+with the two declined rows printing the corrected reason and a non-zero fill
+refusing by name — so both directions of the parity contract are exercised, not
+just the supported one.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
