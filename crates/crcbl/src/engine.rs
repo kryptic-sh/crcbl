@@ -857,6 +857,52 @@ impl GpuContext {
         }
     }
 
+    /// The same context with no window behind it, at `extent`.
+    ///
+    /// [`SurfaceTarget::Offscreen`](crcbl_hal::SurfaceTarget) is a target every
+    /// backend implements and none of them dereferences, so this needs no shell,
+    /// no display server and no `unsafe` from the caller — the obligation
+    /// [`open`](Self::open) carries about a window outliving its surface is
+    /// vacuous when there is no window. Frames are acquired, submitted and
+    /// "presented" exactly as they are on a window; a present to an offscreen
+    /// ring simply returns the image to the ring.
+    ///
+    /// What it is for is rendering with nothing to render *into*: a golden frame
+    /// in a test, a thumbnail from a headless job, an application asserting its
+    /// own scene draws before it has a shell. Read a frame back with
+    /// [`crcbl_hal::Device::request_readback`] rather
+    /// than looking at it.
+    ///
+    /// Blocking, like [`open`](Self::open), and for the same reason it is not
+    /// the browser's entry point — there is no offscreen browser context to
+    /// open, so no non-blocking twin exists.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] on everything [`open`](Self::open) reports it for, minus the
+    /// window: no backend, no adapter, no device, no swapchain.
+    pub fn open_offscreen(extent: (u32, u32), desc: &GpuContextDesc<'_>) -> Result<Self, GpuError> {
+        let instance = match desc.backend {
+            Some(backend) => crate::backend::request_open_backend(backend)?,
+            None => crate::backend::request_open()?,
+        };
+        let mut pending = PendingGpuContext {
+            stage: OpenStage::Instance(instance),
+            target: crcbl_hal::SurfaceTarget::Offscreen,
+            extent,
+            label: desc.label.to_string(),
+            required_features: desc.required_features,
+            optional_features: desc.optional_features,
+            pacing: desc.pacing,
+        };
+        loop {
+            if let Some(context) = pending.poll()? {
+                return Ok(context);
+            }
+            std::thread::yield_now();
+        }
+    }
+
     /// Starts opening the instance, surface, device and swapchain, without
     /// blocking.
     ///

@@ -799,6 +799,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`GpuContext::open_offscreen` renders with no window behind it.** Same
+  context, same `acquire` / `submit_and_present` frame loop, built on
+  `SurfaceTarget::Offscreen` — a target every backend implements and none of
+  them dereferences, so it needs no shell, no display server and no `unsafe`
+  from the caller. What it is for is rendering with nothing to render _into_: a
+  golden frame in a test, a thumbnail from a headless job, an application
+  asserting its own scene draws before it has a shell. It is blocking, like
+  `open`, and has no non-blocking twin because there is no offscreen browser
+  context to open.
+
 - **`ForwardRenderer::with_scene` refuses a cluster array that would read
   outside itself**, through a new `MeshClusters::check` in `crcbl-shaders`. A
   cluster's two runs must lie inside the arrays they index, its vertex run must
@@ -844,11 +854,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   Nothing renders yet. The binary opens no device and reports the counts and the
   reservation, because those halves of the sample's "counts per path" exit
-  criterion need no GPU and the draw counts arrive with the renderer. What is
-  asserted is residency: `tests/residency.rs` hands the generated face to a real
-  `ForwardRenderer` and adds an instance, on `Null` by default and on whatever
-  `CRCBL_GPU` names otherwise, which is where the pools, the clusters and the
-  vertex stride are all judged by something that would reject them.
+  criterion need no GPU and the draw counts arrive with the renderer.
+
+  **But the face draws, and that is asserted rather than looked at.**
+  `tests/residency.rs` opens an offscreen context, makes the scene resident and
+  records a frame through the real `ForwardRenderer` and the real render graph.
+  On `Null` it asserts the frame recorded — the forward pass is in the compiled
+  graph — and says so; on whatever `CRCBL_GPU` names it reads the frame back and
+  asserts what covers it. On an RX 7900 XTX the face selects
+  `GeometryPath::MeshShader` and covers **57.6%** of a 256×192 frame in 947
+  distinct colours, against 0% with the instance removed. That is
+  `docs/plan/sample/14-quarry.md`'s milestone 1.
 
 - **`apps/viewer` reloads the document when it is written again.**
   `docs/plan/sample/05-viewer.md` milestone 3's artist loop: re-export from
