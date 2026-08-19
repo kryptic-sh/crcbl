@@ -950,11 +950,16 @@ fn create_rendering_pipeline(
         .depth_bias_clamp(bias.map_or(0.0, |bias| bias.clamp))
         .depth_bias_slope_factor(bias.map_or(0.0, |bias| bias.slope_scale))
         .line_width(1.0);
-    let sample_mask = [desc.multisample.mask];
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(desc.samples)
         .sample_shading_enable(false)
-        .sample_mask(&sample_mask)
+        // Every sample covered, said the way the spec spells it: an empty slice
+        // is a null `pSampleMask`, which Vulkan defines as all bits set. That is
+        // what the seam guarantees — `MultisampleState` carries no mask, because
+        // `MTLRenderPipelineDescriptor` has no member to put one in — and saying
+        // it with a null beats an array of ones, whose length would have to be
+        // `ceil(rasterization_samples / 32)` and is a second thing to get wrong.
+        .sample_mask(&[])
         .alpha_to_coverage_enable(desc.multisample.alpha_to_coverage);
 
     let depth_stencil = desc.depth_stencil.map(|depth| {

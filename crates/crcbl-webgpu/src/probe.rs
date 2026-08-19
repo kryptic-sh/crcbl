@@ -1706,7 +1706,6 @@ pub const PROBE_GRAPHICS_PIPELINE_DESC: GraphicsPipelineDesc<'static> = Graphics
     }),
     multisample: MultisampleState {
         samples: 1,
-        mask: !0,
         alpha_to_coverage: false,
     },
     color_targets: &PROBE_GRAPHICS_COLOR_TARGETS,
@@ -1932,7 +1931,6 @@ pub const PROBE_DRAW_PIPELINE_DESC: GraphicsPipelineDesc<'static> = GraphicsPipe
     depth_stencil: None,
     multisample: MultisampleState {
         samples: 1,
-        mask: !0,
         alpha_to_coverage: false,
     },
     color_targets: &PROBE_DRAW_COLOR_TARGETS,
@@ -3290,7 +3288,6 @@ pub const PROBE_INDIRECT_PIPELINE_DESC: GraphicsPipelineDesc<'static> = Graphics
     depth_stencil: None,
     multisample: MultisampleState {
         samples: 1,
-        mask: !0,
         alpha_to_coverage: false,
     },
     color_targets: &PROBE_INDIRECT_COLOR_TARGETS,
@@ -3896,7 +3893,6 @@ pub const fn probe_stencil_pipeline_desc() -> GraphicsPipelineDesc<'static> {
         }),
         multisample: MultisampleState {
             samples: 1,
-            mask: !0,
             alpha_to_coverage: false,
         },
         color_targets: &PROBE_STENCIL_COLOR_TARGETS,

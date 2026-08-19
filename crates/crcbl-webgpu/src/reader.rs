@@ -664,12 +664,13 @@ impl ByteReader<'_> {
         })
     }
 
-    /// One [`MultisampleState`], `samples` and `mask` read one at a time because
-    /// they are adjacent `u32`s the replayer reads different rules from.
+    /// One [`MultisampleState`]: the sample count, then the coverage flag, with
+    /// no sample-mask word between them — the seam has none, so neither does the
+    /// wire. See [`STREAM_VERSION`](tag::STREAM_VERSION) for why removing it is
+    /// a version bump.
     fn read_multisample_state(&mut self) -> Result<MultisampleState, DecodeError> {
         Ok(MultisampleState {
             samples: self.read_u32()?,
-            mask: self.read_u32()?,
             alpha_to_coverage: self.read_bool("MultisampleState::alpha_to_coverage")?,
         })
     }

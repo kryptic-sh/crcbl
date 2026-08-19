@@ -1214,7 +1214,12 @@ impl Device for WgpuDevice {
                     depth_stencil: ds,
                     multisample: wgpu::MultisampleState {
                         count: desc.multisample.samples,
-                        mask: u64::from(desc.multisample.mask),
+                        // Every sample covered. The seam guarantees it — it
+                        // carries no mask, because Metal has no pipeline
+                        // member to hold one — so this is `!0` rather than a
+                        // field, and `wgpu`'s mask is a `u64` where the
+                        // underlying APIs' are `u32`.
+                        mask: !0,
                         alpha_to_coverage_enabled: desc.multisample.alpha_to_coverage,
                     },
                     fragment: fs_entry.as_ref().map(|(m, e)| wgpu::FragmentState {

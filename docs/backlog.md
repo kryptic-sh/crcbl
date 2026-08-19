@@ -964,14 +964,21 @@ comes off the seam, `set_stencil_reference` becomes the only channel, and the
 seam states that a pipeline bind does not disturb it. `crcbl-render` never sets
 it, so the blast radius is the backends and the tests.
 
-**2. `MultisampleState::mask` — a whole seam field Metal cannot honour, and
-nothing declares it.** Vulkan, D3D12 and WebGPU all pass it through natively.
-`crcbl_mtl::pipeline`'s `check_multisample` refuses any non-full mask outright:
-"Metal has no per-pipeline sample mask … `MTLRenderPipelineDescriptor` has no
-counterpart at all". There is **no `Capability` variant and no `DIVERGENCES`
-row** for it, which is exactly the class `capability.rs` says every variant was
-derived from. Either add the capability row, or make "every sample" the only
-portable value — nothing in `crcbl-render` sets it to anything else.
+**2. `MultisampleState::mask` — FIXED, removed from the seam.** Nothing in the
+workspace ever set a partial mask; the only non-`!0` values were two wire-format
+fixtures exercising a `u32`. Removing it also fixed a latent Vulkan bug nobody
+had hit: the old code passed a **single** mask word, where the array must be
+`ceil(samples / 32)` long — short at 64 samples. It is now an empty slice, which
+the specification defines as all bits set. Original finding:
+
+**A whole seam field Metal cannot honour, and nothing declares it.** Vulkan,
+D3D12 and WebGPU all pass it through natively. `crcbl_mtl::pipeline`'s
+`check_multisample` refuses any non-full mask outright: "Metal has no
+per-pipeline sample mask … `MTLRenderPipelineDescriptor` has no counterpart at
+all". There is **no `Capability` variant and no `DIVERGENCES` row** for it,
+which is exactly the class `capability.rs` says every variant was derived from.
+Either add the capability row, or make "every sample" the only portable value —
+nothing in `crcbl-render` sets it to anything else.
 
 **3. `Limits::max_bind_groups` with `max_push_constant_size` — ceilings that
 cannot both be spent.** `Limits` documents each field as "a hard ceiling the

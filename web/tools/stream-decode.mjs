@@ -845,7 +845,7 @@ const EXPECTED = [
       // different double. `constant` and `clamp` are exact.
       bias: { constant: -2, slopeScale: Math.fround(0.1), clamp: 0.25 },
     },
-    multisample: { samples: 4, mask: 0xff, alphaToCoverage: true },
+    multisample: { samples: 4, alphaToCoverage: true },
     colorTargets: [
       {
         format: 'RGBA16_FLOAT',
@@ -2282,9 +2282,9 @@ async function main() {
       0, // Fill
       0, // depth_clamp false
       0, // depth_stencil, absent
-      // multisample: samples, mask, alpha_to_coverage
+      // multisample: samples, alpha_to_coverage — no sample mask, the seam
+      // dropped it
       ...u32le(4),
-      ...u32le(0xff),
       0,
       ...u32le(1), // one colour target
       // target 0: format, blend present, blend body, write mask
@@ -2301,8 +2301,9 @@ async function main() {
     return mut(body.slice());
   };
   // The colour-target block starts after the primitive (5), the absent
-  // depth-stencil (1) and the multisample block (9) and target count (4).
-  const targetAt = 1 + 8 + 1 + 8 + 8 + (4 + 2) + 1 + 5 + 1 + 9 + 4; // from the tag byte
+  // depth-stencil (1), the multisample block (5 — a `u32` count and the coverage
+  // byte, with no sample mask) and the target count (4).
+  const targetAt = 1 + 8 + 1 + 8 + 8 + (4 + 2) + 1 + 5 + 1 + 5 + 4; // from the tag byte
   const formatAt = HEADER_BYTES + targetAt;
   const blendColorSrcAt = formatAt + 2; // past format + blend presence
   const blendAlphaSrcAt = blendColorSrcAt + 3; // past color src/dst/op
@@ -2375,8 +2376,17 @@ async function main() {
   // reachable at all.
   checkRefused(
     withByte(fixture, 8, 1),
-    { kind: 'UnsupportedVersion', found: 1, expected: 3 },
+    { kind: 'UnsupportedVersion', found: 1, expected: 4 },
     'a stream from a build that speaks another version is refused'
+  );
+  // And the version immediately before this one, which is the interesting case
+  // rather than a distant number: a `3` stream differs from a `4` only by the
+  // sample-mask word inside `CreateGraphicsPipeline`, so every byte before it
+  // decodes identically and the header word is the only thing that can catch it.
+  checkRefused(
+    withByte(fixture, 8, 3),
+    { kind: 'UnsupportedVersion', found: 3, expected: 4 },
+    'the previous version, which differs only by a word mid-command, is refused'
   );
 
   // ---- no byte anywhere turns a decode into an indexing throw -------------

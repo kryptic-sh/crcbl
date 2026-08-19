@@ -164,6 +164,15 @@ const _: () = assert!(root::MAX_ROOT_COST == D3D12_MAX_ROOT_COST);
 /// makes a longer `color_targets` a refusal rather than a silent truncation.
 const RENDER_TARGETS: usize = 8;
 
+/// Every sample covered, which is what `SampleMask` is on every pipeline here.
+///
+/// [`MultisampleState`] carries no mask: `MTLRenderPipelineDescriptor` has no
+/// member to put one in, so the seam guarantees full coverage instead of a
+/// field one backend would have to refuse. D3D12 has no "all bits" sentinel —
+/// `SampleMask` of `0` really does discard every sample — so the guarantee is
+/// spelled out here rather than left to a struct field's default.
+const ALL_SAMPLES: u32 = u32::MAX;
+
 /// A pipeline layout: the root signature, and where each set's tables are.
 #[derive(Debug)]
 pub(crate) struct PipelineLayoutEntry {
@@ -542,7 +551,7 @@ pub(crate) fn graphics(
         VS: vertex_dxil.bytecode(),
         PS: fragment_dxil.map(Dxil::bytecode).unwrap_or_default(),
         BlendState: blend_state(desc.color_targets, &desc.multisample),
-        SampleMask: desc.multisample.mask,
+        SampleMask: ALL_SAMPLES,
         RasterizerState: rasterizer_state(&desc.primitive, desc.depth_stencil.as_ref(), samples),
         DepthStencilState: depth_stencil,
         // Empty, and deliberately: vertex pulling is the only geometry path, so
@@ -869,7 +878,7 @@ pub(crate) fn mesh(
         &mut stream,
         blend_state(desc.color_targets, &desc.multisample),
     );
-    add(&mut stream, SampleMask(desc.multisample.mask));
+    add(&mut stream, SampleMask(ALL_SAMPLES));
     add(
         &mut stream,
         rasterizer_state(&desc.primitive, desc.depth_stencil.as_ref(), samples),

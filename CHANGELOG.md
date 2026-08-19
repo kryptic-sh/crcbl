@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`MultisampleState::mask` is gone.** Vulkan, D3D12 and WebGPU all carry a
+  per-pipeline sample mask; **Metal has none at all**, so `crcbl-mtl` refused
+  any non-full value outright — and no `Capability` or `DIVERGENCES` row
+  declared that, so the parity mechanism did not know the field existed. Nothing
+  in the workspace ever set a partial mask. Every backend now passes "all
+  samples" explicitly, and `alpha_to_coverage` remains for shader-driven
+  coverage.
+
+  Vulkan's is now an empty slice — a null `pSampleMask`, which the specification
+  defines as all bits set. The old code passed a single word, which would have
+  been **short at 64 samples**, where the array must be `ceil(samples / 32)`
+  long.
+
+  The WebGPU command stream drops the word, so `STREAM_VERSION` goes 3 → 4: an
+  older decoder would read the `alpha_to_coverage` byte plus three bytes of the
+  colour-target count as a mask.
+
 - **`StencilState::reference` is gone; `set_stencil_reference` is the only
   channel.** It was honoured by two backends and dropped by two, so the same
   recorded command stream drew differently depending on the backend: `crcbl-vk`

@@ -321,13 +321,14 @@ impl ByteWriter {
 
     /// One [`MultisampleState`], in the order the struct declares its fields.
     ///
-    /// `samples` and `mask` are both `u32` and adjacent, which is why they are
-    /// written one at a time: the replayer refuses a `samples` count that is
-    /// neither `1` nor `4`, so a body that read the mask where the count goes
-    /// would turn a legal `mask` into an illegal count and vice versa.
+    /// A `u32` count and a coverage flag, with **no sample mask between them**:
+    /// the seam dropped that word, so the replayer fills
+    /// `GPUMultisampleState.mask` with every bit itself. An older decoder would
+    /// read the count's four bytes and then take the `alpha_to_coverage` byte
+    /// and three bytes of the next field as a mask, which is why
+    /// [`STREAM_VERSION`](tag::STREAM_VERSION) moved with it.
     fn put_multisample_state(&mut self, multisample: &MultisampleState) {
         self.put_u32(multisample.samples);
-        self.put_u32(multisample.mask);
         self.put_bool(multisample.alpha_to_coverage);
     }
 

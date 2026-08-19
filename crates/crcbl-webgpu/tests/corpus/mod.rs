@@ -822,7 +822,6 @@ pub fn every_command() -> Vec<Command> {
             }),
             multisample: MultisampleState {
                 samples: 4,
-                mask: 0x0000_00FF,
                 alpha_to_coverage: true,
             },
             color_targets: vec![

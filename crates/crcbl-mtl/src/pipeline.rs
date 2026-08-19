@@ -370,7 +370,7 @@ impl MetalDevice {
         // `MTLDepthClipMode::Clamp` anyway has moved the untruth from the
         // adapter to the encoder, where nothing observes it.
         crate::quirk::check_depth_clamp(desc.primitive, self.inner.caps.features)?;
-        let samples = check_multisample(&desc.multisample)?;
+        let samples = raster_sample_count(&desc.multisample);
 
         let descriptor = MTLRenderPipelineDescriptor::new();
         if let Some(label) = desc.label {
@@ -743,32 +743,15 @@ fn stencil_face(stencil: &StencilState, front: bool) -> Retained<MTLStencilDescr
     descriptor
 }
 
-/// The sample count a pipeline rasterises at, or why the state has no Metal
-/// encoding.
+/// The sample count a pipeline rasterises at.
 ///
-/// **Metal has no per-pipeline sample mask.**
-/// [`MultisampleState::mask`](crcbl_hal::MultisampleState::mask) is Vulkan's
-/// `pSampleMask` and DX12's `SampleMask`; `MTLRenderPipelineDescriptor` has no
-/// counterpart at all, and the only related knob — `alphaToCoverageEnabled` —
-/// derives coverage from the shader instead of masking it. So a mask that is
-/// not "every sample" is refused by name rather than silently ignored, which
-/// would render every sample a caller asked to suppress.
-fn check_multisample(multisample: &MultisampleState) -> Result<u32, HalError> {
-    let samples = multisample.samples.max(1);
-    // Only the bits a sample actually uses have to be set: a 4× pipeline with
-    // mask `0xF` is asking for every one of its samples, however the caller
-    // spelled the unused high bits.
-    let used = if samples >= u32::BITS {
-        u32::MAX
-    } else {
-        (1u32 << samples) - 1
-    };
-    if multisample.mask & used != used {
-        return Err(HalError::InvalidDescriptor(format!(
-            "MultisampleState::mask {:#010x} suppresses samples of a {samples}× pipeline, and \
-             Metal has no sample mask on MTLRenderPipelineDescriptor to express it",
-            multisample.mask
-        )));
-    }
-    Ok(samples)
+/// `setRasterSampleCount` rejects `0`, and the seam's `1` and Metal's `1` mean
+/// the same thing — no multisampling — so a zero is read as the count it was
+/// meant to be rather than refused.
+///
+/// There is nothing else here to check, and that is the point: Metal has no
+/// per-pipeline sample mask, so [`MultisampleState`] does not carry one. Every
+/// pipeline rasterises with all of its samples covered on every backend.
+fn raster_sample_count(multisample: &MultisampleState) -> u32 {
+    multisample.samples.max(1)
 }

@@ -2433,7 +2433,6 @@ fn rich_graphics_pipeline() -> GraphicsPipelineDesc<'static> {
         }),
         multisample: MultisampleState {
             samples: 4,
-            mask: 0x0000_00FF,
             alpha_to_coverage: true,
         },
         color_targets: &TWO_TARGETS,
@@ -2677,13 +2676,13 @@ fn every_nested_graphics_pipeline_enum_refuses_an_unclaimed_code() {
     // The colour target's blend factors and ops, and its write mask, are past the
     // multisample block and the target count. Find the first target's format by
     // decoding the untouched stream and locating it relative to the end.
-    // multisample is samples(4) + mask(4) + alpha_to_coverage(1); then the u32
-    // target count; then target 0: format(1), blend presence(1), blend body
-    // (6 bytes), write_mask(4); then target 1.
+    // multisample is samples(4) + alpha_to_coverage(1) — no sample mask, the
+    // seam has none; then the u32 target count; then target 0: format(1), blend
+    // presence(1), blend body (6 bytes), write_mask(4); then target 1.
     let stencil_body = 1 + (1 + 3) * 2 + 4 + 4; // present + two faces + two masks
     let bias = 4 + 4 + 4;
     let ms_at = stencil_present_at + stencil_body + bias;
-    let target_count_at = ms_at + 4 + 4 + 1;
+    let target_count_at = ms_at + 4 + 1;
     let target0_format_at = target_count_at + 4;
     let target0_blend_present_at = target0_format_at + 1;
     let target0_color_src_at = target0_blend_present_at + 1;
@@ -2731,21 +2730,28 @@ fn every_nested_graphics_pipeline_enum_refuses_an_unclaimed_code() {
     ));
 }
 
-/// **No stencil reference sits between the masks and the bias.**
+/// **Neither word the seam dropped is still on the wire.**
 ///
-/// The reference is pass state on the seam — `StencilState` has no field for it
-/// and [`Command::SetStencilReference`] is the only channel — so the stencil
-/// block ends at `write_mask` and the bias floats follow immediately. A round
-/// trip cannot see this: a writer that put a word there and a reader that took
-/// one back out would agree with each other and disagree with
-/// `web/engine/gpu-stream.js`. So this reads the byte the bias starts at and
-/// checks it is the bias.
+/// Two `u32`s left `CreateGraphicsPipeline`'s body for the same reason — a
+/// backend with no pipeline member to hold them — and each left a place a stray
+/// word would fit unnoticed:
+///
+/// * the stencil reference, which is pass state now (`StencilState` has no field
+///   for it and [`Command::SetStencilReference`] is the only channel), so the
+///   stencil block ends at `write_mask` and the bias floats follow immediately;
+/// * the sample mask, so the multisample block is the sample count and the
+///   coverage flag with the colour-target count straight after.
+///
+/// A round trip cannot see either: a writer that put a word there and a reader
+/// that took one back out would agree with each other and disagree with
+/// `web/engine/gpu-stream.js`. So this reads the bytes at both seams and checks
+/// what is actually there.
 ///
 /// The offsets are the same walk
 /// [`every_nested_graphics_pipeline_enum_refuses_an_unclaimed_code`] does, up to
 /// the stencil's two faces and two masks.
 #[test]
-fn no_stencil_reference_word_sits_between_the_masks_and_the_bias() {
+fn neither_the_stencil_reference_nor_the_sample_mask_still_occupies_a_word() {
     let desc = rich_graphics_pipeline();
     let mut stream = StreamWriter::new();
     stream.create_graphics_pipeline(handle(1, 1), &desc);
@@ -2778,6 +2784,37 @@ fn no_stencil_reference_word_sits_between_the_masks_and_the_bias() {
             .bias
             .constant,
         "the bias must start right after write_mask: a reference word here would push it out",
+    );
+
+    // The multisample block follows the three bias floats. It is the sample
+    // count and the coverage flag with nothing between them — the seam carries
+    // no sample mask, because `MTLRenderPipelineDescriptor` has no member to
+    // hold one — and the colour-target count follows immediately. Same argument
+    // as the reference word above: writer and reader would agree with each other
+    // about a mask word and disagree with `web/engine/gpu-stream.js`, so the
+    // bytes are read rather than round-tripped.
+    let ms_at = bias_at + 4 * 3;
+    let samples = u32::from_le_bytes(
+        whole[ms_at..ms_at + 4]
+            .try_into()
+            .expect("four bytes of sample count"),
+    );
+    assert_eq!(samples, desc.multisample.samples);
+    assert_eq!(
+        whole[ms_at + 4],
+        tag::PRESENT,
+        "alpha_to_coverage must sit right after the sample count: a mask word here would push it \
+         out",
+    );
+    let target_count = u32::from_le_bytes(
+        whole[ms_at + 5..ms_at + 9]
+            .try_into()
+            .expect("four bytes of colour-target count"),
+    );
+    assert_eq!(
+        target_count as usize,
+        desc.color_targets.len(),
+        "the colour-target count must follow alpha_to_coverage directly",
     );
 }
 
@@ -2888,16 +2925,24 @@ fn a_buffer_without_this_formats_header_is_refused_before_any_command_is_read() 
         Err(DecodeError::BadMagic)
     );
 
-    let mut wrong_version = StreamWriter::new().bytes().to_vec();
-    let bumped = tag::STREAM_VERSION + 1;
-    wrong_version[8..10].copy_from_slice(&bumped.to_le_bytes());
-    assert_eq!(
-        decode_stream(&wrong_version),
-        Err(DecodeError::UnsupportedVersion {
-            found: bumped,
-            expected: tag::STREAM_VERSION,
-        })
-    );
+    // Both neighbours of the current version, because both are reachable: the
+    // Rust and JS halves ship as separate artifacts and are cached
+    // independently, so this decoder meets streams from a newer build and an
+    // older one alike. The predecessor is the interesting one — a `3` stream
+    // differs from a `4` only by the sample-mask word inside
+    // `CreateGraphicsPipeline`, so every byte before it decodes identically and
+    // the header word is the only thing that can catch it.
+    for found in [tag::STREAM_VERSION - 1, tag::STREAM_VERSION + 1] {
+        let mut wrong_version = StreamWriter::new().bytes().to_vec();
+        wrong_version[8..10].copy_from_slice(&found.to_le_bytes());
+        assert_eq!(
+            decode_stream(&wrong_version),
+            Err(DecodeError::UnsupportedVersion {
+                found,
+                expected: tag::STREAM_VERSION,
+            })
+        );
+    }
 
     // A header cut short is short, not corrupt.
     let whole = StreamWriter::new();

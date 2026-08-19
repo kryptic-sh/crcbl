@@ -5493,7 +5493,10 @@ export class Replayer {
     }
     const multisample = {
       count: samples,
-      mask: command.multisample.mask,
+      // Every sample covered. The seam carries no mask — Metal's pipeline
+      // descriptor has no member for one — so the value is stated here rather
+      // than decoded, and `GPUMultisampleState.mask` defaults to this anyway.
+      mask: 0xffffffff,
       alphaToCoverageEnabled: command.multisample.alphaToCoverage,
     };
 

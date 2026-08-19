@@ -60,18 +60,22 @@ const STREAM_MAGIC = new Uint8Array([
 /**
  * `tag::STREAM_VERSION`.
  *
- * `3` since `CreateGraphicsPipeline`'s stencil block lost its trailing
- * `reference` word — the seam dropped the pipeline-side reference, leaving
- * `SetStencilReference` as the only thing that carries one. It went to `2` for
- * the trailing `timestampWrites` both pass commands grew.
+ * `4` since `CreateGraphicsPipeline`'s multisample block lost its `mask` word —
+ * the seam dropped `MultisampleState::mask` because Metal's pipeline descriptor
+ * has no member to put it in, so every pipeline covers all of its samples and
+ * `readMultisampleState` no longer reads a mask. It went to `3` when the stencil
+ * block lost its trailing `reference` word, leaving `SetStencilReference` as the
+ * only thing that carries one, and to `2` for the trailing `timestampWrites`
+ * both pass commands grew.
  *
- * Both are *changed records* rather than new tags: an older decoder would read
- * four bytes of depth bias as a stencil reference and carry on, decoding a
- * stream that still parses and means something else — which is the one defect a
- * version word exists to catch, and the reason this half and `crcbl-webgpu`'s
+ * All three are *changed records* rather than new tags: an older decoder meeting
+ * a newer stream reads the `alphaToCoverage` byte and three bytes of the
+ * colour-target count as a sample mask and carries on, decoding a stream that
+ * still parses and means something else — which is the one defect a version word
+ * exists to catch, and the reason this half and `crcbl-webgpu`'s
  * `tag::STREAM_VERSION` move together in one commit.
  */
-const STREAM_VERSION = 3;
+const STREAM_VERSION = 4;
 
 // ── Caps ─────────────────────────────────────────────────────────────────────
 
@@ -1492,16 +1496,17 @@ class ByteReader {
   }
 
   /**
-   * A `crcbl_hal::MultisampleState`. `samples` and `mask` are adjacent `u32`s the
-   * replayer reads different rules from — it refuses a `samples` count that is
-   * neither 1 nor 4 — so they are read one at a time.
+   * A `crcbl_hal::MultisampleState`: the sample count, then the coverage flag,
+   * with no sample-mask word between them. The seam carries no mask — Metal's
+   * pipeline descriptor has no member for one — so the replayer fills
+   * `GPUMultisampleState.mask` with every bit itself, and a stream that still
+   * has the word is an older `STREAM_VERSION` the header gate refuses.
    *
-   * @returns {{ samples: number, mask: number, alphaToCoverage: boolean }}
+   * @returns {{ samples: number, alphaToCoverage: boolean }}
    */
   readMultisampleState() {
     return {
       samples: this.readU32(),
-      mask: this.readU32(),
       alphaToCoverage: this.readPresent('MultisampleState::alpha_to_coverage'),
     };
   }

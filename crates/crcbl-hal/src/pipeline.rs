@@ -855,12 +855,23 @@ impl DepthStencilState {
 }
 
 /// Multisampling state.
+///
+/// # Every sample is covered, and there is no knob to say otherwise
+///
+/// Vulkan's `pSampleMask`, D3D12's `SampleMask` and WebGPU's
+/// `GPUMultisampleState.mask` all suppress individual samples per pipeline;
+/// `MTLRenderPipelineDescriptor` has no counterpart at all, and Metal's only
+/// related knob — `alphaToCoverageEnabled`, which this struct does carry —
+/// *derives* coverage from the shader rather than masking it. A seam field one
+/// parity backend cannot honour is a field whose meaning changes with the
+/// backend, so there is none: every pipeline rasterises with all of its samples
+/// covered, and the three backends that have a mask pass "all bits set"
+/// explicitly. Coverage a caller wants to vary belongs in the shader, where
+/// [`alpha_to_coverage`](Self::alpha_to_coverage) already puts it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MultisampleState {
     /// Samples per pixel; `1` disables MSAA.
     pub samples: u32,
-    /// Sample coverage mask.
-    pub mask: u32,
     /// Derive coverage from the fragment shader's alpha output.
     pub alpha_to_coverage: bool,
 }
@@ -871,7 +882,6 @@ impl Default for MultisampleState {
     fn default() -> Self {
         Self {
             samples: 1,
-            mask: !0,
             alpha_to_coverage: false,
         }
     }

@@ -48,20 +48,26 @@ pub const STREAM_MAGIC: &[u8; 8] = b"CRCBLGPU";
 
 /// Current stream format version.
 ///
-/// `3` since `CreateGraphicsPipeline`'s stencil block lost its trailing
-/// `reference` word: the seam dropped
-/// [`StencilState::reference`](crcbl_hal::StencilState) because two of the four
-/// backends had no pipeline member to put it in, leaving
-/// [`Command::SetStencilReference`](crate::Command::SetStencilReference) as the
-/// only channel.
+/// `4` since `CreateGraphicsPipeline`'s multisample block lost its `mask` word:
+/// the seam dropped `MultisampleState::mask` because
+/// `MTLRenderPipelineDescriptor` has no member to put it in, so every pipeline
+/// now rasterises with all samples covered and the replayer fills
+/// `GPUMultisampleState.mask` itself.
 ///
-/// It went to `2` for the trailing `timestamp_writes` both pass commands grew —
-/// see [`REPLY_VERSION`] for the rule this follows. Both edits are **changed
-/// records**, the kind a decoder cannot notice: an older `gpu-stream.js` reads
-/// four bytes of depth bias as a stencil reference and carries on, decoding a
-/// stream that still parses and means something else. A new tag would not have
-/// moved this word.
-pub const STREAM_VERSION: u16 = 3;
+/// It went to `3` when the stencil block lost its trailing `reference` word —
+/// [`StencilState::reference`](crcbl_hal::StencilState) left the seam for the
+/// same reason, leaving
+/// [`Command::SetStencilReference`](crate::Command::SetStencilReference) as the
+/// only channel — and to `2` for the trailing `timestamp_writes` both pass
+/// commands grew; see [`REPLY_VERSION`] for the rule this follows.
+///
+/// Every one of those is a **changed record**, the kind a decoder cannot
+/// notice: an older `gpu-stream.js` meeting this stream reads the
+/// `alpha_to_coverage` byte and three bytes of the colour-target count as a
+/// sample mask and carries on, decoding a stream that still parses and means
+/// something else. A new tag would not have moved these words, which is why
+/// they are version bumps and not new commands.
+pub const STREAM_VERSION: u16 = 4;
 
 /// Bytes before the first command: [`STREAM_MAGIC`], [`STREAM_VERSION`], and the
 /// sequence number of the first command in the buffer.
