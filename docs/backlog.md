@@ -1747,6 +1747,47 @@ carries `meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
 `lod_resolve.rs`. Milestone 4 is mostly assembling and gating what exists rather
 than building a subsystem; the overlay is the exception.
 
+### MEASURED — vk↔WebGPU replaces vk↔wgpu as the cross-backend oracle
+
+**This settles the second half of the `crcbl-wgpu` deletion bar** — "we don't
+need wgpu for the golden comparisons any more". Measured on 2026-08-19, on one
+Linux machine, with pieces that all already exist:
+
+1. `crcbl screenshot --scene <name> --size 256x192` through `CRCBL_GPU=vk`
+   renders each of the eleven scenes `crcbl_render_harness::golden_names` lists
+   — the CLI's `--scene` names and that list are the same eleven strings.
+2. `web/tools/render-harness-e2e.mjs` drives the same eleven through
+   `crcbl-webgpu` in headless Chromium on SwiftShader and writes each readback.
+3. `cargo run -p render-harness --example compare-readback -- <readbacks> --golden-dir <the vk PNGs>`
+   compares them directly. `--golden-dir` is an existing flag; nothing new was
+   written to take this measurement.
+
+**The result: 9 of 11 match, and the two that do not are `ssr` and `ui` — the
+same two the browser gate already carries as `--expect-fail`.** So the direct
+cross-backend comparison agrees, scene for scene, with what is already gated.
+
+**It is a sharper instrument than the golden comparison, not a weaker one**,
+which is the property the old vk↔wgpu job was kept for:
+
+| scene    | vs the committed golden | vs vk directly    |
+| -------- | ----------------------- | ----------------- |
+| `ssr`    | 25,611 pixels differ    | **1,355**         |
+| `ui`     | 3,872 pixels differ     | **506**           |
+| `sprite` | matches                 | **0** — identical |
+
+`sprite` being byte-identical between radv and Chromium-on-SwiftShader is worth
+recording on its own: two unrelated rasterisers, one number.
+
+**What this does not do.** It compares eleven scenes at one size, where the
+current job compares three at two. It needs a browser, so it belongs in
+`pages.yml`'s `render-harness` job rather than in a native one — and that job
+installs no Vulkan ICD today, so wiring it means adding lavapipe there. Neither
+is an obstacle, and neither has been done yet: **the measurement is taken, the
+gate is not built.**
+
+The remaining half of the deletion bar is the parity blockers, which are four
+rows of hardware nobody here has — see "The numbers, restated".
+
 ### DECISION NEEDED — should quarry place several faces?
 
 `docs/plan/sample/14-quarry.md`'s exit criteria ask for the reduction to be
