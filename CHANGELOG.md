@@ -816,8 +816,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not on iteration order, which a seeded sequential generator would quietly
   depend on the first time the loop was parallelised.
 
-  Nothing renders yet. The binary opens no device and reports the counts,
-  because the triangle and cluster halves of the sample's "counts per path" exit
+  `scene::quarry_scene` turns it into the `SceneDesc` the renderer makes
+  resident — packed vertices, the meshlet clusters, one rock material as row 0
+  and a one-texel page. **It computes its own pool sizes**, because
+  `Capacities::default` reserves 65,536 vertices and 262,144 indices while this
+  face needs 66,049 and 393,216: taking the defaults would be refused at
+  `with_scene`. A test asserts the defaults still would not fit, so the
+  arithmetic cannot quietly become ceremony.
+
+  Nothing renders yet. The binary opens no device and reports the counts and the
+  reservation, because those halves of the sample's "counts per path" exit
   criterion need no GPU and the draw counts arrive with the renderer.
 
 - **`apps/viewer` reloads the document when it is written again.**
