@@ -1747,6 +1747,60 @@ carries `meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
 `lod_resolve.rs`. Milestone 4 is mostly assembling and gating what exists rather
 than building a subsystem; the overlay is the exception.
 
+### MEASURED — what deleting `crcbl-wgpu` does to the parity mechanism
+
+Re-derived from the tree on 2026-08-19, so the deletion is a reviewed change
+rather than a grep. Two halves: what actually references the crate, and what its
+removal does to `parity_blockers`.
+
+**The code surface is five files and two manifests.** Everything else that names
+`wgpu` names it in prose. Counting only lines that are not comments:
+
+| file                                 | references                                                  |
+| ------------------------------------ | ----------------------------------------------------------- |
+| `crates/crcbl-hal/src/capability.rs` | 18 `BackendKind::Wgpu`, 1 `crcbl_wgpu`                      |
+| `crates/crcbl/src/backend.rs`        | 9 `GpuBackend::Wgpu`, 4 `BackendKind::Wgpu`, 1 `crcbl_wgpu` |
+| `crates/crcbl-hal/src/caps.rs`       | 2 `BackendKind::Wgpu`                                       |
+| `crates/crcbl/src/args.rs`           | 1 `GpuBackend::Wgpu`                                        |
+| `crates/crcbl-hal/src/error.rs`      | 1 `BackendKind::Wgpu`                                       |
+
+The manifests are the workspace root's `[workspace.dependencies]` entry and
+`crates/crcbl/Cargo.toml`'s. **`crcbl-mtl` and `crcbl-shaders` name it only in
+comments**, which confirms the earlier reading — what they owe is a reworded
+justification, not a dependency fix.
+
+**And the mechanism half, which is the part a grep does not show.** Divergence
+rows per backend, counted from `DIVERGENCES`:
+
+| backend | parity target | rows | blocking |
+| ------- | ------------- | ---- | -------- |
+| vulkan  | yes           | 0    | 0        |
+| webgpu  | yes           | 13   | **0**    |
+| metal   | yes           | 4    | 4        |
+| dx12    | yes           | 2    | 2        |
+| wgpu    | **no**        | 12   | **7**    |
+
+Two things follow, and neither is obvious from the crate's own contents:
+
+1. **`crcbl-wgpu` is hiding seven blocking rows.** They do not appear in
+   `parity_blockers()` only because `BackendKind::is_parity_target` answers
+   `false` for it. Deleting the crate deletes those rows — it does not close
+   them, and the blocker count stays at six either way.
+2. **The deletion makes `is_parity_target` vestigial.** Its only other `false`
+   is `BackendKind::Null`, which carries no divergence row at all, so after wgpu
+   goes the filter removes nothing.
+   `crcbl_wgpu_is_outside_the_goal_by_construction` already asserts that it
+   removes _something_ — `hidden > 0`, spelled "this exclusion is a filter that
+   removes nothing and the test above proves nothing" — so **that test will fail
+   by design on the day of the deletion.** That is the test working, not
+   breaking.
+
+So the deletion's parity half is: drop `is_parity_target` and its call in
+`parity_blockers`, or keep it for `Null` alone and rewrite that test to say so.
+The first is honest and the second is machinery for a case that cannot arise —
+`Null` declares no divergence because it records rather than draws. Worth
+deciding when the deletion is made rather than discovering it as a red test.
+
 ### MEASURED — vk↔WebGPU replaces vk↔wgpu as the cross-backend oracle
 
 **This settles the second half of the `crcbl-wgpu` deletion bar** — "we don't
