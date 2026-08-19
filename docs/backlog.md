@@ -2022,10 +2022,25 @@ read it — `query_results` returns **`[0, 0]`**. Zero is not a neutral answer f
 this query; it is "nothing was visible". A caller who wired occlusion culling to
 this seam would cull the entire scene and every return value would say success.
 
+**Which backends this reaches, measured rather than assumed.** `crcbl-vk`
+answers `Support::Yes` (gated, and radv has the feature) and is where the
+`[0, 0]` came from. `crcbl-wgpu` **refuses** — it builds no query sets at all —
+so there is no trap there. `crcbl-webgpu` answers `Support::Yes`
+unconditionally, and `crcbl-dx12` and `crcbl-mtl` gate on a device feature, so
+on any device that has it the same read is available. The `Null` backend records
+and answers `Yes`.
+
 `Capability::OcclusionQuery` is honest about this — its doc is "a
 `QueryKind::Occlusion` query set", nothing more, unlike `TimestampQuery` whose
 doc names the writes and the read. The capability is not lying. The **seam** is
 offering a resource whose only purpose it cannot serve.
+
+**And this was already known in-code**, which is worth saying: the comment on
+`crcbl-webgpu`'s arm in `hal/device.rs` states it outright — "`CommandEncoder`
+has no begin/end query verb, so nothing a caller records through this seam can
+ever write one, and the same is true of the Vulkan backend's `Yes`". What is new
+here is the measured value a caller receives instead, and that it is the one
+value that silently means the opposite of the truth.
 
 Nothing plans to use it: no document under `docs/plan/` schedules GPU occlusion
 queries or occlusion culling (the roadmap's "occlusion" is audio, and topic 31's
