@@ -17,11 +17,13 @@
 //! an offscreen context — so the `MeshShader` path rendering the scene is
 //! asserted rather than looked at.
 //!
-//! Still owed, from that document's milestones: per-cluster selection and
-//! hysteresis over the hierarchy [`dag`] builds, with the LOD tint and heatmap
-//! overlays; the two indirect paths and the forced-path comparison; and the
-//! skinned and tiling cases with a Pages demo. There is no window and no dolly
-//! yet, so there are no golden frames.
+//! Per-cluster selection over that hierarchy is asserted too: the face draws
+//! from more than one level at once, and no level dominates the cut.
+//!
+//! Still owed, from that document's milestones: hysteresis, and the LOD tint and
+//! heatmap overlays; the two indirect paths and the forced-path comparison; and
+//! the skinned and tiling cases with a Pages demo. There is no window and no
+//! dolly yet, so there are no golden frames.
 
 pub mod dag;
 pub mod face;

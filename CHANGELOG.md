@@ -799,6 +799,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **quarry selects per cluster, and it is measured rather than looked at.** The
+  amplification stage's cut comes out of `ForwardRenderer::cluster_selection` —
+  one `u32` per resident cluster, which nothing in the frame reads — and
+  `tests/residency.rs` splits it back into levels by the pool's own layout. From
+  the sample's camera on an RX 7900 XTX, swept over the pixel budget:
+
+  | budget | clusters drawn | per level, finest first  |
+  | ------ | -------------- | ------------------------ |
+  | 1      | 102            | `[100, 2, 0, …]`         |
+  | 4      | 71             | `[28, 43, 0, …]`         |
+  | 16     | 48             | `[0, 30, 18, 0, …]`      |
+  | 64     | 32             | `[0, 5, 22, 5, 0, …]`    |
+  | 4096   | 18             | `[0, 0, 0, 13, 5, 0, …]` |
+
+  At 4096 pixels the face is 18 coarse clusters instead of 102 fine ones and
+  still covers 57.0% of the frame against 57.6% — the wall is there, drawn from
+  a fifth of the geometry.
+
+  **The assertion is a share, not a count of non-empty levels.** `[100, 2, …]`
+  is a uniform cut with a rounding error on the end and would clear "more than
+  one level drew", which is exactly the case the test exists to distinguish; it
+  requires instead that no level holds four fifths of the cut. Both extremes are
+  asserted beside it — the base dominating at one pixel, and nothing of the base
+  surviving at 4096 — so the mixing assertion is shown to be able to fail.
+
 - **`apps/quarry`'s face is a cluster hierarchy too.** The new
   `crcbl_quarry::dag` builds the QEM DAG over the same content through
   `crcbl_scene::build_cluster_dag` and describes it as a `Geometry::Dag` scene —
