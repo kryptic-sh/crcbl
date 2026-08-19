@@ -1856,11 +1856,12 @@ fn the_ui_scene_draws_at_an_odd_extent_and_matches_its_golden() {
 ///    frame died on `windows-latest` with `DXGI_ERROR_DEVICE_REMOVED` because
 ///    the first enumerated adapter is not a usable device there.
 /// 3. The device's [`GeometryPath`](crcbl::hal::GeometryPath) is reported, and
-///    the frame is drawn through whichever indirect tail it selects. Metal
-///    reports no `DRAW_INDIRECT_COUNT` — the flag is absent from the API rather
-///    than unimplemented — so it selects
-///    [`IndirectPerBatch`](crcbl::hal::GeometryPath::IndirectPerBatch), the arm
-///    that until now had only ever run on Vulkan behind a forced selector.
+///    the frame is drawn through whichever indirect tail it selects. Metal used
+///    to report no `DRAW_INDIRECT_COUNT` and so select
+///    [`IndirectPerBatch`](crcbl::hal::GeometryPath::IndirectPerBatch); it now
+///    reports the feature on any device that can create the indirect command
+///    buffer `crcbl_mtl::icb` encodes, so it selects `IndirectCount` and this
+///    golden runs through that path.
 /// 4. Something drew: at least `min_colors` colours, plus `inspect`'s
 ///    scene-specific claim about *where* it drew. A full-screen quad and a blank
 ///    frame both fail these and neither is distinguishable by a tolerance.

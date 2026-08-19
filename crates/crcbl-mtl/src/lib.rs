@@ -79,13 +79,12 @@
 //! keeps a shadow of the block because that selector replaces the whole argument
 //! rather than a range of it.
 //!
-//! What is still refused, with `what` naming what is missing: **query sets**,
-//! **indirect-count draws**, a **word-wide buffer fill**, a
-//! **variable-count bind group** and a **wait for a timeline value nothing has
-//! signalled**. The indirect count is not simply unwritten: it needs an
-//! `MTLIndirectCommandBuffer` filled by a compute pass that would have to run
-//! before the render encoder the call happens inside. See
-//! `crcbl_mtl::command`'s `indirect_count`.
+//! What is still refused, with `what` naming what is missing: **query sets**, a
+//! **word-wide buffer fill**, a **variable-count bind group** and a **wait for
+//! a timeline value nothing has signalled**. Indirect-count draws left that
+//! list when `crcbl_mtl::icb` landed — a compute kernel fills an
+//! `MTLIndirectCommandBuffer` before the render encoder opens, which is what
+//! `crcbl_mtl::command`'s deferred pass recording exists to allow.
 //!
 //! Nothing in this crate is a stub that reports success — a refused command
 //! recorded into an encoder *fails the encoder*, so `finish` hands back the
@@ -267,13 +266,16 @@
 //!   rather than an approximation of it: the draw count is a CPU value by
 //!   definition, so N calls emit exactly the N draws from N GPU-written
 //!   argument structures that the flag means.
-//! * [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) is still
-//!   **off**, and it is the one Metal cannot express through this seam's shape
-//!   at all. The count lives in GPU memory, Metal's only execution that reads
-//!   one is `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over
-//!   an `MTLIndirectCommandBuffer`, and filling that buffer from the seam's
-//!   argument structures needs a compute kernel running *before* the render
-//!   encoder the call happens inside was opened.
+//! * [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) is now
+//!   **on**, on any device that holds an `MTLIndirectCommandBuffer`, and it was
+//!   the last Tier A flag missing — so reporting it moves every such Mac onto
+//!   [`GeometryPath::IndirectCount`](crcbl_hal::GeometryPath::IndirectCount).
+//!   The count lives in GPU memory and Metal's only execution that reads one is
+//!   `executeCommandsInBuffer:` over an ICB, so `crcbl_mtl::icb` is a compute
+//!   kernel that fills that buffer *before* the render encoder the call happens
+//!   inside is opened, resetting every command past the count so it draws
+//!   nothing. `crcbl_mtl::command`'s deferred pass recording is what makes the
+//!   ordering reachable, and it landed before this as a pure refactor.
 //! * [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) is
 //!   **back on**, and the round trip is the part worth knowing about. MTL1
 //!   reported it from `argumentBuffersSupport`, which is a true statement about
@@ -299,11 +301,11 @@
 //! [`Features::GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) optionally on top.
 //! Until topic 39 it demanded the whole bundle and this backend was refused
 //! with [`UnsupportedFeatures`](crcbl_hal::HalError::UnsupportedFeatures) over
-//! `DRAW_INDIRECT_COUNT`, a flag absent from Metal's API rather than
-//! unimplemented here — the case that argument was made from. The
-//! `the_default_device_desc_opens_and_the_rest_degrades` test is what keeps
-//! that from changing quietly, and it asserts all three flags above rather than
-//! only the absent ones.
+//! `DRAW_INDIRECT_COUNT`, which was then unwritten here — the case that
+//! argument was made from, and one that no longer arises now that the flag is
+//! reported. The `the_default_device_desc_opens_and_the_rest_degrades` test is
+//! what keeps that from changing quietly, and it pins each flag to the path
+//! derived from it rather than to a fixed answer.
 //!
 //! The one bundled feature that is still purely an adapter question —
 //! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) — is
@@ -356,6 +358,8 @@ mod device;
 mod draw;
 #[cfg(target_os = "macos")]
 mod fault;
+#[cfg(target_os = "macos")]
+mod icb;
 #[cfg(target_os = "macos")]
 mod instance;
 // The fifth, and for the reason the other four give: where a render pass's area

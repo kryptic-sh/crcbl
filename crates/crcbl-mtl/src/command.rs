@@ -70,15 +70,19 @@
 //! [`finish`](CommandEncoder::finish), which is where the seam observes it.
 //!
 //! **Why defer at all**, since the straight-through form was simpler: Metal's
-//! only count-from-memory execution is
-//! `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
+//! only count-from-memory execution is `executeCommandsInBuffer:` over an
 //! `MTLIndirectCommandBuffer`, whose commands a *compute kernel* has to write —
 //! and that kernel must run **before** the render encoder the seam calls
 //! [`draw_indirect_count`](CommandEncoder::draw_indirect_count) inside was
 //! opened. A backend that has already opened the encoder cannot reach backwards
-//! to do that; one that has only a list of commands can. `indirect_count` still
-//! refuses, and `docs/backlog.md` holds the decision and the alternatives that
-//! lost.
+//! to do that; one that has only a list of commands can.
+//!
+//! **That is now a consumer rather than a plan.** `draw_indirect_count` queues
+//! a [`crate::icb::Encode`] onto [`RenderRecording::prologue`], and
+//! `encode_render_pass` dispatches every queued encode on one
+//! `MTLComputeCommandEncoder` before it opens the render one. A pass with no
+//! indirect-count draw opens no compute encoder at all, so the deferral costs
+//! every other pass exactly what it cost before: nothing at run time.
 //!
 //! # A barrier is an encoder boundary
 //!
@@ -112,8 +116,9 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _,
-    MTLComputeCommandEncoder, MTLOrigin, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLScissorRect, MTLTexture, MTLViewport,
+    MTLComputeCommandEncoder, MTLIndirectCommandBuffer, MTLOrigin, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLRenderStages, MTLResourceUsage, MTLScissorRect, MTLTexture,
+    MTLViewport,
 };
 
 use crate::conv;
@@ -135,6 +140,12 @@ const UNLABELLED_RENDER_PASS: &str = "crcbl render pass";
 const UNLABELLED_COMPUTE_PASS: &str = "crcbl compute pass";
 /// See [`UNLABELLED_COMMAND_BUFFER`].
 const COPY_ENCODER: &str = "crcbl copies";
+/// The compute encoder a render pass opens ahead of itself to fill the indirect
+/// command buffers its indirect-count draws execute. See
+/// [`Self::encode_render_pass`](MetalCommandEncoder::encode_render_pass) and
+/// `crcbl_mtl::icb`; named for the same reason [`COPY_ENCODER`] is, since no
+/// seam call names it either.
+const INDIRECT_COUNT_ENCODER: &str = "crcbl indirect-count encoding";
 
 /// The one Metal encoder that may be open on the command buffer — or, for a
 /// render pass, the commands that will become one.
@@ -193,6 +204,20 @@ struct RenderRecording {
     scissor: Option<MTLScissorRect>,
     /// The pass's commands, in the order the seam recorded them.
     commands: Vec<RenderCommand>,
+    /// The kernel dispatches that must run **before** the render encoder opens
+    /// — one per [`draw_indirect_count`](CommandEncoder::draw_indirect_count)
+    /// the pass recorded.
+    ///
+    /// This is what the deferral was for, and the only thing that needs it:
+    /// Metal's GPU-read draw count is an `MTLIndirectCommandBuffer` a compute
+    /// pass has to fill, and a backend that had already opened the render
+    /// encoder could not reach backwards to open a compute one. See
+    /// `crcbl_mtl::icb`.
+    ///
+    /// Empty for every other pass, which is every pass this backend encoded
+    /// before the ICB slice — so the compute encoder is opened only when one
+    /// is actually needed.
+    prologue: Vec<crate::icb::Encode>,
 }
 
 /// One render-pass command, holding everything its Metal call will need.
@@ -262,6 +287,32 @@ enum RenderCommand {
         primitive: objc2_metal::MTLPrimitiveType,
         args: Retained<ProtocolObject<dyn MTLBuffer>>,
         offset: NSUInteger,
+    },
+    /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over the
+    /// indirect command buffer a queued [`crate::icb::Encode`] filled — the
+    /// whole of a
+    /// [`draw_indirect_count`](CommandEncoder::draw_indirect_count) on the
+    /// render encoder's side.
+    ///
+    /// **How many commands run is read from GPU memory**, not passed here: the
+    /// same dispatch that wrote the commands wrote the count it clamped into
+    /// [`range`](Self::ExecuteIndirectCount::range). So the number of draws that
+    /// happen is a number the CPU never learns, which is what the seam verb
+    /// means, and a bucket the GPU emptied executes nothing rather than
+    /// executing a command the kernel reset.
+    ExecuteIndirectCount {
+        icb: Retained<ProtocolObject<dyn MTLIndirectCommandBuffer>>,
+        /// The `MTLIndirectCommandBufferExecutionRange` the encoding kernel
+        /// wrote, read at offset zero; see `crcbl_mtl::icb`.
+        range: Retained<ProtocolObject<dyn MTLBuffer>>,
+        /// The index buffer the encoded commands read, for an indexed draw.
+        ///
+        /// Held so the render encoder can declare it resident: the kernel bakes
+        /// a raw device pointer to it into each command, and `useResource:` is
+        /// the only thing that tells Metal the pass touches it. Nothing else in
+        /// this enum needs one, because every other draw names its buffers in
+        /// the call.
+        index_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
     },
     /// [`DrawIndirect`](Self::DrawIndirect) with the bound index buffer, which
     /// Metal takes as an argument of the draw.
@@ -404,6 +455,39 @@ fn replay(encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>, command: &Rende
         } => unsafe {
             encoder.drawPrimitives_indirectBuffer_indirectBufferOffset(*primitive, args, *offset);
         },
+        RenderCommand::ExecuteIndirectCount {
+            icb,
+            range,
+            index_buffer,
+        } => {
+            // Before the execute, not after: Metal documents `useResource:` as
+            // having to precede any command that may reach the resource, and
+            // the ICB's commands hold a device pointer into this buffer that
+            // nothing else in the pass names. Read-only and vertex-stage,
+            // because that is exactly what an index fetch is — the minimal
+            // usage Apple asks for so colour attachments are not decompressed.
+            if let Some(indices) = index_buffer {
+                encoder.useResource_usage_stages(
+                    ProtocolObject::from_ref(&**indices),
+                    MTLResourceUsage::Read,
+                    MTLRenderStages::Vertex,
+                );
+            }
+            // SAFETY: `objc2` marks this unsafe because either buffer may need
+            // synchronising or be unretained, because the range buffer's
+            // contents must be of the right type, and because the offset might
+            // not be bounds-checked. The kernel that wrote both ran on a
+            // compute encoder this same command buffer ended before this render
+            // encoder was opened, so the writes are ordered ahead of the reads;
+            // both are kept alive by the `Retained`s this command holds; the
+            // range buffer is `crcbl_mtl::icb`'s, whose whole length is one
+            // `MTLIndirectCommandBufferExecutionRange` and whose only writer is
+            // that kernel; and offset zero is inside it and four-byte aligned,
+            // which is what Metal asks of it.
+            unsafe {
+                encoder.executeCommandsInBuffer_indirectBuffer_indirectBufferOffset(icb, range, 0);
+            }
+        }
         // SAFETY: as above, plus the index buffer's offset — which
         // `bind_index_buffer` checked against its allocation.
         RenderCommand::DrawIndexedIndirect {
@@ -641,10 +725,35 @@ impl MetalCommandEncoder {
     /// `end_render_pass` gives: the encoder must exist and be ended before
     /// `commit`, and a failed encoder's command buffer is thrown away
     /// regardless.
+    ///
+    /// **The prologue is why the pass was recorded rather than encoded**, and
+    /// it runs first: every [`crate::icb::Encode`] the pass queued is
+    /// dispatched on one compute encoder, which is ended before the render
+    /// encoder is opened. Metal executes a command buffer's encoders in the
+    /// order they were created, so the kernel's writes are ordered ahead of the
+    /// `executeCommandsInBuffer:` that reads them without a barrier of this
+    /// backend's own.
     fn encode_render_pass(&mut self, recording: &RenderRecording) {
-        let Some(raw) = self.raw.as_ref() else {
+        // Cloned rather than borrowed — one retain — because `fail` below takes
+        // `&mut self` and a borrow of `self.raw` held across it is a second one.
+        let Some(raw) = self.raw.clone() else {
             return;
         };
+        if !recording.prologue.is_empty() {
+            let Some(compute) = raw.computeCommandEncoder() else {
+                self.fail(HalError::DeviceLost(
+                    "MTLCommandBuffer::computeCommandEncoder returned nil for the kernel that \
+                     encodes an indirect-count draw's commands"
+                        .to_string(),
+                ));
+                return;
+            };
+            compute.setLabel(Some(&NSString::from_str(INDIRECT_COUNT_ENCODER)));
+            for encode in &recording.prologue {
+                encode.dispatch(&compute);
+            }
+            compute.endEncoding();
+        }
         let encoder = raw.renderCommandEncoderWithDescriptor(&recording.descriptor);
         let Some(encoder) = encoder else {
             self.fail(HalError::DeviceLost(
@@ -1329,6 +1438,7 @@ impl CommandEncoder for MetalCommandEncoder {
             label: NSString::from_str(desc.label.unwrap_or(UNLABELLED_RENDER_PASS)),
             scissor,
             commands: Vec::new(),
+            prologue: Vec::new(),
         });
         self.in_render_pass = true;
         if let Some(label) = desc.label {
@@ -1720,12 +1830,15 @@ impl CommandEncoder for MetalCommandEncoder {
         self.indirect(draw, true);
     }
 
-    fn draw_indirect_count(&mut self, _draw: &DrawIndirectCount) {
-        self.fail(indirect_count());
+    /// A compute kernel writes the draws into an `MTLIndirectCommandBuffer`
+    /// and the render encoder executes it; `crcbl_mtl::icb` holds the whole
+    /// construction and why Metal leaves no shorter one.
+    fn draw_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.indirect_count(draw, false);
     }
 
-    fn draw_indexed_indirect_count(&mut self, _draw: &DrawIndirectCount) {
-        self.fail(indirect_count());
+    fn draw_indexed_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.indirect_count(draw, true);
     }
 
     /// Refused for the same reason `create_mesh_pipeline` is: there is no mesh
@@ -2216,6 +2329,114 @@ impl MetalCommandEncoder {
         }
     }
 
+    /// The shared body of the two indirect-**count** draws.
+    ///
+    /// The order is: bound, allocate, queue, record. Every check happens here,
+    /// at the call the caller made, rather than at `end_render_pass` — the same
+    /// rule [`replay`] follows, and for the same reason: `crcbl_hal`'s own
+    /// recorder tests assert on *which* call failed.
+    ///
+    /// # Refused rather than performed
+    ///
+    /// On a device without
+    /// [`Features::DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT)
+    /// this is [`HalError::Unsupported`], which is the shape `crcbl-vk`'s
+    /// `indirect_count` uses for the identical case. The flag and the kernels
+    /// arrive together — `MetalDevice::open` builds one exactly when the
+    /// adapter reported the other — so the `None` arm below is a device that
+    /// could not create an indirect command buffer at enumeration, not a
+    /// backend that forgot to compile something.
+    fn indirect_count(&mut self, draw: &DrawIndirectCount, indexed: bool) {
+        let what = if indexed {
+            "draw_indexed_indirect_count"
+        } else {
+            "draw_indirect_count"
+        };
+        let Some(primitive) = self.draw_target(what) else {
+            return;
+        };
+        // Cloned rather than borrowed — one atomic increment — because every
+        // refusal below takes `&mut self` and a borrow of `self.device` held
+        // across one is a second one.
+        let device = Arc::clone(&self.device);
+        let Some(kernels) = device.icb.as_ref() else {
+            self.fail(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Metal,
+                what: "this device has no draw_indirect_count: it refused an \
+                       MTLIndirectCommandBuffer, which is Metal's only GPU-counted execution",
+            });
+            return;
+        };
+        let (Some(args), Some(counts)) = (self.buffer(draw.args), self.buffer(draw.count_buffer))
+        else {
+            return;
+        };
+        let plan = match crate::draw::plan_indirect_count(
+            draw,
+            indexed,
+            args.length() as u64,
+            counts.length() as u64,
+            device.caps.limits.max_draw_indirect_count,
+        ) {
+            Ok(Some(plan)) => plan,
+            // A draw bounded at nothing: no ICB to allocate and no kernel to
+            // run, which is what the seam permits `max_draw_count: 0` to mean.
+            Ok(None) => return,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let indices = if indexed {
+            let Some(index) = self.index.as_ref() else {
+                self.fail(HalError::InvalidDescriptor(
+                    "draw_indexed_indirect_count with no index buffer bound: the encoding kernel \
+                     writes the buffer into each command as a device pointer and has no nil to \
+                     write"
+                        .to_string(),
+                ));
+                return;
+            };
+            Some(crate::icb::Indices {
+                raw: index.raw.clone(),
+                format: index.format,
+                offset: index.offset,
+            })
+        } else {
+            None
+        };
+        let index_buffer = indices.as_ref().map(|indices| indices.raw.clone());
+        let encode = match crate::icb::Encode::plan(crate::icb::Request {
+            device: &device.raw,
+            kernels,
+            args,
+            counts,
+            indices,
+            primitive,
+            plan,
+        }) {
+            Ok(encode) => encode,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        // The two halves of the call, queued and recorded together: the
+        // dispatch that fills the ICB runs before the render encoder opens, and
+        // the execute runs at the point in the pass the seam put the draw at.
+        let icb = encode.icb.clone();
+        let range = encode.range.clone();
+        let Open::Render(recording) = &mut self.open else {
+            return;
+        };
+        recording.prologue.push(encode);
+        self.record(RenderCommand::ExecuteIndirectCount {
+            icb,
+            range,
+            index_buffer,
+        });
+    }
+
     /// Everything a buffer↔image copy needs, once every bound has been checked.
     fn plan_buffer_image_copy(&mut self, copy: &BufferImageCopy, what: &str) -> Option<CopyPlan> {
         let buffer = self.buffer(copy.buffer)?;
@@ -2331,26 +2552,6 @@ struct CopyPlan {
 /// Bytes an indirect dispatch reads: `MTLDispatchThreadgroupsIndirectArguments`
 /// is three `uint32_t`s, fixed by Metal's own header.
 const DISPATCH_ARGUMENTS: u64 = 12;
-
-/// The refusal for the one indirect shape Metal cannot express at all.
-///
-/// `drawPrimitives:indirectBuffer:indirectBufferOffset:` emits one draw and
-/// reads no count, and the multi-draw loop `crcbl_mtl::draw` builds on it works
-/// only because [`DrawIndirect::draw_count`] is a **CPU** value.
-/// [`DrawIndirectCount`] takes its count from GPU memory, and Metal's only
-/// count-from-memory execution —
-/// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
-/// `MTLIndirectCommandBuffer` — needs the commands to already exist, written by
-/// a compute kernel that would have to run before the render encoder this call
-/// happens inside was opened. So
-/// [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) stays off
-/// and this backend's derived tier stays B; see the crate docs.
-fn indirect_count() -> HalError {
-    crate::MetalInstance::not_yet(
-        "indirect-count draws: Metal's only GPU-side count is an MTLIndirectCommandBuffer whose \
-         commands a compute pass must encode before the render pass begins (the Metal ICB slice)",
-    )
-}
 
 impl Drop for MetalCommandEncoder {
     fn drop(&mut self) {

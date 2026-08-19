@@ -151,12 +151,13 @@ crcbl-shaders = { workspace = true }
 # neither pulls a crate — `NSData` wants `bitflags`, which `NSArray` already
 # switched on.
 #
-# `MTLIndirectCommandBuffer` is here on the same terms, and the terms matter
-# because the type it names is the one `crcbl_mtl::command`'s `indirect_count`
-# refuses over. **Nothing this crate ships creates an ICB.** The refusal is
-# unchanged, `Features::DRAW_INDIRECT_COUNT` is still off, and
-# `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` still names the compute kernel that
-# would have to encode one. What needs the feature is `crcbl_mtl::adapter`'s
+# `MTLIndirectCommandBuffer` is here because `crcbl_mtl::icb` **creates and
+# executes one** — this used to say nothing in the crate did, and that stopped
+# being true when the indirect-count slice landed. `draw_indirect_count` now
+# queues a compute kernel that encodes the ICB before the render encoder opens,
+# `Features::DRAW_INDIRECT_COUNT` is granted on any device that can create the
+# descriptor, and `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` is gone with the
+# divergence row it explained. Also used by `crcbl_mtl::adapter`'s
 # `a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling`,
 # which measures whether the runner CI has could verify that slice at all if it
 # were written: `MTLDevice::newIndirectCommandBufferWithDescriptor:
