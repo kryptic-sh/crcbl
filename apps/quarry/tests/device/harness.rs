@@ -129,6 +129,11 @@ pub(crate) struct Frame {
     /// `None` on the mesh path — where a mesh is one bucket and the level is
     /// chosen per cluster instead.
     pub(crate) uniform: Option<Uniform>,
+    /// What the frame's culling kept: instances the camera's cull passed, and
+    /// clusters the amplification stage passed. `None` until the ring has come
+    /// round — it is a few frames behind, which is what makes it free of any
+    /// wait.
+    pub(crate) culled: Option<crcbl::render::CullStats>,
     /// The frame itself, as read back — empty where nothing was drawn.
     ///
     /// Held because coverage, the cut and the triangle counts are all *counts*,
@@ -450,6 +455,7 @@ fn frame_body(quarry: &mut Quarry, at: f32, light: &crcbl::render::DirectionalLi
         pixels,
         cut,
         uniform,
+        culled: quarry.renderer.cull_stats(),
         pixels_rgba: frame,
     }
 }

@@ -799,6 +799,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **quarry attributes its reduction between the two culls.** The sample's exit
+  criteria ask for it by name — "a single total hides which one is working" —
+  and `ForwardRenderer::cull_stats` carries both numbers out of the frame that
+  made them. Down the dolly the camera's instance cull keeps 1 of 1 every frame
+  while the amplification stage keeps 27 to 47 clusters, so **all** of the
+  reduction is cluster culling.
+
+  That is a true answer and a degenerate one: quarry places one instance of one
+  mesh, so "the instance cull did nothing" and "the instance cull is broken"
+  draw the same frame. It is asserted rather than assumed for exactly that
+  reason, and whether the sample should depict several faces is recorded in
+  `docs/backlog.md` as a design question.
+
 - **quarry asserts one thing that is not a count: that the face is shaded.**
   Coverage, the per-cluster cut, the uniform cut's walk and the triangle counts
   would every one be unchanged by a face lit from the wrong side, which is the

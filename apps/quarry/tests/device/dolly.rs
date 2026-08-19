@@ -64,6 +64,7 @@ fn mean_level(cut: &[usize]) -> f32 {
 fn detail_arrives_as_the_dolly_closes_on_the_face() {
     let mut quarry = Quarry::open(Levels::Dag, MIXING_BUDGET);
     let mut means = Vec::with_capacity(STOPS);
+    let mut kept = Vec::with_capacity(STOPS);
     for stop in 0..STOPS {
         let at = DOLLY_START + (DOLLY_END - DOLLY_START) * stop as f32 / (STOPS - 1) as f32;
         let frame = quarry.frame(at);
@@ -77,9 +78,13 @@ fn detail_arrives_as_the_dolly_closes_on_the_face() {
         };
         let mean = mean_level(&cut);
         eprintln!(
-            "quarry dolly: {at:.3} — {} of {} pixels, mean level {mean:.3}, cut {cut:?}",
-            frame.covered, frame.pixels,
+            "quarry dolly: {at:.3} — {} of {} pixels, mean level {mean:.3}, cut {cut:?}, kept \
+             {:?}",
+            frame.covered,
+            frame.pixels,
+            frame.culled.map(|stats| (stats.instances, stats.clusters)),
         );
+        kept.push(frame.culled);
         means.push(mean);
     }
     quarry.finish();
@@ -177,4 +182,70 @@ fn the_uniform_cut_walks_down_without_skipping() {
             );
         }
     }
+}
+
+/// **Where the reduction comes from, split between the two culls.**
+///
+/// The sample's exit criteria ask for it by name — "how much of the reduction is
+/// instance culling and how much is cluster culling, because a single total
+/// hides which one is working" — and `ForwardRenderer::cull_stats` carries both
+/// numbers out of the frame that made them.
+///
+/// **The answer for quarry today is: all of it is cluster culling**, and that is
+/// a property of the scene rather than of the engine. quarry places one instance
+/// of one mesh, so the camera's instance cull has exactly one thing to decide
+/// about and keeps it from every position on the dolly; every cluster the
+/// amplification stage drops is the whole of the reduction. Asserted rather than
+/// assumed, because "the instance cull did nothing" and "the instance cull is
+/// broken" produce the same drawn frame here.
+///
+/// Making the split *interesting* means placing several faces so some fall
+/// outside the frustum — a change to what the sample depicts, and a design call
+/// rather than a test one. It is in `docs/backlog.md`.
+#[test]
+fn all_of_the_reduction_is_cluster_culling() {
+    if backend() == crcbl::backend::GpuBackend::Null {
+        eprintln!(
+            "quarry dolly: the Null backend culls nothing, so there is no reduction to \
+             attribute — run with CRCBL_GPU=vk"
+        );
+        return;
+    }
+    let mut quarry = Quarry::open(Levels::Dag, WALKING_BUDGET);
+    let mut seen = Vec::new();
+    for stop in 0..STOPS {
+        let at = DOLLY_START + (DOLLY_END - DOLLY_START) * stop as f32 / (STOPS - 1) as f32;
+        if let Some(stats) = quarry.frame(at).culled {
+            seen.push(stats);
+        }
+    }
+    quarry.finish();
+
+    assert!(
+        !seen.is_empty(),
+        "the culling statistics never came round in {STOPS} frames, and the ring is only a few \
+         frames deep — so nothing is being counted rather than nothing being reported yet"
+    );
+    for stats in &seen {
+        assert_eq!(
+            stats.instances, 1,
+            "the camera's cull kept {} instances of a scene holding one, on frame {} — so the \
+             count is not the survivors",
+            stats.instances, stats.frame,
+        );
+        let clusters = stats
+            .clusters
+            .expect("the mesh path counts what its amplification stage kept");
+        assert!(
+            clusters > 0,
+            "the amplification stage kept no cluster on frame {}, yet the frame drew",
+            stats.frame,
+        );
+    }
+    eprintln!(
+        "quarry dolly: over {} reported frame(s) the instance cull kept 1 of 1 every time, and \
+         the cluster cull kept {:?}",
+        seen.len(),
+        seen.iter().map(|s| s.clusters).collect::<Vec<_>>(),
+    );
 }

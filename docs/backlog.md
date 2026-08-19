@@ -1734,17 +1734,41 @@ it, forced by subtracting features from one adapter.
   thing and it is a different axis.
 - **Milestone 4 untouched**: the skinned and tiling cases, and the Pages demo
   with a recorded browser budget.
-- **The draw-count split is not recorded.** The criteria ask "how much of the
-  reduction is instance culling and how much is cluster culling, because a
-  single total hides which one is working". What quarry records today is the
-  cluster cut on the mesh path and the drawn level plus triangle count on the
-  indirect ones — the two halves separately, never attributed against a common
-  denominator.
+- **The draw-count split is recorded and the answer is degenerate.**
+  `ForwardRenderer::cull_stats` carries both numbers out of the frame, and
+  `all_of_the_reduction_is_cluster_culling` asserts them: the camera's instance
+  cull keeps 1 of 1 from every position on the dolly, and the amplification
+  stage keeps 27 to 47 clusters. All of the reduction is cluster culling —
+  because quarry places **one** instance of one mesh, so the instance cull has
+  one thing to decide about. See the design question below.
 
 **The engine work for what remains is largely already there.** `crcbl-scene`
 carries `meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
 `lod_resolve.rs`. Milestone 4 is mostly assembling and gating what exists rather
 than building a subsystem; the overlay is the exception.
+
+### DECISION NEEDED — should quarry place several faces?
+
+`docs/plan/sample/14-quarry.md`'s exit criteria ask for the reduction to be
+attributed: "how much of the reduction is instance culling and how much is
+cluster culling, because a single total hides which one is working". quarry now
+records both, and the answer is **all of it is cluster culling** — the instance
+cull keeps 1 of 1 on every frame, because the scene is one instance of one mesh.
+
+That is a true answer and a degenerate one. The criterion exists because a real
+scene has many instances and the two culls can mask each other; with one
+instance, "the instance cull did nothing" and "the instance cull is broken"
+produce the same frame, and the test can only assert the count is 1.
+
+**Making it interesting is a change to what the sample depicts**, which is why
+it is a question rather than a task. Placing four or nine faces in a row, some
+outside the frustum, would give the instance cull something to reject and make
+the split a real measurement — at the cost of a scene the plan describes as "one
+dense scene", and of pools four to nine times larger. The alternative is to keep
+one face and say plainly in the sample's own docs that this criterion is
+answered but not exercised.
+
+Not a blocker either way: the numbers are recorded and asserted as they stand.
 
 ### DECISION NEEDED — does quarry commit goldens, and per what?
 
