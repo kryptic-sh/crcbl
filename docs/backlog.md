@@ -894,9 +894,23 @@ exists to serve. The kernel already writes the count it clamped to; that value
 should drive the execute rather than the range being the whole allocation. Try
 that before anything else.
 
-Second candidate if that is not enough: encoder-to-encoder ordering between the
-prologue dispatch and the execute, which the reverted code left to Metal's own
-tracking with no explicit barrier.
+**Two things the retry deliberately did not change**, so it stays a one-variable
+experiment, and both are the next levers if it is still red:
+
+- **A blit `optimizeIndirectCommandBuffer:withRange:`** between the prologue and
+  the render encoder, which is what Apple's own GPU-encoding sample does. The
+  untested hazard is kernel-write → execute **in the same command buffer**; the
+  probe committed and waited between them.
+- **The per-call allocation.** Every `draw_indexed_indirect_count` allocates a
+  fresh ICB, an 8-byte handle table and now an 8-byte range buffer. Counting the
+  validation log's `redundant setComputePipelineState` notices puts that at
+  roughly **40 ICB allocations per frame** in the ao scene, not the three the
+  encoder list suggests — a real cost and a plausible contributor to a
+  paravirtual stall.
+
+The retry lives on branch `try/mtl-icb-indirect-range` rather than main, because
+this path has hung once and nothing local can execute Metal. Run it with
+`gh workflow run ci.yml --ref try/mtl-icb-indirect-range`.
 
 **Everything else about the slice held.** The parity snapshot moved to eight
 rows and back cleanly, the seam's `can_multi_draw` chain was verified to unblock
