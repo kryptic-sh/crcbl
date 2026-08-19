@@ -1864,6 +1864,35 @@ Two things follow, and neither is obvious from the crate's own contents:
    by design on the day of the deletion.** That is the test working, not
    breaking.
 
+**A third consequence, and it is about coverage rather than bookkeeping:
+`crcbl-wgpu` is the only backend the native seam suite can open on Linux that
+refuses anything.** Measured on 2026-08-20 by reading the suite's own parity
+listing per backend:
+
+- **`vk` declares all 24 capabilities supported.** Every one. So on Vulkan the
+  suite exercises "declared supported must work" and **never** the other
+  direction.
+- **`wgpu` declares 12 of the 24 unsupported** — the padded indirect stride,
+  both mesh rows, `UpdateBindGroup`, `PushConstants`, `BindlessDescriptorArray`,
+  `StorageImageBinding`, all three query rows, and two timeline rows.
+
+That second half of goal 1's contract is genuinely asserted, not printed: the
+driver's table fails `(Support::No, Exercise::Worked)` — "declares unsupported
+something it performs" — and the exercises panic on a refusal that is not
+`HalError::Unsupported` specifically. **Those arms run on `wgpu` and on nothing
+else the Linux job can open.** `crcbl-webgpu` has 13 rows but the seam suite is
+a native binary and cannot open it (browser probe groups AE/AF cover it
+instead); `crcbl-dx12` has 2 and `crcbl-mtl` 4, on the two slowest and least
+available CI jobs.
+
+**How much this matters is arguable and the numbers are here so it can be
+argued.** The refusal direction does not disappear — six rows still exercise it
+on the dx12 and Metal jobs. And most of wgpu's twelve are "this backend never
+grew the arm" rather than an API that cannot do it, so they exercise the
+_suite's_ machinery rather than any real divergence. But after the deletion the
+Linux seam job tests one direction of the parity contract and the other lives
+only on Windows and macOS runners.
+
 So the deletion's parity half is: drop `is_parity_target` and its call in
 `parity_blockers`, or keep it for `Null` alone and rewrite that test to say so.
 The first is honest and the second is machinery for a case that cannot arise —
