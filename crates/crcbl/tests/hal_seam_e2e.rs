@@ -5706,14 +5706,46 @@ fn update_bind_group_dispatch(
 /// is a broken fixture rather than a capability answer.
 fn exercise_update_bind_group(headless: &Headless) -> Exercise {
     let device = headless.device.as_ref();
-    let flags = if device
-        .caps()
-        .features
-        .contains(Features::DESCRIPTOR_INDEXING)
-    {
-        crcbl::hal::BindingFlags::UPDATE_AFTER_BIND
-    } else {
-        crcbl::hal::BindingFlags::empty()
+    // `UPDATE_AFTER_BIND` is asked for where a backend will take it, because it
+    // is the stronger form of this capability — the rewrite happens while the
+    // group is bound. Which backends those are is **asked, not inferred**.
+    //
+    // It used to be inferred from `DESCRIPTOR_INDEXING`, on the reasoning that a
+    // bindless-capable backend supports update-after-bind too. They are separate
+    // `BindingFlags` and the heuristic broke the moment one backend had one
+    // without the other: `crcbl-mtl` gained bindless, took this branch, and
+    // refused the flag — copying a flat binding's values onto the encoder at
+    // bind time, so a later write reaches nothing. That scored a capability the
+    // backend genuinely supports as "declared supported and refused it".
+    //
+    // So the layout is built with the flag and rebuilt without it if the
+    // backend says no, and which form ran is printed rather than left silent.
+    let strong = crcbl::hal::BindingFlags::UPDATE_AFTER_BIND;
+    let flags = match device.create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
+        label: Some("update bind group flag probe"),
+        entries: &[crcbl::hal::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: crcbl::hal::ShaderStages::COMPUTE,
+            kind: crcbl::hal::BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: false,
+            },
+            count: 1,
+            flags: strong,
+        }],
+    }) {
+        Ok(layout) => {
+            device.destroy_bind_group_layout(layout);
+            println!("crcbl hal seam e2e: update_bind_group runs the UPDATE_AFTER_BIND form");
+            strong
+        }
+        Err(_) => {
+            println!(
+                "crcbl hal seam e2e: this backend refuses UPDATE_AFTER_BIND, so update_bind_group \
+                 runs the plain form — the capability is the rewrite, not the flag"
+            );
+            crcbl::hal::BindingFlags::empty()
+        }
     };
 
     let params = staged_buffer(
