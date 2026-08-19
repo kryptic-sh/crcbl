@@ -8,10 +8,11 @@
 //!     ──────────────────────────────→ Viewer::button_event   (pan press)
 //!     ──────────────────────────────→ Viewer::wheel_event    (zoom)
 //!     ──────────────────────────────→ Viewer::pointer_event  (orbit press, drag)
-//!     ──────────────────────────────→ Viewer::key_event      (F)
+//!     ──────────────────────────────→ Viewer::key_event      (F, I)
 //!   run_ticks  ─────────────────────→ Viewer::tick           (nothing at all)
 //!   draw_list.clear()
-//!     ──────────────────────────────→ Viewer::draw           (re-frame, camera)
+//!     ──────────────────────────────→ Viewer::draw           (re-frame, camera,
+//!                                                             listing panel)
 //!     menu, debug overlay             ← the engine's
 //!   gpu.frame()
 //! ```
@@ -55,14 +56,28 @@ use crcbl::ui::{DebugModule, DebugSection, draw_list::DrawList};
 use crate::args::Options;
 use crate::controls::Controls;
 use crate::gpu::Gpu;
+use crate::listing::Listing;
 use crate::menu::{MenuKind, Menus};
 use crate::model::{self, LoadError, Model};
 
 /// Frames the model again, fitting it in the view from wherever the camera is.
 ///
-/// The one key this application binds. It is not one of the loop's, so it
-/// arrives through [`HostedGame::key_event`] like any other game's.
+/// One of the two keys this application binds. Neither is one of the loop's, so
+/// both arrive through [`HostedGame::key_event`] like any other game's.
 pub const REFRAME_KEY: KeyCode = KeyCode::KeyF;
+
+/// Shows or hides [`crate::listing`]'s panel. Off to begin with.
+///
+/// `I` for the information it puts on screen, and it is free: the loop reserves
+/// [`PAUSE_KEY`](crcbl::engine::PAUSE_KEY),
+/// [`DEBUG_OVERLAY_KEY`](crcbl::engine::DEBUG_OVERLAY_KEY) and
+/// [`FULLSCREEN_KEY`](crcbl::engine::FULLSCREEN_KEY), arbitrates
+/// [`MENU_UP_KEY`](crcbl::engine::MENU_UP_KEY),
+/// [`MENU_DOWN_KEY`](crcbl::engine::MENU_DOWN_KEY) and
+/// [`MENU_ACTIVATE_KEY`](crcbl::engine::MENU_ACTIVATE_KEY) while a menu is
+/// showing, and this application already binds [`REFRAME_KEY`]. `I` is none of
+/// those, and `no_two_bindings_claim_the_same_key` is what keeps that true.
+pub const LISTING_KEY: KeyCode = KeyCode::KeyI;
 
 /// What a finished run reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,6 +201,13 @@ pub struct Viewer {
     /// `F` would re-frame on every frame, which fights a drag made with the
     /// other hand.
     reframe_held: bool,
+    /// Whether [`LISTING_KEY`] is currently held, for the reason `reframe_held`
+    /// above exists: the loop forwards auto-repeats as further presses, and a
+    /// panel that toggled on every one would strobe under a resting finger.
+    listing_held: bool,
+    /// `docs/plan/sample/05-viewer.md` milestone 2's listing — see
+    /// [`crate::listing`]. Hidden until [`LISTING_KEY`] is pressed.
+    listing: Listing,
     instances: usize,
     skipped: usize,
 }
@@ -274,6 +296,10 @@ pub fn with_shell<S: Shell + ?Sized>(
     let mut orbit = OrbitCamera::new(model.bounds.center(), 1.0, Projection::default());
     orbit.frame(model.bounds, aspect_of(extent));
 
+    // Read off the document once, here, because nothing in this milestone can
+    // change it afterwards — see `Listing::of`.
+    let listing = Listing::of(&model);
+
     Ok(Loop::new(
         Booted {
             shell,
@@ -289,6 +315,8 @@ pub fn with_shell<S: Shell + ?Sized>(
             extent,
             reframe: false,
             reframe_held: false,
+            listing_held: false,
+            listing,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
         },
@@ -334,13 +362,24 @@ impl HostedGame for Viewer {
     /// be filled in: there is no state here to advance.
     fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {}
 
-    /// `F` frames the model again, once per press.
+    /// `F` frames the model again and `I` shows the listing, once per press.
+    ///
+    /// Framing is deferred to [`Viewer::draw`] because it needs the window's
+    /// aspect; the panel needs nothing, so it flips here.
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
-        if key != REFRAME_KEY {
-            return;
+        match key {
+            REFRAME_KEY => {
+                self.reframe |= pressed && !self.reframe_held;
+                self.reframe_held = pressed;
+            }
+            LISTING_KEY => {
+                if pressed && !self.listing_held {
+                    self.listing.toggle();
+                }
+                self.listing_held = pressed;
+            }
+            _ => {}
         }
-        self.reframe |= pressed && !self.reframe_held;
-        self.reframe_held = pressed;
     }
 
     /// The orbit drag: the primary button's edges, and the movement of the
@@ -372,12 +411,14 @@ impl HostedGame for Viewer {
         MenuKind::of(paused)
     }
 
-    /// Hands the camera to the GPU, and re-frames first if `F` asked.
+    /// Hands the camera to the GPU, re-frames first if `F` asked, and appends
+    /// the listing panel if `I` did.
     ///
-    /// Nothing is appended to `draw_list`: this sample has no HUD, and the only
-    /// UI it draws is the menu and the debug panel the loop appends after this
-    /// returns.
-    fn draw(&mut self, gpu: &mut Gpu, _draw_list: &mut DrawList, _frame: FrameInfo) {
+    /// The panel is the only thing this sample puts in `draw_list` — there is
+    /// still no HUD. It goes in first, so the debug overlay the loop appends
+    /// after this returns is the one on top where the two overlap. They are
+    /// pinned to opposite corners, so today they do not.
+    fn draw(&mut self, gpu: &mut Gpu, draw_list: &mut DrawList, _frame: FrameInfo) {
         // Read here rather than on resize, so it is the extent this frame is
         // actually drawn at — the loop has already applied any resize by now.
         self.extent = gpu.extent();
@@ -385,6 +426,14 @@ impl HostedGame for Viewer {
             self.orbit.frame(self.bounds, aspect_of(self.extent));
         }
         gpu.set_camera(self.orbit.camera());
+        // Laid out against the same extent, and with the atlas the UI pass will
+        // actually draw with: a panel measured with a second atlas is a
+        // background rect the wrong size for the text inside it.
+        self.listing.render(
+            draw_list,
+            crcbl::math::Vec2::new(self.extent.0 as f32, self.extent.1 as f32),
+            gpu.atlas(),
+        );
     }
 
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
@@ -587,7 +636,10 @@ mod tests {
         assert!(skip_report("clean.glb", &[], false).is_empty());
     }
 
-    use crcbl::engine::{DEBUG_OVERLAY_KEY, Flow, PAUSE_KEY};
+    use crcbl::engine::{
+        DEBUG_OVERLAY_KEY, FULLSCREEN_KEY, Flow, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_UP_KEY,
+        PAUSE_KEY,
+    };
     use crcbl::math::Vec3;
     use crcbl::shell::{HeadlessShell, PhysicalPoint};
 
@@ -660,6 +712,24 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// One whole press of `key`: the press and the release the platform sends
+    /// after it, then the frame that routes both.
+    ///
+    /// `HeadlessShell::key_press` injects the press alone, and a binding that
+    /// finds the edge of a press stays latched without the release — see
+    /// `a_held_listing_key_toggles_the_panel_once_not_once_a_frame`.
+    fn tap(engine: &mut Loop<HeadlessShell>, window: crcbl::shell::WindowId, key: KeyCode) {
+        engine
+            .shell_mut()
+            .key_press(window, key)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, key)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
     }
 
     /// The value drawn immediately after the row labelled `label`.
@@ -922,7 +992,8 @@ mod tests {
         engine.frame().expect("a frame");
         assert!(
             ui_text(&engine).is_empty(),
-            "the viewer draws no UI at all while the panel is off",
+            "with both panels off the viewer draws no UI at all: {:?}",
+            ui_text(&engine),
         );
 
         engine
@@ -956,6 +1027,143 @@ mod tests {
             "F3 hides it again",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **`I` reaches the listing panel through the engine's loop, and the panel
+    /// reaches the GPU.**
+    ///
+    /// `crate::listing`'s own tests say the lines are right; this says they
+    /// arrive. Both halves are checked, for the reason the debug-panel test
+    /// above gives: the rows are in the frame's draw list *and* the UI pass is
+    /// in the frame's graph, since `UiRenderer::add_pass` declares nothing for
+    /// an empty list and "drawn" and "composited" are different claims.
+    ///
+    /// The engine's overlay is switched off, so every line asserted on here is
+    /// the viewer's own — `instances` is a row on both panels.
+    #[test]
+    fn i_toggles_the_listing_panel_and_the_frame_composites_it() {
+        let (_dir, mut options) = model_at(&fixture::quad_glb(Vec3::ZERO), 16);
+        options.common.debug_overlay = Some(false);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+
+        engine.frame().expect("a frame");
+        assert!(
+            ui_text(&engine).is_empty(),
+            "the listing is off until it is asked for: {:?}",
+            ui_text(&engine),
+        );
+
+        tap(&mut engine, window, LISTING_KEY);
+        let drawn = ui_text(&engine);
+        assert!(
+            drawn.iter().any(|text| text == "panel.glb"),
+            "the panel names the document it is describing: {drawn:?}",
+        );
+        assert_eq!(
+            row_value(&drawn, "instances"),
+            "1",
+            "the panel's numbers are this document's: {drawn:?}",
+        );
+        assert!(
+            drawn.iter().any(|text| text == "nothing was skipped"),
+            "and it says the fixture arrived intact: {drawn:?}",
+        );
+        assert!(
+            engine.gpu().last_dump().contains("ui-composite"),
+            "the panel must be composited, not merely drawn:\n{}",
+            engine.gpu().last_dump(),
+        );
+
+        tap(&mut engine, window, LISTING_KEY);
+        assert!(
+            ui_text(&engine).is_empty(),
+            "I hides it again: {:?}",
+            ui_text(&engine),
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A held `I` toggles the panel once, not once a frame.**
+    ///
+    /// The loop hands the game a key's auto-repeats as further presses — its
+    /// key fold reads the button state and never the `repeat` flag — so
+    /// finding the edge is this application's job, and without it a resting
+    /// finger strobes the panel at the frame rate. Two repeats rather than one,
+    /// so a guard that only ignored the *first* of them would still fail.
+    #[test]
+    fn a_held_listing_key_toggles_the_panel_once_not_once_a_frame() {
+        let (_dir, mut options) = model_at(&fixture::quad_glb(Vec3::ZERO), 16);
+        options.common.debug_overlay = Some(false);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+
+        engine
+            .shell_mut()
+            .key_press(window, LISTING_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(
+            !ui_text(&engine).is_empty(),
+            "the press never opened the panel, so the repeats below prove nothing",
+        );
+
+        for _ in 0..2 {
+            engine
+                .shell_mut()
+                .key_repeat(window, LISTING_KEY)
+                .expect("the window is live");
+            engine.frame().expect("a frame");
+            assert!(
+                ui_text(&engine).iter().any(|text| text == "panel.glb"),
+                "a repeat closed the panel: {:?}",
+                ui_text(&engine),
+            );
+        }
+
+        engine
+            .shell_mut()
+            .key_release(window, LISTING_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "panel.glb"),
+            "letting go closed it: {:?}",
+            ui_text(&engine),
+        );
+
+        // And the next real press still works, which is what says the guard
+        // released rather than latched.
+        tap(&mut engine, window, LISTING_KEY);
+        assert!(ui_text(&engine).is_empty(), "{:?}", ui_text(&engine));
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **No two bindings claim the same key.**
+    ///
+    /// Three of these are the loop's reserved keys and three more are the ones
+    /// it arbitrates for a menu that is showing; the other two are this
+    /// application's. A collision is silent — the loop would swallow the key
+    /// and the viewer's half would simply never run — so it is checked rather
+    /// than argued about in a comment.
+    #[test]
+    fn no_two_bindings_claim_the_same_key() {
+        let bound = [
+            ("reframe", REFRAME_KEY),
+            ("listing", LISTING_KEY),
+            ("pause", PAUSE_KEY),
+            ("debug overlay", DEBUG_OVERLAY_KEY),
+            ("fullscreen", FULLSCREEN_KEY),
+            ("menu up", MENU_UP_KEY),
+            ("menu down", MENU_DOWN_KEY),
+            ("menu activate", MENU_ACTIVATE_KEY),
+        ];
+        for (at, (name, key)) in bound.iter().enumerate() {
+            for (other_name, other) in &bound[at + 1..] {
+                assert_ne!(key, other, "{name} and {other_name} are both {key:?}");
+            }
+        }
     }
 
     /// **The grid floor is in the frame this application records, and after the

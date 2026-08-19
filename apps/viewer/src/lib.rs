@@ -12,24 +12,21 @@
 //!
 //! # What is here, and what is not
 //!
-//! This is that document's **milestone 1**, "Load + orbit + grid", minus the
-//! grid. What it does: takes a path, reads it through the asset seam, converts
-//! it, frames the camera on it, turns it under the mouse, and draws it under a
-//! single directional light.
+//! This is that document's **milestone 1**, "Load + orbit + grid", and the
+//! first of milestone 2's panels. What it does: takes a path, reads it through
+//! the asset seam, converts it, frames the camera on it, turns it under the
+//! mouse, draws it under a single directional light over a grid floor, and puts
+//! what the document holds — and what the conversion could not bring in — on
+//! screen behind `I`. See [`listing`].
 //!
 //! What it deliberately does not do, each because it needs something this slice
 //! does not build:
 //!
-//! * **No grid floor.** A grid is a second resident mesh and a second material
-//!   row in a [`SceneDesc`](crcbl::render::scene::SceneDesc) that
-//!   [`build_render_scene`](crcbl::scene::gltf_render::build_render_scene) sized
-//!   for the document alone, so it is a change to how the scene is assembled and
-//!   not a pass to add — see [`gpu`].
-//! * **No mesh, material or texture panels.** Milestone 2's listings are the
-//!   viewer's own UI, and there is none: [`gpu`] has a UI pass and everything
-//!   that goes through it — the menu and rule 4's debug panel — is the engine's.
-//! * **No exposure slider**, which is the same UI and a renderer control this
-//!   milestone does not reach for.
+//! * **No wireframe or normals view.** Milestone 2's other half, and they are
+//!   renderer modes `crcbl-render` does not expose rather than UI.
+//! * **No exposure slider**, which is a renderer control this milestone does
+//!   not reach for, and the first thing here that would need a *widget* rather
+//!   than a read-only panel.
 //! * **No hot reload.** Milestone 3, and the whole of the artist loop the
 //!   sample doc's V-F4 describes.
 //! * **No drop target.** V-F5 is "path argument natively, drop target in the
@@ -62,6 +59,7 @@ pub mod app;
 pub mod args;
 pub mod controls;
 pub mod gpu;
+pub mod listing;
 pub mod menu;
 pub mod model;
 
@@ -72,8 +70,11 @@ pub mod model;
 #[cfg(test)]
 mod fixture;
 
-pub use app::{Loop, Summary, Viewer, ViewerError, run, start, with_shell};
+pub use app::{
+    LISTING_KEY, Loop, REFRAME_KEY, Summary, Viewer, ViewerError, run, start, with_shell,
+};
 pub use args::{DEFAULT_TICK_HZ, Invocation, Options, USAGE, parse};
 pub use controls::Controls;
+pub use listing::Listing;
 pub use menu::{MenuKind, Menus};
 pub use model::{LoadError, Model, load, world_bounds};

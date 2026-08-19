@@ -23,8 +23,10 @@
 //!
 //! The menu and UI passes are here because this sample is hosted by
 //! [`crcbl::engine::Loop`] now and the loop draws through them — see
-//! [`crate::app`]. Nothing of the viewer's own goes through the UI pass: it has
-//! no HUD, and rule 4's debug panel is the engine's.
+//! [`crate::app`]. Two things go through the UI pass: rule 4's debug panel,
+//! which is the engine's, and [`crate::listing`]'s panel, which is the
+//! viewer's own and the only thing it draws on top of the user's document.
+//! There is still no HUD.
 //!
 //! # The key light rides with the camera
 //!
@@ -87,13 +89,13 @@ pub struct Gpu {
     /// recorded. The light is derived from it — see [`key_light`] — so there is
     /// no second field that could disagree with it.
     camera: Camera,
-    /// UI compositing, for the debug overlay.
+    /// UI compositing, for the debug overlay and the listing panel.
     ///
-    /// The viewer has no HUD and is not getting one — it draws the user's
-    /// document and nothing of its own on top. It has a UI pass because
-    /// `docs/plan/sample/00-samples-overview.md` rule 4 applies to it too, and
-    /// while this application owned its loop it could not honour that at all:
-    /// `--debug-overlay` parsed and reached nothing. See [`crate::app`].
+    /// The viewer has no HUD and is not getting one — what it draws on top of
+    /// the user's document is asked for and off by default. It has a UI pass
+    /// because `docs/plan/sample/00-samples-overview.md` rule 4 applies to it
+    /// too, and while this application owned its loop it could not honour that
+    /// at all: `--debug-overlay` parsed and reached nothing. See [`crate::app`].
     ui: UiRenderer,
     /// The menu pass: its own sheets, its own screen-space camera, and a pass
     /// that declares nothing on a frame with no menu on it.
@@ -317,8 +319,8 @@ impl Gpu {
         self.menu
             .begin_frame(self.ctx.device(), extent)
             .map_err(GpuError::Hal)?;
-        // Upload this frame's UI geometry: the debug overlay, and only that —
-        // the viewer has no HUD of its own.
+        // Upload this frame's UI geometry: the listing panel and the debug
+        // overlay, both of which are off unless asked for.
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;

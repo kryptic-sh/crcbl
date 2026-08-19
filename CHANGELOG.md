@@ -676,6 +676,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/viewer` lists what it loaded.** `I` toggles a panel naming the
+  document, its mesh, vertex, index, material and texture counts, the page
+  extent its textures were resampled to, the instances placed, the bounds the
+  camera framed on, and **every feature the conversion skipped, by name**. Those
+  skips were already produced and logged; a viewer whose job is opening files
+  nobody curated should put "here is what did not come in" in front of the
+  person who opened it, not only in a terminal they may not be reading.
+
+  Off by default. The box is measured from the text and clamped to the
+  framebuffer, so a narrow window cuts lines with an ellipsis and a short one
+  drops the tail and says how much it dropped — the counts survive, the skip
+  list is what shortens, and stderr still has all of it.
+
 - **`apps/lumen` has mouse look.** Moving the mouse turns the view while flying;
   the pause panel releases the pointer. The keyboard turn is unchanged.
 

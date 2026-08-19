@@ -39,7 +39,7 @@ const INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
 /// A `.glb` of one quad, on a node that translates it to `centre`.
 #[must_use]
 pub fn quad_glb(centre: Vec3) -> Vec<u8> {
-    document(&node_clause(centre, true), POSITIONS)
+    document(&node_clause(centre, true, Vec3::ONE), POSITIONS)
 }
 
 /// A `.glb` whose scene's only node draws nothing.
@@ -49,7 +49,23 @@ pub fn quad_glb(centre: Vec3) -> Vec<u8> {
 /// frame and nothing to draw.
 #[must_use]
 pub fn empty_glb() -> Vec<u8> {
-    document(&node_clause(Vec3::ZERO, false), POSITIONS)
+    document(&node_clause(Vec3::ZERO, false, Vec3::ONE), POSITIONS)
+}
+
+/// A `.glb` whose one node scales its axes unequally.
+///
+/// **A document that loads, draws, and still lost something.** The conversion
+/// places the instance — the geometry is in the right place — and reports a
+/// `scale` skip, because the mesh shader transforms normals with the 3×3 part
+/// of the transform and no inverse-transpose, so the object lights wrongly.
+/// That is the case a listing panel is really for: a file that looks like it
+/// arrived intact and did not.
+#[must_use]
+pub fn skewed_glb() -> Vec<u8> {
+    document(
+        &node_clause(Vec3::ZERO, true, Vec3::new(1.0, 2.0, 1.0)),
+        POSITIONS,
+    )
 }
 
 /// A `.glb` with one corner at infinity.
@@ -63,7 +79,7 @@ pub fn empty_glb() -> Vec<u8> {
 pub fn non_finite_glb() -> Vec<u8> {
     let mut positions = POSITIONS;
     positions[0][1] = f32::INFINITY;
-    document(&node_clause(Vec3::ZERO, true), positions)
+    document(&node_clause(Vec3::ZERO, true, Vec3::ONE), positions)
 }
 
 /// A `.glb` with one `NaN` corner.
@@ -77,15 +93,16 @@ pub fn non_finite_glb() -> Vec<u8> {
 pub fn nan_glb() -> Vec<u8> {
     let mut positions = POSITIONS;
     positions[2][0] = f32::NAN;
-    document(&node_clause(Vec3::ZERO, true), positions)
+    document(&node_clause(Vec3::ZERO, true, Vec3::ONE), positions)
 }
 
-/// The document's one node, translated to `at`, drawing the mesh or not.
-fn node_clause(at: Vec3, draws: bool) -> String {
+/// The document's one node: translated to `at`, scaled by `scale`, drawing the
+/// mesh or not.
+fn node_clause(at: Vec3, draws: bool, scale: Vec3) -> String {
     let mesh = if draws { r#""mesh": 0, "# } else { "" };
     format!(
-        r#"{{ "name": "panel", {mesh}"translation": [{}, {}, {}] }}"#,
-        at.x, at.y, at.z
+        r#"{{ "name": "panel", {mesh}"translation": [{}, {}, {}], "scale": [{}, {}, {}] }}"#,
+        at.x, at.y, at.z, scale.x, scale.y, scale.z
     )
 }
 

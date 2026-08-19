@@ -58,6 +58,9 @@ CONTROLS:
     middle/right drag    Pan
     wheel                Zoom
     F                    Frame the model again
+    I                    Listing panel — what the document holds, and every
+                         feature the conversion could not bring in. Off to
+                         begin with.
     ESC                  Open the menu — the only way to reach the two below
                          without a keyboard
     F11                  Fullscreen

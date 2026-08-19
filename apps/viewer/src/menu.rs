@@ -22,12 +22,14 @@
 //!
 //! # And no item of the viewer's own
 //!
-//! Milestone 2's mesh, material and texture listings are panels this sample does
-//! not have yet, and the exposure slider is a renderer control it does not reach
-//! for; `docs/backlog.md` carries both. Until one of them lands there is nothing
-//! for a viewer button to do, which is why [`crate::app::Viewer`]'s `MenuAction`
-//! is [`core::convert::Infallible`] — uninhabited rather than an empty enum
-//! waiting to be filled in.
+//! Milestone 2's listing panel has landed — [`crate::listing`] — and it is
+//! bound to a key rather than to a button here, because it is a read-only view
+//! of the document and a menu that has to be dismissed to see what it toggled
+//! is the wrong shape for one. The exposure slider is a renderer control this
+//! sample does not reach for and `docs/backlog.md` carries it. So there is
+//! still nothing for a viewer button to do, which is why
+//! [`crate::app::Viewer`]'s `MenuAction` is [`core::convert::Infallible`] —
+//! uninhabited rather than an empty enum waiting to be filled in.
 
 use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
