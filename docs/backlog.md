@@ -736,24 +736,27 @@ still worth having and is not written.
 
 The seven are three different things:
 
-- **`AnimatedColorsCube` is an outright defect.** It declares
-  `KHR_animation_pointer` in `extensionsUsed` and requires **nothing**, so the
-  spec says it must load. It is refused with
-  `missing field 'node' at line 1 column 750`: `gltf_json::animation::Target`
-  makes `node` mandatory, under `KHR_animation_pointer` the target carries a
-  pointer instead, so deserializing `Root` fails and the whole document goes
-  with it. The bitter part is that `gltf_import` **already skips every
-  animation**, with a warning that says so — a document is being refused over a
-  feature the importer had decided to ignore.
-- **Four are refused for a defensible reason with an indefensible message.**
-  `AnimationPointerUVs`, `CubeVisibility`, `LightVisibility` and
-  `PotOfCoalsAnimationPointer` each list extensions in `extensionsRequired`
-  (`KHR_node_visibility`, `KHR_lights_punctual`, `KHR_materials_*`,
-  `KHR_texture_transform`) that this importer does not implement, so refusing is
-  correct — but they get the same serde error about a missing `node`, which
-  names neither the extension nor the reason. That is the sample's **second**
-  exit criterion failing: "unsupported features log actionable skip messages
-  (file, feature, skip reason)".
+- **Five of the seven were the same defect, and it is fixed** —
+  `AnimatedColorsCube`, `AnimationPointerUVs`, `CubeVisibility`,
+  `LightVisibility` and `PotOfCoalsAnimationPointer`. `gltf_json` makes an
+  animation channel's `node` mandatory and `KHR_animation_pointer` replaces it,
+  so `serde` refused the whole `Root` over an animation `gltf_import` skips by
+  design. `parse_without_animations` retries with the array removed. **The rate
+  is now 116/118, 98.3%.**
+
+  What that leaves open is a **decision, not a defect**. Four of those five list
+  extensions in `extensionsRequired` — `KHR_node_visibility`,
+  `KHR_lights_punctual`, `KHR_materials_*`, `KHR_texture_transform` — that this
+  importer does not implement, and they now **load anyway**, drawing the base
+  document without them. The specification says a client SHOULD NOT load an
+  asset whose required extension it lacks; for a viewer whose whole job is
+  "point it at a file and see", degrading is arguably the better answer. But it
+  is currently **silent**, and that is not defensible either way: nothing names
+  the extension that was ignored. The sample's second exit criterion asks for
+  "file, feature, skip reason", so the next slice is to read
+  `extensionsRequired` and report every entry the importer does not implement —
+  whichever way the load/refuse question is settled.
+
 - **`SheenWoodLeatherSofa` requires `EXT_texture_webp`** and is refused with
   `texture 0 names image 4294967295, and there are 13` — `u32::MAX` standing in
   for an absent `source`, an internal sentinel leaking into a user's error.
@@ -762,11 +765,9 @@ The seven are three different things:
   letters, digits, `.`, `_` and `-`. Whether that restriction should stand is a
   separate question; this run says nothing about the document.
 
-So the actionable work is **check `extensionsRequired` before parsing and refuse
-by name**, and **stop an animation the importer already ignores from killing the
-parse**. The first turns five useless serde errors into the messages the exit
-criterion asks for; the second is the only one of the seven that is a true
-loading failure.
+The second half of that — stopping an animation the importer already ignores
+from killing the parse — has shipped. **Reporting `extensionsRequired` by name
+has not**, and it is what the second exit criterion needs.
 
 **The other two exit criteria are still unmeasured.** The skip messages are
 asserted by `app::tests`' `skip_report` cases, which is the message's _shape_

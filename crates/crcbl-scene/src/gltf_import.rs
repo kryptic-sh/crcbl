@@ -527,13 +527,81 @@ pub fn import_gltf(source: &dyn AssetSource, key: &Path) -> Result<GltfScene, St
 
 /// Deserialize without `gltf`'s validation, which cannot be used — see
 /// [`crate::gltf_check`].
+///
+/// # A document is not refused over an animation this importer discards
+///
+/// `gltf_json::animation::Target` makes `node` a required field, and
+/// `KHR_animation_pointer` replaces it with a pointer into the document — so a
+/// file using that extension fails to **deserialize at all**, and the failure
+/// takes the whole `Root` with it. `AnimatedColorsCube` from the Khronos sample
+/// suite is one, and it lists nothing in `extensionsRequired`, so the
+/// specification says it has to load.
+///
+/// It has to load here in particular, because [`report_unsupported`] already
+/// skips every animation in every document and logs a line saying so. Refusing
+/// a file over a feature this code had decided to ignore is the shape of defect
+/// where a guard is present, correct, and ordered so it can never run.
+///
+/// So a parse failure gets one retry with the `animations` array removed — see
+/// [`parse_without_animations`] — and the original error is what a caller hears
+/// if that fails too, because it is the accurate one.
 fn parse(bytes: &[u8], key: &Path) -> Result<gltf::Gltf, StorageError> {
     // The same test `from_slice_without_validation` makes to decide whether
     // this is a container or bare JSON.
     if bytes.starts_with(b"glTF") {
         check_glb_header(bytes, key)?;
     }
-    gltf::Gltf::from_slice_without_validation(bytes).map_err(|error| malformed(key, error))
+    match gltf::Gltf::from_slice_without_validation(bytes) {
+        Ok(document) => Ok(document),
+        Err(error) => parse_without_animations(bytes, key).ok_or_else(|| malformed(key, error)),
+    }
+}
+
+/// [`parse`]'s retry: the same document with its `animations` array removed.
+///
+/// `None` for a document that is malformed for any other reason, so the caller
+/// reports the error from the *first* attempt rather than one about a document
+/// this function has already altered.
+///
+/// **Only `animations` is dropped, and only because nothing reads it.**
+/// `report_unsupported` skips them for every document already, so removing the
+/// array loses nothing a successful parse would have kept — which is what makes
+/// this a repair rather than a way of forcing a file through. No other array
+/// has that property, so no other array is touched.
+fn parse_without_animations(bytes: &[u8], key: &Path) -> Option<gltf::Gltf> {
+    // `check_glb_header` has already run in `parse`, so `Glb::from_slice`
+    // cannot reach the subtraction overflow `crate::gltf_check` documents.
+    let (json, blob) = if bytes.starts_with(b"glTF") {
+        let gltf::binary::Glb { json, bin, .. } = gltf::binary::Glb::from_slice(bytes).ok()?;
+        (json.into_owned(), bin.map(std::borrow::Cow::into_owned))
+    } else {
+        (bytes.to_vec(), None)
+    };
+
+    let mut value: gltf::json::Value = gltf::json::deserialize::from_slice(&json).ok()?;
+    let dropped = value.as_object_mut()?.remove("animations")?;
+    let count = dropped.as_array().map_or(0, Vec::len);
+    // Nothing to repair: the document has no animations and failed for some
+    // other reason, so the first error is the one worth reporting.
+    if count == 0 {
+        return None;
+    }
+    let root: gltf::json::Root = gltf::json::deserialize::from_value(value).ok()?;
+
+    // The file, the feature and the reason — `docs/plan/sample/05-viewer.md`'s
+    // exit criterion for a document that does not arrive whole. Louder than
+    // `report_unsupported`'s line about animations because this one has also
+    // lost the `animations` array itself, so nothing downstream can count them.
+    crcbl_core::log::warn!(
+        "{}: dropping {count} animation(s) this importer cannot deserialize — the document \
+         uses an extension that changes an animation channel's shape, and every animation is \
+         skipped anyway, so the rest of the document is loaded without them",
+        key.display(),
+    );
+    Some(gltf::Gltf {
+        document: gltf::Document::from_json_without_validation(root),
+        blob,
+    })
 }
 
 /// The bytes of every buffer the document names, in order.
@@ -985,6 +1053,82 @@ mod tests {
         tiling: GpuMaterial::TILING_AUTHORED,
         tile_metres: 1.0,
     };
+
+    /// The `animations` array a `KHR_animation_pointer` document carries: a
+    /// channel whose `target` names a **pointer** and no `node`.
+    ///
+    /// `gltf_json::animation::Target` makes `node` mandatory, so this is what
+    /// makes `serde` refuse the whole `Root`. Copied from the shape
+    /// `AnimatedColorsCube` in the Khronos sample suite uses, which is the
+    /// document that found this.
+    const ANIMATION_POINTER: &str = r#""animations": [{
+    "samplers": [{ "input": 0, "output": 1, "interpolation": "LINEAR" }],
+    "channels": [{
+      "sampler": 0,
+      "target": {
+        "path": "pointer",
+        "extensions": {
+          "KHR_animation_pointer": { "pointer": "/materials/0/pbrMetallicRoughness/baseColorFactor" }
+        }
+      }
+    }]
+  }],
+  "extensionsUsed": ["KHR_animation_pointer"],
+  "#;
+
+    /// **A document is not refused over an animation this importer discards.**
+    ///
+    /// `report_unsupported` skips every animation in every document and logs a
+    /// line saying so, but a `KHR_animation_pointer` channel cannot even be
+    /// deserialized — `node` is a required field and that extension replaces it
+    /// — so the failure took the whole document with it. `AnimatedColorsCube`
+    /// from the Khronos suite lists **nothing** in `extensionsRequired`, so the
+    /// specification says it has to load, and before `parse_without_animations`
+    /// it did not.
+    ///
+    /// The geometry is asserted, not just the `Ok`: a repair that dropped the
+    /// animation and the mesh with it would satisfy "it loads" and be useless.
+    #[test]
+    fn an_animation_this_importer_cannot_deserialize_does_not_refuse_the_document() {
+        let json = replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            r#""asset": {"#,
+            &format!("{ANIMATION_POINTER}\"asset\": {{"),
+        );
+        let scene = import_glb(&json).expect("the document loads without its animation");
+
+        assert_eq!(scene.meshes().len(), 1, "the mesh went with the animation");
+        let primitive = &scene.meshes()[0].primitives()[0];
+        assert_eq!(primitive.positions(), POSITIONS);
+        assert_eq!(
+            primitive.indices(),
+            INDICES.map(u32::from),
+            "the repaired parse must produce the same geometry as an untouched one",
+        );
+    }
+
+    /// **The retry does not turn a malformed document into a silent success.**
+    ///
+    /// `parse_without_animations` reports `None` for anything that fails for a
+    /// second reason, so the caller raises the error from the *first* attempt —
+    /// the accurate one, about the document as written rather than as altered.
+    #[test]
+    fn a_document_broken_for_another_reason_is_still_refused_with_its_own_error() {
+        // An animation `serde` refuses *and* a `nodes` array that is not an
+        // array. Dropping the animations cannot rescue this one.
+        let json = replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            r#""asset": {"#,
+            &format!("{ANIMATION_POINTER}\"asset\": {{"),
+        );
+        let json = replacing(&json, r#""scenes": [{ "nodes": [0] }],"#, r#""scenes": 7,"#);
+        let error = import_glb(&json).expect_err("a malformed document is refused");
+        let message = error.to_string();
+        assert!(
+            !message.contains("animation"),
+            "the retry's own failure was reported instead of the document's: {message}",
+        );
+    }
 
     #[test]
     fn a_minimal_glb_yields_its_positions_normals_texcoords_indices_and_material() {

@@ -2265,6 +2265,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A glTF is no longer refused over an animation the importer already
+  discards.** `gltf_json::animation::Target` makes `node` a required field and
+  `KHR_animation_pointer` replaces it with a pointer, so `serde` failed on the
+  whole `Root` and the document was rejected outright — while
+  `gltf_import::report_unsupported` skips every animation in every document and
+  logs a line saying so. A file was being refused over a feature the importer
+  had decided to ignore.
+
+  `parse` now retries once with the `animations` array removed, and reports the
+  **first** error if that fails too, so a document broken for another reason
+  still fails on its own terms rather than on an altered copy. Only `animations`
+  is dropped, and only because nothing reads it; no other array has that
+  property, so no other array is touched.
+
+  Measured on the Khronos `glTF-Sample-Assets` suite: of the 118 models that
+  ship a `glTF-Binary` variant, **111 loaded before and 116 do now** — 94.1% to
+  98.3%. `AnimatedColorsCube` is the one that makes it a defect rather than a
+  limitation: it lists nothing in `extensionsRequired`, so the specification
+  says it has to load.
+
 - **`crcbl-wgpu` accepted a pipeline layout with too many bind groups and handed
   back a poisoned one.** It checked the push-constant range but had no
   `max_bind_groups` guard, so an over-count reached `wgpu`, which files a
