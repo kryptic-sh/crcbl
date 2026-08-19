@@ -49,6 +49,14 @@ Worth knowing generally: **`supportsFamily:` is not an availability check.** Any
 other capability here gated on a family as a proxy for "this selector exists" is
 wrong the same way.
 
+**Swept, and this is the only one.** Every other `supportsFamily:` in
+`crcbl-mtl` is a probe printing what a device answers, not a gate deciding a
+capability. Metal's mesh rows in particular do **not** ride a family query —
+they are `Support::No` with "this backend builds no
+`MTLMeshRenderPipelineDescriptor`", which is honestly unwritten work. The
+runner's `Metal3 = false` is why writing them could not be _verified_ here, not
+why they are reported unsupported today, and those are different claims.
+
 ### `crcbl-phys`'s BVH folds AABBs the way the NaN bug did
 
 The same defect as `Aabb::from_points` and `meshlet::cluster_bounds`, in the one
