@@ -2372,42 +2372,6 @@ two argument structures a draw read, and CI's Metal device reports no
 anything a caller records, because `CommandEncoder` has no begin/end query verb.
 Their `Yes` means a set can be made and read, which is what Vulkan's means too.
 
-### The bindless exercise has never reached a D3D12 device
-
-`exercise_bindless_descriptor_array` and `bindless_probe.slang` landed
-2026-08-19 and were run on `CRCBL_GPU=vk` (RADV Navi31, Mesa 26.1.7) and
-`CRCBL_GPU=wgpu` here. **The dx12 arm has run nowhere.** `crcbl-dx12` answers
-`gated(DESCRIPTOR_INDEXING)` off `RawCaps::dynamic_resources`, and WARP has been
-measured at binding tier 3 with SM 6.6, so on CI it will declare `Yes` and must
-actually work. If it does not, that is a finding about the backend's bindless
-path, not a reason to weaken the exercise.
-
-**What to look at first if it goes red**, in order of how likely each is:
-
-- **The register space.** Slang moves an _unbounded_ array into a register space
-  of its own: without an explicit annotation `dxc -dumpbin` reported this
-  binding at `t0,space1`, and `crcbl_dx12::binding::ranges` builds every
-  descriptor range with `RegisterSpace: 0`. The source therefore pins it with
-  `: register(t0, space0)` — the only `register` annotation in
-  `crates/crcbl-shaders/shaders/`, documented at the declaration. `crcbl-dx12`'s
-  `dxil` module asserts space 0 over every committed container and now lists
-  `bindless_probe` in `registers_are_assigned_per_class_in_declaration_order`,
-  but that test is Windows-only and has never executed. The `-dumpbin` reading
-  is the only evidence the annotation worked.
-- **The unbounded range's placement in the table.** The layout's two entries are
-  a UAV (`destination`, binding 0) and an SRV (`sources`, binding 1) in one view
-  table; `plan_layout` gives an unbounded range `count: 0` for the table-offset
-  arithmetic and `declared: u32::MAX` for the root signature. D3D12 wants an
-  unbounded range last in its table, which it is here — unverified.
-- **The heap size.** `allocate_group` sizes the group from
-  `BindGroupDesc::variable_count`, which this exercise sets to `SOURCE_COUNT`
-  (4) against a declared ceiling of `BINDLESS_CEILING` (5), so five is what the
-  root signature declares and four is what is allocated.
-
-**Also unrun anywhere:** the Metal and WebGPU arms. Both declare `Support::No`
-and refuse at `create_bind_group_layout`, so what CI proves for them is the
-refusal, not the array.
-
 ### `exercise_push_constants_on_compute`'s RADV note is stale
 
 Its doc comment still carries a section headed "The shader indexes its block
@@ -2576,7 +2540,7 @@ differing on radv today, with a max channel delta of 6 and 0.66% over tolerance.
 It passes, but with far less headroom than any sprite golden, so a cross-backend
 move needs the numbers measured on each backend rather than assumed.
 
-### Three capabilities are still declared `Yes` and exercised by nothing
+### One capability is still declared `Yes` and exercised by nothing
 
 The mechanism proves every backend _answers_ for every capability. It does not
 prove the answers are true, and an audit found seven carrying a `Yes` on a
