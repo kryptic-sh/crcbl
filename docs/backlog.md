@@ -3137,9 +3137,11 @@ Applied here that means one `ImageUsage::RENDER_ATTACHMENT` in place of
 `COLOR_ATTACHMENT` and `DEPTH_STENCIL_ATTACHMENT`, with each backend deriving
 the API bit it needs from the format — which `crcbl-vk` can do, since the format
 determines which of `VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT` and
-`VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` is correct, and which the browser
-backends already do. It makes the contradictory descriptor _unwritable_ rather
-than merely refused, which is the difference between a lock and a convention.
+`VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` is correct, and which **three of
+the five backends already do**: Metal, wgpu and WebGPU all fold the pair onto
+one render-target bit today, so the merge adopts the majority shape rather than
+inventing one. It makes the contradictory descriptor _unwritable_ rather than
+merely refused, which is the difference between a lock and a convention.
 
 **Its cost is what makes it a decision rather than a task.** It is a breaking
 change to `ImageUsage` and therefore to every caller — the renderer, the samples
