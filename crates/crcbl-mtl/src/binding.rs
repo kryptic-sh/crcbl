@@ -27,27 +27,43 @@
 //! this engine actually ships for the *raster* shaders, whose parameters are
 //! plain per-stage bindings.
 //!
-//! **That day has now come for one shader.** `bindless_probe.slang` was recast
-//! as a bounded `ParameterBlock` and ships an MSL artifact declaring
-//! `array<uint device*, int(N)>`, and the probe below proves this device reads
-//! a table of `gpuAddress` values through it. So the argument-buffer road is
-//! open for the bindless layout specifically; the flat tables stay right for
-//! everything else.
+//! **That day has now come for one shader, and this module now takes both
+//! roads.** `bindless_probe.slang` was recast as a bounded `ParameterBlock` and
+//! ships an MSL artifact declaring `array<uint device*, int(N)>`, and the probe
+//! below proves this device reads a table of `gpuAddress` values through it. So
+//! a layout slot carrying [`BindingFlags::VARIABLE_COUNT`] becomes **one
+//! argument buffer** — a `Shared` allocation holding nothing but
+//! [`MTLBuffer::gpuAddress`] values, occupying a single entry of the buffer
+//! argument table — while every other slot stays a flat argument-table binding,
+//! because every other committed MSL artifact still declares one.
 //!
-//! Two consequences follow, and both are stated rather than absorbed:
+//! Three consequences follow, and all three are stated rather than absorbed:
 //!
-//! * **Residency needs no `useResource`.** That call exists because Metal
-//!   cannot see through an argument buffer or an `MTLHeap` to the resources
-//!   behind it. A directly bound resource is one Metal knows the encoder
-//!   references, so it is made resident *and* hazard-tracked automatically —
-//!   which is also what keeps `crcbl_mtl::command`'s barrier-is-an-encoder-
-//!   boundary argument intact, since that argument rests on every resource
-//!   being tracked.
-//! * **`DESCRIPTOR_INDEXING` comes off.** See [`plan_set`]: a
-//!   [`BindingFlags`](crcbl_hal::BindingFlags) of any kind is refused here,
-//!   and `crcbl_hal::pipeline` is explicit that a backend which refuses them
-//!   must not report the feature. `crcbl_mtl::adapter` carries the full
-//!   argument.
+//! * **A flat binding needs no `useResource`; a table's contents do.** That
+//!   call exists because Metal cannot see through an argument buffer or an
+//!   `MTLHeap` to the resources behind it. A directly bound resource is one
+//!   Metal knows the encoder references, so it is made resident *and*
+//!   hazard-tracked automatically — which is also what keeps
+//!   `crcbl_mtl::command`'s barrier-is-an-encoder-boundary argument intact for
+//!   every flat binding. A buffer reached through a raw address in a table is
+//!   neither, so [`apply`] and [`apply_compute`] declare every one of the
+//!   table's own resources on the encoder before the draw or dispatch that
+//!   reads them.
+//! * **`DESCRIPTOR_INDEXING` goes back on.** It came off when this module bound
+//!   flat tables and nothing else, because `crcbl_hal::pipeline` is explicit
+//!   that a backend which refuses [`BindingFlags`](crcbl_hal::BindingFlags)
+//!   must not report the feature. [`plan_set`] now honours the bindless flags,
+//!   so the feature is reportable again; `crcbl_mtl::adapter` carries the full
+//!   argument and the device query it is gated on.
+//! * **[`BindingFlags::UPDATE_AFTER_BIND`] is still refused, and now for a
+//!   sharper reason than "the values were copied onto the encoder".** They
+//!   still are, for a flat binding. For a table, the *addresses* live in a
+//!   buffer the encoder holds, so a later write does reach a pending command
+//!   buffer — but the `useResource` calls do not: residency is declared from
+//!   the membership the table had when [`bind_group`](crcbl_hal::CommandEncoder::bind_group)
+//!   ran, so a descriptor swapped in afterwards is a buffer the encoder never
+//!   declared and the dispatch faults on. That is a stronger reason to refuse
+//!   it, not a weaker one.
 //!
 //! # The index a binding lands on, and the rule that decides it
 //!
@@ -109,26 +125,53 @@
 //!   descriptor written" is not a property creation can check. It is the same
 //!   hazard Vulkan has and leaves to its validation layer.
 //! * **An update does not reach a command buffer that already bound the
-//!   group.** The values were copied onto the encoder when `bind_group` ran, so
-//!   a later write lands on the next bind. That is exactly what refusing
-//!   [`UPDATE_AFTER_BIND`](crcbl_hal::BindingFlags::UPDATE_AFTER_BIND) means,
-//!   and it is why refusing it is not cosmetic.
+//!   group.** A flat binding's values were copied onto the encoder when
+//!   `bind_group` ran, and a bindless table's residency was declared there, so
+//!   a later write lands on the next bind either way. That is exactly what
+//!   refusing [`UPDATE_AFTER_BIND`](crcbl_hal::BindingFlags::UPDATE_AFTER_BIND)
+//!   means, and it is why refusing it is not cosmetic.
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindGroupLayoutHandle, BindingKind, BindingResource, HalError, Limits, PipelineLayoutHandle,
-    ShaderStages,
+    BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, HalError, Limits,
+    MemoryLocation, PipelineLayoutHandle, ShaderStages,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBuffer, MTLComputeCommandEncoder, MTLRenderCommandEncoder, MTLSamplerState, MTLTexture,
+    MTLBuffer, MTLComputeCommandEncoder, MTLDevice, MTLGPUAddress, MTLRenderCommandEncoder,
+    MTLRenderStages, MTLResource, MTLResourceUsage, MTLSamplerState, MTLTexture,
 };
 
 use crate::argument::BUFFER_TABLE_ENTRIES;
 use crate::device::{
     DeviceInner, DeviceState, MetalDevice, Owned, lookup, lookup_mut, owned, take_owned, to_ns,
 };
+
+/// Bytes one entry of a bindless table occupies: a single 64-bit device
+/// address, which is the whole of what the committed MSL declares — an
+/// `array<uint device*, int(N)>` and no `[[id(n)]]` block around it.
+const ADDRESS_BYTES: u64 = size_of::<MTLGPUAddress>() as u64;
+
+/// Descriptors one [`BindingFlags::VARIABLE_COUNT`] binding may declare, which
+/// is [`Limits::max_bindless_descriptors`] on every device that reports
+/// [`Features::DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING).
+///
+/// **A contract this backend guarantees rather than a measurement**, exactly as
+/// `crcbl_mtl::adapter` says of every limit it leaves at the seam's floor: the
+/// seam's rule is that a limit is a ceiling the backend honours, and a ceiling
+/// below the hardware's is always safe where one above it is a crash on
+/// somebody else's machine. Metal asks nothing here — a table is an ordinary
+/// `MTLBuffer` of addresses, so the hardware's own ceiling is `maxBufferLength`
+/// divided by [`ADDRESS_BYTES`], which is far above this.
+///
+/// The number matters for one reason: [`BindGroupLayoutEntry::resolved_count`]
+/// resolves the [`u32::MAX`] "as many as this device can" sentinel to it, and
+/// [`BindlessTable::new`] then *allocates* that many addresses. So this is what
+/// sizes the argument buffer a portable bindless declaration gets, and raising
+/// it costs every such group [`ADDRESS_BYTES`] per descriptor added.
+pub(crate) const MAX_BINDLESS_DESCRIPTORS: u32 = 8192;
 
 /// Entries in Metal's per-stage **texture** argument table. See
 /// [`BUFFER_TABLE_ENTRIES`], which carries the argument for all three and lives
@@ -231,6 +274,14 @@ pub(crate) struct Slot {
     /// Whether this binding takes one of
     /// [`bind_group`](crcbl_hal::CommandEncoder::bind_group)'s dynamic offsets.
     pub(crate) dynamic: bool,
+    /// Whether this binding is a **descriptor array**: [`count`](Self::count)
+    /// device addresses inside one argument buffer, occupying a single entry of
+    /// [`Table::Buffer`] rather than `count` of them.
+    ///
+    /// So [`first`](Self::first) is the index of the *table*, and an entry's
+    /// [`array_index`](crcbl_hal::BindGroupEntry::array_index) is a position
+    /// inside the buffer rather than an offset from it.
+    pub(crate) bindless: bool,
 }
 
 /// A bind-group layout, placed: every binding's table and index within the set,
@@ -247,6 +298,13 @@ impl SetPlan {
     /// The binding a [`Slot`] with this number describes, if the set has one.
     fn slot(&self, binding: u32) -> Option<&Slot> {
         self.slots.iter().find(|slot| slot.binding == binding)
+    }
+
+    /// The set's descriptor-array bindings, in the order [`plan_set`] placed
+    /// them. Empty for every layout with no [`BindingFlags::VARIABLE_COUNT`]
+    /// entry, which is every layout this backend had before argument buffers.
+    fn bindless(&self) -> impl Iterator<Item = &Slot> + '_ {
+        self.slots.iter().filter(|slot| slot.bindless)
     }
 
     /// The bindings that take a dynamic offset, ascending — which is the order
@@ -277,12 +335,28 @@ impl SetPlan {
 ///   has no offset per element to be given.
 /// * [`HalError::InvalidDescriptor`] when the set needs more entries of one
 ///   table than Metal has.
-/// * [`HalError::Unsupported`] for any [`BindingFlags`](crcbl_hal::BindingFlags).
-///   All three describe a bindless array, this backend binds flat argument-table
-///   slots, and `crcbl_hal::pipeline` requires the refusal to be loud: "a
+/// * [`HalError::Unsupported`] for [`BindingFlags::UPDATE_AFTER_BIND`], which
+///   the module header gives the residency reason for, and for a descriptor
+///   array of anything but buffers — a Metal argument buffer of textures or
+///   samplers is a table of `MTLTexture::gpuResourceID`/`MTLSamplerState::gpuResourceID`
+///   values rather than of [`MTLBuffer::gpuAddress`] ones, which is a different
+///   width, a different residency call and a different artifact to be proved
+///   against. Both are loud because `crcbl_hal::pipeline` requires it: "a
 ///   bindless array quietly downgraded to a fixed one reads garbage at index
 ///   4097".
-pub(crate) fn plan_set(desc: &BindGroupLayoutDesc<'_>) -> Result<SetPlan, HalError> {
+/// * [`HalError::InvalidDescriptor`] for a descriptor array that also takes a
+///   dynamic offset. The seam gives one offset per dynamic binding, and a table
+///   is a whole array of buffers behind one binding.
+///
+/// `limits` is read for one thing: [`BindGroupLayoutEntry::resolved_count`]
+/// turns the [`u32::MAX`] "as many as this device can" sentinel into
+/// [`Limits::max_bindless_descriptors`], and a table is *allocated* at that
+/// length — so a plan that kept the sentinel would ask for an argument buffer of
+/// four billion addresses.
+pub(crate) fn plan_set(
+    desc: &BindGroupLayoutDesc<'_>,
+    limits: &Limits,
+) -> Result<SetPlan, HalError> {
     let mut ordered: Vec<&BindGroupLayoutEntry> = desc.entries.iter().collect();
     ordered.sort_by_key(|entry| entry.binding);
 
@@ -305,10 +379,25 @@ pub(crate) fn plan_set(desc: &BindGroupLayoutDesc<'_>) -> Result<SetPlan, HalErr
         }
         previous = Some(entry.binding);
 
-        if !entry.flags.is_empty() {
+        if entry.flags.contains(BindingFlags::UPDATE_AFTER_BIND) {
             return Err(crate::MetalInstance::not_yet(
-                "descriptor-indexing flags: this backend binds Metal's flat argument tables, \
-                 which have no runtime-sized array (the Metal argument-buffer slice)",
+                "BindingFlags::UPDATE_AFTER_BIND: this backend copies a flat binding's values \
+                 onto the encoder and declares a table's residency there, so a write after the \
+                 bind reaches neither",
+            ));
+        }
+        // `PARTIALLY_BOUND` needs no arm of its own, and that is a statement
+        // rather than an omission: it says the group may leave descriptors
+        // unwritten as long as the shader does not read them, and this backend
+        // already accepts a partially filled group (see the module header) and
+        // zeroes the entries of a table nothing filled.
+        let bindless = entry.flags.contains(BindingFlags::VARIABLE_COUNT);
+        let table = Table::of(entry.kind);
+        if bindless && table != Table::Buffer {
+            return Err(crate::MetalInstance::not_yet(
+                "a VARIABLE_COUNT array of textures or samplers: this backend's argument buffer \
+                 is a table of MTLBuffer::gpuAddress values, and an image or a sampler is reached \
+                 through an MTLResourceID instead (the Metal bindless-texture slice)",
             ));
         }
         let dynamic = matches!(
@@ -316,30 +405,39 @@ pub(crate) fn plan_set(desc: &BindGroupLayoutDesc<'_>) -> Result<SetPlan, HalErr
             BindingKind::UniformBuffer { dynamic: true }
                 | BindingKind::StorageBuffer { dynamic: true, .. }
         );
-        if dynamic && entry.count != 1 {
+        if dynamic && (bindless || entry.count != 1) {
             return Err(HalError::InvalidDescriptor(format!(
-                "binding {} is a dynamic-offset buffer with count {}; bind_group carries one \
+                "binding {} is a dynamic-offset buffer with count {}{}; bind_group carries one \
                  offset per dynamic binding, so an array of them has no offset per element",
-                entry.binding, entry.count
+                entry.binding,
+                entry.count,
+                if bindless { " and VARIABLE_COUNT" } else { "" }
             )));
         }
 
-        let table = Table::of(entry.kind);
+        // The whole of the argument-buffer road, in one number: a descriptor
+        // array is *one* buffer argument holding `count` addresses, where a
+        // flat array is `count` argument-table entries. `BUFFER_TABLE_ENTRIES`
+        // is what makes that difference decisive — a table of hundreds of
+        // descriptors is not expressible any other way here.
+        let count = entry.resolved_count(limits);
+        let occupies = if bindless { 1 } else { count };
         let used = &mut totals[table.slot()];
-        let Some(next) = used.checked_add(entry.count) else {
-            return Err(table_overflow(table, entry.binding, entry.count, *used));
+        let Some(next) = used.checked_add(occupies) else {
+            return Err(table_overflow(table, entry.binding, occupies, *used));
         };
         if next > table.capacity() {
-            return Err(table_overflow(table, entry.binding, entry.count, *used));
+            return Err(table_overflow(table, entry.binding, occupies, *used));
         }
         slots.push(Slot {
             binding: entry.binding,
             kind: entry.kind,
             table,
             first: *used,
-            count: entry.count,
+            count,
             visibility: entry.visibility,
             dynamic,
+            bindless,
         });
         *used = next;
     }
@@ -434,6 +532,22 @@ pub(crate) enum BoundResource {
     Texture(Retained<ProtocolObject<dyn MTLTexture>>),
     /// A sampler state.
     Sampler(Retained<ProtocolObject<dyn MTLSamplerState>>),
+    /// A descriptor array: the argument buffer of device addresses, and the
+    /// buffers those addresses reach.
+    ///
+    /// `resident` is what [`apply`] and [`apply_compute`] declare with
+    /// `useResource:` — a copy of the table's own membership rather than a
+    /// reference to it, so a group updated after the bind cannot change what
+    /// this encoder was told. It is also what keeps those buffers alive for as
+    /// long as the recorded bind is, which the raw addresses inside the table
+    /// do not.
+    Bindless {
+        raw: Retained<ProtocolObject<dyn MTLBuffer>>,
+        resident: Vec<Retained<ProtocolObject<dyn MTLBuffer>>>,
+        /// Whether the shader may write through the array, which is
+        /// `useResource:`'s [`MTLResourceUsage`].
+        writable: bool,
+    },
 }
 
 /// One filled slot of a bind group.
@@ -442,16 +556,146 @@ pub(crate) struct Bound {
     pub(crate) binding: u32,
     pub(crate) array_index: u32,
     pub(crate) table: Table,
-    /// Index within the set: the slot's `first` plus `array_index`.
+    /// Index within the set: the slot's `first` plus `array_index` — or, for a
+    /// [`bindless`](Self::bindless) slot, the slot's `first` alone, because
+    /// every element of a descriptor array shares the one argument buffer and
+    /// `array_index` is a position *inside* it.
     pub(crate) local: u32,
     pub(crate) visibility: ShaderStages,
     pub(crate) dynamic: bool,
+    /// Whether this fills an element of a descriptor array rather than an
+    /// argument-table slot. Such a `Bound` is never bound directly: it is a
+    /// word of a [`BindlessTable`], and [`DeviceInner::bind_group_raw`] skips
+    /// it in favour of the table.
+    pub(crate) bindless: bool,
     /// Whether this binding's offset alignment is the uniform one. Kept as a
     /// flag rather than the whole [`BindingKind`] because it is the only thing
     /// a bind still needs the kind for — the kind itself was checked against
     /// the resource when the group was created.
     pub(crate) uniform: bool,
     pub(crate) resource: BoundResource,
+}
+
+/// One descriptor array of a bind group, as the Metal objects a bind needs.
+///
+/// **The argument buffer is the shader's whole declared array, not the part the
+/// group filled.** The MSL declares `array<uint device*, int(N)>` inside a
+/// struct, so a buffer shorter than `capacity` addresses leaves that struct's
+/// tail off the end of the allocation — which is why this is sized from the
+/// layout's [`Slot::count`] and [`BindGroupDesc::variable_count`] chooses only
+/// how many of the entries a bind group fills.
+///
+/// Entries nothing filled hold a **zero** address. Reading one is a fault
+/// rather than a plausible number, which is what
+/// [`BindingFlags::PARTIALLY_BOUND`] asks for: the shader must not read a
+/// descriptor the group never wrote, and this makes breaking that rule loud.
+#[derive(Debug)]
+pub(crate) struct BindlessTable {
+    pub(crate) binding: u32,
+    /// Index of the argument buffer within the set — the slot's `first`. One
+    /// entry, whatever `capacity` is.
+    pub(crate) local: u32,
+    pub(crate) visibility: ShaderStages,
+    /// Whether the shader may write through the array; see
+    /// [`BoundResource::Bindless::writable`].
+    pub(crate) writable: bool,
+    /// Addresses the buffer holds, which is the layout's declared count.
+    pub(crate) capacity: u32,
+    pub(crate) raw: Retained<ProtocolObject<dyn MTLBuffer>>,
+    /// The buffers the addresses reach, deduplicated by nothing: one entry per
+    /// filled element, in `array_index` order. Rebuilt by [`refill`](Self::refill)
+    /// beside the addresses themselves, so residency cannot drift from what the
+    /// table points at.
+    pub(crate) resident: Vec<Retained<ProtocolObject<dyn MTLBuffer>>>,
+}
+
+impl BindlessTable {
+    /// Allocates the argument buffer one bindless `slot` needs, with every
+    /// entry still zero.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::OutOfDeviceMemory`] if the allocation fails.
+    fn new(
+        device: &ProtocolObject<dyn MTLDevice>,
+        slot: &Slot,
+        label: Option<&str>,
+    ) -> Result<Self, HalError> {
+        // `Shared` and write-combined: the CPU writes this table and never
+        // reads it back, which is what `MemoryLocation::HostUpload` maps to —
+        // and it goes through the same `conv` helper every `MTLBuffer` this
+        // backend allocates goes through.
+        let options = crate::conv::resource_options(MemoryLocation::HostUpload);
+        let bytes = u64::from(slot.count) * ADDRESS_BYTES;
+        let Some(raw) = device.newBufferWithLength_options(to_ns(bytes), options) else {
+            // As `create_buffer`: nil is the allocation failing, and it is the
+            // one failure the seam has a name for here.
+            return Err(HalError::OutOfDeviceMemory);
+        };
+        let binding = slot.binding;
+        raw.setLabel(Some(&NSString::from_str(&match label {
+            Some(label) => format!("{label} (bindless table, binding {binding})"),
+            None => format!("crcbl-mtl bindless table, binding {binding}"),
+        })));
+        Ok(Self {
+            binding,
+            local: slot.first,
+            visibility: slot.visibility,
+            writable: matches!(
+                slot.kind,
+                BindingKind::StorageBuffer {
+                    read_only: false,
+                    ..
+                }
+            ),
+            capacity: slot.count,
+            raw,
+            resident: Vec::new(),
+        })
+    }
+
+    /// Rewrites the whole table from `bindings`, and rebuilds the residency
+    /// list beside it.
+    ///
+    /// **Every entry is written, including the ones nothing filled.** A stale
+    /// address left behind by an earlier fill would be a descriptor the group
+    /// no longer holds — and, once its `Retained` had gone with it, one nothing
+    /// keeps alive either.
+    fn refill(&mut self, bindings: &[Bound]) {
+        let mut addresses = vec![MTLGPUAddress::default(); self.capacity as usize];
+        self.resident.clear();
+        for bound in bindings
+            .iter()
+            .filter(|bound| bound.bindless && bound.binding == self.binding)
+        {
+            let BoundResource::Buffer { raw, offset, .. } = &bound.resource else {
+                unreachable!("plan_set refuses a descriptor array of anything but buffers");
+            };
+            let Some(entry) = addresses.get_mut(bound.array_index as usize) else {
+                unreachable!("resolve bounds every array_index against its slot's count");
+            };
+            // `gpuAddress` is the allocation's own base and the entry may have
+            // bound a window inside it. The offset was checked against the
+            // buffer's length in `resolve`, so the sum is an address inside the
+            // allocation and the wrap can only be reached by a descriptor that
+            // check already refused.
+            *entry = raw.gpuAddress().wrapping_add(*offset);
+            self.resident.push(raw.clone());
+        }
+        // SAFETY: `contents` covers the `capacity * ADDRESS_BYTES` bytes this
+        // buffer was created with and `addresses` holds exactly `capacity`
+        // entries; the allocation is `Shared`, so the pointer is CPU-writable;
+        // and the seam requires a group not to be updated while a submission
+        // reading it is in flight, which is what refusing
+        // `BindingFlags::UPDATE_AFTER_BIND` states.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                addresses.as_ptr(),
+                self.raw.contents().as_ptr().cast::<MTLGPUAddress>(),
+                addresses.len(),
+            );
+        }
+    }
 }
 
 /// A bind group: its layout, and the resources written into it.
@@ -462,6 +706,15 @@ pub(crate) struct BindGroupRecord {
     /// Sorted by `(binding, array_index)`, so a replay is deterministic and a
     /// duplicate write is adjacent.
     pub(crate) bindings: Vec<Bound>,
+    /// One per [`BindingFlags::VARIABLE_COUNT`] slot of the layout, allocated
+    /// when the group was created and rewritten from [`Self::bindings`]
+    /// whenever those change. Empty for every layout without one.
+    ///
+    /// A list rather than an `Option` because that is the shape the plan hands
+    /// over and the shape a bind walks; the seam admits at most one today, since
+    /// [`BindGroupLayoutDesc::check_entries`] requires a `VARIABLE_COUNT` entry
+    /// to be both the last of its slice and its highest binding number.
+    pub(crate) tables: Vec<BindlessTable>,
 }
 
 /// A bind-group layout.
@@ -550,6 +803,12 @@ impl DeviceInner {
 
         let mut out = Vec::with_capacity(record.bindings.len());
         for bound in &record.bindings {
+            // An element of a descriptor array is a word of the table below,
+            // not an argument-table binding of its own — binding it here would
+            // put a source buffer at the index the table itself occupies.
+            if bound.bindless {
+                continue;
+            }
             let mut resource = bound.resource.clone();
             if bound.dynamic
                 && let BoundResource::Buffer { offset, length, .. } = &mut resource
@@ -583,6 +842,21 @@ impl DeviceInner {
                 index: placement.base[bound.table.slot()] + bound.local,
                 visibility: bound.visibility,
                 resource,
+            });
+        }
+        // One argument buffer per descriptor array, at the single buffer-table
+        // index `plan_set` reserved for it — the same addition every flat
+        // binding above makes, because a table occupies an entry of that table
+        // like any other buffer argument.
+        for table in &record.tables {
+            out.push(BoundBinding {
+                index: placement.base[Table::Buffer.slot()] + table.local,
+                visibility: table.visibility,
+                resource: BoundResource::Bindless {
+                    raw: table.raw.clone(),
+                    resident: table.resident.clone(),
+                    writable: table.writable,
+                },
             });
         }
         Ok(out)
@@ -640,8 +914,64 @@ pub(crate) fn apply_compute(
             BoundResource::Sampler(raw) => unsafe {
                 encoder.setSamplerState_atIndex(Some(raw), index);
             },
+            BoundResource::Bindless {
+                raw,
+                resident,
+                writable,
+            } => {
+                // Before the buffer that points at them, and before the
+                // dispatch either way: Metal cannot follow the raw addresses
+                // inside the table, so nothing here is resident or hazard-
+                // tracked until it is named. See the module header.
+                for resource in resident {
+                    encoder.useResource_usage(
+                        ProtocolObject::from_ref(&**resource),
+                        table_usage(*writable),
+                    );
+                }
+                // SAFETY: as the buffer arm above — the index was bounded by
+                // `Table::capacity` when the pipeline layout was planned, the
+                // table is bound whole so there is no offset to check, and it
+                // is kept alive by the `Retained` this binding holds.
+                unsafe {
+                    encoder.setBuffer_offset_atIndex(Some(raw), 0, index);
+                }
+            }
         }
     }
+}
+
+/// What a descriptor array's contents are declared as on the encoder.
+///
+/// Minimal by class rather than uniformly read-write: Apple's own note on
+/// `useResource:usage:` is that "declaring a minimal usage (i.e. read-only) may
+/// prevent color attachments from becoming decompressed on some devices", so a
+/// read-only array asking for write access costs a render pass and buys
+/// nothing.
+const fn table_usage(writable: bool) -> MTLResourceUsage {
+    if writable {
+        MTLResourceUsage::Read.union(MTLResourceUsage::Write)
+    } else {
+        MTLResourceUsage::Read
+    }
+}
+
+/// The Metal render stages a binding's [`ShaderStages`] name.
+///
+/// `useResource:usage:stages:` takes them because a render encoder declares
+/// residency per stage, where the compute encoder's twin has one stage to
+/// declare for. Only the two this backend's render pipelines have: a stage this
+/// device does not report is one no pipeline here can be built with, which
+/// `BindGroupLayoutDesc::check_entries` refuses at layout creation.
+const fn render_stages(visibility: ShaderStages) -> MTLRenderStages {
+    let mut stages = MTLRenderStages::empty();
+    if visibility.contains(ShaderStages::VERTEX) {
+        stages = stages.union(MTLRenderStages::Vertex);
+    }
+    if visibility.contains(ShaderStages::FRAGMENT) {
+        stages = stages.union(MTLRenderStages::Fragment);
+    }
+    stages
 }
 
 /// Sets every binding of a resolved group on the open render encoder.
@@ -694,6 +1024,34 @@ pub(crate) fn apply(
                     unsafe { encoder.setFragmentSamplerState_atIndex(Some(raw), index) };
                 }
             }
+            BoundResource::Bindless {
+                raw,
+                resident,
+                writable,
+            } => {
+                // As `apply_compute`, with the stage mask a render encoder
+                // takes. A binding visible to neither raster stage declares
+                // nothing and binds nothing, exactly as the three arms above
+                // leave a compute-only binding alone.
+                let stages = render_stages(binding.visibility);
+                if !stages.is_empty() {
+                    for resource in resident {
+                        encoder.useResource_usage_stages(
+                            ProtocolObject::from_ref(&**resource),
+                            table_usage(*writable),
+                            stages,
+                        );
+                    }
+                }
+                // SAFETY: as the buffer arm above, and with no offset — the
+                // table is bound whole.
+                if vertex {
+                    unsafe { encoder.setVertexBuffer_offset_atIndex(Some(raw), 0, index) };
+                }
+                if fragment {
+                    unsafe { encoder.setFragmentBuffer_offset_atIndex(Some(raw), 0, index) };
+                }
+            }
         }
     }
 }
@@ -709,18 +1067,18 @@ impl MetalDevice {
     /// rather than becoming a set of argument-table slots no pipeline on this
     /// backend could ever read. [`plan_set`] then adds what only Metal refuses.
     ///
-    /// This backend withdraws
+    /// A [`BindingFlags`] this device has not got is refused there too: the
+    /// seam's check reads
     /// [`Features::DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING),
-    /// so a layout carrying any [`BindingFlags`](crcbl_hal::BindingFlags) is
-    /// refused by the seam's check before [`plan_set`]'s own refusal is
-    /// reached. [`plan_set`] keeps it because it is a pure function with no
-    /// caps to consult and its contract is tested without a device.
+    /// which `crcbl_mtl::adapter` reports only for a device whose argument
+    /// buffers reach Tier 2 — so on a lesser device a bindless layout is
+    /// refused before [`plan_set`] ever sees the flags.
     pub(crate) fn create_bind_group_layout_impl(
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
         desc.check_entries(&self.inner.caps, crcbl_hal::BackendKind::Metal)?;
-        let plan = plan_set(desc)?;
+        let plan = plan_set(desc, &self.inner.caps.limits)?;
         let handle = self
             .state()
             .bind_group_layouts
@@ -736,18 +1094,28 @@ impl MetalDevice {
         take_owned(&mut state.bind_group_layouts, layout, &*self.inner);
     }
 
-    /// Resolves every entry to a retained Metal object. See the module docs for
-    /// why the objects rather than the handles are kept.
+    /// Resolves every entry to a retained Metal object, and allocates the
+    /// argument buffer of every descriptor array the layout declares. See the
+    /// module docs for why the objects rather than the handles are kept.
+    ///
+    /// **[`BindGroupDesc::variable_count`](crcbl_hal::BindGroupDesc::variable_count)
+    /// is checked and does not size anything**, which is the one place this
+    /// backend's arithmetic differs from Vulkan's. A `VkDescriptorSet` is
+    /// *allocated* at the chosen length, where the argument buffer here has to
+    /// be the whole array the MSL declares — `array<uint device*, int(N)>`
+    /// inside a struct, so a shorter buffer leaves that struct's tail off the
+    /// end of the allocation. The length the caller chooses is therefore how
+    /// many entries it fills, and the layout's count is how many exist.
     ///
     /// # Errors
     ///
     /// [`HalError::InvalidHandle`] for a layout no device issued,
-    /// [`HalError::Unsupported`] for a
-    /// [`BindGroupDesc::variable_count`](crcbl_hal::BindGroupDesc::variable_count)
-    /// — the same answer [`plan_set`] gives the layout half of
-    /// [`Capability::BindlessDescriptorArray`](crcbl_hal::Capability::BindlessDescriptorArray)
-    /// — and [`HalError::InvalidDescriptor`] from [`resolve`] for an entry that
-    /// does not fit the layout it names.
+    /// [`HalError::InvalidDescriptor`] for a `variable_count` on a layout with
+    /// no [`BindingFlags::VARIABLE_COUNT`] binding or one larger than that
+    /// binding holds, [`HalError::InvalidDescriptor`] from [`resolve`] for an
+    /// entry that does not fit the layout it names, and
+    /// [`HalError::OutOfDeviceMemory`] if an argument buffer cannot be
+    /// allocated.
     pub(crate) fn create_bind_group_impl(
         &self,
         desc: &BindGroupDesc<'_>,
@@ -762,32 +1130,44 @@ impl MetalDevice {
         )?
         .plan
         .clone();
-        if desc.variable_count.is_some() {
-            // The field exists for a `VARIABLE_COUNT` binding, and `plan_set`
-            // refuses every layout that declares one — so this is a caller
-            // asking for a shape no layout on this backend can have, rather
-            // than a value to ignore.
-            //
-            // **The same variant `plan_set` uses**, because it is the same
-            // answer: `Capability::BindlessDescriptorArray` is what both halves
-            // report, and the two ends of one capability refusing with two
-            // different errors is what let a caller branch on `Unsupported` and
-            // still be surprised here.
-            return Err(crate::MetalInstance::unsupported(
-                "BindGroupDesc::variable_count on a Metal bind group: this backend binds flat \
-                 argument tables and refuses every VARIABLE_COUNT layout, so no group has a \
-                 variable length to choose",
-            ));
+        if let Some(count) = desc.variable_count {
+            // Checked here rather than left to be ignored, in the vocabulary
+            // `crcbl-vk` refuses the same two shapes in: a length on a layout
+            // with nothing variable in it, and a length larger than the array
+            // that holds it.
+            let Some(slot) = plan.bindless().next() else {
+                return Err(HalError::InvalidDescriptor(
+                    "BindGroupDesc::variable_count on a layout that declares no VARIABLE_COUNT \
+                     binding"
+                        .to_string(),
+                ));
+            };
+            if count > slot.count {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "BindGroupDesc::variable_count is {count}, but binding {} holds at most {} \
+                     descriptors",
+                    slot.binding, slot.count
+                )));
+            }
         }
         let mut bindings = Vec::with_capacity(desc.entries.len());
         for entry in desc.entries {
             bindings.push(resolve(&plan, entry, &state, &self.inner, &limits)?);
         }
         sort_bindings(&mut bindings)?;
+        // After the entries, so a group whose descriptors were refused
+        // allocates nothing.
+        let mut tables = Vec::new();
+        for slot in plan.bindless() {
+            let mut table = BindlessTable::new(&self.inner.raw, slot, desc.label)?;
+            table.refill(&bindings);
+            tables.push(table);
+        }
         let handle = state.bind_groups.insert(BindGroupRecord {
             owner: self.inner.id,
             layout: desc.layout,
             bindings,
+            tables,
         });
         Ok(self.stamp(handle))
     }
@@ -832,6 +1212,16 @@ impl MetalDevice {
             }
         }
         sort_bindings(&mut record.bindings)?;
+        // Every table, not only the ones an entry named: `refill` rewrites the
+        // whole argument buffer from the group's bindings, so the tables the
+        // update left alone are rewritten to what they already held rather
+        // than needing to be told they were not touched.
+        let BindGroupRecord {
+            bindings, tables, ..
+        } = record;
+        for table in tables {
+            table.refill(bindings);
+        }
         Ok(())
     }
 
@@ -912,6 +1302,18 @@ fn resolve(
                     end.map_or_else(|| "overflow".to_string(), |end| end.to_string())
                 )));
             }
+            // A descriptor array reaches this buffer through its **address**,
+            // which is a thing a device can decline to answer: `gpuAddress` is
+            // a Metal 3 property, and a zero from it would put a null pointer
+            // in the table for the shader to dereference. Read once here rather
+            // than at every refill, so a device that answers nothing is
+            // reported as that at the call that named the buffer.
+            if slot.bindless && raw.gpuAddress() == 0 {
+                return Err(crate::MetalInstance::unsupported(
+                    "MTLBuffer::gpuAddress answered zero for a buffer bound into a descriptor \
+                     array, so the argument buffer would point the shader at nothing",
+                ));
+            }
             BoundResource::Buffer {
                 raw,
                 offset,
@@ -936,9 +1338,17 @@ fn resolve(
         binding: entry.binding,
         array_index: entry.array_index,
         table: slot.table,
-        local: slot.first + entry.array_index,
+        // A descriptor array's elements all live in the one argument buffer at
+        // `slot.first`, and `array_index` is a position inside it rather than
+        // an offset from it — see `Bound::local`.
+        local: if slot.bindless {
+            slot.first
+        } else {
+            slot.first + entry.array_index
+        },
         visibility: slot.visibility,
         dynamic: slot.dynamic,
+        bindless: slot.bindless,
         uniform,
         resource,
     })
@@ -949,23 +1359,21 @@ mod tests {
     use super::*;
     use crcbl_core::Handle;
     use crcbl_hal::{
-        BindingFlags, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoder,
-        CommandEncoderDesc, Device, Extent3d, Format, ImageDesc, ImageType, ImageUsage,
-        ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation, PipelineLayoutDesc,
-        QueueKind, Rect2d, RenderPassDesc, SampleType, SamplerDesc, StoreOp,
+        BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoder, CommandEncoderDesc,
+        Device, Extent3d, Format, ImageDesc, ImageType, ImageUsage, ImageViewDesc, ImageViewType,
+        Instance, LoadOp, PipelineLayoutDesc, QueueKind, Rect2d, RenderPassDesc, SampleType,
+        SamplerDesc, StoreOp,
     };
     // Only the bindless probe hand-encodes a compute dispatch rather than going
-    // through the seam, because nothing in this backend can build a pipeline
-    // that reads an argument buffer — see
-    // [`a_kernel_reads_four_buffers_through_an_unbounded_argument_buffer_array`].
+    // through the seam — see
+    // [`a_kernel_reads_every_bound_buffer_through_one_argument_buffer_array`]
+    // for why it still does so now that the seam reaches the same construction.
     // Ungated, these would fail `cargo clippy -p crcbl-mtl` without the feature
     // on unused imports, in a configuration every developer can run.
     #[cfg(feature = "mtl-e2e")]
-    use objc2_foundation::NSString;
-    #[cfg(feature = "mtl-e2e")]
     use objc2_metal::{
         MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder as _, MTLComputePipelineState,
-        MTLDevice, MTLGPUAddress, MTLLibrary, MTLResource, MTLResourceUsage, MTLSize,
+        MTLLibrary, MTLSize,
     };
 
     use crate::MetalInstance;
@@ -995,6 +1403,18 @@ mod tests {
         BindGroupLayoutDesc {
             label: Some("crcbl-mtl test layout"),
             entries,
+        }
+    }
+
+    /// The device ceilings the pure planner reads.
+    ///
+    /// The seam's floor with this backend's own bindless capacity on top, which
+    /// is what `crcbl_mtl::adapter` reports for a device that has the feature —
+    /// and `max_bindless_descriptors` is the only field [`plan_set`] looks at.
+    fn test_limits() -> Limits {
+        Limits {
+            max_bindless_descriptors: MAX_BINDLESS_DESCRIPTORS,
+            ..Limits::minimum()
         }
     }
 
@@ -1096,7 +1516,8 @@ mod tests {
             ),
             entry(4, STORAGE, 1),
         ];
-        let plan = plan_set(&layout(&entries)).expect("a layout with no bindless flags");
+        let plan =
+            plan_set(&layout(&entries), &test_limits()).expect("a layout with no bindless flags");
         assert_eq!(plan.slots.len(), entries.len(), "a binding was dropped");
         assert_eq!(placed(&plan, 0), (Table::Buffer, 0));
         assert_eq!(placed(&plan, 4), (Table::Buffer, 1), "the second buffer");
@@ -1135,7 +1556,8 @@ mod tests {
             count: 1,
             flags: BindingFlags::empty(),
         }];
-        let plan = plan_set(&layout(&entries)).expect("one read-only storage buffer");
+        let plan =
+            plan_set(&layout(&entries), &test_limits()).expect("one read-only storage buffer");
         assert_eq!(placed(&plan, 0), (Table::Buffer, 0));
         let (placements, totals) =
             plan_layout(&[(unissued_layout(), plan.totals)]).expect("one set");
@@ -1157,6 +1579,91 @@ mod tests {
         Handle::from_bits(1 << 32).expect("generation 1 is non-zero")
     }
 
+    /// **The committed `msl/bindless_probe.metal` needs its argument buffer at
+    /// `[[buffer(1)]]`, and this is the check that the rule puts it there.**
+    ///
+    /// The shader's shape is the fixture: `destination` at set 0 binding 0, and
+    /// the `ParameterBlock` at set 1 binding 0 declaring
+    /// `array<uint device*, int(SOURCE_CAPACITY)>`. `crcbl_shaders::bindless_probe`
+    /// records both, and its own tests read the two `[[buffer(n)]]` attributes
+    /// back out of the artifact by name — so what is left for this side is the
+    /// arithmetic that has to agree with them.
+    ///
+    /// **What turns it red.** Counting a descriptor array as `count` entries of
+    /// the buffer table, which is what the flat path does: the set's `totals`
+    /// would be the capacity rather than one, and every set after it would
+    /// start that far along instead of one along. Both are asserted, because
+    /// the second is what a shader would actually read at the wrong index.
+    /// Dropping the flag on the way into the plan: `slot.bindless` is asserted
+    /// too, so a plan that placed the array correctly by accident still fails.
+    #[test]
+    fn the_bindless_probes_argument_buffer_lands_at_metal_buffer_one() {
+        let capacity = crcbl_shaders::bindless_probe::SOURCE_CAPACITY;
+        let destination = plan_set(
+            &layout(&[entry(
+                0,
+                BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                },
+                1,
+            )]),
+            &test_limits(),
+        )
+        .expect("set 0 holds the shader's written destination");
+        let table = plan_set(
+            &layout(&[BindGroupLayoutEntry {
+                flags: BindingFlags::VARIABLE_COUNT,
+                ..entry(0, STORAGE, capacity)
+            }]),
+            &test_limits(),
+        )
+        .expect("set 1 holds the shader's descriptor array");
+
+        assert_eq!(placed(&table, 0), (Table::Buffer, 0));
+        assert_eq!(
+            table.totals,
+            [1, 0, 0],
+            "a descriptor array is one argument buffer whatever its capacity, and this layout \
+             declares {capacity} descriptors"
+        );
+        let slot = table.slots.first().expect("the set has its one binding");
+        assert!(
+            slot.bindless,
+            "the VARIABLE_COUNT flag did not reach the plan"
+        );
+        assert_eq!(
+            slot.count, capacity,
+            "the slot carries the layout's declared capacity, which is what sizes the argument \
+             buffer"
+        );
+
+        let (placements, totals) = plan_layout(&[
+            (unissued_layout(), destination.totals),
+            (unissued_layout(), table.totals),
+        ])
+        .expect("the shader's two sets");
+        assert_eq!(
+            placements[1].base[Table::Buffer.slot()],
+            1,
+            "the argument buffer must land at the [[buffer(1)]] the artifact declares"
+        );
+        assert_eq!(
+            totals,
+            [2, 0, 0],
+            "two buffer arguments in the whole pipeline layout: the destination and the table"
+        );
+
+        let msl = crcbl_shaders::BINDLESS_PROBE
+            .msl()
+            .expect("the probe ships the MSL its target line declares");
+        assert!(
+            msl.contains(&format!("array<uint device*, int({capacity})>")),
+            "the committed MSL no longer declares an array of {capacity} device addresses, so the \
+             table this backend allocates is not the one the shader reads:\n{msl}"
+        );
+    }
+
     /// Later sets start where earlier ones stopped, per table.
     ///
     /// This is the shape `sprite.slang` has: set 0 holds two buffers, set 1
@@ -1169,19 +1676,25 @@ mod tests {
     /// 1's buffer base would be 0 and collide with set 0's.
     #[test]
     fn later_sets_start_where_the_earlier_ones_stopped() {
-        let frame = plan_set(&layout(&[entry(0, UNIFORM, 1), entry(1, STORAGE, 1)]))
-            .expect("two buffers in set 0");
-        let sheet = plan_set(&layout(&[
-            entry(
-                0,
-                BindingKind::SampledImage {
-                    view_type: ImageViewType::D2,
-                    sample_type: SampleType::Float,
-                },
-                1,
-            ),
-            entry(1, BindingKind::Sampler { comparison: false }, 1),
-        ]))
+        let frame = plan_set(
+            &layout(&[entry(0, UNIFORM, 1), entry(1, STORAGE, 1)]),
+            &test_limits(),
+        )
+        .expect("two buffers in set 0");
+        let sheet = plan_set(
+            &layout(&[
+                entry(
+                    0,
+                    BindingKind::SampledImage {
+                        view_type: ImageViewType::D2,
+                        sample_type: SampleType::Float,
+                    },
+                    1,
+                ),
+                entry(1, BindingKind::Sampler { comparison: false }, 1),
+            ]),
+            &test_limits(),
+        )
         .expect("a texture and a sampler in set 1");
         let (placements, totals) = plan_layout(&[
             (unissued_layout(), frame.totals),
@@ -1206,41 +1719,58 @@ mod tests {
     /// Every layout shape this backend cannot honour is refused, and the two
     /// causes are different errors.
     ///
-    /// **What turns it red.** Accepting any [`BindingFlags`] bit — the loop,
-    /// which walks all three individually rather than trusting one to stand for
-    /// the others. Accepting `count: 0`, a duplicate binding number, or a
-    /// dynamic-offset array — each has its own assertion, and each is a layout
-    /// the seam already calls invalid.
+    /// **What turns it red.** Accepting
+    /// [`BindingFlags::UPDATE_AFTER_BIND`] — the residency this backend
+    /// declares at bind time is what it cannot honour, and the module header
+    /// says why. Accepting a descriptor array of textures or samplers — an
+    /// `MTLResourceID` is not an `MTLBuffer::gpuAddress` and the table would be
+    /// filled with the wrong kind of handle. Accepting `count: 0`, a duplicate
+    /// binding number, or a dynamic-offset array — each has its own assertion,
+    /// and each is a layout the seam already calls invalid.
     #[test]
     fn a_bindless_or_malformed_layout_is_refused_by_cause() {
-        let flags = [
-            BindingFlags::PARTIALLY_BOUND,
-            BindingFlags::UPDATE_AFTER_BIND,
-            BindingFlags::VARIABLE_COUNT,
-        ];
-        assert!(!flags.is_empty(), "nothing to check");
-        for flag in flags {
-            assert!(
-                !flag.is_empty(),
-                "{flag:?} is the empty set, so it proves nothing"
-            );
-            let entries = [BindGroupLayoutEntry {
-                flags: flag,
-                ..entry(
-                    0,
-                    BindingKind::SampledImage {
-                        view_type: ImageViewType::D2,
-                        sample_type: SampleType::Float,
-                    },
-                    8,
-                )
-            }];
-            let error = plan_set(&layout(&entries))
-                .expect_err("a flat argument table has no runtime-sized array");
+        for (what, entries) in [
+            (
+                "UPDATE_AFTER_BIND on a plain buffer",
+                vec![BindGroupLayoutEntry {
+                    flags: BindingFlags::UPDATE_AFTER_BIND,
+                    ..entry(0, STORAGE, 1)
+                }],
+            ),
+            (
+                "UPDATE_AFTER_BIND beside VARIABLE_COUNT",
+                vec![BindGroupLayoutEntry {
+                    flags: BindingFlags::VARIABLE_COUNT | BindingFlags::UPDATE_AFTER_BIND,
+                    ..entry(0, STORAGE, 8)
+                }],
+            ),
+            (
+                "a descriptor array of textures",
+                vec![BindGroupLayoutEntry {
+                    flags: BindingFlags::VARIABLE_COUNT,
+                    ..entry(
+                        0,
+                        BindingKind::SampledImage {
+                            view_type: ImageViewType::D2,
+                            sample_type: SampleType::Float,
+                        },
+                        8,
+                    )
+                }],
+            ),
+            (
+                "a descriptor array of samplers",
+                vec![BindGroupLayoutEntry {
+                    flags: BindingFlags::VARIABLE_COUNT,
+                    ..entry(0, BindingKind::Sampler { comparison: false }, 8)
+                }],
+            ),
+        ] {
+            let error = plan_set(&layout(&entries), &test_limits()).expect_err(what);
             assert!(
                 matches!(error, HalError::Unsupported { backend, .. }
                     if backend == crcbl_hal::BackendKind::Metal),
-                "{flag:?}: {error:?}"
+                "{what}: {error:?}"
             );
         }
 
@@ -1254,8 +1784,15 @@ mod tests {
                 "a dynamic array",
                 vec![entry(0, DYNAMIC_UNIFORM, 1), entry(1, DYNAMIC_UNIFORM, 2)],
             ),
+            (
+                "a dynamic descriptor array",
+                vec![BindGroupLayoutEntry {
+                    flags: BindingFlags::VARIABLE_COUNT,
+                    ..entry(0, DYNAMIC_UNIFORM, 1)
+                }],
+            ),
         ] {
-            let error = plan_set(&layout(&entries)).expect_err(what);
+            let error = plan_set(&layout(&entries), &test_limits()).expect_err(what);
             assert!(
                 matches!(error, HalError::InvalidDescriptor(_)),
                 "{what}: {error:?}"
@@ -1263,7 +1800,8 @@ mod tests {
         }
         // The same dynamic binding at count 1 is fine, so the refusal above is
         // about the array and not about dynamic offsets.
-        plan_set(&layout(&[entry(0, DYNAMIC_UNIFORM, 1)])).expect("one dynamic uniform buffer");
+        plan_set(&layout(&[entry(0, DYNAMIC_UNIFORM, 1)]), &test_limits())
+            .expect("one dynamic uniform buffer");
     }
 
     /// Metal's argument tables are finite, and both the per-set and the
@@ -1275,16 +1813,25 @@ mod tests {
     /// two-set half, where neither set alone overruns.
     #[test]
     fn the_argument_tables_bound_a_set_and_a_whole_layout() {
-        let full = plan_set(&layout(&[entry(0, STORAGE, BUFFER_TABLE_ENTRIES)]))
-            .expect("exactly the buffer table");
+        let full = plan_set(
+            &layout(&[entry(0, STORAGE, BUFFER_TABLE_ENTRIES)]),
+            &test_limits(),
+        )
+        .expect("exactly the buffer table");
         assert_eq!(full.totals[Table::Buffer.slot()], BUFFER_TABLE_ENTRIES);
-        let error = plan_set(&layout(&[entry(0, STORAGE, BUFFER_TABLE_ENTRIES + 1)]))
-            .expect_err("one more than the table holds");
+        let error = plan_set(
+            &layout(&[entry(0, STORAGE, BUFFER_TABLE_ENTRIES + 1)]),
+            &test_limits(),
+        )
+        .expect_err("one more than the table holds");
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
 
         // Two sets that each fit and together do not.
-        let half = plan_set(&layout(&[entry(0, STORAGE, BUFFER_TABLE_ENTRIES - 1)]))
-            .expect("one short of the table");
+        let half = plan_set(
+            &layout(&[entry(0, STORAGE, BUFFER_TABLE_ENTRIES - 1)]),
+            &test_limits(),
+        )
+        .expect("one short of the table");
         plan_layout(&[(unissued_layout(), half.totals)]).expect("one set fits");
         let error = plan_layout(&[
             (unissued_layout(), half.totals),
@@ -1993,149 +2540,30 @@ mod tests {
 
     // --- the bindless probe -------------------------------------------------
     //
-    // A measurement, not a feature. Everything below is `#[cfg(mtl-e2e)]`d
-    // because it makes the GPU execute a kernel, and none of it is reachable
-    // from the seam: `create_bind_group_layout` still refuses the bindless
-    // layout, so no pipeline this backend builds reads an argument buffer yet —
-    // even though `bindless_probe.slang` now ships MSL that would.
+    // A measurement beside the implementation rather than a substitute for it.
+    // Everything below is `#[cfg(mtl-e2e)]`d because it makes the GPU execute a
+    // kernel, and it reaches the device *without* the seam: it hand-encodes the
+    // dispatch this module now performs, over the same committed artifact. So a
+    // failure here is the construction — a table of `gpuAddress` values, the
+    // residency call, the two buffer indices — and not a bind group, a pipeline
+    // layout or a shader module on the way to it. `crcbl`'s own
+    // `hal_seam_e2e` drives the whole path instead, and neither is the other's
+    // evidence.
 
-    /// The MSL for an unbounded array of buffers, **verbatim from the pinned
-    /// Slang** — nothing here was written by hand.
+    /// The MSL the probe dispatches: `crcbl-shaders`' own committed artifact.
     ///
-    /// Regenerate it with the compiler `crcbl-shaders` pins, from this source:
-    ///
-    /// ```slang
-    /// struct Sources { StructuredBuffer<uint> items[64]; };
-    /// ParameterBlock<Sources> sources;
-    /// RWStructuredBuffer<uint> destination;
-    /// [shader("compute")] [numthreads(64,1,1)]
-    /// void computeMain(uint3 group: SV_GroupID, uint thread: SV_GroupIndex) {
-    ///     if (thread >= 4) return;
-    ///     uint source = group.x;
-    ///     if (source >= 4) return;
-    ///     destination[source * 4 + thread] = sources.items[source][thread];
-    /// }
-    /// ```
-    ///
-    /// as `slangc -target metal -line-directive-mode none <source>`. The
-    /// `-line-directive-mode none` is the one departure from
-    /// `crates/crcbl-shaders/tools/compile-shaders.sh`, and it is not cosmetic:
-    /// Slang copies the path it was *given* into the `#line` directives of its
-    /// Metal output, and this probe has no committed `.slang` file for such a
-    /// path to name. The directives change no token the Metal front end
-    /// compiles.
-    ///
-    /// **The array is bounded, and that is a correction rather than a
-    /// preference.** The first version of this probe declared `items[]`, which
-    /// Slang lowers to `uint device* items_0[]` — a C99 flexible array member.
-    /// It ran on CI's `Apple Paravirtual device` and Metal's own front end
-    /// refused it:
-    ///
-    /// ```text
-    /// program_source:7:19: error: flexible array members are a C99 feature
-    /// ```
-    ///
-    /// A fixed length lowers instead to `array<uint device*, int(64)>`, an
-    /// ordinary `metal::array` of device pointers, which is the shape MSL
-    /// actually defines. Nothing is lost: a bindless table is a capacity
-    /// declared once in the shader with a count chosen per bind, which is how
-    /// Vulkan's `VARIABLE_DESCRIPTOR_COUNT` and D3D12's heap-bounded unbounded
-    /// arrays are used too.
-    ///
-    /// **The reusable half is the exit code.** `slangc -target metal` returned
-    /// 0 for the flexible-array source and emitted MSL no Metal compiler
-    /// accepts. That is the third time this target has failed by emitting
-    /// plausible garbage rather than diagnosing — see `docs/backlog.md` — so a
-    /// zero exit is not evidence a Metal shader is usable.
+    /// **Read rather than pasted, and that is a correction.** This was a copy
+    /// of the Metal source with its table length written down beside it, which
+    /// is two numbers for one fact — and the copy was left declaring sixty-four
+    /// descriptors after `bindless_probe.slang` was recast at
+    /// [`SOURCE_CAPACITY`]. The artifact is the only source now, and
+    /// `crcbl_shaders::bindless_probe` carries every length beside it.
     #[cfg(feature = "mtl-e2e")]
-    const BINDLESS_MSL: &str = r#"#include <metal_stdlib>
-#include <metal_math>
-#include <metal_texture>
-using namespace metal;
-struct _Array_default_StructuredBufferx3Cuintx3E64_0
-{
-    array<uint device*, int(64)> data_0;
-};
-
-struct Sources_default_0
-{
-    _Array_default_StructuredBufferx3Cuintx3E64_0 items_0;
-};
-
-struct KernelContext_0
-{
-    uint device* destination_0;
-    Sources_default_0 constant* sources_0;
-};
-
-[[kernel]] void computeMain(uint3 sv_groupthreadid_0 [[thread_position_in_threadgroup]], uint3 group_0 [[threadgroup_position_in_grid]], uint device* destination_1 [[buffer(1)]], Sources_default_0 constant* sources_1 [[buffer(0)]])
-{
-    thread KernelContext_0 kernelContext_0;
-    (&kernelContext_0)->destination_0 = destination_1;
-    (&kernelContext_0)->sources_0 = sources_1;
-    uint sv_groupindex_0 = (sv_groupthreadid_0[int(2)] + sv_groupthreadid_0[int(1)]) * 64U + sv_groupthreadid_0[int(0)];
-    if(sv_groupindex_0 >= 4U)
-    {
-        return;
+    fn bindless_msl() -> &'static str {
+        crcbl_shaders::BINDLESS_PROBE
+            .msl()
+            .expect("bindless_probe.slang declares msl in its target line")
     }
-    uint source_0 = group_0.x;
-    if(source_0 >= 4U)
-    {
-        return;
-    }
-    *((&kernelContext_0)->destination_0+(source_0 * 4U + sv_groupindex_0)) = (&(&kernelContext_0)->sources_0->items_0)->data_0[source_0][sv_groupindex_0];
-    return;
-}
-
-"#;
-
-    /// Source buffers the probe's argument buffer points at. Four, because
-    /// [`BINDLESS_MSL`]'s `if(source_0 >= 4U)` returns above that.
-    #[cfg(feature = "mtl-e2e")]
-    /// The table length [`BINDLESS_MSL`] declares.
-    ///
-    /// The shader says `StructuredBuffer<uint> items[64]`, so the argument
-    /// buffer is 64 device addresses wide whatever fraction of it a bind fills
-    /// — which is how a bindless table is used in practice, a capacity declared
-    /// once and a count chosen per bind.
-    /// [`the_probes_table_length_matches_the_shader_it_binds`] is what keeps
-    /// this number and the MSL from drifting apart.
-    const BINDLESS_TABLE: u32 = 64;
-
-    /// [`BINDLESS_TABLE`] is the length [`BINDLESS_MSL`] actually declares.
-    ///
-    /// Two constants describing one thing, and the MSL is a pasted artifact
-    /// nobody edits by eye — so a regenerated shader with a different bound
-    /// would leave the argument buffer sized for the old one, which is an
-    /// out-of-bounds table rather than a failing assertion.
-    ///
-    /// Needs no device — but this module is `#[cfg(target_os = "macos")]`, so
-    /// it compiles and runs only on the Mac jobs, not in a Linux `cargo test`.
-    /// Not `#[ignore]`d, so it runs there without `--run-ignored`.
-    #[cfg(feature = "mtl-e2e")]
-    #[test]
-    fn the_probes_table_length_matches_the_shader_it_binds() {
-        let wanted = format!("array<uint device*, int({BINDLESS_TABLE})>");
-        assert!(
-            BINDLESS_MSL.contains(&wanted),
-            "BINDLESS_TABLE is {BINDLESS_TABLE}, so the MSL should declare {wanted:?} — the              shader was regenerated with a different bound, or lowered to a shape this no longer              recognises:\n{BINDLESS_MSL}"
-        );
-    }
-
-    const BINDLESS_SOURCES: u32 = 4;
-
-    /// Words each source buffer holds, and words each threadgroup copies.
-    /// Four, because [`BINDLESS_MSL`]'s `if(sv_groupindex_0 >= 4U)` returns
-    /// above that.
-    #[cfg(feature = "mtl-e2e")]
-    const BINDLESS_WORDS: u32 = 4;
-
-    /// Threads per threadgroup, which is [`BINDLESS_MSL`]'s `[numthreads]` and
-    /// therefore not free to differ: Metal derives nothing about thread counts
-    /// from a `[[kernel]]`, so a dispatch that disagreed with the source would
-    /// simply run the wrong shape.
-    #[cfg(feature = "mtl-e2e")]
-    const BINDLESS_THREADS: u32 = 64;
 
     /// What the probe's destination buffer holds before the dispatch, so a
     /// dispatch that writes *nothing* fails instead of passing.
@@ -2144,14 +2572,6 @@ struct KernelContext_0
     /// the top half of every word it makes, and this does not match it.
     #[cfg(feature = "mtl-e2e")]
     const BINDLESS_POISON: u32 = 0xDEAD_BEEF;
-
-    /// Bytes in the `uint` [`BINDLESS_MSL`] reads and writes.
-    #[cfg(feature = "mtl-e2e")]
-    const BINDLESS_WORD_BYTES: u64 = size_of::<u32>() as u64;
-
-    /// Bytes in one entry of the argument buffer, which is one device address.
-    #[cfg(feature = "mtl-e2e")]
-    const BINDLESS_ADDRESS_BYTES: u64 = size_of::<MTLGPUAddress>() as u64;
 
     /// The word source buffer `source` holds at index `word`.
     ///
@@ -2165,43 +2585,38 @@ struct KernelContext_0
         0x00BD_0000 | (source << 8) | word
     }
 
-    /// **Whether this device will read four separate buffers through one
-    /// argument buffer holding an unbounded array of device pointers.**
+    /// **Whether this device reads [`SOURCE_COUNT`] separate buffers through
+    /// one argument buffer holding an array of device addresses.**
     ///
-    /// # This is a measurement and moves nothing
+    /// # The construction this module performs, encoded by hand
     ///
-    /// This module's header takes flat argument tables over argument buffers,
-    /// and [`MetalDevice::create_bind_group_impl`] refuses
-    /// [`BindGroupDesc::variable_count`] because "this backend binds flat
-    /// argument tables". Both said the argument-buffer road becomes the right
-    /// one once `crcbl-shaders` emits `ParameterBlock`-shaped MSL, which it now
-    /// does — so what remains for
+    /// `create_bind_group_layout` accepts a
+    /// [`BindingFlags::VARIABLE_COUNT`] slot now, and
     /// [`Capability::BindlessDescriptorArray`](crcbl_hal::Capability::BindlessDescriptorArray)
-    /// is this backend's own refusal at `create_bind_group_layout`, not the
-    /// toolchain. Nothing here had ever asked the device whether the shape is
-    /// legal at all.
-    ///
-    /// So this is `crcbl_mtl::device`'s
-    /// `an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`
-    /// applied to bindless: prove the hardware path runs *before* committing a
-    /// design that rests on it. **It changes no capability row, reports no
-    /// feature, and nothing in this crate calls what it exercises.**
+    /// says so — so this is no longer a measurement of something nothing uses.
+    /// What it still is, and what keeps it worth its lines, is the *narrowest*
+    /// statement of that construction: the same committed MSL, the same table
+    /// of `gpuAddress` values, the same `useResource:` calls and the same two
+    /// buffer indices, with no bind group, pipeline layout or shader module in
+    /// between. `crcbl`'s `hal_seam_e2e` drives the whole path through the
+    /// seam; when the two disagree, the difference between them is where the
+    /// defect is.
     ///
     /// # The argument buffer is a table of `gpuAddress` values
     ///
-    /// [`BINDLESS_MSL`]'s `Sources_default_0` is a flexible array member of
-    /// `uint device*`, which is to say sixty-four-bit device addresses and
-    /// nothing else — no `[[id(n)]]`, no textures, no samplers. That is the
-    /// Metal 3 argument-buffer layout, and the CPU writes it by storing
-    /// [`MTLBuffer::gpuAddress`] values into an ordinary buffer.
+    /// The artifact's `Sources_default_0` holds an
+    /// `array<uint device*, int(SOURCE_CAPACITY)>` — sixty-four-bit device
+    /// addresses and nothing else, no `[[id(n)]]`, no textures, no samplers.
+    /// That is the Metal 3 argument-buffer layout, and the CPU writes it by
+    /// storing [`MTLBuffer::gpuAddress`] values into an ordinary buffer.
     ///
     /// **`MTLArgumentEncoder` is not an alternative here**, which is why the
-    /// simpler-looking call is also the only one: `newArgumentEncoderWithBufferIndex:`
-    /// encodes the MSL 2.x `[[id(n)]]` layout, and it derives a stride and a
-    /// size from the declared struct — a flexible array member declares
-    /// neither. The addresses are read back and asserted non-zero before they
-    /// are stored, so a device that answers nothing to `gpuAddress` is reported
-    /// as that rather than as a kernel reading garbage.
+    /// simpler-looking call is also the only one:
+    /// `newArgumentEncoderWithBufferIndex:` encodes the MSL 2.x `[[id(n)]]`
+    /// layout, whose stride a `metal::array` of pointers does not declare. The
+    /// addresses are read back and asserted non-zero before they are stored, so
+    /// a device that answers nothing to `gpuAddress` is reported as that rather
+    /// than as a kernel reading garbage.
     ///
     /// # Residency is explicit, and that is the pairing being tested
     ///
@@ -2209,9 +2624,10 @@ struct KernelContext_0
     /// so the sources are not automatically resident the way a directly bound
     /// buffer is — this module's header states that consequence and this is the
     /// call it names. Every source goes through `useResource:usage:` with
-    /// [`MTLResourceUsage::Read`] before the dispatch. Omitting it is the
-    /// classic way a bindless dispatch reads garbage or page-faults, so its
-    /// presence is part of what "the device can do this" means.
+    /// [`MTLResourceUsage::Read`] before the dispatch, exactly as
+    /// [`apply_compute`] does for a bound group. Omitting it is the classic way
+    /// a bindless dispatch reads garbage or page-faults, so its presence is
+    /// part of what "the device can do this" means.
     ///
     /// # What turns it red, and how that was confirmed
     ///
@@ -2228,37 +2644,28 @@ struct KernelContext_0
     ///   [`crate::fault::describe`] printing the reason — a faulted submission
     ///   arrives as a named failure, not as a readback of the poison pattern.
     ///
-    /// **How that was confirmed, and how far the confirmation goes.** By
-    /// construction, not by execution: this was written on Linux, where the
-    /// crate compiles for `aarch64-apple-darwin` and runs nothing. What was
-    /// actually checked is that [`bindless_word`] and [`BINDLESS_POISON`]
-    /// share no value and that neither is zero, so the untouched destination,
-    /// the zeroed destination and the mis-indexed destination are each a
-    /// different vector from the expected one. The gate that says the code
-    /// compiles *was* watched fail and pass — a deliberate type error, then its
-    /// removal. **None of the three red paths has been observed going red on
-    /// hardware, because nothing in this repository can run them.**
+    /// **Every refusal is a failure now, and that is the change this slice
+    /// makes to the probe.** It used to *print* a refusal from
+    /// `newLibraryWithSource:options:error:` or
+    /// `newComputePipelineStateWithFunction:error:` and return, because nothing
+    /// in this backend claimed the shape worked and reporting a fact about
+    /// Metal by turning a job red would have been reporting the answer as a
+    /// defect. `crcbl_mtl::adapter` now reports
+    /// [`Features::DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING)
+    /// and `create_bind_group_layout` honours the layouts it promises, so a
+    /// device that will not compile this kernel is a promise this crate has
+    /// broken — which is exactly what an assertion is for.
     ///
-    /// # If the device refuses
-    ///
-    /// That is a result and it is the one this probe is worth running for. A
-    /// refusal from `newLibraryWithSource:options:error:` or
-    /// `newComputePipelineStateWithFunction:error:` **prints Metal's own
-    /// `NSError` text and returns**, rather than failing.
-    ///
-    /// That is not a check wired to nothing, and the line is worth being exact
-    /// about. Nothing in this backend yet claims an unbounded argument-buffer
-    /// array works — `create_bind_group_impl` refuses `variable_count` and
-    /// `Capability::BindlessDescriptorArray` is `No` — so a refusal contradicts
-    /// no promise this crate makes; it is a fact about Metal that the probe was
-    /// written to go and collect, and failing the job to report it would be
-    /// reporting the answer as a defect. `adapter.rs`'s capability probes print
-    /// device facts the same way. **Everything past the front end is asserted
-    /// hard**, because once Metal has accepted the kernel a wrong readback is
-    /// this backend's own bug.
-    ///
-    /// The follow-up either way is to assert what the runner actually said —
-    /// which needs the text, and this is how the text is obtained.
+    /// **How far the confirmation goes.** By construction, not by execution:
+    /// this was written on Linux, where the crate compiles for
+    /// `aarch64-apple-darwin` and runs nothing. What was actually checked is
+    /// that [`bindless_word`] and [`BINDLESS_POISON`] share no value and that
+    /// neither is zero, so the untouched destination, the zeroed destination
+    /// and the mis-indexed destination are each a different vector from the
+    /// expected one. The gate that says the code compiles *was* watched fail
+    /// and pass — a deliberate type error, then its removal. **None of the red
+    /// paths has been observed going red on hardware, because nothing in this
+    /// repository can run them.**
     ///
     /// nextest captures a passing test's stdout, so read the addresses and the
     /// destination words with `--success-output immediate`, which is what
@@ -2269,7 +2676,12 @@ struct KernelContext_0
     #[cfg(feature = "mtl-e2e")]
     #[test]
     #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_kernel_reads_four_buffers_through_an_unbounded_argument_buffer_array() {
+    fn a_kernel_reads_every_bound_buffer_through_one_argument_buffer_array() {
+        use crcbl_shaders::bindless_probe::{
+            DESTINATION_BYTES, SOURCE_BYTES, SOURCE_CAPACITY, SOURCE_COUNT, WORDS_PER_SOURCE,
+            WORKGROUP_SIZE,
+        };
+
         // `crate::device::tests::open_device`, not this module's, because this
         // is the one test here that submits a command buffer: what that one
         // returns asserts at teardown that Metal interposed its validation
@@ -2284,53 +2696,39 @@ struct KernelContext_0
         );
         println!("crcbl-mtl bindless: device={name:?}");
 
-        // Half of the question is whether the front end accepts the flexible
-        // array member at all. A refusal is an answer; see the doc comment.
-        let library =
-            match raw.newLibraryWithSource_options_error(&NSString::from_str(BINDLESS_MSL), None) {
-                Ok(library) => library,
-                Err(error) => {
-                    // Printed rather than asserted, and the distinction is what this
-                    // probe is for. A refusal here is a fact about Metal, not a
-                    // regression in this backend — nothing yet claims the shape
-                    // works, so failing would turn the job red to report an answer
-                    // the probe was written to go and get. `adapter.rs`'s
-                    // capability probes report device facts the same way. Every
-                    // assertion below stays hard: once the front end has accepted
-                    // the kernel, a wrong readback IS this backend's defect.
-                    println!(
-                        "crcbl-mtl bindless: newLibraryWithSource:options:error: REFUSED the \
-                     unbounded argument-buffer array — {error}"
-                    );
-                    return;
-                }
-            };
+        let msl = bindless_msl();
+        let library = raw
+            .newLibraryWithSource_options_error(&NSString::from_str(msl), None)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Metal's front end refused the committed msl/bindless_probe.metal, which this \
+                     backend reports DESCRIPTOR_INDEXING and accepts VARIABLE_COUNT layouts on the \
+                     strength of — {error}\n{msl}"
+                )
+            });
         let function = library
             .newFunctionWithName(&NSString::from_str("computeMain"))
-            .expect("BINDLESS_MSL declares a [[kernel]] named computeMain");
-        let pipeline = match raw.newComputePipelineStateWithFunction_error(&function) {
-            Ok(pipeline) => pipeline,
-            Err(error) => {
-                println!(
-                    "crcbl-mtl bindless: the front end compiled the kernel and \
-                     newComputePipelineStateWithFunction:error: REFUSED to specialise it — \
-                     {error}"
-                );
-                return;
-            }
-        };
+            .expect("bindless_probe.slang declares a [[kernel]] named computeMain");
+        let pipeline = raw
+            .newComputePipelineStateWithFunction_error(&function)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the front end compiled the kernel and \
+                     newComputePipelineStateWithFunction:error: refused to specialise it — {error}"
+                )
+            });
         let allowed = pipeline.maxTotalThreadsPerThreadgroup();
-        let wanted = to_ns(u64::from(BINDLESS_THREADS));
+        let wanted = to_ns(u64::from(WORKGROUP_SIZE));
         assert!(
             allowed >= wanted,
             "the kernel's maxTotalThreadsPerThreadgroup is {allowed}, below the {wanted} threads \
-             BINDLESS_MSL declares, so the dispatch below would raise rather than fail"
+             bindless_probe.slang declares, so the dispatch below would raise rather than fail"
         );
 
         // What the kernel must land in the destination, in the order
-        // `destination[source * 4 + thread]` writes them.
-        let expected: Vec<u32> = (0..BINDLESS_SOURCES)
-            .flat_map(|source| (0..BINDLESS_WORDS).map(move |word| bindless_word(source, word)))
+        // `destination[source * WORDS_PER_SOURCE + thread]` writes them.
+        let expected: Vec<u32> = (0..SOURCE_COUNT)
+            .flat_map(|source| (0..WORDS_PER_SOURCE).map(move |word| bindless_word(source, word)))
             .collect();
 
         // Shared and cached: the CPU writes all three allocations below and
@@ -2338,17 +2736,16 @@ struct KernelContext_0
         // maps to — and it goes through the same `conv` helper every `MTLBuffer`
         // this backend allocates goes through.
         let options = crate::conv::resource_options(MemoryLocation::HostReadback);
-        let source_bytes = u64::from(BINDLESS_WORDS) * BINDLESS_WORD_BYTES;
-        let sources: Vec<Retained<ProtocolObject<dyn MTLBuffer>>> = (0..BINDLESS_SOURCES)
+        let sources: Vec<Retained<ProtocolObject<dyn MTLBuffer>>> = (0..SOURCE_COUNT)
             .map(|source| {
                 let buffer = raw
-                    .newBufferWithLength_options(to_ns(source_bytes), options)
-                    .expect("a four-word shared buffer");
+                    .newBufferWithLength_options(to_ns(SOURCE_BYTES), options)
+                    .expect("a shared buffer of one source's words");
                 buffer.setLabel(Some(&NSString::from_str("crcbl-mtl bindless source")));
-                let words: Vec<u32> = (0..BINDLESS_WORDS)
+                let words: Vec<u32> = (0..WORDS_PER_SOURCE)
                     .map(|word| bindless_word(source, word))
                     .collect();
-                // SAFETY: `contents` covers the `source_bytes` this buffer was
+                // SAFETY: `contents` covers the `SOURCE_BYTES` this buffer was
                 // just created with and `words` is exactly that many bytes; the
                 // allocation is `Shared`, so the pointer is CPU-writable; and
                 // no GPU work has been submitted against it yet.
@@ -2363,7 +2760,7 @@ struct KernelContext_0
             })
             .collect();
 
-        // The argument buffer: `BINDLESS_SOURCES` device addresses and nothing
+        // The argument buffer: one device address per bound source and nothing
         // else, which is what `Sources_default_0` declares.
         let addresses: Vec<MTLGPUAddress> =
             sources.iter().map(|source| source.gpuAddress()).collect();
@@ -2373,22 +2770,18 @@ struct KernelContext_0
              table would point the kernel at nothing: {addresses:#X?}"
         );
         println!("crcbl-mtl bindless: gpuAddress={addresses:#X?}");
-        // The shader's whole declared table, not the four entries this probe
-        // fills. `Sources_default_0` is now a fixed `array<uint device*, 64>`,
-        // so the argument buffer must be that size however few of its slots are
-        // used — a buffer sized to the prefix would leave the struct's tail off
-        // the end of the allocation.
+        // The shader's whole declared table, not the entries this probe fills —
+        // the same rule `BindlessTable::new` sizes a real one by, and for the
+        // same reason: a buffer sized to the prefix would leave the struct's
+        // tail off the end of the allocation.
         let table = raw
-            .newBufferWithLength_options(
-                to_ns(u64::from(BINDLESS_TABLE) * BINDLESS_ADDRESS_BYTES),
-                options,
-            )
+            .newBufferWithLength_options(to_ns(u64::from(SOURCE_CAPACITY) * ADDRESS_BYTES), options)
             .expect("an argument buffer of the shader's declared table size");
         table.setLabel(Some(&NSString::from_str(
             "crcbl-mtl bindless argument buffer",
         )));
         // SAFETY: as above — `contents` covers the bytes this buffer was just
-        // created with, `addresses` is exactly that many, the allocation is
+        // created with, `addresses` is fewer than that many, the allocation is
         // `Shared`, and nothing has been submitted against it.
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -2401,13 +2794,13 @@ struct KernelContext_0
         // Primed with the poison, so "the dispatch wrote nothing" cannot reach
         // the comparison looking like a pass. See the doc comment.
         let destination = raw
-            .newBufferWithLength_options(to_ns(u64::from(BINDLESS_SOURCES) * source_bytes), options)
-            .expect("a sixteen-word shared buffer");
+            .newBufferWithLength_options(to_ns(DESTINATION_BYTES), options)
+            .expect("a shared buffer of the destination's words");
         destination.setLabel(Some(&NSString::from_str("crcbl-mtl bindless destination")));
         let poison = vec![BINDLESS_POISON; expected.len()];
-        // SAFETY: as above, for a buffer created with
-        // `BINDLESS_SOURCES * source_bytes` bytes — which is `expected.len()`
-        // words, because `expected` has one word per source per index.
+        // SAFETY: as above, for a buffer created with `DESTINATION_BYTES` —
+        // which is `expected.len()` words, because `expected` has one word per
+        // source per index and `DESTINATION_WORDS` is that product.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 poison.as_ptr(),
@@ -2426,12 +2819,15 @@ struct KernelContext_0
         // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
         // the offset nor the index, and because the buffer's contents must be
         // of the type the shader declared. Both offsets are zero; both indices
-        // are the ones BINDLESS_MSL's entry point names — `[[buffer(0)]]` for
-        // `sources_1` and `[[buffer(1)]]` for `destination_1`; and both buffers
-        // are `Retained` locals held across the `waitUntilCompleted` below.
+        // are the ones the committed artifact's entry point names —
+        // `[[buffer(0)]]` for `destination_1` and `[[buffer(1)]]` for
+        // `sources_1`, which is the ascending `(set, binding)` order this
+        // backend binds by and `the_bindless_probes_argument_buffer_lands_at_metal_buffer_one`
+        // computes; and both buffers are `Retained` locals held across the
+        // `waitUntilCompleted` below.
         unsafe {
-            encoder.setBuffer_offset_atIndex(Some(&table), 0, 0);
-            encoder.setBuffer_offset_atIndex(Some(&destination), 0, 1);
+            encoder.setBuffer_offset_atIndex(Some(&destination), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(&table), 0, 1);
         }
         // The residency half, and it is not optional: the kernel reaches the
         // sources through raw addresses, which Metal cannot follow.
@@ -2440,12 +2836,12 @@ struct KernelContext_0
         }
         encoder.dispatchThreadgroups_threadsPerThreadgroup(
             MTLSize {
-                width: to_ns(u64::from(BINDLESS_SOURCES)),
+                width: to_ns(u64::from(SOURCE_COUNT)),
                 height: 1,
                 depth: 1,
             },
             MTLSize {
-                width: to_ns(u64::from(BINDLESS_THREADS)),
+                width: to_ns(u64::from(WORKGROUP_SIZE)),
                 height: 1,
                 depth: 1,
             },
@@ -2494,7 +2890,7 @@ struct KernelContext_0
         );
         assert_eq!(
             written, expected,
-            "the kernel read the wrong words through the unbounded argument-buffer array"
+            "the kernel read the wrong words through the argument-buffer array"
         );
     }
 }

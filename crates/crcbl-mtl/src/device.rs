@@ -1166,9 +1166,18 @@ impl Device for MetalDevice {
                 Features::PUSH_CONSTANTS,
                 "this device reports no PUSH_CONSTANTS",
             ),
-            Capability::BindlessDescriptorArray => Support::No(
-                "this backend binds Metal's flat argument tables, which have a fixed length and \
-                 no runtime-sized array (the Metal argument-buffer slice)",
+            // `create_bind_group_layout` turns a VARIABLE_COUNT slot into one
+            // argument buffer of `MTLBuffer::gpuAddress` values, the bind group
+            // fills it and keeps its contents resident with `useResource:`, and
+            // `crcbl_mtl::binding` carries the construction. The gate is the
+            // device's: the addresses are a Metal 3 property and a dynamically
+            // indexed argument buffer is Tier 2, which is what `crate::adapter`
+            // reads the flag off.
+            Capability::BindlessDescriptorArray => gated(
+                Features::DESCRIPTOR_INDEXING,
+                "this device reports no DESCRIPTOR_INDEXING; crcbl_mtl::adapter reports it only \
+                 for argument buffers at MTLArgumentBuffersTier::Tier2 on an MTLGPUFamily::Metal3 \
+                 device, which is what MTLBuffer::gpuAddress needs",
             ),
             Capability::StorageImageBinding => Support::Yes,
             Capability::PolygonModeLine => gated(
@@ -1871,10 +1880,13 @@ impl Device for MetalDevice {
         // A sampler's argument-buffer support is fixed at creation and cannot
         // be retrofitted, so a sampler made now that could not be written into
         // an argument buffer is one a later slice would have to re-create.
-        // `crcbl_mtl::binding` binds flat argument tables and does not need
-        // this; it is asked for anyway, keyed off the device's own tier query
-        // rather than off a reported feature, because the feature it used to be
-        // keyed off is exactly the one the binding slice took away.
+        // `crcbl_mtl::binding` puts no sampler in an argument buffer — a
+        // descriptor array of anything but buffers is refused there, because a
+        // sampler is reached through an `MTLResourceID` rather than an
+        // `MTLBuffer::gpuAddress` — so nothing needs this yet. It is asked for
+        // anyway, keyed off the device's own tier query rather than off a
+        // reported feature, so that the slice which does put one there finds
+        // every existing sampler already able to go.
         if self.inner.raw.argumentBuffersSupport() == MTLArgumentBuffersTier::Tier2 {
             descriptor.setSupportArgumentBuffers(true);
         }
@@ -1915,9 +1927,9 @@ impl Device for MetalDevice {
         self.destroy_shader_module_impl(module);
     }
 
-    /// Places a set's bindings in Metal's flat argument tables. See
-    /// `crcbl_mtl::binding` for the model and for why a bindless layout is
-    /// refused.
+    /// Places a set's bindings in Metal's flat argument tables, and a
+    /// `VARIABLE_COUNT` slot in an argument buffer of its own. See
+    /// `crcbl_mtl::binding` for both models and the evidence behind them.
     fn create_bind_group_layout(
         &self,
         desc: &BindGroupLayoutDesc<'_>,

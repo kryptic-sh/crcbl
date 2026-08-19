@@ -34,7 +34,7 @@
 use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSProcessInfo, NSUInteger};
-use objc2_metal::{MTLDevice, MTLDeviceLocation, MTLGPUFamily};
+use objc2_metal::{MTLArgumentBuffersTier, MTLDevice, MTLDeviceLocation, MTLGPUFamily};
 
 /// Sample counts to probe, coarsest first.
 ///
@@ -239,23 +239,29 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   is a way to count into one: the seam has no begin/end query verb on any
 ///   backend, which `crcbl_mtl::query` and `Device::create_query_set` both say.
 ///
+/// * [`Features::DESCRIPTOR_INDEXING`] — **withdrawn by the binding slice and
+///   restored by the argument-buffer one, which is the entry worth reading
+///   before changing anything here.** MTL1 reported it from
+///   `argumentBuffersSupport`, a true statement about the *hardware*; the
+///   binding slice made it a false one about this *backend*, because bind
+///   groups were flat argument tables with no runtime-sized array and
+///   `crcbl_hal::pipeline` is explicit that a backend which refuses
+///   [`BindingFlags`](crcbl_hal::BindingFlags) must not report the feature.
+///   `crcbl_mtl::binding` now honours a `VARIABLE_COUNT` slot as an argument
+///   buffer of `MTLBuffer::gpuAddress` values, so the flag is earned again —
+///   and the two queries behind it are the two things that construction needs
+///   rather than a proxy for it. `argumentBuffersSupport` must be
+///   `MTLArgumentBuffersTier::Tier2`, which is where an argument buffer may
+///   hold a dynamically indexed array at all; and `MTLGPUFamily::Metal3` must
+///   be supported, because `gpuAddress` is a Metal 3 property and there would
+///   be no address to write. That second gate is the same one
+///   [`Features::BUFFER_DEVICE_ADDRESS`] rides on, and it is also what keeps
+///   this module inside the macOS floor above: `supportsFamily:` answers
+///   `false` for a family the system does not know, so the macOS 13 selector is
+///   only ever sent to a system that has it.
+///
 /// # Absent, with the reason for each
 ///
-/// * [`Features::DESCRIPTOR_INDEXING`] — **removed by the binding slice, and
-///   this is the entry worth reading before changing anything here.**
-///   `argumentBuffersSupport` does report `MTLArgumentBuffersTier::Tier2` on
-///   every machine this backend targets, and MTL1 reported the flag from it.
-///   What has changed is that bind groups now exist, and `crcbl_mtl::binding`
-///   binds Metal's **flat argument tables** rather than argument buffers —
-///   because every MSL artifact `crcbl-shaders` commits declares plain
-///   `[[buffer(n)]]`/`[[texture(n)]]`/`[[sampler(n)]]` arguments, which an
-///   argument buffer cannot feed. A flat table has no runtime-sized array, so
-///   `create_bind_group_layout` refuses every
-///   [`BindingFlags`](crcbl_hal::BindingFlags), and `crcbl_hal::pipeline` is
-///   explicit that a backend which refuses them must not report the feature.
-///   Reporting it while refusing the layouts it promises is the shape this
-///   crate treats as a lie. It comes back with argument buffers, which need
-///   `crcbl-shaders` to emit MSL declaring them.
 /// * [`Features::DRAW_INDIRECT_COUNT`] — the count comes from **GPU memory**,
 ///   and Metal's only execution that reads one is
 ///   `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
@@ -284,8 +290,16 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   routes it into `log` yet.
 fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     let mut out = Features::empty();
-    if device.supportsFamily(MTLGPUFamily::Metal3) {
+    let metal3 = device.supportsFamily(MTLGPUFamily::Metal3);
+    if metal3 {
         out |= Features::BUFFER_DEVICE_ADDRESS;
+    }
+    // Both halves are device queries and both are load-bearing: the tier is
+    // what makes a dynamically indexed argument buffer legal, and Metal 3 is
+    // what makes `MTLBuffer::gpuAddress` — the value `crcbl_mtl::binding` fills
+    // the table with — exist at all. See the doc comment.
+    if metal3 && device.argumentBuffersSupport() == MTLArgumentBuffersTier::Tier2 {
+        out |= Features::DESCRIPTOR_INDEXING;
     }
     if device.supportsBCTextureCompression() {
         out |= Features::TEXTURE_COMPRESSION_BC;
@@ -357,10 +371,11 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
 /// cap is Metal's own ceiling because [`Features::SAMPLER_ANISOTROPY`] is
 /// reported, `max_push_constant_size` is
 /// [`argument::MAX_PUSH_CONSTANT_BYTES`](crate::argument::MAX_PUSH_CONSTANT_BYTES)
-/// because [`Features::PUSH_CONSTANTS`] is, and the bindless capacity and the
-/// timestamp period stay at the floor's zeroes because their features are
-/// absent — `max_bindless_descriptors` since the binding slice, which took
-/// [`Features::DESCRIPTOR_INDEXING`] off for the reason `features_of` gives.
+/// because [`Features::PUSH_CONSTANTS`] is,
+/// `max_bindless_descriptors` is
+/// [`binding::MAX_BINDLESS_DESCRIPTORS`](crate::binding::MAX_BINDLESS_DESCRIPTORS)
+/// because [`Features::DESCRIPTOR_INDEXING`] is, and the timestamp period stays
+/// at the floor's zero because its feature is absent.
 ///
 /// The push-constant figure is the **call's** documented ceiling rather than a
 /// share of anything: Apple's feature-set tables cap inlined buffer contents at
@@ -384,6 +399,11 @@ fn limits_of(device: &ProtocolObject<dyn MTLDevice>, features: Features) -> Limi
             crate::argument::MAX_PUSH_CONSTANT_BYTES
         } else {
             floor.max_push_constant_size
+        },
+        max_bindless_descriptors: if features.contains(Features::DESCRIPTOR_INDEXING) {
+            crate::binding::MAX_BINDLESS_DESCRIPTORS
+        } else {
+            floor.max_bindless_descriptors
         },
         max_sample_count: max_sample_count(device),
         max_compute_workgroup_size: [

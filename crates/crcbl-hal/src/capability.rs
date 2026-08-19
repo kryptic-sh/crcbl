@@ -977,14 +977,11 @@ pub const DIVERGENCES: &[Divergence] = &[
               layouts and nothing beside them. The substitute is a dynamic-offset uniform buffer, \
               which the seam already carries as bind-group dynamic offsets",
     },
-    Divergence {
-        capability: Capability::BindlessDescriptorArray,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::Unwritten,
-        why: "Metal's argument buffers do carry arrays of resources, and this backend binds flat \
-              argument tables instead, which have a fixed length and no runtime-sized array (the \
-              Metal argument-buffer slice)",
-    },
+    // The Metal row that used to sit here is gone, and it left the way a row is
+    // meant to: `crcbl-mtl` binds a VARIABLE_COUNT slot as one argument buffer
+    // of `MTLBuffer::gpuAddress` values and keeps its contents resident with
+    // `useResource:`, so the backend answers `Support::Yes` wherever the device
+    // reports `DESCRIPTOR_INDEXING`.
     Divergence {
         capability: Capability::BindlessDescriptorArray,
         backend: BackendKind::Wgpu,
@@ -1753,11 +1750,6 @@ mod tests {
         ),
         (
             Capability::TaskShaderStage,
-            BackendKind::Metal,
-            DivergenceKind::Unwritten,
-        ),
-        (
-            Capability::BindlessDescriptorArray,
             BackendKind::Metal,
             DivergenceKind::Unwritten,
         ),

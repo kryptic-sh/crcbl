@@ -521,12 +521,19 @@ pub(crate) mod tests {
     ///
     /// **The gap is now reported rather than refused, and this test is what
     /// records where it sits.** [`Features::MULTI_DRAW_INDIRECT`] is reported,
-    /// because `crcbl_mtl::draw`'s loop is the call behind it;
-    /// [`Features::DESCRIPTOR_INDEXING`] has been *withdrawn*, because bind
-    /// groups bind Metal's flat argument tables and refuse every bindless
-    /// layout; and [`Features::DRAW_INDIRECT_COUNT`] was never reported and
-    /// still cannot be. All three are asserted rather than only the absent
-    /// ones, so a change in either direction fails here.
+    /// because `crcbl_mtl::draw`'s loop is the call behind it; and
+    /// [`Features::DRAW_INDIRECT_COUNT`] was never reported and still cannot
+    /// be. Both are asserted rather than only the absent one, so a change in
+    /// either direction fails here.
+    ///
+    /// [`Features::DESCRIPTOR_INDEXING`] is asserted differently, because it is
+    /// the one flag here whose answer is the *device's*: `crcbl_mtl::adapter`
+    /// reports it for argument buffers at `MTLArgumentBuffersTier::Tier2` on an
+    /// `MTLGPUFamily::Metal3` device, and a lesser Mac is entitled to withhold
+    /// it. So what is pinned is the pairing — the flag and the
+    /// [`BindingModel`] derived from it must agree — which fails if the flag
+    /// stops being reported *or* if it is reported while the selector says
+    /// otherwise.
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_default_device_desc_opens_and_the_rest_degrades() {
@@ -550,20 +557,31 @@ pub(crate) mod tests {
             caps.features
         );
         assert!(
-            !caps.supports(Features::DESCRIPTOR_INDEXING),
-            "bind groups are flat argument tables, so bindless stays withdrawn: {:?}",
-            caps.features
-        );
-        assert!(
             caps.supports(Features::MULTI_DRAW_INDIRECT),
             "the indirect loop earns this one: {:?}",
             caps.features
         );
+        // Printed, because which of the two this device is decides the binding
+        // model below and a reader of the log should not have to derive it.
+        let bindless = caps.supports(Features::DESCRIPTOR_INDEXING);
+        println!(
+            "crcbl-mtl: DESCRIPTOR_INDEXING={bindless} on {:?}",
+            caps.features
+        );
 
-        // The paths those absences select, named rather than implied: this is
+        // The paths those features select, named rather than implied: this is
         // what the renderer would record on this device today.
         assert_eq!(caps.geometry_path(), GeometryPath::IndirectPerBatch);
-        assert_eq!(caps.binding_model(), BindingModel::ArrayPages);
+        assert_eq!(
+            caps.binding_model(),
+            if bindless {
+                BindingModel::Bindless
+            } else {
+                BindingModel::ArrayPages
+            },
+            "the binding model is derived from DESCRIPTOR_INDEXING, so the two cannot disagree \
+             unless one of them stopped being read"
+        );
         assert_eq!(caps.lighting_path(), LightingPath::Rasterised);
     }
 

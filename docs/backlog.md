@@ -376,7 +376,7 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Eleven blockers: dx12 5, Metal 6, WebGPU 0.** That is what stands between here
+**Nine blockers: dx12 4, Metal 5, WebGPU 0.** That is what stands between here
 and the deletion, and it can now be asked rather than re-derived.
 
 **Five contradictions were settled against the installed interfaces**, not
@@ -880,7 +880,7 @@ So the decision:
   Exactly the shape `crcbl_mtl::quirk` already uses — that module's rule is that
   a quirk needs a measurement contradicting an unconditional API guarantee, and
   says what was measured, on which device, and what every other device does. It
-  closes two blockers (ten rows to eight). The price: CI would report a
+  closes two blockers (nine rows to seven). The price: CI would report a
   capability **no CI job can ever exercise**, since every dx12 job is WARP. That
   is a real loss — it is the failure mode the parity mechanism exists to prevent
   — and it should be a deliberate choice, not a side effect.
@@ -1598,7 +1598,7 @@ need it.
 — and must shrink the dx12-local test asserting every remaining refusal names
 itself.
 
-### Metal's nine blockers, ordered — and a hole in the parity mechanism
+### Metal's five blockers, ordered — and a hole in the parity mechanism
 
 Planned 2026-08-18 against `objc2-metal 0.3.2` and `wgpu-hal 30.0.0` on disk.
 
@@ -1898,7 +1898,7 @@ scoring a pass it did not earn, which is the right behaviour and also means the
 Metal arm silently covers two capabilities less than the others.
 
 **What this means for the goal**, and it needs a decision rather than more work:
-four of Metal's nine blockers — two query rows and two mesh rows — are now known
+four of Metal's five blockers — two query rows and two mesh rows — are now known
 to be unprovable on the only Metal machine this project has. The options are a
 hardware macOS runner, an explicit "implemented but unproven here" state that a
 reviewer accepts once, or leaving them open indefinitely. Closing them on a
@@ -2238,21 +2238,37 @@ engines give it its own set. But it does mean recasting `bindless_probe.slang`
 changes the bind groups `crcbl-vk` and `crcbl-dx12` build for it, and those pass
 today.
 
-**The shader half has landed.** `bindless_probe.slang` is a bounded
-`ParameterBlock` of `SOURCE_CAPACITY = 7` at set 1 / binding 0, ships
-`spirv, msl, dxil`, and the seam builds two bind groups for it — 17/17 on an RX
-7900 XTX. The capacity is not a taste: it must exceed `SOURCE_COUNT` or the
-layout's count stops being a ceiling, and Vulkan requires a sized array's layout
-to declare the whole array, so `PORTABLE_STORAGE_BUFFERS_PER_STAGE` (8) minus
-the destination caps it at 7.
+**Both halves have landed.** `bindless_probe.slang` is a bounded
+`ParameterBlock` of `SOURCE_CAPACITY = 7` at set 1 / binding 0 shipping
+`spirv, msl, dxil`, and `crcbl_mtl::binding` binds the table as a Metal argument
+buffer of `gpuAddress` values with `useResource` residency. The capability is
+`granted(DESCRIPTOR_INDEXING)`, reported when the device answers argument-buffer
+`Tier2` **and** `Metal3`, so a lesser Mac says `NotOnThisDevice` rather than the
+backend saying `No`. **The row is gone from `REVIEWED_BLOCKERS`** — nine rows,
+dx12 4 and Metal 5.
 
-**What remains is `crcbl-mtl` alone**: `create_bind_group_layout` refuses
-`BindingFlags` outright, so the seam scores this `Refused` there. Implementing
-it means building the argument buffer the probe already proves — and the probe's
-own `BINDLESS_MSL` is pinned at capacity 64 while the committed artifact is 7,
-so the backend should drive `crcbl_shaders::BINDLESS_PROBE.msl()` and size the
-buffer from the layout's `count` rather than keep a second number. Its test name
-still says "unbounded" and should be renamed then.
+The capacity is not a taste: it must exceed `SOURCE_COUNT` or the layout's count
+stops being a ceiling, and Vulkan requires a sized array's layout to declare the
+whole array, so `PORTABLE_STORAGE_BUFFERS_PER_STAGE` (8) minus the destination
+caps it at 7.
+
+**Nothing in `crcbl-mtl` has executed**, and the flip landed with the
+implementation rather than after it because the two cannot be separated: the
+capability is gated on `DESCRIPTOR_INDEXING`, and withholding the feature makes
+`check_entries` refuse the layout, so the split would be "nothing now,
+everything later". What only the `mtl e2e` run can settle: that the CI Mac
+reports `Tier2` and `Metal3` at all; that Metal takes the table at
+`[[buffer(1)]]` with the destination at `[[buffer(0)]]`, the reverse of the
+indices the probe proved; that `useResource` on the compute encoder covers
+buffers a preceding blit wrote in the same command buffer; and that a
+zero-filled tail passes GPU validation when never read. **The render-side
+`useResource:usage:stages:` arm is compiled and unproven anywhere** — the only
+bindless shader is compute-only.
+
+If it goes red, the revert is three hunks: restore the `Divergence` row and the
+`REVIEWED_BLOCKERS` tuple in `capability.rs`, and delete the `Tier2 && Metal3`
+block in `crcbl_mtl::adapter`'s `features_of`, which turns the path off at the
+gate without touching `binding.rs`.
 
 So **four of six can never go green on the hardware this project has**, whatever
 anyone writes. "Metal fully closed" is not reachable by working harder; it is
@@ -2435,8 +2451,8 @@ and it is the last thing standing between here and goal 3.
 than answering it.** `crcbl-webgpu` now has **zero** divergences —
 `REVIEWED_BLOCKERS` does not name it at all, after `StorageImageBinding` gained
 the seam field it needed and `TimestampQuery` was closed by moving timestamps
-into the pass descriptor. The blocker list is **eleven rows across two
-backends**: dx12 5, Metal 6.
+into the pass descriptor. The blocker list is **nine rows across two backends**:
+dx12 4, Metal 5.
 
 That matters because the browser backend is the one `crcbl-wgpu`'s deletion is
 _about_. The replacement for the path `crcbl-wgpu` used to serve now implements

@@ -1996,6 +1996,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Capability::BindlessDescriptorArray` works on the Metal backend**, taking
+  the parity blocker list from ten rows to nine. `crcbl_mtl::binding` binds a
+  descriptor array as a Metal argument buffer — a table of
+  `MTLBuffer::gpuAddress` values written directly, with `useResource` residency
+  — instead of refusing `BindingFlags` outright. It is reported only where the
+  device answers argument-buffer `Tier2` and `Metal3`; a lesser Mac now answers
+  "not on this device" rather than the backend answering "no".
+
+  `bindless_probe.slang` changed shape to make this possible: its array is a
+  **bounded** `ParameterBlock`, which is the only form Slang lowers to something
+  Metal accepts, and it now ships an MSL artifact. That moves the array to its
+  own descriptor set, so a bind group for it is two groups rather than one.
+
 - **`crcbl_render::grid` draws an infinite reference grid as a screen-space
   pass.** `grid.slang` reconstructs the ground plane per fragment — view ray
   against `y = 0` — and derives line coverage from screen-space derivatives, so

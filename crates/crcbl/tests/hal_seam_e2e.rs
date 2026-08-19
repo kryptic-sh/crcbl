@@ -6821,9 +6821,11 @@ fn bindless_expected() -> Vec<u32> {
 ///
 /// # A refusal can arrive at four different points
 ///
-/// `crcbl-mtl` refuses every [`BindingFlags`](crcbl::hal::BindingFlags) at
-/// `create_bind_group_layout` because it binds Metal's flat argument tables;
-/// `crcbl-webgpu` refuses because WebGPU has no binding arrays at all; and
+/// `crcbl-mtl` **used to** refuse every
+/// [`BindingFlags`](crcbl::hal::BindingFlags) here and no longer does: it binds
+/// the table as a Metal argument buffer of device addresses, and refuses only
+/// the flags it genuinely cannot serve. `crcbl-webgpu` refuses because WebGPU
+/// has no binding arrays at all; and
 /// `crcbl-wgpu` refuses there too, because a wgpu binding array's length is the
 /// layout's fixed count rather than something a group chooses. A backend that
 /// accepted the layout and not the group would refuse at `create_bind_group` —
@@ -7091,10 +7093,9 @@ fn bindless_dispatch(
             // `wgsl` is `None`, and that is the artifact rather than an
             // omission: `crcbl-webgpu` and `crcbl-wgpu` refuse this layout
             // above and could never reach here. The MSL is real — the shader's
-            // array is a `ParameterBlock` precisely so that Metal has something
-            // loadable — even though `crcbl-mtl` still refuses the layout, so
-            // this line stays untaken there until that backend binds an
-            // argument buffer.
+            // array is a bounded `ParameterBlock` precisely so that Metal has
+            // something loadable — and this line is now taken, because
+            // `crcbl-mtl` binds the table as an argument buffer.
             wgsl: crcbl::shaders::BINDLESS_PROBE.wgsl(),
             msl: crcbl::shaders::BINDLESS_PROBE.msl(),
             dxil: &crcbl::shaders::BINDLESS_PROBE.dxil_containers(),

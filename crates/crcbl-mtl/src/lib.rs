@@ -251,16 +251,15 @@
 //! handles for the same reason two devices do, and the tag is what separates
 //! them.
 //!
-//! # Paths: this backend selects the **floor** of every axis, and the binding
-//! slice moved the reason rather than removing it
+//! # Paths: the binding model is earned, the geometry one is not
 //!
 //! `docs/plan/09-backends-metal-dx12.md` specs this backend as fully
 //! GPU-driven, and the hardware supports it.
 //! [`GeometryPath`](crcbl_hal::GeometryPath) and its siblings are *derived*
 //! from [`Features`](crcbl_hal::Features) precisely so that a backend cannot
-//! assert a path it has not earned. Two of the six
-//! [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) features are off, and they
-//! are **not the two that were off before**:
+//! assert a path it has not earned. Which of the six
+//! [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) features are off has moved
+//! twice, and the direction of each move is the point:
 //!
 //! * [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) is now
 //!   **on**. `crcbl_mtl::draw` explains why a loop over
@@ -275,16 +274,18 @@
 //!   an `MTLIndirectCommandBuffer`, and filling that buffer from the seam's
 //!   argument structures needs a compute kernel running *before* the render
 //!   encoder the call happens inside was opened.
-//! * [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) has been
-//!   **withdrawn**, and that is the reversal worth knowing about. MTL1 reported
-//!   it from `argumentBuffersSupport`, which is a true statement about the
-//!   *hardware*; the binding slice makes it a false one about this *backend*,
-//!   because bind groups here are flat argument tables with no runtime-sized
-//!   array, so `create_bind_group_layout` refuses every
-//!   [`BindingFlags`](crcbl_hal::BindingFlags) — and `crcbl_hal::pipeline` says
-//!   a backend that refuses them must not report the feature. It comes back
-//!   with argument buffers, which need `crcbl-shaders` to emit MSL declaring
-//!   them.
+//! * [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) is
+//!   **back on**, and the round trip is the part worth knowing about. MTL1
+//!   reported it from `argumentBuffersSupport`, which is a true statement about
+//!   the *hardware*; the binding slice made it a false one about this
+//!   *backend*, because bind groups were flat argument tables with no
+//!   runtime-sized array and `crcbl_hal::pipeline` says a backend that refuses
+//!   [`BindingFlags`](crcbl_hal::BindingFlags) must not report the feature. It
+//!   came back when `crcbl-shaders` grew MSL declaring an argument buffer and
+//!   `crcbl_mtl::binding` grew the path that fills one — a table of
+//!   `MTLBuffer::gpuAddress` values, kept resident with `useResource:`. The
+//!   flag is now a device query rather than a constant: Tier 2 argument buffers
+//!   on a Metal 3 device, which is what those addresses need.
 //!
 //! [`COMPUTE`](crcbl_hal::Features::COMPUTE) stays on and now means the whole
 //! of it: pipelines build, a pass opens an encoder, and both dispatches are
