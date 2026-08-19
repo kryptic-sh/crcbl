@@ -639,9 +639,11 @@ always the current answer. Read it there. (The blocker total is quoted below
 because the decision turns on it, and it is checked whenever it is touched.)
 
 **Every row carries a kind.** `Divergence` has a `DivergenceKind`: `ApiAbsence`
-(the API cannot express it — its reason must carry the evidence), `Unwritten`,
-`Declined`, and `Unclassified` for rows that cannot be settled without hardware
-nobody here has.
+(the API cannot express it — its reason must carry the evidence), `Unwritten`
+and `Declined`. There was a fourth, `Unclassified`, for rows that could not be
+settled without hardware nobody here has; it emptied on 2026-08-19 when the
+Metal counter-sampling probe's output settled its last two rows, and it was
+removed. See its own entry above — reintroducing it is three small edits.
 
 `parity_blockers()` is the query — a row on vk, dx12, Metal or WebGPU whose kind
 is anything but `ApiAbsence` — and `crcbl-wgpu` is excluded **by construction**
@@ -649,8 +651,12 @@ rather than by a reader remembering. A snapshot test fails when that set
 changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
 which its failure message names.
 
-**Nine blockers: dx12 4, Metal 5, WebGPU 0.** That is what stands between here
-and the deletion, and it can now be asked rather than re-derived.
+**Eight blockers: dx12 4, Metal 4, WebGPU 0** — six `Unwritten`, two `Declined`,
+counted out of `REVIEWED_BLOCKERS` on 2026-08-19 rather than remembered. That is
+what stands between here and the deletion, and it can be asked rather than
+re-derived. This entry said nine for long enough to prove its own point about
+restating numbers: `DrawIndirectCount` on Metal closed when
+`crcbl_mtl::indirect_count` landed, and nothing here noticed.
 
 **Five contradictions were settled against the installed interfaces**, not
 recall — and two of them had been recorded in this file the wrong way round:
@@ -662,14 +668,16 @@ execution range from GPU memory — it has no `countBuffer:` draw, but the count
 is expressible and only the encoding is missing, so that row is `Unwritten` and
 the backend's "(the Metal ICB slice)" was right where this list was wrong.
 
-**The two `Unclassified` rows are Metal's counter-sampled queries.** Whether a
-device samples at all depends on which `MTLCounterSamplingPoint` values it
-reports, and whether `MTLCommonCounterSetStatistic` exists depends on that
-device's `counterSets`. (The seam's half of this is settled: it asks for a
-sample only where an encoder opens and closes, which is what
-`sampleBufferAttachments` express.) Both need a Mac. They block parity
-deliberately: a guess would have read exactly like a checked classification, and
-"nobody has looked" is not "done".
+**The two counter-sampled query rows on Metal were the last `Unclassified` ones,
+and the probe settled them** — both are `Unwritten` since 2026-08-19, and the
+kind itself is gone. What follows is why they were open. Whether a device
+samples at all depends on which `MTLCounterSamplingPoint` values it reports, and
+whether `MTLCommonCounterSetStatistic` exists depends on that device's
+`counterSets`. (The seam's half of this is settled: it asks for a sample only
+where an encoder opens and closes, which is what `sampleBufferAttachments`
+express.) Both need a Mac. They block parity deliberately: a guess would have
+read exactly like a checked classification, and "nobody has looked" is not
+"done".
 
 **Why `Features` cannot be the mechanism on its own.** It is `bitflags`, and a
 bitflag has no exhaustiveness: a backend that never sets a new bit compiles
@@ -2887,8 +2895,9 @@ today.
 buffer of `gpuAddress` values with `useResource` residency. The capability is
 `granted(DESCRIPTOR_INDEXING)`, reported when the device answers argument-buffer
 `Tier2` **and** `Metal3`, so a lesser Mac says `NotOnThisDevice` rather than the
-backend saying `No`. **The row is gone from `REVIEWED_BLOCKERS`** — nine rows,
-dx12 4 and Metal 5.
+backend saying `No`. **The row is gone from `REVIEWED_BLOCKERS`** — which stood
+at nine rows, dx12 4 and Metal 5, on the day that landed. Read the current
+answer out of `REVIEWED_BLOCKERS`; it is eight now.
 
 The capacity is not a taste: it must exceed `SOURCE_COUNT` or the layout's count
 stops being a ceiling, and Vulkan requires a sized array's layout to declare the
@@ -3133,8 +3142,9 @@ deletion.
 than answering it.** `crcbl-webgpu` now has **zero** divergences —
 `REVIEWED_BLOCKERS` does not name it at all, after `StorageImageBinding` gained
 the seam field it needed and `TimestampQuery` was closed by moving timestamps
-into the pass descriptor. The blocker list is **nine rows across two backends**:
-dx12 4, Metal 5.
+into the pass descriptor. The blocker list stood at **nine rows across two
+backends** on the day this was written, dx12 4 and Metal 5; it is eight now, and
+`REVIEWED_BLOCKERS` is the current answer.
 
 That matters because the browser backend is the one `crcbl-wgpu`'s deletion is
 _about_. The replacement for the path `crcbl-wgpu` used to serve now implements
