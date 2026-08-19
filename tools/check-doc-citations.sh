@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Every repository path a markdown doc cites in backticks must exist.
 #
-#   tools/check-doc-citations.sh [file…]      # default: docs/backlog.md
+#   tools/check-doc-citations.sh [file…]   # default: every tracked *.md but the changelog
 #
 # `docs/backlog.md` is the working record, and its worth is that an entry can be
 # acted on months later. A citation that no longer resolves defeats that
@@ -36,13 +36,19 @@ allowed() {
     # Cited *because* it is stale: the entry reports that `docs/code-review.md`
     # still points at a file that no longer exists.
     'crates/crcbl-server/tests/integration.rs') return 0 ;;
+    # The editor is planned, not built. `docs/plan/08-editor.md` is its design.
+    'apps/editor') return 0 ;;
   esac
   return 1
 }
 
+# Default: every tracked markdown file except the changelog. A changelog entry
+# is a dated account of a release, and the path it named was right on the day —
+# rewriting those to chase a later move would make the history wrong instead of
+# stale. Everything else describes the tree as it is now, so it has to resolve.
 files=("$@")
 if [ ${#files[@]} -eq 0 ]; then
-  files=(docs/backlog.md)
+  mapfile -t files < <(git ls-files '*.md' | grep -v '^CHANGELOG.md$')
 fi
 
 status=0
@@ -51,7 +57,10 @@ for file in "${files[@]}"; do
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     checked=$((checked + 1))
-    if [ -e "$path" ] || allowed "$path"; then
+    # A doc may cite a path from its own directory (`web/README.md` says
+    # `tools/serve.mjs` for `web/tools/serve.mjs`) or from the repository root.
+    # Both are ordinary ways to write it, so both resolve.
+    if [ -e "$(dirname "$file")/$path" ] || [ -e "$path" ] || allowed "$path"; then
       continue
     fi
     # `grep -n` so the report is a place to go, not just a name.

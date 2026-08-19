@@ -337,7 +337,7 @@ validation-report assertion once, for all of them.
   they belong to this topic's anchor list too.
 
   **Closed, 2026-08-15 — all four are validated now.** `spirv-val` still runs on
-  the SPIR-V from `tools/compile-shaders.sh`;
+  the SPIR-V from `crates/crcbl-shaders/tools/compile-shaders.sh`;
   `crates/crcbl-shaders/tests/wgsl_validation.rs` runs naga over every committed
   `wgsl/*.wgsl`, and its header records the `var<uniform>` with no binding
   decoration that shipped for months because nothing looked; the DXIL comes from

@@ -208,9 +208,9 @@ workaround. Recorded in `docs/backlog.md` rather than argued again here.
 > the record of what was owed.
 >
 > 1. **Built.** Each `.slang` carries exactly one `// crcbl-targets:` line, and
->    `tools/compile-shaders.sh` refuses a source with none or with more than
->    one, refuses a target name it does not know, requires `spirv`, and records
->    the declaration in the manifest as a `targets` key.
+>    `crates/crcbl-shaders/tools/compile-shaders.sh` refuses a source with none
+>    or with more than one, refuses a target name it does not know, requires
+>    `spirv`, and records the declaration in the manifest as a `targets` key.
 > 2. **Built.** The script passes `CRCBL_TARGET_SPIRV`, `CRCBL_TARGET_WGSL`,
 >    `CRCBL_TARGET_MSL` and `CRCBL_TARGET_HLSL` on the respective invocations.
 > 3. **Built** as `crates/crcbl-shaders/src/declaration_order.rs`, which parses
