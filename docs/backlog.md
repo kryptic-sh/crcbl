@@ -359,7 +359,7 @@ and the entry that matters (the readback's own failure reason) is already
 correct in both orderings. Recorded so the next reader does not mistake the
 ordering for an oversight.
 
-### A lost device is reported as whatever call noticed it first
+### A lost device is named but never rebuilt on
 
 **Reported from a real machine, 2026-08-18.** An NVIDIA GeForce MX550 laptop
 (hybrid with Intel UHD, nvidia 610.57.04, i915, Linux 7.1.6) failed two ways on
@@ -387,23 +387,13 @@ immediately on first load. A kilobyte-scale allocation cannot exhaust that.
 Both messages are the same event — the device failing — surfacing through
 whichever call happened to touch it. The second one says so outright.
 
-**What is actually missing:** `web/engine/gpu-replay.js` deliberately does not
-watch `GPUDevice.lost`, and says why at `#requestDevice` — it "means the device
-is gone rather than that a call failed, so what it wants is the seam's
-device-lost path, and there is none on this channel yet". That reasoning is
-sound and the channel has since grown one: `Reply::ReadbackFailed` becomes
-`HalError::DeviceLost`, and its doc already lists "a device lost mid-map" among
-what reaches it. So the plumbing exists; what is missing is the **cause**.
-`GPUDevice.lost` resolves with a `reason` and a `message` that name why the
-device died, and nothing reads them, so every loss is diagnosed from the tail of
-an unrelated call's error.
-
-**The work:** watch `GPUDevice.lost`, record the reason, and make the replayer
-fail fast afterwards — every subsequent command answering "the device was lost:
-&lt;reason&gt;" rather than each producing its own downstream error. That is the
-distinction `#requestDevice`'s comment asks for, not a contradiction of it: not
-"one more error to log and carry on from", but a terminal state that names
-itself.
+**The reporting half is built**, and this entry is kept for the two halves that
+are not. `gpu-replay.js` watches `GPUDevice.lost`, records its `reason` and
+`message` in `Replayer#lost`, and `Replayer#replay` checks that terminal state
+once at the top of the loop rather than in every handler: a lost device answers
+every subsequent command through `#answerLost`, naming the loss, instead of each
+call producing its own downstream error about whichever corpse it touched. So
+the second message above would today read as the loss it is.
 
 **Not diagnosed:** why that machine's device dies. It is a hybrid laptop and the
 demos run on the discrete GPU. Whether Chrome on the Intel UHD survives is the
