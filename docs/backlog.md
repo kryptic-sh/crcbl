@@ -2075,9 +2075,27 @@ each job got the narrow step, so the fix is exercised rather than asserted.
 `aarch64-apple-darwin` — the project's own practice for platform code, and the
 same footing the nanosecond refactor was landed on. CI is what settles them.
 
-**`crcbl-webgpu` has not been examined this way at all** — it is a browser
-backend the native suite cannot open, so its equivalent would be a probe group
-rather than a seam-suite pass.
+**`crcbl-webgpu` was examined by reading and is clean on this point.** The
+native suite cannot open it, so the narrow pass is not available — but the
+defect the pass finds is visible in `supports` without running anything, and
+this backend does not have it: `TimelineWaitBeforeSignal` is grouped _with_ the
+other three timeline rows as `Support::No(NO_TIMELINE)` rather than answering
+`Yes` beside them. Its remaining unconditional `Support::Yes` arms are core
+WebGPU — the two copies, the MSAA resolve, the stencil reference, the
+storage-image binding and the binary semaphore — with `OcclusionQuery` the one
+open question, and that has an entry of its own.
+
+So of the five backends the pattern was checked on: three had it (`crcbl-vk`,
+`crcbl-dx12`, `crcbl-mtl`, all fixed), `crcbl-webgpu` did not, and `crcbl-wgpu`
+has a different defect in the same family — `PolygonModeLine` refusing through a
+raw validation error rather than `HalError::Unsupported`, left alone for the
+deletion.
+
+**What a browser equivalent would take**, recorded so it is not re-derived: a
+probe group that opens the device without an optional feature and asserts the
+capability it gates now refuses. `web/tools/probe-groups.mjs` is where groups
+live, and AE/AF are the two that already hold this backend's query claims to a
+value.
 
 ### DECISION NEEDED — occlusion queries: finish them, refuse them, or delete them
 
