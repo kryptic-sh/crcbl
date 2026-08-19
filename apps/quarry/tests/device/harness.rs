@@ -86,6 +86,15 @@ const READBACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30
 /// is a copy that never happened rather than a frame that came out dark.
 const POISON: u8 = 0xA5;
 
+/// This suite's name, as it prefixes every line this fixture prints.
+///
+/// **`tests/run-quarry-e2e.sh` greps this**, so changing the string turns a
+/// green suite into a failed harness run rather than into nothing.
+pub(crate) const SUITE: &str = "crcbl quarry e2e";
+
+/// The variable naming which adapter to open, echoed on the line above.
+const ADAPTER_ENV_VAR: &str = "CRCBL_ADAPTER";
+
 /// Which backend to open, `Null` unless `CRCBL_GPU` names another.
 pub(crate) fn backend() -> GpuBackend {
     match std::env::var("CRCBL_GPU") {
@@ -254,8 +263,19 @@ impl Quarry {
             .expect("one instance fits the reservation this scene asked for");
         renderer.set_lod_error_budget(budget);
         let selected = ctx.device().caps().geometry_path();
+        // **Which device drew, named once per fixture.** `tests/run-quarry-e2e.sh`
+        // greps this prefix: a green run that never said what it ran on is
+        // evidence about nothing, and on a machine with three adapters the
+        // answer is not guessable from the backend alone.
         eprintln!(
-            "quarry: {levels:?} at a {budget}px budget, {} triangles, geometry path {selected:?}, \
+            "{SUITE}: device on adapter {:?} ({ADAPTER_ENV_VAR}={})",
+            ctx.adapter()
+                .expect("the context's own adapter is enumerable")
+                .name,
+            crcbl::adapter::pin().as_deref().unwrap_or("<unset>"),
+        );
+        eprintln!(
+            "{SUITE}: {levels:?} at a {budget}px budget, {} triangles, geometry path {selected:?}, \
              format {:?}",
             face.triangles(),
             ctx.format(),
@@ -405,7 +425,7 @@ fn frame_body(quarry: &mut Quarry, at: f32, light: &crcbl::render::DirectionalLi
     let pixels = (width * height) as usize;
     if backend() == GpuBackend::Null {
         eprintln!(
-            "quarry: the Null backend records and draws nothing, so this frame was asserted as a \
+            "{SUITE}: the Null backend records and draws nothing, so this frame was asserted as a \
              recording only — run with CRCBL_GPU=vk (or dx12, metal) for the pixels"
         );
     } else {
@@ -424,7 +444,7 @@ fn frame_body(quarry: &mut Quarry, at: f32, light: &crcbl::render::DirectionalLi
             .expect("a frame has pixels in it");
         covered = pixels - count;
         eprintln!(
-            "quarry: {} distinct colour(s), {covered} of {pixels} pixels ({:.1}%) are not the \
+            "{SUITE}: {} distinct colour(s), {covered} of {pixels} pixels ({:.1}%) are not the \
              most common one {background:?}",
             histogram.len(),
             covered as f32 / pixels as f32 * 100.0,
@@ -513,7 +533,7 @@ pub(crate) fn read_the_cut(quarry: &Quarry) -> Option<Vec<usize>> {
         Some(selection) => selection,
         None => {
             eprintln!(
-                "quarry: no amplification stage on this device, so there is no per-cluster cut to \
+                "{SUITE}: no amplification stage on this device, so there is no per-cluster cut to \
                  read — that is every device without TASK_SHADER and every non-mesh path"
             );
             return None;
@@ -605,7 +625,7 @@ pub(crate) fn read_the_cut(quarry: &Quarry) -> Option<Vec<usize>> {
          there are"
     );
     let total: usize = drawn.iter().sum();
-    eprintln!("quarry: cut drew {total} cluster(s), per level (finest first) {drawn:?}");
+    eprintln!("{SUITE}: cut drew {total} cluster(s), per level (finest first) {drawn:?}");
     assert!(
         total > 0,
         "the amplification stage ran and selected no cluster at all, yet the frame drew — so \
@@ -721,7 +741,7 @@ fn read_the_uniform_cut(quarry: &Quarry) -> Option<Uniform> {
          route it — the frame drew, so this is not an empty scene",
     );
     eprintln!(
-        "quarry: uniform cut drew level {} — {} triangle(s)",
+        "{SUITE}: uniform cut drew level {} — {} triangle(s)",
         drew.level, drew.triangles
     );
     Some(drew)

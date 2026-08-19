@@ -79,8 +79,14 @@ jobs:
       # `run-*`: the sourced-not-run helpers (`vulkan-icd.sh`,
       # `sway-session.sh`) are where the cross-crate knowledge lives, and `-x`
       # alone would only ever see them through a caller.
+      #
+      # **`apps/*/tests/` is in it too, and was not.** `crates/*/tests/*.sh`
+      # reads like "every harness" and is not: the samples have harnesses of
+      # their own, and `apps/quarry/tests/run-quarry-e2e.sh` was outside this
+      # glob on the day it was written. A pattern that silently matches less
+      # than its name claims is the shape this repo keeps removing.
       - name: Lint every harness and the helpers they share
-        run: shellcheck -x tools/*.sh crates/*/tests/*.sh
+        run: shellcheck -x tools/*.sh crates/*/tests/*.sh apps/*/tests/*.sh
       - name: The summary guard rejects the runs it is there to reject
         run: ./tools/nextest-summary-test.sh
 
@@ -1038,6 +1044,27 @@ jobs:
       # `cull_stats.rs` and most of `draw_gen.rs` became — the same checks the
       # step above this job's `run-vk-e2e.sh` used to make, now made from a
       # binary that names no backend so the other three jobs make them too.
+      # **quarry's milestones, asserted rather than looked at.** The sample's
+      # device suite runs on the `Null` backend under a bare `cargo test`, where
+      # every assertion about a picture reports itself skipped — honest, and
+      # useless as a gate. This is the step that makes it evidence.
+      #
+      # It runs here rather than only on a developer's GPU because the numbers
+      # it asserts turn out not to be a driver's: measured on 2026-08-19, the
+      # per-cluster cuts and the drawn levels are **identical** on radv and on
+      # lavapipe, and only the rasterised pixel counts differ — by five of
+      # 49,152 at the widest. The suite was written on that observation, which
+      # is why it compares counts and levels rather than images.
+      #
+      # The runner refuses a run whose substance skipped: `CRCBL_GPU=null`
+      # passes all nine tests and it still exits non-zero, because no frame
+      # reported a per-cluster cut.
+      - name: Measure the quarry sample on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: apps/quarry/tests/run-quarry-e2e.sh
+
       - name: Check the draw generation on lavapipe
         env:
           CRCBL_GPU: vk

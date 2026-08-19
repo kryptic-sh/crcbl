@@ -1152,6 +1152,24 @@ impl GpuContext {
         self.swapchain
     }
 
+    /// The adapter this context opened its device on.
+    ///
+    /// **The only way an application can say which GPU it is running on.** Every
+    /// other place that names one is inside a backend, writing to the log, so a
+    /// caller that wants it on screen or in a test's output has nothing to read
+    /// — and "which device produced this frame" is the first question asked of
+    /// any measurement.
+    ///
+    /// `None` only if the adapter list changed under the context, which no
+    /// backend does while a device is open.
+    #[must_use]
+    pub fn adapter(&self) -> Option<crcbl_hal::AdapterInfo> {
+        self.instance
+            .adapters()
+            .into_iter()
+            .find(|info| info.id == self.adapter)
+    }
+
     /// The graphics queue everything is submitted to.
     #[must_use]
     pub const fn queue(&self) -> QueueHandle {

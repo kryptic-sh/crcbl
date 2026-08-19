@@ -799,6 +799,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **quarry's device suite runs in CI, on lavapipe.** It ran only on a
+  developer's GPU before: under a bare `cargo test` it opens the `Null` backend,
+  where every assertion about a picture reports itself skipped — honest, and
+  useless as a gate. `apps/quarry/tests/run-quarry-e2e.sh` is the harness, and
+  it refuses two ways a green run can prove nothing: no `CRCBL_GPU` named, and a
+  run in which no frame reported a per-cluster cut. `CRCBL_GPU=null` passes all
+  nine tests and still exits non-zero.
+
+  **The numbers turned out not to be a driver's**, which is what made the CI
+  step worth adding: measured, the per-cluster cuts and the drawn levels are
+  _identical_ on radv and on lavapipe, and only the rasterised pixel counts
+  differ — by five of 49,152 at the widest.
+
+  Also widened: CI's shellcheck glob was `crates/*/tests/*.sh`, which reads like
+  "every harness" and left the samples' own harnesses unchecked. It now covers
+  `apps/*/tests/*.sh` too.
+
+- **`GpuContext::adapter` names the GPU a context opened on.** The only way an
+  application can say which device it is running on — every other place that
+  names one is inside a backend, writing to the log.
+
 - **quarry attributes its reduction between the two culls.** The sample's exit
   criteria ask for it by name — "a single total hides which one is working" —
   and `ForwardRenderer::cull_stats` carries both numbers out of the frame that
