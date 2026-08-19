@@ -1230,11 +1230,31 @@ machinery on top of it.
 
 ### DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
 
-**Read option (d) first.** Three measurements bracket this and three options
-came out of them, but all three assume the runner's WARP is the only WARP. A
-fourth — give it a newer one — was researched on 2026-08-20 and is untried: if
-it works it dominates the others, and if it fails it answers (c) for the price
-of one CI run.
+**Option (d) has been tried, and it does not fix it.** Run 32297440428 on
+`diagnose/dx12-warp-redist` gave the runner `Microsoft.Direct3D.WARP` 1.0.20 and
+reported the mesh flags. The device was removed exactly as before.
+
+The load is verified rather than assumed: both dx12 steps log
+`driver="D3D12 UMD 1.0.20.0"`, against the OS WARP's
+`D3D12 UMD 10.0.26100.33158` that every other Windows job still reports. So the
+newest WARP Microsoft ships reproduces it.
+
+**Two things that run narrowed it.** The crate's own suite — every D3D12 device
+test, with `MESH_SHADER` and `TASK_SHADER` reported — **passed** on that WARP;
+only `render_e2e`'s frame fails. And the failure is unchanged in kind:
+`DXGI_ERROR_DEVICE_REMOVED` from `ID3D12Resource::Map`, zero debug-layer errors,
+DRED still reporting `0 command list(s) with recorded work`. The three warnings
+it does hold are `ClearDepthStencilView` perf notices about a missing optimised
+clear value, which is not this.
+
+**What that does to the options.** The entry's own bar was that a bug
+reproducing on the newest WARP is far more likely ours than theirs, so (d)
+answers (c)'s question in the direction of our defect and weakens (a) — (a)
+would report a capability on the strength of hardware evidence for a path that
+now fails on two WARP versions. It leaves (b) and (c) as the live pair.
+
+Three measurements bracket the rest of this, and they assumed the runner's WARP
+was the only WARP. That assumption is now tested.
 
 Together the measurements turn this from "our mesh path is broken" into a
 question about what to report.
@@ -1275,7 +1295,8 @@ So the decision:
 - **(b) Keep both rows withheld** until a hardware Windows GPU can run them.
   Honest, costs two blockers that may never close on the hardware this project
   has, and matches how Metal's four unprovable rows are already treated.
-- **(d) Give the runner a newer WARP — researched 2026-08-20, untried here.**
+- **(d) Give the runner a newer WARP — tried 2026-08-20, and it did not fix
+  it.** Kept because the reasoning is what makes the result mean something.
   Microsoft ships WARP as a NuGet redistributable,
   [`Microsoft.Direct3D.WARP`](https://www.nuget.org/packages/Microsoft.Direct3D.WARP)
   (1.0.20, 28 May 2026), precisely so a developer can "try out changes or
@@ -1314,9 +1335,15 @@ So the decision:
   arriving for the price of one CI run: a bug reproducing on the newest WARP
   Microsoft ships is far more likely to be ours than theirs.
 
-  **Untried.** Nothing here can run it — this project has no Windows machine,
-  and every dx12 job is CI. It is one workflow change and one CI round trip,
-  which is cheaper than (c) by a large margin and should be tried before it.
+  **Tried, and the harness is kept.** Branch `diagnose/dx12-warp-redist` carries
+  both halves — the unconditional `MESH_SHADER | TASK_SHADER` in `features_of`
+  with the three geometry-path assertions neutralised, and the CI step that
+  fetches the redistributable and copies `d3d10warp.dll` beside the test
+  binaries in `target/debug` and `target/debug/deps`. Run it with
+  `gh workflow run ci.yml --ref diagnose/dx12-warp-redist`; it is expected red
+  and the job log is the deliverable. Never merge it. It is rebuilt on main
+  rather than on the older `diagnose/dx12-mesh-device-removal`, which is far
+  enough behind that a result off it would say nothing.
 
 - **(c) Narrow it first.** Build a smaller repro on WARP — the amplification
   dispatch alone, then with the DAG descent, then with the real bind groups —
