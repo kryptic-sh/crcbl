@@ -99,6 +99,14 @@ jobs:
       - name: The summary guard rejects the runs it is there to reject
         run: ./tools/nextest-summary-test.sh
 
+      # `docs/backlog.md` is the working record and its worth is that an entry
+      # can be acted on months later. A moved file breaks that silently: the
+      # reader greps the cited path, finds nothing, and concludes the work was
+      # deleted rather than relocated. Prettier reads the file as prose and no
+      # test opens it, so nothing else would notice.
+      - name: The docs cite paths that exist
+        run: ./tools/check-doc-citations.sh
+
   clippy:
     name: clippy (linux)
     runs-on: ubuntu-latest

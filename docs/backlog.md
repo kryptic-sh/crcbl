@@ -3392,10 +3392,10 @@ is blocked on something outside this repo, and the honest options are:
    artifact-hash job needs an exception mechanism it does not have" — **and that
    is wrong.** `crcbl-mtl` compiles MSL through
    `newLibraryWithSource:options:error:`, so MSL is _source at runtime_, not a
-   precompiled artifact; and `tools/compile-shaders.sh` is source-driven,
-   walking `shaders/*.slang` and emitting each one's declared targets, then
-   refusing orphans **inside `msl/`**. A kernel that never lives in `msl/` is
-   invisible to it, with no exception mechanism required.
+   precompiled artifact; and `crates/crcbl-shaders/tools/compile-shaders.sh` is
+   source-driven, walking `shaders/*.slang` and emitting each one's declared
+   targets, then refusing orphans **inside `msl/`**. A kernel that never lives
+   in `msl/` is invisible to it, with no exception mechanism required.
 
    The precedent already shipped and is green: `crcbl_mtl::binding`'s bindless
    probe carried its whole kernel as a `const BINDLESS_MSL: &str` in Rust. Note
@@ -5093,7 +5093,7 @@ previous frame's reads. That is a write-after-read hazard, and **CI's validation
 layer is the only thing in this project that reports it**.
 
 Got wrong twice now: `crcbl::screenshot`'s readback barriers (fixed earlier this
-session) and `crates/crcbl-vk/tests/vk_e2e/depth_probe.rs`'s 1x1 shadow
+session) and `crates/crcbl/tests/forward_e2e/depth_probe.rs`'s 1x1 shadow
 placeholder, which imported `Undefined` on every call while a previous
 `render_probe` had left it in `ShaderRead`. Both were the same shape and neither
 was caught locally.
@@ -5791,7 +5791,7 @@ annotated.
   future enemy ever wants a heading.
 
 - **The wizard's walk cycle has never been watched.** `art::mirrored`'s reversal
-  is now rasterised — `crates/crcbl-vk/tests/vk_e2e/sprite/mirror.rs` renders a
+  is now rasterised — `crates/crcbl/tests/sprite_e2e/sprite/mirror.rs` renders a
   frame and its mirror and compares the two images column-reversed, bit-exact on
   radv, which is the shader-side evidence the older entry asked for. What is
   still unverified is the _animation_: nobody has seen the walk cycle play in a
@@ -5867,7 +5867,7 @@ not:
   across a 959×463 canvas on the SwiftShader adapter. What is still unchecked is
   whether it is the **right** picture, and in particular whether a rotated
   `SampleMode::Pixel` sprite looks right on a real driver.
-  `crates/crcbl-vk/tests/vk_e2e.rs` has sprite goldens including a rotated one,
+  `crates/crcbl/tests/sprite_e2e/` has sprite goldens including a rotated one,
   so the shader path is covered; the game's own frame is not. There is also no
   display in the build environment, so the _windowed_ native path is compiled
   and never run. The art was checked by eye against the baked PNGs, and that is
@@ -6340,9 +6340,9 @@ it.
   — so the source would have to be `#if`-split per target, and there is no
   target macro to split on (probed: `__TARGET_SPIRV__`, `SLANG_SPIRV`,
   `__SPIRV__`, `__TARGET_WGSL__` are all undefined; only `__SLANG_COMPILER__`
-  is), so `tools/compile-shaders.sh` would have to start passing its own `-D`
-  per target. Second and worse, the WGSL half would then be correct **because
-  Slang's two lowerings disagree**: `SV_InstanceID` becomes
+  is), so `crates/crcbl-shaders/tools/compile-shaders.sh` would have to start
+  passing its own `-D` per target. Second and worse, the WGSL half would then be
+  correct **because Slang's two lowerings disagree**: `SV_InstanceID` becomes
   `InstanceIndex - BaseInstance` on SPIR-V and a bare `@builtin(instance_index)`
   on WGSL, and only the SPIR-V one matches HLSL. A Slang release that made WGSL
   consistent with the rest would silently break the browser, with nothing in
@@ -7146,16 +7146,6 @@ longer the Tier B leg it was assumed to be.
 
 One arm was salvaged: the `update_bind_group` refusal is a layout rule rather
 than a tier rule, so that test runs its refusal path on Tier A devices too.
-
-## Modules of `--test vk_e2e` need `#[path]`, which is not obvious
-
-`crates/crcbl-vk/tests/vk_e2e.rs` declares its modules with
-`#[path = "vk_e2e/<name>.rs"]`. Without it a crate root resolves `mod foo;`
-beside itself — `tests/foo.rs` — and Cargo would then compile that file as its
-own separate test binary. Verified: plain `mod harness;` fails with E0583 naming
-`tests/harness.rs`. The alternative Cargo supports is `tests/vk_e2e/main.rs` as
-the target root, which needs no `#[path]` at all; it was not taken because the
-slice's brief pinned `tests/vk_e2e.rs` as the root file.
 
 ## Vulkan's cross-submission barriers are unverified on this machine
 
@@ -9768,10 +9758,10 @@ All were real, all are fixed, and all three are invisible to a mouse:
   `OffscreenSetup::open` takes one of them, so "render this glTF at this level"
   is a new capability rather than a delta on `crcbl screenshot`. That is the
   prerequisite, and it is also what a golden frame per LOD level would need.
-- **`tools/cook-clusters.rs` duplicates `ClusterDag::cook()`.** The
-  transcription now lives on the type in `crcbl-scene`, where both callers can
-  reach it; the example still has its own private copy and should call the
-  method instead. One file, mechanical.
+- **`crates/crcbl-shaders/tools/cook-clusters.rs` duplicates
+  `ClusterDag::cook()`.** The transcription now lives on the type in
+  `crcbl-scene`, where both callers can reach it; the example still has its own
+  private copy and should call the method instead. One file, mechanical.
 - **`stats` only reports nodes the scene draws.** A mesh no node instantiates is
   invisible to it; `--node` reaches any node in the table.
 - **The importer's skip warnings are invisible from the CLI**, which installs no
@@ -10973,7 +10963,7 @@ left:
   rule the doc defends binds a caller that must run on whatever device it finds,
   and no shipping caller violates it; the doc now says that, and the callers are
   unchanged.
-- **`crates/crcbl-vk/tests/run-cross-backend-e2e.sh` does not echo its ICD pin**
+- **`crates/crcbl/tests/run-cross-backend-e2e.sh` does not echo its ICD pin**
   the way `run-render-e2e.sh` does, so which adapter it used is not observable
   from its output. It passed 6/6, but with `CRCBL_VK_ICD` set it still drew vk
   on the discrete card here.
