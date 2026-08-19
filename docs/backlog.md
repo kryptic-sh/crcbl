@@ -86,10 +86,10 @@ why they are reported unsupported today, and those are different claims.
 
 ### What `apps/viewer` still owes sample 05
 
-`apps/viewer` is `docs/plan/sample/05-viewer.md`'s **milestone 1 minus the
-grid**: a path argument, the load through `crcbl::assets::DirSource`, the
-conversion, frame-on-load, orbit/pan/zoom/`F`, and one directional light. Every
-module's docs name its own omission; this is the list in one place.
+`apps/viewer` is `docs/plan/sample/05-viewer.md`'s **milestone 1**: a path
+argument, the load through `crcbl::assets::DirSource`, the conversion,
+frame-on-load, orbit/pan/zoom/`F`, one directional light, and the grid floor.
+Every module's docs name its own omission; this is the list in one place.
 
 - **The grid floor is drawn, and its scale is fixed.** `crcbl_render::grid` is
   wired into `ForwardRenderer` behind `set_ground_grid`, off by default, drawn
