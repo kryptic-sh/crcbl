@@ -29,30 +29,6 @@ fires, and on what, comes from the `dx12 e2e (software adapter)` job. Given
 `crcbl-vk`'s suites had four leaks between them, the expectation is that it will
 find some.
 
-### The apt cache is fixed and demonstrated, end to end
-
-Closed on 2026-08-19. Both bugs are gone and the thing they existed to provide
-has now been seen working, so this is here only to save the next reader the
-archaeology.
-
-The restore permission bug — `actions/cache` extracting as the runner user into
-root-owned `/var/cache/apt/archives`, failing with
-`Cannot open: Permission denied` on every file and then printing
-`Cache not found` — meant the cache had **never once** been used. The 30-second
-timeout on the cached-install branch was harmless only while that was true; with
-an archive to install from it killed `apt-get` mid-dpkg, and a killed dpkg keeps
-`/var/lib/dpkg/lock`, so both mirror attempts after it failed on the lock.
-
-`9e57c51` is green with **27 successful restores**, and **nine jobs installed
-from the cache without asking the mirror at all** — `clippy (linux)`,
-`test (linux)`, `rustdoc`, `coverage`, `cli e2e`, `decoder fuzz`, `x11 e2e`,
-`wgpu e2e` and `cross-backend`. `vk e2e` and `wayland e2e` still went to the
-mirror on that run, which is the expected shape while their entries fill.
-
-**One thing to know before editing the action**: its own `hashFiles` is in the
-cache key, so every change to it abandons every entry. The run that lands a
-change is always cold and says nothing about whether the cache works.
-
 ### `render_e2e` never runs against dx12's own e2e job, and that hid a step
 
 Found while trying to reproduce the WARP device removal. The
@@ -74,68 +50,6 @@ has to check that the step actually executed rather than that the job went red.
 Not a defect to fix so much as a shape to know. If it is ever worth changing,
 the options are to run the render step first, or to give it its own job so the
 two failures cannot mask each other.
-
-### The GPU-encoded ICB probe ran, and every answer was yes
-
-`crcbl_mtl::device`'s
-`a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes` passed
-on CI's `Apple Paravirtual device`:
-
-```text
-icb-kernel: device="Apple Paravirtual device" argumentBuffersSupport=MTLArgumentBuffersTier(1)
-            supportsFamily Metal3=false Apple3=true Mac2=true
-icb-kernel: gpuResourceID=MTLResourceID { _impl: 90194771968 } size=1
-icb-kernel: centre=[40, 80, C0, FF]  corner=[11, 22, 33, FF]
-```
-
-`centre` is the ink and `corner` the untouched prime, so the four open questions
-are all answered:
-
-1. **Metal's front end accepts hand-written `command_buffer`/`render_command`
-   MSL** on that runner's MSL version.
-2. **A Metal 3 argument buffer does read a `command_buffer` member as the
-   `MTLResourceID` `gpuResourceID` hands out** — the `MTLArgumentEncoder`
-   fallback was not needed.
-3. **The device is `Tier1`** and encodes anyway, which is also what proved the
-   bindless gate's tier half wrong.
-4. **`useResource:usage:` covered the blit-reset-to-kernel-write hazard**, and
-   `optimizeIndirectCommandBuffer:withRange:` was not needed to make it work.
-
-So GPU-side ICB encoding is a proven mechanism on the only Mac this project has.
-What it does **not** prove is a whole frame's worth: the slice built on it hung
-the GPU, and the diagnosis is in its own entry below.
-
-### A capability gate is a proxy until you check it — four in one day
-
-`Capability::BindlessDescriptorArray` on Metal is closed **and driven**: the
-seam reports `BindlessDescriptorArray supported`, 20 of 26 driven, and
-`every seam obligation held on mtl`. Getting there took four wrong questions,
-each of which looked reasonable and each of which the seam caught with the same
-line — "this device withheld …, so metal was never asked":
-
-1. **`supportsFamily(MTLGPUFamily::Metal3)`** — a family _feature set_ standing
-   in for an _API's availability_. CI's `Apple Paravirtual device` answers
-   `Metal3 = false` and returns usable `gpuAddress` values anyway.
-2. **`argumentBuffersSupport() == Tier2`** — the tier governs argument buffers
-   in the _resource-binding_ sense (`[[id(n)]]` slots, resource arrays, heaps).
-   That device is `Tier1`, and both a bindless pointer table and an ICB handle
-   in an argument buffer work on it under Metal API **and** GPU validation.
-3. **`respondsToSelector(sel!(gpuAddress))` sent to the `MTLDevice`** —
-   `gpuAddress` belongs to `MTLBuffer`, so a device never responds and the gate
-   was false everywhere. The right question is the system's: an `NSProcessInfo`
-   macOS-13 check.
-4. **`Features::DESCRIPTOR_INDEXING` standing in for `UPDATE_AFTER_BIND`** — in
-   the seam itself, not the backend. Independent `BindingFlags`, and the
-   heuristic held only while no backend had one without the other. Metal gaining
-   bindless broke it and scored a capability Metal genuinely supports as
-   declared-and-refused. The exercise now asks by building a throwaway layout.
-
-**The transferable rule: a capability gate must ask the question the code
-depends on.** Every one of these substituted a nearby, easier question. Three of
-them produced a row reported closed while running on no machine anywhere, which
-is green and worthless — and the only reason any of it was caught is that the
-seam prints what it did _not_ exercise. That print is load-bearing; do not let
-it become a summary of counts.
 
 ### `Features::BUFFER_DEVICE_ADDRESS` on Metal rides a query that is wrong
 
