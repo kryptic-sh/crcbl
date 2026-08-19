@@ -613,8 +613,8 @@ fn release_root_signature(state: &mut D3D12_GRAPHICS_PIPELINE_STATE_DESC) {
 }
 
 /// A *permanent* refusal on a Windows old enough to have no stream path, and
-/// deliberately not [`crate::instance::not_yet`]'s voice: no slice of work in
-/// this repository makes `ID3D12Device2` appear on a runtime that predates it.
+/// deliberately not an unwritten slice's voice: no slice of work in this
+/// repository makes `ID3D12Device2` appear on a runtime that predates it.
 ///
 /// It is separately worth naming because the interface arrived in Windows 10
 /// 1703 while the mesh stages themselves arrived in 2004, so a device that fails

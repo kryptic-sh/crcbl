@@ -13,7 +13,13 @@
 //! `ResolveQueryData`. [`finish`](CommandEncoder::finish) closes the list and
 //! hands back a pooled [`CommandBufferHandle`] the device can submit.
 //!
-//! What still needs a slice — buffer fills, mesh dispatch —
+//! A buffer fill is here too, and it writes **zero only**: D3D12 has no valued
+//! device-side fill this backend takes, so a zero fill is a `CopyBufferRegion`
+//! out of the device's zeroed resource and any other value is refused. See
+//! [`fill_buffer`](CommandEncoder::fill_buffer) below for the whole argument.
+//!
+//! What this backend will not do — that non-zero fill, and a mesh dispatch on a
+//! runtime whose command list is not an `ID3D12GraphicsCommandList6` —
 //! **fails the encoder** rather than
 //! recording nothing, so `finish` returns the refusal instead of a command
 //! buffer that submits and draws nothing. That is `crcbl-mtl`'s rule in its
@@ -113,10 +119,9 @@ use windows::core::Interface;
 use crate::conv;
 use crate::device::{
     AttachmentRef, BoundCompute, BoundPipeline, BoundRoot, BufferRef, CommandBufferEntry,
-    DeviceInner, ImageRef, QuerySetRef,
+    DeviceInner, ImageRef, QuerySetRef, ZERO_SOURCE_BYTES,
 };
 use crate::draw::{IndirectKind, check_count, plan_index_binding, plan_indirect};
-use crate::instance::not_yet;
 use crate::{query, resolve};
 
 /// A batch of resource-state transitions, and the references they borrowed.
@@ -361,11 +366,6 @@ impl Dx12CommandEncoder {
             crcbl_core::log::error!("crcbl-dx12: command recording failed: {error}");
             self.failed = Some(error);
         }
-    }
-
-    /// Refuses a command that needs a slice which has not arrived.
-    fn refuse(&mut self, what: &'static str) {
-        self.fail(not_yet(what));
     }
 
     /// Takes a reference to a resource a recorded command names.
@@ -808,9 +808,9 @@ fn release_location(location: &mut D3D12_TEXTURE_COPY_LOCATION) {
 
 /// The one buffer↔image copy D3D12 has no expression for, refused by name.
 ///
-/// A *permanent* refusal and deliberately not [`crate::instance::not_yet`]'s
-/// voice, for the reason `crate::instance::create_surface` gives about the
-/// window-system targets: no slice of work makes it arrive. No fully typed
+/// A *permanent* refusal and deliberately not an unwritten slice's voice, for
+/// the reason `crate::instance::create_surface` gives about the window-system
+/// targets: no slice of work makes it arrive. No fully typed
 /// single-plane DXGI format has 24-bit unorm elements, so nothing can describe
 /// the buffer side of this copy — [`conv::copy_footprint_format`] carries the
 /// enumeration, and `wgpu-hal` and WebGPU both withhold the same pair.
@@ -837,6 +837,18 @@ const NO_D24_DEPTH_FOOTPRINT: &str = "a buffer copy of the DEPTH plane of a D24U
 /// `ID3D12Device2`.
 const NO_DISPATCH_MESH: &str = "draw_mesh_tasks: DispatchMesh lives on ID3D12GraphicsCommandList6, and this runtime's \
      command list does not implement that interface";
+
+/// The refusal a valued fill gets, naming the two capabilities it would be.
+///
+/// A *declined* refusal rather than a permanent one: the pattern-buffer route
+/// would close both, and `docs/backlog.md` records the price. What makes it a
+/// decline is that the cheap route — `ClearUnorderedAccessViewUint` — needs a
+/// shader-visible UAV of the destination, and see
+/// [`fill_buffer`](CommandEncoder::fill_buffer) for what that would cost.
+const NON_ZERO_FILL: &str = "fill_buffer with a non-zero value: this backend fills only to zero \
+     (Capability::BufferFillZero), because a zero fill is a copy out of a zeroed resource and a \
+     valued one is ClearUnorderedAccessViewUint. Capability::BufferFillRepeatedByte and \
+     Capability::BufferFillWord are declined, and crcbl_hal::DIVERGENCES carries the reason";
 
 /// Which plane of one image an aspect names, and how wide that plane's texel is.
 ///
@@ -1506,24 +1518,106 @@ impl CommandEncoder for Dx12CommandEncoder {
         }
     }
 
-    fn fill_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _size: u64, _value: u32) {
-        // **Deliberately not implemented, and nothing needs it.** D3D12's fill
-        // is `ClearUnorderedAccessViewUint`, which needs a descriptor from a
-        // **shader-visible** heap. `crate::descriptor` deliberately never sets
-        // that flag — but `crate::binding` does build shader-visible heaps for
-        // bind groups, so the obstacle is which heap such a descriptor would
-        // come from and its lifetime, not that the crate has none. Read the old
-        // phrasing of this comment as the state of the crate before bind groups
-        // landed.
-        //
-        // `crcbl-render` zeroes its draw-generation counters with a clear
-        // dispatch instead — chosen over a graph-level fill precisely because
-        // `fill_buffer` is four separate backend promises (Metal repeats a
-        // byte, wgpu clears only to zero, this refuses) where a dispatch runs
-        // anywhere that can dispatch. So this is a non-fix on purpose rather
-        // than an oversight, and a caller that wants it should say why a
-        // dispatch will not do.
-        self.refuse("buffer fills (the DX12 binding slice)");
+    /// Fills a buffer range with a repeating 32-bit value — **zero only**.
+    ///
+    /// D3D12 has no `vkCmdFillBuffer`. Its valued fill is
+    /// `ClearUnorderedAccessViewUint`, which needs a shader-visible UAV of the
+    /// destination: closing the valued fills that way costs either
+    /// `ALLOW_UNORDERED_ACCESS` on every device-local buffer this backend
+    /// allocates, or a `fill_buffer` that works only on `STORAGE` ones — a
+    /// capability that works only sometimes, which is worse than a clean
+    /// refusal. So the *zero* fill is a `CopyBufferRegion` out of
+    /// [`DeviceInner::zero`] in a loop of
+    /// [`ZERO_SOURCE_BYTES`](crate::device::ZERO_SOURCE_BYTES) chunks, which is
+    /// what `wgpu-hal`'s dx12 backend does for `clear_buffer`, and a value with
+    /// any bit set is refused by name. Zero is what
+    /// `crcbl_hal::Capability::BufferFillZero` says the call is *for*: an
+    /// indirect count buffer at the top of a frame.
+    ///
+    /// **`crcbl-render` still zeroes its draw-generation counters with a clear
+    /// dispatch, and this landing does not change that.** Two reasons put it
+    /// there and only one was this backend's refusal: the other is that a fill
+    /// is legal only outside a pass while a render-graph frame is passes end to
+    /// end, and that survives on every backend. `fill_buffer` also remains four
+    /// separate backend promises — Metal repeats a byte, wgpu and this backend
+    /// write only zero — where a dispatch runs anywhere that can dispatch.
+    ///
+    /// # Which refusal, and why they differ
+    ///
+    /// * A non-zero value is `Capability::BufferFillRepeatedByte` or
+    ///   `Capability::BufferFillWord`, both of which this backend declines, so
+    ///   it is [`HalError::Unsupported`] — the variant a caller matches on to
+    ///   take the clear-dispatch fallback, and the one the agnostic seam suite
+    ///   requires of a declared refusal.
+    /// * A range that is not a whole number of `u32`s, or that runs past the end
+    ///   of the buffer, is the caller's arithmetic and stays
+    ///   [`HalError::InvalidDescriptor`] naming it — the same answers `crcbl-vk`
+    ///   and `crcbl-mtl` give for the same two mistakes.
+    fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
+        if self.list().is_none() || !self.outside_a_pass("a buffer fill") {
+            return;
+        }
+        // Before the handle is resolved, so a caller asking for a value this
+        // backend cannot write is told that rather than being sent to look at
+        // its handle. `crcbl-mtl` refuses the values Metal cannot write in the
+        // same position.
+        if value != 0 {
+            self.fail(HalError::Unsupported {
+                backend: BackendKind::Dx12,
+                what: NON_ZERO_FILL,
+            });
+            return;
+        }
+        // The seam's fill writes `u32`s, so a range that is not a whole number
+        // of them describes no fill at all. `crcbl-vk` refuses the same pair
+        // because `vkCmdFillBuffer` requires it, and the copies underneath this
+        // one would happily write a partial word.
+        if !offset.is_multiple_of(4) || !size.is_multiple_of(4) {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "fill_buffer offset {offset} and size {size} must both be multiples of 4"
+            )));
+            return;
+        }
+        let Some(target) = self.buffer(buffer) else {
+            return;
+        };
+        if size == 0 {
+            return;
+        }
+        if offset.checked_add(size).is_none_or(|end| end > target.size) {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "fill_buffer range {offset}..{} exceeds the buffer's {} bytes",
+                offset.saturating_add(size),
+                target.size
+            )));
+            return;
+        }
+        // Retained like every resource a recorded command names, for the reason
+        // the module docs give: a D3D12 command list holds no reference of its
+        // own. The device's reference would outlive the submission anyway —
+        // `DeviceInner::drop` waits for the queue first — so this is the crate's
+        // one invariant kept literally rather than a second guarantee.
+        let zero = self.device.zero.clone();
+        self.retain(&zero);
+        let Some(list) = self.list() else { return };
+        let mut written = 0;
+        while written < size {
+            let chunk = ZERO_SOURCE_BYTES.min(size - written);
+            // SAFETY: `list` is live and recording. `target.raw` is a live
+            // buffer this device created, held by `self.retained` for the
+            // encoder's lifetime and by the retire queue for the submission's,
+            // and `zero` is the device's own zeroed resource retained the same
+            // way. Both are buffers, which D3D12 promotes out of `COMMON` into
+            // the copy states implicitly, so neither needs a barrier this
+            // encoder would have to invent. The destination range was
+            // bounds-checked above and every chunk lies inside it; the source
+            // range is `0..chunk`, and `chunk` is capped at the source's own
+            // length.
+            unsafe {
+                list.CopyBufferRegion(&target.raw, offset + written, &zero, 0, chunk);
+            }
+            written += chunk;
+        }
     }
 
     // --- render scope ---

@@ -745,6 +745,30 @@ pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immut
      — GPUBindGroup exposes a label and nothing else — so the stream has no update_bind_group \
      command and could not carry one that worked";
 
+/// D3D12's answer for the two *valued* fills, in the parity record and in
+/// `crcbl-dx12`'s own declaration alike.
+///
+/// The third sentence to be shared, and the same treatment as
+/// [`METAL_NO_DRAW_INDIRECT_COUNT`] — one obstacle declining two capabilities,
+/// so two paraphrases would read like two obstacles and would drift.
+///
+/// It replaces two claims that were **wrong**. The list used to say this backend
+/// had "no buffer fill at all" — it has one, for zero — and the reason before
+/// that was that the crate had no shader-visible heap to take a descriptor from.
+/// `crcbl_dx12::binding` builds shader-visible heaps for every bind group, so
+/// the real obstacle is where such a descriptor would come from and who keeps it
+/// alive across the submission. [`Capability::BufferFillZero`] is not declined
+/// at all any more.
+pub const DX12_NO_VALUED_FILL: &str = "a deliberate decline rather than a missing slice: the zero \
+     fill this backend does support is a CopyBufferRegion out of a zeroed device-local resource, \
+     which no value can be passed through, and D3D12's valued fill is ClearUnorderedAccessViewUint \
+     — which needs a shader-visible UAV of the destination. crcbl_dx12::binding does build \
+     shader-visible heaps, so the obstacle is descriptor provenance and lifetime, which heap one \
+     is taken from and who keeps it alive across the submission, rather than the crate having \
+     none. Closing it that way costs either ALLOW_UNORDERED_ACCESS on every device-local buffer \
+     or a fill that works only on STORAGE ones, and a capability that works only sometimes is \
+     worse than a clean no";
+
 /// Every capability a backend is knowingly without, **on every device it can
 /// open**.
 ///
@@ -773,18 +797,12 @@ pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immut
 /// [`BackendKind::is_gpu`].
 pub const DIVERGENCES: &[Divergence] = &[
     // --- fills: the worked example, and why there are three variants ---
-    Divergence {
-        capability: Capability::BufferFillZero,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Declined,
-        why: "a deliberate non-fix rather than a missing slice: D3D12's fill is \
-              ClearUnorderedAccessViewUint, and crcbl-render zeroes its draw-generation counters \
-              with a clear dispatch instead, which runs anywhere that can dispatch. The \
-              descriptor it needs would come from a shader-visible heap, which \
-              crcbl_dx12::binding builds for bind groups — crcbl_dx12::descriptor is the module \
-              that never sets the flag, so this is about which heap and whose lifetime rather \
-              than the crate having none",
-    },
+    //
+    // `BufferFillZero` on Dx12 is not here, and its absence is what the list is
+    // for: the row left because the work landed. `crcbl_dx12`'s `fill_buffer`
+    // copies out of a zeroed device-local resource, which is `wgpu-hal`'s dx12
+    // answer to the same call, so the backend that had every fill row now has
+    // only the two a *value* has to travel through.
     Divergence {
         capability: Capability::BufferFillRepeatedByte,
         backend: BackendKind::Wgpu,
@@ -804,7 +822,7 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::BufferFillRepeatedByte,
         backend: BackendKind::Dx12,
         kind: DivergenceKind::Declined,
-        why: "no buffer fill at all on this backend; see the BufferFillZero entry",
+        why: DX12_NO_VALUED_FILL,
     },
     Divergence {
         capability: Capability::BufferFillWord,
@@ -831,7 +849,7 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::BufferFillWord,
         backend: BackendKind::Dx12,
         kind: DivergenceKind::Declined,
-        why: "no buffer fill at all on this backend; see the BufferFillZero entry",
+        why: DX12_NO_VALUED_FILL,
     },
     // --- draws ---
     Divergence {
@@ -1614,10 +1632,11 @@ mod tests {
             )
             .is_gap()
         );
-        // Ungated and listed: never a gap.
+        // Ungated and listed: never a gap. The *valued* fill, because dx12's
+        // zero fill landed and its row left with it.
         assert!(
             !parity_verdict(
-                Capability::BufferFillZero,
+                Capability::BufferFillRepeatedByte,
                 BackendKind::Dx12,
                 refused,
                 Features::empty()
@@ -1693,12 +1712,10 @@ mod tests {
     /// pass whether the classification were right or wrong.
     const REVIEWED_BLOCKERS: &[(Capability, BackendKind, DivergenceKind)] = &[
         // `crcbl-dx12` is the whole of its own list: D3D12 expresses every
-        // capability here, and the three fills are the only rows anybody chose.
-        (
-            Capability::BufferFillZero,
-            BackendKind::Dx12,
-            DivergenceKind::Declined,
-        ),
+        // capability here, and the two *valued* fills are the only rows anybody
+        // chose. `BufferFillZero` was a third and left the way a row is meant
+        // to: the backend fills to zero now, by copying out of a zeroed
+        // resource.
         (
             Capability::BufferFillRepeatedByte,
             BackendKind::Dx12,

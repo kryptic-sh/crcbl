@@ -13,10 +13,11 @@
 //! deadline wait — the query block: heaps of all three kinds, and both of the
 //! seam's ways of reading one back — and the presentation block: swapchains,
 //! acquire, present and
-//! the present wait. Everything else on the trait refuses with
-//! [`HalError::Unsupported`] whose `what` names the slice it arrives in, in the
-//! same voice `Dx12Instance` established. Nothing here is a stub that reports
-//! success.
+//! the present wait. **No entry point here refuses any more** — the mesh
+//! pipeline was the last, and the one refusal the backend still makes moved to
+//! the encoder, where a `fill_buffer` with a non-zero value answers
+//! [`HalError::Unsupported`] naming the capability. Nothing here is a stub that
+//! reports success.
 //!
 //! The presentation block is **thin on purpose**: the DXGI calls live in
 //! [`crate::swapchain`] and every decision that is arithmetic lives in
@@ -100,11 +101,12 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW,
     D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, D3D12_MEMORY_POOL_UNKNOWN, D3D12_QUERY_HEAP_DESC,
     D3D12_QUERY_TYPE, D3D12_RANGE, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC,
-    D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_ROOT_PARAMETER_TYPE, D3D12_SAMPLER_DESC,
-    D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12CreateDevice,
-    ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12CommandSignature,
-    ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Object,
-    ID3D12PipelineState, ID3D12QueryHeap, ID3D12Resource, ID3D12RootSignature,
+    D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_RESOURCE_FLAG_NONE, D3D12_ROOT_PARAMETER_TYPE,
+    D3D12_SAMPLER_DESC, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN,
+    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue,
+    ID3D12CommandSignature, ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence,
+    ID3D12GraphicsCommandList, ID3D12Object, ID3D12PipelineState, ID3D12QueryHeap, ID3D12Resource,
+    ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
@@ -135,6 +137,23 @@ use crate::{buffer, conv, validate};
 /// creation and visibility, not the index `D3D12_FEATURE_DATA_ARCHITECTURE1`
 /// takes, which is why this is a bit and not a zero.
 const FIRST_NODE: u32 = 1;
+
+/// How many zeroed bytes [`DeviceInner::zero`] holds.
+///
+/// D3D12 has no valued device-side fill this backend takes, so
+/// `crate::command`'s `fill_buffer` writes zero by copying out of that resource
+/// in a loop of `ceil(size / ZERO_SOURCE_BYTES)` steps. That makes this number a
+/// straight trade with two sides: every device that opens pays it once in device
+/// memory whether it ever fills anything or not, and every fill longer than it
+/// pays one `CopyBufferRegion` per chunk.
+///
+/// A quarter of a megabyte is where `wgpu-hal`'s dx12 backend settles the same
+/// trade. It is a whole number of the 64 KiB blocks D3D12 aligns a committed
+/// buffer to, so nothing is rounded away; and the fills this seam exists for —
+/// an indirect count buffer, a handful of counter words — are one copy at any
+/// size worth choosing, which is what leaves the memory side free to be the
+/// modest number.
+pub(crate) const ZERO_SOURCE_BYTES: u64 = 256 << 10;
 
 macro_rules! owned {
     ($($ty:ty),+ $(,)?) => {
@@ -525,6 +544,20 @@ pub(crate) struct DeviceInner {
     /// lock and this device already has exactly one.
     fence: ID3D12Fence,
     pub(crate) caps: DeviceCaps,
+    /// [`ZERO_SOURCE_BYTES`] of zeroes on the default heap: the source every
+    /// zero `fill_buffer` copies out of.
+    ///
+    /// One per device, created here rather than per call, because a fill is on
+    /// the frame path and `CreateCommittedResource` is not — and because the
+    /// alternative is an allocation inside a recording method that has nowhere
+    /// to report a failure.
+    ///
+    /// **Nothing ever writes it.** `CreateCommittedResource` zeroes a resource
+    /// unless it is passed `D3D12_HEAP_FLAG_CREATE_NOT_ZEROED`, which
+    /// [`zero_source`] deliberately does not, so the guarantee comes from the
+    /// runtime rather than from an upload this backend would have to record —
+    /// there is no CPU route into a default-heap resource anyway.
+    pub(crate) zero: ID3D12Resource,
     /// Which device this is, and the tag it stamps into every handle it issues.
     /// See [`crate::handle`].
     pub(crate) owner: Owner,
@@ -1411,6 +1444,65 @@ fn heap_properties(memory: MemoryLocation) -> D3D12_HEAP_PROPERTIES {
     }
 }
 
+/// Creates [`DeviceInner::zero`], the zeroed resource a zero fill copies out of.
+///
+/// A committed resource on the default heap in `COMMON`, exactly as
+/// [`create_buffer`](crcbl_hal::Device::create_buffer) makes a
+/// [`MemoryLocation::DeviceLocal`] buffer — a copy source needs no flag of its
+/// own, and D3D12 promotes a buffer out of `COMMON` into `COPY_SOURCE`
+/// implicitly, so nothing has to barrier it. `wgpu-hal`'s dx12 backend allocates
+/// the same thing at device creation for the same call.
+///
+/// # Errors
+///
+/// As every other creation here: [`HalError::OutOfDeviceMemory`] for
+/// `E_OUTOFMEMORY` and [`HalError::Backend`] otherwise, through
+/// [`creation_error`].
+fn zero_source(device: &ID3D12Device) -> Result<ID3D12Resource, HalError> {
+    let resource_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: ZERO_SOURCE_BYTES,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let properties = heap_properties(MemoryLocation::DeviceLocal);
+    let mut resource: Option<ID3D12Resource> = None;
+    // SAFETY: both descriptors are live, fully initialised locals borrowed for
+    // the duration of the call, and `resource` is a live `Option` the call
+    // writes through. `D3D12_HEAP_FLAG_NONE` is what leaves the zeroing on,
+    // since the flag that turns it off is `CREATE_NOT_ZEROED`. No optimised
+    // clear value is passed, which is required for a buffer.
+    unsafe {
+        device.CreateCommittedResource(
+            &properties,
+            D3D12_HEAP_FLAG_NONE,
+            &resource_desc,
+            conv::initial_state(MemoryLocation::DeviceLocal),
+            None,
+            &mut resource,
+        )
+    }
+    .map_err(|error| {
+        creation_error(device, "CreateCommittedResource (zero fill source)", &error)
+    })?;
+    let raw = resource.ok_or_else(|| {
+        HalError::Backend(
+            "CreateCommittedResource reported success and wrote no zero fill source".to_string(),
+        )
+    })?;
+    label_object(&raw, "crcbl-dx12 zero fill source");
+    Ok(raw)
+}
+
 /// Turns a resource-creation failure into the seam's word for it.
 ///
 /// Only `E_OUTOFMEMORY` becomes [`HalError::OutOfDeviceMemory`]. Everything else
@@ -1504,6 +1596,12 @@ impl Dx12Device {
         let fence: ID3D12Fence = unsafe { raw.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
             .map_err(|error| HalError::Backend(format!("CreateFence failed: {error}")))?;
 
+        // Before any command list exists, because `fill_buffer` may not fail for
+        // want of it: an encoder has nowhere to report an allocation failure
+        // until `finish`, and this device would then have opened successfully
+        // while every fill on it refused.
+        let zero = zero_source(&raw)?;
+
         if let Some(label) = desc.label {
             // The device object names hardware rather than something a program
             // made, so the caller's name goes on the queue — which is where PIX
@@ -1567,6 +1665,7 @@ impl Dx12Device {
             queue,
             fence,
             caps,
+            zero,
             owner,
             state: Mutex::new(state),
         });
@@ -1970,10 +2069,11 @@ impl Device for Dx12Device {
     ///
     /// **This is the backend mid-build, and the reasons say so.** D3D12 has
     /// every capability below; what is missing is this crate's expression of it,
-    /// and each refusal names the slice that owes it — the one exception being
-    /// the buffer fill, which is a deliberate non-fix argued at
+    /// and each refusal names the slice that owes it — the exception being the
+    /// two *valued* buffer fills, which are a deliberate decline argued at
     /// [`fill_buffer`](crate::Dx12CommandEncoder) rather than an unwritten
-    /// slice.
+    /// slice. The zero fill is supported and lands as a copy out of
+    /// [`DeviceInner::zero`].
     ///
     /// The honest reading of this list is that `crcbl-dx12` is the furthest from
     /// parity of the five, and the point of writing it down is that the number
@@ -1986,9 +2086,11 @@ impl Device for Dx12Device {
         let gated = |feature: Features, why: &'static str| -> Support {
             Support::granted(has, feature, why)
         };
-        // One sentence for the three fills: they are three capabilities refused
-        // at one site, and three paraphrases of one obstacle would read like
-        // three obstacles.
+        // The two valued fills take their sentence from `crcbl-hal` itself:
+        // `DX12_NO_VALUED_FILL` is the same string this backend's `DIVERGENCES`
+        // rows carry, shared for the reason `METAL_NO_DRAW_INDIRECT_COUNT` is —
+        // the declaration a caller reads and the parity record a reviewer reads
+        // drifted apart last time they were written twice.
         // One sentence for both mesh rows, for the same reason: the amplification
         // stage is not separately missing, it is behind the same unreported flag.
         const NO_MESH_FLAG: &str = "the mesh and amplification stages are built — crcbl_dx12::pipeline packs the \
@@ -1996,18 +2098,13 @@ impl Device for Dx12Device {
              backend does not yet report Features::MESH_SHADER, because doing so moves every \
              adapter onto GeometryPath::MeshShader and re-keys every golden image (the DX12 mesh \
              reporting slice)";
-        const NO_FILL: &str = "a deliberate non-fix rather than a missing slice: D3D12's fill is \
-             ClearUnorderedAccessViewUint, and crcbl-render zeroes its counters with a clear \
-             dispatch instead, which runs anywhere that can dispatch and does not make \
-             fill_buffer's four different backend promises load-bearing. The descriptor it needs \
-             would come from a shader-visible heap, which crcbl_dx12::binding builds for bind \
-             groups — crcbl_dx12::descriptor is the module that never sets the flag, so the heap \
-             is a question of where one is taken from and not of whether the crate has any";
-
         match capability {
-            Capability::BufferFillZero
-            | Capability::BufferFillRepeatedByte
-            | Capability::BufferFillWord => Support::No(NO_FILL),
+            // A CopyBufferRegion in a loop; see crate::command's fill_buffer and
+            // DeviceInner::zero.
+            Capability::BufferFillZero => Support::Yes,
+            Capability::BufferFillRepeatedByte | Capability::BufferFillWord => {
+                Support::No(crcbl_hal::DX12_NO_VALUED_FILL)
+            }
             // Both sides are subresource-index locations, which is the copy
             // `crate::command::plan_image_copy` builds — including the plane
             // slice a depth format's aspect names, since an image-to-image copy
@@ -8045,22 +8142,27 @@ pub(crate) mod tests {
         device.destroy_semaphore(timeline);
     }
 
-    /// Every slice that has not arrived still refuses, by name — so none of them
-    /// can be half-implemented without this saying so.
+    /// Every command this backend refuses still refuses, by name — so none of
+    /// them can be half-implemented without this saying so.
     ///
-    /// **No `Device` entry point is on this list any more.** The mesh pipeline
-    /// was the last one, and the mesh slice took it off:
+    /// **No `Device` entry point is on this list any more, and no *unwritten
+    /// slice* is either.** The mesh pipeline was the last `Device` call, and the
+    /// mesh slice took it off:
     /// [`create_mesh_pipeline`](crcbl_hal::Device::create_mesh_pipeline) now
     /// packs a `D3D12_PIPELINE_STATE_STREAM_DESC` and diagnoses its descriptor,
     /// so it moved to
-    /// [`the_entry_points_that_landed_never_answer_unsupported_again`]. What is
-    /// left is the buffer fill, and that one is a *deliberate* non-fix argued at
-    /// `Dx12CommandEncoder::fill_buffer` rather than an unwritten slice — so if
-    /// it ever moves, this whole test goes with it rather than being emptied and
-    /// left standing.
+    /// [`the_entry_points_that_landed_never_answer_unsupported_again`]. The
+    /// buffer fill was the last slice, and the zero fill took *it* off — a zero
+    /// fill is a copy out of [`DeviceInner::zero`] now, and is asserted there
+    /// alongside the calls that landed.
+    ///
+    /// What is left is the one refusal this backend **chose**: a fill with a
+    /// non-zero value. It is not a slice anybody owes, so what the message must
+    /// name is the capability rather than a slice — which is what a caller
+    /// reading it has to act on.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
-    fn the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
+    fn the_commands_this_backend_refuses_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
 
         // **Recording works now, so the encoder's refusals moved to the commands
@@ -8073,8 +8175,11 @@ pub(crate) mod tests {
             .queue(QueueKind::Graphics)
             .expect("the graphics queue exists");
         type Refused = (&'static str, fn(&mut dyn CommandEncoder));
-        let recording: &[Refused] = &[("buffer fills", |encoder| {
-            encoder.fill_buffer(unissued(), 0, 4, 0);
+        // The handle is one nothing issued, which is the point: the value is
+        // refused *before* it is resolved, so a caller asking for a fill this
+        // backend cannot write is never sent to look at its handle instead.
+        let recording: &[Refused] = &[("non-zero buffer fills", |encoder| {
+            encoder.fill_buffer(unissued(), 0, 4, 0xABAB_ABAB);
         })];
         assert!(!recording.is_empty(), "nothing to check");
         for (what, record) in recording {
@@ -8090,7 +8195,9 @@ pub(crate) mod tests {
             );
             let text = error.to_string();
             assert!(
-                text.contains("dx12") && text.contains("DX12") && text.contains("slice"),
+                text.contains("dx12")
+                    && text.contains("BufferFillZero")
+                    && text.contains("BufferFillWord"),
                 "{what}: {text}"
             );
         }
@@ -8129,11 +8236,11 @@ pub(crate) mod tests {
     /// **The entry points that crossed over must never answer `Unsupported`
     /// again.**
     ///
-    /// This is the half that rots. The test above asserts that unwritten slices
-    /// still refuse; without its inverse, an entry point that was implemented
-    /// and then *regressed* to `not_yet` — a merge that reverted a match arm, a
-    /// refactor that reinstated a stub — would go on passing every test in this
-    /// file. `crcbl-mtl` added this after exactly that happened.
+    /// This is the half that rots. The test above asserts that what this backend
+    /// refuses still refuses; without its inverse, an entry point that was
+    /// implemented and then *regressed* to a refusal — a merge that reverted a
+    /// match arm, a refactor that reinstated a stub — would go on passing every
+    /// test in this file. `crcbl-mtl` added this after exactly that happened.
     ///
     /// Each call below is given deliberately bad arguments, because the claim is
     /// not that they succeed: it is that they now *diagnose*. A stale handle is
@@ -8229,9 +8336,9 @@ pub(crate) mod tests {
                     .expect_err("that pipeline layout was never issued"),
             ),
             (
-                // The one that arrived last, and the one whose regression this
-                // list would otherwise not catch: a `create_mesh_pipeline`
-                // reverted to `not_yet` answers `Unsupported` for a descriptor
+                // The last `Device` call to arrive, and the one whose regression
+                // this list would otherwise not catch: a `create_mesh_pipeline`
+                // reverted to a refusal answers `Unsupported` for a descriptor
                 // that is merely wrong, which is what every entry here rules out.
                 "mesh pipelines",
                 device
@@ -8315,7 +8422,7 @@ pub(crate) mod tests {
             }),
             ("draws", |encoder| encoder.draw(0..3, 0..1)),
             // Both mesh draws, because they are two entry points and either
-            // could regress to `not_yet` on its own. Each refuses here for the
+            // could regress to a refusal on its own. Each refuses here for the
             // reason the plain draw above does — no pipeline is bound — which is
             // an `InvalidDescriptor` and not an `Unsupported`.
             ("mesh draws", |encoder| encoder.draw_mesh_tasks(1, 1, 1)),
@@ -8326,6 +8433,15 @@ pub(crate) mod tests {
                     draw_count: 1,
                     stride: 0,
                 });
+            }),
+            // The zero fill, which is the newest arrival and the one this list
+            // would otherwise not catch regressing: a `fill_buffer(_, _, _, 0)`
+            // reverted to a refusal would answer `Unsupported` for a handle
+            // that is merely dead. The value is `0` deliberately — a non-zero
+            // one is still refused, and is asserted in
+            // [`the_commands_this_backend_refuses_still_refuse_and_name_themselves`].
+            ("zero buffer fills", |encoder| {
+                encoder.fill_buffer(unissued(), 0, 4, 0);
             }),
             ("image-to-image copies", |encoder| {
                 let layers = ImageSubresourceLayers {
@@ -8621,10 +8737,9 @@ pub(crate) mod tests {
     /// `create_mesh_pipeline` was the last one and the mesh slice took it: it now
     /// resolves its descriptor, so it is asserted below as a *handle* diagnosis
     /// like the two above. What still answers `Unsupported` is the encoder's
-    /// buffer fill, and
-    /// [`the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves`]
-    /// is where that is checked — which is the test that has to move if the fill
-    /// ever lands.
+    /// buffer fill with a **non-zero** value — the zero fill lands — and
+    /// [`the_commands_this_backend_refuses_still_refuse_and_name_themselves`]
+    /// is where that is checked.
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_query_set_and_a_semaphore_handle_refuse_as_unresolvable_not_as_unimplemented() {
@@ -8687,8 +8802,9 @@ pub(crate) mod tests {
 
         // The `Unsupported` side of the contrast still exists, but no `Device`
         // entry point carries it any more — it moved to the encoder, where
-        // `Dx12CommandEncoder::fill_buffer` refuses before touching its handle.
-        // `the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves`
+        // `Dx12CommandEncoder::fill_buffer` refuses a non-zero value before
+        // touching its handle.
+        // `the_commands_this_backend_refuses_still_refuse_and_name_themselves`
         // owns that assertion, and this comment is the pointer that stops the
         // pair being read as "this backend answers `InvalidHandle` to everything".
 
@@ -9173,9 +9289,9 @@ pub(crate) mod tests {
         destination: BufferHandle,
         /// The upload-heap buffer the sentinel is copied from before each run.
         ///
-        /// A copy rather than `fill_buffer`, which this backend still refuses —
-        /// so the reset is a transfer the encoder already records rather than a
-        /// second slice this test would have to wait for.
+        /// A copy rather than `fill_buffer`: the sentinel is non-zero and this
+        /// backend fills only to zero, so the reset is a transfer the encoder
+        /// already records rather than a fill it would refuse.
         sentinel: BufferHandle,
         /// Host-readable copy target, so the result can be asserted rather than
         /// assumed.

@@ -39,18 +39,12 @@ pub(crate) fn next_owner_id() -> u64 {
     NEXT_OWNER_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// The refusal this backend hands back for a slice that has not arrived, with
-/// `what` naming that slice.
-///
-/// One constructor rather than a literal per call site so every entry point
-/// refuses in the same voice, and so the reader can see at a glance which ones
-/// still do.
-pub(crate) fn not_yet(what: &'static str) -> HalError {
-    HalError::Unsupported {
-        backend: BackendKind::Dx12,
-        what,
-    }
-}
+// **There is no `not_yet` constructor here any more, and its absence is the
+// point.** It built the `HalError::Unsupported` a slice that had not arrived
+// handed back, and the buffer fill was its last caller — so every refusal this
+// crate still makes is one it *chose*, written out at the site that makes it
+// with the reason attached. See `crate::command`'s `NON_ZERO_FILL` and
+// `NO_DISPATCH_MESH`.
 
 /// One enumerated adapter: what the seam was told about it, the raw D3D12
 /// answers that were told from, and the DXGI interface it was read through.
@@ -658,7 +652,8 @@ impl Instance for Dx12Instance {
     ///
     /// # The window-system targets are refused permanently
     ///
-    /// The four are [`HalError::Unsupported`] rather than `not_yet`: D3D12's
+    /// The four are [`HalError::Unsupported`] naming the absence rather than a
+    /// slice to wait for: D3D12's
     /// only presentation target is an `HWND` (a `CoreWindow` and a composition
     /// surface are the other two DXGI accepts, and neither is a variant of this
     /// enum), so no slice will ever make them work.
@@ -1425,7 +1420,7 @@ pub(crate) mod tests {
     /// [`SurfaceTarget::Offscreen`] used to be the second kind and is now
     /// neither: it succeeds, and its capabilities are the ring's own rather
     /// than a window's. That is asserted here because this is the test the
-    /// refusal used to live in, so a regression to `not_yet` lands on an
+    /// refusal used to live in, so a regression to a refusal lands on an
     /// assertion instead of on a deleted one.
     ///
     /// [`SurfaceTarget::Win32`] is deliberately **not** here. It succeeds too,

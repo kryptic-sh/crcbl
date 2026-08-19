@@ -1994,6 +1994,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   copies. Shadow cascades keep their own state, since sharing the camera's would
   have two eyes undoing each other's band every frame.
 
+### Added
+
+- **`CommandEncoder::fill_buffer` works on the D3D12 backend, for a value of
+  zero.** `Capability::BufferFillZero` now reports supported on dx12, which
+  takes the parity blocker list from eleven rows to ten. It is implemented the
+  way `wgpu-hal`'s dx12 backend does it — one small zeroed device-local resource
+  created with the device, then `CopyBufferRegion` over the destination range —
+  rather than through `ClearUnorderedAccessViewUint`, which would need a UAV of
+  every fillable buffer and so either `ALLOW_UNORDERED_ACCESS` on every
+  allocation or a fill that works only on `STORAGE` buffers.
+
+  **A non-zero fill is still refused**, now with a message naming the capability
+  and why, rather than as an unimplemented slice.
+  `Capability::BufferFillRepeatedByte` and `Capability::BufferFillWord` remain
+  declined on dx12; their recorded reason was wrong — the crate does build
+  shader-visible descriptor heaps — and now states the real obstacle.
+
 ### Fixed
 
 - **A `NaN` vertex moved a meshlet cluster's bounding sphere off its geometry.**

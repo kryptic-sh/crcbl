@@ -2387,37 +2387,30 @@ about whether the deletion is safe. They can be separated: nothing about
 deleting `crcbl-wgpu` makes dx12's mesh reporting or Metal's counter sets
 harder, and keeping the crate does not make either easier.
 
-### DECISION NEEDED — do the three dx12 fill rows stay declined?
+### The two valued dx12 fills stay declined, and the zero one shipped
 
-They were declined for a reason that turns out to be wrong (above), and they now
-count among the blockers. `exercise_fill` already drives all three on WARP with
-distinct values and poison priming, so **the evidence is free and only the work
-is optional** — an unusual combination.
+The decision this entry asked for was taken: the middle position it named. The
+zero-buffer copy — one small zeroed device-local resource created with the
+device, then `CopyBufferRegion` over the range, which is what `wgpu-hal`'s dx12
+backend does — landed, so `BufferFillZero` reports supported and the blocker
+list went from eleven to ten.
 
-Three routes, and they differ in what they cost:
+`BufferFillRepeatedByte` and `BufferFillWord` stay `Declined`, and the price is
+unchanged: `ClearUnorderedAccessViewUint` needs a UAV of the destination, so
+closing them costs `ALLOW_UNORDERED_ACCESS` on every device-local allocation or
+a fill that works only on `STORAGE` buffers — a capability that works only
+sometimes, which is worse than a clean `No`. The pattern-buffer route (an
+encoder-owned upload arena) remains the option if they are ever wanted; nothing
+asks for them.
 
-- **Zero-buffer copy — closes `BufferFillZero` only.** What `wgpu-hal`'s dx12
-  actually does: one 256 KiB device-local zeroed resource at device open, then
-  `CopyBufferRegion` in a loop. No descriptor, no heap, no change to how buffers
-  are created. About thirty lines.
-- **`ClearUnorderedAccessViewUint` — closes all three.** Needs a UAV of the
-  destination, so either every device-local buffer gains
-  `ALLOW_UNORDERED_ACCESS` (a cost paid by every allocation on the backend) or
-  `fill_buffer` refuses buffers not created `STORAGE` — a capability that works
-  only sometimes, which is worse than a clean `No`.
-- **Pattern-buffer copy — closes all three, no UAV.** A per-encoder upload arena
-  holding the repeated word, then `CopyBufferRegion`. The new thing is an
-  encoder-owned upload allocation the crate does not have.
+Their recorded reason was also wrong and is corrected in the parity record
+itself: the crate _does_ build shader-visible heaps in `crcbl_dx12::binding`, so
+the obstacle is descriptor provenance and lifetime rather than a missing heap.
 
-**What closing them does not buy:** `crcbl-render` still cannot use a fill. It
-zeroes its draw-generation counters with a dispatch for two reasons, and only
-one is dx12's refusal — the other is that a fill is legal only outside a pass
-and a render-graph frame is passes end to end. That survives on every backend.
-
-**A middle position, named explicitly:** take the zero-buffer route for
-`BufferFillZero` — cheap, and it matches what the capability's own doc says the
-fill is _for_ — and leave the other two `Declined` with the reason corrected.
-That is one blocker fewer for about thirty lines.
+**Still unproven:** nothing has executed. `exercise_fill` on WARP, in the dx12
+e2e job's render step, is the first run that observes bytes — and note that step
+runs _after_ the crate's own suite, so a failure there hides it (see the entry
+on that above).
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
