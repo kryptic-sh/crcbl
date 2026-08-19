@@ -3047,7 +3047,7 @@ every probe pipeline sets it false; `BinarySemaphore` — unprovable by
 construction and honestly declared so; and `SamplerAnisotropy`, whose `Yes` arm
 is **unreachable** because the limit is pinned to 1.
 
-### Two create-image paths accept a format the device cannot serve
+### DECISION NEEDED — how a caller asks whether a format is usable
 
 Found while building the seam suite's raster fixture, which needed a
 depth-stencil attachment and hit both:
@@ -3070,9 +3070,24 @@ works around it by trying `D32FloatS8Uint`, then `D24UnormS8Uint`, and checking
 _both_ channels — the returned `HalError` and `Device::take_error` — which is
 the shape every caller would otherwise have to reinvent.
 
-Worth deciding as one question: does `DeviceCaps` grow a format-capability
-query, or do the backends validate at `create_image` and refuse? The first is
-more useful (a caller can choose), the second is cheaper and closes the UB.
+**The decision is one question: does `DeviceCaps` grow a format-capability
+query, or do the backends validate at `create_image` and refuse?** The first is
+more useful — a caller can choose a format instead of guessing and retrying —
+and it is the one that satisfies the seam rule, since without it there is no
+backend-agnostic way to ask. The second is cheaper.
+
+**But they are not really alternatives, and treating them as one question hid
+that.** A backend returning `Ok` for an image it cannot create is a correctness
+bug on its own terms: the handle looks live, the validation layer reports
+`VK_ERROR_FORMAT_NOT_SUPPORTED`, and the caller finds out at view or pipeline
+creation, or not at all. That fix should land whichever way the query question
+goes. What is genuinely a decision is only whether the seam grows the query.
+
+**Not currently reachable by our own code**, which is why it is not urgent: the
+seam suite's raster fixture negotiates — it tries `D32FloatS8Uint`, then
+`D24UnormS8Uint`, and checks both the returned `HalError` and
+`Device::take_error`. That workaround is the shape every caller would otherwise
+have to reinvent, which is the argument for the query.
 
 ### A wgpu pipeline refusal is `Backend`, not `Unsupported`
 
