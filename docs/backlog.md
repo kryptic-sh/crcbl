@@ -874,6 +874,29 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
+### The runner's apt mirror goes down, and now says so
+
+Three jobs failed on it in one session — `x11 e2e`, `wayland e2e`, `cli e2e` —
+across commits that changed only markdown. It is a GitHub runner mirror outage,
+not a fault here, and re-running the failed jobs is the response.
+
+**What was fixed is the legibility, and it is worth knowing why.**
+`.github/actions/apt-packages` retries a hung mirror, and its whole argument is
+that a hang should fail by name rather than look like somebody cancelled the
+run. But its budget could not fit: callers cap the step at 8 or 10 minutes while
+the timeouts allowed `240 + 3x360` plus backoff — twenty-three. The step was
+killed mid-loop, so the later tries never ran and the failure surfaced as "The
+action has timed out", which is exactly the illegible failure the retry exists
+to prevent. The worst case is now `100 + 2x(40 + 100) + 30 = 410s`, and a real
+outage prints
+`the runner's mirror is unreachable, which is not a fault in this repository`.
+
+**Not done, and a real option if this keeps happening:** caching the `.deb`
+files so a job does not depend on the mirror at all. It is more machinery than
+it sounds — the cache still has to be populated, and the package set differs per
+job — which is why the cheap legibility fix came first. If the outage rate stays
+this high, that is the next step.
+
 ### The seam audit — five places the seam is not backend agnostic
 
 Found by auditing `crcbl-hal` against every backend's implementation, after the
