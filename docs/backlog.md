@@ -2661,11 +2661,12 @@ reasons did not survive reading the code**, and both change what the work is:
   but `binding.rs` creates shader-visible CBV/SRV/UAV and sampler heaps lazily
   and hands them to `SetDescriptorHeaps`, and has since the bind-group slice.
   There is no descriptor-heap prerequisite to schedule.
-- **No committed DXIL has a push-constant block.** The `PushConstants` row says
-  nothing knows which root slot the committed DXIL puts one at. No `.slang` in
-  the repo declares one — `ui.slang`'s was replaced by a bound uniform buffer in
-  2026-08 — and every `push_constants:` field in `crcbl-render` is `None`. The
-  obstacle is a missing test artifact, not a missing fact about a shader.
+- **No committed DXIL had a push-constant block.** The `PushConstants` row said
+  nothing knew which root slot the committed DXIL puts one at. No `.slang` in
+  the repo declared one — `ui.slang`'s was replaced by a bound uniform buffer in
+  2026-08 — and every `push_constants:` field in `crcbl-render` is still `None`.
+  The obstacle was a missing test artifact, not a missing fact about a shader,
+  and `push_constant_probe.slang` has since supplied it.
 
 **The one real shared prerequisite is about five lines:** adapter caps are
 computed before any device or queue exists, and `Features::TIMESTAMP_QUERY` is
@@ -2689,10 +2690,10 @@ need it.
 4. ~~MSAA resolve~~ — **landed.** The trap was this backend's own: a `D2`
    render-target view addresses layer zero alone, so reading the layer count
    would have planned a resolve per layer for a descriptor covering one.
-5. **Push constants.** Small implementation; the evidence costs a new committed
-   shader artifact, since nothing in the engine would consume one. WGSL cannot
-   carry it, so the artifact's target list excludes wgsl and both wgpu backends
-   stay refused.
+5. ~~Push constants~~ — **landed.** The artifact it was waiting on is
+   `push_constant_probe.slang` and its committed `dxil`, and dx12 now carries no
+   `PushConstants` row in `DIVERGENCES` at all. WGSL cannot carry the block, so
+   the artifact's target list excludes wgsl and both wgpu backends stay refused.
 6. **Mesh, and only after a measurement.** Largest, riskiest, and the only one
    whose provability is unknown: `crcbl-dx12` never calls `CheckFeatureSupport`
    for `OPTIONS7`, so it reports no mesh support **by construction rather than
