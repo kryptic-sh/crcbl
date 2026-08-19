@@ -29,6 +29,39 @@ fires, and on what, comes from the `dx12 e2e (software adapter)` job. Given
 `crcbl-vk`'s suites had four leaks between them, the expectation is that it will
 find some.
 
+### Fixing the apt cache exposed a 30-second timeout that killed dpkg
+
+The restore permission bug is genuinely fixed — `22871f0`'s run and every one
+since logs `Cache restored successfully` where every previous run logged
+`Cannot open: Permission denied` for each file. But making the cache work made a
+latent bug reachable, and `4c69938` went red on it in two jobs:
+
+```text
+the cache reported a hit and restored 1 .deb file(s)
+Selecting previously unselected package libasound2-dev:amd64.
+(Reading database ... 80%
+the cached archive did not satisfy 'libasound2-dev'; asking the mirror
+E: Could not get lock /var/lib/dpkg/lock. It is held by process 2487 (dpkg)
+```
+
+The cached install was **working**. `timeout 30` killed it at 80% of dpkg's
+database read, and a killed dpkg keeps `/var/lib/dpkg/lock`, so both mirror
+attempts after it died on the lock rather than on the mirror. The 30s was
+harmless for as long as the cache never restored, because the branch exited
+instantly with nothing to install from.
+
+Fixed by giving that branch 180s — it touches no network and cannot hang on a
+mirror, so its timeout is a runaway guard rather than a budget — by skipping it
+when no `.deb` was restored, and by running `dpkg --configure -a` before the
+mirror attempts so a half-finished transaction cannot poison them.
+
+**The stale figure that hid the headroom.** The action's own comment said the
+tightest caller cap was eight minutes, and the budget was squeezed to 450s to
+fit it. No job that uses the action is capped below **twenty** minutes; the
+eight-minute jobs install nothing. That is why the first attempt could be
+lengthened without shortening the mirror's, which the backlog already records as
+a regression once made.
+
 ### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
 
 Checked on 2026-08-19, because the obvious assumption is wrong. `apps/quarry`

@@ -138,12 +138,34 @@ runs:
         # either installs entirely from the restored `.deb` files or fails
         # without waiting on anything. A miss here is ordinary — an empty cache,
         # or one package short — and falls through to the attempts below.
-        if timeout 30 sudo apt-get install -y --no-install-recommends \
-          --no-download $PACKAGES; then
-          echo "installed from the cached archive; the mirror was not asked"
-          exit 0
+        # **Skipped outright when nothing was restored**, because it cannot
+        # succeed and every second it spends is spent before the mirror is
+        # asked.
+        if compgen -G "$ARCHIVES/*.deb" > /dev/null; then
+          # 180s, not the 30s this had until 2026-08-19. That 30s was harmless
+          # only while the cache never restored: with an archive to install
+          # from, `apt-get` reaches dpkg, and dpkg reading its database took
+          # longer than the budget — the log shows `(Reading database ... 80%)`
+          # and then the kill. **A killed dpkg keeps /var/lib/dpkg/lock**, so
+          # every later attempt in this step died with `Could not get lock`, and
+          # an install that was working turned into a failed job. This branch
+          # touches no network and cannot hang on a mirror, so its timeout is a
+          # runaway guard rather than a budget.
+          if timeout 180 sudo apt-get install -y --no-install-recommends \
+            --no-download $PACKAGES; then
+            echo "installed from the cached archive; the mirror was not asked"
+            exit 0
+          fi
+          echo "the cached archive did not satisfy '${PACKAGES}'; asking the mirror"
+        else
+          echo "the cache restored no .deb files; asking the mirror"
         fi
-        echo "the cached archive did not satisfy '${PACKAGES}'; asking the mirror"
+        # Whatever went wrong above may have left dpkg mid-transaction, and a
+        # held lock fails every attempt below for a reason that has nothing to
+        # do with the mirror. Best-effort: if there is nothing to recover this
+        # says so, and the attempts below report the real problem either way.
+        sudo dpkg --configure -a ||
+          echo "dpkg had nothing to recover, or could not"
         # The first attempt skips `update`: the runner image ships populated
         # package lists, and `update` and the package mirror are separate
         # endpoints that fail separately. When only the index is unreachable
@@ -158,10 +180,15 @@ runs:
         #
         # The retry is short because it is cheap: `Keep-Downloaded-Packages`
         # above means whatever arrived is still on disk, so a second attempt
-        # resumes rather than re-fetching. Total worst case is
-        # 30 + 300 + 30 + 90 = 450s, inside the tightest caller cap of eight
-        # minutes. Two tries at the mirror, not three: a third would not fit,
-        # and on a slow mirror one long attempt beats several short ones.
+        # resumes rather than re-fetching. Two tries at the mirror, not three:
+        # on a slow mirror one long attempt beats several short ones.
+        #
+        # **The budget, and the cap it actually has to fit.** Worst case is
+        # 180 + 300 + 30 + 90 = 600s. This comment used to say the tightest
+        # caller cap was eight minutes, which was wrong: no job that uses this
+        # action is capped below **twenty**, and the eight-minute jobs are the
+        # ones that install nothing. Ten minutes of installing inside a
+        # twenty-minute job still leaves the job its own half.
         if timeout 300 sudo apt-get install -y --no-install-recommends $PACKAGES; then
           exit 0
         fi
