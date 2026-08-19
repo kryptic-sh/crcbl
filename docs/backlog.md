@@ -2518,12 +2518,13 @@ dx12, Metal and WebGPU in CI, and `crcbl-vk`'s own suite is down from 92 tests
 to 55. The nine sprite goldens moved without a single re-bless — every one
 matches on wgpu with zero differing pixels.
 
-**`mesh.rs` (3180 lines, 15 tests, 4 goldens) cannot be moved as it stands.** At
-least seven of its tests open the device demanding
-`Features::MESH_SHADER | Features::TASK_SHADER` and then assert that
-`GeometryPath::MeshShader` was the path selected — one failure message even says
-"radv and lavapipe both report VK_EXT_mesh_shader". That path does not exist on
-wgpu, WARP or Metal, so those tests assert a Vulkan fact, not a seam fact.
+**`mesh.rs` cannot be moved as it stands.** Its line and test counts used to be
+written here and both had rotted by a third; ask the file. At least seven of its
+tests open the device demanding `Features::MESH_SHADER | Features::TASK_SHADER`
+and then assert that `GeometryPath::MeshShader` was the path selected — one
+failure message even says "radv and lavapipe both report VK_EXT_mesh_shader".
+That path does not exist on wgpu, WARP or Metal, so those tests assert a Vulkan
+fact, not a seam fact.
 
 **Decision, taken rather than deferred: split each affected test in two.** The
 claim about what the cluster DAG selected — which levels, which clusters, how
@@ -2570,13 +2571,13 @@ The mesh cluster split; what stayed did so for a reason worth keeping written
 down, because "why is this still vk-only?" is the question a future reader asks.
 
 **`per_cluster_culling_rejects_the_clusters_a_camera_hides`,
-`a_scaled_instance_keeps_the_clusters_a_camera_can_see`,
-`the_gpu_descends_the_dag_to_the_cut_the_camera_asks_for` and
-`the_shadow_cascades_select_coarser_levels_than_the_camera_does` are not
-splittable.** Each reads a buffer only the amplification stage writes —
-`CLUSTER_SURVIVOR_WORD`, `cluster_selection`, `shadow_selection`. On a backend
-with no mesh-shader path those words are never written, so the agnostic half
-would be a counter nobody incremented: a test that passes because nothing ran.
+`a_scaled_instance_keeps_the_clusters_its_own_size_puts_on_screen`,
+`the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` and
+`the_shadow_cascades_select_coarser_than_the_camera` are not splittable.** Each
+reads a buffer only the amplification stage writes — `CLUSTER_SURVIVOR_WORD`,
+`cluster_selection`, `shadow_selection`. On a backend with no mesh-shader path
+those words are never written, so the agnostic half would be a counter nobody
+incremented: a test that passes because nothing ran.
 
 **`the_mesh_dispatch_extent_is_the_culled_instance_count`** stayed for the
 opposite reason — its agnostic half already exists as `draw_gen_e2e`'s
