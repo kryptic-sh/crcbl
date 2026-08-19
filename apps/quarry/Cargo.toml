@@ -1,0 +1,27 @@
+[package]
+name = "quarry"
+description = "Quarry — the geometry acceptance fixture: one dense scene, every geometry path"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# `cdylib` for the browser demo S4C's fourth milestone owes, `rlib` so the
+# binary and the tests share one crate — the same pair every sample uses. See
+# `apps/breakout/Cargo.toml` for why both names are needed.
+[lib]
+name = "crcbl_quarry"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "quarry"
+path = "src/main.rs"
+
+[dependencies]
+# `scene` for `build_meshlets`: the whole subject of this sample is the meshlet
+# path, so the crate that builds them is not optional here.
+crcbl = { workspace = true, features = ["scene"] }
+
+[lints]
+workspace = true

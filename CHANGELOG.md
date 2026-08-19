@@ -799,6 +799,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/quarry` exists, and generates its scene.**
+  `docs/plan/sample/14-quarry.md`'s S4C sample — the geometry acceptance fixture
+  — begins with its content: `face::quarry_face` builds a dense heightfield
+  quarry face, 131,072 triangles at the binary's 256 cells, which
+  `crcbl_scene::build_meshlets` turns into 1,640 clusters.
+
+  **It recedes rather than standing up**, and that is the specification talking:
+  a flat wall is one distance from the camera, so every cluster in it wants the
+  same LOD and per-cluster selection has nothing to prove over per-instance
+  selection. The face spans 180 m of depth so the near and far clusters of one
+  mesh sit at screen-space errors an order of magnitude apart.
+
+  Deterministic by construction: each height is `crcbl::core::rand::hash_u64` of
+  its lattice coordinate, so a vertex depends on where it is and nothing else —
+  not on iteration order, which a seeded sequential generator would quietly
+  depend on the first time the loop was parallelised.
+
+  Nothing renders yet. The binary opens no device and reports the counts,
+  because the triangle and cluster halves of the sample's "counts per path" exit
+  criterion need no GPU and the draw counts arrive with the renderer.
+
 - **`apps/viewer` reloads the document when it is written again.**
   `docs/plan/sample/05-viewer.md` milestone 3's artist loop: re-export from
   Blender and the frame becomes the new file, with no window reopened. The new
