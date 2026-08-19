@@ -7184,17 +7184,32 @@ rather than rediscovering.
 The illegal _commands_ are still caught by the validation layer at record time.
 The illegal _pass bookkeeping_ is caught nowhere.
 
-## The Tier B arms of the indirect-draw tests have never run
+## The bindless Tier B arm is unrun, and no driver is needed to fix it
 
-`draw_indirect_count` and `draw_indexed_indirect_count` have a Tier A path and a
-fallback, and the tests cover both arms and assert which one they took. But
-lavapipe on Mesa 26.1.6 reports **tier A**, so on this machine and in CI the
-fallback is compiled and unrun. Reaching it needs a genuinely Tier B driver, and
-we do not currently have one anywhere — CI's "software rasteriser" leg is no
-longer the Tier B leg it was assumed to be.
+**This entry used to name the wrong tests and give the wrong reason.** It said
+`draw_indirect_count` and `draw_indexed_indirect_count` have tier arms; they do
+not, and nothing in the vk suite branches on a tier for them. The tier arms are
+bindless ones, in `crates/crcbl-vk/tests/vk_e2e/pipeline.rs` and `compute.rs`.
+It also said reaching Tier B needs a genuinely Tier B driver. It does not.
 
-One arm was salvaged: the `update_bind_group` refusal is a layout rule rather
-than a tier rule, so that test runs its refusal path on Tier A devices too.
+The `Err` arm in `pipeline.rs` keys on whether the device reports
+`Features::DESCRIPTOR_INDEXING` — so the "Tier B device" it wants is a device
+opened without that feature, which is a subtraction rather than a driver.
+`mesh.rs`'s `open_for_mesh_with` already does exactly this for
+`DRAW_INDIRECT_COUNT` to reach `GeometryPath::IndirectPerBatch`, and its own doc
+gives the principle: asking for less is the only way to run that arm on real
+hardware at all. radv can therefore run the bindless refusal locally.
+
+**What it needs, and the trap.** `open_for_triangle` and `open_for_mesh_with`
+are already two copies of the same open-a-headless-device body, differing in
+label and optional set. A third copy for this is the duplication that gets fixed
+once and missed twice, so the slice is an extraction first — one opener taking a
+label and an optional `Features` set — then the second device and the assertion
+that a bindless layout is refused with `HalError::Unsupported`.
+
+One arm was salvaged earlier: the `update_bind_group` refusal is a layout rule
+rather than a tier rule, so that test runs its refusal path on Tier A devices
+too.
 
 ## Vulkan's cross-submission barriers are unverified on this machine
 
