@@ -28,13 +28,25 @@ runs:
     # release is not the one another release resolves to. `restore-keys` is
     # deliberately absent for the same reason — a near-miss here is a wrong
     # package set, not a slightly stale one.
+    # The image identity is read in a step rather than taken from `env.ImageOS`
+    # in the key expression: that variable does not resolve inside a composite
+    # action, and the first version of this silently keyed on an **empty**
+    # segment — `apt-Linux-X64--<hash>` in the log. An empty segment is not a
+    # cosmetic flaw here, it is the wrong-package-set bug this key exists to
+    # prevent, since one release's `.deb` would restore onto another's.
+    - id: image
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "id=${ImageOS:-$(. /etc/os-release && echo "${ID}${VERSION_ID}")}" \
+          >> "$GITHUB_OUTPUT"
     - id: archive
       uses: actions/cache@v4
       with:
         path: /var/cache/apt/archives/*.deb
         key:
-          apt-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{
-          hashFiles('.github/actions/apt-packages/action.yml') }}-${{
+          apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.id
+          }}-${{ hashFiles('.github/actions/apt-packages/action.yml') }}-${{
           inputs.packages }}
     # `apt-get` deletes what it downloaded once a package is unpacked, so
     # without this the cache would save an empty directory every time.

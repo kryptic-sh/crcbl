@@ -903,6 +903,14 @@ because a `.deb` built for one release is not what another resolves to. There
 are **no `restore-keys`**: a near-miss here would be the wrong package set, not
 a slightly stale one.
 
+**The image half was broken on the first attempt and the log said so.**
+`${{ env.ImageOS }}` does not resolve inside a composite action, so the key read
+`apt-Linux-X64--<hash>` — an empty segment, which would have restored one
+release's `.deb` files onto another. It is read in a shell step now, falling
+back to `/etc/os-release` when the variable is absent. Worth remembering
+generally: a cache key with an empty segment fails silently and _looks_ like a
+hit.
+
 What it does not fix: the very first run after a cache eviction still needs the
 mirror. The cache narrows the window rather than closing it.
 
