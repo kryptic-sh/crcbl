@@ -1847,6 +1847,34 @@ stays until `crcbl-wgpu` goes, and this runs beside it.
 The remaining half of the deletion bar is the parity blockers, which are four
 rows of hardware nobody here has — see "The numbers, restated".
 
+### The render-harness job fails at browser launch about a third of the time
+
+Measured from the last eight Pages runs on `main` that were not concurrency
+cancellations: **three failed**, and the shape is always the same —
+
+```
+render-harness-e2e: the browser never wrote DevToolsActivePort
+##[error]Process completed with exit code 2.
+```
+
+preceded by `Failed to connect to the bus` from Chromium's dbus client. Exit 2
+is the driver's own "could not run at all", so nothing was compared and no
+golden is implicated. Runs affected: `171f385`, `6228aef`, `0be6f79`; `ae0d03b`
+and `f2b8327` passed.
+
+**This matters more now than it did**, because `web/run-cross-backend-e2e.sh`
+runs in the same job and reuses that step's readbacks — so a launch failure
+takes both comparisons with it. It is not made worse by the new step, which runs
+after and passed on `ae0d03b`, but it does mean the deletion bar's oracle clause
+rests on a gate that is down a third of the time.
+
+**Not diagnosed.** The candidate is the runner's Chromium sandbox or dbus
+availability rather than anything in the repo, since the failure is before any
+page loads. What would settle it: capture the browser's own stderr on the
+failing path — `browser-launch.mjs` currently reports only that the port file
+never appeared, so the launch failure's reason is discarded rather than shown.
+That is a small change to that file and the obvious first step.
+
 ### The viewer's suite segfaulted once on lavapipe, and did not again
 
 On 2026-08-19 the `vk e2e (lavapipe)` job's "Run the viewer's suite against
