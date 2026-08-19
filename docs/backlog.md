@@ -5135,11 +5135,12 @@ widen it here. What that costs: the **two-submission** instance of this bug can
 only be observed in CI.
 
 What stands in for it locally is
-`reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it` in
-`crates/crcbl-vk/tests/vk_e2e.rs`, which provokes the same missing dependency at
-record-time distance — a one-image ring, both trips recorded into one command
-buffer — where every layer build sees it. It was falsified by disabling the
-widening in `VkCommandEncoder::pipeline_barrier`: red, with the layer naming
+`reusing_an_offscreen_vulkan_ring_image_is_ordered_against_the_frame_that_had_it`
+in `crates/crcbl-vk/tests/vk_e2e/swapchain.rs`, which provokes the same missing
+dependency at record-time distance — a one-image ring, both trips recorded into
+one command buffer — where every layer build sees it. It was falsified by
+disabling the widening in `VkCommandEncoder::pipeline_barrier`: red, with the
+layer naming
 `vkCmdPipelineBarrier2 performs image layout transition on the VkImage ... which was previously read by vkCmdCopyImageToBuffer`.
 
 **A CPU wait was tried first and does not work**, which is worth keeping because
@@ -5163,12 +5164,12 @@ texture→buffer copy, and `device/queue.rs`'s
 which is what carries a texture's state across submissions (read in wgpu-core
 30.0.0, the resolved version).
 
-`reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it` in
-`crates/crcbl-wgpu/tests/wgpu_e2e.rs` is the check: a one-image ring, trip one
-clears and copies out, trip two clears the same image to the reversed colour,
-and the staging buffer must still hold trip one's. Green on radv, on lavapipe
-and on the GL backend. Falsified both ways — writing trip two's colour in trip
-one, and deleting the copy — each red, and each for its own reason.
+`reusing_an_offscreen_wgpu_ring_image_is_ordered_against_the_frame_that_had_it`
+in `crates/crcbl-wgpu/tests/wgpu_e2e.rs` is the check: a one-image ring, trip
+one clears and copies out, trip two clears the same image to the reversed
+colour, and the staging buffer must still hold trip one's. Green on radv, on
+lavapipe and on the GL backend. Falsified both ways — writing trip two's colour
+in trip one, and deleting the copy — each red, and each for its own reason.
 
 **And the layer agrees, with a control that proves the layer was listening.**
 Sync validation is not something wgpu-hal requests, so it was forced at layer
@@ -7037,15 +7038,15 @@ The question this file told the DX12 phase to settle is settled: the
 `windows-latest` runner reports
 `ResourceBindingTier=3  HighestShaderModel=6.8 sm66-dynamic-resources=yes` for
 both the DXGI lists and `EnumWarpAdapter`, and `crcbl_dx12::device`'s
-`a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` has since passed there
-— so WARP supports SM6.6 dynamic resources **and executes a shader**, which
-closes the coverage hole that `windows-latest` has never had golden images or a
-render pass: Windows can have a software rasteriser, the way Linux has lavapipe.
-What that does not cover is hardware: WARP is one implementation with one set of
-tolerances, and no D3D12 code in this workspace has run on a GPU.
-`renderer-tier=B` in the run's lines is the backend's own gap — `COMPUTE`,
-`TIMELINE_SEMAPHORE` and the two indirect features wait on calls no slice has
-written.
+`a_pulled_triangle_is_drawn_by_d3d12_and_read_back_texel_by_texel` has since
+passed there — so WARP supports SM6.6 dynamic resources **and executes a
+shader**, which closes the coverage hole that `windows-latest` has never had
+golden images or a render pass: Windows can have a software rasteriser, the way
+Linux has lavapipe. What that does not cover is hardware: WARP is one
+implementation with one set of tolerances, and no D3D12 code in this workspace
+has run on a GPU. `renderer-tier=B` in the run's lines is the backend's own gap
+— `COMPUTE`, `TIMELINE_SEMAPHORE` and the two indirect features wait on calls no
+slice has written.
 
 Deferred inside DX4, each with what it would take:
 
@@ -7677,7 +7678,7 @@ Not proven on any device: dynamic offsets, offscreen surfaces, and a recorded
 frame.
 
 **A rot to expect.** `c4e8655` reddened WARP on
-`the_slices_that_have_not_arrived_still_refuse_and_name_themselves`, which
+`the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves`, which
 asserts the unimplemented calls still answer `Unsupported`. Three of them had
 just started working. That test's own comment calls it "the half that rots" —
 every DX12 slice from here has to prune it, and the failure is legible when it
@@ -8099,17 +8100,13 @@ rename's paths:
   destroyed handle and mtl's swapchain refusals were deleted once
   `crates/crcbl/tests/hal_seam_e2e.rs` covered them on all four backends in CI.
   A behaviour every backend owes now has exactly one name, in that file — which
-  is the convention arriving rather than being described.
-- `docs/backlog.md` itself names old identifiers in entries that predate the
-  rename: `a_render_pass_clear_reads_back_the_exact_texels` (now
-  `a_metal_`/`a_d3d12_`-prefixed, and the entry means the Metal one),
-  `the_slices_that_have_not_arrived_still_refuse_and_name_themselves`,
-  `an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer`,
-  `an_indexed_draw_reads_the_bound_index_range`,
-  `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
-  `a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` and
-  `reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it`.
-  Each now carries a backend word.
+  is the convention arriving rather than being described. `docs/backlog.md`'s
+  own stale identifiers are fixed. One of them did not go the way this entry
+  predicted: `a_render_pass_clear_reads_back_the_exact_texels` was not given a
+  backend word at all. It is
+  `a_render_pass_clear_reaches_memory_with_the_colour_it_was_given` in
+  `crates/crcbl/tests/hal_seam_e2e.rs` — the agnostic suite absorbed it, which
+  is the outcome the paragraph above calls the convention arriving.
 
 ### Two backend test-name pairs deliberately left diverging
 
