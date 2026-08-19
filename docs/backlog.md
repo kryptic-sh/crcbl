@@ -3511,7 +3511,7 @@ does not make the deletion wait on Metal's mesh support, which nothing in the
 engine uses on that backend today. But it is a scope call, not a technical one,
 and it is the last thing standing between here and goal 3.
 
-## The numbers, restated — the eight rows and what each would take
+## What each remaining blocker row would take
 
 The list is **six**, down from eleven, and it is worth seeing that **none** of
 the six is work anybody could finish here today:
@@ -3545,8 +3545,9 @@ than answering it.** `crcbl-webgpu` now has **zero** divergences —
 `REVIEWED_BLOCKERS` does not name it at all, after `StorageImageBinding` gained
 the seam field it needed and `TimestampQuery` was closed by moving timestamps
 into the pass descriptor. The blocker list stood at **nine rows across two
-backends** on the day this was written, dx12 4 and Metal 5; it is eight now, and
-`REVIEWED_BLOCKERS` is the current answer.
+backends** on the day this was written, dx12 4 and Metal 5. Whatever it is
+today, `REVIEWED_BLOCKERS` is the answer — this heading said eight while the
+paragraph above it said six, which is what restating a count here buys.
 
 That matters because the browser backend is the one `crcbl-wgpu`'s deletion is
 _about_. The replacement for the path `crcbl-wgpu` used to serve now implements
@@ -5046,21 +5047,20 @@ macOS this is the gap it would hide in); and the pure modules (`geometry`,
   log line, or the compositor's own tree. That a fullscreen frame is _composed_
   at the new extent, rather than merely built at it, is unchecked.
 
-## Five sample `gpu.rs` files, two of them identical
+## The two sample `gpu.rs` files that stopped being identical
 
-`apps/breakout/src/gpu.rs` and `apps/flappy/src/gpu.rs` differ in **nothing**
-but the game's name: rename `breakout`/`Breakout` to match and `diff` reports
-zero lines. Both are 622 and 619 lines. `apps/asteroids` and `apps/horde` differ
-substantially (352 and 487 lines against breakout's) and `apps/sandbox` almost
-entirely, so this is a two-file duplication rather than a five-file one.
+`apps/breakout/src/gpu.rs` and `apps/flappy/src/gpu.rs` were once identical once
+the game's name was normalised away. They are not any more — `cmp` says so — and
+flappy's camera scrolls where breakout's is fixed.
 
-Not acted on because the seam is not obvious. The shared shape is "orthographic
-camera + sprite pass + menu pass + UI pass over `GpuContext`", which is a
-plausible `crcbl-render` bundle — but breakout's camera is fixed and flappy's
-scrolls, and the two files agreeing today may be the coincidence of two 2D games
-at the same stage rather than one piece of knowledge written twice. Revisit when
-a third game wants the same bundle; a helper with two callers that then needs a
-flag per caller is the failure mode.
+**Kept because the decline was right and that is worth not re-arguing.** The
+shared shape looked like a plausible `crcbl-render` bundle: orthographic camera,
+sprite pass, menu pass, UI pass over `GpuContext`. The stated reason for leaving
+it alone was that two 2D games at the same stage resembling each other is not
+the same as one piece of knowledge written twice, and that the failure mode
+would be a helper with two callers needing a flag per caller. That is exactly
+what a scrolling camera would have become. The trigger is unchanged: revisit
+when a third game wants the bundle.
 
 ## `run-vk-e2e.sh` pins no ICD by default, so nobody was running CI's gate
 
