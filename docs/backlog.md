@@ -3084,10 +3084,20 @@ with `HalError::Unsupported`. Measured both ways by forcing the raster fixture
 to try `D24UnormS8Uint` first — it returned `Ok` before and is refused now — and
 it refuses nothing in use across every suite on radv.
 
-**`crcbl-wgpu`'s half is not fixed** and is left for the deletion: its
-`create_image` is not wrapped in `checked()`, unlike `create_graphics_pipeline`
-beside it, so a format the device did not enable arrives through the
-uncaptured-error handler and a live-looking handle comes back anyway.
+**`crcbl-wgpu`'s half is fixed too.** `create_texture` is wrapped in `checked()`
+now, like `create_graphics_pipeline` beside it. It was left for the deletion
+until a new agnostic test — `a_created_image_is_one_the_device_can_serve` in the
+seam suite — found it on the first run, refusing `D32FloatS8Uint` on a device
+without `depth32float-stencil8`. Fixing it was cheaper than excusing it, and
+leaving it would have meant a red seam job on that backend.
+
+**The contract now has a test, which is what makes this stop recurring.** It
+asserts a successful `create_image` yields a usable image, reads both error
+channels — `crcbl-mtl` refuses through the return value and `crcbl-wgpu` through
+`Device::take_error` — and requires at least one format to be served, so a run
+where everything was refused cannot pass as coverage of the accepting path.
+Measured: radv serves `D32FloatS8Uint` and refuses `D24UnormS8Uint`, wgpu the
+exact reverse, lavapipe both.
 
 **`crcbl-dx12` and `crcbl-mtl` make no per-format query either**, read on
 2026-08-20 — but whether that is a _bug_ there is genuinely unknown, and the

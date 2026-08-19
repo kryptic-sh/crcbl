@@ -3668,6 +3668,122 @@ const STENCIL_READ_MASK: u32 = 0xFF;
 /// numeric limits and no format table at all, so the only probe available is to
 /// create the image and look at what came back.
 ///
+/// **A successful `create_image` means a usable image**, for every format this
+/// suite knows how to ask about.
+///
+/// The seam's contract has two acceptable answers and one that is not: return a
+/// handle that works, or refuse. What a backend may **not** do is answer `Ok`
+/// with a handle the device cannot serve, because a caller has no way to tell
+/// that from the good case and finds out at view creation, at pipeline
+/// creation, or not at all.
+///
+/// # This caught a real defect, and it was invisible to every other test
+///
+/// `crcbl-vk::create_image` never asked the device whether it served the
+/// format. `vkCreateImage` is not required to fail for an unsupported
+/// format/usage pair, and radv returns success for
+/// [`Format::D24UnormS8Uint`] as a depth-stencil attachment while the
+/// validation layer reports `VK_ERROR_FORMAT_NOT_SUPPORTED` from
+/// `vkGetPhysicalDeviceImageFormatProperties2`. The suite's own raster fixture
+/// passed on undefined behaviour once before anyone read the layer output — and
+/// it passes *legitimately* now only because it tries
+/// [`Format::D32FloatS8Uint`] first, which every native API serves. So the
+/// order of that list was hiding the bug from every backend at once.
+///
+/// # Both error channels, and that is not belt and braces
+///
+/// A backend may refuse through the return value or through
+/// [`Device::take_error`] — `crcbl-mtl` uses the first for this case and
+/// `crcbl-wgpu` the second, routing a bad format to the uncaptured-error
+/// handler and returning a live-looking handle anyway. Reading one channel
+/// would score one of them wrong, which is why the raster fixture reads both
+/// and why this does.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_created_image_is_one_the_device_can_serve() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    assert_no_out_of_band_error(device);
+
+    let mut served = 0usize;
+    for format in STENCIL_FORMATS {
+        let image = match device.create_image(&ImageDesc {
+            label: Some("format contract probe"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(RASTER_WIDTH, RASTER_HEIGHT),
+            format,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+        }) {
+            Ok(image) => image,
+            Err(error) => {
+                eprintln!(
+                    "crcbl hal seam e2e: {format:?} refused as a depth-stencil attachment — \
+                     {error}"
+                );
+                // A refusal must not also leave an error pending: a caller that
+                // took the `Err` and carried on would meet it on an unrelated
+                // call and blame that one.
+                assert!(
+                    device.take_error().is_none(),
+                    "{format:?} was refused by return value *and* left an error pending, so the \
+                     next unrelated call would report it"
+                );
+                continue;
+            }
+        };
+
+        // The claim under test. `create_image` said yes; the device gets to
+        // disagree exactly once, here, and not later.
+        if let Some(error) = device.take_error() {
+            device.destroy_image(image);
+            panic!(
+                "create_image returned Ok for {format:?} as a depth-stencil attachment and the \
+                 device then reported {error}. That is the answer a caller cannot act on: the \
+                 handle looks live and the failure arrives at view creation, at pipeline \
+                 creation, or not at all. Refuse it instead."
+            );
+        }
+
+        // And a view over it, which is where Vulkan's VUIDs landed when
+        // `create_image` had lied.
+        let view = device
+            .create_image_view(&ImageViewDesc {
+                label: Some("format contract probe view"),
+                image,
+                view_type: ImageViewType::D2,
+                format,
+                range: ImageSubresourceRange::all(format),
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "create_image accepted {format:?} and create_image_view then refused it — \
+                     {error}. The image is not one this device serves, and the refusal belongs \
+                     at creation where a caller can still choose another format."
+                )
+            });
+        assert_no_out_of_band_error(device);
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+        served += 1;
+    }
+
+    // **A run where every format was refused proves nothing about the accepting
+    // path**, and this suite draws that distinction everywhere else too.
+    assert!(
+        served > 0,
+        "no format in {STENCIL_FORMATS:?} was served as a depth-stencil attachment, so this \
+         checked only the refusal path — a device that can render depth at all serves one of them"
+    );
+    eprintln!(
+        "crcbl hal seam e2e: {served} of {} depth-stencil format(s) served, and every \
+         accepted one was usable",
+        STENCIL_FORMATS.len()
+    );
+    headless.finish();
+}
+
 /// [`Format::D32FloatS8Uint`] is first because it is the one every *native* API
 /// has: radv reports `D24_UNORM_S8_UINT` with no
 /// `DEPTH_STENCIL_ATTACHMENT` format feature at all, and Metal's

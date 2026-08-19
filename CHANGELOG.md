@@ -799,6 +799,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-wgpu::create_image` refuses one too**, and a new agnostic seam test
+  is what found it. `create_texture` was not wrapped in `checked()`, unlike
+  `create_graphics_pipeline` beside it, so an unservable format reached the
+  caller as success and surfaced through the uncaptured-error handler —
+  `D32FloatS8Uint` on a device without `depth32float-stencil8`, which is the
+  mirror of radv's case.
+
+- **`a_created_image_is_one_the_device_can_serve` holds every backend to the
+  contract**: a successful `create_image` must yield a usable image, or the call
+  must refuse. It reads _both_ error channels, because `crcbl-mtl` refuses
+  through the return value and `crcbl-wgpu` through `Device::take_error`, and it
+  asserts at least one format was served so a run where everything was refused
+  cannot pass as coverage of the accepting path. Measured: radv serves
+  `D32FloatS8Uint` and refuses `D24UnormS8Uint`, wgpu the exact reverse, and
+  lavapipe serves both.
+
 - **`crcbl-vk::create_image` refuses a format the device cannot serve.** It did
   not ask: `vkCreateImage` is not required to fail for an unsupported
   format/usage pair, and radv returns success for `D24UnormS8Uint` as a

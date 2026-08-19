@@ -735,24 +735,33 @@ impl Device for WgpuDevice {
                 desc.usage
             )));
         }
-        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: desc.label,
-            size: wgpu::Extent3d {
-                width: desc.extent.width,
-                height: desc.extent.height,
-                depth_or_array_layers: desc.extent.depth_or_layers,
-            },
-            mip_level_count: desc.mip_levels,
-            sample_count: desc.samples,
-            dimension: match desc.image_type {
-                hal::ImageType::D1 => wgpu::TextureDimension::D1,
-                hal::ImageType::D2 => wgpu::TextureDimension::D2,
-                hal::ImageType::D3 => wgpu::TextureDimension::D3,
-            },
-            format: conv::map_format(desc.format),
-            usage,
-            view_formats: &[conv::map_format(desc.format)],
-        });
+        // **Wrapped, like `create_graphics_pipeline` beside it, and it was not.**
+        // wgpu reports a texture it cannot make through the uncaptured-error
+        // handler and hands back a live-looking `Texture` regardless, so an
+        // unservable format — `D32FloatS8Uint` on a device without
+        // `depth32float-stencil8`, say — reached the caller as success and
+        // failed later, or never. `checked` turns the error queue's answer into
+        // this call's answer, which is what the seam documents.
+        let tex = self.checked("create_texture", || {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: desc.label,
+                size: wgpu::Extent3d {
+                    width: desc.extent.width,
+                    height: desc.extent.height,
+                    depth_or_array_layers: desc.extent.depth_or_layers,
+                },
+                mip_level_count: desc.mip_levels,
+                sample_count: desc.samples,
+                dimension: match desc.image_type {
+                    hal::ImageType::D1 => wgpu::TextureDimension::D1,
+                    hal::ImageType::D2 => wgpu::TextureDimension::D2,
+                    hal::ImageType::D3 => wgpu::TextureDimension::D3,
+                },
+                format: conv::map_format(desc.format),
+                usage,
+                view_formats: &[conv::map_format(desc.format)],
+            })
+        })?;
         Ok(handle::insert(
             &mut self.pools.images.lock().unwrap(),
             self.owner(),
