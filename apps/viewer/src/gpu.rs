@@ -319,6 +319,18 @@ impl Gpu {
         self.renderer.exposure()
     }
 
+    /// Sets the tonemap's exposure outright and returns what is now in force.
+    ///
+    /// [`Gpu::scale_exposure`]'s sibling, for the control that names a value
+    /// rather than a step: a slider handle is a **position in the range**, so a
+    /// factor computed from where the exposure happens to be would accumulate
+    /// the error of every drag before it. The answer comes back for the same
+    /// reason it does there — [`ForwardRenderer::set_exposure`] clamps.
+    pub const fn set_exposure(&mut self, exposure: f32) -> f32 {
+        self.renderer.set_exposure(exposure);
+        self.renderer.exposure()
+    }
+
     /// The exposure the next frame is drawn with.
     #[must_use]
     pub const fn exposure(&self) -> f32 {

@@ -149,10 +149,21 @@ module's docs name its own omission; this is the list in one place.
   drawing into a different format needs a second one. That matches the tonemap
   pipeline's existing assumption rather than adding a new limit.
 
-- **Milestone 2's remainder** — the exposure _slider_. The listing panel landed
-  (`I`), the wireframe landed (`W`), runtime exposure landed on `-`/`=` and the
-  normals view landed on `N`, so what is left is a pointer-driven control where
-  today there is a key pair.
+- **Milestone 2 has landed in full** — the listing panel (`I`), the wireframe
+  (`W`), runtime exposure on `-`/`=`, the normals view (`N`) and now the
+  exposure slider on the `ESC` panel. What follows is what each of them left
+  behind.
+
+  The slider leaves two. **It has no keyboard of its own**: the engine owns the
+  menu keys and arbitrates up, down and Enter, so left/right on a highlighted
+  row would be a fourth reserved binding in `crcbl::engine` and a change to
+  `MenuPump`. `-` and `=` reach the exposure whether or not the panel is up and
+  the handle mirrors them, so the row is reachable without a pointer — it is the
+  _handle_ that is not. Worth doing when a second sample wants a slider; not
+  worth a reserved key for one. And **the groove is drawn with the UI pass's own
+  rectangles**, not nine-sliced art, so it does not swap under
+  `ButtonState::Pressed` the way the row behind it does; a skin would need three
+  more sprites on the shipped sheet.
 
   Three things the wireframe left behind. Its **pixel proof runs only with a
   backend pinned** and was measured here on RADV through the _mesh-shader_ path;

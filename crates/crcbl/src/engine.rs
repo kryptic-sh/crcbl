@@ -5089,6 +5089,19 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         &self.debug
     }
 
+    /// The game's menus, for a test that asks where a panel put something.
+    ///
+    /// Read-only, unlike [`game_mut`](Self::game_mut): a caller that could
+    /// swap a menu here would be changing what the frame it is about to
+    /// measure draws. The panel's rectangles come from
+    /// [`Menu::layout`](crcbl_ui::menu::Menu::layout), which is a pure function
+    /// of this, the extent and the atlas — so a test that wants to click a
+    /// widget can find it rather than guess at a coordinate.
+    #[must_use]
+    pub const fn menus(&self) -> &crcbl_ui::menu::MenuSet<G::MenuKind> {
+        &self.menus
+    }
+
     /// Simulation ticks run so far.
     #[must_use]
     pub const fn ticks(&self) -> u64 {

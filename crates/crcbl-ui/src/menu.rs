@@ -92,12 +92,30 @@ pub struct MenuStyle {
     pub item_size: f32,
     /// The least space between an item's label and its key hint.
     pub hint_gap: f32,
+    /// The least width a [`Slider`] row's groove is given.
+    ///
+    /// A least, not a width: [`Menu::layout_with`] stretches the groove into
+    /// whatever the panel's widest row left over, so a slider beside a long
+    /// label is a long slider. This is what stops it collapsing when the slider
+    /// row *is* the widest one.
+    pub track_width: f32,
+    /// How tall a slider's groove is drawn.
+    pub track_height: f32,
+    /// The handle's size. Its width is also the travel the groove loses at each
+    /// end, so the handle stays inside the groove at both extremes.
+    pub handle_size: Vec2,
     /// The title's colour.
     pub title_color: [f32; 4],
     /// An item label's colour.
     pub label_color: [f32; 4],
     /// A key hint's colour — dimmer than the label it belongs to.
     pub hint_color: [f32; 4],
+    /// A slider groove's colour, behind the part not filled in.
+    pub track_color: [f32; 4],
+    /// The colour of the groove up to the handle.
+    pub fill_color: [f32; 4],
+    /// The handle's colour.
+    pub handle_color: [f32; 4],
     /// What the frame behind the menu is dimmed with.
     pub scrim_color: [f32; 4],
 }
@@ -155,9 +173,18 @@ impl MenuStyle {
             title_size: NATURAL_FONT_SIZE * 2.0 * scale,
             item_size: NATURAL_FONT_SIZE * scale,
             hint_gap: 10.0 * scale,
+            track_width: 48.0 * scale,
+            track_height: 4.0 * scale,
+            handle_size: Vec2::new(6.0, 12.0) * scale,
             title_color: [1.0, 0.94, 0.55, 1.0],
             label_color: [0.94, 0.95, 1.0, 1.0],
             hint_color: [0.62, 0.64, 0.82, 1.0],
+            // The groove is the darkest of the three and the handle the
+            // brightest, so the three read as recess, level and grip without
+            // any art behind them.
+            track_color: [0.10, 0.11, 0.18, 1.0],
+            fill_color: [0.42, 0.46, 0.72, 1.0],
+            handle_color: [0.94, 0.95, 1.0, 1.0],
             // Two thirds, in straight alpha: enough that the panel's own dark
             // fill separates from the game behind it, not so much that the
             // player loses track of where the ball was.
@@ -203,8 +230,67 @@ impl Default for MenuStyle {
 // The model
 // ---------------------------------------------------------------------------
 
+/// A value between zero and one that the player drags along a groove.
+///
+/// **Unitless on purpose.** A slider that knew it was showing an exposure, a
+/// volume or a mouse sensitivity would need to know that exposure is a ratio
+/// and volume is decibels, and it would be wrong for the next one. The caller
+/// owns the mapping in both directions: it writes a position in with
+/// [`Menu::set_slider`] and reads one back with [`Menu::slider`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Slider {
+    position: f32,
+}
+
+impl Slider {
+    /// A slider whose handle sits `position` of the way along, clamped into
+    /// `0.0..=1.0`.
+    #[must_use]
+    pub fn new(position: f32) -> Self {
+        Self {
+            position: clamp_unit(position),
+        }
+    }
+
+    /// Where the handle sits: `0.0` at the left end of the groove, `1.0` at the
+    /// right. Always in that range.
+    #[must_use]
+    pub const fn position(&self) -> f32 {
+        self.position
+    }
+
+    /// Moves the handle, clamped into `0.0..=1.0`.
+    pub fn set_position(&mut self, position: f32) {
+        self.position = clamp_unit(position);
+    }
+}
+
+/// Into `0.0..=1.0`, with `NaN` landing at zero.
+///
+/// `f32::clamp` propagates a `NaN` rather than replacing it, and a `NaN`
+/// position is a handle drawn nowhere and a caller handed back a number it
+/// cannot map. Zero is the end of the groove, which is a place.
+fn clamp_unit(position: f32) -> f32 {
+    if position.is_nan() {
+        0.0
+    } else {
+        position.clamp(0.0, 1.0)
+    }
+}
+
+/// What a menu row *is*: something that fires, or something that carries a
+/// value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MenuItemKind {
+    /// A button. [`Menu::activate`] and a click both report its id.
+    Action,
+    /// A slider. It never fires — see [`Menu::activate`] — and the caller reads
+    /// its value with [`Menu::slider`] instead.
+    Slider(Slider),
+}
+
 /// One line of a menu: what it says, what key does it, and what it is called.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MenuItem {
     /// Names this item to the caller — what [`Menu::activate`] hands back.
     ///
@@ -219,7 +305,13 @@ pub struct MenuItem {
     /// **A hint, not a binding.** This type does not read the keyboard; the game
     /// loop already owns its key handling and this is what tells the player what
     /// it is.
+    ///
+    /// A [`MenuItemKind::Slider`] row has no key of its own to advertise, so
+    /// this is where its **value** goes — the formatted number the caller
+    /// refreshes as the handle moves. Right-aligned either way.
     pub hint: String,
+    /// Whether this row fires or carries a value.
+    pub kind: MenuItemKind,
 }
 
 impl MenuItem {
@@ -230,6 +322,24 @@ impl MenuItem {
             id,
             label: label.into(),
             hint: hint.into(),
+            kind: MenuItemKind::Action,
+        }
+    }
+
+    /// A slider row: a label, a groove with its handle `position` of the way
+    /// along, and `value` drawn where a key hint would be.
+    #[must_use]
+    pub fn slider(
+        id: WidgetId,
+        label: impl Into<String>,
+        value: impl Into<String>,
+        position: f32,
+    ) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            hint: value.into(),
+            kind: MenuItemKind::Slider(Slider::new(position)),
         }
     }
 }
@@ -239,7 +349,7 @@ impl MenuItem {
 /// Retained across frames — unlike the rest of this crate — because a selection
 /// is state by definition, and an immediate-mode menu whose highlight was
 /// recomputed from nothing every frame would have no keyboard at all.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Menu {
     /// The heading, drawn above the items.
     pub title: String,
@@ -255,6 +365,12 @@ pub struct Menu {
     /// Which item the pointer is over, if any. Takes over the highlight from
     /// [`Menu::selected`] while it is `Some`.
     hovered: Option<usize>,
+    /// The slider row the pointer is dragging, if it is dragging one.
+    ///
+    /// What makes [`Menu::set_slider`] leave a handle alone while the player
+    /// has hold of it: a caller pushing the value it last read back in every
+    /// frame would otherwise fight the drag it is reading from.
+    dragging: Option<usize>,
 }
 
 impl Menu {
@@ -268,6 +384,7 @@ impl Menu {
             pressed: false,
             pressed_index: None,
             hovered: None,
+            dragging: None,
         }
     }
 
@@ -312,6 +429,7 @@ impl Menu {
         self.hovered = None;
         self.pressed = false;
         self.pressed_index = None;
+        self.dragging = None;
     }
 
     /// Selects the item with this id, if it is in the menu.
@@ -346,11 +464,17 @@ impl Menu {
     /// The **highlighted** one, which is the hovered item when a pointer is over
     /// one and the selected item otherwise — so Enter commits what the player can
     /// see is about to happen, whichever device put the highlight there.
+    /// A [`MenuItemKind::Slider`] row reports **nothing**: there is no press of
+    /// a commit key that means anything to a value, and an id fired from one
+    /// would reach the game's action table as if a button had been clicked.
     pub fn activate(&mut self) -> Option<WidgetId> {
         self.pressed = false;
         self.pressed_index = None;
         let index = self.hovered.unwrap_or(self.selected);
-        self.items.get(index).map(|item| item.id)
+        match self.items.get(index) {
+            Some(item) if item.kind == MenuItemKind::Action => Some(item.id),
+            _ => None,
+        }
     }
 
     /// Drops any hover and any held key.
@@ -361,6 +485,65 @@ impl Menu {
         self.hovered = None;
         self.pressed = false;
         self.pressed_index = None;
+        self.dragging = None;
+    }
+
+    /// Where the handle of the slider row named `id` sits, in `0.0..=1.0`.
+    ///
+    /// `None` for an id this menu has no row for, and for a row that is a
+    /// button rather than a slider.
+    #[must_use]
+    pub fn slider(&self, id: WidgetId) -> Option<f32> {
+        self.items.iter().find_map(|item| match item.kind {
+            MenuItemKind::Slider(slider) if item.id == id => Some(slider.position()),
+            _ => None,
+        })
+    }
+
+    /// Moves the handle of the slider row named `id`, and reports whether it
+    /// moved.
+    ///
+    /// **Refused while the player is dragging that row**, which is what lets a
+    /// caller push the value back in unconditionally every frame: the state the
+    /// caller is mirroring came from this handle in the first place, so the
+    /// drag is the newer of the two and writing over it would pin the handle
+    /// under the cursor.
+    ///
+    /// So `false` means one of three things — no such row, not a slider, or the
+    /// player has hold of it — and a caller that needs to tell them apart asks
+    /// [`Menu::slider`] first.
+    pub fn set_slider(&mut self, id: WidgetId, position: f32) -> bool {
+        let dragging = self.dragging;
+        for (index, item) in self.items.iter_mut().enumerate() {
+            if item.id != id {
+                continue;
+            }
+            let MenuItemKind::Slider(slider) = &mut item.kind else {
+                return false;
+            };
+            if dragging == Some(index) {
+                return false;
+            }
+            slider.set_position(position);
+            return true;
+        }
+        false
+    }
+
+    /// The value text a slider row draws, replaced.
+    ///
+    /// Separate from [`Menu::set_slider`] because the two move for different
+    /// reasons: the handle is refused mid-drag and the caption never is — a
+    /// player dragging the exposure is precisely who needs to read the number
+    /// it has reached.
+    pub fn set_item_hint(&mut self, id: WidgetId, hint: impl Into<String>) -> bool {
+        match self.items.iter_mut().find(|item| item.id == id) {
+            Some(item) => {
+                item.hint = hint.into();
+                true
+            }
+            None => false,
+        }
     }
 
     /// How item `index` is drawn.
@@ -412,11 +595,38 @@ impl Menu {
             if inside {
                 hovered = Some(index);
             }
-            if state == ButtonState::Pressed && inside {
+            let is_slider = matches!(
+                self.items.get(index).map(|item| item.kind),
+                Some(MenuItemKind::Slider(_))
+            );
+            if state == ButtonState::Pressed && is_slider {
+                // Tracked whether or not the cursor is still **inside** the
+                // row, unlike a button's press: a slider dragged off the end of
+                // its groove — or above it, which is what a hand does while
+                // watching the frame behind the panel — keeps the handle at the
+                // end rather than letting go of it.
+                if let Some(track) = item.track
+                    && let Some(MenuItemKind::Slider(slider)) =
+                        self.items.get_mut(index).map(|item| &mut item.kind)
+                {
+                    slider.set_position(position_along(
+                        track,
+                        layout.style.handle_size.x,
+                        pointer.pos.x,
+                    ));
+                }
+                self.dragging = Some(index);
+                self.pressed = true;
+                self.pressed_index = Some(index);
+                self.selected = index;
+            } else if state == ButtonState::Pressed && inside {
                 self.pressed = true;
                 self.pressed_index = Some(index);
             }
-            if fired {
+            // A release over a slider ends a drag; it is not a click, and an id
+            // reported from one would reach the game's action table as though a
+            // button had been pressed.
+            if fired && !is_slider {
                 clicked = Some(item.id);
                 self.selected = index;
             }
@@ -425,6 +635,7 @@ impl Menu {
         if !pointer.down {
             self.pressed = false;
             self.pressed_index = None;
+            self.dragging = None;
         }
         clicked
     }
@@ -505,15 +716,37 @@ impl Menu {
                     // puts it back in the middle of what is visible.
                     + (inner.top - inner.bottom) * 0.5;
                 let hint_width = text_width(atlas, &item.hint, style.item_size);
+                let hint_x = item_max.x - inner.right - style.button_padding.x - hint_width;
+                // The groove takes everything between the label and the value,
+                // so the slider row of a panel widened by a longer label
+                // elsewhere is a longer slider rather than a short one adrift in
+                // the middle. `content_size` reserves `track_width` for it, so
+                // the span is never shorter than that on the row that sets the
+                // panel's width.
+                let track = match item.kind {
+                    MenuItemKind::Action => None,
+                    MenuItemKind::Slider(_) => {
+                        let label_end = label_x + text_width(atlas, &item.label, style.item_size);
+                        let right = if item.hint.is_empty() {
+                            hint_x
+                        } else {
+                            hint_x - style.hint_gap
+                        };
+                        let left = (label_end + style.hint_gap).min(right);
+                        let middle = item_min.y + button_height * 0.5;
+                        Some((
+                            Vec2::new(left, middle - style.track_height * 0.5),
+                            Vec2::new(right, middle + style.track_height * 0.5),
+                        ))
+                    }
+                };
                 MenuItemLayout {
                     id: item.id,
                     min: item_min,
                     max: item_max,
                     label_pos: Vec2::new(label_x, label_y),
-                    hint_pos: Vec2::new(
-                        item_max.x - inner.right - style.button_padding.x - hint_width,
-                        label_y,
-                    ),
+                    hint_pos: Vec2::new(hint_x, label_y),
+                    track,
                 }
             })
             .collect();
@@ -553,8 +786,13 @@ impl Menu {
             } else {
                 style.hint_gap
             };
-            width = width
-                .max(label + gap + hint + inner.minimum_size().x + style.button_padding.x * 2.0);
+            let track = match item.kind {
+                MenuItemKind::Action => 0.0,
+                MenuItemKind::Slider(_) => style.hint_gap + style.track_width,
+            };
+            width = width.max(
+                label + track + gap + hint + inner.minimum_size().x + style.button_padding.x * 2.0,
+            );
         }
 
         let mut height = 0.0;
@@ -593,6 +831,19 @@ impl Menu {
             );
         }
         for (item, placed) in self.items.iter().zip(layout.items.iter()) {
+            if let (MenuItemKind::Slider(slider), Some(track)) = (item.kind, placed.track) {
+                dl.rect(track.0, track.1, style.track_color);
+                let (start, end) = handle_travel(track, style.handle_size.x);
+                let centre = start + (end - start) * slider.position();
+                dl.rect(track.0, Vec2::new(centre, track.1.y), style.fill_color);
+                let half = style.handle_size * 0.5;
+                let middle = (track.0.y + track.1.y) * 0.5;
+                dl.rect(
+                    Vec2::new(centre - half.x, middle - half.y),
+                    Vec2::new(centre + half.x, middle + half.y),
+                    style.handle_color,
+                );
+            }
             dl.text(
                 placed.label_pos,
                 item.label.as_str(),
@@ -630,6 +881,30 @@ fn line_height(size: f32) -> f32 {
     LINE_HEIGHT * (size / NATURAL_FONT_SIZE)
 }
 
+/// Where the **centre** of a handle `handle_width` wide may travel inside
+/// `track`, as `(leftmost, rightmost)`.
+///
+/// Half a handle in from each end, so position `0.0` and position `1.0` both
+/// draw a handle wholly inside the groove — a handle centred on the end would
+/// hang half of itself out over the button's face and read as a different
+/// value at each extreme. A groove narrower than one handle collapses the
+/// travel to its middle rather than inverting it.
+fn handle_travel(track: (Vec2, Vec2), handle_width: f32) -> (f32, f32) {
+    let half = (handle_width * 0.5)
+        .min((track.1.x - track.0.x) * 0.5)
+        .max(0.0);
+    (track.0.x + half, track.1.x - half)
+}
+
+/// The position a pointer at `x` names on `track`, before clamping.
+fn position_along(track: (Vec2, Vec2), handle_width: f32, x: f32) -> f32 {
+    let (start, end) = handle_travel(track, handle_width);
+    if end <= start {
+        return 0.0;
+    }
+    (x - start) / (end - start)
+}
+
 // ---------------------------------------------------------------------------
 // The layout
 // ---------------------------------------------------------------------------
@@ -647,6 +922,9 @@ pub struct MenuItemLayout {
     pub label_pos: Vec2,
     /// Where the key hint's em box starts — right-aligned inside the button.
     pub hint_pos: Vec2,
+    /// A [`MenuItemKind::Slider`] row's groove: `(min, max)` in screen pixels,
+    /// between the label and the value. `None` for a button row.
+    pub track: Option<(Vec2, Vec2)>,
 }
 
 impl MenuItemLayout {
@@ -882,10 +1160,23 @@ impl<K: Copy + Eq> MenuSet<K> {
 
     /// The menu being shown, mutably.
     pub fn current_mut(&mut self) -> Option<&mut Menu> {
-        let shown = self.shown;
+        self.get_mut(self.shown)
+    }
+
+    /// One menu of the set by name, mutably, whether or not it is on screen.
+    ///
+    /// What a game refreshing a live value on a panel needs and
+    /// [`current_mut`](Self::current_mut) cannot give it: `crcbl`'s loop asks
+    /// the game which menu to show *after* the game has had its say, so during
+    /// that call `current_mut` is still last frame's panel. Naming the menu is
+    /// exact where "the current one" is a frame out of step.
+    ///
+    /// Unlike [`replace`](Self::replace) this keeps the panel's selection and
+    /// the pointer's capture, which is what makes it safe to call every frame.
+    pub fn get_mut(&mut self, kind: K) -> Option<&mut Menu> {
         self.menus
             .iter_mut()
-            .find_map(|(kind, menu)| (*kind == shown).then_some(menu))
+            .find_map(|(seen, menu)| (*seen == kind).then_some(menu))
     }
 
     /// Moves the selection down, if there is a menu.
@@ -1809,6 +2100,294 @@ mod tests {
         let _ = MenuSet::new(
             Kind::None,
             vec![(Kind::Paused, pause_menu()), (Kind::Paused, start_menu())],
+        );
+    }
+    // -----------------------------------------------------------------------
+    // Sliders
+    // -----------------------------------------------------------------------
+
+    /// The id of the slider row in [`slider_menu`].
+    const DIAL: WidgetId = 20;
+
+    /// A panel whose second row is a slider, so every test below has a button
+    /// above it to prove the two kinds do not behave alike.
+    fn slider_menu() -> Menu {
+        Menu::new(
+            "OPTIONS",
+            vec![
+                MenuItem::new(10, "BACK", "ESC"),
+                MenuItem::slider(DIAL, "EXPOSURE", "1.00", 0.5),
+            ],
+        )
+    }
+
+    /// The slider row's groove and the travel its handle's centre has inside
+    /// it, at `extent`.
+    ///
+    /// Both read off the layout the menu actually chose. A test that measured
+    /// the travel at [`MenuStyle::pixel_art`]`(1)` would be a quarter of a
+    /// handle out at the scale a 960x720 window picks, and would report the
+    /// clamp as a rounding error.
+    fn groove(menu: &Menu, extent: (u32, u32)) -> ((Vec2, Vec2), (f32, f32)) {
+        let layout = menu.layout(extent, &atlas());
+        let track = layout.items()[1]
+            .track
+            .expect("the slider row has a groove");
+        (track, handle_travel(track, layout.style().handle_size.x))
+    }
+
+    /// **A slider is dragged, not clicked.** The handle follows the pointer's
+    /// `x` while the press is held, which is the whole of the control.
+    #[test]
+    fn dragging_a_slider_moves_the_handle_to_the_pointer() {
+        let extent = (960, 720);
+        let mut menu = slider_menu();
+        let mut ui = UiState::new();
+        let (track, (start, end)) = groove(&menu, extent);
+
+        for (fraction, expected) in [(0.0, 0.0), (0.25, 0.25), (1.0, 1.0)] {
+            let layout = menu.layout(extent, &atlas());
+            let x = start + (end - start) * fraction;
+            let y = (track.0.y + track.1.y) * 0.5;
+            menu.point(&layout, &mut ui, press_at(Vec2::new(x, y)));
+            let at = menu.slider(DIAL).expect("the row is a slider");
+            assert!(
+                (at - expected).abs() <= 1e-3,
+                "a press {fraction} of the way along put the handle at {at}",
+            );
+        }
+    }
+
+    /// **Past either end is the end, not a wrap and not a `NaN`.** A pointer
+    /// dragged off the panel entirely is the ordinary way a player reaches the
+    /// minimum, so the clamp is the feature.
+    #[test]
+    fn a_drag_past_either_end_of_the_groove_stops_there() {
+        let extent = (960, 720);
+        let mut menu = slider_menu();
+        let mut ui = UiState::new();
+        let (track, _) = groove(&menu, extent);
+        let y = (track.0.y + track.1.y) * 0.5;
+        let layout = menu.layout(extent, &atlas());
+
+        menu.point(&layout, &mut ui, press_at(Vec2::new(track.0.x, y)));
+        menu.point(
+            &layout,
+            &mut ui,
+            press_at(Vec2::new(track.0.x - 10_000.0, y)),
+        );
+        assert_eq!(menu.slider(DIAL), Some(0.0));
+
+        menu.point(
+            &layout,
+            &mut ui,
+            press_at(Vec2::new(track.1.x + 10_000.0, y)),
+        );
+        assert_eq!(menu.slider(DIAL), Some(1.0));
+    }
+
+    /// **A drag that leaves the row keeps the handle.** Unlike a button, whose
+    /// press is abandoned when the cursor wanders off it: a player watching the
+    /// frame behind the panel drags upward out of the row as a matter of course,
+    /// and a slider that let go there would be unusable.
+    #[test]
+    fn a_drag_that_leaves_the_row_still_moves_the_handle() {
+        let extent = (960, 720);
+        let mut menu = slider_menu();
+        let mut ui = UiState::new();
+        let (track, (start, end)) = groove(&menu, extent);
+        let layout = menu.layout(extent, &atlas());
+
+        let inside = Vec2::new(start, (track.0.y + track.1.y) * 0.5);
+        menu.point(&layout, &mut ui, press_at(inside));
+        assert_eq!(menu.slider(DIAL), Some(0.0));
+
+        // Three quarters along, and a long way above the panel.
+        let outside = Vec2::new(start + (end - start) * 0.75, 0.0);
+        menu.point(&layout, &mut ui, press_at(outside));
+        let at = menu.slider(DIAL).expect("the row is a slider");
+        assert!(
+            (at - 0.75).abs() <= 1e-3,
+            "the drag left the handle at {at}"
+        );
+    }
+
+    /// **A slider never reports an id**, from the commit key or from a release
+    /// over it. Either would arrive at the game's action table looking exactly
+    /// like a button press, and the game would run whatever that id means.
+    #[test]
+    fn a_slider_fires_nothing_from_either_device() {
+        let extent = (960, 720);
+        let mut menu = slider_menu();
+        let mut ui = UiState::new();
+
+        menu.select_next();
+        assert_eq!(menu.selected(), 1, "the slider is the second row");
+        menu.press(true);
+        assert_eq!(menu.activate(), None, "the commit key fired the slider");
+
+        let (track, _) = groove(&menu, extent);
+        let at = Vec2::new((track.0.x + track.1.x) * 0.5, (track.0.y + track.1.y) * 0.5);
+        let layout = menu.layout(extent, &atlas());
+        menu.point(&layout, &mut ui, press_at(at));
+        assert_eq!(
+            menu.point(&layout, &mut ui, release_at(at)),
+            None,
+            "letting go of a slider was reported as a click",
+        );
+
+        // And the button above it still does, so the suppression is the
+        // slider's and not a menu that stopped firing altogether.
+        menu.select_previous();
+        assert_eq!(menu.activate(), Some(10));
+    }
+
+    /// **The caller's write loses to the player's drag.** A game mirroring the
+    /// value it read back into the handle every frame is the normal shape; if
+    /// that write won, the handle would be pinned wherever the game last
+    /// committed and the drag would go nowhere.
+    #[test]
+    fn a_write_is_refused_while_the_handle_is_held_and_taken_after() {
+        let extent = (960, 720);
+        let mut menu = slider_menu();
+        let mut ui = UiState::new();
+        let (track, _) = groove(&menu, extent);
+        let y = (track.0.y + track.1.y) * 0.5;
+        let layout = menu.layout(extent, &atlas());
+
+        assert!(menu.set_slider(DIAL, 0.25), "an untouched handle takes it");
+        assert_eq!(menu.slider(DIAL), Some(0.25));
+
+        menu.point(&layout, &mut ui, press_at(Vec2::new(track.1.x, y)));
+        assert_eq!(menu.slider(DIAL), Some(1.0));
+        assert!(
+            !menu.set_slider(DIAL, 0.25),
+            "the write went through mid-drag",
+        );
+        assert_eq!(menu.slider(DIAL), Some(1.0));
+
+        menu.point(&layout, &mut ui, release_at(Vec2::new(track.1.x, y)));
+        assert!(menu.set_slider(DIAL, 0.25), "the drag was never let go of");
+        assert_eq!(menu.slider(DIAL), Some(0.25));
+    }
+
+    /// A value neither the caller nor the pointer can name lands at the start of
+    /// the groove, because `f32::clamp` would hand a `NaN` straight back.
+    #[test]
+    fn a_nan_position_lands_at_the_start() {
+        let mut menu = slider_menu();
+        assert!(menu.set_slider(DIAL, f32::NAN));
+        assert_eq!(menu.slider(DIAL), Some(0.0));
+        assert_eq!(Slider::new(f32::NAN).position(), 0.0);
+        assert_eq!(Slider::new(f32::INFINITY).position(), 1.0);
+    }
+
+    /// Asking a button row for a value, or a row that is not there, is `None`
+    /// rather than a number the caller would act on.
+    #[test]
+    fn only_a_slider_row_has_a_value() {
+        let mut menu = slider_menu();
+        assert_eq!(menu.slider(10), None, "the button row reported a value");
+        assert_eq!(menu.slider(999), None, "an absent row reported a value");
+        assert!(!menu.set_slider(10, 0.5), "a button row took a value");
+    }
+
+    /// **The groove is reserved, not squeezed in.** The panel grows by at least
+    /// a groove and its gap over the same menu with a button in that row — a
+    /// slider row that fitted in a button's width would have laid its groove
+    /// over the label.
+    #[test]
+    fn a_slider_row_widens_the_panel_by_its_groove() {
+        let atlas = atlas();
+        let style = MenuStyle::pixel_art(1);
+        let with_button = Menu::new(
+            "OPTIONS",
+            vec![
+                MenuItem::new(10, "BACK", "ESC"),
+                MenuItem::new(DIAL, "EXPOSURE", "1.00"),
+            ],
+        );
+        let grew =
+            slider_menu().panel_size(&atlas, &style).x - with_button.panel_size(&atlas, &style).x;
+        assert!(
+            grew >= style.track_width + style.hint_gap - 1e-3,
+            "a slider row only widened the panel by {grew}",
+        );
+    }
+
+    /// **The groove sits between the label and the value, and the handle inside
+    /// the groove — at both ends.** A handle centred on the groove's end would
+    /// hang half of itself over the button's face, so nought and one would look
+    /// like different amounts of overhang rather than like the two extremes.
+    #[test]
+    fn the_handle_stays_inside_the_groove_at_both_ends() {
+        let extent = (960, 720);
+        let atlas = atlas();
+        for position in [0.0, 0.5, 1.0] {
+            let mut menu = slider_menu();
+            assert!(menu.set_slider(DIAL, position));
+            let layout = menu.layout(extent, &atlas);
+            let placed = layout.items()[1];
+            let track = placed.track.expect("a groove");
+
+            let label_end = placed.label_pos.x + atlas.text_width("EXPOSURE", 1.0);
+            assert!(
+                track.0.x >= label_end && track.1.x <= placed.hint_pos.x,
+                "at {position} the groove {track:?} overlaps the row's text",
+            );
+
+            let mut dl = DrawList::new();
+            menu.render(&mut dl, &layout);
+            let handle = dl
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCommand::Rect { min, max, color }
+                        if *color == layout.style().handle_color =>
+                    {
+                        Some((*min, *max))
+                    }
+                    _ => None,
+                })
+                .next()
+                .expect("the handle is drawn");
+            assert!(
+                handle.0.x >= track.0.x - 1e-3 && handle.1.x <= track.1.x + 1e-3,
+                "at {position} the handle {handle:?} left the groove {track:?}",
+            );
+        }
+    }
+
+    /// The filled part of the groove is what says how far along the handle is
+    /// without reading the number, so it has to actually track the value.
+    #[test]
+    fn the_fill_grows_with_the_value() {
+        let extent = (960, 720);
+        let atlas = atlas();
+        let mut widths = Vec::new();
+        for position in [0.0, 0.5, 1.0] {
+            let mut menu = slider_menu();
+            assert!(menu.set_slider(DIAL, position));
+            let layout = menu.layout(extent, &atlas);
+            let mut dl = DrawList::new();
+            menu.render(&mut dl, &layout);
+            let fill = dl
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::Rect { min, max, color }
+                        if *color == layout.style().fill_color =>
+                    {
+                        Some(max.x - min.x)
+                    }
+                    _ => None,
+                })
+                .expect("the fill is drawn");
+            widths.push(fill);
+        }
+        assert!(
+            widths[0] < widths[1] && widths[1] < widths[2],
+            "the fill widths were {widths:?}",
         );
     }
 }

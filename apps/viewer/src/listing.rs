@@ -419,7 +419,12 @@ fn row(label: &str, value: String) -> Line {
 /// Two decimals and an `x`, because it is a multiplier: the range runs from a
 /// thirty-second to thirty-two, and two decimals is what tells the bottom of
 /// that range apart from the step below it.
-fn exposure_value(exposure: f32) -> String {
+///
+/// Shared with [`crate::menu`]'s slider, which draws the same number beside its
+/// groove: two formatters would drift, and a panel and a menu disagreeing about
+/// the exposure by one decimal is exactly the kind of thing nobody would look
+/// for.
+pub(crate) fn exposure_value(exposure: f32) -> String {
     format!("{exposure:.2}x")
 }
 

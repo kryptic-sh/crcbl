@@ -315,6 +315,21 @@ pub struct Viewer {
     /// which is what lets the listing panel say that a key has reached the end
     /// of its range.
     exposure: f32,
+    /// The exposure the menu's slider is to be set to on the next
+    /// [`Viewer::draw`], when the player has dragged its handle.
+    ///
+    /// Deferred on `exposure_steps`' terms — the renderer is reachable only
+    /// from `tick` and `draw`, and [`Viewer::menu_kind`] is where the handle is
+    /// read.
+    exposure_pending: Option<f32>,
+    /// Where [`Viewer::menu_kind`] last saw the slider's handle.
+    ///
+    /// **Compared for exact equality, and that is deliberate.** This holds the
+    /// number the widget itself last held, not a value derived from anything,
+    /// so a difference is a drag and nothing else. A tolerance here would need
+    /// to be wider than one pixel of groove, which is a drag the player can see
+    /// and the viewer would ignore.
+    exposure_handle: f32,
     /// `docs/plan/sample/05-viewer.md` milestone 2's listing — see
     /// [`crate::listing`]. Hidden until [`LISTING_KEY`] is pressed.
     listing: Listing,
@@ -437,6 +452,8 @@ pub fn with_shell<S: Shell + ?Sized>(
             normals_held: false,
             exposure_steps: 0,
             exposure,
+            exposure_pending: None,
+            exposure_handle: crate::menu::handle_at(exposure),
             listing,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
@@ -554,7 +571,49 @@ impl HostedGame for Viewer {
         match action {}
     }
 
-    fn menu_kind(&mut self, _menus: &mut Menus, paused: bool) -> MenuKind {
+    /// **Which panel this frame shows, and the exposure slider reconciled.**
+    ///
+    /// The slider is two-way: `-` and `=` move the exposure and the handle has
+    /// to follow, and a drag moves the handle and the exposure has to follow.
+    /// Both directions run here, in that order, and which one wins is decided
+    /// by a comparison that cannot be fooled — `exposure_handle` is the number
+    /// the widget itself last held, so a difference is the pointer and nothing
+    /// else.
+    ///
+    /// The drag is applied one frame later, in [`Viewer::draw`], because a
+    /// hosted game is handed the GPU only there. `set_slider` refuses a write
+    /// while the handle is held, so the mirror below cannot pin a drag in
+    /// progress under the cursor.
+    ///
+    /// [`MenuSet::get_mut`](crcbl::ui::MenuSet::get_mut) rather than
+    /// `current_mut`, because the loop has not been told which menu this frame
+    /// shows yet — that is what this call returns.
+    fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> MenuKind {
+        if let Some(menu) = menus.get_mut(MenuKind::Menu) {
+            let handle = menu.slider(crate::menu::EXPOSURE_ID);
+            match handle {
+                Some(position) if position != self.exposure_handle => {
+                    self.exposure_pending = Some(crate::menu::exposure_at(position));
+                    self.exposure_handle = position;
+                }
+                _ => {
+                    menu.set_slider(
+                        crate::menu::EXPOSURE_ID,
+                        crate::menu::handle_at(self.exposure),
+                    );
+                    if let Some(position) = menu.slider(crate::menu::EXPOSURE_ID) {
+                        self.exposure_handle = position;
+                    }
+                }
+            }
+            // Every frame and unconditionally, so the number beside the groove
+            // is the exposure the frame behind the panel was drawn with — the
+            // renderer's answer, clamp and all, exactly as the listing row is.
+            menu.set_item_hint(
+                crate::menu::EXPOSURE_ID,
+                crate::listing::exposure_value(self.exposure),
+            );
+        }
         MenuKind::of(paused)
     }
 
@@ -584,6 +643,12 @@ impl HostedGame for Viewer {
         let steps = std::mem::take(&mut self.exposure_steps);
         if steps != 0 {
             self.exposure = gpu.scale_exposure(exposure_step().powi(steps));
+        }
+        // After the keys, so a frame that saw both ends with the value the
+        // player was last **looking at** — the handle is on screen and the keys
+        // are not.
+        if let Some(exposure) = std::mem::take(&mut self.exposure_pending) {
+            self.exposure = gpu.set_exposure(exposure);
         }
         // Every frame rather than on the key's edge, because there is no answer
         // to keep: the normals view builds nothing and cannot be refused, so the
@@ -828,6 +893,7 @@ mod tests {
         DEBUG_OVERLAY_KEY, FULLSCREEN_KEY, Flow, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_UP_KEY,
         PAUSE_KEY,
     };
+    use crcbl::math::Vec2;
     use crcbl::math::Vec3;
     use crcbl::shell::{HeadlessShell, PhysicalPoint};
 
@@ -1558,6 +1624,149 @@ mod tests {
             row_value(&ui_text(&engine), "exposure"),
             "1.00x",
             "the picture could not be brought back from the top of the range",
+        );
+
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The exposure slider's groove, read off the panel the loop is showing.
+    ///
+    /// Off the live menu rather than a rebuilt one: the value beside the groove
+    /// changes width as the exposure moves, and the panel is sized by its widest
+    /// row — so a rebuilt copy with a stale caption would hand back a rectangle
+    /// the frame never drew.
+    fn slider_groove(engine: &Loop<HeadlessShell>) -> (Vec2, Vec2) {
+        let menu = engine.menus().current().expect("the panel is showing");
+        let layout = menu.layout(engine.gpu().extent(), engine.gpu().atlas());
+        let at = menu
+            .items()
+            .iter()
+            .position(|item| item.id == crate::menu::EXPOSURE_ID)
+            .expect("the panel has an exposure row");
+        layout.items()[at].track.expect("the row is a slider")
+    }
+
+    /// Presses the primary button at `at`, in framebuffer pixels.
+    fn press_at(engine: &mut Loop<HeadlessShell>, window: crcbl::shell::WindowId, at: Vec2) {
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                crcbl::core::input::ButtonState::Pressed,
+                Some(PhysicalPoint::new(f64::from(at.x), f64::from(at.y))),
+            )
+            .expect("the window is live");
+    }
+
+    /// **Dragging the panel's handle moves the exposure, and the keys move the
+    /// handle back.**
+    ///
+    /// The claim a unit test of the mapping cannot make. `crcbl-ui` proves the
+    /// handle follows the pointer and `crate::menu` proves the two conversions
+    /// are inverses; what is left — and what nothing else covers — is that the
+    /// loop routes a press on that row to the slider at all, that
+    /// `Viewer::menu_kind` turns the handle into a renderer call, and that the
+    /// mirror runs the other way rather than the panel and the frame drifting
+    /// apart.
+    ///
+    /// The listing row is the observable for the same reason the key test uses
+    /// it: it reports what the renderer answered, after the clamp.
+    #[test]
+    fn dragging_the_panel_handle_sets_the_exposure_and_the_keys_move_it_back() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 128);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        tap(&mut engine, window, LISTING_KEY);
+        assert_eq!(row_value(&ui_text(&engine), "exposure"), "1.00x");
+
+        // The panel has to be on screen *before* the press: a press that began
+        // before the panel did is not the panel's, which is the loop's rule.
+        tap(&mut engine, window, PAUSE_KEY);
+        assert!(engine.menus().is_showing(), "ESC did not open the panel");
+
+        // The right-hand end of the groove is the top of the range.
+        let groove = slider_groove(&engine);
+        let middle_y = (groove.0.y + groove.1.y) * 0.5;
+        press_at(&mut engine, window, Vec2::new(groove.1.x, middle_y));
+        // One frame routes the press and reads the handle; the next hands the
+        // value to the renderer — `menu_kind` runs after `draw`.
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+        assert!(
+            (engine.gpu().exposure() - crcbl::render::EXPOSURE_MAX).abs() < 1e-3,
+            "a drag to the end of the groove reached {} rather than {}",
+            engine.gpu().exposure(),
+            crcbl::render::EXPOSURE_MAX,
+        );
+        assert_eq!(
+            row_value(&ui_text(&engine), "exposure"),
+            "32.00x",
+            "the renderer moved and the listing panel did not follow",
+        );
+
+        // The other end, from a fresh press, so this is a drag and not a
+        // one-way latch.
+        let groove = slider_groove(&engine);
+        press_at(&mut engine, window, Vec2::new(groove.0.x, middle_y));
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "exposure"),
+            "0.03x",
+            "a drag to the start of the groove did not reach the bottom of the range",
+        );
+
+        // **And the middle of the groove is one, which is what says the handle
+        // is even in stops.** Both ends agree whatever the curve is, so a
+        // linear mapping would pass everything above and land here at sixteen.
+        let groove = slider_groove(&engine);
+        press_at(
+            &mut engine,
+            window,
+            Vec2::new((groove.0.x + groove.1.x) * 0.5, middle_y),
+        );
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "exposure"),
+            "1.00x",
+            "the middle of the groove is not the middle of the range in stops",
+        );
+
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                crcbl::core::input::ButtonState::Released,
+                None,
+            )
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+
+        // **And the mirror, which is the direction a drag cannot prove.** Three
+        // presses of the key is one stop, and one stop is a tenth of a groove
+        // ten stops wide.
+        let before = engine
+            .menus()
+            .current()
+            .expect("the panel is showing")
+            .slider(crate::menu::EXPOSURE_ID)
+            .expect("the row is a slider");
+        for _ in 0..3 {
+            tap(&mut engine, window, EXPOSURE_UP_KEY);
+        }
+        let after = engine
+            .menus()
+            .current()
+            .expect("the panel is showing")
+            .slider(crate::menu::EXPOSURE_ID)
+            .expect("the row is a slider");
+        assert!(
+            (after - before - 0.1).abs() <= 1e-3,
+            "a stop moved the handle from {before} to {after}",
         );
 
         engine.finish(ExitReason::FrameBudget).expect("teardown");

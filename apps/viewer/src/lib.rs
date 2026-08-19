@@ -13,20 +13,17 @@
 //! # What is here, and what is not
 //!
 //! This is that document's **milestone 1**, "Load + orbit + grid", and the
-//! first of milestone 2's panels. What it does: takes a path, reads it through
-//! the asset seam, converts it, frames the camera on it, turns it under the
-//! mouse, draws it under a single directional light over a grid floor, and puts
-//! what the document holds — and what the conversion could not bring in — on
-//! screen behind `I`. See [`listing`].
+//! whole of milestone 2. What it does: takes a path, reads it through the asset
+//! seam, converts it, frames the camera on it, turns it under the mouse, draws
+//! it under a single directional light over a grid floor, and puts what the
+//! document holds — and what the conversion could not bring in — on screen
+//! behind `I`. See [`listing`]. `W` draws it in wireframe and `N` in
+//! world-space normals; `-` and `=` step the exposure, and so does the slider
+//! on the `ESC` panel — see [`menu`].
 //!
 //! What it deliberately does not do, each because it needs something this slice
 //! does not build:
 //!
-//! * **No wireframe or normals view.** Milestone 2's other half, and they are
-//!   renderer modes `crcbl-render` does not expose rather than UI.
-//! * **No exposure slider**, which is a renderer control this milestone does
-//!   not reach for, and the first thing here that would need a *widget* rather
-//!   than a read-only panel.
 //! * **No hot reload.** Milestone 3, and the whole of the artist loop the
 //!   sample doc's V-F4 describes.
 //! * **No drop target.** V-F5 is "path argument natively, drop target in the

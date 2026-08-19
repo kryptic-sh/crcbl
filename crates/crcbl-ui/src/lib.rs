@@ -48,8 +48,8 @@ pub use debug::{
 pub use draw_list::{DrawCommand, DrawList, Vertex2d};
 pub use hud::{Anchor, Hud, HudPanel};
 pub use menu::{
-    BUTTON_INSETS, FIT_FRACTION, Menu, MenuItem, MenuItemLayout, MenuLayout, MenuSet, MenuStyle,
-    PANEL_INSETS,
+    BUTTON_INSETS, FIT_FRACTION, Menu, MenuItem, MenuItemKind, MenuItemLayout, MenuLayout, MenuSet,
+    MenuStyle, PANEL_INSETS, Slider,
 };
 pub use text::{
     ASCENDER, ASCII_GLYPH_COUNT, FIRST_CHAR, FontAtlas, GLYPH_ADVANCE, GLYPH_COUNT, GLYPH_HEIGHT,

@@ -730,6 +730,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-ui` menus carry sliders, and `apps/viewer`'s panel has one for the
+  exposure.** `MenuItem` gained a `kind` — `MenuItemKind::Action` for the button
+  every row was until now, or `MenuItemKind::Slider`, a value in `0.0..=1.0` the
+  pointer drags along a groove drawn between the row's label and its value
+  column. `Menu::slider`/`set_slider` are the two ends of it, `MenuSet::get_mut`
+  reaches a menu by name for a game refreshing a live value, and `MenuStyle`
+  gained the groove's metrics and the three colours it is painted with.
+
+  **A slider reports no `WidgetId`, from the commit key or from a click.** There
+  is no action for a value to fire, and an id escaping one would arrive at a
+  game's action table looking exactly like a button press — which is why the
+  viewer's `MenuAction` stays uninhabited while its panel now carries a row
+  numbered in the game's range.
+
+  **The drag wins over the caller's write.** `set_slider` is refused while the
+  handle is held, so a game mirroring the value it reads back into the widget
+  every frame — which is the shape the viewer uses — cannot pin the handle under
+  the cursor.
+
+  In the viewer the handle is **even in stops**, not in multipliers: the range
+  is five stops either side of one, and laid out linearly every value below one
+  would live in the first one-and-a-half percent of the groove. `-` and `=`
+  still step the exposure and now move the handle with it.
+
+  The groove is drawn with the UI pass's own rectangles rather than nine-sliced
+  art, so it needs no addition to the shipped sheet.
+
 - **`apps/viewer` draws a normals view.** `N` toggles it, off by default. Each
   surface is coloured by its **world-space** normal as `n * 0.5 + 0.5` — +X red,
   +Y green, +Z blue — so an inverted face reads as the complement of the colour
