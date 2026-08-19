@@ -137,6 +137,60 @@ impl Default for GridStyle {
     }
 }
 
+impl GridStyle {
+    /// Roughly how many fine cells should span the thing being looked at.
+    ///
+    /// Ten is the count that makes a cell read as a *unit of the model* rather
+    /// than as texture: fewer and the grid stops giving a sense of scale, more
+    /// and the fine lines merge before the model fills the view.
+    const CELLS_ACROSS: f32 = 10.0;
+
+    /// How far past the subject the grid runs before it has faded out.
+    ///
+    /// The grid has to reach the horizon at the framing distance or the ground
+    /// visibly ends in mid-air behind the model.
+    const FADE_MULTIPLE: f32 = 20.0;
+
+    /// The narrowest and widest fine cell this will choose, in world units.
+    ///
+    /// A degenerate or absurd extent otherwise picks a spacing that makes the
+    /// whole grid one line or none, and `f32` runs out of precision either way.
+    const MIN_SPACING: f32 = 1e-4;
+    const MAX_SPACING: f32 = 1e6;
+
+    /// A style scaled to a subject `extent` world units across.
+    ///
+    /// [`Default`] is a metre grid fading at a hundred, which suits content
+    /// authored at human scale and nothing else: a five-centimetre model sits
+    /// inside a single cell, and a five-hundred-metre one is entirely past the
+    /// fade. A viewer opening arbitrary documents cannot assume either.
+    ///
+    /// **The spacing snaps to a power of ten.** A cell of `0.1`, `1` or `10`
+    /// units is a number a person can count in and do arithmetic with, which is
+    /// the grid's whole job; a cell of `3.7` gives the same line density and
+    /// tells the eye nothing. Blender's adaptive grid steps by powers of ten
+    /// for the same reason. So this picks the power of ten nearest to
+    /// `extent / CELLS_ACROSS` rather than that value itself.
+    ///
+    /// A non-finite or non-positive `extent` returns [`Default`] — there is no
+    /// scale to derive one from, and a `log10` of zero is `-inf`.
+    #[must_use]
+    pub fn for_extent(extent: f32) -> Self {
+        if !extent.is_finite() || extent <= 0.0 {
+            return Self::default();
+        }
+        let ideal = (extent / Self::CELLS_ACROSS).clamp(Self::MIN_SPACING, Self::MAX_SPACING);
+        let spacing = 10.0f32
+            .powf(ideal.log10().round())
+            .clamp(Self::MIN_SPACING, Self::MAX_SPACING);
+        Self {
+            spacing,
+            fade_distance: extent * Self::FADE_MULTIPLE,
+            ..Self::default()
+        }
+    }
+}
+
 /// Distance along `direction` from `origin` to the ground plane `y = 0`, or
 /// [`None`] when the ray does not reach it.
 ///
@@ -606,6 +660,60 @@ impl Rollback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A style derived for a subject keeps a countable cell and reaches past it.
+    ///
+    /// The two properties that matter, at four scales spanning ten orders of
+    /// magnitude: the cell is a power of ten (so the grid is something a person
+    /// can count in), and the model spans a sane number of cells rather than
+    /// sitting inside one or drowning in them.
+    #[test]
+    fn a_derived_style_keeps_a_power_of_ten_cell_at_any_scale() {
+        for extent in [0.05f32, 1.0, 12.0, 500.0, 20_000.0] {
+            let style = GridStyle::for_extent(extent);
+
+            let decades = style.spacing.log10();
+            assert!(
+                (decades - decades.round()).abs() < 1e-4,
+                "a {extent} m subject chose a {} m cell, which is not a power of ten and so is \
+                 not a number anyone can count in",
+                style.spacing
+            );
+
+            let across = extent / style.spacing;
+            assert!(
+                (1.0..=100.0).contains(&across),
+                "a {extent} m subject spans {across} cells of {} m — outside the range where the \
+                 grid says anything about its scale",
+                style.spacing
+            );
+            assert!(
+                style.fade_distance > extent,
+                "a {extent} m subject fades at {}, so the ground would end inside the model",
+                style.fade_distance
+            );
+        }
+    }
+
+    /// A scale-less subject falls back rather than computing a `log10` of zero.
+    ///
+    /// `for_extent` is fed a bounding box, and a document can produce a
+    /// degenerate one — a single point, or the empty scene the viewer refuses
+    /// only *after* it has framed. Zero would give `-inf` and a `NaN` spacing,
+    /// which is a grid that never draws and never says why.
+    #[test]
+    fn a_degenerate_extent_falls_back_to_the_default_style() {
+        for extent in [0.0f32, -3.0, f32::NAN, f32::INFINITY] {
+            let style = GridStyle::for_extent(extent);
+            assert_eq!(
+                style.spacing,
+                GridStyle::default().spacing,
+                "an extent of {extent} should fall back, not derive"
+            );
+            assert!(style.spacing.is_finite() && style.fade_distance.is_finite());
+        }
+    }
+
     use crcbl_hal::null::{NullInstance, Recorder};
     use crcbl_hal::{
         CommandEncoderDesc, DeviceDesc, Features, ImageUsage, Instance, QueueHandle, QueueKind,

@@ -143,6 +143,7 @@ impl Gpu {
         gpu: GpuOptions,
         scene: &crcbl::render::scene::SceneDesc<'_>,
         instances: &[InstanceDesc],
+        grid_extent: f32,
     ) -> Result<Self, GpuError> {
         let ctx = GpuContext::open(shell, window, extent, &desc(gpu))?;
         let format = ctx.format();
@@ -157,12 +158,16 @@ impl Gpu {
         // `docs/plan/sample/05-viewer.md` milestone 1's grid floor — see the
         // [module docs](self) for why it is a pass rather than a mesh.
         //
-        // [`GridStyle::default`] and not a style of this sample's own: its fine
-        // cell is one metre, which is the unit glTF is authored in and so the
-        // unit the documents this application opens are already in.
+        // Scaled to the document rather than [`GridStyle::default`]'s metre
+        // cell. glTF is authored in metres, but nothing makes an *asset* human
+        // sized: a five-centimetre part sits inside one default cell and a
+        // five-hundred-metre one is entirely past the default fade, and this is
+        // the application whose whole job is opening a file nobody curated.
         //
         // Unwound by hand for the reason the loop below is.
-        if let Err(error) = renderer.set_ground_grid(ctx.device(), Some(GridStyle::default())) {
+        if let Err(error) =
+            renderer.set_ground_grid(ctx.device(), Some(GridStyle::for_extent(grid_extent)))
+        {
             renderer.destroy(ctx.device());
             ctx.destroy()?;
             return Err(GpuError::Hal(error));

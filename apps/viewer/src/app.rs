@@ -262,6 +262,10 @@ pub fn with_shell<S: Shell + ?Sized>(
         options.common.gpu(),
         &model.render.scene,
         &model.render.instances,
+        // The grid is scaled to the document's own size — see `crate::gpu`.
+        // The largest axis rather than the diagonal, so a long thin model does
+        // not get a cell sized for a span it only has in one direction.
+        model.bounds.half_extent().max_element() * 2.0,
     )?;
 
     // Frame on load, against the extent the window actually configured at: an
