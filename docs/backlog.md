@@ -1657,6 +1657,140 @@ Two consequences worth keeping:
   drops the other, which is exactly what `crcbl-webgpu`'s separate
   `begin_compute_pass` encoding makes possible and nothing else would catch.
 
+### DECIDED — the `crcbl-wgpu` deletion bar, and quarry is next
+
+Answered by the owner on 2026-08-19.
+
+**quarry (S4C) is the next demo.** Started.
+
+**`crcbl-wgpu` goes when every feature is implemented on the other backends and
+the golden comparisons no longer need it.** One wrinkle to make that checkable:
+"every feature on every backend" can never be literally true while rows are
+`ApiAbsence` — `BufferFillWord` has no encoding on Metal, whose
+`fillBuffer:range:value:` takes a byte, nor on WebGPU. The workable reading is
+**`parity_blockers()` empty** — which excludes `ApiAbsence` by construction and
+is already the query the snapshot test guards — **plus** the separate condition
+that `cross-backend-e2e` no longer needs wgpu as its comparison oracle. Nothing
+measures that second half today, and it is now half the bar.
+
+### The two dx12 `Declined` fill rows, and a third option nobody costed
+
+`BufferFillRepeatedByte` and `BufferFillWord`, sharing `DX12_NO_VALUED_FILL` so
+two paraphrases cannot drift. Who has what: vk both; Metal repeated-byte only,
+since its fill takes a byte and a `u32` needs four equal ones to have an
+encoding; WebGPU and wgpu neither; dx12 declines both.
+
+The obstacle is **descriptor provenance and lifetime**, not a missing heap. The
+zero fill dx12 does support is a `CopyBufferRegion` out of a zeroed resource,
+which no value passes through; the valued fill is
+`ClearUnorderedAccessViewUint`, needing a shader-visible UAV of the destination.
+`crcbl_dx12::binding` does build shader-visible heaps — the question is which
+one the descriptor comes from and who keeps it alive across the submission.
+Closing it costs either `ALLOW_UNORDERED_ACCESS` on every device-local buffer or
+a fill that works only on `STORAGE` ones, and the reason's own line is that a
+capability which works only sometimes is worse than a clean no.
+
+**The third option: take `BufferFillWord` off the seam.** Nothing in the
+workspace calls `fill_buffer` outside the backends and their tests, and the seam
+rule is that anything which cannot work on all the backends gets refactored. It
+is `ApiAbsence` on two of four and can never be otherwise, so removing the verb
+closes the dx12 blocker by deleting the divergence rather than implementing it —
+eight blockers to seven, no dx12 work. It does not apply to
+`BufferFillRepeatedByte`, which vk and Metal both perform and which is genuinely
+implementable on three of four.
+
+Still the owner's call: implement both, keep both declined, or drop
+`BufferFillWord` from the seam and judge the other on its own merits.
+
+### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
+
+Checked on 2026-08-19, because the obvious assumption is wrong. `apps/quarry`
+does not exist; the phase table's S4C row asks for "meshlet clusters, QEM
+cluster LOD, and all three `GeometryPath` values on one dense scene", gated by
+"golden frames per `GeometryPath`; three-way comparison recorded; no LOD popping
+on any path".
+
+**The engine work is largely already there.** `crcbl-scene` carries
+`meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
+`lod_resolve.rs`, and `crcbl-hal` defines all three paths. quarry is mostly
+assembling and gating what exists rather than building a subsystem.
+
+**`MeshShading` being `Unwritten` on dx12 and Metal does not block the gate**,
+which is the thing worth writing down. The paths are not one-per-backend: they
+are reached by **subtracting features from a single capable adapter**.
+`crates/crcbl/tests/render_e2e.rs` does exactly that, and it passes here on an
+RX 7900 XTX — eleven `..._draws_the_same_frame_on_every_geometry_path` tests,
+with the harness printing
+
+```text
+asked for MESH_SHADER: true,  adapter has it: true, drew through MeshShader
+asked for MESH_SHADER: false, adapter has it: true, drew through IndirectCount
+spot_shadow on MeshShader against IndirectCount — 0 channel(s) differ, budget 0
+```
+
+So Vulkan reaches `MeshShader` and `IndirectCount` on one device and compares
+them pixel-for-pixel. The **third** path, `IndirectPerBatch`, is not in that
+cross-backend suite — it is covered by `crcbl-vk`'s own `vk_e2e/draw_gen.rs`,
+whose three arms name all three paths and which opens its device without
+`DRAW_INDIRECT_COUNT` on purpose, because no adapter that suite can see would
+ever select the floor path. A three-way quarry gate would follow `draw_gen.rs`'s
+shape, not `render_e2e.rs`'s.
+
+**The decision this needs** is only whether quarry is the right next sample at
+all, against the alternatives: `breakout-as-wasm` (P6A, a `wasmtime` `WasmHost`
+seam — self-contained, no renderer work, no new demo), lumen's second half (S4B,
+blocked on P7C's ray tracing), and orbit (S5, the roadmap's own "flashiest web
+demo", behind three physics phases: P6, P8, P11). quarry is the only one whose
+prerequisites are already built.
+
+### `DivergenceKind::Unclassified` is gone, and can come back
+
+Removed on 2026-08-19. It held exactly two rows — Metal's `TimestampQuery` and
+`PipelineStatisticsQuery` — and its whole meaning was "which of the other three
+this is cannot be settled from here, and the reason says what measurement would
+settle it". `crcbl_mtl::adapter`'s counter-sampling probe has now taken that
+measurement on CI, so both rows are classified and the variant held nothing.
+`every_kind_describes_at_least_one_real_row` is the test that forces the issue:
+a kind with no row is vocabulary rather than classification.
+
+**The concept was good and may be wanted again**, so the reasoning is kept here
+rather than only in `git log`. It was an admission about evidence rather than a
+fourth kind of divergence: a property of a device this workspace cannot open,
+where "a guess written into the data would read exactly like the classifications
+that were checked". It blocked parity, because "nobody has looked" is not
+"done". Reintroducing it is a variant, an arm in `blocks_parity`, and an entry
+in that test's list.
+
+**What settled the two rows**, from the `mtl e2e (macos-latest)` job:
+
+```text
+crcbl-mtl counters: supportsCounterSampling AtStageBoundary = false
+crcbl-mtl counters: supportsCounterSampling AtDrawBoundary = true
+crcbl-mtl counters: supportsCounterSampling AtDispatchBoundary = true
+crcbl-mtl counters: supportsCounterSampling AtBlitBoundary = true
+crcbl-mtl counters: counterSets = 0
+crcbl-mtl counters: sampleTimestamps ... did not move across a 50ms sleep
+```
+
+Metal expresses both features — `MTLCounterSampleBuffer`,
+`MTLCommonCounterSetStatistic` — so neither is an `ApiAbsence`; the code is
+unwritten, which is `Unwritten`. **The blocker count did not move**, and that is
+the point: reclassifying an unanswered question as unwritten work is honesty
+about what is owed, not progress against it. It is still eight.
+
+`counterSets = 0` on the CI Mac is a separate fact from the classification: no
+`MTLCounterSampleBuffer` can be built there at all, so that device could not run
+the feature however it were written. `AtStageBoundary = false` says the same
+thing about the pass-boundary shape `PassTimestampWrites` asks for — though
+`AtDrawBoundary` being true means an encoder-level sample would serve, on a Mac
+that advertised a set. **Whether any Mac available to this project advertises
+one is still unknown**, and that is the residual.
+
+`PipelineStatisticsQuery` also owes a seam change the timestamp row does not: an
+`MTLCounterResultStatistic` is eight `u64`s and `query_results` reads one per
+query, so whoever writes it decides whether the seam grows a shape for the other
+seven or this backend reports one of the eight.
+
 ### The doc gate does not cover private items
 
 CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding
