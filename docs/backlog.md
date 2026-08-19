@@ -1825,10 +1825,33 @@ it, forced by subtracting features from one adapter.
   comparison recorded here". The frames exist and are measured; nothing blesses
   or commits an image. This is the largest remaining piece and it needs a
   decision — see the entry below.
-- **No LOD tint or heatmap overlay** (milestone 2's last item). It needs a debug
-  view mode in the forward shader, which is engine work rather than quarry's,
-  and nothing in the engine has one today — `set_normals_view` is the nearest
-  thing and it is a different axis.
+- **No LOD tint or heatmap overlay** (milestone 2's last item), and the sizing
+  here was wrong twice over — corrected 2026-08-20 by reading rather than
+  assuming.
+
+  **The debug-view mechanism already exists.** `mesh.slang` reads a view switch
+  out of `frame.ambient.w` against a threshold —
+  `static const float NORMALS_VIEW = 0.5` — so a second view is another sentinel
+  in a lane that is already there, with no new binding, no layout change and no
+  `set_normals_view`-shaped API to invent. My earlier claim that "nothing in the
+  engine has one" was simply false.
+
+  **And the shader can nearly tell the levels apart already.**
+  `ClusterSelect::vertex_base` is per cluster and differs per level by
+  construction, since a DAG's levels are separate vertex ranges. It is an
+  _offset_ rather than an ordinal, so tinting by it would give distinct colours
+  without giving meaningful ones — level 3 would not read as "three levels
+  coarse".
+
+  **So the real cost is a shader struct change**: a `level` field on
+  `ClusterSelect`, its Rust mirror in `crcbl_shaders::cluster_dag`'s selection
+  records, and every committed artifact re-blessed through
+  `tools/compile-shaders.sh` — slangc 2026.14 and dxc are both installed here,
+  so that is possible locally rather than blocked. What makes it a slice rather
+  than an afternoon is that it changes a GPU struct on the mesh path for every
+  backend, where a mistake reads as corrupted geometry rather than a failed
+  assertion, and the goldens may move with it.
+
 - **Milestone 4: the tiling case is done, the skinned one is blocked, the Pages
   demo is untouched.** `crcbl_quarry::tile` is the modular wall piece, and two
   tiles decimated independently still meet — asserted bit-for-bit. **The skinned
