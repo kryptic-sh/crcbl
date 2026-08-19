@@ -899,6 +899,14 @@ So the decision:
 My reading is (c) then (a) or (b) on what it finds, because (a) taken now is
 reporting a capability on the strength of a _different backend's_ evidence.
 
+**The harness for (c) already exists**: branch
+`diagnose/dx12-mesh-device-removal`, pushed and kept deliberately. It reports
+`MESH_SHADER` unconditionally from `features_of` and neutralises the two
+assertions that would otherwise fail the dx12 job before it reaches its "Draw a
+frame through ForwardRenderer on WARP" step. Run it with
+`gh workflow run ci.yml --ref diagnose/dx12-mesh-device-removal`; it is expected
+red, and the job log is the deliverable. Never merge it.
+
 The two hypotheses eliminated by reading are unchanged and still worth not
 re-testing: the indirect argument size is right (`IndirectKind::DispatchMesh`
 reports the 12 bytes `D3D12_DISPATCH_MESH_ARGUMENTS` wants), and the asymmetric
