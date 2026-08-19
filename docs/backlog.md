@@ -1276,7 +1276,10 @@ very differently per backend.
 `query_results`" is unreachable — `create_query_set` refuses, so no caller can
 hold a handle to ask with. And `Capability::OcclusionQuery` is unfalsifiable
 everywhere: `CommandEncoder` has no begin/end-query verb, so nothing recorded
-through this seam can write an occlusion result on any backend.
+through this seam can write an occlusion result on any backend. **That second
+one turned out to be worse than unfalsifiable and now has an entry of its own**
+— the read returns `[0, 0]`, which for this query means "nothing was visible".
+See "DECISION NEEDED — occlusion queries".
 
 **Checked and genuinely uniform**, so not concerns: `MemoryLocation`, the
 stencil read/write masks, push-constant alignment, `present_id`
@@ -2000,6 +2003,67 @@ call.
 `crcbl_scene::simplify`'s other stated limitation and which quarry's single
 untextured material cannot exercise: a seam in an attribute the decimator does
 not carry is invisible to a position-only comparison like this one.
+
+### DECISION NEEDED — occlusion queries: finish them, refuse them, or delete them
+
+The seam audit recorded in one line that `Capability::OcclusionQuery` "is
+unfalsifiable everywhere". Re-derived and **measured** on 2026-08-20, it is
+worse than unfalsifiable.
+
+**What the seam has.** `Device::create_query_set`, `destroy_query_set`,
+`query_results`, and `CommandEncoder::reset_query_set`, `resolve_query_set`.
+**There is no begin/end-query verb anywhere on `CommandEncoder`** — timestamps
+are written through `PassTimestampWrites` on the pass descriptor, and nothing
+equivalent exists for occlusion. Read off the trait, not inferred.
+
+**So the result a caller gets is not an occlusion count.** Measured through the
+seam suite on radv: create a `QueryKind::Occlusion` set, reset it, resolve it,
+read it — `query_results` returns **`[0, 0]`**. Zero is not a neutral answer for
+this query; it is "nothing was visible". A caller who wired occlusion culling to
+this seam would cull the entire scene and every return value would say success.
+
+`Capability::OcclusionQuery` is honest about this — its doc is "a
+`QueryKind::Occlusion` query set", nothing more, unlike `TimestampQuery` whose
+doc names the writes and the read. The capability is not lying. The **seam** is
+offering a resource whose only purpose it cannot serve.
+
+Nothing plans to use it: no document under `docs/plan/` schedules GPU occlusion
+queries or occlusion culling (the roadmap's "occlusion" is audio, and topic 31's
+vis-culling rays are CPU/server side), and no caller outside the backends' own
+plumbing and tests constructs one.
+
+**The options.**
+
+1. **Finish it.** A pass-descriptor field plus a per-draw index verb, on
+   `PassTimestampWrites`' precedent — and it is genuinely backend-agnostic:
+   WebGPU has `occlusionQuerySet` on the render-pass descriptor and
+   `beginOcclusionQuery(index)` on the pass encoder, Metal has
+   `visibilityResultBuffer` plus `setVisibilityResultMode:offset:`, Vulkan has
+   `vkCmdBeginQuery`/`vkCmdEndQuery` inside a pass, D3D12
+   `BeginQuery`/`EndQuery` with `RESOLVE_QUERY_DATA`. Real work across five
+   backends, two of which nothing here can run, for a feature nothing has asked
+   for.
+2. **Refuse it until then.** `create_query_set` returns `HalError::Unsupported`
+   for `QueryKind::Occlusion`, and `Capability::OcclusionQuery` becomes an
+   `Unwritten` divergence on every backend. Small, and it turns a silent wrong
+   answer into a loud refusal, which is what this repository does everywhere
+   else. Costs two parity blockers per backend on the report — honestly, since
+   the work genuinely is unwritten.
+3. **Delete it.** `QueryKind::Occlusion` and `Capability::OcclusionQuery` leave
+   the seam, exactly as the valued `fill_buffer` forms did: a promise three
+   backends could not keep was removed rather than implemented, and the
+   changelog records that as the right call. Cheapest, and the one that loses
+   information if occlusion culling is ever wanted.
+
+**My reading:** (2) now and (1) if occlusion culling is ever scheduled. (3) is
+defensible but the `fill_buffer` case differed in an important way — that call
+_could not_ be honoured by the API on three backends, whereas every backend here
+can do occlusion queries and this seam simply never grew the verb. Deleting
+would record "we decided against it" for something nobody has decided against.
+
+What makes it urgent enough to write down rather than leave in a one-line note:
+until one of the three happens, the seam has a resource that returns "everything
+is hidden" and reports success doing it.
 
 ### DECISION NEEDED — should quarry place several faces?
 
