@@ -2766,12 +2766,20 @@ pub(crate) mod tests {
     // neither `executeCommandsInBuffer:withRange:` nor a pipeline built with
     // `supportIndirectCommandBuffers` has a seam verb — see
     // [`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`].
+    //
+    // The kernel-encoded sibling,
+    // [`a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes`],
+    // adds the rest: a blit encoder for the GPU-side ICB reset a `Private`
+    // buffer needs, a compute encoder for the dispatch that writes it, and
+    // `MTLResourceID` for the handle the argument buffer carries.
     #[cfg(feature = "mtl-e2e")]
     use objc2_metal::{
-        MTLCommandEncoder as _, MTLIndirectCommandBuffer, MTLIndirectCommandBufferDescriptor,
-        MTLIndirectCommandType, MTLIndirectRenderCommand, MTLLibrary, MTLPrimitiveType,
-        MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
-        MTLRenderPipelineState, MTLScissorRect, MTLViewport,
+        MTLBlitCommandEncoder, MTLCommandEncoder as _, MTLComputeCommandEncoder,
+        MTLComputePipelineState, MTLGPUFamily, MTLIndirectCommandBuffer,
+        MTLIndirectCommandBufferDescriptor, MTLIndirectCommandType, MTLIndirectRenderCommand,
+        MTLLibrary, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+        MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceID, MTLResourceUsage,
+        MTLScissorRect, MTLSize, MTLViewport,
     };
 
     /// Every [`MemoryLocation`] the seam has, so the buffer tests cover all
@@ -6448,6 +6456,398 @@ using namespace metal;\n\
             texel_at(&direct, centre_x, centre_y),
             texel_at(&painted, centre_x, centre_y),
         );
+    }
+
+    /// The kernel [`a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes`]
+    /// dispatches, in Metal Shading Language:
+    ///
+    /// ```metal
+    /// #include <metal_stdlib>
+    /// using namespace metal;
+    ///
+    /// struct EncodeTarget {
+    ///     command_buffer commands [[id(0)]];
+    /// };
+    ///
+    /// [[kernel]] void encodeMain(device EncodeTarget& target [[buffer(0)]],
+    ///                            uint index [[thread_position_in_grid]]) {
+    ///     render_command command(target.commands, index);
+    ///     command.draw_primitives(primitive_type::triangle, 0, 3, 1, 0);
+    /// }
+    /// ```
+    ///
+    /// # Hand-written, and it has to be
+    ///
+    /// Every other shader this crate executes is compiled from Slang by
+    /// `crcbl-shaders`. **Slang's Metal target has no `command_buffer` and no
+    /// `render_command`**, and a parameter of that shape is dropped rather than
+    /// diagnosed — so a Slang-authored version of this kernel would compile to
+    /// one that encodes nothing, and the probe would be measuring the shader
+    /// compiler instead of the device. That is why the source is a string here.
+    ///
+    /// The shape is not new to this backend: MSL reaches this device as source
+    /// through `newLibraryWithSource:options:error:`, which is the same call
+    /// [`icb_triangle_pipeline`] makes for the triangle it builds.
+    ///
+    /// # What it encodes, and what it deliberately does not
+    ///
+    /// One `render_command` at the thread's own index, and one non-indexed
+    /// draw of the three vertices [`ink_msl`]'s `corners` array declares —
+    /// exactly the draw the sibling test writes from the CPU. It sets no
+    /// pipeline and binds no buffer, because the ICB it writes into inherits
+    /// both; see the test for why that is the minimal shape.
+    ///
+    /// # How the ICB reaches it
+    ///
+    /// Through an **argument buffer**, because that is the only route Metal
+    /// offers: `MTLComputeCommandEncoder` has no `setIndirectCommandBuffer:`,
+    /// so a `command_buffer` can only be a member of a struct the kernel takes
+    /// by reference. `EncodeTarget` is that struct, and the CPU writes it by
+    /// storing [`MTLIndirectCommandBuffer::gpuResourceID`] — documented as "the
+    /// handle of the GPU resource suitable for storing in an argument buffer" —
+    /// into an ordinary [`MTLBuffer`] bound at `[[buffer(0)]]`.
+    ///
+    /// **`MTLArgumentEncoder` is not needed and is not enabled**, which is the
+    /// same call [`crate::binding`]'s bindless probe declined for the same
+    /// reason: a Metal 3 argument buffer is a plain struct in device memory,
+    /// and a single 8-byte handle at offset zero has the same layout under the
+    /// MSL 2.x `[[id(n)]]` rules and the Metal 3 ones. The `[[id(0)]]` is
+    /// written anyway so the member's slot is stated rather than inferred.
+    #[cfg(feature = "mtl-e2e")]
+    const ENCODE_ICB_MSL: &str = r"
+#include <metal_stdlib>
+using namespace metal;
+
+struct EncodeTarget {
+    command_buffer commands [[id(0)]];
+};
+
+[[kernel]] void encodeMain(device EncodeTarget& target [[buffer(0)]],
+                           uint index [[thread_position_in_grid]]) {
+    render_command command(target.commands, index);
+    command.draw_primitives(primitive_type::triangle, 0, 3, 1, 0);
+}
+";
+
+    /// **Whether a compute kernel can encode a draw into an
+    /// `MTLIndirectCommandBuffer` on this device** — and whether the render
+    /// pass then executes what the kernel wrote.
+    ///
+    /// # Why this question, and why it is only a measurement
+    ///
+    /// [`Capability::DrawIndirectCount`] is the one row Metal cannot fill, and
+    /// `crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT` names the reason: Metal has no
+    /// count-from-memory draw, so the count would have to be consumed by a
+    /// **compute kernel that writes the ICB before the render encoder opens**.
+    /// Two rungs of that are already answered and are not re-measured here —
+    /// [`crate::adapter`]'s probe watched this device create ICBs up to a
+    /// `maxCommandCount` of 1048576, and
+    /// [`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`]
+    /// watched one execute and paint the same texels a direct draw paints.
+    ///
+    /// Both of those encode the ICB **from the CPU**, which is the easy half.
+    /// This is the half that decides whether the design is buildable at all,
+    /// and it is a measurement: nothing here implements `draw_indirect_count`,
+    /// touches [`Features::DRAW_INDIRECT_COUNT`] or moves a capability row.
+    ///
+    /// # The construction
+    ///
+    /// * The ICB holds [`ICB_COMMAND_COUNT`] `Draw` commands and **inherits
+    ///   both the pipeline state and the buffers**. That is what keeps
+    ///   [`ENCODE_ICB_MSL`] to a single call, and it is also the shape a real
+    ///   `draw_indirect_count` would want: the pass that calls the seam verb
+    ///   has already bound both on its render encoder. Both stage bind counts
+    ///   are set to zero, because an inheriting command may not set buffers and
+    ///   Metal's defaults would otherwise size a per-command stride for binds
+    ///   the kernel never encodes.
+    /// * It is `Private` — [`MemoryLocation::DeviceLocal`] — because the CPU
+    ///   never touches it. That is the difference from the sibling test, and it
+    ///   is also why the reset below is a **blit** command: `resetWithRange:`
+    ///   writes through a CPU mapping a `Private` ICB does not have.
+    /// * The kernel is dispatched as one thread, so `thread_position_in_grid`
+    ///   is the one command index in range.
+    ///
+    /// The blit reset and the dispatch share one command buffer, and the hazard
+    /// between them is `useResource:usage:`'s: the ICB is a tracked resource,
+    /// the kernel reaches it through an argument buffer, and Metal documents
+    /// that call as protecting against exactly that data hazard. The dispatch
+    /// is then committed and **waited on** before the render pass is recorded,
+    /// so the kernel-to-execution ordering is not something this probe is also
+    /// measuring.
+    ///
+    /// # What makes the assertion able to fail
+    ///
+    /// [`ink_pass_canvas`] clears the attachment to [`CLEAR`], which the
+    /// shader cannot produce — [`INK`] shares no channel with it. So:
+    ///
+    /// * A kernel that ran and encoded nothing leaves command zero at the blit
+    ///   reset's no-op, the pass draws nothing, and the centre comes back
+    ///   [`CLEAR_TEXEL`] — which [`assert_ink_triangle`] reports as "nothing was
+    ///   drawn", printing the texel it actually found.
+    /// * A kernel that never ran at all is the same failure, and the command
+    ///   buffer's status is asserted `Completed` above it so a faulted or hung
+    ///   dispatch arrives naming its reason rather than as a blank canvas.
+    /// * A command that executed but drew the wrong thing lands on the corner
+    ///   assertions and the per-texel sweep [`assert_ink_triangle`] ends with.
+    /// * A nil ICB, a nil pipeline, a descriptor that dropped its inheritance
+    ///   flags, and a `gpuResourceID` of zero are each their own assertion,
+    ///   before anything is encoded — so a probe that reached the end having
+    ///   asked the device nothing is not possible.
+    ///
+    /// **The one thing that is not a failure is the front end refusing the
+    /// MSL.** `newLibraryWithSource:options:error:` prints Metal's own
+    /// `NSError` and returns, following the precedent
+    /// [`crate::binding`]'s bindless probe set while it too was measuring
+    /// rather than backing a promise: this backend claims nothing about
+    /// kernel-encoded ICBs, so "the compiler will not take this kernel" is the
+    /// answer the probe went to get and turning `mtl-e2e` red would be
+    /// reporting an answer as a defect. Everything after a successful compile
+    /// asserts hard.
+    ///
+    /// Metal exposes no device query for this shape — there is no
+    /// `supportRDComputeCommands`-style property on `MTLDevice`, and the three
+    /// `support*` flags on `MTLIndirectCommandBufferDescriptor` cover ray
+    /// tracing, dynamic attribute strides and colour attachment mapping. The
+    /// two answers that *do* bear on it are printed instead:
+    /// `argumentBuffersSupport`, which must be
+    /// [`MTLArgumentBuffersTier::Tier2`] for an ICB handle to live in an
+    /// argument buffer at all, and `supportsFamily:` for the families Apple's
+    /// tables gate GPU-side encoding on.
+    ///
+    /// **How far the confirmation goes.** By construction, not by execution:
+    /// this was written on Linux, where the crate compiles for
+    /// `aarch64-apple-darwin` and runs nothing. The gate that says the code
+    /// compiles was watched fail and pass — a deliberate type error, then its
+    /// removal. **No path here, red or green, has been observed on hardware.**
+    ///
+    /// nextest captures a passing test's stdout, so read the printed answers
+    /// with `--success-output immediate`, which is what
+    /// `tests/run-mtl-e2e.sh` passes.
+    ///
+    /// **Needs a real GPU**, like every other gated draw.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes() {
+        let (_validated, device) = open_device();
+        let raw = &*device.inner.raw;
+
+        let name = raw.name().to_string();
+        assert!(
+            !name.is_empty(),
+            "MTLDevice::name came back empty, so this probe never reached a device"
+        );
+        println!(
+            "crcbl-mtl icb-kernel: device={name:?} argumentBuffersSupport={:?} \
+             supportsFamily Metal3={} Apple3={} Mac2={}",
+            raw.argumentBuffersSupport(),
+            raw.supportsFamily(MTLGPUFamily::Metal3),
+            raw.supportsFamily(MTLGPUFamily::Apple3),
+            raw.supportsFamily(MTLGPUFamily::Mac2),
+        );
+
+        // The one refusal that is a result rather than a failure; see the doc
+        // comment. The source is printed with the error so the reader sees the
+        // exact text the front end was handed.
+        let library = match raw
+            .newLibraryWithSource_options_error(&NSString::from_str(ENCODE_ICB_MSL), None)
+        {
+            Ok(library) => library,
+            Err(error) => {
+                println!(
+                    "crcbl-mtl icb-kernel: REFUSED — Metal's front end will not compile a kernel \
+                     taking a command_buffer: {error}\n{ENCODE_ICB_MSL}"
+                );
+                return;
+            }
+        };
+        let function = library
+            .newFunctionWithName(&NSString::from_str("encodeMain"))
+            .expect("the source Metal just compiled declares a [[kernel]] named encodeMain");
+        let encode = raw
+            .newComputePipelineStateWithFunction_error(&function)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the front end compiled a kernel that takes a command_buffer and \
+                     newComputePipelineStateWithFunction:error: refused to specialise it — {error}"
+                )
+            });
+        println!(
+            "crcbl-mtl icb-kernel: maxTotalThreadsPerThreadgroup={} threadExecutionWidth={}",
+            encode.maxTotalThreadsPerThreadgroup(),
+            encode.threadExecutionWidth(),
+        );
+
+        // The same helper the sibling test builds its pipeline with, so the
+        // state the render encoder binds is the one an indirect command may
+        // legally run under — `supportIndirectCommandBuffers`, read back off
+        // both the descriptor and the finished state in there.
+        let pipeline = icb_triangle_pipeline(&device);
+
+        let descriptor = MTLIndirectCommandBufferDescriptor::new();
+        descriptor.setCommandTypes(MTLIndirectCommandType::Draw);
+        // Both inherited, which is what keeps the kernel to one call.
+        descriptor.setInheritPipelineState(true);
+        descriptor.setInheritBuffers(true);
+        descriptor.setMaxVertexBufferBindCount(0);
+        descriptor.setMaxFragmentBufferBindCount(0);
+        // Read back rather than assumed: a descriptor that stored none of this
+        // would produce an ICB whose shape disagrees with the kernel, and the
+        // disagreement would surface as a blank canvas with no reason attached.
+        assert_eq!(
+            descriptor.commandTypes(),
+            MTLIndirectCommandType::Draw,
+            "MTLIndirectCommandBufferDescriptor did not keep the command types it was given"
+        );
+        assert!(
+            descriptor.inheritPipelineState()
+                && descriptor.inheritBuffers()
+                && descriptor.maxVertexBufferBindCount() == 0
+                && descriptor.maxFragmentBufferBindCount() == 0,
+            "MTLIndirectCommandBufferDescriptor did not keep the inheriting, no-binds shape the \
+             kernel encodes for: inheritPipelineState={} inheritBuffers={} \
+             maxVertexBufferBindCount={} maxFragmentBufferBindCount={}",
+            descriptor.inheritPipelineState(),
+            descriptor.inheritBuffers(),
+            descriptor.maxVertexBufferBindCount(),
+            descriptor.maxFragmentBufferBindCount(),
+        );
+
+        // Device-local, through the same helper every `MTLBuffer` this backend
+        // allocates goes through: the CPU neither writes nor reads this ICB.
+        let options = conv::resource_options(MemoryLocation::DeviceLocal);
+        // SAFETY: `objc2` marks this unsafe because `maxCount` might not be
+        // bounds-checked. It is `ICB_COMMAND_COUNT`, one, far below the 1048576
+        // the adapter probe watched this device accept, and Metal's declared
+        // return is `Option` — a request it cannot satisfy comes back nil and
+        // is reported by the `expect` rather than unwound.
+        let icb = unsafe {
+            raw.newIndirectCommandBufferWithDescriptor_maxCommandCount_options(
+                &descriptor,
+                ICB_COMMAND_COUNT,
+                options,
+            )
+        }
+        .expect("this device creates a one-command inheriting indirect command buffer");
+
+        let handle = icb.gpuResourceID();
+        println!(
+            "crcbl-mtl icb-kernel: gpuResourceID={handle:?} size={}",
+            icb.size()
+        );
+
+        // The argument buffer: one `MTLResourceID` and nothing else, which is
+        // what `EncodeTarget` declares. `HostUpload` is the seam location whose
+        // documented contract is exactly this — written once by the CPU, never
+        // read back.
+        let table = raw
+            .newBufferWithLength_options(
+                to_ns(size_of::<MTLResourceID>() as u64),
+                conv::resource_options(MemoryLocation::HostUpload),
+            )
+            .expect("an argument buffer of one MTLResourceID");
+        table.setLabel(Some(&NSString::from_str(
+            "crcbl-mtl icb-kernel argument buffer",
+        )));
+        // SAFETY: `contents` covers the bytes this buffer was just created
+        // with, which is exactly one `MTLResourceID`; the allocation is
+        // `Shared`, so the pointer is CPU-writable; and no GPU work has been
+        // submitted against it yet.
+        unsafe {
+            table
+                .contents()
+                .as_ptr()
+                .cast::<MTLResourceID>()
+                .write(handle)
+        };
+
+        let commands = crate::fault::command_buffer(&device.inner.queue, "crcbl-mtl icb-kernel")
+            .expect("MTLCommandQueue::commandBufferWithDescriptor: returned nil");
+
+        // An ICB's contents are undefined until they are written, and a reset
+        // command is a no-op — so if the kernel encodes nothing, the pass below
+        // draws nothing instead of executing whatever the allocation held.
+        let blit = commands
+            .blitCommandEncoder()
+            .expect("MTLCommandBuffer::blitCommandEncoder returned nil");
+        // SAFETY: `objc2` marks this unsafe because the ICB may need
+        // synchronising, may be unretained, and the range might not be
+        // bounds-checked. `icb` is a live `Retained` held across the
+        // `waitUntilCompleted` below, nothing has touched it yet, and the range
+        // is its whole `maxCommandCount`.
+        unsafe { blit.resetCommandsInBuffer_withRange(&icb, NSRange::new(0, ICB_COMMAND_COUNT)) };
+        blit.endEncoding();
+
+        let compute = commands
+            .computeCommandEncoder()
+            .expect("MTLCommandBuffer::computeCommandEncoder returned nil");
+        compute.setComputePipelineState(&encode);
+        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
+        // the offset nor the index, and because the buffer's contents must be
+        // of the type the shader declared. The offset is zero, index zero is
+        // the `[[buffer(0)]]` `ENCODE_ICB_MSL` names, the contents are the one
+        // `MTLResourceID` `EncodeTarget` declares, and `table` is a `Retained`
+        // local held across the `waitUntilCompleted` below.
+        unsafe { compute.setBuffer_offset_atIndex(Some(&table), 0, 0) };
+        // Not optional: the kernel reaches the ICB through a handle Metal
+        // cannot follow, and this is both the residency declaration and the
+        // barrier against the blit reset above.
+        compute.useResource_usage(ProtocolObject::from_ref(&*icb), MTLResourceUsage::Write);
+        compute.dispatchThreadgroups_threadsPerThreadgroup(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: ICB_COMMAND_COUNT,
+                height: 1,
+                depth: 1,
+            },
+        );
+        compute.endEncoding();
+        commands.commit();
+        commands.waitUntilCompleted();
+
+        // Asserted rather than assumed: a faulted or hung dispatch must arrive
+        // naming its reason, not as a canvas nobody can explain.
+        let status = commands.status();
+        assert_eq!(
+            status,
+            MTLCommandBufferStatus::Completed,
+            "the encoding kernel's command buffer ended {status:?} rather than Completed: {}",
+            if status == MTLCommandBufferStatus::Error {
+                crate::fault::describe(&commands)
+            } else {
+                "no NSError was recorded".to_string()
+            }
+        );
+
+        let painted = ink_pass_canvas(&device, "crcbl-mtl icb-kernel draw", |encoder| {
+            // The command the kernel wrote inherits this, and names no pipeline
+            // of its own. Binding a pipeline draws nothing by itself: the only
+            // draw in this pass is the one the kernel encoded.
+            encoder.setRenderPipelineState(&pipeline);
+            // SAFETY: `objc2` marks this unsafe because the ICB may need
+            // synchronising, may be unretained, and the execution range might
+            // not be bounds-checked. The submission that wrote it has completed
+            // — asserted immediately above rather than assumed — `icb` is a live
+            // `Retained` held across `ink_pass_canvas`'s own
+            // `waitUntilCompleted`, and the range is the whole buffer, which is
+            // the `maxCommandCount` it was created with.
+            unsafe {
+                encoder.executeCommandsInBuffer_withRange(&icb, NSRange::new(0, ICB_COMMAND_COUNT))
+            };
+        });
+
+        // Printed before the assertion, so a run that comes back blank says so
+        // with the texels beside the answer rather than only in a panic.
+        println!(
+            "crcbl-mtl icb-kernel: centre={:02X?} corner={:02X?}",
+            texel_at(&painted, CANVAS.width / 2, CANVAS.height / 2),
+            texel_at(&painted, 0, 0),
+        );
+        assert_ink_triangle(&painted, Format::Rgba8Unorm);
     }
 
     /// Records `paint` into a [`CANVAS`]-sized pass over a `format` target,

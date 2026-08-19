@@ -25,6 +25,44 @@ Not a defect to fix so much as a shape to know. If it is ever worth changing,
 the options are to run the render step first, or to give it its own job so the
 two failures cannot mask each other.
 
+### The GPU-encoded ICB probe is written and has never run
+
+`crcbl_mtl::device`'s
+`a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes` asks the
+one question `Capability::DrawIndirectCount` on Metal is blocked on: can a
+**compute kernel encode** into an `MTLIndirectCommandBuffer`? The existing ICB
+evidence only covers _executing_ one the CPU encoded, which is a different
+capability.
+
+The kernel is hand-written MSL (`command_buffer` / `render_command`), because
+Slang's Metal target cannot express it. That is now a cheap shape rather than an
+expensive one — see the correction above about the artifact-hash job.
+
+**Four things only the `mtl e2e` run can settle**, recorded so they are not
+re-derived:
+
+1. Whether Metal's front end accepts `command_buffer`/`render_command` at all on
+   the runner's MSL version. This is the outcome that prints rather than fails.
+2. Whether a Metal 3 argument buffer reads a `command_buffer` member as the
+   `MTLResourceID` that `MTLIndirectCommandBuffer::gpuResourceID` hands out. The
+   probe takes that route because `objc2-metal` 0.3.2 exposes **no**
+   `setIndirectCommandBuffer:` on the compute encoder — the only such binding is
+   `MTLArgumentEncoder::setIndirectCommandBuffer:atIndex:`. **If it fails, the
+   fallback is enabling the `MTLArgumentEncoder` feature and using that**, which
+   is what Apple's own GPU-encoding sample does. Do not re-derive this.
+3. Whether the paravirtual device is `Tier2` and on a family permitting GPU-side
+   ICB encoding — the probe prints `argumentBuffersSupport()`, which also
+   answers the bindless question in the entry above.
+4. Whether `useResource:usage:` covers the blit-reset-to-kernel-write hazard
+   there, and whether `optimizeIndirectCommandBuffer:withRange:` — omitted as
+   performance-only — turns out to be load-bearing.
+
+One premise was taken on trust and is worth flagging: that Slang silently drops
+a `command_buffer` parameter is written into the probe's doc comment as its
+reason for existing, and was **not** re-tested when the probe was written. It
+was measured earlier in this project's life; if it is ever revisited, measure
+again rather than citing the comment.
+
 ### Metal bindless is implemented and STILL not exercised on CI
 
 The capability was closed and the row removed from `REVIEWED_BLOCKERS`, but the
