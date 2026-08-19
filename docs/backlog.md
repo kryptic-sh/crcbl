@@ -3103,12 +3103,38 @@ format, so a shared helper in `crcbl-hal` called at the top of each
 `create_image` would make all five refuse identically, and the impossible case
 above would then be refused everywhere rather than on some backends.
 
-**Why it was recorded rather than done:** where seam-level validation lives is a
-design call — a shared helper every backend must remember to call is a
-convention, and a convention is not a lock, which is the same objection this
-repository raises elsewhere about `unsafe` contracts. The alternatives are a
-wrapper type the backends cannot bypass, or accepting the divergence and
-documenting it. Worth deciding rather than reaching for the first shape.
+**The option the seam rule actually points at, and my first write-up missed it:
+delete the distinction.** The standing rule is "refactor anything that cannot
+work on all the backends — the seam must be fully backend agnostic", and this is
+a seam flag one backend family cannot express. The precedent is
+`CommandEncoder::fill_buffer`: the seam promised a repeating 32-bit value three
+backends could not keep, and the _parameter was removed_ rather than emulated.
+
+Applied here that means one `ImageUsage::RENDER_ATTACHMENT` in place of
+`COLOR_ATTACHMENT` and `DEPTH_STENCIL_ATTACHMENT`, with each backend deriving
+the API bit it needs from the format — which `crcbl-vk` can do, since the format
+determines which of `VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT` and
+`VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` is correct, and which the browser
+backends already do. It makes the contradictory descriptor _unwritable_ rather
+than merely refused, which is the difference between a lock and a convention.
+
+**Its cost is what makes it a decision rather than a task.** It is a breaking
+change to `ImageUsage` and therefore to every caller — the renderer, the samples
+and every suite — where the two validation options touch only `create_image`. It
+also gives up a real thing: today a caller states intent and Vulkan checks it,
+and after the merge nobody states intent at all, so a caller who _meant_ depth
+and passed a colour format gets a colour attachment silently on every backend
+rather than a refusal on some.
+
+So the four options are: merge the flags (the seam rule's answer, breaking),
+validate in a shared helper (a convention), validate through a type the backends
+cannot bypass (a lock, more machinery), or document the divergence.
+
+**Why it was recorded rather than done:** every one of the four is a design call
+with a real cost, and the cheapest is not obviously right. A shared helper is a
+convention, and a convention is not a lock — the same objection this repository
+raises about `unsafe` contracts. The merge is the rule's answer and the most
+expensive. Worth deciding rather than reaching for the first shape.
 
 ### DECISION NEEDED — how a caller asks whether a format is usable
 
