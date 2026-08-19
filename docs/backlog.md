@@ -1534,7 +1534,7 @@ or redefine the capability in terms of the reported feature rather than the
 callable surface — which would weaken what it asserts for every backend to
 accommodate one, and is worth naming only to reject.
 
-### The graphics push-constant path is unrun on Metal and dx12
+### Nothing in `crcbl-render` uses push constants
 
 `exercise_push_constants_on_graphics` in `crates/crcbl/tests/hal_seam_e2e.rs`
 closed the coverage gap this entry used to record: it draws twice in one render
@@ -1544,10 +1544,12 @@ fragment stage its colour. Verified on vk against real hardware (RADV Navi31),
 and `Refused` on wgpu, which is that backend's answer at layout creation because
 it never enables wgpu's `IMMEDIATES`.
 
-**The Metal and dx12 arms were type-checked only** —
-`--target aarch64-apple-darwin` and `--target x86_64-pc-windows-msvc` — so CI is
-the first thing that runs them, and three pieces of arithmetic run there for the
-first time:
+**The Metal and dx12 arms have since run green.** They were type-checked only
+when this was written — `--target aarch64-apple-darwin` and
+`--target x86_64-pc-windows-msvc` — and CI has run them since: the seam reports
+`PushConstants supported` on both, and push constants are absent from each run's
+unexercised list, which is the print that would have said otherwise. Three
+pieces of arithmetic ran there for the first time, and none was wrong:
 
 - `crcbl_mtl::argument::plan` computing a block index for a layout with **no
   bind groups at all**. The index is zero, and `msl/push_constant_raster.metal`
