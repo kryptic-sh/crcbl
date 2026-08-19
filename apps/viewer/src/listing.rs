@@ -468,7 +468,7 @@ fn fit(atlas: &FontAtlas, text: &str, max: f32, scale: f32) -> String {
 ///
 /// The bytes divided by the stride, because that is what the description
 /// carries: [`Geometry`] is vertex *bytes*, and
-/// [`VERTEX_STRIDE`](crcbl::shaders::mesh::VERTEX_STRIDE) is the one vertex
+/// [`VERTEX_STRIDE`] is the one vertex
 /// format the mesh pool has.
 fn vertex_count(mesh: &MeshDesc<'_>) -> usize {
     match &mesh.geometry {

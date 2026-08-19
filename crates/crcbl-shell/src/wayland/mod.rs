@@ -3487,7 +3487,7 @@ impl WaylandShell {
     ///
     /// Only this seat's constraints go — another seat's mouse is still plugged
     /// in and still locked. The windows keep their
-    /// [`PointerMode`](crate::PointerMode), so
+    /// [`PointerMode`], so
     /// [`add_pointer`](Self::add_pointer) restores this seat's when a pointer
     /// reappears.
     fn drop_window_constraints_for_seat(&mut self, index: usize) {

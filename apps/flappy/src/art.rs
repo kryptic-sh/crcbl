@@ -416,7 +416,7 @@ fn tiles(width: f32, parallax: f32, camera: f32, half_width: f32) -> impl Iterat
 ///
 /// [`ART_TICK_HZ`] is generated into each crate that bakes art, so the rate is
 /// per-crate configuration; the failure policy is the shared half and lives in
-/// [`load_baked`](crcbl::sprite::load::load_baked).
+/// [`load_baked`].
 fn baked(name: &str, png: &[u8], json: Option<&str>) -> Loaded {
     load_baked(name, png, json, ART_TICK_HZ)
 }

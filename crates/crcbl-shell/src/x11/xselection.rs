@@ -1,7 +1,7 @@
 //! The clipboard: owning the `CLIPBOARD` selection, answering conversions, and
 //! reading someone else's.
 //!
-//! [`selection`](super::selection) owns the state machines and the reasoning;
+//! [`selection`] owns the state machines and the reasoning;
 //! this is the half that talks to the server. The division is deliberate — the
 //! part that is hardest to get right is the part with no X server in it.
 //!
@@ -25,7 +25,7 @@
 //!   is never returned here — which the trait says is "obviously correct rather
 //!   than obviously incomplete".
 //!
-//! **Obligation 4 did not.** See [`selection`](super::selection) for the
+//! **Obligation 4 did not.** See [`selection`] for the
 //! deadline an `INCR` transfer needs and why there is nothing else that could
 //! end one.
 //!

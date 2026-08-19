@@ -396,7 +396,7 @@ impl Instance for NullInstance {
 /// A null device request in flight.
 ///
 /// Reached through `dyn PendingDevice` from
-/// [`Instance::request_device`](crate::Instance::request_device). The device is
+/// [`Instance::request_device`]. The device is
 /// built up front — nothing about it can fail late — and handed over once the
 /// simulated latency from
 /// [`Recorder::set_device_latency`] has elapsed, which is how a caller's poll
@@ -1970,7 +1970,7 @@ impl NullDevice {
     /// Refuses a host-visible buffer filling a binding a shader can write.
     ///
     /// The seam's rule, stated on
-    /// [`MemoryLocation`](crate::MemoryLocation): a buffer a shader writes is
+    /// [`MemoryLocation`]: a buffer a shader writes is
     /// [`MemoryLocation::DeviceLocal`] and nothing else, because D3D12's upload
     /// and readback heaps admit no unordered access view. `crcbl-dx12` refuses
     /// it too, at the binding it builds the view for — but a violation that only

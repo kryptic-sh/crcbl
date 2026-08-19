@@ -55,7 +55,7 @@
 //! | --- | --- | --- |
 //! | [`KeyCode`] | our evdev table | our evdev table — **unchanged** |
 //! | [`Scancode`](crcbl_core::input::Scancode) | the evdev code | the evdev code — **unchanged** |
-//! | [`Keysym`](crcbl_core::input::Keysym) | the layout's symbol | [`Keysym::NONE`](crcbl_core::input::Keysym::NONE) |
+//! | [`Keysym`] | the layout's symbol | [`Keysym::NONE`](crcbl_core::input::Keysym::NONE) |
 //! | `TextCommit` | committed UTF-8 | never emitted |
 //! | [`Modifiers`] | XKB's effective state | derived from held [`KeyCode`]s |
 //! | key repeats at all | `xkb_keymap_key_repeats` | every key repeats |

@@ -1660,9 +1660,9 @@ Two consequences worth keeping:
 ### The doc gate does not cover private items
 
 CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding
-`--document-private-items` to that same command still exits 0 but emits **139
-diagnostics** on the Linux target, re-measured 2026-08-19 — it was 104 when this
-entry was written, and the tree has grown since.
+`--document-private-items` to that same command still exits 0 but emits **91
+diagnostics** on the Linux target — 139 when re-measured on 2026-08-19, of which
+the 48 mechanical ones have since been fixed.
 
 Where they are: `crcbl-shell` 33, `crcbl-webgpu` 29, `crcbl-vk` 7,
 `crcbl-render` 6, `apps/horde` 6, `crcbl-hal` 4, `apps/breakout` 4,
@@ -1671,10 +1671,12 @@ others.
 
 **The split is what makes it startable**, and it is not one job:
 
-- **48 are `redundant explicit link target`** — ``[`Foo`](Foo)`` where the
-  target repeats the text. Mechanical and safe, and the only reason not to do
-  them today is that fixing 48 doc comments ships nothing on its own: the gate
-  cannot be turned on until the other 91 are gone too.
+- **The 48 `redundant explicit link target` ones are done** — ``[`Foo`](Foo)``
+  where the target repeated the label, across 23 files. The check that mattered
+  was that removing a target cannot turn a redundant link into a broken one:
+  after the rewrite the private-items build reports **0 redundant and still
+  exactly 72 unresolved**, and CI's own
+  `cargo doc --workspace --all-features --no-deps` reports **zero warnings**.
 - **72 are `unresolved link`** — each needs judgement about whether the target
   moved, was renamed, or never existed. These are the real cleanup, and the ones
   a reader following a link actually hits.

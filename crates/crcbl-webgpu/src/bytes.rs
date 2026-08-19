@@ -79,7 +79,7 @@ pub enum DecodeError {
         field: &'static str,
         /// The code that was read, widened to the largest a field can carry.
         ///
-        /// A `u64` because [`Features`](crcbl_hal::Features) is a 64-bit
+        /// A `u64` because [`Features`] is a 64-bit
         /// bitflags and is refused through `from_bits` rather than truncated —
         /// a narrower field here would have to drop the half of the value that
         /// says which bit was unclaimed.

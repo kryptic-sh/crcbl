@@ -17,7 +17,7 @@
 //! Pipelines declare attachment *formats* through
 //! [`vk::PipelineRenderingCreateInfo`], never a `VkRenderPass`. The seam is
 //! shaped that way on purpose, and it is why
-//! [`GraphicsPipelineDesc`](crcbl_hal::GraphicsPipelineDesc) carries
+//! [`GraphicsPipelineDesc`] carries
 //! `color_targets` while the attachments themselves arrive at
 //! `begin_render_pass`.
 //!
@@ -33,7 +33,7 @@
 //!
 //! # Bindless is declared here and exercised at P3
 //!
-//! [`BindingFlags`](crcbl_hal::BindingFlags) is translated in full —
+//! [`BindingFlags`] is translated in full —
 //! `PARTIALLY_BOUND`, `UPDATE_AFTER_BIND` and `VARIABLE_COUNT` all reach the
 //! driver — and a Tier B device **rejects** them rather than ignoring them,
 //! which is what the seam requires: "a bindless array quietly downgraded to a

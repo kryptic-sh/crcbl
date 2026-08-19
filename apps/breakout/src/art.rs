@@ -332,7 +332,7 @@ fn brick_frame(y: f64) -> usize {
 ///
 /// [`ART_TICK_HZ`] is generated into each crate that bakes art, so the rate is
 /// per-crate configuration; the failure policy is the shared half and lives in
-/// [`load_baked`](crcbl::sprite::load::load_baked).
+/// [`load_baked`].
 fn baked(name: &str, png: &[u8], json: Option<&str>) -> Loaded {
     load_baked(name, png, json, ART_TICK_HZ)
 }

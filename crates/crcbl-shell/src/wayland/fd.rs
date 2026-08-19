@@ -27,7 +27,7 @@
 //!
 //! # Decision: `std::io::pipe` and `File`, not more hand-written libc
 //!
-//! [`ffi`](super::ffi) declares libwayland by hand because there is no
+//! [`ffi`] declares libwayland by hand because there is no
 //! alternative. There is one here: `std::io::pipe` creates the
 //! `O_CLOEXEC` pipe a `receive` needs, and `File` reads and writes it with
 //! errors already classified — `ErrorKind::WouldBlock` is `EAGAIN` and

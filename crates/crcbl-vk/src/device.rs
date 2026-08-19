@@ -16,7 +16,7 @@
 //! # Everything a driver owns is retired, never freed inline
 //!
 //! `destroy_*` invalidates the handle immediately and parks the driver object in
-//! [`RetireQueue`](crate::deletion::RetireQueue), keyed on the submission
+//! [`RetireQueue`], keyed on the submission
 //! counter. The one exception is [`Device::destroy_command_buffer`], which the
 //! seam explicitly says "must not be called until the submission that used it
 //! has completed" — so the caller has already done the waiting and the pool is
@@ -375,7 +375,7 @@ pub(crate) struct DeviceInner {
     /// [`Limits`](crcbl_hal::Limits) has no field for it and should not: it is
     /// Vulkan's way of describing a timestamp, D3D12 describes the same thing
     /// as a frequency, and Metal and WebGPU have no such number at all.
-    /// [`Device::query_results`](crcbl_hal::Device::query_results) spends it
+    /// [`Device::query_results`] spends it
     /// here and reports nanoseconds, which is a unit every backend has.
     timestamp_period_ns: f32,
     pub(crate) id: u64,

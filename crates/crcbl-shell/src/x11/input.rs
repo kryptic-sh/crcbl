@@ -60,7 +60,7 @@ use super::{
 /// a **grab artefact rather than a focus change**.
 ///
 /// Every pointer grab this backend takes for
-/// [`PointerMode`](crate::PointerMode) generates a `FocusOut(NotifyGrab)` and a
+/// [`PointerMode`] generates a `FocusOut(NotifyGrab)` and a
 /// matching `FocusIn(NotifyUngrab)`. Forwarding them would tell a game it lost
 /// focus at the exact moment it locked the pointer — and
 /// [`ShellEvent::Focus`]'s own documentation says a consumer must treat focus

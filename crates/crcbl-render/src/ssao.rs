@@ -413,7 +413,7 @@ impl Ssao {
 /// backend hands back a handle it allocated itself and learns the browser's
 /// verdict later, so the pass records its draw, the invalid group makes the
 /// submission invalid, and the failure arrives through
-/// [`Device::take_error`](crcbl_hal::Device::take_error) — where
+/// [`Device::take_error`] — where
 /// `crcbl::engine`'s frame acquire turns it into an error that stops the frame.
 /// That is louder than skipping a pass, and it is the right way round: a bind
 /// group this code built wrongly is a bug, not a device that ran out of room.

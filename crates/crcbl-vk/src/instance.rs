@@ -59,7 +59,7 @@ struct SurfaceEntry {
 /// surface is gone — lives here as **pure bookkeeping**, separately from the
 /// driver call it decides on. That split is what makes it testable at all: the
 /// only surface this crate's e2e suite can create is
-/// [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen), which
+/// [`SurfaceTarget::Offscreen`], which
 /// has no driver object to defer, so a headless run cannot reach the case whose
 /// failure mode is undefined behaviour rather than a wrong error code.
 #[derive(Debug, Default)]

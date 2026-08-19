@@ -12,7 +12,7 @@
 //! So every caller-supplied field whose length is *data* is measured here,
 //! before a byte of the command is written, and one past a cap comes back as a
 //! [`HalError`] the caller can report — the shape
-//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) already gives the
+//! [`HalError::Unsupported`] already gives the
 //! ops this backend has no command for.
 //!
 //! # What is deliberately not measured

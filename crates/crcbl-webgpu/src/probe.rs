@@ -4613,8 +4613,8 @@ impl ReadbackProbe {
     /// there.
     ///
     /// `true` when this call settled or advanced the probe. A
-    /// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) makes it
-    /// [`Ready`](Self::Ready); a [`Reply::ReadbackPending`](crate::Reply::ReadbackPending)
+    /// [`Reply::ReadbackReady`] makes it
+    /// [`Ready`](Self::Ready); a [`Reply::ReadbackPending`]
     /// drops it back to [`Pending`](Self::Pending) so the next frame re-polls.
     /// Everything not naming this probe's sequence is left alone, exactly as
     /// [`SurfaceCapsProbe::absorb`] leaves the other probes' answers.
@@ -4649,8 +4649,8 @@ impl ReadbackProbe {
 /// their own schedules, so each holds its own place in the poll protocol. A draw
 /// probe *is* a readback at heart — its setup frame ends in the same
 /// `request_readback`, and it is answered by the same
-/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
-/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending) — so the transitions
+/// [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`] — so the transitions
 /// mirror the readback's exactly.
 ///
 /// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
@@ -4716,8 +4716,8 @@ impl DrawProbe {
 /// The two probes differ only in the frame they encode: a draw rasterises a
 /// triangle, a dispatch runs a compute shader that writes a storage buffer. Both
 /// end in the same `request_readback` and are answered by the same
-/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
-/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so the transitions
+/// [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`], so the transitions
 /// mirror [`DrawProbe`]'s exactly.
 ///
 /// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
@@ -4910,8 +4910,8 @@ impl FillProbe {
 /// surface, a configured swapchain, an acquire, a clear of the *acquired* view,
 /// the copy, a submit and a no-op present rather than a create-image-and-clear.
 /// It ends in the same `request_readback` and is answered by the same
-/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
-/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so the transitions
+/// [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`], so the transitions
 /// mirror [`DrawProbe`]'s exactly.
 ///
 /// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
@@ -5039,8 +5039,8 @@ impl ReconfigProbe {
 /// The two probes differ only in the frame they encode: a draw rasterises a
 /// triangle with `draw`, this one fills an args buffer and records a
 /// `draw_indexed_indirect`. Both end in the same `request_readback` and are
-/// answered by the same [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
-/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so the transitions
+/// answered by the same [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`], so the transitions
 /// mirror [`DrawProbe`]'s exactly.
 ///
 /// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
@@ -5104,8 +5104,8 @@ impl IndirectProbe {
 /// triangle into a colour attachment, this one clears a `depth32float`
 /// attachment and copies its depth plane out. Both end in the same
 /// `request_readback` and are answered by the same
-/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
-/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so the transitions
+/// [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`], so the transitions
 /// mirror [`DrawProbe`]'s exactly.
 ///
 /// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
@@ -5167,8 +5167,8 @@ impl DepthProbe {
 ///
 /// [`DrawProbe`]'s state machine on the stencil probe's handle: the setup frame
 /// ends in the same `request_readback` and is answered by the same
-/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) /
-/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending).
+/// [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`].
 ///
 /// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -5501,7 +5501,7 @@ impl TimestampProbe {
 /// this backend runs in a browser, so every [`Support`] answer
 /// [`WebGpuDevice`] gives is a declaration nothing
 /// holds it to — the browser gate's other groups drive the writer and the
-/// replayer and never construct a [`Device`](crcbl_hal::Device) at all. This is
+/// replayer and never construct a [`Device`] at all. This is
 /// what constructs one and reads its whole matrix.
 #[derive(Debug)]
 struct ParityReport {
@@ -6274,8 +6274,8 @@ impl Probe {
     /// [`Pending`](ReadbackProbe::Pending), and is a no-op while
     /// [`Waiting`](ReadbackProbe::Waiting) or [`Ready`](ReadbackProbe::Ready).
     ///
-    /// Answered by a [`Reply::ReadbackReady`](crate::Reply::ReadbackReady) or
-    /// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending), so it goes
+    /// Answered by a [`Reply::ReadbackReady`] or
+    /// [`Reply::ReadbackPending`], so it goes
     /// through [`encode_awaited`](StreamChannel::encode_awaited) — the reply
     /// names the sequence it returns.
     fn poll_readback(&mut self) -> bool {
@@ -7502,7 +7502,7 @@ impl Probe {
     /// Every `supports` answer this backend gives is a declaration nothing holds
     /// it to. The native seam suite is a native binary and this backend runs in a
     /// browser; the browser gate's other groups drive [`StreamWriter`] and the
-    /// replayer and never construct a [`Device`](crcbl_hal::Device). This is what
+    /// replayer and never construct a [`Device`]. This is what
     /// constructs one and reads its whole matrix.
     ///
     /// # The device is real; its channel is not, and does not need to be

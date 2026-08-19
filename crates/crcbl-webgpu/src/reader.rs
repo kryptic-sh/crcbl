@@ -331,7 +331,7 @@ impl ByteReader<'_> {
     /// [`BindingResource::Sampler`] both resolve a handle only the discriminant
     /// says the table for, so a folded code binds the wrong kind of object as well
     /// as landing the cursor wrong. See
-    /// [`tag::binding_resource_code`](crate::tag::binding_resource_code).
+    /// [`tag::binding_resource_code`].
     fn read_binding_resource(
         &mut self,
         field: &'static str,
@@ -630,7 +630,7 @@ impl ByteReader<'_> {
     /// in that order so a front/back swap is visible; the two masks and the
     /// three bias floats follow. **No reference:** the value a draw compares
     /// against is pass state on the seam, carried by
-    /// [`Command::SetStencilReference`](crate::Command::SetStencilReference) and
+    /// [`Command::SetStencilReference`] and
     /// by nothing else.
     fn read_depth_stencil_state(&mut self) -> Result<DepthStencilState, DecodeError> {
         let format = self.read_format("DepthStencilState::format")?;

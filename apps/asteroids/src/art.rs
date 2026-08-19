@@ -496,7 +496,7 @@ fn rect(centre: DVec3, half_w: f64, half_h: f64) -> [f32; 4] {
 ///
 /// [`ART_TICK_HZ`] is generated into each crate that bakes art, so the rate is
 /// per-crate configuration; the failure policy is the shared half and lives in
-/// [`load_baked`](crcbl::sprite::load::load_baked).
+/// [`load_baked`].
 fn baked(name: &str, png: &[u8], json: Option<&str>) -> Loaded {
     load_baked(name, png, json, ART_TICK_HZ)
 }

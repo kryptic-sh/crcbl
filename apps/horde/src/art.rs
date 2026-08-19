@@ -121,7 +121,7 @@
 //! large horde is off screen most of the time. An off-screen sprite is a 64-byte
 //! instance uploaded and a quad clipped for nothing, and GPU culling is P7's, so
 //! [`Scene::build`] rejects them on the CPU against the same
-//! [`camera_centre`](crate::gpu::camera_centre) the projection uses. There is no
+//! [`camera_centre`] the projection uses. There is no
 //! cap beyond that any more: the placeholder renderer had one because a
 //! `DrawList` quad was six vertices uploaded per frame, and an instanced sprite
 //! is not.
@@ -828,7 +828,7 @@ fn rect(centre: DVec3, half: f64) -> [f32; 4] {
 ///
 /// [`ART_TICK_HZ`] is generated into each crate that bakes art, so the rate is
 /// per-crate configuration; the failure policy is the shared half and lives in
-/// [`load_baked`](crcbl::sprite::load::load_baked).
+/// [`load_baked`].
 fn baked(name: &str, png: &[u8], json: Option<&str>) -> Loaded {
     load_baked(name, png, json, ART_TICK_HZ)
 }

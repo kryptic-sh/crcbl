@@ -735,7 +735,7 @@ pub struct ForwardRenderer {
     mesh_pipeline_layout: PipelineLayoutHandle,
     mesh_pipeline: GraphicsPipelineHandle,
     /// [`ForwardRenderer::mesh_pipeline`] again in
-    /// [`PolygonMode::Line`](crcbl_hal::PolygonMode::Line), for
+    /// [`PolygonMode::Line`], for
     /// [`set_wireframe`](ForwardRenderer::set_wireframe).
     ///
     /// [`None`] until a caller first switches the view on — the ground grid's

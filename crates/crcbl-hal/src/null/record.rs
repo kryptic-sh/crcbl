@@ -873,7 +873,7 @@ impl Recorder {
     /// event and all decidable here, by decoding what landed with the same
     /// layout the shader reads it with.
     ///
-    /// Only [`MemoryLocation::HostUpload`](crate::MemoryLocation::HostUpload)
+    /// Only [`MemoryLocation::HostUpload`]
     /// buffers hold anything: the null backend executes no copies, so a
     /// device-local buffer's contents are whatever nothing wrote to it. It is
     /// therefore evidence about the *host's* writes, and a copy this backend

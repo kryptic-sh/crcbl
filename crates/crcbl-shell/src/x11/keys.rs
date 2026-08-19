@@ -13,8 +13,8 @@
 //! `min_keycode >= 8`), the XFree86 keymaps were numbered around that, and
 //! Linux's evdev codes were later defined to line up with them minus the
 //! offset. So the direction of the debt runs the other way from what the
-//! Wayland backend's [`EVDEV_OFFSET`](crate::linux::xkb::EVDEV_OFFSET) comment
-//! might suggest, and the shared [`keymap`](crate::linux::keymap) table is
+//! Wayland backend's [`EVDEV_OFFSET`] comment
+//! might suggest, and the shared [`keymap`] table is
 //! reachable from here by subtracting eight —
 //! [`scancode`] is that subtraction, in one place, named.
 //!
@@ -28,7 +28,7 @@
 //!
 //! This is also why the wheel is not smooth on core X11: a notch is one
 //! discrete event with no magnitude, which is exactly
-//! [`ScrollDelta::Lines`](crcbl_core::input::ScrollDelta::Lines). XInput 2 has
+//! [`ScrollDelta::Lines`]. XInput 2 has
 //! smooth scroll valuators; this slice uses XI2 only for raw motion, and says
 //! so in [the backend docs](super).
 
