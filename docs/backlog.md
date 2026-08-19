@@ -578,6 +578,18 @@ in both directions, and `REVIEWED_BLOCKERS` plus
 list. What is left of step 4 is the six rows in "The numbers, restated" below —
 none of which can be finished on the hardware available here — and step 5.
 
+**"In both directions" was only half true until 2026-08-20**, and it is worth
+knowing how it was false, because the shape recurs. A backend that supports
+everything declares everything supported, so on a capable device the suite runs
+"declared supported must work" for every row and "declared unsupported must
+refuse" for none — `crcbl-vk` on an RX 7900 XTX declared all 24 supported. The
+refusal arm existed, was correct, and could not fire. `CRCBL_SEAM_WITHHOLD=all`
+opens the device with no optional feature so that the gated rows move to the
+other side; it runs as its own CI step on the vk, dx12 and Metal jobs, and it
+found four mis-declarations across those three backends the first time it was
+pointed at them. **A guard that cannot fire is the failure mode this whole
+mechanism exists to prevent, and the mechanism had one in it.**
+
 **Order of work:**
 
 1. Finish migrating the white-box tests to the agnostic suites, so all four
