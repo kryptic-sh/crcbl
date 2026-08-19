@@ -697,6 +697,12 @@ fn build(
             material
                 .pbr_metallic_roughness()
                 .base_color_texture()
+                // **`Texture::source` panics on a texture that has none**, so
+                // this filter is load-bearing rather than tidy — see
+                // `gltf_check::TEXTURE_SOURCE_ABSENT`. A texture whose image an
+                // extension supplies becomes a material with no texture, which
+                // is the same place an undecodable image lands.
+                .filter(|info| texture_has_an_image(document, info.texture().index()))
                 .map(|info| GltfTexture {
                     image: info.texture().source().index(),
                     tex_coord: info.tex_coord(),
@@ -805,6 +811,37 @@ fn warn_dropped_features(document: &gltf::Document, key: &Path) {
         }
     }
     warn_unsupported_extensions(root, key);
+
+    // Counted off the JSON for `texture_has_an_image`'s reason. Reported
+    // separately from the extension lines because a texture can lose its image
+    // without the document declaring anything — and then this is the only line
+    // that says why a material came out untextured.
+    let imageless = root
+        .textures
+        .iter()
+        .filter(|texture| texture.source.value() >= root.images.len())
+        .count();
+    if imageless > 0 {
+        crcbl_core::log::warn!(
+            "{}: skipping {imageless} texture(s) that name no image: it is supplied by an \
+             extension this importer does not implement, so every material using them shades \
+             with its base colour",
+            key.display(),
+        );
+    }
+}
+
+/// Whether texture `index` names an image this document actually carries.
+///
+/// Read off the JSON rather than through [`gltf::Texture::source`], because
+/// that accessor is `images().nth(source).unwrap()` and the whole point is the
+/// textures for which it would panic — see
+/// [`crate::gltf_check::TEXTURE_SOURCE_ABSENT`].
+fn texture_has_an_image(document: &gltf::Document, index: usize) -> bool {
+    let root = document.as_json();
+    root.textures
+        .get(index)
+        .is_some_and(|texture| texture.source.value() < root.images.len())
 }
 
 /// The one glTF extension this importer implements.
@@ -1283,6 +1320,85 @@ mod tests {
             .filter(|line| line.contains("KHR_texture_transform"))
             .count();
         assert_eq!(mentions, 1, "named more than once: {warnings:#?}");
+    }
+
+    /// **A texture whose image an extension supplies is skipped, not refused.**
+    ///
+    /// `source` has a `serde` default of `u32::MAX` — see
+    /// `gltf_check::TEXTURE_SOURCE_ABSENT` — so a texture that omits it used to
+    /// be refused with `texture 0 names image 4294967295`, a sentinel this crate
+    /// invented reported as though the document had written it.
+    /// `SheenWoodLeatherSofa` from the Khronos suite was the one model in that
+    /// suite refused for it.
+    ///
+    /// The material must survive with **no** texture rather than with a broken
+    /// one: `gltf::Texture::source` is an `unwrap` on that index and would abort
+    /// the process.
+    #[test]
+    fn a_texture_that_names_no_image_is_skipped_and_its_material_keeps_its_colour() {
+        let (base, bin) = textured_parts(&png_bytes(2, 2, &IMAGE_TEXELS), "image/png", 0);
+        let json = replacing(
+            &base,
+            r#""textures": [{ "source": 0 }]"#,
+            r#""textures": [{ }]"#,
+        );
+        let scene = import_glb_bytes(&glb(&json, Some(&bin)))
+            .expect("a texture with no image does not refuse the document");
+
+        assert_eq!(
+            scene.materials().len(),
+            1,
+            "the material went with its texture",
+        );
+        assert!(
+            scene.base_color_textures()[0].is_none(),
+            "the material kept a texture whose image cannot be read",
+        );
+    }
+
+    /// And it says so, naming the count — otherwise a material coming out
+    /// untextured has no explanation anywhere.
+    #[test]
+    fn a_skipped_texture_is_reported() {
+        let (base, bin) = textured_parts(&png_bytes(2, 2, &IMAGE_TEXELS), "image/png", 0);
+        let json = replacing(
+            &base,
+            r#""textures": [{ "source": 0 }]"#,
+            r#""textures": [{ }]"#,
+        );
+        let logs = crcbl_core::log::capture();
+        import_glb_bytes(&glb(&json, Some(&bin))).expect("the document imports");
+        let messages: Vec<String> = logs
+            .records()
+            .into_iter()
+            .filter(|record| record.target.contains("gltf_import"))
+            .map(|record| record.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|line| line.contains("1 texture(s) that name no image")),
+            "nothing said the texture was skipped: {messages:#?}",
+        );
+    }
+
+    /// **An out-of-range source is still refused**, which is the half that must
+    /// not move: that is a document naming an image it does not have, and
+    /// letting it through would put an `unwrap` on a real index.
+    #[test]
+    fn a_texture_naming_an_image_that_does_not_exist_is_still_refused() {
+        let (base, bin) = textured_parts(&png_bytes(2, 2, &IMAGE_TEXELS), "image/png", 0);
+        let json = replacing(
+            &base,
+            r#""textures": [{ "source": 0 }]"#,
+            r#""textures": [{ "source": 9 }]"#,
+        );
+        let error = import_glb_bytes(&glb(&json, Some(&bin)))
+            .expect_err("a texture naming a missing image is refused");
+        assert!(
+            error.to_string().contains("texture 0 names image 9"),
+            "the refusal does not name the index: {error}",
+        );
     }
 
     #[test]

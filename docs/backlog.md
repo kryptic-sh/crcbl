@@ -730,9 +730,9 @@ live.
 all 118 models in `KhronosGroup/glTF-Sample-Assets` that ship a `glTF-Binary`
 variant (of 148 in `model-index.json`) were run through
 `viewer --headless --frames 1 --backend vk` on an RX 7900 XTX. **111 loaded and
-drew, 7 did not.** Not automated — a shell loop over a scratch download — so the
-number is a measurement rather than a gate. A script that keeps it honest is
-still worth having and is not written.
+drew, 7 did not — and after the two fixes below it is 117.** Not automated — a
+shell loop over a scratch download — so the number is a measurement rather than
+a gate. A script that keeps it honest is still worth having and is not written.
 
 The seven are three different things:
 
@@ -760,13 +760,26 @@ The seven are three different things:
   extension outright; or a `--strict` flag defaulting to today's behaviour. The
   third costs a flag in `crate::args` and a bool threaded through `import_gltf`.
 
-- **`SheenWoodLeatherSofa` requires `EXT_texture_webp`** and is refused with
-  `texture 0 names image 4294967295, and there are 13` — `u32::MAX` standing in
-  for an absent `source`, an internal sentinel leaking into a user's error.
-- **`Unicode❤♻Test` was not really tested.** Its name percent-encodes to
-  non-ASCII and `crate::args::USAGE` already says an asset key holds only
-  letters, digits, `.`, `_` and `-`. Whether that restriction should stand is a
-  separate question; this run says nothing about the document.
+- **`SheenWoodLeatherSofa` is fixed too.** It required `EXT_texture_webp`, which
+  supplies the image, so its textures had no `source` and it was refused with
+  `texture 0 names image 4294967295` — `u32::MAX`, an internal sentinel leaking
+  into a user's error. Such a texture is now skipped and the material keeps its
+  base colour; an out-of-range source is still refused. **117/118, 99.2%.**
+- **`Unicode❤♻Test` is the last one, and it is not the importer.** Verified by
+  copying the same bytes to an ASCII name: it loads and draws one instance. The
+  refusal is `crate::model`'s asset-key rule, which allows only letters, digits,
+  `.`, `_` and `-` — so both the percent-encoded name and the decoded `❤♻` are
+  rejected.
+
+  **This needs a call.** A viewer is opened on files somebody else named, and
+  non-ASCII file names are ordinary everywhere outside this repository — a
+  Japanese or German asset name is not an edge case. Against that, the key
+  restriction is what keeps a key from being a path traversal or a URI that
+  needs escaping in the browser half. Options: widen the rule to any name with
+  no path separator and no `..`; keep the rule and percent-encode on the way in
+  so the key stays ASCII while the file does not; or leave it and document the
+  limit in `USAGE`, which today only states the rule and not that it will refuse
+  the file. The middle one looks right and is the most work.
 
 The second half of that — stopping an animation the importer already ignores
 from killing the parse — has shipped. **Reporting `extensionsRequired` by name

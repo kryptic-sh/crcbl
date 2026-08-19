@@ -2265,6 +2265,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A texture whose image comes from an extension is skipped, not refused.**
+  `source` is not an `Option` in `gltf-json`'s model — it carries a `serde`
+  default of `u32::MAX` — so a texture supplying its image through
+  `EXT_texture_webp` or `KHR_texture_basisu` was refused with
+  `texture 0 names image 4294967295`, a sentinel this crate invented reported as
+  though the document had written it. The material now loses its texture and
+  keeps its base colour, which is where an undecodable image already landed, and
+  a warning names the count. **A source that is genuinely out of range is still
+  refused** — that is a document naming an image it does not have.
+
 - **A glTF that needs an extension this importer lacks now says so.** Every
   entry in `extensionsRequired` and `extensionsUsed` that `crcbl-scene` does not
   implement is named in a warning against the document's key — required loudly

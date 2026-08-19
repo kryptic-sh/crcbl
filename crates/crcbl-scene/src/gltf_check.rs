@@ -527,19 +527,46 @@ fn check_images(root: &Root, key: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Every texture names an image and a sampler that exist.
+/// The `source` a texture that omits one arrives with.
+///
+/// **`source` is not an `Option` in `gltf-json`'s model**: it carries a `serde`
+/// default of `u32::MAX`, so a texture supplying its image through an extension
+/// — `KHR_texture_basisu`, `EXT_texture_webp` — is indistinguishable from one
+/// naming image four billion. Named here because two modules have to agree on
+/// it: this one lets it through, and `gltf_import::build` must not call
+/// [`gltf::Texture::source`] on it.
+pub(crate) const TEXTURE_SOURCE_ABSENT: usize = u32::MAX as usize;
+
+/// Every texture names an image and a sampler that exist, or names no image at
+/// all.
 ///
 /// [`gltf::Texture::source`] is `images().nth(json.source.value()).unwrap()` and
-/// [`gltf::Texture::sampler`] is the same shape over `samplers`. `source` is
-/// **not** an `Option` in the JSON model: `gltf-json` gives it a `serde` default
-/// of `u32::MAX`, so a texture that omits it — which is what
-/// `KHR_texture_basisu` and friends produce, the image being supplied by the
-/// extension instead — arrives as an index far past the end and panics on the
-/// way out. It is refused here rather than skipped, because a texture with no
-/// readable image is a material pointing at nothing.
+/// [`gltf::Texture::sampler`] is the same shape over `samplers`, so an index
+/// past the end aborts the process rather than being refused. That is what this
+/// checks.
+///
+/// # A texture with no image is skipped, not refused
+///
+/// It was refused until 2026-08-19, on the argument that a texture with no
+/// readable image is a material pointing at nothing. Two things made that
+/// wrong. The message said `texture 0 names image 4294967295`, reporting a
+/// sentinel this crate invented as though the document had written it. And it
+/// is inconsistent with everything around it: a document requiring an extension
+/// this importer lacks now loads and says so — see
+/// `gltf_import::warn_unsupported_extensions` — and an image whose bytes cannot
+/// be decoded is already skipped with the material falling back to its base
+/// colour. `SheenWoodLeatherSofa` from the Khronos suite is the case: it
+/// requires `EXT_texture_webp`, which supplies the image, and it was the one
+/// document in that suite refused for this.
+///
+/// So an **absent** source passes here and `gltf_import::build` drops the
+/// texture; an **out-of-range** source is still refused, because that is a
+/// document naming an image it does not have.
 fn check_textures(root: &Root, key: &Path) -> Result<(), StorageError> {
     for (index, texture) in root.textures.iter().enumerate() {
-        if texture.source.value() >= root.images.len() {
+        if texture.source.value() != TEXTURE_SOURCE_ABSENT
+            && texture.source.value() >= root.images.len()
+        {
             return Err(malformed(
                 key,
                 format!(
@@ -827,11 +854,9 @@ mod tests {
     /// `textures().nth(index).unwrap()`. A document that reaches one of those
     /// aborts the process instead of being refused.
     ///
-    /// The empty-`textures`-entry case is the one worth naming: `source` is not
-    /// an `Option` in `gltf-json`'s model — it carries a `serde` default of
-    /// `u32::MAX` — so a texture that omits it, which is what a document
-    /// supplying its image through `KHR_texture_basisu` looks like, arrives as
-    /// an index four billion past the end.
+    /// A texture that omits `source` entirely is **not** on this list, and has
+    /// its own test below: it is skipped rather than refused, because the
+    /// image is supplied by an extension — see [`check_textures`].
     #[test]
     fn every_malformed_texture_reference_is_refused_with_the_reason_it_was_refused_for() {
         let (base, bin) = textured_parts(b"not really a png", "image/png", 0);
@@ -840,11 +865,6 @@ mod tests {
                 "\"textures\": [{ \"source\": 0 }]",
                 "\"textures\": [{ \"source\": 9 }]",
                 "texture 0 names image 9, and there are 1",
-            ),
-            (
-                "\"textures\": [{ \"source\": 0 }]",
-                "\"textures\": [{ }]",
-                "texture 0 names image 4294967295, and there are 1",
             ),
             (
                 "\"textures\": [{ \"source\": 0 }]",
