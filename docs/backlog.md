@@ -311,6 +311,27 @@ than a flat fill — the flat fill is what makes the current check exact on
 SwiftShader and paravirtual Metal without a tolerance, and that property is
 worth keeping rather than trading for coverage.
 
+**But it is not a gap in coverage of the sRGB bug, and that distinction decides
+whether it is worth a slice.** The canvas encode is one shared mechanism — the
+configuration `web/engine/gpu-replay.js` applies for every demo — so a
+regression in it cannot spare three demos and break the other three; whichever
+demos are covered would catch it. The escape this entry names is _lumen's tone
+mapping_, which is a per-demo rendering regression and a different class of
+thing. So three of six is enough for the bug this group was built for, and the
+open half is end-to-end output coverage in general.
+
+That would be falsified by a demo choosing its own canvas format rather than
+taking the shared one; nothing does today, and if one ever does, this reasoning
+stops holding and the group needs all six.
+
+**What closing it properly would take**, recorded so the option is not
+re-derived: comparing each demo's canvas against the engine's own framebuffer
+through the sRGB transfer function, which is content-independent and needs no
+flat region and no golden. It is not cheap — `crcbl-web` exports no readback to
+JS (`__crcbl_web_*` covers input, audio, fetch and OPFS, and nothing reads
+pixels), so it means new engine surface existing only for a test. That is why it
+has not been done, rather than nobody having thought of it.
+
 Measured, not assumed: with `surfaceCapsFor` offering only linear formats, `hud`
 scores **33 of 34** with group G the only failure, while group D's "the canvas
 is not one flat colour" passes on `rgb(8,8,16)` at 89.2%. The same broken build
