@@ -3,6 +3,47 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
+
+Checked on 2026-08-19, because the obvious assumption is wrong. `apps/quarry`
+does not exist; the phase table's S4C row asks for "meshlet clusters, QEM
+cluster LOD, and all three `GeometryPath` values on one dense scene", gated by
+"golden frames per `GeometryPath`; three-way comparison recorded; no LOD popping
+on any path".
+
+**The engine work is largely already there.** `crcbl-scene` carries
+`meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
+`lod_resolve.rs`, and `crcbl-hal` defines all three paths. quarry is mostly
+assembling and gating what exists rather than building a subsystem.
+
+**`MeshShading` being `Unwritten` on dx12 and Metal does not block the gate**,
+which is the thing worth writing down. The paths are not one-per-backend: they
+are reached by **subtracting features from a single capable adapter**.
+`crates/crcbl/tests/render_e2e.rs` does exactly that, and it passes here on an
+RX 7900 XTX — eleven `..._draws_the_same_frame_on_every_geometry_path` tests,
+with the harness printing
+
+```text
+asked for MESH_SHADER: true,  adapter has it: true, drew through MeshShader
+asked for MESH_SHADER: false, adapter has it: true, drew through IndirectCount
+spot_shadow on MeshShader against IndirectCount — 0 channel(s) differ, budget 0
+```
+
+So Vulkan reaches `MeshShader` and `IndirectCount` on one device and compares
+them pixel-for-pixel. The **third** path, `IndirectPerBatch`, is not in that
+cross-backend suite — it is covered by `crcbl-vk`'s own `vk_e2e/draw_gen.rs`,
+whose three arms name all three paths and which opens its device without
+`DRAW_INDIRECT_COUNT` on purpose, because no adapter that suite can see would
+ever select the floor path. A three-way quarry gate would follow `draw_gen.rs`'s
+shape, not `render_e2e.rs`'s.
+
+**The decision this needs** is only whether quarry is the right next sample at
+all, against the alternatives: `breakout-as-wasm` (P6A, a `wasmtime` `WasmHost`
+seam — self-contained, no renderer work, no new demo), lumen's second half (S4B,
+blocked on P7C's ray tracing), and orbit (S5, the roadmap's own "flashiest web
+demo", behind three physics phases: P6, P8, P11). quarry is the only one whose
+prerequisites are already built.
+
 ### `DivergenceKind::Unclassified` is gone, and can come back
 
 Removed on 2026-08-19. It held exactly two rows — Metal's `TimestampQuery` and
