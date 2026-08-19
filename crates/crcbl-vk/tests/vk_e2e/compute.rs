@@ -17,10 +17,12 @@
 //! did the right thing were the same green test there; these two are about the
 //! *refusals* around it rather than the dispatch.
 //!
-//! `update_bind_group_moves_a_dispatch_onto_a_different_buffer` branches on
-//! whether the device reports `DESCRIPTOR_INDEXING` and asserts both arms — a
-//! rewrite in place on Tier A, a loud refusal on Tier B — and prints which one
-//! it took, so a run cannot check less than it looks.
+//! `update_bind_group_moves_a_dispatch_onto_a_different_buffer` asserts both
+//! arms on every run — a rewrite in place on Tier A, a loud refusal on Tier B.
+//! It takes the first from whatever this device reports and the second from a
+//! device it opens without `DESCRIPTOR_INDEXING`, because every adapter here
+//! reports the feature and the refusal would otherwise be an arm no machine
+//! executes.
 
 use crate::harness::{Headless, poisoned};
 use crcbl_hal::{
@@ -615,7 +617,9 @@ fn compute_passes_do_not_nest_and_may_not_be_left_open() {
 /// `Device::update_bind_group`: the bindless write path, and the one call the
 /// seam permits while command buffers referencing the group are still pending.
 ///
-/// Both tiers are covered and both are asserted. With `DESCRIPTOR_INDEXING` the
+/// Both tiers are covered and both are asserted, the second on a device opened
+/// without the feature rather than on a driver that lacks it. With
+/// `DESCRIPTOR_INDEXING` the
 /// group is rebuilt in place to point at a second destination buffer and the
 /// *same* pipeline then writes the new one and leaves the old one alone — which
 /// a write that silently did nothing could not produce. Without it, the call
@@ -748,6 +752,37 @@ fn update_bind_group_moves_a_dispatch_onto_a_different_buffer() {
     );
     device.destroy_bind_group(plain_group);
     device.destroy_bind_group_layout(plain_layout);
+
+    // **The refusal arm, on a device manufactured to have it.** The early
+    // return above is the genuine Tier B path and runs on no adapter this suite
+    // can reach — radv and lavapipe both report `DESCRIPTOR_INDEXING`. Opening
+    // a second device without it reaches the refusal, so it is asserted on
+    // every machine rather than on a driver nobody here has.
+    let lesser = Headless::open_pinning_format(
+        "vk e2e update_bind_group tier b",
+        Features::DEBUG_MARKERS,
+        crate::harness::EXTENT,
+    );
+    let lesser_device = lesser.device.as_ref();
+    assert!(
+        !lesser_device
+            .caps()
+            .features
+            .contains(Features::DESCRIPTOR_INDEXING),
+        "this device is opened without DESCRIPTOR_INDEXING; if it reports the \
+         feature anyway the subtraction is not happening and the refusal below \
+         is a Tier A device's answer wearing this one's name"
+    );
+    let lesser_probe = ComputeProbe::new(&lesser, crcbl_hal::BindingFlags::empty());
+    let error = lesser_device
+        .update_bind_group(lesser_probe.bind_group, &[])
+        .expect_err("a set without UPDATE_AFTER_BIND must refuse a rewrite");
+    assert!(
+        matches!(error, crcbl_hal::HalError::Unsupported { .. }),
+        "the refusal must be loud and typed: {error}"
+    );
+    lesser_probe.destroy(lesser_device);
+    lesser.finish();
 
     device.destroy_buffer(second);
     probe.destroy(device);
