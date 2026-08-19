@@ -575,6 +575,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The demo site needs no Python.** `web/build-pages.py` — the static page
+  renderer that fills `web/templates/layout.html` from `web/pages/` — is now
+  `web/tools/build-pages.mjs`, so `cargo` and `node` are the whole tool list for
+  `./web/build.sh`. Node was already required by the export-contract check, the
+  boot smoke test, the static server and the browser e2e, and no workflow ever
+  installed Python: the site build had an unpinned dependency on whatever
+  `python3` the runner image happened to ship.
+
+  A straight port, checked as one — both renderers were run side by side and
+  every one of the seven pages came out byte-identical, with identical stdout
+  and identical exit codes, and eight error paths were compared message by
+  message.
+
+  Two deliberate differences. The cycle guard's message said `<!--include-->`
+  could nest 8 deep while the loop actually rejected a legitimate chain of
+  exactly 8; it now allows what it claims. And the unsubstituted-slot message
+  lists names comma-separated rather than in Python's list `repr`, matching the
+  other messages in the same file.
+
 - **`crcbl-wgpu` now refuses a `BindingFlags::VARIABLE_COUNT` layout at
   `create_bind_group_layout`**, with `HalError::Unsupported`, and refuses
   `BindGroupDesc::variable_count` at `create_bind_group` with the same variant —

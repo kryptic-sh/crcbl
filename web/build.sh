@@ -3,8 +3,8 @@
 #
 # The same script the Pages workflow runs, so "it works in CI" and "it works on
 # my machine" are the same claim. Nothing here is npm, and since `crcbl-wgpu`
-# stopped being a wasm dependency there is no `wasm-bindgen` either — `cargo`,
-# `python3` and `node` are the whole tool list. See "no wasm-bindgen" below.
+# stopped being a wasm dependency there is no `wasm-bindgen` either — `cargo`
+# and `node` are the whole tool list. See "no wasm-bindgen" below.
 #
 #   ./web/build.sh                 # build everything into target/site
 #   ./web/build.sh --serve         # …and serve it on http://localhost:8000
@@ -64,7 +64,7 @@ mkdir -p "$SITE"
 # The rendered half: every page is `templates/layout.html` filled from a file
 # in `pages/`, so the header, the demo bar and the footer live in one place.
 echo "==> rendering pages"
-python3 "$REPO/web/build-pages.py" "$SITE"
+node "$REPO/web/tools/build-pages.mjs" "$SITE"
 
 # The static half: everything in `web/` except the build tooling and the
 # template sources, which are inputs rather than output.
@@ -78,7 +78,6 @@ python3 "$REPO/web/build-pages.py" "$SITE"
   -path ./pages -prune -o \
   -path ./templates -prune -o \
   -name '*.sh' -prune -o \
-  -name '*.py' -prune -o \
   -name README.md -prune -o \
   -type f -print) | while read -r file; do
   mkdir -p "$SITE/$(dirname "$file")"

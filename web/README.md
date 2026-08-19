@@ -13,7 +13,7 @@ framework that owns policy — and it applies here for the same reason.
 | `pages/*.html`            | one content file per page: its metadata, its prose, its includes           |
 | `templates/layout.html`   | the chrome every page is rendered into                                     |
 | `templates/demo-*.html`   | the blocks every demo shares — the window, the loop's keys, the log note   |
-| `build-pages.py`          | fills the layout from `pages/`, expands the includes                       |
+| `tools/build-pages.mjs`   | fills the layout from `pages/`, expands the includes                       |
 | `style.css`               | one stylesheet for the site                                                |
 | `favicon.svg`             | the site icon, declared by the layout                                      |
 | `engine/demo.js`          | the boot sequence and the frame loop, shared by every demo                 |
@@ -33,7 +33,8 @@ framework that owns policy — and it applies here for the same reason.
 
 Six things, none of them an edit to an existing demo's page:
 
-1. a row in `build.sh`'s `DEMOS` and a line in `build-pages.py`'s `DEMOS`;
+1. a row in `build.sh`'s `DEMOS` and a line in `tools/build-pages.mjs`'s
+   `DEMOS`;
 2. `pages/<name>.html` — metadata, the game's own prose, and the three
    `<!--include …-->` directives every demo page carries;
 3. `demos/<name>/main.js` — roughly thirty lines binding this sample's
@@ -48,8 +49,8 @@ Six things, none of them an edit to an existing demo's page:
 The index page's own card and call-to-action are prose and are not on that list.
 
 The demo window itself is not on it either, which is the point:
-`templates/demo-window.html` is the only copy of it, and `build-pages.py` fails
-the build for a demo page that renders its own instead.
+`templates/demo-window.html` is the only copy of it, and `tools/build-pages.mjs`
+fails the build for a demo page that renders its own instead.
 
 Each `engine/` module implements the JS side of an ABI a Rust module already
 specified symbol by symbol. Those specifications are the source of truth:
@@ -66,8 +67,10 @@ specified symbol by symbol. Those specifications are the source of truth:
 ./web/build.sh --serve      # http://localhost:8000/
 ```
 
-No tool to install first. `cargo`, `python3` and `node` are the whole list — see
-"Why there is no `wasm-bindgen` here" below for what used to be here.
+No tool to install first. `cargo` and `node` are the whole list — see "Why there
+is no `wasm-bindgen` here" below for what used to be here, and note that the
+page renderer was Python until 2026-08-19, which is one runtime fewer to have
+installed.
 
 `file://` will not work: ES modules need an origin, and the Origin Private File
 System needs a secure context. `localhost` is one.

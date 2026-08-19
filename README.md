@@ -133,9 +133,9 @@ and `lod` (report or generate a glTF mesh's LOD chain). Every one of them takes
 ```
 
 Builds the browser demos into `target/site` and serves them with the COOP/COEP
-pair a threaded wasm build needs. `cargo`, `python3` and `node` are the whole
-tool list — no npm, no bundler, no `wasm-bindgen`. It is the same script GitHub
-Pages runs, so "works in CI" and "works on my machine" are one claim. See
+pair a threaded wasm build needs. `cargo` and `node` are the whole tool list —
+no npm, no bundler, no `node_modules`, no `wasm-bindgen`. It is the same script
+GitHub Pages runs, so "works in CI" and "works on my machine" are one claim. See
 `web/README.md`.
 
 ## The samples

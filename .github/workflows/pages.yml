@@ -67,8 +67,10 @@ jobs:
       # functions only that tool could resolve. `crcbl-wgpu` is a
       # `cfg(not(target_arch = "wasm32"))` dependency of the umbrella now, the
       # artifacts import nothing, and the CLI cannot even run over them — see
-      # `web/build.sh`'s "no wasm-bindgen" note. `cargo`, `python3` and `node`
-      # are the whole tool list.
+      # `web/build.sh`'s "no wasm-bindgen" note. `cargo` and `node` are the
+      # whole tool list — the page renderer was Python until 2026-08-19, and
+      # dropping it also dropped an unpinned dependency on whatever `python3`
+      # the runner image happens to ship, which no workflow ever installed.
 
       # Every JS file parses. Cheap, and it catches the class of mistake that
       # otherwise only appears as a blank page. `web/tools/*.js` is
@@ -315,7 +317,7 @@ jobs:
   # browser time against the demos' 2m38s, and it is the gate that reads bytes
   # back and compares their values rather than watching a canvas change.
   #
-  # NEITHER OF THEM BUILDS THE SITE. `web/build.sh` needs python3 and a wasm
+  # NEITHER OF THEM BUILDS THE SITE. `web/build.sh` needs node and a wasm
   # toolchain, and a second and third build would be three different artifacts
   # under test; both download the `site` artifact `build` uploaded, so all three
   # platforms drive the identical bytes that ship.

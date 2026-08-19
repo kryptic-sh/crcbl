@@ -768,15 +768,15 @@ no.
 9. **Adding a demo to the site is one content file and two one-line list
    entries** — checked by doing it, because the claim had been wrong before. The
    whole of it: `web/pages/asteroids.html` (a content file that
-   `<!--include-->`s the shared window), one row in `web/build-pages.py`'s
-   `DEMOS` (the bar), one row in `web/build.sh`'s `DEMOS` (the wasm build), a
-   two-file demo directory (`main.js` at 33 lines of literal symbol names, and
-   an empty asset manifest), one entry in `web/tools/browser-e2e.mjs`'s
-   expectation table, one CI step, and the index page's own card and
-   call-to-action, which are prose. **No existing page was edited**, which is
-   the property the shared template was built for, and `build-pages.py` refuses
-   a demo page that does not include the shared window — falsified by removing
-   the include and watching the build fail.
+   `<!--include-->`s the shared window), one row in
+   `web/tools/build-pages.mjs`'s `DEMOS` (the bar), one row in `web/build.sh`'s
+   `DEMOS` (the wasm build), a two-file demo directory (`main.js` at 33 lines of
+   literal symbol names, and an empty asset manifest), one entry in
+   `web/tools/browser-e2e.mjs`'s expectation table, one CI step, and the index
+   page's own card and call-to-action, which are prose. **No existing page was
+   edited**, which is the property the shared template was built for, and
+   `build-pages.mjs` refuses a demo page that does not include the shared window
+   — falsified by removing the include and watching the build fail.
 
    The roadmap's claim of "a content file and one line in the demo bar" is
    therefore true of the chrome and understates the build: there are _two_
@@ -1271,13 +1271,13 @@ gets recorded in the relevant crate's docs rather than worked around silently.
   too: `hud` and `lumen` are published and neither is an S-phase game. Broken
   wasm build = broken CI = blocked merge — the browser target can't rot.
 - The demo site's pages are rendered from one layout (`web/templates/` +
-  `web/pages/`, built by `web/build-pages.py`), the same shape the org site
-  uses. Adding a demo is a content file and one line in the demo bar, not an
-  edit to every existing page — the property S1B first exercised and S2
-  measured: no existing page needed editing, and `build-pages.py` fails a demo
+  `web/pages/`, built by `web/tools/build-pages.mjs`), the same shape the org
+  site uses. Adding a demo is a content file and one line in the demo bar, not
+  an edit to every existing page — the property S1B first exercised and S2
+  measured: no existing page needed editing, and `build-pages.mjs` fails a demo
   page that does not `<!--include-->` the shared window. There are, however,
   **four** places a new demo has to be named that nothing keeps in step — the
-  bar in `build-pages.py`, the wasm artifacts in `build.sh`, the game's two
+  bar in `build-pages.mjs`, the wasm artifacts in `build.sh`, the game's two
   assertions in `web/tools/browser-e2e.mjs`'s `EXPECTATIONS`, and a per-demo
   step in `.github/workflows/pages.yml` (the gate reads one canvas, so it runs
   once per demo). S3 found the last two by hitting them; `web/README.md`'s
