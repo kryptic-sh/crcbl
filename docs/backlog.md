@@ -1228,6 +1228,22 @@ run, including the goldens that had hung three times.
 Look for what the backend already does successfully before building new
 machinery on top of it.
 
+**The isolated probes are intermittent, which was not known when this closed.**
+On 2026-08-20 both of them —
+`a_compute_kernel_encodes_the_draw_an_indirect_command_buffer_executes` and
+`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints` —
+failed in run 32297440428 at `assert_ink_triangle`: "the centre of the image is
+not the triangle's colour, so nothing was drawn". The ICB executed and painted
+nothing. An hour later run 32298272395 passed the same 68-test suite with both
+of them green, on the same Metal code; the run that failed was a dx12 diagnostic
+branch whose diff touches `crcbl-dx12` and one dx12 CI step and nothing else.
+
+So "the isolated ICB probes pass on that exact device" is true on average rather
+than every time, and the sentence above should be read that way. It makes the
+decision already taken safer rather than shakier: a mechanism whose smallest
+probe silently draws nothing on some runs is not one to have built the indirect
+count on, and `crcbl_mtl::indirect_count` does not.
+
 ### DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
 
 **Option (d) has been tried, and it does not fix it.** Run 32297440428 on
