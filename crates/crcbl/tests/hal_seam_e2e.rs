@@ -1039,6 +1039,7 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
         headless.format
     );
 
+    device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
     headless.finish();
 }
@@ -5962,13 +5963,19 @@ fn exercise_update_bind_group(headless: &Headless) -> Exercise {
                             push_constants: None,
                         }) {
                             Err(error) => Exercise::Refused(error),
-                            Ok(pipeline_layout) => update_bind_group_rewrite(
-                                headless,
-                                &first,
-                                &second,
-                                bind_group,
-                                pipeline_layout,
-                            ),
+                            Ok(pipeline_layout) => {
+                                let outcome = update_bind_group_rewrite(
+                                    headless,
+                                    &first,
+                                    &second,
+                                    bind_group,
+                                    pipeline_layout,
+                                );
+                                // Borrowed by the call, not taken — exactly as
+                                // the bind group below is.
+                                device.destroy_pipeline_layout(pipeline_layout);
+                                outcome
+                            }
                         };
                     device.destroy_bind_group(bind_group);
                     outcome

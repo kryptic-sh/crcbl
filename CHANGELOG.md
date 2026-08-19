@@ -588,6 +588,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-vk`'s teardown leak warning names what leaked.** It said
+  `N object(s) still alive at device teardown`, which tells a reader that
+  something leaked and nothing about where to look — the suites that trip it
+  have hundreds of creations between them. It now lists the kinds:
+  `14 object(s) still alive at device teardown (7 image, 7 image view)`. The
+  comment above it already called this "a leak worth naming"; it just never
+  named it.
+
+  Two leaks were found and fixed with it the same afternoon, both in
+  `hal_seam_e2e`: a command buffer the render-pass-clear test never destroyed,
+  and a pipeline layout `exercise_update_bind_group` created and handed to a
+  callee that only borrows it.
+
 - **The demo site needs no Python.** `web/build-pages.py` — the static page
   renderer that fills `web/templates/layout.html` from `web/pages/` — is now
   `web/tools/build-pages.mjs`, so `cargo` and `node` are the whole tool list for

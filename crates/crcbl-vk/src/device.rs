@@ -3461,23 +3461,38 @@ impl Drop for DeviceInner {
         // Anything the caller never destroyed is a leak worth naming, but it
         // still has to be freed — the driver's own validation reports it
         // otherwise, drowning the real signal.
-        let live = state.buffers.len()
-            + state.images.len()
-            + state.views.len()
-            + state.semaphores.len()
-            + state.query_sets.len()
-            + state.command_buffers.len()
-            + state.swapchains.len()
-            + state.shader_modules.len()
-            + state.bind_group_layouts.len()
-            + state.bind_groups.len()
-            + state.pipeline_layouts.len()
-            + state.pipelines.len()
-            + state.samplers.len();
+        //
+        // **Named by kind, because a bare count is not actionable.** This said
+        // only "N object(s)" until 2026-08-19, which tells a reader that
+        // something leaked and nothing about where to look; the suites that
+        // trip it have hundreds of creations between them. The kind is the one
+        // piece of information that narrows it, and it is free here.
+        let kinds = [
+            ("buffer", state.buffers.len()),
+            ("image", state.images.len()),
+            ("image view", state.views.len()),
+            ("semaphore", state.semaphores.len()),
+            ("query set", state.query_sets.len()),
+            ("command buffer", state.command_buffers.len()),
+            ("swapchain", state.swapchains.len()),
+            ("shader module", state.shader_modules.len()),
+            ("bind group layout", state.bind_group_layouts.len()),
+            ("bind group", state.bind_groups.len()),
+            ("pipeline layout", state.pipeline_layouts.len()),
+            ("pipeline", state.pipelines.len()),
+            ("sampler", state.samplers.len()),
+        ];
+        let live: usize = kinds.iter().map(|(_, count)| count).sum();
         if live > 0 {
+            let named = kinds
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(kind, count)| format!("{count} {kind}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             crcbl_core::log::warn!(
-                "crcbl-vk: {live} object(s) still alive at device teardown, \
-                 and {} still parked in the deletion queue",
+                "crcbl-vk: {live} object(s) still alive at device teardown \
+                 ({named}), and {} still parked in the deletion queue",
                 state.trash.pending()
             );
         }

@@ -3,6 +3,43 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Two vk e2e mesh tests leak 7 images and 7 image views each
+
+Found on 2026-08-19, the moment `crcbl-vk`'s teardown warning started naming
+kinds instead of counting. `crcbl-vk::vk_e2e` is 48/48 green and prints:
+
+```text
+mesh::the_shadow_cascades_select_coarser_than_the_camera
+  14 object(s) still alive at device teardown (7 image, 7 image view),
+  and 314 still parked in the deletion queue
+mesh::the_gpu_descends_the_dag_to_the_cut_the_host_rule_says
+  14 object(s) still alive at device teardown (7 image, 7 image view),
+  and 320 still parked in the deletion queue
+```
+
+**What has been ruled out.** Both tests call `renderer.destroy` and
+`headless.finish`, so it is not a missing teardown in the test. It is not
+`Headless::open_for_mesh_with` either: eight tests in `mesh.rs` use it and only
+these two leak. `ForwardRenderer::destroy` does release the shadow atlas, the
+shadow placeholder and their views. And the two counts are **identical**, 7 and
+7, across two tests that otherwise share little — which says a single shared
+allocation site rather than two independent slips.
+
+**What has not been established** is whether the owner is the engine or the test
+harness. If it is `ForwardRenderer`, every application that destroys one leaks
+fourteen objects, which makes this an engine defect rather than test tidiness —
+and nothing about these two tests suggests they would be the only ones to hit
+it, which is itself unexplained and worth resolving before believing any answer.
+
+The cheapest next step is to give `ImageEntry` a label — `ImageDesc` already
+carries one and the backend drops it — so the warning can name the objects
+rather than their kind. That is a small change to `crcbl-vk` and would end the
+guessing.
+
+The seam suite's own two leaks (a command buffer and a pipeline layout) were
+found the same way and are fixed; `hal_seam_e2e` and `render_e2e` are both clean
+now.
+
 ### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
 
 Checked on 2026-08-19, because the obvious assumption is wrong. `apps/quarry`
