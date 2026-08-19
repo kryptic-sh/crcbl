@@ -216,6 +216,18 @@ module's docs name its own omission; this is the list in one place.
   `stat` follows the path, so the new inode's stamp is what the next poll sees.
   Untested.
 
+  **Neither half of the stamp is individually pinned by the suite.** A stamp is
+  a modification time and a length, and each covers the other's blind spot — but
+  breaking `watch::stamp` to report a constant length, and again to report no
+  modification time, leaves every `watch::tests` case green on Linux. The length
+  half is what a coarse clock needs, and CI proved that the hard way: a test
+  that leaned on the modification time moving between two writes failed on
+  Windows, where the clock a write is stamped from advances on the ~15.6 ms
+  timer tick and all three writes shared a timestamp. The modification-time half
+  is what a same-length edit needs, and **nothing tests it** — `std` has no way
+  to set a file's modification time, so a test cannot hold one still. Closing it
+  means a `filetime` dev-dependency, which is a decision rather than a chore.
+
   **`load_and_report`'s `drew_nothing` branch is unreachable.** `model::load`
   computes the bounds from the primitives the conversion would draw, so a
   document with nothing to draw is already a `LoadError::NoGeometry` from

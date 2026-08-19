@@ -27,11 +27,18 @@
 //! length *and* the same modification time is missed; a rewrite that lands the
 //! same **bytes** with a new modification time is offered, and rebuilds a scene
 //! that draws identically.
-//! Every filesystem this runs on stamps sub-second — ext4 and APFS to the
-//! nanosecond, NTFS to 100 ns — so that needs a write inside one filesystem tick
-//! of the last one, which an exporter does not do. The alternative is hashing
-//! the file's contents on every poll, which is megabytes of reading four times a
-//! second to catch a case nothing produces.
+//!
+//! **The window for the first is wider on Windows than the file system
+//! suggests.** ext4 and APFS stamp to the nanosecond and NTFS stores 100 ns, but
+//! the clock Windows stamps a write from advances on the system timer tick —
+//! about 15.6 ms by default — so two writes inside one tick share a timestamp.
+//! Not theoretical: a test here wrote a file three times in a row and CI caught
+//! the second and third landing on the same stamp, which is why that test no
+//! longer depends on one moving. An export takes orders of magnitude longer than
+//! a tick, so the case that matters is unaffected.
+//!
+//! The alternative is hashing the file's contents on every poll, which is
+//! megabytes of reading four times a second to catch a case nothing produces.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -254,22 +261,36 @@ mod tests {
         );
     }
 
-    /// **A rewrite that lands the same bytes is still a change**, and this
-    /// records that rather than wishing otherwise.
+    /// **Going back to bytes the viewer has already drawn is still a change**,
+    /// and this records that rather than wishing otherwise.
     ///
-    /// A stamp is a modification time and a length — see the [module
-    /// docs](self) — so an exporter writing the document it wrote last time
-    /// moves the stamp and is offered. The cost is one rebuild of a scene that
-    /// draws identically, which nobody can see; avoiding it means hashing the
-    /// file's contents on every poll, which is the trade the module docs
-    /// decline. It is asserted so that a future content check is a deliberate
-    /// change to this line and not a silent one.
+    /// A [`Watch`] keeps one stamp and no history, so it cannot know that a
+    /// document is the one it opened with. The cost is a rebuild of a scene
+    /// that draws identically, which nobody can see; avoiding it means hashing
+    /// the file's contents on every poll, which is the trade the [module
+    /// docs](self) decline. Asserted so that a future content check is a
+    /// deliberate change to this line and not a silent one.
+    ///
+    /// **The two documents differ in length, deliberately.** An earlier version
+    /// of this test rewrote the same three bytes and leaned on the modification
+    /// time to tell the writes apart; on Windows all three landed inside one
+    /// 15.6 ms timer tick and shared a timestamp, so the watch correctly saw no
+    /// change and the assertion — not the code — was wrong. A length is the
+    /// half of a stamp no clock granularity can flatten.
     #[test]
-    fn a_rewrite_with_the_same_bytes_is_still_a_change() {
+    fn returning_to_a_document_already_drawn_is_still_a_change() {
         let (_dir, path) = file(b"one");
         let mut watch = Watch::new(&path);
+
         rewrite(&path, b"two words");
         assert!(!watch.poll(ONE_INTERVAL), "the first sighting was offered");
+        assert!(
+            watch.poll(ONE_INTERVAL),
+            "the settled change was not offered"
+        );
+
+        // Back to the bytes the watch was built on, which it has no way to
+        // recognise as such.
         rewrite(&path, b"one");
         assert!(
             !watch.poll(ONE_INTERVAL),
@@ -277,7 +298,7 @@ mod tests {
         );
         assert!(
             watch.poll(ONE_INTERVAL),
-            "a rewrite the watch cannot see through was not offered",
+            "a document the watch cannot see through was not offered",
         );
     }
 }
