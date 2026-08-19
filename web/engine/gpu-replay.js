@@ -3525,8 +3525,8 @@ export class Replayer {
         case 'CopyImageToImage':
           this.#copyImageToImage(sequence, command);
           break;
-        case 'FillBuffer':
-          this.#fillBuffer(sequence, command);
+        case 'ClearBuffer':
+          this.#clearBuffer(sequence, command);
           break;
         case 'WriteBuffer':
           this.#writeBuffer(sequence, command);
@@ -6667,23 +6667,16 @@ export class Replayer {
    * @param {{ buffer: { index: number, generation: number }, offset: bigint,
    *   size: bigint, value: number }} command
    */
-  #fillBuffer(sequence, command) {
-    const named = `buffer fill (command ${sequence})`;
+  #clearBuffer(sequence, command) {
+    const named = `buffer clear (command ${sequence})`;
     if (!this.#currentEncoder) {
       this.#deviceError(`${named} was recorded with no command encoder open`);
-      return;
-    }
-    if (command.value !== 0) {
-      this.#deviceError(
-        `${named} fills a non-zero value 0x${(command.value >>> 0).toString(16)}: ` +
-          'WebGPU only offers a zero fill (clearBuffer)'
-      );
       return;
     }
     const buffer = this.#buffers.get(command.buffer);
     if (buffer === undefined) {
       this.#deviceError(
-        `${named} fills buffer ${command.buffer.index}.${command.buffer.generation}, ` +
+        `${named} clears buffer ${command.buffer.index}.${command.buffer.generation}, ` +
           'which this replayer holds no live buffer under'
       );
       return;
@@ -6703,10 +6696,10 @@ export class Replayer {
    * encoder — `queue.writeBuffer` submits its own copy directly, between frames
    * and without a command buffer. A write before any device opened, or of an
    * unresolvable buffer, goes to the error queue naming the handle rather than
-   * throwing — {@link Replayer#fillBuffer}'s judgement.
+   * throwing — {@link Replayer#clearBuffer}'s judgement.
    *
    * The `u64` offset arrives as `BigInt` and is narrowed with `Number` for the
-   * WebGPU call, exactly as {@link Replayer#fillBuffer}'s is: an offset past
+   * WebGPU call, exactly as {@link Replayer#clearBuffer}'s is: an offset past
    * `Number.MAX_SAFE_INTEGER` is not one this seam produces. The bytes are the
    * `Uint8Array` the decoder read them into.
    *

@@ -147,9 +147,9 @@ impl CommandEncoder for WebGpuCommandEncoder {
             .with(|c| c.encode(|stream| stream.copy_image_to_image(copy)));
     }
 
-    fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
+    fn clear_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64) {
         self.channel
-            .with(|c| c.encode(|stream| stream.fill_buffer(buffer, offset, size, value)));
+            .with(|c| c.encode(|stream| stream.clear_buffer(buffer, offset, size)));
     }
 
     // --- render scope ---

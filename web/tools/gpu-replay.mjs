@@ -2390,7 +2390,7 @@ async function main() {
       'CopyBufferToBuffer',
       'CopyBufferToImage',
       'CopyImageToImage',
-      'FillBuffer',
+      'ClearBuffer',
       'WriteBuffer',
       'PipelineBarrier',
       'Finish',
@@ -8483,9 +8483,9 @@ async function main() {
   // ---- the remaining copies and the buffer fill ----------------------------
   //
   // `CopyBufferToImage` and `CopyImageToImage` record onto the encoder itself
-  // (spied by `bufferToImageCopies` / `imageCopies`), and `FillBuffer` maps a
-  // zero fill to `clearBuffer` (spied by `bufferFills`) and refuses any other
-  // value to the error queue — the same judgement `crcbl-wgpu` makes. None
+  // (spied by `bufferToImageCopies` / `imageCopies`), and `ClearBuffer` maps to
+  // `clearBuffer` (spied by `bufferFills`). It refused a non-zero value until
+  // the seam's fill became a clear and there was nothing left to refuse. None
   // answers a reply, so a malformed one leaves a line on the device's error
   // queue instead of throwing.
   {
@@ -9092,7 +9092,7 @@ async function main() {
     replayer.replay(frameOf(encoderCommand, 701n));
     replayer.replay(
       frameOf(
-        { name: 'FillBuffer', buffer: bufH, offset: 16n, size: 64n, value: 0 },
+        { name: 'ClearBuffer', buffer: bufH, offset: 16n, size: 64n },
         702n
       )
     );
@@ -9103,80 +9103,39 @@ async function main() {
         fills[0].offset === 16 &&
         fills[0].size === 64 &&
         replayer.pendingErrors === 0,
-      'FillBuffer with value 0 records clearBuffer(buffer, offset, size) with the buffer resolved'
+      'ClearBuffer records clearBuffer(buffer, offset, size) with the buffer resolved'
     );
   }
   {
-    // **A non-zero fill is refused to the error queue and records NO clearBuffer**
-    // — WebGPU's clearBuffer is zero-only, the same refusal crcbl-wgpu makes. The
-    // buffer is built so the refusal is the value's, not an unresolvable handle.
-    const { replayer, device } = await readyWithDevice();
-    const bufH = handle(80, 1);
-    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
-    replayer.replay(frameOf(encoderCommand, 701n));
-    replayer.replay(
-      frameOf(
-        {
-          name: 'FillBuffer',
-          buffer: bufH,
-          offset: 0n,
-          size: 64n,
-          value: 0xdeadbeef,
-        },
-        702n
-      )
-    );
-    const error = replayer.takeError();
-    check(
-      error !== null &&
-        error.includes('non-zero') &&
-        error.includes('clearBuffer') &&
-        device.createdEncoders.at(-1).bufferFills.length === 0,
-      `a non-zero fill is refused and records no clearBuffer (${JSON.stringify(error)})`
-    );
-  }
-  {
-    // **A fill with no encoder open is a mid-frame ordering fault.**
+    // **A clear with no encoder open is a mid-frame ordering fault.**
     const { replayer } = await readyWithDevice();
     replayer.replay(
       frameOf(
-        {
-          name: 'FillBuffer',
-          buffer: handle(80, 1),
-          offset: 0n,
-          size: 4n,
-          value: 0,
-        },
+        { name: 'ClearBuffer', buffer: handle(80, 1), offset: 0n, size: 4n },
         702n
       )
     );
     const error = replayer.takeError();
     check(
       error !== null && error.includes('no command encoder open'),
-      `a fill with no encoder goes to the error queue (${JSON.stringify(error)})`
+      `a clear with no encoder goes to the error queue (${JSON.stringify(error)})`
     );
   }
   {
-    // **A zero fill of an unresolvable buffer is named on the error queue.** The
+    // **A clear of an unresolvable buffer is named on the error queue.** The
     // encoder is open, so the refusal is the buffer's.
     const { replayer } = await readyWithDevice();
     replayer.replay(frameOf(encoderCommand, 701n));
     replayer.replay(
       frameOf(
-        {
-          name: 'FillBuffer',
-          buffer: handle(80, 1),
-          offset: 0n,
-          size: 4n,
-          value: 0,
-        },
+        { name: 'ClearBuffer', buffer: handle(80, 1), offset: 0n, size: 4n },
         702n
       )
     );
     const error = replayer.takeError();
     check(
       error !== null && error.includes('80.1'),
-      `a fill of an unresolvable buffer names it on the error queue (${JSON.stringify(error)})`
+      `a clear of an unresolvable buffer names it on the error queue (${JSON.stringify(error)})`
     );
   }
 

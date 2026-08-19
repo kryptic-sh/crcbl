@@ -2135,12 +2135,11 @@ impl Device for Dx12Device {
         let gated = |feature: Features, why: &'static str| -> Support {
             Support::granted(has, feature, why)
         };
-        // The two valued fills take their sentence from `crcbl-hal` itself:
-        // `DX12_NO_VALUED_FILL` is the same string this backend's `DIVERGENCES`
-        // rows carry, shared for the reason `METAL_NO_DRAW_INDIRECT_COUNT` is —
-        // the declaration a caller reads and the parity record a reviewer reads
-        // drifted apart last time they were written twice.
-        // One sentence for both mesh rows, for the same reason: the amplification
+        // One sentence for both mesh rows, shared for the reason
+        // `METAL_NO_DRAW_INDIRECT_COUNT` is — the declaration a caller reads and
+        // the parity record a reviewer reads drifted apart last time they were
+        // written twice. The two valued fills used to share one the same way,
+        // and both rows are gone: the amplification
         // stage is not separately missing, it is behind the same unreported flag.
         const NO_MESH_FLAG: &str = "the mesh and amplification stages are built — crcbl_dx12::pipeline packs the \
              D3D12_PIPELINE_STATE_STREAM_DESC and the encoder records DispatchMesh — but this \
@@ -2148,12 +2147,9 @@ impl Device for Dx12Device {
              adapter onto GeometryPath::MeshShader and re-keys every golden image (the DX12 mesh \
              reporting slice)";
         match capability {
-            // A CopyBufferRegion in a loop; see crate::command's fill_buffer and
-            // DeviceInner::zero.
+            // A CopyBufferRegion in a loop; see crate::command's clear_buffer
+            // and DeviceInner::zero.
             Capability::BufferFillZero => Support::Yes,
-            Capability::BufferFillRepeatedByte | Capability::BufferFillWord => {
-                Support::No(crcbl_hal::DX12_NO_VALUED_FILL)
-            }
             // Both sides are subresource-index locations, which is the copy
             // `crate::command::plan_image_copy` builds — including the plane
             // slice a depth format's aspect names, since an image-to-image copy
@@ -8229,97 +8225,6 @@ pub(crate) mod tests {
         device.destroy_semaphore(timeline);
     }
 
-    /// Every command this backend refuses still refuses, by name — so none of
-    /// them can be half-implemented without this saying so.
-    ///
-    /// **No `Device` entry point is on this list any more, and no *unwritten
-    /// slice* is either.** The mesh pipeline was the last `Device` call, and the
-    /// mesh slice took it off:
-    /// [`create_mesh_pipeline`](crcbl_hal::Device::create_mesh_pipeline) now
-    /// packs a `D3D12_PIPELINE_STATE_STREAM_DESC` and diagnoses its descriptor,
-    /// so it moved to
-    /// [`the_entry_points_that_landed_never_answer_unsupported_again`]. The
-    /// buffer fill was the last slice, and the zero fill took *it* off — a zero
-    /// fill is a copy out of [`DeviceInner::zero`] now, and is asserted there
-    /// alongside the calls that landed.
-    ///
-    /// What is left is the one refusal this backend **chose**: a fill with a
-    /// non-zero value. It is not a slice anybody owes, so what the message must
-    /// name is the capability rather than a slice — which is what a caller
-    /// reading it has to act on.
-    #[test]
-    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
-    fn the_commands_this_backend_refuses_still_refuse_and_name_themselves() {
-        let (_instance, device) = open_device();
-
-        // **Recording works now, so the encoder's refusals moved to the commands
-        // that still need a pipeline state object or a root signature.** This is
-        // the inverse half, and it is the half that rots: without it a command
-        // that started working would keep passing a test written when nothing
-        // did. `create_command_encoder` returns a bare `Box`, so a draw has
-        // nowhere to report itself and `finish` carries the refusal.
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .expect("the graphics queue exists");
-        type Refused = (&'static str, fn(&mut dyn CommandEncoder));
-        // The handle is one nothing issued, which is the point: the value is
-        // refused *before* it is resolved, so a caller asking for a fill this
-        // backend cannot write is never sent to look at its handle instead.
-        let recording: &[Refused] = &[("non-zero buffer fills", |encoder| {
-            encoder.fill_buffer(unissued(), 0, 4, 0xABAB_ABAB);
-        })];
-        assert!(!recording.is_empty(), "nothing to check");
-        for (what, record) in recording {
-            let mut encoder =
-                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
-            record(encoder.as_mut());
-            let Err(error) = encoder.finish() else {
-                panic!("{what} recorded successfully, so the encoder reported a lie");
-            };
-            assert!(
-                matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
-                "{what}: {error:?}"
-            );
-            let text = error.to_string();
-            assert!(
-                text.contains("dx12")
-                    && text.contains("BufferFillZero")
-                    && text.contains("BufferFillWord"),
-                "{what}: {text}"
-            );
-        }
-
-        // And an empty submission is a legal no-op now rather than a refusal,
-        // which is the only honest answer: there is no work to run and nothing
-        // to signal for.
-        device
-            .submit(queue, &SubmitInfo::new(&[]))
-            .expect("an empty submission is a no-op, not a refusal");
-        // A queue handle really belonging to another device is foreign; a
-        // hand-made one carries no device tag at all and was never issued.
-        let (_other_instance, other) = open_device();
-        let other_queue = other
-            .queue(QueueKind::Graphics)
-            .expect("the other device has a queue too");
-        assert_ne!(queue, other_queue);
-        let error = device
-            .submit(other_queue, &SubmitInfo::new(&[]))
-            .expect_err("that queue belongs to the other device");
-        assert!(
-            matches!(error, HalError::ForeignObject { kind, .. } if kind == "queue"),
-            "{error:?}"
-        );
-
-        let untagged = unissued();
-        let error = device
-            .submit(untagged, &SubmitInfo::new(&[]))
-            .expect_err("no device ever issued that handle");
-        assert!(
-            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "queue"),
-            "{error:?}"
-        );
-    }
-
     /// **The entry points that crossed over must never answer `Unsupported`
     /// again.**
     ///
@@ -8521,14 +8426,14 @@ pub(crate) mod tests {
                     stride: 0,
                 });
             }),
-            // The zero fill, which is the newest arrival and the one this list
-            // would otherwise not catch regressing: a `fill_buffer(_, _, _, 0)`
-            // reverted to a refusal would answer `Unsupported` for a handle
-            // that is merely dead. The value is `0` deliberately — a non-zero
-            // one is still refused, and is asserted in
-            // [`the_commands_this_backend_refuses_still_refuse_and_name_themselves`].
-            ("zero buffer fills", |encoder| {
-                encoder.fill_buffer(unissued(), 0, 4, 0);
+            // The buffer clear, and the one this list would otherwise not catch
+            // regressing: a `clear_buffer` reverted to a refusal would answer
+            // `Unsupported` for a handle that is merely dead. **This backend
+            // now refuses no command at all** — the non-zero fill was the last
+            // one it chose, and it went when the seam dropped the value, so the
+            // test that held the refusals has no subject left and is gone.
+            ("buffer clears", |encoder| {
+                encoder.clear_buffer(unissued(), 0, 4);
             }),
             ("image-to-image copies", |encoder| {
                 let layers = ImageSubresourceLayers {

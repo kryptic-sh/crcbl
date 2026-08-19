@@ -43,8 +43,8 @@ pub(crate) fn next_owner_id() -> u64 {
 // point.** It built the `HalError::Unsupported` a slice that had not arrived
 // handed back, and the buffer fill was its last caller — so every refusal this
 // crate still makes is one it *chose*, written out at the site that makes it
-// with the reason attached. See `crate::command`'s `NON_ZERO_FILL` and
-// `NO_DISPATCH_MESH`.
+// with the reason attached. See `crate::command`'s `NO_DISPATCH_MESH`; the
+// buffer fill's own refusal went when the seam's valued fill did.
 
 /// One enumerated adapter: what the seam was told about it, the raw D3D12
 /// answers that were told from, and the DXGI interface it was read through.

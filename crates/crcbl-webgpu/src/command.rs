@@ -933,7 +933,7 @@ pub enum Command {
     /// **The counts come from buffer contents at replay time**, so observing one
     /// end to end needs those bytes written first — this seam's
     /// [`WriteBuffer`](Self::WriteBuffer) is the upload that can do it, since
-    /// [`FillBuffer`](Self::FillBuffer) only clears to zero on WebGPU.
+    /// [`ClearBuffer`](Self::ClearBuffer) becomes WebGPU's `clearBuffer`.
     DispatchIndirect {
         /// Buffer holding the three workgroup counts.
         buffer: BufferHandle,
@@ -1149,7 +1149,7 @@ pub enum Command {
         /// Source, destination, their subresources and offsets, and the extent.
         copy: ImageCopy,
     },
-    /// [`fill_buffer`](crcbl_hal::CommandEncoder::fill_buffer) — a value fill
+    /// [`clear_buffer`](crcbl_hal::CommandEncoder::clear_buffer) — a buffer zeroing
     /// over a buffer range, recorded on the implicit-current encoder.
     ///
     /// **WebGPU has no valued device-side fill.** Its `clearBuffer` zeroes and
@@ -1157,15 +1157,13 @@ pub enum Command {
     /// and any other value is a write the replayer refuses to the error queue —
     /// the same judgement the `crcbl-wgpu` backend makes. The value crosses
     /// verbatim so the refusal happens where the target is, not at the encoder.
-    FillBuffer {
-        /// Buffer filled.
+    ClearBuffer {
+        /// Buffer zeroed.
         buffer: BufferHandle,
-        /// Byte offset the fill starts at.
+        /// Byte offset the clear starts at.
         offset: u64,
-        /// Bytes filled.
+        /// Bytes zeroed.
         size: u64,
-        /// The `u32` written into each word; only `0` is expressible on WebGPU.
-        value: u32,
     },
     /// [`Device::write_buffer`](crcbl_hal::Device::write_buffer) — a host→buffer
     /// upload, which becomes WebGPU's `queue.writeBuffer(buffer, offset, data)`.
@@ -1590,7 +1588,7 @@ impl Command {
             Self::CopyBufferToBuffer { .. } => "CopyBufferToBuffer",
             Self::CopyBufferToImage { .. } => "CopyBufferToImage",
             Self::CopyImageToImage { .. } => "CopyImageToImage",
-            Self::FillBuffer { .. } => "FillBuffer",
+            Self::ClearBuffer { .. } => "ClearBuffer",
             Self::WriteBuffer { .. } => "WriteBuffer",
             Self::PipelineBarrier { .. } => "PipelineBarrier",
             Self::Finish { .. } => "Finish",

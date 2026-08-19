@@ -81,6 +81,16 @@ struct ComputeProbe {
     /// Host-readable copy target, so the result can be asserted rather than
     /// assumed.
     staging: crcbl_hal::BufferHandle,
+    /// A host-upload buffer holding [`PROBE_SENTINEL`] in every word, copied
+    /// over the destination before each run.
+    ///
+    /// **This is what a valued `fill_buffer` used to do.** The seam's fill
+    /// became a zero-only clear — see `CommandEncoder::clear_buffer` — and
+    /// `0xDEAD_BEEF` is the whole point of the prime: an untouched slot has to
+    /// hold something no dispatch would ever produce, which zero is not.
+    /// Priming through a copy is what `hal_seam_e2e`'s clear exercise does for
+    /// the same reason.
+    sentinel: crcbl_hal::BufferHandle,
     bind_group_layout: crcbl_hal::BindGroupLayoutHandle,
     bind_group: crcbl_hal::BindGroupHandle,
     pipeline_layout: crcbl_hal::PipelineLayoutHandle,
@@ -109,6 +119,12 @@ impl ComputeProbe {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
+        let sentinel_bytes: Vec<u8> = std::iter::repeat_n(
+            PROBE_SENTINEL.to_le_bytes(),
+            probe_bytes() as usize / size_of::<u32>(),
+        )
+        .flatten()
+        .collect();
 
         let upload = device
             .create_buffer(&BufferDesc {
@@ -121,6 +137,21 @@ impl ComputeProbe {
         device.write_buffer(upload, 0, &params).expect("write");
         device
             .write_buffer(upload, params.len() as u64, &source_bytes)
+            .expect("write");
+
+        // Its own buffer rather than a tail on `upload`, because `upload` is
+        // destroyed at the end of this function and every later run needs this
+        // one.
+        let sentinel = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe sentinel"),
+                size: probe_bytes(),
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a sentinel buffer");
+        device
+            .write_buffer(sentinel, 0, &sentinel_bytes)
             .expect("write");
 
         let params_buffer = device
@@ -307,6 +338,7 @@ impl ComputeProbe {
             source,
             destination,
             staging,
+            sentinel,
             bind_group_layout,
             bind_group,
             pipeline_layout,
@@ -363,7 +395,13 @@ impl ComputeProbe {
             )],
             ..Barriers::default()
         });
-        encoder.fill_buffer(destination, 0, probe_bytes(), PROBE_SENTINEL);
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: self.sentinel,
+            src_offset: 0,
+            dst: destination,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
         // `ShaderReadWrite`, not `ShaderWrite`, even though `compute_probe.slang`
         // only ever assigns to `destination`. A barrier names the access the
         // *descriptor* permits rather than the one the source performs, and a
@@ -470,6 +508,7 @@ impl ComputeProbe {
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group(self.bind_group);
         device.destroy_bind_group_layout(self.bind_group_layout);
+        device.destroy_buffer(self.sentinel);
         device.destroy_buffer(self.staging);
         device.destroy_buffer(self.destination);
         device.destroy_buffer(self.source);

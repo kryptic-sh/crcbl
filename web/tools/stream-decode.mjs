@@ -1181,15 +1181,15 @@ const EXPECTED = [
       extent: { width: 16, height: 12, depthOrLayers: 1 },
     },
   },
-  // The buffer fill, with a NON-ZERO value so the fixture carries the wire the
-  // replayer refuses (WebGPU's `clearBuffer` is zero-only). `offset` and `size`
-  // are `BigInt`; the value is a `u32`.
+  // The buffer clear. `offset` and `size` are `BigInt`, and they are distinct
+  // so a transposition among them shows. It carried a non-zero value until
+  // `STREAM_VERSION` 5, chosen so the fixture held the wire the replayer
+  // refused; the seam dropped the value and there is nothing left to refuse.
   {
-    name: 'FillBuffer',
+    name: 'ClearBuffer',
     buffer: handle(188, 189),
     offset: 64n,
     size: 256n,
-    value: 0xdeadbeef,
   },
   // The host→buffer upload — `queue.writeBuffer` on the replayer, not an encoder
   // op. Buffer, offset and payload are all distinct so a transposition shows;
@@ -2370,22 +2370,24 @@ async function main() {
   );
   // The version is a `u16` at offset 8, so its low byte alone says 1 — the
   // version this format spoke before both pass commands grew a
-  // `timestampWrites` and before the stencil block lost its `reference` word,
-  // and exactly the buffer an older wasm would send. The two halves ship as
-  // separate artifacts and are cached independently, which is what makes this
-  // reachable at all.
+  // `timestampWrites`, before the stencil block lost its `reference` word and
+  // before the buffer fill lost its `value`, and exactly the buffer an older
+  // wasm would send. The two halves ship as separate artifacts and are cached
+  // independently, which is what makes this reachable at all.
   checkRefused(
     withByte(fixture, 8, 1),
-    { kind: 'UnsupportedVersion', found: 1, expected: 4 },
+    { kind: 'UnsupportedVersion', found: 1, expected: 5 },
     'a stream from a build that speaks another version is refused'
   );
   // And the version immediately before this one, which is the interesting case
-  // rather than a distant number: a `3` stream differs from a `4` only by the
-  // sample-mask word inside `CreateGraphicsPipeline`, so every byte before it
-  // decodes identically and the header word is the only thing that can catch it.
+  // rather than a distant number: a `4` stream differs from a `5` only by the
+  // trailing `value` word on `FillBuffer`, so every byte before it decodes
+  // identically and the header word is the only thing that can catch it. The
+  // same was true of `3` against `4`, which differed only by the sample-mask
+  // word inside `CreateGraphicsPipeline`.
   checkRefused(
-    withByte(fixture, 8, 3),
-    { kind: 'UnsupportedVersion', found: 3, expected: 4 },
+    withByte(fixture, 8, 4),
+    { kind: 'UnsupportedVersion', found: 4, expected: 5 },
     'the previous version, which differs only by a word mid-command, is refused'
   );
 

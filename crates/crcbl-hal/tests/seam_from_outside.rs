@@ -255,7 +255,7 @@ fn render(frame: &Frame) {
     });
 
     encoder.begin_debug_label("frame");
-    encoder.fill_buffer(frame.draw_count, 0, 4, 0);
+    encoder.clear_buffer(frame.draw_count, 0, 4);
     encoder.pipeline_barrier(&Barriers {
         buffers: &[
             BufferBarrier::new(
@@ -405,7 +405,7 @@ fn the_same_frame_runs_on_both_geometry_paths_through_trait_objects() {
 
         let mut expected = vec![
             "BeginDebugLabel",
-            "FillBuffer",
+            "ClearBuffer",
             "Barrier",
             "BeginRenderPass",
             "SetViewport",

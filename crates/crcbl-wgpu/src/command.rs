@@ -425,22 +425,17 @@ impl CommandEncoder for WgpuCommandEncoder {
         encoder.copy_texture_to_texture(source, destination, extent);
     }
 
-    fn fill_buffer(&mut self, buffer: hal::BufferHandle, offset: u64, size: u64, value: u32) {
+    fn clear_buffer(&mut self, buffer: hal::BufferHandle, offset: u64, size: u64) {
         // `clear_buffer` is a zero fill and wgpu has nothing else: the seam's
         // headline use — zeroing an indirect count at the top of a frame — is
         // exactly the case it covers, and any other value is a write nothing
         // here can perform.
-        if value != 0 {
-            return self.unsupported(
-                "fill_buffer with a non-zero value: wgpu only offers a zero fill (clear_buffer)",
-            );
-        }
         let target = match self.buffer(buffer) {
             Ok(buffer) => buffer,
             Err(error) => return self.fail(error),
         };
         let Some(encoder) = self.encoder_mut() else {
-            return self.unsupported("fill_buffer after finish");
+            return self.unsupported("clear_buffer after finish");
         };
         encoder.clear_buffer(&target, offset, Some(size));
     }

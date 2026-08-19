@@ -1265,11 +1265,7 @@ impl Device for MetalDevice {
             // so a word whose bytes agree has an encoding and one whose bytes
             // differ has none. This is the backend that makes the three fill
             // capabilities three rather than one.
-            Capability::BufferFillZero | Capability::BufferFillRepeatedByte => Support::Yes,
-            Capability::BufferFillWord => Support::No(
-                "MTLBlitCommandEncoder fillBuffer:range:value: repeats a single byte, so only a \
-                 u32 whose four bytes are equal has an encoding",
-            ),
+            Capability::BufferFillZero => Support::Yes,
             Capability::ImageToImageCopy => Support::Yes,
             // A Metal depth texture is a single-plane typed texture, so the blit
             // encoder's texture↔buffer calls take it with the bytes-per-row
@@ -5713,7 +5709,7 @@ using namespace metal;\n\
             label: None,
             timestamp_writes: None,
         });
-        copying.fill_buffer(scratch, 0, 4, 0);
+        copying.clear_buffer(scratch, 0, 4);
         copying.end_compute_pass();
         let error = copying
             .finish()

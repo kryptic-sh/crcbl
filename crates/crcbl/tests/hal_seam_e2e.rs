@@ -2522,13 +2522,17 @@ enum Exercise {
 const FILL_POISON: u32 = 0x5A5A_5A5A;
 
 /// Drives [`CommandEncoder::fill_buffer`](crcbl::hal::CommandEncoder::fill_buffer)
-/// with `value` and reports what actually reached memory.
+/// and reports what actually reached memory.
 ///
 /// The destination is primed with [`FILL_POISON`] through a copy first, so the
-/// three outcomes are separable: the fill's value means it worked, the poison
-/// means the call was accepted and dropped, and an error out of `finish` means
-/// it was refused.
-fn exercise_fill(headless: &Headless, value: u32) -> Exercise {
+/// three outcomes are separable: zero means it worked, the poison means the
+/// call was accepted and dropped, and an error out of `finish` means it was
+/// refused.
+///
+/// It took a `value` and was driven three times — with `0`, with four equal
+/// bytes for Metal's byte-wide fill, and with four different ones — until the
+/// seam's fill became a clear. The two valued capabilities went with it.
+fn exercise_clear(headless: &Headless) -> Exercise {
     const BYTES: u64 = 16;
     let device = headless.device.as_ref();
 
@@ -2601,7 +2605,7 @@ fn exercise_fill(headless: &Headless, value: u32) -> Exercise {
         )],
         ..Barriers::default()
     });
-    encoder.fill_buffer(target, 0, BYTES, value);
+    encoder.clear_buffer(target, 0, BYTES);
     encoder.pipeline_barrier(&Barriers {
         buffers: &[barrier(
             target,
@@ -2633,15 +2637,15 @@ fn exercise_fill(headless: &Headless, value: u32) -> Exercise {
                 .chunks_exact(4)
                 .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
                 .collect();
-            if words.iter().all(|word| *word == value) {
+            if words.iter().all(|word| *word == 0) {
                 Exercise::Worked
             } else if words.iter().all(|word| *word == FILL_POISON) {
                 Exercise::SilentlyIgnored
             } else {
                 panic!(
-                    "fill_buffer({value:#010x}) left {words:#010x?}, which is neither the value \
-                     asked for nor the {FILL_POISON:#010x} the destination was primed with — so \
-                     the fill wrote something, and wrote the wrong thing"
+                    "clear_buffer left {words:#010x?}, which is neither the zero it writes \
+                     nor the {FILL_POISON:#010x} the destination was primed with — so the clear \
+                     wrote something, and wrote the wrong thing"
                 );
             }
         }
@@ -7533,11 +7537,7 @@ fn exercise(headless: &Headless, capability: crcbl::hal::Capability) -> Exercise
          something it performs, and fail. Adding it therefore waits on the DX12 mesh reporting \
          slice rather than on an artifact";
     match capability {
-        C::BufferFillZero => exercise_fill(headless, 0),
-        // Four equal bytes: what Metal's byte-wide `fillBuffer:` can encode.
-        C::BufferFillRepeatedByte => exercise_fill(headless, 0xABAB_ABAB),
-        // Four different bytes: what only a word-wide fill can encode.
-        C::BufferFillWord => exercise_fill(headless, 0x1234_5678),
+        C::BufferFillZero => exercise_clear(headless),
         C::ImageToImageCopy => exercise_image_to_image_copy(headless),
         C::DepthImageCopy => exercise_depth_image_copy(headless),
         // A clear, not a draw: this one needs no pipeline at all, which is why

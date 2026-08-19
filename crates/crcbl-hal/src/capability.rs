@@ -187,7 +187,7 @@ macro_rules! capabilities {
             /// one. The parity report and the agnostic seam suite both walk it.
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 
-            /// How the variant is spelled in source, e.g. `"BufferFillWord"`.
+            /// How the variant is spelled in source, e.g. `"BufferFillZero"`.
             ///
             /// Taken from the declaration rather than written out beside it, so
             /// a renamed variant cannot keep an old name in a log line.
@@ -204,33 +204,24 @@ macro_rules! capabilities {
 capabilities! {
     // --- copies and fills ---
 
-    /// [`fill_buffer`](crate::CommandEncoder::fill_buffer) with a value of `0`.
+    /// [`clear_buffer`](crate::CommandEncoder::clear_buffer).
     ///
-    /// The seam's headline use: zeroing an indirect count buffer at the top of a
-    /// frame, which is otherwise a whole compute dispatch for four bytes.
+    /// **Every backend answers `Yes`, and it is kept anyway.** This enum covers
+    /// what the seam does rather than only what backends disagree about, so a
+    /// capability with no `DIVERGENCES` row is the shape a settled one takes —
+    /// and the agnostic suite still drives it, which is what would notice a
+    /// backend quietly dropping the call.
     ///
-    /// Separate from the two below because the three are genuinely different
-    /// questions with different answers — this is the one every API with a fill
-    /// at all can express, including `wgpu`'s `clear_buffer`, which is a zero
-    /// fill and nothing else.
+    /// It had two valued siblings until 2026-08-19,
+    /// `BufferFillRepeatedByte` and `BufferFillWord`. They described how badly
+    /// each backend could keep a promise the seam should not have made: Metal's
+    /// fill repeats a byte and WebGPU has no valued fill at all, so three of
+    /// five had to refuse most values. The verb lost its `value` instead — see
+    /// [`clear_buffer`](crate::CommandEncoder::clear_buffer) — and both rows
+    /// went with it.
     BufferFillZero,
 
-    /// [`fill_buffer`](crate::CommandEncoder::fill_buffer) with a non-zero value
-    /// whose four bytes are **equal**, e.g. `0xFFFF_FFFF`.
-    ///
-    /// Its own capability because Metal's `MTLBlitCommandEncoder`
-    /// `fillBuffer:range:value:` takes a **byte**, not a word: it can write this
-    /// and cannot write [`BufferFillWord`](Self::BufferFillWord). A backend on
-    /// `wgpu` can do neither, because `clear_buffer` writes zero.
-    BufferFillRepeatedByte,
 
-    /// [`fill_buffer`](crate::CommandEncoder::fill_buffer) with an arbitrary
-    /// `u32` — the repeating 32-bit value the seam's own documentation promises.
-    ///
-    /// The narrowest of the three and the one fewest backends have. A value
-    /// whose bytes differ, `0x1234_5678`, is what separates it from
-    /// [`BufferFillRepeatedByte`](Self::BufferFillRepeatedByte).
-    BufferFillWord,
 
     /// [`copy_image_to_image`](crate::CommandEncoder::copy_image_to_image).
     ///
@@ -496,11 +487,10 @@ impl Capability {
     #[must_use]
     pub const fn gating_feature(self) -> Option<Features> {
         match self {
-            // Nothing in `Features` describes what a fill may write, which is
-            // why the fills were the divergence that reached CI.
+            // Nothing in `Features` describes a buffer clear, which is why the
+            // fills were the divergence that reached CI — and why the two
+            // valued ones are gone: see `CommandEncoder::clear_buffer`.
             Self::BufferFillZero
-            | Self::BufferFillRepeatedByte
-            | Self::BufferFillWord
             | Self::ImageToImageCopy
             | Self::DepthImageCopy
             | Self::MsaaResolveAttachment
@@ -669,22 +659,14 @@ pub enum DivergenceKind {
     /// The reason says roughly what the work is, and by convention names the
     /// slice that owes it — `crcbl-dx12` is almost entirely this.
     Unwritten,
-
-    /// Expressible, and deliberately not done. The reason says what was chosen
-    /// instead, and why that was enough.
-    ///
-    /// Blocks parity all the same: the decline was **ours**, so a caller that
-    /// needs it can overturn it — which is exactly what an
-    /// [`ApiAbsence`](Self::ApiAbsence) row can never be.
-    Declined,
 }
 
 impl DivergenceKind {
     /// Whether a row of this kind stands between a backend and parity.
     ///
     /// Everything except [`ApiAbsence`](Self::ApiAbsence): an API with no
-    /// expression for something is not a backlog item, while the other two are
-    /// work owed and a decision that could be reversed.
+    /// expression for something is not a backlog item, while unwritten code is
+    /// work owed.
     ///
     /// A `match` rather than a comparison against one variant, so a kind added
     /// later has to say which side of the goal it falls on.
@@ -692,7 +674,7 @@ impl DivergenceKind {
     pub const fn blocks_parity(self) -> bool {
         match self {
             Self::ApiAbsence => false,
-            Self::Unwritten | Self::Declined => true,
+            Self::Unwritten => true,
         }
     }
 }
@@ -754,30 +736,6 @@ pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immut
      — GPUBindGroup exposes a label and nothing else — so the stream has no update_bind_group \
      command and could not carry one that worked";
 
-/// D3D12's answer for the two *valued* fills, in the parity record and in
-/// `crcbl-dx12`'s own declaration alike.
-///
-/// The third sentence to be shared, and the same treatment as
-/// [`METAL_NO_DRAW_INDIRECT_COUNT`] — one obstacle declining two capabilities,
-/// so two paraphrases would read like two obstacles and would drift.
-///
-/// It replaces two claims that were **wrong**. The list used to say this backend
-/// had "no buffer fill at all" — it has one, for zero — and the reason before
-/// that was that the crate had no shader-visible heap to take a descriptor from.
-/// `crcbl_dx12::binding` builds shader-visible heaps for every bind group, so
-/// the real obstacle is where such a descriptor would come from and who keeps it
-/// alive across the submission. [`Capability::BufferFillZero`] is not declined
-/// at all any more.
-pub const DX12_NO_VALUED_FILL: &str = "a deliberate decline rather than a missing slice: the zero \
-     fill this backend does support is a CopyBufferRegion out of a zeroed device-local resource, \
-     which no value can be passed through, and D3D12's valued fill is ClearUnorderedAccessViewUint \
-     — which needs a shader-visible UAV of the destination. crcbl_dx12::binding does build \
-     shader-visible heaps, so the obstacle is descriptor provenance and lifetime, which heap one \
-     is taken from and who keeps it alive across the submission, rather than the crate having \
-     none. Closing it that way costs either ALLOW_UNORDERED_ACCESS on every device-local buffer \
-     or a fill that works only on STORAGE ones, and a capability that works only sometimes is \
-     worse than a clean no";
-
 /// Every capability a backend is knowingly without, **on every device it can
 /// open**.
 ///
@@ -812,54 +770,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     // copies out of a zeroed device-local resource, which is `wgpu-hal`'s dx12
     // answer to the same call, so the backend that had every fill row now has
     // only the two a *value* has to travel through.
-    Divergence {
-        capability: Capability::BufferFillRepeatedByte,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "wgpu's only fill is CommandEncoder::clear_buffer(&Buffer, offset, size), which \
-              writes zero and has no parameter a value could be passed through",
-    },
-    Divergence {
-        capability: Capability::BufferFillRepeatedByte,
-        backend: BackendKind::WebGpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "WebGPU's only fill is GPUCommandEncoder.clearBuffer(buffer, offset, size), which \
-              writes zero and takes no value; the stream carries the value so the replayer can \
-              refuse a non-zero one at the target rather than write the wrong bytes",
-    },
-    Divergence {
-        capability: Capability::BufferFillRepeatedByte,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Declined,
-        why: DX12_NO_VALUED_FILL,
-    },
-    Divergence {
-        capability: Capability::BufferFillWord,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "wgpu's only fill is CommandEncoder::clear_buffer(&Buffer, offset, size), which \
-              writes zero and has no parameter a value could be passed through",
-    },
-    Divergence {
-        capability: Capability::BufferFillWord,
-        backend: BackendKind::WebGpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "WebGPU's only fill is GPUCommandEncoder.clearBuffer(buffer, offset, size), which \
-              writes zero and takes no value at all",
-    },
-    Divergence {
-        capability: Capability::BufferFillWord,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::ApiAbsence,
-        why: "MTLBlitCommandEncoder fillBuffer:range:value: declares value as a uint8_t, so it \
-              repeats one byte and only a u32 whose four bytes are equal has an encoding",
-    },
-    Divergence {
-        capability: Capability::BufferFillWord,
-        backend: BackendKind::Dx12,
-        kind: DivergenceKind::Declined,
-        why: DX12_NO_VALUED_FILL,
-    },
     // --- draws ---
     //
     // `DrawIndirectCount` on Metal is not here, and its absence is the second
@@ -1555,9 +1465,12 @@ mod tests {
             );
         }
         assert_eq!(
-            divergence(Capability::BufferFillWord, BackendKind::Vulkan),
+            divergence(
+                Capability::IndirectArgumentPaddedStride,
+                BackendKind::Vulkan
+            ),
             None,
-            "Vulkan writes a whole word, and the list would be describing it wrongly"
+            "Vulkan takes a padded stride, and the list would be describing it wrongly"
         );
         assert_eq!(
             divergence(Capability::PushConstants, BackendKind::Null),
@@ -1587,10 +1500,18 @@ mod tests {
         );
         // A backend refusal the list names: reviewed.
         assert_eq!(
-            parity_verdict(Capability::BufferFillWord, BackendKind::Metal, refused, all),
+            parity_verdict(
+                Capability::IndirectArgumentPaddedStride,
+                BackendKind::WebGpu,
+                refused,
+                all
+            ),
             ParityVerdict::Reviewed(
-                divergence(Capability::BufferFillWord, BackendKind::Metal)
-                    .expect("Metal's byte-wide blit fill is on the list")
+                divergence(
+                    Capability::IndirectArgumentPaddedStride,
+                    BackendKind::WebGpu
+                )
+                .expect("WebGPU's packed-only indirect stride is on the list")
             )
         );
         // The device withheld the gate: this run proves nothing either way, and
@@ -1653,12 +1574,12 @@ mod tests {
             )
             .is_gap()
         );
-        // Ungated and listed: never a gap. The *valued* fill, because dx12's
-        // zero fill landed and its row left with it.
+        // Ungated and listed: never a gap. The indirect stride, because
+        // nothing in `Features` describes it and WebGPU's row is permanent.
         assert!(
             !parity_verdict(
-                Capability::BufferFillRepeatedByte,
-                BackendKind::Dx12,
+                Capability::IndirectArgumentPaddedStride,
+                BackendKind::WebGpu,
                 refused,
                 Features::empty()
             )
@@ -1737,16 +1658,6 @@ mod tests {
         // chose. `BufferFillZero` was a third and left the way a row is meant
         // to: the backend fills to zero now, by copying out of a zeroed
         // resource.
-        (
-            Capability::BufferFillRepeatedByte,
-            BackendKind::Dx12,
-            DivergenceKind::Declined,
-        ),
-        (
-            Capability::BufferFillWord,
-            BackendKind::Dx12,
-            DivergenceKind::Declined,
-        ),
         (
             Capability::MeshShading,
             BackendKind::Dx12,
@@ -1867,18 +1778,13 @@ mod tests {
     fn only_an_api_absence_is_off_the_hook() {
         assert!(!DivergenceKind::ApiAbsence.blocks_parity());
         assert!(DivergenceKind::Unwritten.blocks_parity());
-        assert!(DivergenceKind::Declined.blocks_parity());
     }
 
     /// A kind nothing uses is a distinction nobody made. Each of the four has to
     /// describe a real row, or it is vocabulary rather than classification.
     #[test]
     fn every_kind_describes_at_least_one_real_row() {
-        for kind in [
-            DivergenceKind::ApiAbsence,
-            DivergenceKind::Unwritten,
-            DivergenceKind::Declined,
-        ] {
+        for kind in [DivergenceKind::ApiAbsence, DivergenceKind::Unwritten] {
             assert!(
                 DIVERGENCES.iter().any(|entry| entry.kind == kind),
                 "no divergence is classified {kind:?}, so the variant is a name with nothing \

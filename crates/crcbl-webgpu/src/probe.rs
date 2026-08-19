@@ -72,7 +72,7 @@
 //! | [`__crcbl_web_gpu_probe_copychain_state`](shim::__crcbl_web_gpu_probe_copychain_state) | `() -> i32` | Drain, and answer one of the `COPYCHAIN_*` codes. |
 //! | [`__crcbl_web_gpu_probe_copychain_bytes_ptr`](shim::__crcbl_web_gpu_probe_copychain_bytes_ptr) | `() -> i32` | Where the copied bytes start, once [`__crcbl_web_gpu_probe_copychain_state`](shim::__crcbl_web_gpu_probe_copychain_state) answers [`COPYCHAIN_READY`]. |
 //! | [`__crcbl_web_gpu_probe_copychain_bytes_len`](shim::__crcbl_web_gpu_probe_copychain_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the copy chain has not answered. |
-//! | [`__crcbl_web_gpu_probe_fill`](shim::__crcbl_web_gpu_probe_fill) | `() -> i32` | Encode one frame — a dispatch that fills a storage buffer with [`PROBE_FILL_PATTERN`], a zero `fill_buffer` over its first half, the copy to a host buffer, and a `request_readback` against [`PROBE_FILL_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_fill`](shim::__crcbl_web_gpu_probe_fill) | `() -> i32` | Encode one frame — a dispatch that fills a storage buffer with [`PROBE_FILL_PATTERN`], a `clear_buffer` over its first half, the copy to a host buffer, and a `request_readback` against [`PROBE_FILL_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_fill_poll`](shim::__crcbl_web_gpu_probe_fill_poll) | `() -> i32` | Poll the fill probe's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) | `() -> i32` | Drain, and answer one of the `FILL_*` codes. |
 //! | [`__crcbl_web_gpu_probe_fill_bytes_ptr`](shim::__crcbl_web_gpu_probe_fill_bytes_ptr) | `() -> i32` | Where the filled bytes start, once [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) answers [`FILL_READY`]. |
@@ -554,7 +554,7 @@ pub const COPYCHAIN_UNDECODABLE: u32 = 5;
 /// Nothing has been asked, or there is no channel to ask through.
 pub const FILL_UNASKED: u32 = 0;
 /// The setup frame — a dispatch that fills a storage buffer with the pattern, a
-/// zero [`fill_buffer`](crate::StreamWriter::fill_buffer) over its first half,
+/// zero [`clear_buffer`](crate::StreamWriter::clear_buffer) over its first half,
 /// the copy to a host buffer, the submit and the request — is on the stream,
 /// and no poll has been issued.
 pub const FILL_REQUESTED: u32 = 1;
@@ -2484,7 +2484,7 @@ pub const fn probe_copychain_image_to_buffer() -> BufferImageCopy {
 }
 
 // The fill probe (group W): a compute dispatch fills a 256-byte storage buffer
-// with a pattern, `fill_buffer(offset 0, size 128, value 0)` zeroes its first
+// with a pattern, `clear_buffer(offset 0, size 128)` zeroes its first
 // half, and the whole buffer is copied to a host buffer and read back. The read
 // back proves `clearBuffer` zeroed exactly its sub-range — the first half zero,
 // the second half still the pattern. `4 << 32`, with the handle kinds it shares
@@ -4844,7 +4844,7 @@ impl CopyChainProbe {
 /// path.
 ///
 /// The frame it encodes fills a storage buffer by dispatch, zeroes its first
-/// half with a [`fill_buffer`](crate::StreamWriter::fill_buffer), and copies the
+/// half with a [`clear_buffer`](crate::StreamWriter::clear_buffer), and copies the
 /// whole thing to a host buffer. Both end in the same `request_readback`, so the
 /// transitions mirror [`ComputeProbe`]'s exactly.
 ///
@@ -7921,11 +7921,11 @@ impl Probe {
     }
 
     /// Encode the fill setup frame: a dispatch that fills a storage buffer with
-    /// the pattern, a zero [`fill_buffer`](crate::StreamWriter::fill_buffer) over
+    /// the pattern, a zero [`clear_buffer`](crate::StreamWriter::clear_buffer) over
     /// its first half, and the copy to a host buffer that is read back.
     ///
     /// **One frame, many commands, no reply** — [`request_compute`](Self::request_compute)'s
-    /// shape with a `fill_buffer` recorded on the encoder after the compute pass
+    /// shape with a `clear_buffer` recorded on the encoder after the compute pass
     /// closes and before the buffer→buffer copy. `false` until a device has
     /// opened, that method's ordering rule.
     fn request_fill(&mut self) -> bool {
@@ -7963,7 +7963,7 @@ impl Probe {
                 stream.bind_group(0, PROBE_FILL_BIND_GROUP, &[], PROBE_FILL_PIPELINE_LAYOUT);
                 stream.dispatch(1, 1, 1);
                 stream.end_compute_pass();
-                stream.fill_buffer(PROBE_FILL_STORAGE_BUFFER, 0, PROBE_FILL_ZEROED_BYTES, 0);
+                stream.clear_buffer(PROBE_FILL_STORAGE_BUFFER, 0, PROBE_FILL_ZEROED_BYTES);
                 stream.copy_buffer_to_buffer(&probe_fill_copy());
                 stream.finish(PROBE_FILL_COMMAND_BUFFER);
                 stream.submit(&SubmitInfo::new(&[PROBE_FILL_COMMAND_BUFFER]));
@@ -8938,7 +8938,7 @@ pub mod shim {
     }
 
     /// Ask the page to run the fill probe — a dispatch that fills a storage buffer
-    /// with a pattern, a zero [`fill_buffer`](crate::StreamWriter::fill_buffer)
+    /// with a pattern, a zero [`clear_buffer`](crate::StreamWriter::clear_buffer)
     /// over its first half, and a copy to a host buffer — and start reading it
     /// back on the device it opened.
     ///
@@ -12056,8 +12056,8 @@ mod tests {
     }
 
     /// The fill half: **one export, a whole frame** that dispatches a pattern into
-    /// a storage buffer, zeroes its first half with a `fill_buffer`, and copies it
-    /// out. The `FillBuffer` between the pass and the copy is the point.
+    /// a storage buffer, zeroes its first half with a `clear_buffer`, and copies it
+    /// out. The `ClearBuffer` between the pass and the copy is the point.
     #[test]
     fn the_fill_export_encodes_the_dispatch_the_fill_and_the_copy() {
         open_device();
@@ -12080,7 +12080,7 @@ mod tests {
                 "BindGroup",
                 "Dispatch",
                 "EndComputePass",
-                "FillBuffer",
+                "ClearBuffer",
                 "CopyBufferToBuffer",
                 "Finish",
                 "Submit",
@@ -12089,11 +12089,10 @@ mod tests {
             "the frame dispatches, fills half the buffer to zero, then copies and reads back"
         );
         // The fill zeroes exactly the first half of the storage buffer.
-        assert!(commands.contains(&Command::FillBuffer {
+        assert!(commands.contains(&Command::ClearBuffer {
             buffer: PROBE_FILL_STORAGE_BUFFER,
             offset: 0,
             size: PROBE_FILL_ZEROED_BYTES,
-            value: 0,
         }));
     }
 

@@ -1502,20 +1502,19 @@ impl StreamWriter {
         sequence
     }
 
-    /// [`fill_buffer`](crcbl_hal::CommandEncoder::fill_buffer), on the
+    /// [`clear_buffer`](crcbl_hal::CommandEncoder::clear_buffer), on the
     /// implicit-current encoder — the buffer, its offset and size, then the
     /// `u32` value.
     ///
     /// The value crosses verbatim even though WebGPU can only express a zero
     /// fill: the replayer refuses a non-zero value at the target, so it must be
     /// told what the value was. See
-    /// [`Command::FillBuffer`](crate::Command::FillBuffer).
-    pub fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) -> u64 {
-        let sequence = self.push_tag(tag::FILL_BUFFER_TAG);
+    /// [`Command::ClearBuffer`](crate::Command::ClearBuffer).
+    pub fn clear_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64) -> u64 {
+        let sequence = self.push_tag(tag::CLEAR_BUFFER_TAG);
         self.bytes.put_handle(buffer);
         self.bytes.put_u64(offset);
         self.bytes.put_u64(size);
-        self.bytes.put_u32(value);
         sequence
     }
 

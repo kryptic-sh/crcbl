@@ -16,6 +16,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`CommandEncoder::fill_buffer` is `clear_buffer`, and it takes no value.**
+  The seam promised "a repeating 32-bit value" that three of five backends could
+  never keep: Metal's `fillBuffer:range:value:` repeats a _byte_, so only a word
+  with four equal bytes has an encoding, and WebGPU and wgpu offer a zero clear
+  and nothing else. `Capability::BufferFillRepeatedByte` and `BufferFillWord`
+  existed only to describe how badly each one could keep the promise, and both
+  are gone with the parameter. `BufferFillZero` stays; every backend answers
+  `Yes`.
+
+  **Parity blockers go from eight to six** — by deleting the divergence rather
+  than implementing it. `crcbl-dx12` now refuses **no command at all**: the
+  non-zero fill was the last refusal it chose, so the test that held them has no
+  subject and is gone too.
+
+  Nothing called it. Every caller of `fill_buffer` in the workspace was a
+  backend or a test, and the use it was written for — zeroing an indirect count
+  at the top of a frame — belongs to `clear_counters.slang`, which does it from
+  _inside_ the render graph where a clear may not go, and which is what let
+  those counters become device-local.
+
+  **The WebGPU command stream drops the trailing `u32`, so `STREAM_VERSION` goes
+  4 → 5**, and `gpu-stream.js`, `gpu-replay.js` and the corpus move with it. The
+  replayer's non-zero refusal is gone: there is no such value to refuse.
+
 - **`DivergenceKind::Unclassified` is gone.** It meant "which of the other three
   this is cannot be settled from here", and held exactly two rows — Metal's
   `TimestampQuery` and `PipelineStatisticsQuery`. `crcbl_mtl::adapter`'s

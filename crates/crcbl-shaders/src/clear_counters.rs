@@ -9,11 +9,11 @@
 //! What the shader zeroes is every counter [`crate::cull`]'s and
 //! [`crate::draw_gen`]'s passes — and `mesh_cluster.slang`'s amplification
 //! stage — only ever *add* to. It is a dispatch rather than
-//! a [`CommandEncoder::fill_buffer`] because a fill is legal only outside a
+//! a [`CommandEncoder::clear_buffer`] because a clear is legal only outside a
 //! pass, where a render-graph frame has no room, and because `crcbl-dx12`
 //! refuses one outright — the shader's own header has the whole argument.
 //!
-//! [`CommandEncoder::fill_buffer`]: https://docs.rs/crcbl-hal
+//! [`CommandEncoder::clear_buffer`]: https://docs.rs/crcbl-hal
 
 /// Invocations per workgroup, matching `[numthreads(64, 1, 1)]` in
 /// `shaders/clear_counters.slang`.

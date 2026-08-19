@@ -75,7 +75,7 @@ const STREAM_MAGIC = new Uint8Array([
  * exists to catch, and the reason this half and `crcbl-webgpu`'s
  * `tag::STREAM_VERSION` move together in one commit.
  */
-const STREAM_VERSION = 4;
+const STREAM_VERSION = 5;
 
 // ── Caps ─────────────────────────────────────────────────────────────────────
 
@@ -186,7 +186,7 @@ const COPY_BUFFER_TO_BUFFER_TAG = 0x79;
 // WebGPU can only perform for the value zero (`clearBuffer`).
 const COPY_BUFFER_TO_IMAGE_TAG = 0x7a;
 const COPY_IMAGE_TO_IMAGE_TAG = 0x7b;
-const FILL_BUFFER_TAG = 0x7c;
+const CLEAR_BUFFER_TAG = 0x7c;
 // The host→buffer upload — `queue.writeBuffer` on the replayer, not an encoder
 // op. In the copy-and-fill family because it is a queue-side data transfer, the
 // upload counterpart of the copies.
@@ -2356,15 +2356,15 @@ function decodeCommand(r) {
         },
       };
     }
-    case FILL_BUFFER_TAG: {
-      // The buffer, its offset and size (`u64`, `BigInt`), then the `u32` value.
-      // Only `0` is expressible on WebGPU (`clearBuffer`); the replayer refuses
-      // any other value.
-      const buffer = r.readHandle('FillBuffer::buffer');
+    case CLEAR_BUFFER_TAG: {
+      // The buffer, then its offset and size (`u64`, `BigInt`). It carried a
+      // trailing `u32` value until `STREAM_VERSION` 5, and the replayer refused
+      // every non-zero one; the seam dropped the value instead, so a clear is
+      // all this can be and there is nothing left to refuse.
+      const buffer = r.readHandle('ClearBuffer::buffer');
       const offset = r.readU64();
       const size = r.readU64();
-      const value = r.readU32();
-      return { name: 'FillBuffer', buffer, offset, size, value };
+      return { name: 'ClearBuffer', buffer, offset, size };
     }
     case WRITE_BUFFER_TAG: {
       // A host→buffer upload: the buffer, its byte offset (`u64`, `BigInt`),

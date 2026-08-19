@@ -753,8 +753,6 @@ impl Device for NullDevice {
         match capability {
             // Recorded verbatim, arguments and all.
             Capability::BufferFillZero
-            | Capability::BufferFillRepeatedByte
-            | Capability::BufferFillWord
             | Capability::ImageToImageCopy
             | Capability::DepthImageCopy
             | Capability::MsaaResolveAttachment
@@ -2313,14 +2311,13 @@ impl CommandEncoder for NullEncoder {
         self.record(Command::CopyImageToImage(*copy));
     }
 
-    fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
-        self.need_outside("FillBuffer");
-        self.need_live("FillBuffer", ObjectKind::Buffer, buffer.to_bits());
-        self.record(Command::FillBuffer {
+    fn clear_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64) {
+        self.need_outside("ClearBuffer");
+        self.need_live("ClearBuffer", ObjectKind::Buffer, buffer.to_bits());
+        self.record(Command::ClearBuffer {
             buffer,
             offset,
             size,
-            value,
         });
     }
 

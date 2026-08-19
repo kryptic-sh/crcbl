@@ -1811,7 +1811,7 @@ fn every_command_has_its_own_name() {
     // PollReadback, DestroyReadback, DestroyCommandBuffer) and of the compute pass
     // (BindComputePipeline, Dispatch, DispatchIndirect, EndComputePass,
     // CopyBufferToBuffer), the
-    // remaining copies and fill (CopyBufferToImage, CopyImageToImage, FillBuffer),
+    // remaining copies and fill (CopyBufferToImage, CopyImageToImage, ClearBuffer),
     // the host→buffer upload (WriteBuffer), the dynamic viewport and scissor the
     // graph sets on every pass and the stencil reference a masked pass sets
     // (SetViewport, SetScissor, SetStencilReference), the UI pass's indexed

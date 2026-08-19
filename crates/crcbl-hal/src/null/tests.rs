@@ -1697,11 +1697,10 @@ fn scope_violations_are_recorded() {
         timestamp_writes: None,
     });
     // A copy inside a pass.
-    encoder.fill_buffer(
+    encoder.clear_buffer(
         crcbl_core::Handle::from_bits(1 << 32).expect("non-zero generation"),
         0,
         4,
-        0,
     );
     // An unclosed pass is the one violation that is *also* an `Err`: the seam's
     // `finish` doc names it and `crcbl-vk` returns one, because
@@ -1746,7 +1745,7 @@ fn scope_violations_are_recorded() {
         errors.iter().any(|error| matches!(
             error,
             ValidationError::InsidePass {
-                command: "FillBuffer"
+                command: "ClearBuffer"
             }
         )),
         "{errors:?}"
@@ -1972,7 +1971,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         queue,
     });
     encoder.reset_query_set(timers, 0..4);
-    encoder.fill_buffer(draw_count, 0, 4, 0);
+    encoder.clear_buffer(draw_count, 0, 4);
     encoder.pipeline_barrier(&Barriers {
         buffers: &[crate::BufferBarrier::new(
             draw_count,
@@ -2068,7 +2067,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         recorder.command_names(),
         vec![
             "ResetQuerySet",
-            "FillBuffer",
+            "ClearBuffer",
             "Barrier",
             "BeginComputePass",
             "BindComputePipeline",
@@ -2526,7 +2525,7 @@ fn commands_naming_a_foreign_handle_are_recorded_as_such() {
         .expect("buffer");
 
     let mut encoder = first.create_command_encoder(&CommandEncoderDesc { label: None, queue });
-    encoder.fill_buffer(foreign, 0, 4, 0);
+    encoder.clear_buffer(foreign, 0, 4);
     let _ = encoder.finish().expect("finish");
 
     let errors = recorder.validation_errors();
@@ -2534,7 +2533,7 @@ fn commands_naming_a_foreign_handle_are_recorded_as_such() {
         errors.iter().any(|error| matches!(
             error,
             ValidationError::ForeignHandle {
-                command: "FillBuffer",
+                command: "ClearBuffer",
                 ..
             }
         )),

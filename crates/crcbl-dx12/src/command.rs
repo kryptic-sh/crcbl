@@ -838,18 +838,6 @@ const NO_D24_DEPTH_FOOTPRINT: &str = "a buffer copy of the DEPTH plane of a D24U
 const NO_DISPATCH_MESH: &str = "draw_mesh_tasks: DispatchMesh lives on ID3D12GraphicsCommandList6, and this runtime's \
      command list does not implement that interface";
 
-/// The refusal a valued fill gets, naming the two capabilities it would be.
-///
-/// A *declined* refusal rather than a permanent one: the pattern-buffer route
-/// would close both, and `docs/backlog.md` records the price. What makes it a
-/// decline is that the cheap route — `ClearUnorderedAccessViewUint` — needs a
-/// shader-visible UAV of the destination, and see
-/// [`fill_buffer`](CommandEncoder::fill_buffer) for what that would cost.
-const NON_ZERO_FILL: &str = "fill_buffer with a non-zero value: this backend fills only to zero \
-     (Capability::BufferFillZero), because a zero fill is a copy out of a zeroed resource and a \
-     valued one is ClearUnorderedAccessViewUint. Capability::BufferFillRepeatedByte and \
-     Capability::BufferFillWord are declined, and crcbl_hal::DIVERGENCES carries the reason";
-
 /// Which plane of one image an aspect names, and how wide that plane's texel is.
 ///
 /// One question rather than two: a plane a format does not have has no width,
@@ -1553,28 +1541,24 @@ impl CommandEncoder for Dx12CommandEncoder {
     ///   of the buffer, is the caller's arithmetic and stays
     ///   [`HalError::InvalidDescriptor`] naming it — the same answers `crcbl-vk`
     ///   and `crcbl-mtl` give for the same two mistakes.
-    fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
-        if self.list().is_none() || !self.outside_a_pass("a buffer fill") {
+    fn clear_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64) {
+        if self.list().is_none() || !self.outside_a_pass("a buffer clear") {
             return;
         }
-        // Before the handle is resolved, so a caller asking for a value this
-        // backend cannot write is told that rather than being sent to look at
-        // its handle. `crcbl-mtl` refuses the values Metal cannot write in the
-        // same position.
-        if value != 0 {
-            self.fail(HalError::Unsupported {
-                backend: BackendKind::Dx12,
-                what: NON_ZERO_FILL,
-            });
-            return;
-        }
-        // The seam's fill writes `u32`s, so a range that is not a whole number
+        // **The refusal that used to open this function is gone with the seam's
+        // `value`.** D3D12's valued fill is `ClearUnorderedAccessViewUint`,
+        // which needs a shader-visible UAV of the destination — so this backend
+        // refused every non-zero value, and those two `Declined` rows were the
+        // last ones `DivergenceKind::Declined` had. A clear writes zero, which
+        // the copy below has always been able to do.
+        //
+        // The seam's clear writes `u32`s, so a range that is not a whole number
         // of them describes no fill at all. `crcbl-vk` refuses the same pair
         // because `vkCmdFillBuffer` requires it, and the copies underneath this
         // one would happily write a partial word.
         if !offset.is_multiple_of(4) || !size.is_multiple_of(4) {
             self.fail(HalError::InvalidDescriptor(format!(
-                "fill_buffer offset {offset} and size {size} must both be multiples of 4"
+                "clear_buffer offset {offset} and size {size} must both be multiples of 4"
             )));
             return;
         }
@@ -1586,7 +1570,7 @@ impl CommandEncoder for Dx12CommandEncoder {
         }
         if offset.checked_add(size).is_none_or(|end| end > target.size) {
             self.fail(HalError::InvalidDescriptor(format!(
-                "fill_buffer range {offset}..{} exceeds the buffer's {} bytes",
+                "clear_buffer range {offset}..{} exceeds the buffer's {} bytes",
                 offset.saturating_add(size),
                 target.size
             )));

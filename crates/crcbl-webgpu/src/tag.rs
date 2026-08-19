@@ -54,7 +54,11 @@ pub const STREAM_MAGIC: &[u8; 8] = b"CRCBLGPU";
 /// now rasterises with all samples covered and the replayer fills
 /// `GPUMultisampleState.mask` itself.
 ///
-/// It went to `3` when the stencil block lost its trailing `reference` word —
+/// It went to `5` when the buffer fill lost its trailing `value` word and
+/// became a clear: `CommandEncoder::fill_buffer` took a `u32` that three of the
+/// five backends had to refuse most values of, so the seam dropped it — see
+/// [`CLEAR_BUFFER_TAG`]. To `3` when the stencil block lost its trailing
+/// `reference` word —
 /// [`StencilState::reference`](crcbl_hal::StencilState) left the seam for the
 /// same reason, leaving
 /// [`Command::SetStencilReference`](crate::Command::SetStencilReference) as the
@@ -67,7 +71,7 @@ pub const STREAM_MAGIC: &[u8; 8] = b"CRCBLGPU";
 /// sample mask and carries on, decoding a stream that still parses and means
 /// something else. A new tag would not have moved these words, which is why
 /// they are version bumps and not new commands.
-pub const STREAM_VERSION: u16 = 4;
+pub const STREAM_VERSION: u16 = 5;
 
 /// Bytes before the first command: [`STREAM_MAGIC`], [`STREAM_VERSION`], and the
 /// sequence number of the first command in the buffer.
@@ -595,10 +599,11 @@ pub const COPY_BUFFER_TO_IMAGE_TAG: u8 = 0x7A;
 /// [`Command::CopyImageToImage`](crate::Command::CopyImageToImage) — the
 /// image→image copy.
 pub const COPY_IMAGE_TO_IMAGE_TAG: u8 = 0x7B;
-/// [`Command::FillBuffer`](crate::Command::FillBuffer) — a buffer fill, which
-/// WebGPU can perform only for the value zero (`clearBuffer`); any other value
-/// is refused by the replayer.
-pub const FILL_BUFFER_TAG: u8 = 0x7C;
+/// [`Command::ClearBuffer`](crate::Command::ClearBuffer) — a buffer zeroing,
+/// which becomes WebGPU's `clearBuffer`. It carried a trailing `u32` value until
+/// `STREAM_VERSION` 5 and the replayer refused every non-zero one; the seam
+/// dropped the value instead, so there is nothing left to refuse.
+pub const CLEAR_BUFFER_TAG: u8 = 0x7C;
 /// [`Command::WriteBuffer`](crate::Command::WriteBuffer) — a host→buffer upload,
 /// which becomes WebGPU's `queue.writeBuffer(buffer, offset, data)`.
 ///
@@ -2230,7 +2235,7 @@ mod tests {
         ("CopyBufferToBuffer", COPY_BUFFER_TO_BUFFER_TAG, FAMILY_COPY),
         ("CopyBufferToImage", COPY_BUFFER_TO_IMAGE_TAG, FAMILY_COPY),
         ("CopyImageToImage", COPY_IMAGE_TO_IMAGE_TAG, FAMILY_COPY),
-        ("FillBuffer", FILL_BUFFER_TAG, FAMILY_COPY),
+        ("ClearBuffer", CLEAR_BUFFER_TAG, FAMILY_COPY),
         ("WriteBuffer", WRITE_BUFFER_TAG, FAMILY_COPY),
         ("ResetQuerySet", RESET_QUERY_SET_TAG, FAMILY_QUERY),
         ("ResolveQuerySet", RESOLVE_QUERY_SET_TAG, FAMILY_QUERY),

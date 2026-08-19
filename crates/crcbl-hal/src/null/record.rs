@@ -154,16 +154,14 @@ pub enum Command {
     CopyImageToBuffer(BufferImageCopy),
     /// [`copy_image_to_image`](crate::CommandEncoder::copy_image_to_image).
     CopyImageToImage(ImageCopy),
-    /// [`fill_buffer`](crate::CommandEncoder::fill_buffer).
-    FillBuffer {
-        /// Buffer filled.
+    /// [`fill_buffer`](crate::CommandEncoder::clear_buffer).
+    ClearBuffer {
+        /// Buffer zeroed.
         buffer: BufferHandle,
         /// Byte offset.
         offset: u64,
         /// Byte length.
         size: u64,
-        /// Repeating value.
-        value: u32,
     },
     /// [`begin_render_pass`](crate::CommandEncoder::begin_render_pass).
     BeginRenderPass {
@@ -319,7 +317,7 @@ impl Command {
             Self::CopyBufferToImage(_) => "CopyBufferToImage",
             Self::CopyImageToBuffer(_) => "CopyImageToBuffer",
             Self::CopyImageToImage(_) => "CopyImageToImage",
-            Self::FillBuffer { .. } => "FillBuffer",
+            Self::ClearBuffer { .. } => "ClearBuffer",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::EndRenderPass => "EndRenderPass",
             Self::SetViewport(_) => "SetViewport",
@@ -1235,11 +1233,10 @@ mod tests {
                 dst_offset: crate::Offset3d::default(),
                 extent: crate::Extent3d::d2(1, 1),
             }),
-            Command::FillBuffer {
+            Command::ClearBuffer {
                 buffer: handle(),
                 offset: 0,
                 size: 4,
-                value: 0,
             },
             Command::BeginRenderPass {
                 label: None,
@@ -1320,7 +1317,7 @@ mod tests {
                 | Command::CopyBufferToImage(_)
                 | Command::CopyImageToBuffer(_)
                 | Command::CopyImageToImage(_)
-                | Command::FillBuffer { .. }
+                | Command::ClearBuffer { .. }
                 | Command::BeginRenderPass { .. }
                 | Command::EndRenderPass
                 | Command::SetViewport(_)

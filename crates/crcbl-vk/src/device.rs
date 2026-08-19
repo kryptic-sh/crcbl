@@ -1555,9 +1555,7 @@ impl Device for VkDevice {
             // `vkCmdFillBuffer` takes a `uint32_t` and writes it whole, which is
             // the seam's own wording and the reason the three fill capabilities
             // are separable at all: this is the backend that has all three.
-            Capability::BufferFillZero
-            | Capability::BufferFillRepeatedByte
-            | Capability::BufferFillWord => Support::Yes,
+            Capability::BufferFillZero => Support::Yes,
             Capability::ImageToImageCopy => Support::Yes,
             // `VkBufferImageCopy::imageSubresource` names the aspect, so a depth
             // plane is addressed by the same call and the same struct a colour

@@ -605,7 +605,7 @@ impl CommandEncoder for VkCommandEncoder {
         }
     }
 
-    fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
+    fn clear_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64) {
         if !self.ok() {
             return;
         }
@@ -615,7 +615,7 @@ impl CommandEncoder for VkCommandEncoder {
         // `VK_WHOLE_SIZE` is the one legal non-multiple.
         if !offset.is_multiple_of(4) || (size != vk::WHOLE_SIZE && !size.is_multiple_of(4)) {
             self.fail(HalError::InvalidDescriptor(format!(
-                "fill_buffer offset {offset} and size {size} must both be multiples of 4"
+                "clear_buffer offset {offset} and size {size} must both be multiples of 4"
             )));
             return;
         }
@@ -629,9 +629,12 @@ impl CommandEncoder for VkCommandEncoder {
         self.use_object(raw.as_raw());
         // SAFETY: `self.raw` is recording and `raw` is live.
         unsafe {
+            // Vulkan's fill takes the word this seam no longer carries, so
+            // the zero is written here rather than passed in — see
+            // `CommandEncoder::clear_buffer`.
             self.device
                 .raw
-                .cmd_fill_buffer(self.raw, raw, offset, size, value);
+                .cmd_fill_buffer(self.raw, raw, offset, size, 0);
         }
     }
 

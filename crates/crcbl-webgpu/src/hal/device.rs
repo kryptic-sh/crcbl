@@ -432,9 +432,6 @@ impl Device for WebGpuDevice {
         let gated = |feature: Features, why: &'static str| -> Support {
             Support::granted(has, feature, why)
         };
-        const NO_VALUE_FILL: &str = "WebGPU's only fill is GPUCommandEncoder.clearBuffer, which writes zero; the stream \
-             carries the value so the replayer can refuse a non-zero one rather than write the \
-             wrong bytes";
         const NO_MESH: &str = NO_MESH_STAGE;
         // One sentence for the three, because they are one obstacle: there is no
         // semaphore object, so there is nothing to signal, read or wait on.
@@ -446,9 +443,6 @@ impl Device for WebGpuDevice {
 
         match capability {
             Capability::BufferFillZero => Support::Yes,
-            Capability::BufferFillRepeatedByte | Capability::BufferFillWord => {
-                Support::No(NO_VALUE_FILL)
-            }
             Capability::ImageToImageCopy => Support::Yes,
             // The replayer's `DEPTH_STENCIL_COPY` table carries the WebGPU
             // specification's depth-stencil rows, so a copy naming

@@ -1535,16 +1535,14 @@ impl<'a> StreamReader<'a> {
                     },
                 })
             }
-            tag::FILL_BUFFER_TAG => {
-                let buffer = r.read_handle("FillBuffer::buffer")?;
+            tag::CLEAR_BUFFER_TAG => {
+                let buffer = r.read_handle("ClearBuffer::buffer")?;
                 let offset = r.read_u64()?;
                 let size = r.read_u64()?;
-                let value = r.read_u32()?;
-                Ok(Command::FillBuffer {
+                Ok(Command::ClearBuffer {
                     buffer,
                     offset,
                     size,
-                    value,
                 })
             }
             tag::WRITE_BUFFER_TAG => {

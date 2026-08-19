@@ -1295,19 +1295,12 @@ impl CommandEncoder for MetalCommandEncoder {
     /// * A range running past the end of the buffer is the caller's arithmetic,
     ///   so it stays [`HalError::InvalidDescriptor`] naming the range: no
     ///   fallback would help, and the same call with a smaller `size` works.
-    fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
-        let bytes = value.to_ne_bytes();
-        if bytes.iter().any(|byte| *byte != bytes[0]) {
-            // The word itself cannot ride along: `Unsupported::what` is
-            // `&'static str` by design. `fail` logs the error, and the value is
-            // the caller's own, so what is worth carrying is the obstacle.
-            self.fail(crate::MetalInstance::unsupported(
-                "fill_buffer with a u32 whose four bytes differ: \
-                 MTLBlitCommandEncoder::fillBuffer:range:value: repeats a single byte, so only a \
-                 value whose four bytes are equal has an encoding",
-            ));
-            return;
-        }
+    fn clear_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64) {
+        // **The refusal that used to open this function is gone with the
+        // seam's `value`.** `fillBuffer:range:value:` repeats a single byte, so
+        // this backend had to reject any `u32` whose four bytes differed —
+        // which is why `Capability::BufferFillWord` existed at all. A clear
+        // writes zero, and zero has the same encoding either way.
         let Some(raw) = self.buffer(buffer) else {
             return;
         };
@@ -1319,7 +1312,7 @@ impl CommandEncoder for MetalCommandEncoder {
             .is_none_or(|end| end > raw.length() as u64)
         {
             self.fail(HalError::InvalidDescriptor(format!(
-                "fill_buffer range {offset}..{} exceeds the buffer's {} bytes",
+                "clear_buffer range {offset}..{} exceeds the buffer's {} bytes",
                 offset.saturating_add(size),
                 raw.length()
             )));
@@ -1328,7 +1321,7 @@ impl CommandEncoder for MetalCommandEncoder {
         let Some(encoder) = self.blit() else {
             return;
         };
-        encoder.fillBuffer_range_value(&raw, NSRange::new(to_ns(offset), to_ns(size)), bytes[0]);
+        encoder.fillBuffer_range_value(&raw, NSRange::new(to_ns(offset), to_ns(size)), 0);
     }
 
     // --- render scope ---
@@ -2089,7 +2082,7 @@ impl CommandEncoder for MetalCommandEncoder {
     /// `MTLBuffer` (`crate::query` says why), and a fresh allocation's contents
     /// are not promised to be anything. So "reset so it can be written again" is
     /// a `fillBuffer:range:value:` of zero — the same call
-    /// [`fill_buffer`](CommandEncoder::fill_buffer) makes — and it is what puts a
+    /// [`clear_buffer`](CommandEncoder::clear_buffer) makes — and it is what puts a
     /// defined value under every [`Device::query_results`](crcbl_hal::Device::query_results)
     /// of a query nothing has counted into. Zero is the right one: it is what a
     /// query that passed no samples reports.

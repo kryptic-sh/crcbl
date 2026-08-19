@@ -1673,64 +1673,22 @@ is already the query the snapshot test guards — **plus** the separate conditio
 that `cross-backend-e2e` no longer needs wgpu as its comparison oracle. Nothing
 measures that second half today, and it is now half the bar.
 
-### The two dx12 `Declined` fill rows, and a third option nobody costed
+### `DivergenceKind::Declined` is gone too, and can come back
 
-`BufferFillRepeatedByte` and `BufferFillWord`, sharing `DX12_NO_VALUED_FILL` so
-two paraphrases cannot drift. Who has what: vk both; Metal repeated-byte only,
-since its fill takes a byte and a `u32` needs four equal ones to have an
-encoding; WebGPU and wgpu neither; dx12 declines both.
+The two dx12 valued fills were the only `Declined` rows in the whole table, so
+removing them emptied the kind and `every_kind_describes_at_least_one_real_row`
+failed — the same rule that retired `Unclassified` earlier the same day. Its
+reasoning is worth keeping: **expressible, and deliberately not done**, where
+the reason says what was chosen instead and why that was enough. It blocked
+parity all the same, because the decline was _ours_ and a caller who needs the
+thing can overturn it, which is exactly what an `ApiAbsence` row can never be.
 
-The obstacle is **descriptor provenance and lifetime**, not a missing heap. The
-zero fill dx12 does support is a `CopyBufferRegion` out of a zeroed resource,
-which no value passes through; the valued fill is
-`ClearUnorderedAccessViewUint`, needing a shader-visible UAV of the destination.
-`crcbl_dx12::binding` does build shader-visible heaps — the question is which
-one the descriptor comes from and who keeps it alive across the submission.
-Closing it costs either `ALLOW_UNORDERED_ACCESS` on every device-local buffer or
-a fill that works only on `STORAGE` ones, and the reason's own line is that a
-capability which works only sometimes is worse than a clean no.
+`DivergenceKind` is now `ApiAbsence` and `Unwritten`. Reintroducing `Declined`
+is a variant, an arm in `blocks_parity`, and an entry in that test's list.
 
-**The third option: take the two valued fills off the seam.** The case is
-stronger than "dx12 declines them", and it is written down in
-`clear_counters.slang`'s own header.
-
-`fill_buffer`'s documented headline use is zeroing an indirect count buffer at
-the top of a frame. **The engine hit exactly that need and could not use it** —
-dx12 refuses, Metal repeats a byte, wgpu clears only to zero — so
-`clear_counters.slang` was written instead. Its comment says as much: the fill
-"is what this would be if the four backends could all record one".
-
-**And the dispatch turned out to be the better answer, for reasons unrelated to
-parity.** A fill is legal only _outside_ a pass, and a render-graph frame is
-passes end to end, so a fill cannot go where the zeroing is needed at all.
-Landing inside the graph is what let the three counters become **device-local**;
-they had been `HostUpload` purely so the CPU could zero them before the frame,
-and D3D12 has no unordered-access view of an upload-heap resource. The zero also
-has to complete and be visible before the first atomic add, which is a barrier
-and therefore its own pass regardless — so a fill would not have saved the
-dispatch even if every backend could record one.
-
-**Every caller of `fill_buffer` in the workspace is a backend or a test.**
-`crcbl-render`, `crcbl-scene` and every app call it zero times.
-
-So the seam carries a verb and three capabilities that no production code uses,
-whose headline case was solved better another way, and two of whose variants
-cost two of the eight parity blockers. What the valued fills would still enable
-is real — a non-zero sentinel outside a pass, `0xFFFF_FFFF` for a min-reduction
-or an "empty" marker in a hash or visibility buffer — but each of those, when
-wanted per frame inside the graph, hits the same outside-a-pass rule and becomes
-a dispatch again.
-
-**Recommendation: drop `BufferFillRepeatedByte` and `BufferFillWord`, keep
-`BufferFillZero`.** That takes the blockers from eight to **six** by deleting
-divergence rather than implementing it, and keeps the one variant all five
-backends perform, which is still a cheap one-off zero for setup paths outside a
-frame. The alternatives remain: implement both on dx12 at the cost of
-`ALLOW_UNORDERED_ACCESS` on every device-local buffer, keep both declined, or
-drop only `BufferFillWord` (eight to seven) on the narrower `ApiAbsence`
-argument.
-
-Owner's call.
+**Note this is a consequence, not a decision that was asked for.** Dropping the
+valued fills was; emptying a kind was what it did, and the alternative was
+weakening the test that noticed.
 
 ### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
 

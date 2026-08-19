@@ -1227,13 +1227,14 @@ pub fn every_command() -> Vec<Command> {
             },
         },
         // The buffer fill, with a NON-ZERO value so the corpus carries the wire
-        // the replayer refuses (WebGPU's `clearBuffer` is zero-only). Its offset
-        // and size are distinct so a transposition among the `u64` fields shows.
-        Command::FillBuffer {
+        // Its offset and size are distinct so a transposition among the `u64`
+        // fields shows. It carried a `value` until the seam's fill became a
+        // clear — the corpus used `0xDEAD_BEEF` there precisely because the
+        // replayer refused it, and there is no such value to refuse now.
+        Command::ClearBuffer {
             buffer: handle(188, 189),
             offset: 64,
             size: 256,
-            value: 0xDEAD_BEEF,
         },
         // The host→buffer upload — `queue.writeBuffer` on the replayer, not an
         // encoder op. Its buffer, offset and payload are all distinct so a
@@ -1797,12 +1798,11 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         Command::CopyBufferToBuffer { copy } => stream.copy_buffer_to_buffer(copy),
         Command::CopyBufferToImage { copy } => stream.copy_buffer_to_image(copy),
         Command::CopyImageToImage { copy } => stream.copy_image_to_image(copy),
-        Command::FillBuffer {
+        Command::ClearBuffer {
             buffer,
             offset,
             size,
-            value,
-        } => stream.fill_buffer(*buffer, *offset, *size, *value),
+        } => stream.clear_buffer(*buffer, *offset, *size),
         Command::WriteBuffer {
             buffer,
             offset,

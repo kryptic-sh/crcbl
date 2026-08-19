@@ -344,8 +344,6 @@ impl Device for WgpuDevice {
         let gated = |feature: hal::Features, why: &'static str| -> hal::Support {
             hal::Support::granted(has, feature, why)
         };
-        const NO_VALUE_FILL: &str =
-            "wgpu's only fill is clear_buffer, which writes zero and takes no value";
         // Not "wgpu has no mesh stage": the resolved wgpu does, natively and
         // experimentally, and this backend enables none of it. The browser is
         // where the stage is genuinely absent, and the browser is where
@@ -359,7 +357,6 @@ impl Device for WgpuDevice {
 
         match capability {
             C::BufferFillZero => hal::Support::Yes,
-            C::BufferFillRepeatedByte | C::BufferFillWord => hal::Support::No(NO_VALUE_FILL),
             C::ImageToImageCopy => hal::Support::Yes,
             // `conv::map_aspect` turns ImageAspect::DEPTH into
             // `wgpu::TextureAspect::DepthOnly` and the copy carries it, so a

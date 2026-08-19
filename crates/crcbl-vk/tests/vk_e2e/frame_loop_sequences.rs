@@ -246,7 +246,7 @@ fn a_failed_submit_does_not_wedge_the_retire_timeline() {
         label: Some("vk e2e recovery"),
         queue: headless.queue,
     });
-    encoder.fill_buffer(staging, 0, 256, 0);
+    encoder.clear_buffer(staging, 0, 256);
     let commands = encoder.finish().expect("recording succeeded");
     device
         .submit(headless.queue, &SubmitInfo::new(&[commands]))

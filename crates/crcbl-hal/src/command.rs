@@ -692,11 +692,27 @@ pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Image-to-image copy.
     fn copy_image_to_image(&mut self, copy: &ImageCopy);
 
-    /// Fills a buffer range with a repeating 32-bit value.
+    /// Zeroes a buffer range.
     ///
-    /// The idiomatic way to zero an indirect count buffer at the start of a
-    /// frame, which is otherwise a whole compute dispatch for four bytes.
-    fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32);
+    /// **Zero and nothing else, which is why it is a clear rather than a fill.**
+    /// This took a `value: u32` until 2026-08-19 and promised "a repeating
+    /// 32-bit value", which two of the four backends could never keep: Metal's
+    /// `fillBuffer:range:value:` repeats a *byte*, so only a word with four
+    /// equal bytes has an encoding, and WebGPU offers `clearBuffer` and no
+    /// valued fill at all. A parameter three backends had to refuse most values
+    /// of is not a seam, and `Capability::BufferFillRepeatedByte` and
+    /// `BufferFillWord` existed only to describe how badly each one could keep
+    /// the promise.
+    ///
+    /// The name follows what the backends call it — `clearBuffer` on WebGPU,
+    /// `clear_buffer` on wgpu — rather than what one of them could do.
+    ///
+    /// Zeroing an indirect count at the top of a frame is the use this was
+    /// written for, and it is **not** what the renderer does: a clear is legal
+    /// only outside a pass, and a render-graph frame is passes end to end. See
+    /// `crcbl_shaders::clear_counters`, which zeroes from inside the graph and
+    /// is what let those counters become device-local.
+    fn clear_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64);
 
     // --- render scope ---
 
