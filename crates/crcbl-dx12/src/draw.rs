@@ -330,7 +330,7 @@ mod tests {
     /// Getting the indexed structure's width wrong — the last pair, where 16 is
     /// legal for a plain draw and one word short of an indexed one.
     #[test]
-    fn an_indirect_calls_stride_is_only_checked_when_it_is_used() {
+    fn a_d3d12_indirect_draws_stride_is_only_checked_when_it_is_used() {
         assert_eq!(
             plan_indirect(IndirectKind::Draw, 0, 1, 0, 16).expect("one structure fills the buffer"),
             Some(IndirectPlan {

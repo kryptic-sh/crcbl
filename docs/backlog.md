@@ -8138,21 +8138,6 @@ rename's paths:
   `crates/crcbl/tests/hal_seam_e2e.rs` — the agnostic suite absorbed it, which
   is the outcome the paragraph above calls the convention arriving.
 
-### One backend test name still says nothing about its backend
-
-Both pairs this entry used to hold as deliberately diverging have since been
-renamed, and `docs/plan/12-testing.md` was updated with them rather than
-stranded — which was the reason given for leaving them alone. Metal's limits
-test says `metal` now, and its indirect-stride test carries `a_metal_`.
-
-What is left is one half. `crcbl-dx12`'s
-`an_indirect_calls_stride_is_only_checked_when_it_is_used` (`src/draw.rs`) names
-neither D3D12 nor the verb its Metal counterpart uses, so a grep for one still
-misses the other. Whether that matters depends on something not checked here:
-whether the two assert the same obligation, in which case the convention wants
-both to name their API, or different ones, in which case the verbs are doing
-real work and the pair is not a pair.
-
 ### Exact test-name collisions still open between non-backend crates
 
 Measured over every crate under `crates/` with the same detector used for the
