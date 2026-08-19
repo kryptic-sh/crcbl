@@ -1868,12 +1868,19 @@ takes both comparisons with it. It is not made worse by the new step, which runs
 after and passed on `ae0d03b`, but it does mean the deletion bar's oracle clause
 rests on a gate that is down a third of the time.
 
-**Not diagnosed.** The candidate is the runner's Chromium sandbox or dbus
-availability rather than anything in the repo, since the failure is before any
-page loads. What would settle it: capture the browser's own stderr on the
-failing path — `browser-launch.mjs` currently reports only that the port file
-never appeared, so the launch failure's reason is discarded rather than shown.
-That is a small change to that file and the obvious first step.
+**Diagnosed, and the budget was the cause.** The driver already prints the
+browser's stderr on this path, and the failing run's is two dbus errors at **22
+seconds** after launch and then silence until the 30-second deadline. The loop
+distinguishes a browser that _exited_ — a different message — so this branch is
+only reached by one that is alive and has not finished starting. For scale, a
+healthy runner drives the whole phase, launch and all eleven scenes and their
+readbacks, in 14 to 19 seconds.
+
+So the browser was still starting and the gate gave up on it.
+`LAUNCH_TIMEOUT_MS` is now 120 seconds in `render-harness-e2e.mjs` and
+`probe-e2e.mjs`, which is spent only on the path that would otherwise have
+failed. **Whether that is enough is not yet known** — the next occurrence is the
+measurement, and it will say a longer time rather than the same one.
 
 ### The viewer's suite segfaulted once on lavapipe, and did not again
 

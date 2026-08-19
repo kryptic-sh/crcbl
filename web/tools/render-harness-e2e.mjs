@@ -67,7 +67,24 @@ import {
 } from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
-const LAUNCH_TIMEOUT_MS = 30_000;
+/**
+ * How long to wait for Chrome to write `DevToolsActivePort` before giving up.
+ *
+ * **Two minutes, and it was thirty seconds.** Three of the last eight
+ * non-cancelled Pages runs on `main` failed here, and the failing run's own
+ * evidence says the browser was still starting rather than wedged: it reached
+ * dbus initialisation 22 seconds in, printed nothing further, and had not
+ * written the port file when the deadline fired at 30. The loop below already
+ * distinguishes a browser that *exited* — that is a different message — so this
+ * branch is only ever reached by one that is alive and has not got there yet.
+ *
+ * For scale: on a healthy runner the whole drive phase, launch and every scene
+ * and readback together, takes 14 to 19 seconds. A launch alone approaching
+ * thirty is already pathological, so this budget is not tuned to normal — it is
+ * headroom for a runner having a bad minute, and it is spent only on the path
+ * that would otherwise fail.
+ */
+const LAUNCH_TIMEOUT_MS = 120_000;
 const RUN_TIMEOUT_MS = 180_000;
 
 function fail(message) {

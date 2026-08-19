@@ -797,6 +797,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   but its own `status`, so a submission nobody waited on failed in total
   silence. Failures are now tracked per submission and logged as errors.
 
+### Fixed
+
+- **The browser gates wait two minutes for Chrome to start, not thirty
+  seconds.** Three of the last eight non-cancelled Pages runs on `main` died
+  with "the browser never wrote DevToolsActivePort", and the failing run's own
+  stderr says why: it reached dbus initialisation 22 seconds after launch and
+  had not written the port file when the deadline fired at 30. The driver
+  already distinguishes a browser that _exited_, so that branch is only reached
+  by one still starting — the gate was giving up on a live browser. A healthy
+  runner drives the whole phase, launch and eleven scenes and their readbacks,
+  in 14 to 19 seconds, so the new budget is headroom for a bad minute and is
+  spent only on the path that would otherwise fail.
+
 ### Added
 
 - **`Capability::SamplerAnisotropy` is driven by the agnostic seam suite**, so
