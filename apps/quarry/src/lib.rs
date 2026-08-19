@@ -26,6 +26,9 @@
 //! All three [`GeometryPath`](crcbl::hal::GeometryPath) values draw it, forced
 //! by subtracting features from one adapter, and they agree about the frame.
 //!
+//! One assertion is not a count — that the face is shaded by the light it is
+//! given — because every other one would survive a face lit from the wrong side.
+//!
 //! Still owed, from that document's milestones: the LOD tint and heatmap
 //! overlays, and the skinned and tiling cases with a Pages demo. There is no
 //! window, so there are no golden frames yet.

@@ -129,6 +129,11 @@ pub(crate) struct Frame {
     /// `None` on the mesh path — where a mesh is one bucket and the level is
     /// chosen per cluster instead.
     pub(crate) uniform: Option<Uniform>,
+    /// The frame itself, as read back — empty where nothing was drawn.
+    ///
+    /// Held because coverage, the cut and the triangle counts are all *counts*,
+    /// and a face lit from the wrong side leaves every one of them unchanged.
+    pub(crate) pixels_rgba: Vec<u8>,
 }
 
 /// What a uniform cut drew, read out of the indirect arguments.
@@ -276,7 +281,16 @@ impl Quarry {
     /// before it on this renderer — which is what makes a dolly a different
     /// measurement from the same positions rendered by fresh contexts.
     pub(crate) fn frame(&mut self, at: f32) -> Frame {
-        frame_body(self, at)
+        self.lit_frame(at, &crcbl::render::DirectionalLight::default())
+    }
+
+    /// The same, under a light of the caller's choosing.
+    ///
+    /// The one thing quarry measures that is not a count. See
+    /// `shading::the_face_is_shaded_by_the_light_it_is_given`, which is the
+    /// caller and the reason this exists.
+    pub(crate) fn lit_frame(&mut self, at: f32, light: &crcbl::render::DirectionalLight) -> Frame {
+        frame_body(self, at, light)
     }
 
     /// Unwinds in reverse order of creation. Nothing here has a `Drop`, and a
@@ -297,7 +311,7 @@ pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>
 }
 
 /// The body of one frame: renders at `at` along the dolly and measures it.
-fn frame_body(quarry: &mut Quarry, at: f32) -> Frame {
+fn frame_body(quarry: &mut Quarry, at: f32, light: &crcbl::render::DirectionalLight) -> Frame {
     let (width, height) = EXTENT;
     let bytes = u64::from(width) * u64::from(height) * 4;
 
@@ -321,12 +335,7 @@ fn frame_body(quarry: &mut Quarry, at: f32) -> Frame {
 
     quarry
         .renderer
-        .begin_frame(
-            device,
-            &dolly(at),
-            &crcbl::render::DirectionalLight::default(),
-            EXTENT,
-        )
+        .begin_frame(device, &dolly(at), light, EXTENT)
         .expect("the uniform buffer is writable");
 
     let mut encoder = device.create_command_encoder(&crcbl::hal::CommandEncoderDesc {
@@ -387,6 +396,7 @@ fn frame_body(quarry: &mut Quarry, at: f32) -> Frame {
 
     // **Drawn, wherever there are pixels to read.**
     let mut covered = 0usize;
+    let mut frame = Vec::new();
     let pixels = (width * height) as usize;
     if backend() == GpuBackend::Null {
         eprintln!(
@@ -394,7 +404,7 @@ fn frame_body(quarry: &mut Quarry, at: f32) -> Frame {
              recording only — run with CRCBL_GPU=vk (or dx12, metal) for the pixels"
         );
     } else {
-        let mut frame = vec![POISON; bytes as usize];
+        frame = vec![POISON; bytes as usize];
         readback(quarry.ctx.device(), staging, bytes, &mut frame);
         let mut histogram: std::collections::HashMap<[u8; 4], usize> =
             std::collections::HashMap::new();
@@ -440,6 +450,7 @@ fn frame_body(quarry: &mut Quarry, at: f32) -> Frame {
         pixels,
         cut,
         uniform,
+        pixels_rgba: frame,
     }
 }
 

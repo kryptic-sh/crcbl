@@ -27,6 +27,7 @@
 mod dolly;
 mod paths;
 mod residency;
+mod shading;
 
 // The fixture and the two readbacks, in a file of their own because every area
 // opens the same ring and measures a frame the same two ways.

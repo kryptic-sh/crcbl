@@ -799,6 +799,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **quarry asserts one thing that is not a count: that the face is shaded.**
+  Coverage, the per-cluster cut, the uniform cut's walk and the triangle counts
+  would every one be unchanged by a face lit from the wrong side, which is the
+  gap a golden closes — but shading is a mechanism, so it can be observed by
+  moving its input. Crossing the sun from one shoulder to the other changes
+  58.3% of the frame, and switching it off changes 37.2%; a light of **no colour
+  has no direction**, byte for byte, which is where a shadow cascade that
+  survived its own light would show up.
+
+  **What was tried and is not true: "a sun below the horizon is no sun."** It
+  looked like a leak — a sun 53° under moves 12 pixels the unlit frame does not,
+  and one 24° under moves 12,227 — and it is correct rendering. The face carries
+  34 metres of relief over 120 of width, so it has slopes steep enough to catch
+  a low sun. Recorded in the test, because the measurement reads like a bug.
+
 - **The dolly runs on every path, and quarry records its triangle counts.** The
   sample's exit criteria ask for no LOD popping on _any_ path and a triangle
   count per path, and the two indirect paths needed their own observable: a
