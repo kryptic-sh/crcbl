@@ -947,9 +947,23 @@ reporting the browser's words.
 
 Unchanged behaviour and the probe gate is green — nothing is failing today. But
 it means the one harness whose job is diagnosing the seam is the one place a
-failure diagnoses as a timeout. Extending the eight to absorb the new reply is
-mechanical; doing it while adding a ninth probe would be cheaper than doing it
-twice.
+failure diagnoses as a timeout.
+
+**Measured on 2026-08-20 rather than estimated, and it is wider than "eight".**
+Twelve state machines carry the swallowing arm — `ReadbackProbe`, `DrawProbe`,
+`ComputeProbe`, `CopyChainProbe`, `FillProbe`, `PresentProbe`, `ReconfigProbe`,
+`IndirectProbe`, `DepthProbe`, `StencilProbe`, `MsaaProbe`, `OcclusionProbe` —
+each a separate enum with its own `absorb`, its own `__crcbl_web_*` reader, and
+a state code that `web/engine/gpu-probe.js` mirrors in one of its twenty frozen
+tables. So a `Failed { reason }` variant is not twelve edits but twelve times
+four, and it moves the wasm ABI the JS side is written against.
+
+**Mechanical but wide, and testable without a browser**, which is the one thing
+that makes it cheaper than it looks: `absorb` is a pure function over
+`&[(u64, Reply)]`, so feeding it a `Reply::ReadbackFailed` is an ordinary unit
+test in this crate — the same route
+`a_capability_declared_unsupported_is_refused_by_its_own_call` takes. Doing it
+while adding a thirteenth probe is still cheaper than doing it twice.
 
 ### glTF reaches the renderer — what it still cannot open
 
