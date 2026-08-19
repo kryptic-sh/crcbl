@@ -17,14 +17,12 @@
 //! clear, the extent and `triangle.slang` so that the indirect path varies
 //! nothing but its arguments.
 
-use crate::harness::{DeviceSlot, Headless, instance, poisoned};
-use crcbl_core::SurfaceTarget;
+use crate::harness::{Headless, poisoned};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-    CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format,
-    ImageAspect, ImageSubresourceLayers, ImageSubresourceRange, Instance, LoadOp, MemoryLocation,
-    PresentInfo, PresentMode, ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc, ResourceState,
-    StoreOp, SubmitInfo, SwapchainDesc,
+    CommandEncoderDesc, Device, Extent3d, Features, Format, ImageAspect, ImageSubresourceLayers,
+    ImageSubresourceRange, LoadOp, MemoryLocation, PresentInfo, ReadbackDesc, ReadbackState,
+    Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
 };
 
 /// The size the triangle suite renders at.
@@ -48,43 +46,11 @@ impl Headless {
     /// each of them happened to prefer, or a format change would look like a
     /// rendering regression.
     pub(crate) fn open_for_triangle() -> Self {
-        let instance = instance();
-        let adapter = instance.adapters().remove(0);
-        // SAFETY: `Offscreen` names no platform object at all.
-        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
-            .expect("offscreen always works");
-        let device = instance
-            .create_device(&DeviceDesc {
-                label: Some("vk e2e triangle"),
-                adapter: adapter.id,
-                required_features: Features::empty(),
-                optional_features: Features::GPU_DRIVEN | Features::DEBUG_MARKERS,
-                compatible_surface: Some(surface),
-            })
-            .expect("a device opens");
-        let queue = device
-            .queue(crcbl_hal::QueueKind::Graphics)
-            .expect("a graphics queue always exists");
-        let format = Format::Rgba8UnormSrgb;
-        let swapchain = device
-            .create_swapchain(&SwapchainDesc {
-                label: Some("vk e2e triangle ring"),
-                surface,
-                format,
-                extent: TRIANGLE_EXTENT,
-                image_count: 2,
-                present_mode: PresentMode::Fifo,
-                composite_alpha: CompositeAlpha::Opaque,
-            })
-            .expect("the ring is created");
-        Self {
-            instance,
-            device: DeviceSlot::new(device),
-            surface,
-            swapchain,
-            queue,
-            format,
-        }
+        Self::open_pinning_format(
+            "vk e2e triangle",
+            Features::GPU_DRIVEN | Features::DEBUG_MARKERS,
+            TRIANGLE_EXTENT,
+        )
     }
 }
 

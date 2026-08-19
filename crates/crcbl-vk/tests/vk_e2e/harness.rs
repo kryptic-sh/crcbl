@@ -230,6 +230,61 @@ impl Headless {
         }
     }
 
+    /// Opens a fixture whose swapchain format is **pinned**, for the suites
+    /// that compare golden images.
+    ///
+    /// [`open_with`](Self::open_with) takes the surface's preferred format,
+    /// which is right for tests that are about the surface. A golden compared
+    /// across two drivers must not depend on which format each of them happened
+    /// to prefer, or a format change reads as a rendering regression — so these
+    /// callers pin `Rgba8UnormSrgb` instead.
+    ///
+    /// `optional` is the whole optional set rather than an addition to a
+    /// default, because asking for **less** is how a test reaches an arm no
+    /// adapter here would otherwise select: `mesh`'s geometry-path sweep
+    /// subtracts `DRAW_INDIRECT_COUNT` to reach `IndirectPerBatch`, and
+    /// `pipeline`'s bindless refusal subtracts `DESCRIPTOR_INDEXING`.
+    pub(crate) fn open_pinning_format(label: &str, optional: Features, extent: (u32, u32)) -> Self {
+        let instance = instance();
+        let adapter = instance.adapters().remove(0);
+        // SAFETY: `Offscreen` names no platform object at all.
+        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("offscreen always works");
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: Some(label),
+                adapter: adapter.id,
+                required_features: Features::empty(),
+                optional_features: optional,
+                compatible_surface: Some(surface),
+            })
+            .expect("a device opens");
+        let queue = device
+            .queue(crcbl_hal::QueueKind::Graphics)
+            .expect("a graphics queue always exists");
+        let format = Format::Rgba8UnormSrgb;
+        let ring = format!("{label} ring");
+        let swapchain = device
+            .create_swapchain(&SwapchainDesc {
+                label: Some(&ring),
+                surface,
+                format,
+                extent,
+                image_count: 2,
+                present_mode: PresentMode::Fifo,
+                composite_alpha: CompositeAlpha::Opaque,
+            })
+            .expect("the ring is created");
+        Self {
+            instance,
+            device: DeviceSlot::new(device),
+            surface,
+            swapchain,
+            queue,
+            format,
+        }
+    }
+
     /// Reads a whole image back into `out`, polling with a deadline.
     pub(crate) fn readback(&self, staging: crcbl_hal::BufferHandle, size: u64, out: &mut [u8]) {
         let device = self.device.as_ref();

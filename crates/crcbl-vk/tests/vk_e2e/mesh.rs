@@ -56,12 +56,11 @@
 //! [`Features::MESH_SHADER`]: crcbl_hal::Features::MESH_SHADER
 //! [`Features::TASK_SHADER`]: crcbl_hal::Features::TASK_SHADER
 
-use crate::harness::{DeviceSlot, Headless, POISON, instance, poisoned};
-use crcbl_core::SurfaceTarget;
+use crate::harness::{Headless, POISON, poisoned};
 use crcbl_hal::{
-    Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, CompositeAlpha,
-    DeviceDesc, Extent3d, Features, Format, ImageAspect, ImageSubresourceLayers, Instance,
-    MemoryLocation, PresentInfo, PresentMode, ResourceState, SubmitInfo, SwapchainDesc,
+    Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, Features,
+    Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,
+    SubmitInfo,
 };
 
 /// The size the mesh suite renders at.
@@ -182,43 +181,11 @@ impl Headless {
     /// would otherwise select — so asking for less is the only way to run that
     /// arm on real hardware at all.
     pub(crate) fn open_for_mesh_with(optional: Features) -> Self {
-        let instance = instance();
-        let adapter = instance.adapters().remove(0);
-        // SAFETY: `Offscreen` names no platform object at all.
-        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
-            .expect("offscreen always works");
-        let device = instance
-            .create_device(&DeviceDesc {
-                label: Some("vk e2e mesh"),
-                adapter: adapter.id,
-                required_features: Features::empty(),
-                optional_features: optional | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
-                compatible_surface: Some(surface),
-            })
-            .expect("a device opens");
-        let queue = device
-            .queue(crcbl_hal::QueueKind::Graphics)
-            .expect("a graphics queue always exists");
-        let format = Format::Rgba8UnormSrgb;
-        let swapchain = device
-            .create_swapchain(&SwapchainDesc {
-                label: Some("vk e2e mesh ring"),
-                surface,
-                format,
-                extent: MESH_EXTENT,
-                image_count: 2,
-                present_mode: PresentMode::Fifo,
-                composite_alpha: CompositeAlpha::Opaque,
-            })
-            .expect("the ring is created");
-        Self {
-            instance,
-            device: DeviceSlot::new(device),
-            surface,
-            swapchain,
-            queue,
-            format,
-        }
+        Self::open_pinning_format(
+            "vk e2e mesh",
+            optional | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
+            MESH_EXTENT,
+        )
     }
 }
 

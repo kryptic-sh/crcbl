@@ -10,11 +10,14 @@
 //! driver's initialisation failure, which names neither the module nor the
 //! stage.
 //!
-//! Which arm the bindless test takes depends on what the device reports, and
-//! both are asserted — which is exactly why this suite is run on radv and on
-//! lavapipe rather than on one of them.
+//! The bindless test asserts both arms on every machine. The accepting one
+//! comes from whatever this device reports; the refusing one comes from a
+//! second device opened without `DESCRIPTOR_INDEXING`, because every adapter
+//! this suite can reach reports it and the refusal would otherwise be compiled
+//! and run nowhere.
 
 use crate::harness::Headless;
+use crate::triangle::TRIANGLE_EXTENT;
 use crcbl_hal::{Features, SampleType};
 
 /// The tier story for bind-group layouts, against whatever this machine is.
@@ -22,8 +25,10 @@ use crcbl_hal::{Features, SampleType};
 /// The seam requires a device without `DESCRIPTOR_INDEXING` to **reject** a
 /// layout that sets any [`BindingFlags`](crcbl_hal::BindingFlags), rather than
 /// ignoring it — "a bindless array quietly downgraded to a fixed one reads
-/// garbage at index 4097". Which branch runs depends on the driver, and both are
-/// asserted, which is exactly why this suite runs on radv and lavapipe.
+/// garbage at index 4097". The first branch runs whichever arm this driver's
+/// tier selects; the refusal is then asserted again against a device opened
+/// without the feature, so it runs everywhere rather than only on a driver
+/// nobody here has.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier() {
@@ -90,6 +95,39 @@ fn a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier() {
             eprintln!("vk e2e: Tier B device refused the bindless layout, as required: {error}");
         }
     }
+
+    // **The refusal arm, on a device manufactured to have it.** The branch
+    // above takes whichever arm this driver's tier selects, and every adapter
+    // this suite can reach — radv and lavapipe both — reports
+    // `DESCRIPTOR_INDEXING`, so the `Err` half was compiled and executed
+    // nowhere. Subtracting the feature is what reaches it, the same move
+    // `mesh`'s geometry-path sweep makes to reach `IndirectPerBatch`.
+    let lesser = Headless::open_pinning_format(
+        "vk e2e bindless tier b",
+        Features::DEBUG_MARKERS,
+        TRIANGLE_EXTENT,
+    );
+    let tier_b = lesser.device.as_ref();
+    assert!(
+        !tier_b
+            .caps()
+            .features
+            .contains(Features::DESCRIPTOR_INDEXING),
+        "this device is opened without DESCRIPTOR_INDEXING; if it reports the \
+         feature anyway the subtraction is not happening and the arm below \
+         would be the Tier A one wearing this one's name"
+    );
+    let error = tier_b
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: None,
+            entries: &entries,
+        })
+        .expect_err("a device without DESCRIPTOR_INDEXING must refuse a bindless layout");
+    assert!(
+        matches!(error, crcbl_hal::HalError::Unsupported { .. }),
+        "the refusal must be loud and typed, not an InvalidDescriptor: {error}"
+    );
+    lesser.finish();
 
     // `VARIABLE_COUNT` anywhere but last is a caller bug on *every* tier.
     let misplaced = [entries[1], entries[0]];
