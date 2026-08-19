@@ -5226,6 +5226,12 @@ were signed off at "25/25" against a site built before the focus, pause and menu
 work landed, and the gate had in fact been red the whole time. Pass `--build`,
 or delete `target/site` first.
 
+**There is a warning for it now**, added after this was written:
+`web/run-browser-e2e.sh` runs `find -newer` against the entry point it copied
+and prints "re-run with --build … before believing the result" when any source
+is newer than the built site. It warns rather than fails, so the advice above is
+unchanged — but a stale run now says so instead of passing quietly.
+
 ## Should the click that refocuses a canvas reach the game at all?
 
 **Behaviour that surprised us, deliberately left alone.** A canvas has no title
@@ -5348,8 +5354,13 @@ The modular panel is built and all three samples switch it on with F3 (or
   `cfg!(debug_assertions)`, which is sample rule 4's "on by default in dev
   builds" taken literally; the demos on `crcbl.kryptic.sh` are release builds,
   so a visitor has to press F3. Whether the published demos should default it on
-  is a product decision nobody has made. `web.rs` builds `Options::default()`,
-  so turning it on there is one field.
+  is a product decision nobody has made. This used to say `web.rs` builds an
+  `Options::default()` and turning it on there is one field. It does not —
+  `crates/crcbl/src/web.rs` names no such type, and the `Options` structs that
+  do exist belong to the apps, one per `src/args.rs`. The switch is
+  `Common::debug_overlay` in `crates/crcbl/src/args.rs`, which each app sets for
+  itself, so turning it on for the published demos is a change per app rather
+  than one field.
 
 ## Coverage gaps
 
@@ -5363,12 +5374,15 @@ The modular panel is built and all three samples switch it on with F3 (or
   too. The browser gate (`web/run-browser-e2e.sh --build`) covers the four demos
   end to end, which is the only place that path runs.
 
-- **`html-validate` reports `require-sri` on every `<link>` and `<script>`, and
-  it is being ignored.** Subresource Integrity guards a resource served by
-  someone else; the stylesheet and the demo shims are same-origin files this
-  repo builds in the same step as the page that names them, and a hash pinned in
-  the layout would have to be regenerated on every edit to `style.css`. Recorded
-  so the next person to run the validator does not re-litigate it.
+- **Subresource Integrity is deliberately absent, and nothing checks for it.**
+  This used to say `html-validate` reports `require-sri` and is being ignored;
+  that tool is not wired into this repository at all, so nothing reports it. The
+  reasoning for not wanting it stands. Subresource Integrity guards a resource
+  served by someone else; the stylesheet and the demo shims are same-origin
+  files this repo builds in the same step as the page that names them, and a
+  hash pinned in the layout would have to be regenerated on every edit to
+  `style.css`. Recorded so the next person to run the validator does not
+  re-litigate it.
 - **No visual regression baseline for the site.** The browser gate captures the
   _canvas_ — deliberately, since the page's chrome is not what it tests — so a
   stylesheet or template change that breaks the layout around the canvas would
@@ -5841,11 +5855,12 @@ S2 is done — simulation, art, audio, persistence and the browser demo. What is
 not:
 
 - **No golden buffer for the cues.** The three sounds are synthesised
-  deterministically — `audio::noise` runs splitmix64 from a fixed seed — so a
-  golden buffer is _possible_, and there is not one. What the tests assert is
-  that each cue fires, that it carries the position of the thing that raised it,
-  and that the explosion decays and is not a tone. Nobody has listened to the
-  result on a real device and no test can tell a good explosion from a bad one.
+  deterministically — `crcbl_audio::synth::noise_burst` runs splitmix64 from a
+  fixed seed — so a golden buffer is _possible_, and there is not one. What the
+  tests assert is that each cue fires, that it carries the position of the thing
+  that raised it, and that the explosion decays and is not a tone. Nobody has
+  listened to the result on a real device and no test can tell a good explosion
+  from a bad one.
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
   simulated play), 337 rocks spawned, 1,221 bullets fired, six waves cleared,
