@@ -22,12 +22,13 @@ not, and the reasons differ:
   would be — the browser side reporting objects the stream never freed — is not
   designed.
 
-**The dx12 half is type-checked, not run.**
-`cargo clippy -p crcbl-dx12 --target x86_64-pc-windows-msvc --all-targets -- -D warnings`
-is clean, and that is the whole of the local verification available; whether it
-fires, and on what, comes from the `dx12 e2e (software adapter)` job. Given
-`crcbl-vk`'s suites had four leaks between them, the expectation is that it will
-find some.
+**The dx12 half has now run, and reports nothing.** Run 32292785037's
+`dx12 e2e (software adapter)` job is green and its log contains no
+`object(s) still alive at device teardown` line from any backend, so the WARP
+suites leak nothing the reporter can see. That is a weaker result than it
+sounds: the warning does not fail a job, so a green run never proved this on its
+own and the log had to be read. What remains open is only the mtl and webgpu
+halves above.
 
 ### `render_e2e` never runs against dx12's own e2e job, and that hid a step
 
