@@ -1,16 +1,19 @@
-//! Reports what the quarry face is, and what the meshlet builder makes of it.
+//! Reports what the quarry face is, and what the builders make of it.
 //!
-//! **A measuring tool rather than a viewer, and that is the milestone talking.**
+//! **A measuring tool rather than a viewer**, and it opens no window and no
+//! adapter on purpose: a sample binary that needed a GPU to tell you how many
+//! triangles it generates would be unrunnable in every job this repository has
+//! on a machine without one.
+//!
 //! `docs/plan/sample/14-quarry.md`'s exit criteria ask for "triangle count and
-//! draw count per path, at a stated camera position, recorded". The triangle
-//! and cluster halves of that need no device, so they are answerable now and
-//! this answers them; the draw counts arrive with the renderer.
-//!
-//! It opens no window and no adapter on purpose. A sample binary that needed a
-//! GPU to tell you how many triangles it generates would be untestable in every
-//! job this repository runs on a machine without one.
+//! draw count per path, at a stated camera position, recorded". The counts that
+//! need no device are here. **The ones that need one are measured and asserted
+//! rather than printed** — `tests/device/` draws the face on every
+//! `GeometryPath`, reads back what covered the frame, and reports the drawn
+//! level and triangle count per path. Run it with
+//! `CRCBL_GPU=vk apps/quarry/tests/run-quarry-e2e.sh`.
 
-use crcbl_quarry::{face, scene};
+use crcbl_quarry::{dag, face, scene};
 
 /// Quads per side of the reported face.
 ///
@@ -48,5 +51,38 @@ fn main() {
         reserved.indices,
         crcbl::render::scene::Capacities::default().vertices,
         crcbl::render::scene::Capacities::default().indices,
+    );
+
+    // The hierarchy the sample is actually about. Reported per level rather than
+    // as a total, because "how many levels and how fast do they shrink" is the
+    // question a reader has about a DAG and a single number answers neither.
+    let dag = match dag::quarry_dag(&face) {
+        Ok(dag) => dag,
+        Err(error) => {
+            eprintln!("quarry: the face could not be coarsened into a cluster DAG: {error}");
+            std::process::exit(1);
+        }
+    };
+    let per_level: Vec<String> = dag
+        .levels
+        .iter()
+        .map(|level| {
+            format!(
+                "{} cluster(s)/{} tri",
+                level.clusters.clusters.len(),
+                level.indices().len() / 3
+            )
+        })
+        .collect();
+    println!(
+        "quarry: {} DAG level(s), finest first — {}",
+        dag.levels.len(),
+        per_level.join(", "),
+    );
+    let levelled = dag::dag_capacities(&dag);
+    println!(
+        "quarry: the levelled scene reserves {} vertices and {} indices across {} mesh table \
+         entries",
+        levelled.vertices, levelled.indices, levelled.meshes,
     );
 }

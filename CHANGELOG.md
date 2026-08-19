@@ -974,6 +974,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asserted beside it — the base dominating at one pixel, and nothing of the base
   surviving at 4096 — so the mixing assertion is shown to be able to fail.
 
+- **The `quarry` binary reports the hierarchy, not just the flat mesh.** At its
+  256-cell default the face coarsens into **12 levels**, 1640 clusters and
+  131,072 triangles down to 30 and 1,540, and the levelled scene reserves
+  180,714 vertices across 12 mesh-table entries against the flat one's 82,562.
+  Per level rather than as a total, because "how many levels and how fast do
+  they shrink" is the question a reader has about a DAG and one number answers
+  neither. It still opens no device; what needs one is asserted in
+  `tests/device/`.
+
 - **`apps/quarry`'s face is a cluster hierarchy too.** The new
   `crcbl_quarry::dag` builds the QEM DAG over the same content through
   `crcbl_scene::build_cluster_dag` and describes it as a `Geometry::Dag` scene —
