@@ -105,11 +105,13 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSString, NSUInteger};
 use objc2_metal::{
-    MTLBuffer, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice,
+    MTLBlitCommandEncoder, MTLBuffer, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice,
     MTLIndirectCommandBuffer, MTLIndirectCommandBufferDescriptor,
     MTLIndirectCommandBufferExecutionRange, MTLIndirectCommandType, MTLLibrary, MTLPrimitiveType,
     MTLResource, MTLResourceID, MTLResourceUsage, MTLSize,
 };
+
+use objc2_foundation::NSRange;
 
 use crate::conv;
 use crate::device::to_ns;
@@ -627,6 +629,34 @@ impl Encode {
     /// family this backend does not query for. The kernel's own
     /// `index >= max_draws` guard is what makes the rounding up harmless, and
     /// it is the *only* thing that does.
+    /// Hands the encoded commands to the driver on an already-open blit
+    /// encoder, between the kernel that wrote them and the pass that runs them.
+    ///
+    /// **This is the one structural difference between the probes that pass and
+    /// the frame that hung.** `crcbl_mtl::device`'s two ICB rungs both `commit`
+    /// and `waitUntilCompleted` between encoding an ICB and executing it, so
+    /// kernel-write and execute land in *separate* command buffers. A frame does
+    /// both in one, and Apple's own GPU-encoding sample calls this in exactly
+    /// that position. Nothing here can execute Metal, so this is reasoning from
+    /// the difference plus Apple's guidance rather than a measurement — the
+    /// `mtl e2e` job is what settles it.
+    ///
+    /// The whole command count, because the kernel writes every index: the ones
+    /// past the count are `reset()` rather than left undefined, which is what
+    /// makes optimising the full range meaningful.
+    pub(crate) fn optimize(&self, encoder: &ProtocolObject<dyn MTLBlitCommandEncoder>) {
+        let range = NSRange {
+            location: 0,
+            length: to_ns(u64::from(self.params.max_draws)),
+        };
+        // SAFETY: `encoder` is open and belongs to the command buffer this
+        // encode's dispatch was recorded on, and `self.icb` is the buffer that
+        // dispatch writes. The range is the count the ICB was created with.
+        unsafe {
+            encoder.optimizeIndirectCommandBuffer_withRange(&self.icb, range);
+        }
+    }
+
     pub(crate) fn dispatch(&self, encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>) {
         encoder.setComputePipelineState(&self.kernel);
         // SAFETY for every setter below: `objc2` marks them unsafe because

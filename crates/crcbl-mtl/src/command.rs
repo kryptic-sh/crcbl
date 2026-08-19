@@ -145,6 +145,8 @@ const COPY_ENCODER: &str = "crcbl copies";
 /// [`Self::encode_render_pass`](MetalCommandEncoder::encode_render_pass) and
 /// `crcbl_mtl::icb`; named for the same reason [`COPY_ENCODER`] is, since no
 /// seam call names it either.
+const INDIRECT_COUNT_OPTIMISE: &str = "crcbl indirect-count optimise";
+
 const INDIRECT_COUNT_ENCODER: &str = "crcbl indirect-count encoding";
 
 /// The one Metal encoder that may be open on the command buffer — or, for a
@@ -753,6 +755,30 @@ impl MetalCommandEncoder {
                 encode.dispatch(&compute);
             }
             compute.endEncoding();
+
+            // Between the kernel that wrote the commands and the pass that runs
+            // them, on its own encoder — which is the only barrier Metal has.
+            //
+            // `crcbl_mtl::device`'s two ICB rungs both `commit` and
+            // `waitUntilCompleted` between encoding an ICB and executing it, so
+            // they never exercised kernel-write and execute in **one** command
+            // buffer, which is what a frame does. Apple's own GPU-encoding
+            // sample calls `optimizeIndirectCommandBuffer` in exactly this
+            // position. A nil encoder is reported rather than skipped: running
+            // the pass without it is the arrangement that hung.
+            let Some(blit) = raw.blitCommandEncoder() else {
+                self.fail(HalError::DeviceLost(
+                    "MTLCommandBuffer::blitCommandEncoder returned nil for the indirect-count \
+                     optimise between the encoding kernel and the pass that executes it"
+                        .to_string(),
+                ));
+                return;
+            };
+            blit.setLabel(Some(&NSString::from_str(INDIRECT_COUNT_OPTIMISE)));
+            for encode in &recording.prologue {
+                encode.optimize(&blit);
+            }
+            blit.endEncoding();
         }
         let encoder = raw.renderCommandEncoderWithDescriptor(&recording.descriptor);
         let Some(encoder) = encoder else {
