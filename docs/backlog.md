@@ -73,51 +73,28 @@ grid**: a path argument, the load through `crcbl::assets::DirSource`, the
 conversion, frame-on-load, orbit/pan/zoom/`F`, and one directional light. Every
 module's docs name its own omission; this is the list in one place.
 
-- **The grid floor.** The one part of milestone 1 that is missing, and the "mesh
-  or screen-space shader" question is now answerable rather than open.
+- **The grid floor — the pass exists, nothing draws it.** `crcbl_render::grid`
+  landed: a screen-space infinite grid, plane reconstructed per fragment, line
+  width from `fwidth` so it is constant in pixels at any zoom, two scales, a
+  distance fade, and `SV_Depth` written so geometry occludes it. Verified on a
+  real RX 7900 XTX through the render graph — grid visible against a far depth
+  clear, **zero lit pixels** against a near one, so the occlusion is real.
 
-  **The industry answer is the screen-space shader**, and for a reason a mesh
-  cannot address: a grid drawn as geometry has lines whose _screen_ width
-  changes with zoom, so it needs a density LOD to stay legible, and it either
-  ends at its own edges or is drawn absurdly large. Blender's overlay grid,
-  Godot 4's editor grid and Unity's all draw a full-screen pass instead,
-  reconstructing the ground plane per fragment by intersecting the view ray with
-  `y = 0` and using screen-space derivatives (`fwidth`) for a constant-width,
-  anti-aliased line that fades with distance. That is the correct-robust-and-
-  performant answer: one triangle, no pool growth, no LOD, and lines that look
-  the same at every zoom.
+  What remains is **wiring**: nothing calls `Grid::add_pass`, so no sample shows
+  a grid and no golden covers it. The call site needs the colour target, the
+  depth image and the camera matrices, all of which `forward` already has.
 
-  **What blocks it here is depth, and this was measured rather than assumed.**
-  `crcbl_render::forward::add_passes` returns exactly one `ImageId` — the HDR
-  colour — and nothing on that type exposes the depth image it renders against.
-  So a grid pass added in `apps/viewer`'s `gpu.rs`, beside the menu and UI
-  passes, **cannot be occluded by the model**: it would draw over or under the
-  whole thing with no depth test. The earlier framing here — mesh means a scene
-  change, shader means a pass in `crate::gpu` — was right about the mesh half
-  and wrong about the shader half being local.
+  Two things to settle when wiring it. `Grid::new` bakes `target_format` and
+  `depth_format` into its pipeline, so a caller drawing into a different pair
+  needs a second `Grid`. And `add_pass` takes only the inverse view-projection
+  and recovers the forward matrix with `Mat4::inverse()` each frame — the call
+  site has both, so passing both removes an inversion; left alone rather than
+  changing a signature with no caller to justify it.
 
-  So the real choice is where it lives, and two facts settle it against the
-  first instinct:
-  1. **A shader cannot live in the viewer.** Every `.slang` in this workspace is
-     in `crcbl-shaders`, whose build hashes each source against its committed
-     artifacts; no app owns one. So the grid's shader is engine-side whatever
-     happens, and putting the pass in the viewer would split one feature across
-     two crates.
-  2. **`crcbl-render` already owns chrome.** `menu.rs`, `button_skin.rs`,
-     `nine_slice.rs` and `ui_pass.rs` are all in it. A reference grid is not out
-     of place beside them, which is what the "editor furniture does not belong
-     in the renderer" objection assumed.
-
-  **So: the grid goes in `crcbl-render`, opt-in, and `forward::add_passes` keeps
-  its signature.** Depth is right there internally, which was the whole
-  difficulty. An earlier note here recommended widening `add_passes` to hand
-  depth back so the pass could sit in the viewer — that is recorded as the wrong
-  call, because it widens a public API for one consumer _and_ still leaves the
-  shader in another crate.
-
-  Not started. Grid as scene geometry stays rejected for the reason above: it
-  inherits depth for free and buys the zoom and LOD problems every editor
-  abandoned.
+  Only the SPIR-V has ever executed. The WGSL, MSL and DXIL artifacts compile
+  and validate — naga over the WGSL, `spirv-val` over the SPIR-V, the MSL read
+  by eye for `[[depth(any)]]` and `discard_fragment()` — but `SV_Depth` on Metal
+  and WebGPU is unrun.
 
 - **Milestone 2 in whole** — the mesh/material/texture panels, the wireframe and
   normals views, the exposure slider. `crate::gpu` has a `UiRenderer` pass now,

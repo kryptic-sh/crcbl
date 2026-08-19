@@ -69,6 +69,20 @@ msl-sha256 = 41a7201b8a7142f2286a7d79063a0c303ab97a4b77b3a575a1ce22e09c6c2999
 dxil = computeMain:dxil/draw_gen.computeMain.dxil:d80aef98fd3b193c9091cb7d1b1cc07e782786f45923d8bbaa1bcf0010276b6a
 entry-points = computeMain:glcompute
 
+[grid]
+source = shaders/grid.slang
+source-sha256 = d5049517c497424b52e17caf19fe905188db84f71727f155ccecbbf4c3e3664f
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/grid.spv
+spirv-sha256 = 289a65dd7f0d0d86d97ad377c3a8e96c6f7a37c3d75e1ee0e84be84eb45332b6
+wgsl = wgsl/grid.wgsl
+wgsl-sha256 = 591ac7c433c7342400264ca9050f84908e8d2f23d5cb2b6039a7141e15fcc7bf
+msl = msl/grid.metal
+msl-sha256 = e52d897788e4023fd4382f3438da9265eb25d174b7ace8e1b19ed16664b38409
+dxil = vertexMain:dxil/grid.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/grid.fragmentMain.dxil:9ba86d7496dfef41a5bbd87a4feea99d18089a5dfa6f8834d57dc761252889c7
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [light_cluster]
 source = shaders/light_cluster.slang
 source-sha256 = b522e072aaa779e7f1e69ef05d6d5bcd6a24d112e88a3ab2bb771c9fbc4cddde

@@ -1996,6 +1996,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_render::grid` draws an infinite reference grid as a screen-space
+  pass.** `grid.slang` reconstructs the ground plane per fragment — view ray
+  against `y = 0` — and derives line coverage from screen-space derivatives, so
+  a line is a constant width in pixels at any zoom and needs no density LOD. Two
+  scales, a distance fade, premultiplied output, and `SV_Depth` written from the
+  hit so scene geometry occludes it. This is the technique Blender's overlay
+  grid, Godot 4's and Unity's all use; a grid drawn as geometry cannot hold a
+  constant screen width.
+
+  It is `docs/plan/sample/05-viewer.md` milestone 1's last missing piece.
+  **Nothing adds it to a frame yet** — that is the next slice — so the pass
+  exists and is tested but no sample shows a grid.
+
 - **`CommandEncoder::fill_buffer` works on the D3D12 backend, for a value of
   zero.** `Capability::BufferFillZero` now reports supported on dx12, which
   takes the parity blocker list from eleven rows to ten. It is implemented the

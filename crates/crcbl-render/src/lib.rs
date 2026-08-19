@@ -132,6 +132,7 @@ pub mod draw_gen;
 pub mod effects;
 pub mod forward;
 pub mod graph;
+pub mod grid;
 pub mod instance_pool;
 pub mod layers;
 pub mod light;
