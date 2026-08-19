@@ -799,6 +799,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **quarry draws the same face on all three geometry paths.**
+  `docs/plan/sample/14-quarry.md`'s milestone 3, reached by subtracting features
+  from one capable adapter rather than by needing three machines: withholding
+  `MESH_SHADER` selects `IndirectCount` and withholding `DRAW_INDIRECT_COUNT` as
+  well selects `IndirectPerBatch`. The fixture asserts the path that opened is
+  the path asked for, because a device that never had the feature lands a rung
+  lower and would make a green comparison between one path and itself.
+
+  Read at two budgets, since they say different things. At one pixel the mesh
+  path's cut is the base mesh, so all three draw the same triangles and cover an
+  identical 28,650 pixels of 49,152. At sixteen the mesh path is drawing levels
+  1 and 2 per cluster while the other two select per instance — **different
+  geometry** — and they still land within four pixels of each other, which is
+  "no LOD popping" seen from another angle.
+
 - **quarry has its fixed dolly, and detail arrives as the camera closes.** One
   straight run down the face's own axis, nine stops, all on **one renderer** —
   which is what makes it a different measurement from the same positions

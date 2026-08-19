@@ -33,7 +33,7 @@
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{GpuContext, GpuContextDesc};
 use crcbl::hal::{
-    BufferDesc, BufferImageCopy, BufferUsage, Extent3d, Features, ImageAspect,
+    BufferDesc, BufferImageCopy, BufferUsage, Extent3d, Features, GeometryPath, ImageAspect,
     ImageSubresourceLayers, MemoryLocation, ReadbackDesc, ReadbackState, ResourceState,
 };
 use crcbl::render::scene::InstanceDesc;
@@ -87,7 +87,7 @@ const READBACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30
 const POISON: u8 = 0xA5;
 
 /// Which backend to open, `Null` unless `CRCBL_GPU` names another.
-fn backend() -> GpuBackend {
+pub(crate) fn backend() -> GpuBackend {
     match std::env::var("CRCBL_GPU") {
         Err(_) => GpuBackend::Null,
         Ok(name) => GpuBackend::from_name(&name).unwrap_or_else(|| {
@@ -169,6 +169,33 @@ pub(crate) enum Levels {
 impl Quarry {
     /// Opens the ring, generates the face and makes it resident.
     pub(crate) fn open(levels: Levels, budget: f32) -> Self {
+        Self::open_on(levels, budget, GeometryPath::MeshShader)
+    }
+
+    /// The same, on the geometry path `path` names — **by subtracting features
+    /// from one capable adapter**, which is how the engine's own suites reach a
+    /// path no device would select for itself.
+    ///
+    /// `GeometryPath::from_features` reads `MESH_SHADER` then
+    /// `DRAW_INDIRECT_COUNT` and falls through to `IndirectPerBatch`, so
+    /// withholding one feature at a time walks down the three. A device that
+    /// never had the feature lands on the same path by the same rule, which is
+    /// what makes the forced path evidence about the path rather than about this
+    /// adapter.
+    pub(crate) fn open_on(levels: Levels, budget: f32, path: GeometryPath) -> Self {
+        let wanted = match path {
+            GeometryPath::MeshShader => {
+                Features::MESH_SHADER | Features::TASK_SHADER | Features::GPU_DRIVEN
+            }
+            GeometryPath::IndirectCount => Features::GPU_DRIVEN,
+            GeometryPath::IndirectPerBatch => {
+                Features::GPU_DRIVEN.difference(Features::DRAW_INDIRECT_COUNT)
+            }
+        };
+        Self::open_with(levels, budget, wanted, path)
+    }
+
+    fn open_with(levels: Levels, budget: f32, wanted: Features, path: GeometryPath) -> Self {
         crcbl::core::log::init_logging();
         let ctx = GpuContext::open_offscreen(
             EXTENT,
@@ -179,9 +206,7 @@ impl Quarry {
                 // not *required*, because neither assertion here is about which
                 // path draws: `GeometryPath::from_features` resolves downward on
                 // a device without it.
-                optional_features: Features::MESH_SHADER
-                    | Features::TASK_SHADER
-                    | Features::GPU_DRIVEN,
+                optional_features: wanted,
                 ..GpuContextDesc::default()
             },
         )
@@ -203,12 +228,22 @@ impl Quarry {
             })
             .expect("one instance fits the reservation this scene asked for");
         renderer.set_lod_error_budget(budget);
+        let selected = ctx.device().caps().geometry_path();
         eprintln!(
-            "quarry: {levels:?} at a {budget}px budget, {} triangles, geometry path {:?}, \
+            "quarry: {levels:?} at a {budget}px budget, {} triangles, geometry path {selected:?}, \
              format {:?}",
             face.triangles(),
-            ctx.device().caps().geometry_path(),
             ctx.format(),
+        );
+        // **The path asked for is the path that opened.** Subtracting a feature
+        // is a request, and a device that never offered it lands one rung lower
+        // than intended — so a run that silently drew through `IndirectPerBatch`
+        // while claiming `IndirectCount` would be a green comparison between one
+        // path and itself. `Null` selects its own path and is exempt: it draws
+        // nothing to compare.
+        assert!(
+            selected == path || backend() == GpuBackend::Null,
+            "{path:?} was asked for by withholding features and {selected:?} opened"
         );
         Self {
             ctx,

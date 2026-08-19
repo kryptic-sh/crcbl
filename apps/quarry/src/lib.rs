@@ -23,10 +23,12 @@
 //! The fixed dolly runs too, on one renderer so that hysteresis is in play, and
 //! detail measurably arrives as the camera closes without the cut jumping.
 //!
+//! All three [`GeometryPath`](crcbl::hal::GeometryPath) values draw it, forced
+//! by subtracting features from one adapter, and they agree about the frame.
+//!
 //! Still owed, from that document's milestones: the LOD tint and heatmap
-//! overlays; the two indirect paths and the forced-path comparison; and the
-//! skinned and tiling cases with a Pages demo. There is no window, so there are
-//! no golden frames yet.
+//! overlays, and the skinned and tiling cases with a Pages demo. There is no
+//! window, so there are no golden frames yet.
 
 pub mod dag;
 pub mod face;
