@@ -2181,19 +2181,27 @@ a bare encoder, one verb per encoder so the first recorded refusal cannot mask
 the others, and finishes a clean encoder too so it cannot pass on a backend that
 refused every command buffer.
 
-**`UpdateBindGroup` did not need a bind group either**, which is the same
-mistake caught a second time: this backend refuses unconditionally and reads
-neither argument, because a `GPUBindGroup` exposes a label and nothing else. One
-call with a fabricated handle reaches it. **Nine of the twelve are now checked
-natively.**
+**Nine of this backend's thirteen unsupported rows are checked natively**, and
+the four that are not cannot be — which is a structural fact rather than a cost.
+The thirteen is `DIVERGENCES`' own row count for `BackendKind::WebGpu`, not a
+hand tally; an earlier version of this entry said "twelve", which came from
+counting something else entirely.
 
-**What is genuinely still uncovered here — checked one at a time this time**:
-`PushConstants` and `BindlessDescriptorArray` are refused where a layout is
-built, `IndirectArgumentPaddedStride` where an indirect draw is recorded against
-a real argument buffer, and `PolygonModeLine` where a graphics pipeline is
-created. Those three shapes are the seam suite's `exercise_*` machinery and not
-worth a second copy in this crate; a browser probe group remains the honest
-route for them.
+**The line falls exactly where the refusal is decided.** Nine are refused by
+this crate in Rust — a device method returning `Err`, or an encoder verb
+recording one for `finish` — so an ordinary unit test sees them. The other four
+are refused by `gpu-replay.js` in the browser, by the stream's own design rule:
+the writer "carries what the caller gives" and validates nothing, because "the
+replayer is the half that faces WebGPU". `push_constants` encodes and crosses;
+`create_graphics_pipeline` lets a `PolygonMode::Line`, a `depth_clamp` the
+device cannot serve and a forbidden sample count all cross verbatim.
+
+So `PushConstants`, `BindlessDescriptorArray`, `PolygonModeLine` and
+`IndirectArgumentPaddedStride` are not "uncovered because they need a pipeline
+built first" — the Rust side deliberately does not decide them, so **no native
+test can ever cover them** and a browser probe group is the only possible route,
+not merely the convenient one. Three earlier versions of this paragraph gave a
+setup-cost reason instead, and each was wrong about which rows it applied to.
 
 So of the five backends the pattern was checked on: three had it (`crcbl-vk`,
 `crcbl-dx12`, `crcbl-mtl`, all fixed), `crcbl-webgpu` did not, and `crcbl-wgpu`

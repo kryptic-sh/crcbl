@@ -899,10 +899,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `draw_indexed_indirect_count` and `draw_mesh_tasks` return nothing, so they
   record the refusal and surface it at `finish`, and reaching them needs no
   pipeline at all. Nine of this backend's twelve unsupported rows are now
-  checked natively — `update_bind_group` needed no bind group either, refusing
-  unconditionally without reading its arguments. The three that genuinely need a
-  layout, an argument buffer or a pipeline are named in `docs/backlog.md` rather
-  than left implied.
+  checked natively — nine of thirteen, which is `DIVERGENCES`' own row count for
+  this backend. The line falls where the refusal is _decided_: those nine are
+  refused by the crate in Rust, while `PushConstants`,
+  `BindlessDescriptorArray`, `PolygonModeLine` and
+  `IndirectArgumentPaddedStride` are refused by `gpu-replay.js` in the browser,
+  because the writer "carries what the caller gives" and validates nothing. No
+  native test can ever cover those four, so a probe group is the only route
+  rather than the convenient one.
 
 - **The seam suite can now exercise the half of the parity contract a capable
   device hides — and it found three mis-declarations in `crcbl-vk`.** With every
