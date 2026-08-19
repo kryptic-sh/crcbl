@@ -874,6 +874,80 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
+### The seam audit — five places the seam is not backend agnostic
+
+Found by auditing `crcbl-hal` against every backend's implementation, after the
+rule was stated: anything on the seam that cannot work on all backends gets
+refactored. Each entry below was checked in at least two backends' code. Ranked
+by how badly it misleads.
+
+**1. `StencilState::reference` — a silent 2-versus-2 divergence, and parity
+cannot see it.** `crcbl-vk` declares `STENCIL_REFERENCE` dynamic
+_unconditionally_ ("a pipeline that baked it would make that call a no-op"), so
+the pipeline's value is dead and an earlier `set_stencil_reference` survives a
+bind. `crcbl-webgpu` drops the field in its writer, same result. But
+`crcbl-dx12` re-applies `OMSetStencilRef` at every bind from
+`GraphicsPipelineEntry::stencil_reference`, and `crcbl-mtl` calls
+`setStencilReferenceValue` the same way — both _overwriting_ what the encoder
+set. So `set_stencil_reference(0x80)` followed by binding a pipeline declaring
+`reference: 0` **draws with 0x80 on two backends and 0 on the other two**, and
+`Capability::StencilReference` is `Support::Yes` on all four, so the parity
+report is green. Verified by reading all four.
+
+The fix follows the rule: `StencilState::reference` is a Vulkan/D3D12
+static-state artefact — WebGPU and Metal have no such pipeline field — so it
+comes off the seam, `set_stencil_reference` becomes the only channel, and the
+seam states that a pipeline bind does not disturb it. `crcbl-render` never sets
+it, so the blast radius is the backends and the tests.
+
+**2. `MultisampleState::mask` — a whole seam field Metal cannot honour, and
+nothing declares it.** Vulkan, D3D12 and WebGPU all pass it through natively.
+`crcbl_mtl::pipeline`'s `check_multisample` refuses any non-full mask outright:
+"Metal has no per-pipeline sample mask … `MTLRenderPipelineDescriptor` has no
+counterpart at all". There is **no `Capability` variant and no `DIVERGENCES`
+row** for it, which is exactly the class `capability.rs` says every variant was
+derived from. Either add the capability row, or make "every sample" the only
+portable value — nothing in `crcbl-render` sets it to anything else.
+
+**3. `Limits::max_bind_groups` with `max_push_constant_size` — ceilings that
+cannot both be spent.** `Limits` documents each field as "a hard ceiling the
+backend guarantees". That is Vulkan's model. D3D12 leaves `max_bind_groups` at
+the floor of 4 because the number does not exist there — `D3D12_MAX_ROOT_COST`
+bounds the whole signature, and what a set spends depends on its contents —
+while reporting the _entire_ root signature as `max_push_constant_size`. A
+layout inside both reported limits can still be refused by `root::place`. Metal
+has its own shared budget in `argument::plan`, and WebGPU caps per-stage binding
+counts, which the seam has no field for at all. Vulkan is the only backend where
+the independence assumption holds.
+
+**4. `Limits::max_bindless_descriptors` — D3D12 reports ~244x what it can
+serve.** It reports `D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2` (a
+million) while `crcbl_dx12::binding` allocates one heap of
+`VIEW_DESCRIPTORS = 4096`; exceeding that is `OutOfDeviceMemory` at bind-group
+creation, not the `InvalidDescriptor` the seam documents for exceeding a limit,
+and it depends on what else is live. Metal's 8192 is honest and honoured. **This
+one is a one-line fix** in dx12's `limits_of` and worth doing whatever else
+happens.
+
+**5. `Limits::max_draw_indirect_count` — the same field means three things.** A
+device fact on Vulkan, the type's ceiling on D3D12 (`u32::MAX`, argued), and a
+deliberate policy budget of 8 on Metal. Honestly documented and enforced in
+each, so this ranks last — but a caller sizing work off it portably will size
+very differently per backend.
+
+**Two smaller things, recorded so they are not rediscovered.**
+`crcbl-hal/src/query.rs`'s "a backend without the feature returns zeros from
+`query_results`" is unreachable — `create_query_set` refuses, so no caller can
+hold a handle to ask with. And `Capability::OcclusionQuery` is unfalsifiable
+everywhere: `CommandEncoder` has no begin/end-query verb, so nothing recorded
+through this seam can write an occlusion result on any backend.
+
+**Checked and genuinely uniform**, so not concerns: `MemoryLocation`, the
+stencil read/write masks, push-constant alignment, `present_id`
+non-monotonicity, `PolygonMode::Line`, `DepthClamp`, `SamplerAnisotropy`, and
+the no-op present verbs (decided deliberately, with the caller handed a feature
+bit to check).
+
 ### DECIDED — the seam returns nanoseconds; `timestamp_period_ns` goes
 
 Metal's `TimestampQuery` and `PipelineStatisticsQuery` are the last two
