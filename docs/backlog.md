@@ -3065,13 +3065,36 @@ whether a texture can be a depth attachment is decided by its **format**, not by
 a usage bit. So the caller's distinction is lost in the mapping, and what comes
 back is a perfectly good colour render target that cannot be a depth attachment.
 
-**This is inherent to WebGPU, not a `crcbl-wgpu` quirk, so it survives the
-deletion.** `gpu-replay.js` folds the same two flags for the same reason and
-says so at length: "`COLOR_ATTACHMENT` and `DEPTH_STENCIL_ATTACHMENT` are both
-`RENDER_ATTACHMENT`: WebGPU has one attachment usage and reads _which kind_ off
-the format". So `crcbl-webgpu` — the backend that outlives `crcbl-wgpu` —
-behaves the same way, and this divergence is permanent unless the seam closes
-it.
+**Measured on all five backends, and the split is 3–2 the other way from the
+first reading.** `Format::Rgba8Unorm` asked for as an
+`ImageUsage::DEPTH_STENCIL_ATTACHMENT`:
+
+| backend                     | answer                                                              |
+| --------------------------- | ------------------------------------------------------------------- |
+| `crcbl-vk` (radv, lavapipe) | **refused** — `VK_ERROR_FORMAT_NOT_SUPPORTED` from the format query |
+| `crcbl-dx12` (WARP)         | **refused** — `CreateCommittedResource` returns `0x80070057`        |
+| `crcbl-mtl` (CI Mac)        | served                                                              |
+| `crcbl-wgpu` (lavapipe)     | served                                                              |
+
+**This corrects an earlier reading here that called the fold "inherent to
+WebGPU".** It is not a browser property. `crcbl_mtl::conv::texture_usage` folds
+the same two flags into the single `MTLTextureUsage::RenderTarget`, so **three
+of the five APIs have one render-target usage** — Metal, wgpu and WebGPU — and
+only Vulkan and D3D12 carry two. The seam's two flags are the minority position,
+not the norm one backend family fails to meet.
+
+**And it closes the dx12 question this entry opened.** `crcbl-dx12`'s refusal
+path was unexercised when the contract test only asked about depth formats,
+since WARP serves both; the impossible case reaches it, and D3D12 refuses on its
+own without any per-format query. dx12 is proven to refuse rather than merely
+untested.
+
+**It survives the `crcbl-wgpu` deletion either way.** `gpu-replay.js` folds the
+same two flags for the same reason and says so at length: "`COLOR_ATTACHMENT`
+and `DEPTH_STENCIL_ATTACHMENT` are both `RENDER_ATTACHMENT`: WebGPU has one
+attachment usage and reads _which kind_ off the format". So `crcbl-webgpu` — the
+backend that outlives `crcbl-wgpu` — behaves the same way, and this divergence
+is permanent unless the seam closes it.
 
 **That comment argues the fold is lossless, and it is right about the texture
 and incomplete about the descriptor.** Its claim — "the seam's two flags carry
