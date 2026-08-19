@@ -1793,8 +1793,13 @@ it, forced by subtracting features from one adapter.
   view mode in the forward shader, which is engine work rather than quarry's,
   and nothing in the engine has one today — `set_normals_view` is the nearest
   thing and it is a different axis.
-- **Milestone 4 untouched**: the skinned and tiling cases, and the Pages demo
-  with a recorded browser budget.
+- **Milestone 4: the tiling case is done, the skinned one is blocked, the Pages
+  demo is untouched.** `crcbl_quarry::tile` is the modular wall piece, and two
+  tiles decimated independently still meet — asserted bit-for-bit. **The skinned
+  prop cannot be built**: the sample wants "skinned weights carried through
+  collapses" and the engine has no skinning at all (`crcbl-render` and
+  `crcbl-scene` carry none), so that criterion is behind an unbuilt engine
+  feature rather than behind sample work.
 - **The draw-count split is recorded and the answer is degenerate.**
   `ForwardRenderer::cull_stats` carries both numbers out of the frame, and
   `all_of_the_reduction_is_cluster_culling` asserts them: the camera's instance
@@ -1967,6 +1972,34 @@ scratch branch until it fires; or serialise the device-opening viewer tests and
 see whether the class disappears. Neither is worth doing for one occurrence, and
 both are worth doing at the second — which is what this entry exists to make
 recognisable.
+
+### A tile's border needs no explicit locking — the decimator already holds it
+
+Found on 2026-08-20 by a red-check that came back green, while building quarry's
+tiling case for "border locking on a tiling mesh".
+
+`crcbl_quarry::tile` first called `simplify_with_locked_edges` with every one of
+the tile's border edges named. Replacing that list with `&[]` **passed
+identically**: the two tiles' shared seam survived decimation bit-for-bit either
+way.
+
+The reason is in `crcbl_scene::simplify`'s own module docs and was there all
+along — "an edge used by any number of faces other than two is a border (or a
+non-manifold seam)… an open mesh keeps its boundary loop exactly". A tile is an
+open mesh and its outer border is a mesh border, so the decimator locks it
+unconditionally.
+
+**So `simplify_with_locked_edges` is for boundaries interior to the mesh**,
+which no rule over the two arrays can find — a cluster group's outer edge, which
+is what `crcbl_scene::cluster_dag` passes it and remains its only caller. Worth
+recording because the sample's own exit criterion is phrased as though a caller
+must do the locking, and the next reader will otherwise write the same redundant
+call.
+
+**What this does not say.** It says nothing about UV or normal seams, which are
+`crcbl_scene::simplify`'s other stated limitation and which quarry's single
+untextured material cannot exercise: a seam in an attribute the decimator does
+not carry is invisible to a position-only comparison like this one.
 
 ### DECISION NEEDED — should quarry place several faces?
 

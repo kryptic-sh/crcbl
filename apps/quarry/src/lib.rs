@@ -29,10 +29,15 @@
 //! One assertion is not a count — that the face is shaded by the light it is
 //! given — because every other one would survive a face lit from the wrong side.
 //!
+//! [`tile`] is milestone 4's modular wall piece: two tiles decimated apart still
+//! meet, bit for bit.
+//!
 //! Still owed, from that document's milestones: the LOD tint and heatmap
-//! overlays, and the skinned and tiling cases with a Pages demo. There is no
-//! window, so there are no golden frames yet.
+//! overlays, and the Pages demo. The skinned prop is behind an engine feature
+//! that does not exist — nothing here does skinning. There is no window, so
+//! there are no golden frames yet.
 
 pub mod dag;
 pub mod face;
 pub mod scene;
+pub mod tile;

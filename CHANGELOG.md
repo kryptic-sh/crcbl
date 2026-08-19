@@ -981,6 +981,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asserted beside it — the base dominating at one pixel, and nothing of the base
   surviving at 4096 — so the mixing assertion is shown to be able to fail.
 
+- **`apps/quarry` has its tiling case, and it found that border locking is not
+  needed for it.** `docs/plan/sample/14-quarry.md`'s scope names "a tiling
+  modular wall piece for border locking", and `crcbl_quarry::tile` is it: tiles
+  sample the same height field at **world** coordinates, so tile 0's `+X` column
+  and tile 1's `-X` column are the same places and come out bit-identical, with
+  no stitching pass to keep in sync. Decimated independently, they still meet.
+
+  **The explicit locking turned out to be ceremony**, and the red-check is what
+  said so: written first with every border edge passed to
+  `simplify_with_locked_edges`, replacing that list with `&[]` **still passed**.
+  `crcbl_scene::simplify`'s own docs have the reason — "an edge used by any
+  number of faces other than two is a border… an open mesh keeps its boundary
+  loop exactly" — so a tile's outer border is held whether or not a caller asks.
+  That function is for boundaries **interior** to the mesh, which is the cluster
+  group's edge `crcbl_scene::cluster_dag` passes it. The module calls plain
+  `simplify` and says so.
+
 - **The `quarry` binary reports the hierarchy, not just the flat mesh.** At its
   256-cell default the face coarsens into **12 levels**, 1640 clusters and
   131,072 triangles down to 30 and 1,540, and the levelled scene reserves

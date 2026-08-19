@@ -141,7 +141,7 @@ pub fn quarry_face(cells: u32) -> Face {
 /// unit range rather than normalised by the amplitude sum, because the sum is
 /// what decides how much of the range the rock actually occupies and a
 /// normalised one would flatten every octave's contribution equally.
-fn height_at(across: f32, away: f32) -> f32 {
+pub(crate) fn height_at(across: f32, away: f32) -> f32 {
     let mut height = 0.0;
     for (cells, amplitude) in OCTAVES {
         height += amplitude * value_noise(across, away, cells);
