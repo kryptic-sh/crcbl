@@ -1052,6 +1052,92 @@ fn a_timestamp_set_follows_the_feature_the_device_opened_with() {
 /// **What turns it red.** A verb going back to `record_unsupported`, which
 /// `finish` would then refuse over; a command encoding under the wrong tag; or
 /// the range arriving with its halves swapped.
+/// **Every capability this backend declares unsupported is refused by the call
+/// that names it** — the half of the parity contract the native seam suite
+/// cannot reach here.
+///
+/// `crcbl-webgpu` is the one backend `crates/crcbl/tests/hal_seam_e2e.rs` cannot
+/// open: `crcbl::backend::open` answers "the crcbl-webgpu backend is not active
+/// in this build — it reaches a device only on wasm32". So the driver that holds
+/// every other backend to `(Support::No, Exercise::Refused)` has never run
+/// against this one, and nine of its rows are unconditional `Support::No`.
+///
+/// It needs no browser, which is the point. `WebGpuDevice` records commands to a
+/// stream rather than executing them, so a refusal is a decision this crate
+/// makes in Rust and is observable in an ordinary unit test.
+///
+/// # What this covers, and what it does not
+///
+/// The rows whose refusal is a single device call: the four timeline rows,
+/// through `create_semaphore`, and `PipelineStatisticsQuery` through
+/// `create_query_set`. The rest — `PushConstants`, `MeshShading`,
+/// `DrawIndirectCount`, `IndirectArgumentPaddedStride`, `UpdateBindGroup`,
+/// `BindlessDescriptorArray`, `PolygonModeLine` — need a pipeline or a layout
+/// built first, which is the seam suite's `exercise_*` machinery and is not
+/// worth a second copy here. Those stay uncovered on this backend and the
+/// backlog says so.
+#[test]
+fn a_capability_declared_unsupported_is_refused_by_its_own_call() {
+    use crcbl_hal::{Capability, QueryKind, QuerySetDesc, SemaphoreDesc, SemaphoreKind, Support};
+
+    let (_channel, device) = device_on_fresh_channel();
+
+    // The declarations under test, so a row that changed side would fail here
+    // rather than silently stop being checked.
+    for capability in [
+        Capability::TimelineSemaphore,
+        Capability::CpuTimelineWait,
+        Capability::CpuTimelineSignal,
+        Capability::TimelineWaitBeforeSignal,
+        Capability::PipelineStatisticsQuery,
+    ] {
+        assert!(
+            matches!(device.supports(capability), Support::No(_)),
+            "{capability:?} is no longer declared unsupported on this backend, so this test is \
+             asserting a refusal the seam no longer promises"
+        );
+    }
+
+    let timeline = device.create_semaphore(&SemaphoreDesc {
+        label: Some("refused timeline"),
+        kind: SemaphoreKind::Timeline { initial_value: 0 },
+    });
+    assert!(
+        matches!(timeline, Err(HalError::Unsupported { .. })),
+        "a timeline semaphore is declared unsupported and create_semaphore answered {timeline:?}. \
+         The seam documents Unsupported for this, and a caller branching on that variant to pick \
+         a fallback would miss any other error"
+    );
+
+    let statistics = device.create_query_set(&QuerySetDesc {
+        label: Some("refused statistics"),
+        kind: QueryKind::PipelineStatistics,
+        count: 1,
+    });
+    assert!(
+        matches!(statistics, Err(HalError::Unsupported { .. })),
+        "a pipeline-statistics query set is declared unsupported and create_query_set answered \
+         {statistics:?}"
+    );
+
+    // **The accepting side, so this is not a test that passes by refusing
+    // everything.** A binary semaphore and an occlusion set are both declared
+    // supported, and both must still be served.
+    device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("served binary"),
+            kind: SemaphoreKind::Binary,
+        })
+        .expect("a binary semaphore is declared supported");
+    device
+        .create_query_set(&QuerySetDesc {
+            label: Some("served occlusion"),
+            kind: QueryKind::Occlusion,
+            count: 1,
+        })
+        .expect("an occlusion set is declared supported");
+}
+
 #[test]
 fn the_occlusion_query_spine_reaches_the_stream() {
     use crcbl_hal::{BufferHandle, QueryKind, QuerySetDesc};

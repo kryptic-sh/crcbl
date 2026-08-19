@@ -884,6 +884,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-webgpu`'s refusals are checked too, without a browser.** It is the
+  one backend the native seam suite cannot open — `crcbl::backend::open` answers
+  "it reaches a device only on wasm32" — so the driver that holds every other
+  backend to "declared unsupported must refuse" had never run against it.
+  `WebGpuDevice` records commands to a stream rather than executing them, so a
+  refusal is a decision the crate makes in Rust and an ordinary unit test can
+  see it. Covers the rows whose refusal is a single device call — the four
+  timeline rows and `PipelineStatisticsQuery` — demands `HalError::Unsupported`
+  specifically, and checks the accepting side so it cannot pass by refusing
+  everything.
+
 - **The seam suite can now exercise the half of the parity contract a capable
   device hides — and it found three mis-declarations in `crcbl-vk`.** With every
   optional feature asked for, that backend declares **all 24** capabilities

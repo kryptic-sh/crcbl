@@ -2101,42 +2101,35 @@ each job got the narrow step, so the fix is exercised rather than asserted.
 same footing the nanosecond refactor was landed on. CI is what settles them.
 
 **`crcbl-webgpu` was examined by reading and is clean on this point.** The
-native suite cannot open it, so the narrow pass is not available — but the
-defect the pass finds is visible in `supports` without running anything, and
-this backend does not have it: `TimelineWaitBeforeSignal` is grouped _with_ the
-other three timeline rows as `Support::No(NO_TIMELINE)` rather than answering
-`Yes` beside them. Its remaining unconditional `Support::Yes` arms are core
-WebGPU — the two copies, the MSAA resolve, the stencil reference, the
-storage-image binding and the binary semaphore — with `OcclusionQuery` the one
-open question, and that has an entry of its own.
+native suite cannot open it — `crcbl::backend::open` answers "the crcbl-webgpu
+backend is not active in this build — it reaches a device only on wasm32",
+measured rather than assumed — but the defect the narrow pass finds is visible
+in `supports` without running anything, and this backend does not have it:
+`TimelineWaitBeforeSignal` is grouped _with_ the other three timeline rows as
+`Support::No(NO_TIMELINE)` rather than answering `Yes` beside them.
+
+**And part of its refusal direction now runs, in an ordinary unit test.**
+`a_capability_declared_unsupported_is_refused_by_its_own_call` in
+`crcbl-webgpu/src/hal/tests.rs` needs no browser: `WebGpuDevice` records
+commands to a stream rather than executing them, so a refusal is a decision this
+crate makes in Rust. It covers the rows whose refusal is a single device call —
+the four timeline rows through `create_semaphore`, `PipelineStatisticsQuery`
+through `create_query_set` — asserts each is `HalError::Unsupported`
+specifically, and checks the accepting side too so it cannot pass by refusing
+everything.
+
+**What is still uncovered on this backend**: `PushConstants`, `MeshShading`,
+`DrawIndirectCount`, `IndirectArgumentPaddedStride`, `UpdateBindGroup`,
+`BindlessDescriptorArray` and `PolygonModeLine`, each of which needs a pipeline
+or a layout built first. That is the seam suite's `exercise_*` machinery and is
+not worth a second copy in this crate; a browser probe group remains the honest
+route for them.
 
 So of the five backends the pattern was checked on: three had it (`crcbl-vk`,
 `crcbl-dx12`, `crcbl-mtl`, all fixed), `crcbl-webgpu` did not, and `crcbl-wgpu`
 has a different defect in the same family — `PolygonModeLine` refusing through a
 raw validation error rather than `HalError::Unsupported`, left alone for the
 deletion.
-
-**What a browser equivalent would take is smaller than the native one**, and the
-first sizing of it here was wrong in a way worth correcting: it said "open the
-device without an optional feature", which is the expensive half and covers the
-_minority_ of the rows. Counted from `crcbl-webgpu`'s `supports`:
-
-- **Nine rows are unconditional `Support::No`** — the timeline group, the
-  statistics query, and the rest. Those need no special device at all. A probe
-  group asserting that each of the nine operations refuses with
-  `HalError::Unsupported` on the ordinary device is the whole check, and it is
-  the same claim the native driver makes with
-  `(Support::No, Exercise::Refused)`.
-- **Three rows are feature-gated** — `DepthClamp`, `SamplerAnisotropy`,
-  `TimestampQuery`. Only these need the harder thing: a device requested without
-  the feature, which the probe plumbing does not do today (the replayer opens
-  one device from a `DeviceDesc`).
-
-So the cheap nine and the expensive three are separable, and the nine are worth
-doing first. `web/tools/probe-groups.mjs` is where groups live; AE and AF
-already hold this backend's query claims to a value, and a new group would need
-a `__crcbl_web_*` export from `crcbl-webgpu/src/probe.rs` linked into the wasm —
-see the note about exports failing `check-exports` until the crate is linked.
 
 ### DECISION NEEDED — occlusion queries: finish them, refuse them, or delete them
 
