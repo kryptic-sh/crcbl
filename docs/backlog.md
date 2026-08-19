@@ -17,24 +17,36 @@ mesh::the_gpu_descends_the_dag_to_the_cut_the_host_rule_says
   and 320 still parked in the deletion queue
 ```
 
+**The formats identify them**, now that the warning prints those too:
+
+```text
+1 image D32Float, 2 image R8Unorm, 3 image Rgba16Float, 1 image Rgba8Unorm
+(and one image view of each)
+```
+
+That is the shape of a `ForwardRenderer` target set — a depth buffer, an HDR
+scene target with SSR and its blur, SSAO and its blur, and an LDR output — not a
+stray allocation.
+
 **What has been ruled out.** Both tests call `renderer.destroy` and
 `headless.finish`, so it is not a missing teardown in the test. It is not
-`Headless::open_for_mesh_with` either: eight tests in `mesh.rs` use it and only
-these two leak. `ForwardRenderer::destroy` does release the shadow atlas, the
-shadow placeholder and their views. And the two counts are **identical**, 7 and
-7, across two tests that otherwise share little — which says a single shared
-allocation site rather than two independent slips.
+`Headless::open_for_mesh_with`: eight tests in `mesh.rs` use it and only these
+two leak. `ForwardRenderer::destroy` does call `self.ssr.destroy` and
+`self.ssao.destroy`, which should cover four of the seven. And it is **not the
+harness's offscreen ring**, which opens `Rgba8UnormSrgb` while the leaked one is
+`Rgba8Unorm`.
 
-**What has not been established** is whether the owner is the engine or the test
-harness. If it is `ForwardRenderer`, every application that destroys one leaks
-fourteen objects, which makes this an engine defect rather than test tidiness —
-and nothing about these two tests suggests they would be the only ones to hit
-it, which is itself unexplained and worth resolving before believing any answer.
+**The contradiction to resolve first.** If `ForwardRenderer` leaked its targets,
+every one of the 48 vk e2e tests that builds one would leak, and 46 do not. So
+either these two reach a target set the others never allocate, or something
+about their teardown order differs. Believing any fix before that is explained
+would be guessing.
 
-The cheapest next step is to give `ImageEntry` a label — `ImageDesc` already
-carries one and the backend drops it — so the warning can name the objects
-rather than their kind. That is a small change to `crcbl-vk` and would end the
-guessing.
+**The cheapest next step is object labels.** `ImageDesc` carries a `label` and
+`crcbl-vk` drops it; storing it in `ImageEntry` would let the warning name the
+objects rather than their format. Per-image allocation is the only cost, and
+`cfg(debug_assertions)` removes even that from release builds — tests run in
+debug, which is where the warning is read.
 
 The seam suite's own two leaks (a command buffer and a pipeline layout) were
 found the same way and are fixed; `hal_seam_e2e` and `render_e2e` are both clean
