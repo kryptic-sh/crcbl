@@ -80,13 +80,11 @@ module's docs name its own omission; this is the list in one place.
   against the scene depth the forward pass already stores for SSR. `apps/viewer`
   turns it on, which completes milestone 1.
 
-  **What is left is the scale.** The style is `GridStyle::default()`: 1 m cells,
-  coarse every 10, fade at 100 m. A document authored at a very different scale
-  gets a grid that is one line (a 5 cm model) or entirely faded (a 500 m one).
-  The viewer already computes the model's bounds for frame-on-load, so deriving
-  `spacing` and `fade_distance` from them is the obvious fix and was
-  deliberately left out of "turn it on". Until then the grid is only meaningful
-  for models around human scale.
+  **The scale is derived from the document.** `GridStyle::for_extent` picks the
+  power of ten nearest `extent / 10` for the cell and fades at twenty times the
+  extent, and the viewer feeds it the model's largest axis. A power of ten
+  because a cell of `0.1`, `1` or `10` is a number a person can count in, which
+  is what a grid is for — `3.7` gives the same line density and says nothing.
 
   **Verified on Vulkan only.** The wiring's pixel evidence is one RADV run; no
   golden anywhere turns the grid on, so `run-render-e2e.sh`'s Metal, DX12 and
