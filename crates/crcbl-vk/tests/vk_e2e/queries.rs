@@ -29,6 +29,11 @@ const TIMED_PASSES: u32 = crcbl_render::ForwardRenderer::MAX_PASSES;
 
 /// Timestamp queries, if the device has them: the profiler HUD's foundation,
 /// and the seam says it degrades rather than breaks without them.
+///
+/// Both halves of the name run. The working half comes from whatever this
+/// device reports; the refusal comes from a device opened without
+/// `TIMESTAMP_QUERY`, because every adapter this suite can reach has it and
+/// "or are refused cleanly" would otherwise describe a branch no run takes.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn timestamps_either_work_or_are_refused_cleanly() {
@@ -86,6 +91,39 @@ fn timestamps_either_work_or_are_refused_cleanly() {
         results[1] >= results[0],
         "the GPU clock does not run backwards: {results:?}"
     );
+
+    // **The refusal arm, on a device manufactured to have it.** The `Err`
+    // branch above is what a device without `TIMESTAMP_QUERY` takes, and no
+    // adapter this suite can reach is one — radv and lavapipe both report the
+    // feature, so "or are refused cleanly" was a claim about the source rather
+    // than about any run. Opening a device without it is what reaches the
+    // refusal.
+    let lesser = Headless::open_pinning_format(
+        "vk e2e timestamps unsupported",
+        Features::DEBUG_MARKERS,
+        crate::harness::EXTENT,
+    );
+    let lesser_device = lesser.device.as_ref();
+    assert!(
+        !lesser_device
+            .caps()
+            .features
+            .contains(Features::TIMESTAMP_QUERY),
+        "this device is opened without TIMESTAMP_QUERY; if it reports the \
+         feature anyway the subtraction is not happening and the refusal below \
+         is a timestamped device's answer wearing this one's name"
+    );
+    let refused = lesser_device.create_query_set(&QuerySetDesc {
+        label: Some("frame timers on a device without them"),
+        kind: QueryKind::Timestamp,
+        count: 2,
+    });
+    let error = refused.expect_err("a device without TIMESTAMP_QUERY must refuse a timestamp set");
+    assert!(
+        matches!(error, crcbl_hal::HalError::Unsupported { .. }),
+        "the refusal must be loud and typed, not an InvalidDescriptor: {error}"
+    );
+    lesser.finish();
 
     device.destroy_command_buffer(commands);
     device.destroy_query_set(set);
