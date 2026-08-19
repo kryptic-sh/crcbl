@@ -2737,69 +2737,6 @@ need it.
 — and must shrink the dx12-local test asserting every remaining refusal names
 itself.
 
-### Metal's five blockers, ordered — and a hole in the parity mechanism
-
-Planned 2026-08-18 against `objc2-metal 0.3.2` and `wgpu-hal 30.0.0` on disk.
-
-**The mechanism hole this plan found has since shipped.** Eight of Metal's nine
-rows sit behind a `Features` flag `crcbl-mtl` reports on no device, and the old
-rule excused a refusal whenever the device withheld the gate — so a row could be
-retired by a device that could not have proved anything either way. `Support`
-now separates the backend's refusal from the device's, and a plain `Support::No`
-needs a listed row on **every** device, so a slice can retire its row only by
-making the backend answer `Support::Yes`.
-
-Three of those flags change what the renderer _builds_: `MESH_SHADER` and
-`DRAW_INDIRECT_COUNT` both move `GeometryPath`, and `DESCRIPTOR_INDEXING` moves
-`BindingModel`. The other five move nothing, which makes them the cheap ones.
-
-**The order:**
-
-1. **A counter probe that closes no rows and unblocks three.** One `#[ignore]`d
-   test on the existing Metal CI job printing `supportsFamily` for the three
-   families mesh shaders need, all five `supportsCounterSampling:` answers,
-   every `counterSets()` name, and a `sampleTimestamps:gpuTimestamp:`
-   correlation across a sleep. That last one is the measured
-   `timestamp_period_ns` the adapter currently says Metal has no way to report —
-   and `wgpu-hal` fabricates it as 1.0 on Apple silicon and 83.333 on Intel,
-   calling it "the dangerous but easy thing" in its own comment. We do not have
-   to guess. Needs one manifest line: `MTLCounters`, which the manifest
-   currently calls deliberately absent.
-2. **`PushConstants`** — small, moves no golden, and its unknown is measurable
-   _here_ rather than on CI (see the corrections below).
-3. **`TimestampQuery`** — the exercise already exists and only has to flip.
-   Metal is _easier_ than D3D12 here: `resolveCounterRange:` reads on the CPU
-   with no submit, where D3D12 needs a hidden resolve buffer and its own list.
-4. **`OcclusionQuery`** — downstream of the seam's query redesign, which was
-   already shaped by Metal's `visibilityResultBuffer` being pass-level. Metal's
-   own part is small, and one decision is its own: use
-   `MTLVisibilityResultMode::Counting`, not the `Boolean` wgpu-hal picks for
-   WebGPU's sake, since the design's `PreciseOcclusionCount` capability exists
-   exactly to let Metal answer `Yes` there.
-5. **`PipelineStatisticsQuery`** — only if the probe finds the statistic counter
-   set. This is the one slice with **no upstream to read**: `wgpu-hal`'s Metal
-   `create_query_set` is `todo!()` for it.
-6. **`DrawIndirectCount`** — largest non-mesh slice and likely a seam change
-   (see corrections). `wgpu-hal`'s Metal version is an empty `//TODO`.
-7. **`MeshShading` + `TaskShaderStage`** — last, splits in four, and re-keys
-   Metal's goldens twice. The MSL is already committed and `xcrun metal` already
-   compiles it in CI.
-
-   **A measurement in flight may rule this out on CI entirely.** `wgpu-hal`'s
-   mesh gate is not the three-family AND this plan first recorded — it is
-   `family_check && (Metal3 || Apple7 || Mac2) && !is_virtual`, where
-   `is_virtual` is the device name containing "virtual". CI's runner reports
-   **`Apple Paravirtual device`**, so by that formula mesh pipelines are off the
-   table on this runner whatever the families answer. The counter probe prints
-   all four terms, so the next Metal CI run settles it. If it holds, the honest
-   outcome is that Metal's mesh rows cannot be proved by this CI at all and need
-   either a hardware runner or an explicit "unproven here" state — not a
-   retirement.
-
-8. **`BindlessDescriptorArray`** — last or `Declined`. The blocker is in
-   `crcbl-shaders`, not `crcbl-mtl`, and closing it reopens the backend's
-   barrier model.
-
 ### Five Metal divergence reasons that are wrong
 
 Same exercise as the dx12 pass, and it found more. Two of these mislead about
@@ -3209,58 +3146,6 @@ hardware macOS runner, an explicit "implemented but unproven here" state that a
 reviewer accepts once, or leaving them open indefinitely. Closing them on a
 device that cannot execute them is not among the options.
 
-### MEASURED — CI's Mac creates indirect command buffers; the device is not the blocker
-
-`crcbl_mtl::adapter`'s
-`a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling`
-ran on `mtl e2e (macos-latest)` on 2026-08-18. It was written to answer the
-question that has to be settled _before_ anyone restructures this backend's
-encoder for `Capability::DrawIndirectCount`. The answer is that the device can
-do everything the ICB path needs:
-
-- **Families:** `Apple1`–`Apple5`, `Mac2`, `Common1`–`Common3` all `true`, and
-  **`Metal4`, `Metal3` and `Apple6`–`Apple10` all `false`.** That second half is
-  a finding in its own right — see below.
-- **ICB creation succeeds at every rung tried**, `64` through `1_048_576`, with
-  `first refused = None` — no ceiling was found, and the top rung is
-  `Limits::desktop()`'s `max_draw_indirect_count`.
-- **Inheritance works both ways.** `inheritBuffers`/`inheritPipelineState` set
-  (what a real `draw_indirect_count` needs, since the seam's pass has already
-  bound its pipeline and argument tables) creates just as readily as the control
-  with them clear. "Refuses ICBs" and "refuses _inheriting_ ICBs" were
-  distinguishable and neither happened.
-- **`max_draw_indirect_count = 1` is this backend's floor, not the device's
-  answer**, which the probe prints in as many words: `limits_of` assigns the
-  field nothing, and `Limits::minimum()` is 1 while `Limits::desktop()`
-  is 1048576.
-- **A compute kernel has room to encode them:**
-  `max_compute_workgroups_per_dimension = 65535`,
-  `max_compute_invocations_per_workgroup = 256`,
-  `max_storage_buffer_range = 3758096384`, and `COMPUTE = true`.
-  `MULTI_DRAW_INDIRECT` and `INDIRECT_FIRST_INSTANCE` are already reported;
-  `DRAW_INDIRECT_COUNT` is the one that is not.
-
-**So the row's obstacle is exactly what it always said and nothing more:** the
-architecture, not the hardware. Metal's only count-from-memory execution needs
-commands a compute kernel wrote, and that kernel must run before the render
-encoder `draw_indirect_count` is called inside was opened. **`crcbl-mtl` no
-longer encodes straight through** — `crcbl_mtl::command` records a render pass
-and encodes it at `end_render_pass`, so the compute encoder can be opened ahead
-of the render one. That restructuring was the prerequisite, it has landed as a
-pure refactor, and what remains is the ICB kernel itself.
-
-**The one-byte-per-command caveat is closed by measurement.** Every ICB reported
-`size` equal to its `maxCommandCount` — one byte per command, implausible for
-real command storage — so creation succeeding was never evidence that
-`executeCommandsInBuffer:` would run anything. `crcbl_mtl::device`'s
-`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints` now
-settles it: it encodes `ink_msl`'s triangle into a one-command ICB from the CPU,
-executes it with `executeCommandsInBuffer:withRange:`, and compares the readback
-against the same pipeline drawn directly on the encoder. **It passed on
-`mtl e2e (macos-latest)` on 2026-08-18** — 66 of 66 — so this device executes an
-ICB draw and produces a byte-identical canvas. The nominal `size` is a reporting
-quirk, not a hollow allocation.
-
 ### MEASURED — Metal's mesh rows are unprovable on the Mac CI has
 
 The ICB probe's family list answers a question the mesh rows had only guessed
@@ -3343,27 +3228,6 @@ stands, and its slice is smaller than planned because the block lands behind the
 bound buffer rather than ahead of it. Plus the re-homing of `crcbl-wgpu`'s
 push-constant-range exercise, which is one of the two coverage losses still
 standing between here and that crate's deletion.
-
-### A divergent index into a push-constant block reads lane 0 on RADV
-
-Found by the seam suite's new push-constant exercise, and worth remembering
-because of the shape rather than the bug. The probe shader read
-`constants.values[index]` with `index` from the dispatch ID. That is valid
-SPIR-V — `spirv-val --target-env vulkan1.3` is clean — and it reads correctly on
-llvmpipe. On real hardware it is wrong: NIR defines a `load_push_constant`
-offset as dynamically uniform, so ACO scalarises a divergent one, RADV emits
-`v_readfirstlane_b32` on the byte offset, and every invocation reads the block
-at lane 0's index. All four words came back holding `values[0]`, on a discrete
-Navi31 and an integrated Raphael alike.
-
-**CI's Vulkan arm is lavapipe, which gets it right.** So this would have been
-green on every runner and wrong on every AMD card — the asymmetry is the part
-worth carrying forward, not the fix. A local hardware run is not a nicety here;
-it is the only thing that sees this class of defect.
-
-Fixed by naming each component through a `switch` rather than indexing, which
-keeps the `uint4` layout and makes each invocation's offset a compile-time
-constant.
 
 ### No GPU job in CI runs on real hardware, and one defect has already proved it matters
 
