@@ -24,9 +24,23 @@ runs:
     # turns the hang into a non-zero exit the loop can act on. Callers add
     # their own `timeout-minutes` as a backstop under the job's.
     #
-    # Three attempts with a widening gap: a mirror briefly unreachable comes
+    # Three tries with a widening gap: a mirror briefly unreachable comes
     # back inside a minute, and one that does not is a real outage worth
     # failing loudly for rather than waiting out.
+    #
+    # THE BUDGET HAS TO FIT THE CALLER'S CAP, and it did not. Callers set
+    # `timeout-minutes: 8` or `10`; the timeouts here allowed 240 + 3x360 plus
+    # backoff — twenty-three minutes — so the later tries were unreachable and
+    # the step was killed mid-loop. Two runs died that way in one session,
+    # reporting "The action has timed out" rather than the mirror error this
+    # writes, which is the opposite of the legibility the retry exists for.
+    #
+    # So the worst case is now 100 + 2x(40 + 100) + 30 = 410s, inside the
+    # tightest cap with a minute to spare, and "three" counts the first try
+    # plus two retries — which is what the loop actually does. A healthy
+    # install of this repo's largest list (sway, mesa and the validation
+    # layers) is seconds, so 100s is headroom rather than a limit; anything
+    # slower than that is the outage case, not a slow success.
     - shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
@@ -40,17 +54,17 @@ runs:
         # endpoints that fail separately. When only the index is unreachable
         # this succeeds outright instead of waiting out a timeout for a refresh
         # nothing needed.
-        if timeout 240 sudo apt-get install -y --no-install-recommends $PACKAGES; then
+        if timeout 100 sudo apt-get install -y --no-install-recommends $PACKAGES; then
           exit 0
         fi
         echo "install against the image's package lists failed; refreshing them"
-        for attempt in 1 2 3; do
-          if timeout 120 sudo apt-get update \
-            && timeout 240 sudo apt-get install -y --no-install-recommends $PACKAGES; then
+        for attempt in 1 2; do
+          if timeout 40 sudo apt-get update \
+            && timeout 100 sudo apt-get install -y --no-install-recommends $PACKAGES; then
             exit 0
           fi
           delay=$((attempt * 10))
-          echo "apt-get attempt ${attempt} of 3 failed or hung; retrying in ${delay}s"
+          echo "apt-get retry ${attempt} of 2 failed or hung; retrying in ${delay}s"
           sleep "${delay}"
         done
         echo "::error::apt-get could not install '${PACKAGES}' in three attempts — the runner's mirror is unreachable, which is not a fault in this repository"
