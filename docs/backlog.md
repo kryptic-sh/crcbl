@@ -63,47 +63,37 @@ reason for existing, and was **not** re-tested when the probe was written. It
 was measured earlier in this project's life; if it is ever revisited, measure
 again rather than citing the comment.
 
-### Metal's bindless gate was wrong twice, and the tier was the second
+### A capability gate is a proxy until you check it — four in one day
 
-Both halves of `DESCRIPTOR_INDEXING`'s gate turned out to be the wrong question,
-and each was settled by measurement rather than argument.
+`Capability::BindlessDescriptorArray` on Metal is closed **and driven**: the
+seam reports `BindlessDescriptorArray supported`, 20 of 26 driven, and
+`every seam obligation held on mtl`. Getting there took four wrong questions,
+each of which looked reasonable and each of which the seam caught with the same
+line — "this device withheld …, so metal was never asked":
 
-- **`supportsFamily(Metal3)`** confuses a family feature set with an API's
-  availability. CI's `Apple Paravirtual device` answers `Metal3 = false` and
-  returns usable `gpuAddress` values anyway. Replaced with
-  `respondsToSelector:`.
-- **`argumentBuffersSupport() == Tier2`** was the reading that a dynamically
-  indexed argument buffer needs Tier 2. That device answers **`Tier1`** — now
-  printed by the ICB probe rather than inferred — and two independent
-  constructions work on it under Metal API _and_ GPU validation: the bindless
-  kernel indexing `array<uint device*, N>` by thread group, and a
-  `gpuResourceID` handle read out of an argument buffer. The tier describes
-  argument buffers in the _resource-binding_ sense — `[[id(n)]]` slots, resource
-  arrays, heaps — while a table of raw addresses or resource IDs bypasses that
-  machinery.
+1. **`supportsFamily(MTLGPUFamily::Metal3)`** — a family _feature set_ standing
+   in for an _API's availability_. CI's `Apple Paravirtual device` answers
+   `Metal3 = false` and returns usable `gpuAddress` values anyway.
+2. **`argumentBuffersSupport() == Tier2`** — the tier governs argument buffers
+   in the _resource-binding_ sense (`[[id(n)]]` slots, resource arrays, heaps).
+   That device is `Tier1`, and both a bindless pointer table and an ICB handle
+   in an argument buffer work on it under Metal API **and** GPU validation.
+3. **`respondsToSelector(sel!(gpuAddress))` sent to the `MTLDevice`** —
+   `gpuAddress` belongs to `MTLBuffer`, so a device never responds and the gate
+   was false everywhere. The right question is the system's: an `NSProcessInfo`
+   macOS-13 check.
+4. **`Features::DESCRIPTOR_INDEXING` standing in for `UPDATE_AFTER_BIND`** — in
+   the seam itself, not the backend. Independent `BindingFlags`, and the
+   heuristic held only while no backend had one without the other. Metal gaining
+   bindless broke it and scored a capability Metal genuinely supports as
+   declared-and-refused. The exercise now asks by building a throwaway layout.
 
-Between them, the capability read **closed while running on no machine at all**,
-which is the failure the parity mechanism exists to prevent, and it was green
-the whole time. The gate is now `respondsToSelector(gpuAddress)` alone.
-
-**The gate has now been wrong three times, and the seam caught every one** with
-the same line — "this device withheld Features(DESCRIPTOR_INDEXING), so metal
-was never asked". After the family query and the tier came a third:
-`respondsToSelector(sel!(gpuAddress))` sent to the **`MTLDevice`**, when
-`gpuAddress` is a property of `MTLBuffer`. A device never responds to it, so
-that gate was false everywhere. It is now an `NSProcessInfo` macOS-13 check,
-which is the system question all three forms were reaching for.
-
-**The residual risk, stated plainly:** the evidence is two measurements on one
-device class. A Metal 3-capable device that genuinely cannot serve a raw-address
-table would now be told it can. That is judged the lesser risk against a
-capability nothing exercises, but it is a judgement, not a proof. The next
-`mtl e2e` run is the first that actually drives this path — if the construction
-is wrong, that run says so, which is the whole point of turning it on.
-
-Note `crcbl_mtl::device`'s sampler path still keys on `Tier2`, correctly: that
-is a real argument-buffer question about `setSupportArgumentBuffers`, not about
-pointer tables.
+**The transferable rule: a capability gate must ask the question the code
+depends on.** Every one of these substituted a nearby, easier question. Three of
+them produced a row reported closed while running on no machine anywhere, which
+is green and worthless — and the only reason any of it was caught is that the
+seam prints what it did _not_ exercise. That print is load-bearing; do not let
+it become a summary of counts.
 
 ### `Features::BUFFER_DEVICE_ADDRESS` on Metal rides a query that is wrong
 
