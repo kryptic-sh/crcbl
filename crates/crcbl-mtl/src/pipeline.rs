@@ -389,6 +389,26 @@ impl MetalDevice {
         descriptor.setFragmentFunction(fragment.as_deref());
         descriptor.setRasterSampleCount(to_ns(u64::from(samples)));
         descriptor.setAlphaToCoverageEnabled(desc.multisample.alpha_to_coverage);
+        // **Set for every pipeline on a device that has the feature, because
+        // the seam gives no way to know which pipelines will need it.** A
+        // command inside an `MTLIndirectCommandBuffer` may only run under a
+        // state built from a descriptor that asked for this, and
+        // `draw_indirect_count` executes an ICB under whatever pipeline the
+        // pass had already bound — a pipeline created long before, by a caller
+        // who never named an indirect-count draw. There is no later moment to
+        // decide it in: `supportIndirectCommandBuffers` is a creation-time
+        // property.
+        //
+        // Conditional rather than unconditional because it is not free — Apple
+        // documents it as a capability the compiler must reserve for, so a
+        // device that cannot serve the path at all should not pay for it. The
+        // flag and the path arrive together; see `crcbl_mtl::icb`.
+        descriptor.setSupportIndirectCommandBuffers(
+            self.inner
+                .caps
+                .features
+                .contains(crcbl_hal::Features::DRAW_INDIRECT_COUNT),
+        );
 
         for (index, target) in desc.color_targets.iter().enumerate() {
             if target.format.is_depth_stencil() {

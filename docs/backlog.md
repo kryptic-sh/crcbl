@@ -2380,169 +2380,39 @@ pure refactor with no capability change at all — **has landed**, and the
 existing Metal e2e and render jobs are what prove it: nothing about it can be
 executed off a Mac, and the local gates only type-check it.
 
-### BLOCKED ON THE SHADER TOOLCHAIN — Slang cannot write an ICB
+### The Metal indirect-count slice landed, and what it costs
 
-**This overturns the decision below, and it was found by trying to build the
-kernel.** The design picked deferred encoding so a compute kernel could write
-the `MTLIndirectCommandBuffer`. **Slang cannot express that kernel.** Its Metal
-target has no indirect-command-buffer support: an ICB parameter is silently
-dropped rather than diagnosed, and Slang's own "Metal-Specific Functionalities"
-page lists what the target does implement — mesh shaders, parameter blocks as
-argument buffers, `SubpassInput` framebuffer fetch, specialization constants as
-function constants, address spaces — with no `command_buffer` or
-`render_command` anywhere, and an explicit unsupported list that does not
-mention them either because they were never in scope.
+`Capability::DrawIndirectCount` is implemented in `crcbl_mtl::icb`: a
+hand-written MSL kernel encodes an `MTLIndirectCommandBuffer` from the GPU-side
+count, on a compute encoder opened before the render encoder — the consumer the
+deferred recording refactor was written for. Slang still cannot express that
+kernel, and no longer needs to: MSL is compiled at runtime and a kernel carried
+as a Rust `const` sits outside the artifact pipeline entirely.
 
-Every shader in this repo is Slang; `crcbl-shaders`' whole build is `.slang` →
-spirv/msl/dxil/wgsl, and the `shaders (committed artifacts match their sources)`
-CI job hashes each source against its artifacts.
+**Real costs, recorded rather than discovered later:**
 
-**So `DrawIndirectCount` on Metal is not "unwritten" in the ordinary sense.** It
-is blocked on something outside this repo, and the honest options are:
+- **One ICB plus an 8-byte argument buffer are allocated per
+  `draw_indirect_count` call** — so one pair per bucket per frame in the forward
+  renderer. Nothing pools them yet. That is the obvious next optimisation and it
+  was left out deliberately: correctness first, and a pool wants a measurement
+  to size it.
+- **`max_draw_indirect_count` is 4096**, not the 1048576 the adapter ladder
+  measured, because it is allocated for real on every call rather than probed
+  once.
+- **Every graphics pipeline on a capable device now sets
+  `supportIndirectCommandBuffers`.** An ICB command may only run under a state
+  created with it, and the seam gives no way to know at creation time which
+  pipeline an indirect-count draw will later bind. Its cost was not measured.
+- **A negative `baseVertex` is not expressible**; see `icb.rs`.
 
-1. **Hand-write one MSL kernel.** The stated cost here was that "the
-   artifact-hash job needs an exception mechanism it does not have" — **and that
-   is wrong.** `crcbl-mtl` compiles MSL through
-   `newLibraryWithSource:options:error:`, so MSL is _source at runtime_, not a
-   precompiled artifact; and `tools/compile-shaders.sh` is source-driven,
-   walking `shaders/*.slang` and emitting each one's declared targets, then
-   refusing orphans **inside `msl/`**. A kernel that never lives in `msl/` is
-   invisible to it, with no exception mechanism required.
-
-   The precedent already shipped and is green: `crcbl_mtl::binding`'s bindless
-   probe carried its whole kernel as a `const BINDLESS_MSL: &str` in Rust. Note
-   what that precedent is and is not — it is about _where_ MSL may live, not
-   about hand-authoring it; that text was slangc's own output with a test tying
-   it to its source.
-
-   So the real cost is the honest half of the original objection: a hand-written
-   kernel has no `.slang` to regenerate from, and nothing checks it against a
-   source because there is none. That is a maintenance cost, not a CI-mechanism
-   problem, which makes this option materially cheaper than recorded.
-
-2. **Wait for Slang.** Out of our control and unscheduled; the row stays open
-   indefinitely and the deferral refactor sits with no consumer.
-3. **Take MoltenVK's route** — read the count back and loop on the CPU. Correct
-   and simple, and it stalls the frame, which is why it was rejected above. It
-   would close the row with a performance regression on the path
-   `crcbl-render`'s GPU-driven work exists to make fast.
-4. **Leave the row open with this as its reason**, reclassified from `Unwritten`
-   to something that says "the toolchain cannot express it", which is closer to
-   `ApiAbsence` in spirit than to work nobody has done.
-
-My reading: (4) now and (1) only if something else also needs hand-written MSL,
-because one exception to a hashed pipeline is a rule with an asterisk forever.
-(3) fails the standard this project sets.
-
-**And it makes the deferral refactor speculative for now.** `crcbl_mtl`'s
-`RenderRecording` landed and is verified green on CI, and it is
-behaviour-neutral — but its consumer was this kernel. It is not wasted (it is
-the prerequisite for _any_ pre-pass work on this backend, including a
-hand-written kernel) and it is not harmful, but it currently has no caller,
-which is worth saying plainly rather than leaving it to look load-bearing.
-
-**Decided below: (1), and the research is why rather than taste** — recorded as
-it stood, because the reasoning about MoltenVK, pre-encoding and pass-splitting
-is still correct and still decides the shape _if_ a kernel can ever be written.
-
-- **MoltenVK does not take the ICB route at all.** It implements
-  `vkCmdDrawIndirectCount` by reading the count back to the CPU and looping
-  `drawIndexedPrimitives`, which needs a CPU–GPU synchronisation to see a number
-  the GPU wrote. That is correct and simple and it stalls the frame, so it fails
-  the performance half of this project's bar. It is worth knowing the reference
-  Vulkan-on-Metal implementation gave up here — it is why nobody should read
-  Metal's silence on this as "there is an easy way we missed".
-- **A third option does not exist: the commands cannot be pre-encoded once.**
-  `MTLIndirectRenderCommand`'s draws take literal vertex and instance counts, so
-  an ICB encoded on the CPU cannot serve draws whose arguments the cull pass
-  writes into GPU memory each frame. A kernel has to write them, which is what
-  forces the ordering in the first place.
-- **(2) is disqualified by the hardware this targets.** Ending and reopening a
-  render encoder on a tiler stores every attachment out of tile memory and
-  reloads it — per call, and the seam makes one call per bucket per frame. On
-  Apple silicon that is the expensive operation, not a rounding error.
-
-**What the deferral left behind, stated as a gap rather than a footnote.**
-
-- **Nothing about it executed a Metal call before it was pushed.** The refactor
-  was written and gated on Linux, where `crcbl-mtl` compiles for
-  `aarch64-apple-darwin` and runs nothing. The only proof it works is
-  `mtl e2e (macos-latest)` and the Metal render job — every draw, every bind,
-  every golden comparison — so a red run there is the first real signal, not a
-  regression against a local pass.
-- **One failure moved, and only one.** `renderCommandEncoderWithDescriptor:`
-  returning nil is now a `HalError::DeviceLost` recorded at `end_render_pass`
-  instead of at `begin_render_pass`; both are before `finish`, which is where
-  the seam observes it. The visible difference is confined to the case where a
-  copy is recorded inside a pass whose encoder would have been nil — then the
-  first error is the copy's `InvalidDescriptor` rather than the `DeviceLost`.
-  Nothing can produce a nil encoder here without a lost device, so it is
-  documented in `crcbl_mtl::command` rather than worked around.
-- **The command list's replay order is not unit-testable off macOS.** Every
-  `RenderCommand` payload is an Objective-C object, so only `crcbl_mtl::pass`'s
-  scissor plan and debug-group stack are covered by `cargo test` on any host.
-  Ordering is a `Vec` push and drain with no branch in it, which is why that was
-  accepted rather than mocked.
-
-- **The one semantic change the deferral makes is the one nothing exercises —
-  and the gap is not Metal's.** `RenderCommand::PushConstants` carries
-  `bytes: Vec<u8>`, a copy taken with `shadow.bytes().to_vec()` rather than a
-  pointer into the live shadow, because `setBytes:length:atIndex:` copies
-  immediately when encoding straight through while a recorded command would
-  otherwise see whatever a _later_ `push_constants` spliced in. The copy is
-  correct and was checked by reading. Nothing tests it — see the entry below,
-  which is the general version of the problem.
-
-**And one widely repeated claim is false, which our own measurement settles.**
-Several sources say fragment shaders cannot be used with indirect command
-buffers.
-`an_indirect_command_buffer_executes_the_triangle_the_direct_draw_paints`
-executed a full vertex-and-fragment pipeline through an ICB on CI and produced a
-canvas byte-identical to the direct draw. Had that been believed rather than
-measured, the whole approach would have been abandoned for a stall.
-
-**So the question is what bar the deletion clears.** Three honest positions:
-
-1. **Every row closed.** Requires a hardware macOS runner for four Metal rows,
-   and possibly a hardware Windows runner for the two mesh rows. Real money, and
-   it would close the loop completely.
-2. **Every row either closed or _measured_ unprovable here**, with the
-   unprovable ones implemented and marked. `Support::NotOnThisDevice` and the
-   report's _unprovable here_ state already express this exactly — it is what
-   Metal's `DepthClamp` does today. The claim becomes "every backend implements
-   it, and the CI we have proves it wherever it can".
-3. **Delete now on the coverage argument.** `crcbl-wgpu` closes zero capability
-   gaps — every capability its 13 rows name is also refused by a keeper backend
-   — and on Linux it runs Vulkan underneath, so agreement with `crcbl-vk` proves
-   less than it appears. Two of the four exercises its deletion would have cost
-   are already re-homed; the other two are one slice each.
-
-**My reading, for what it is worth:** (2) is the honest bar and (1) is the same
-thing plus hardware. (3) is defensible on its own terms and is the only one that
-does not make the deletion wait on Metal's mesh support, which nothing in the
-engine uses on that backend today. But it is a scope call, not a technical one,
-and it is the last thing standing between here and goal 3.
-
-**What has changed since this was written, and it sharpens the question rather
-than answering it.** `crcbl-webgpu` now has **zero** divergences —
-`REVIEWED_BLOCKERS` does not name it at all, after `StorageImageBinding` gained
-the seam field it needed and `TimestampQuery` was closed by moving timestamps
-into the pass descriptor. The blocker list is **nine rows across two backends**:
-dx12 4, Metal 5.
-
-That matters because the browser backend is the one `crcbl-wgpu`'s deletion is
-_about_. The replacement for the path `crcbl-wgpu` used to serve now implements
-the whole seam with nothing outstanding, which is the strongest form position
-(3) could ever take: the question is no longer "is the replacement ready" but
-"does an unrelated backend's unfinished work gate an unrelated crate's removal".
-Every remaining row belongs to dx12 or Metal, neither of which `crcbl-wgpu` has
-ever served — it runs Vulkan underneath on Linux and is not built for macOS or
-Windows CI at all.
-
-Position (1) and (2) are now really about **when parity is declared done**, not
-about whether the deletion is safe. They can be separated: nothing about
-deleting `crcbl-wgpu` makes dx12's mesh reporting or Metal's counter sets
-harder, and keeping the crate does not make either easier.
+**The live risk is the goldens, not the seam.** Reporting the feature moves
+every Metal adapter onto `GeometryPath::IndirectCount`, so `run-render-e2e.sh`
+and `run-forward-e2e.sh` now drive blessed goldens through this path — the same
+shape of change that removed the WARP device when dx12 reported mesh shading.
+The one-block revert is in `features_of`: delete the `icb::probe` grant and the
+whole slice switches off at the gate. Note that leaves the row closed and
+unexercised, which is the state this project has now been burned by four times,
+so treat it as stopping the bleeding rather than an answer.
 
 ### The two valued dx12 fills stay declined, and the zero one shipped
 

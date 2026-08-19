@@ -293,17 +293,22 @@ fn gpu_address_is_available() -> bool {
 ///   turn on an unproven path rather than fix a measured defect. See
 ///   `docs/backlog.md`.
 ///
+/// * [`Features::DRAW_INDIRECT_COUNT`] — **the one flag here that is decided by
+///   an allocation rather than by a query.** The count comes from GPU memory,
+///   and Metal's only execution that reads one is `executeCommandsInBuffer:`
+///   over an `MTLIndirectCommandBuffer` whose commands already exist. Those
+///   commands are written by a compute kernel that runs before the render
+///   encoder `draw_indirect_count` is called inside is opened, which is what
+///   `crcbl_mtl::command`'s deferred recording makes reachable and
+///   `crcbl_mtl::icb` implements. So the question left for this function is
+///   whether the *device* holds such a buffer, and
+///   [`icb::probe`](crate::icb::probe) answers it by asking for one of exactly
+///   the shape and size the path uses. This is the last Tier A feature, so
+///   reporting it moves every Metal adapter onto
+///   [`GeometryPath::IndirectCount`](crcbl_hal::GeometryPath::IndirectCount).
+///
 /// # Absent, with the reason for each
 ///
-/// * [`Features::DRAW_INDIRECT_COUNT`] — the count comes from **GPU memory**,
-///   and Metal's only execution that reads one is
-///   `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
-///   `MTLIndirectCommandBuffer` whose commands already exist. Encoding those
-///   commands from the seam's argument buffer needs a compute kernel running
-///   before the render encoder the seam calls `draw_indirect_count` *inside*
-///   was opened, which this backend's encode-straight-through shape cannot
-///   reach. This is the one Tier A feature still missing, and it is why the
-///   derived tier is still B; see the crate docs.
 /// * [`Features::TIMESTAMP_QUERY`] and
 ///   [`Features::PIPELINE_STATISTICS_QUERY`] — `supportsCounterSampling:` would
 ///   answer both, but reporting them obliges a
@@ -399,6 +404,17 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     // loop is the call that makes both true of this backend.
     out |= Features::MULTI_DRAW_INDIRECT;
     out |= Features::INDIRECT_FIRST_INSTANCE;
+    // And this one *is* a question, asked by creating the thing the path needs
+    // rather than by reading a property — Metal exposes no `supportsICB`-style
+    // flag, and the three `support*` fields on
+    // `MTLIndirectCommandBufferDescriptor` are about ray tracing, dynamic
+    // attribute strides and colour attachment mapping. So the probe builds the
+    // exact descriptor `crcbl_mtl::icb` builds, asks for the exact command
+    // count `limits_of` is about to promise, and reports whether Metal handed
+    // one back.
+    if crate::icb::probe(device) {
+        out |= Features::DRAW_INDIRECT_COUNT;
+    }
     // And no query for this one either, for a sharper reason: there is nothing
     // to ask. Metal has no push constants, so `crcbl-shaders` commits MSL in
     // which the block is an ordinary buffer argument and this backend sends it
@@ -471,6 +487,11 @@ fn limits_of(device: &ProtocolObject<dyn MTLDevice>, features: Features) -> Limi
             crate::binding::MAX_BINDLESS_DESCRIPTORS
         } else {
             floor.max_bindless_descriptors
+        },
+        max_draw_indirect_count: if features.contains(Features::DRAW_INDIRECT_COUNT) {
+            crate::icb::MAX_DRAW_INDIRECT_COUNT
+        } else {
+            floor.max_draw_indirect_count
         },
         max_sample_count: max_sample_count(device),
         max_compute_workgroup_size: [
@@ -869,21 +890,21 @@ mod tests {
         }
     }
 
-    /// **The measurement that says whether the Metal ICB slice could be
-    /// verified**, before anyone restructures this backend's encoder to write
-    /// it.
+    /// **The ceiling this device would actually accept**, printed rather than
+    /// asserted, so the number [`limits_of`] promises can be read against the
+    /// one the hardware can hold.
     ///
-    /// [`Capability::DrawIndirectCount`](crcbl_hal::Capability::DrawIndirectCount)
-    /// is `DivergenceKind::Unwritten` for Metal, and
-    /// [`METAL_NO_DRAW_INDIRECT_COUNT`](crcbl_hal::METAL_NO_DRAW_INDIRECT_COUNT)
-    /// names the work: a compute kernel encoding the seam's `DrawIndirect`
-    /// structs into an `MTLIndirectCommandBuffer` that
-    /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` then runs
-    /// with a GPU-written execution range. That is a change to how this backend
-    /// encodes, and the question this test answers first is the cheaper one:
-    /// **on the only Mac this repository's CI has, can an ICB be created at
-    /// all, and at what size?** A slice whose result no runner could observe is
-    /// a slice written blind.
+    /// It was written before `crcbl_mtl::icb` existed, to answer the question a
+    /// slice written blind would have skipped: **on the only Mac this
+    /// repository's CI has, can an ICB be created at all, and at what size?**
+    /// The answer turned out to be yes at every rung to 1048576, and the slice
+    /// was built on it.
+    ///
+    /// It is kept because [`icb::MAX_DRAW_INDIRECT_COUNT`](crate::icb::MAX_DRAW_INDIRECT_COUNT)
+    /// is a *choice* rather than a measurement — a number picked well below the
+    /// ceiling because it is allocated for real on every call — and this ladder
+    /// is the only thing that says what the ceiling was. Raising the constant
+    /// without rereading this log would be guessing.
     ///
     /// It creates ICBs and destroys them; it encodes nothing, submits nothing
     /// and executes nothing. Like
@@ -1109,19 +1130,30 @@ mod tests {
         }
 
         // The backend's own derivation, so the printed ceiling above can be read
-        // against what this backend promises today. `limits_of` never assigns
-        // `max_draw_indirect_count`, which is what makes the `1` a floor rather
-        // than a measurement — the two numbers below being equal is that fact,
-        // visible.
+        // against what this backend promises today.
         let features = features_of(raw, &name);
         let limits = limits_of(raw, features);
         println!(
-            "crcbl-mtl icb: derived max_draw_indirect_count={} (Limits::minimum() is {}, \
-             Limits::desktop() is {}; limits_of assigns the field nothing, so the derived value \
-             is this backend's choice of floor and not this device's answer)",
+            "crcbl-mtl icb: derived max_draw_indirect_count={} (icb::MAX_DRAW_INDIRECT_COUNT is \
+             {}, Limits::minimum() is {}, Limits::desktop() is {}; the derived value is the \
+             constant on a device that answered icb::probe and the floor on one that did not)",
             limits.max_draw_indirect_count,
+            crate::icb::MAX_DRAW_INDIRECT_COUNT,
             Limits::minimum().max_draw_indirect_count,
             Limits::desktop().max_draw_indirect_count,
+        );
+        // The one thing here that is an assertion rather than a print, because
+        // it is the failure that would leave two capabilities unexercised on
+        // this whole backend rather than merely under-promised:
+        // `crates/crcbl/tests/hal_seam_e2e.rs`'s `can_multi_draw` declines a
+        // device that answers one, and both of its indirect exercises decline
+        // with it.
+        assert_eq!(
+            features.contains(Features::DRAW_INDIRECT_COUNT),
+            limits.max_draw_indirect_count > 1,
+            "the DRAW_INDIRECT_COUNT flag and max_draw_indirect_count disagree, so either a \
+             device that can serve the path is reporting the seam's floor or one that cannot is \
+             promising more than one draw"
         );
         println!(
             "crcbl-mtl icb: DRAW_INDIRECT_COUNT={} MULTI_DRAW_INDIRECT={} \
