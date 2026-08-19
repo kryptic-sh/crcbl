@@ -1397,6 +1397,43 @@ impl Drop for DeviceInner {
             );
         }
         let mut state = self.state();
+        // **What the caller never destroyed, named.** `crcbl-vk` has reported
+        // this since it was written and found four real leaks the afternoon it
+        // learned to name kinds rather than count; this backend's suites had no
+        // equivalent, so a leak here was invisible. Same message and same
+        // shape, so a reader who knows one knows the other.
+        //
+        // Dropping the pools below releases the COM references regardless, so
+        // this is a diagnostic and not a repair — which is why it warns rather
+        // than failing anything.
+        let kinds = [
+            ("buffer", state.buffers.len()),
+            ("image", state.images.len()),
+            ("image view", state.views.len()),
+            ("sampler", state.samplers.len()),
+            ("command buffer", state.command_buffers.len()),
+            ("readback", state.readbacks.len()),
+            ("semaphore", state.semaphores.len()),
+            ("query set", state.query_sets.len()),
+            ("shader module", state.shader_modules.len()),
+            ("bind group layout", state.bind_group_layouts.len()),
+            ("bind group", state.bind_groups.len()),
+            ("pipeline layout", state.pipeline_layouts.len()),
+            ("graphics pipeline", state.graphics_pipelines.len()),
+            ("compute pipeline", state.compute_pipelines.len()),
+        ];
+        let live: usize = kinds.iter().map(|(_, count)| count).sum();
+        if live > 0 {
+            let named = kinds
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(kind, count)| format!("{count} {kind}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            crcbl_core::log::warn!(
+                "crcbl-dx12: {live} object(s) still alive at device teardown ({named})"
+            );
+        }
         let pending = state.retire.pending();
         if pending > 0 {
             crcbl_core::log::debug!(

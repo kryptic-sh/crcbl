@@ -3,6 +3,32 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Only two backends report a leak at device teardown
+
+`crcbl-vk` has always warned about objects a caller never destroyed, and on
+2026-08-19 it learned to name their kinds and formats — which found four real
+leaks the same afternoon (two in `hal_seam_e2e`, two in `crcbl-vk`'s own mesh
+tests, all fixed). `crcbl-dx12` now carries the same warning. The other two do
+not, and the reasons differ:
+
+- **`crcbl-mtl` has no device `Drop` at all.** Metal objects are ARC-managed
+  through `objc2`, so dropping the pools releases them and nothing is actually
+  leaked in the C sense — but a caller that forgets `destroy_image` still holds
+  a texture for the device's whole life, and nothing says so. Adding the report
+  means adding a `Drop for DeviceInner` purely as a diagnostic. Worth doing;
+  more invasive than dx12's, which had a `Drop` already.
+- **`crcbl-webgpu` has no pools of this shape**, being a command stream rather
+  than a handle table, so the check does not translate. What the equivalent
+  would be — the browser side reporting objects the stream never freed — is not
+  designed.
+
+**The dx12 half is type-checked, not run.**
+`cargo clippy -p crcbl-dx12 --target x86_64-pc-windows-msvc --all-targets -- -D warnings`
+is clean, and that is the whole of the local verification available; whether it
+fires, and on what, comes from the `dx12 e2e (software adapter)` job. Given
+`crcbl-vk`'s suites had four leaks between them, the expectation is that it will
+find some.
+
 ### quarry (S4C) is the next demo, and its gate is reachable on Vulkan alone
 
 Checked on 2026-08-19, because the obvious assumption is wrong. `apps/quarry`
