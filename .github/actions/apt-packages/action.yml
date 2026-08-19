@@ -96,7 +96,7 @@ runs:
         # either installs entirely from the restored `.deb` files or fails
         # without waiting on anything. A miss here is ordinary — an empty cache,
         # or one package short — and falls through to the attempts below.
-        if timeout 60 sudo apt-get install -y --no-install-recommends \
+        if timeout 30 sudo apt-get install -y --no-install-recommends \
           --no-download $PACKAGES; then
           echo "installed from the cached archive; the mirror was not asked"
           exit 0
@@ -107,18 +107,26 @@ runs:
         # endpoints that fail separately. When only the index is unreachable
         # this succeeds outright instead of waiting out a timeout for a refresh
         # nothing needed.
-        if timeout 100 sudo apt-get install -y --no-install-recommends $PACKAGES; then
+        # ONE LONG ATTEMPT, THEN A SHORT ONE, and the split is a correction.
+        # An earlier version ran three tries of 100s each and turned a *slow*
+        # mirror into a fatal one: the log showed `mesa-vulkan-drivers [17.5 MB]`
+        # downloading and being cut off at the timeout, three times over. Slow is
+        # the common failure, not silent, so the first attempt gets the time a
+        # large package actually needs.
+        #
+        # The retry is short because it is cheap: `Keep-Downloaded-Packages`
+        # above means whatever arrived is still on disk, so a second attempt
+        # resumes rather than re-fetching. Total worst case is
+        # 30 + 300 + 30 + 90 = 450s, inside the tightest caller cap of eight
+        # minutes. Two tries at the mirror, not three: a third would not fit,
+        # and on a slow mirror one long attempt beats several short ones.
+        if timeout 300 sudo apt-get install -y --no-install-recommends $PACKAGES; then
           exit 0
         fi
         echo "install against the image's package lists failed; refreshing them"
-        for attempt in 1 2; do
-          if timeout 40 sudo apt-get update \
-            && timeout 100 sudo apt-get install -y --no-install-recommends $PACKAGES; then
-            exit 0
-          fi
-          delay=$((attempt * 10))
-          echo "apt-get retry ${attempt} of 2 failed or hung; retrying in ${delay}s"
-          sleep "${delay}"
-        done
-        echo "::error::apt-get could not install '${PACKAGES}' in three attempts — the runner's mirror is unreachable, which is not a fault in this repository"
+        if timeout 30 sudo apt-get update \
+          && timeout 90 sudo apt-get install -y --no-install-recommends $PACKAGES; then
+          exit 0
+        fi
+        echo "::error::apt-get could not install '${PACKAGES}' — the runner's mirror is unreachable, or too slow to deliver them inside the 450s this step has, which is not a fault in this repository"
         exit 1

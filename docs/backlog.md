@@ -891,6 +891,16 @@ to prevent. The worst case is now `100 + 2x(40 + 100) + 30 = 410s`, and a real
 outage prints
 `the runner's mirror is unreachable, which is not a fault in this repository`.
 
+**And the tightening was overdone — that is worth knowing before touching these
+numbers again.** Fitting three tries inside the cap meant 100s per install, and
+that turned a _slow_ mirror into a fatal one: the log showed
+`mesa-vulkan-drivers [17.5 MB]` downloading and being cut off at the timeout,
+three times over, on a mirror that was answering. Slow is the common failure
+here, not silent. It is now one long attempt (300s) and one short retry, because
+a large package needs the time and the retry is cheap —
+`Keep-Downloaded- Packages` means whatever arrived is still on disk and a second
+attempt resumes. Worst case 450s, inside the eight-minute cap.
+
 **Done, because the rate stayed high — five jobs in one session.** The `.deb`
 files are cached and tried **first**, with `--no-download`, which forbids the
 network outright: a job whose packages were fetched on an earlier run installs
