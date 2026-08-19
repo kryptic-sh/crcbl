@@ -1022,91 +1022,12 @@ Two gaps remain in the same bug class:
   there is no compositor in the test environment, so closing this needs a
   windowed harness, not another assertion.
 
-### A hung fetch reports as "cancelled", and that is what the mystery runs were
+### The apt cache does not close the mirror window
 
-Two runs today finished `cancelled` with **no newer push to supersede them**,
-which reads like somebody pushed over the board. Neither was. Both were the
-`shaders` job hanging on **"Install the pinned spirv-tools"** — one run sat
-there from 07:49:47 to 08:10:05, twenty minutes, until the job's own
-`timeout-minutes` fired. GitHub reports a job killed by its timeout as
-_cancelled_, not _failed_, so nothing in the summary says a fetch stalled.
-
-The cause was three unwrapped network operations in one step: a bare `curl` with
-no `--max-time` and no retry, and two bare `apt-get` calls. `slangc` and `dxc`
-had the same bare `curl`. All three are now bounded and retried, and the
-`apt-get update` beside them is best-effort rather than chained to the install
-that follows.
-
-**This is the same argument `.github/actions/apt-packages` already makes** — "a
-hang is not a failure, and never returns to be retried" — applied to the fetches
-nobody had given it to. Worth checking the rest of the workflow for any other
-network call without a bound; these three were found by grepping `curl` for the
-absence of `--max-time`.
-
-**And the diagnostic lesson**: a run that reads `cancelled` with nothing after
-it is not noise. Three of them today were a real hang wearing the wrong label.
-
-### The runner's apt mirror goes down, and now says so
-
-Three jobs failed on it in one session — `x11 e2e`, `wayland e2e`, `cli e2e` —
-across commits that changed only markdown. It is a GitHub runner mirror outage,
-not a fault here, and re-running the failed jobs is the response.
-
-**What was fixed is the legibility, and it is worth knowing why.**
-`.github/actions/apt-packages` retries a hung mirror, and its whole argument is
-that a hang should fail by name rather than look like somebody cancelled the
-run. But its budget could not fit: callers cap the step at 8 or 10 minutes while
-the timeouts allowed `240 + 3x360` plus backoff — twenty-three. The step was
-killed mid-loop, so the later tries never ran and the failure surfaced as "The
-action has timed out", which is exactly the illegible failure the retry exists
-to prevent. The worst case is now `100 + 2x(40 + 100) + 30 = 410s`, and a real
-outage prints
-`the runner's mirror is unreachable, which is not a fault in this repository`.
-
-**And the tightening was overdone — that is worth knowing before touching these
-numbers again.** Fitting three tries inside the cap meant 100s per install, and
-that turned a _slow_ mirror into a fatal one: the log showed
-`mesa-vulkan-drivers [17.5 MB]` downloading and being cut off at the timeout,
-three times over, on a mirror that was answering. Slow is the common failure
-here, not silent. It is now one long attempt (300s) and one short retry, because
-a large package needs the time and the retry is cheap —
-`Keep-Downloaded- Packages` means whatever arrived is still on disk and a second
-attempt resumes. Worst case 450s, inside the eight-minute cap.
-
-**A third correction, and the same lesson twice.** The retry was written as
-`update && install`, so when a slow `apt-get update` used its whole timeout the
-`&&` short-circuited and **the retry install never ran** — the wayland job
-failed thirty seconds after the refresh began, having attempted the packages
-exactly once. The refresh is best-effort now (`|| echo …`): a stale index is a
-reason to refresh, not a reason to skip the attempt.
-
-Both this and the 100s regression before it are the same mistake — treating a
-_slow_ mirror as if it were an _absent_ one. Timeouts here should be generous on
-the thing that transfers bytes and never allowed to eat the attempt that
-follows.
-
-**Done, because the rate stayed high — five jobs in one session.** The `.deb`
-files are cached and tried **first**, with `--no-download`, which forbids the
-network outright: a job whose packages were fetched on an earlier run installs
-from disk without asking the mirror at all. A miss falls through to the retry
-loop, which then repopulates the cache.
-
-Two things about the key are deliberate. It includes the package list, so jobs
-wanting different sets do not fight over one entry, and the runner image,
-because a `.deb` built for one release is not what another resolves to. There
-are **no `restore-keys`**: a near-miss here would be the wrong package set, not
-a slightly stale one.
-
-**The image half was broken on the first attempt and the log said so.**
-`${{ env.ImageOS }}` does not resolve inside a composite action, so the key read
-`apt-Linux-X64--<hash>` — an empty segment, which would have restored one
-release's `.deb` files onto another. It is read in a shell step now, falling
-back to `/etc/os-release` when the variable is absent. Worth remembering
-generally: a cache key with an empty segment fails silently and _looks_ like a
-hit.
-
-What it does not fix: the very first run after a cache eviction still needs the
-mirror. The cache narrows the window rather than closing it.
+`.github/actions/apt-packages/action.yml` tries its cache before the network and
+carries the current worst-case timing in comments beside the code, which is the
+copy to read. What none of it fixes: the first run after a cache eviction still
+needs the mirror, so the cache narrows the outage window rather than closing it.
 
 ### The seam audit — five places the seam is not backend agnostic
 
