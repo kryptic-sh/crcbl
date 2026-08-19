@@ -952,7 +952,10 @@ mod tests {
                 "tonemap",
                 &crcbl_shaders::TONEMAP,
                 &["vertexMain", "fragmentMain"],
-                &[Srv, Sampler],
+                // The scene target, the sampler that reads it, and the exposure
+                // block — declared last because it is numbered last, so `t0`,
+                // `s0` and `b0`.
+                &[Srv, Sampler, Cbv],
             ),
             (
                 "triangle",

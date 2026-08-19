@@ -676,6 +676,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Exposure is a runtime value, and `apps/viewer` can change it.** The
+  tonemap's multiplier was a compile-time constant; it now arrives in a uniform
+  block, with `ForwardRenderer::set_exposure`/`exposure` and a range of five
+  stops either side of the default. `-` and `=` step it in the viewer by a third
+  of a stop — the camera exposure-compensation increment, so three presses is a
+  doubling — and holding a key sweeps, which is what a continuous range wants.
+  The listing panel shows the current value.
+
+  A **uniform block rather than a push constant**, because WebGPU has no push
+  constants: a range would split the pass into two layouts and two copies of the
+  shader for the sake of four bytes a frame.
+
+  The default is exactly the constant it replaced, so no golden moved.
+
 - **`Capability::DrawIndirectCount` works on the Metal backend**, taking the
   parity blocker list from nine rows to eight — and it also unblocks
   `Capability::IndirectArgumentPaddedStride`, which the seam had been declining

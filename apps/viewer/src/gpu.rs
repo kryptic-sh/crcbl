@@ -287,6 +287,30 @@ impl Gpu {
         self.wireframe_supported
     }
 
+    /// Multiplies the tonemap's exposure by `factor` and returns what is now in
+    /// force.
+    ///
+    /// **Multiplicative, because exposure is a scale**: doubling it is one stop
+    /// wherever it starts from, where adding a constant is a large change at the
+    /// bottom of the range and an imperceptible one at the top.
+    ///
+    /// [`ForwardRenderer::set_exposure`] clamps, so the answer is what the frame
+    /// will actually be drawn with and not what was asked for — the same
+    /// distinction [`Gpu::set_wireframe`] makes, and here it is also what stops a
+    /// key held against the end of the range from winding up a value it would
+    /// take as many presses to unwind.
+    pub const fn scale_exposure(&mut self, factor: f32) -> f32 {
+        self.renderer
+            .set_exposure(self.renderer.exposure() * factor);
+        self.renderer.exposure()
+    }
+
+    /// The exposure the next frame is drawn with.
+    #[must_use]
+    pub const fn exposure(&self) -> f32 {
+        self.renderer.exposure()
+    }
+
     /// The extent the swapchain is currently configured at.
     #[must_use]
     pub const fn extent(&self) -> (u32, u32) {
@@ -743,6 +767,197 @@ mod tests {
         let ((width, height), pixels) = setup.draw_and_readback().expect("the frame lands");
         setup.finish().expect("teardown");
         (width, height, pixels)
+    }
+
+    /// One frame of a single cube at `exposure`, read back off the GPU.
+    ///
+    /// [`wireframe_proof_frame`]'s scene exactly — the same cube, the same
+    /// camera, this application's own [`key_light`] — so the only thing that
+    /// differs between two calls is the number the tonemap multiplies by.
+    ///
+    /// `None` never calls the setter at all, which is what makes "the default is
+    /// unchanged" a claim about the code path a golden run takes rather than
+    /// about a constant.
+    fn exposure_proof_frame(exposure: Option<f32>) -> (u32, u32, Vec<u8>) {
+        let camera = Camera {
+            eye: Vec3::new(2.6, 2.0, 3.4),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            projection: Projection::Perspective {
+                fov_y: std::f32::consts::FRAC_PI_3,
+                near: 0.01,
+            },
+        };
+        let mut setup = OffscreenSetup::open_forward(
+            PROOF_EXTENT.0,
+            PROOF_EXTENT.1,
+            move |device, queue, format| {
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer
+                    .add_instance(&InstanceDesc {
+                        mesh: crcbl::render::scene::DEMO_CUBE,
+                        material: crcbl::render::scene::DEMO_UNTINTED,
+                        transform: crcbl::math::Mat4::IDENTITY,
+                    })
+                    .expect("one instance fits in any pool");
+                if let Some(exposure) = exposure {
+                    renderer.set_exposure(exposure);
+                }
+                Ok(ForwardScene {
+                    camera,
+                    sun: key_light(&camera),
+                    renderer: Box::new(renderer),
+                })
+            },
+        )
+        .expect("the pinned backend opens");
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame lands");
+        setup.finish().expect("teardown");
+        (width, height, pixels)
+    }
+
+    /// Linear light from one byte of the swapchain, undoing its sRGB encode.
+    ///
+    /// IEC 61966-2-1's electro-optical transfer function, which is what an sRGB
+    /// swapchain format applies on write — so this is the only way back from a
+    /// readback byte to the value the tonemap produced. Written out here as
+    /// every other pixel test in this workspace writes it (see
+    /// `crcbl/tests/render_e2e.rs`'s `srgb_encode`), and
+    /// [`the_transfer_function_pins_its_own_endpoints`] is what says the
+    /// transcription is right.
+    fn linear_of(byte: u8) -> f32 {
+        let encoded = f32::from(byte) / 255.0;
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// The decode's fixed points, from the specification rather than from this
+    /// implementation: a check computed by the thing it checks is no check.
+    #[test]
+    fn the_transfer_function_pins_its_own_endpoints() {
+        assert!(linear_of(0).abs() < 1e-6);
+        assert!((linear_of(255) - 1.0).abs() < 1e-6);
+        // The knee: 0.04045 encoded is 0.0031308 linear, and 12.92 is the slope
+        // below it.
+        assert!((linear_of(10) - (10.0 / 255.0 / 12.92)).abs() < 1e-6);
+    }
+
+    /// **The exposure reaches pixels, and it scales the picture the way an
+    /// exposure does.**
+    ///
+    /// `crate::app`'s key test says the presses reach the renderer and
+    /// `crcbl_render::forward`'s block test says the number reaches the buffer;
+    /// neither can tell a frame drawn with it from a frame that ignored it. Only
+    /// the bytes can.
+    ///
+    /// **Two exposures a factor of four apart, one stop either side of the
+    /// default**, and they are chosen to sit where the operator still
+    /// discriminates: it is `saturate(colour * exposure)`, so far enough up
+    /// every pixel pins to white and two exposures produce the same frame. The
+    /// clear behind the cube is about 0.012 to 0.030 in linear light, so even at
+    /// 2.0 it is nowhere near the clamp — and `the_bright_frame_is_not_saturated`
+    /// below is not a separate test but the third assertion here, which is what
+    /// keeps that reasoning honest if the clear colour ever changes.
+    ///
+    /// Four claims:
+    ///
+    /// * the corner the cube cannot reach scales by **exactly the exposure
+    ///   ratio** in linear light — the claim that this is an exposure and not
+    ///   merely something that got brighter;
+    /// * no byte anywhere got darker — a brightening, not a different picture;
+    /// * a real share got strictly brighter — not a no-op that redrew the same
+    ///   frame;
+    /// * and the bright frame has unsaturated colour left in it, so the two
+    ///   exposures were compared where the operator still tells them apart.
+    #[test]
+    fn the_exposure_scales_the_frame_the_way_an_exposure_does() {
+        if !a_driver_is_pinned() {
+            return;
+        }
+        let (width, height, dark) = exposure_proof_frame(Some(0.5));
+        let (bright_width, bright_height, bright) = exposure_proof_frame(Some(2.0));
+        assert_eq!((width, height), (bright_width, bright_height));
+        assert_eq!(dark.len(), bright.len());
+
+        // The first texel of the frame, which the cube's silhouette cannot
+        // reach — `the_wireframe_view_empties_the_interior_and_keeps_the_edges`
+        // reads the same one as its background. Byte 3 is alpha, which the
+        // tonemap writes as 1.0 and no encode touches, so only the three colour
+        // bytes carry the exposure.
+        for channel in 0..3 {
+            let low = linear_of(dark[channel]);
+            let high = linear_of(bright[channel]);
+            assert!(low > 0.0, "channel {channel} of the clear is black already");
+            let ratio = high / low;
+            // 8-bit quantisation at the dark end, and nothing else: the clear is
+            // a few hundredths of full scale, where one byte of the encoded
+            // value is a couple of percent of the linear one.
+            assert!(
+                (ratio - 4.0).abs() < 0.4,
+                "channel {channel} of the clear went from {low} to {high}, a factor of {ratio} \
+                 rather than the 4 the exposures differ by",
+            );
+        }
+        assert_eq!(dark[3], bright[3], "the tonemap writes alpha, not exposure");
+
+        assert!(
+            dark.iter().zip(&bright).all(|(low, high)| high >= low),
+            "a byte got darker when the exposure went up, so this is a different picture rather \
+             than a brighter one",
+        );
+        let brighter = dark
+            .iter()
+            .zip(&bright)
+            .filter(|(low, high)| high > low)
+            .count();
+        assert!(
+            brighter > dark.len() / 2,
+            "only {brighter} of {} bytes moved, which is not a frame that changed exposure",
+            dark.len(),
+        );
+        let unsaturated = bright
+            .chunks_exact(4)
+            .filter(|texel| texel[..3].iter().any(|byte| *byte < u8::MAX))
+            .count();
+        assert!(
+            unsaturated > bright.len() / 8,
+            "only {unsaturated} texels of the bright frame have colour left below white, so 2.0 \
+             is past where this operator still discriminates",
+        );
+    }
+
+    /// **A renderer nobody configures draws the frame it always drew.**
+    ///
+    /// The check behind "every golden image is unchanged": the default is not
+    /// merely equal to the old constant in a doc comment, the frame drawn
+    /// without ever calling the setter is byte-identical to the frame drawn with
+    /// it set to the default.
+    #[test]
+    fn the_default_exposure_is_the_frame_drawn_without_one() {
+        if !a_driver_is_pinned() {
+            return;
+        }
+        let (width, height, untouched) = exposure_proof_frame(None);
+        let (set_width, set_height, set) =
+            exposure_proof_frame(Some(crcbl::shaders::tonemap::DEFAULT_EXPOSURE));
+        assert_eq!((width, height), (set_width, set_height));
+        assert_eq!(
+            untouched, set,
+            "setting the default has to be the same frame as never setting anything",
+        );
+
+        // Anti-vacuity: the same comparison against a different exposure fails,
+        // so the equality above is a fact about this frame and not about two
+        // readbacks that would match whatever was asked for.
+        let (_, _, moved) = exposure_proof_frame(Some(2.0));
+        assert_ne!(
+            untouched, moved,
+            "two different exposures produced the same bytes, so nothing here is measuring the \
+             exposure at all",
+        );
     }
 
     /// **The wireframe view draws edges where the filled frame drew a solid.**

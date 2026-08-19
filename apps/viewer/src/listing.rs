@@ -52,6 +52,15 @@
 //!   metres — which is glTF's unit, and therefore how a file exported in
 //!   centimetres announces itself: as a hundred-metre chair. The centre is what
 //!   explains a model that turns around a point somewhere off to the side.
+//! * **`exposure`.** The one line here that is not a fact about the file: it is
+//!   what the two keys in [`crate::app`] change, and a control with no readout
+//!   is a control a user cannot tell has reached the end of its range — which
+//!   [`ForwardRenderer::set_exposure`](crcbl::render::ForwardRenderer::set_exposure)
+//!   clamps to. It is on *this* panel rather than on `F3` because it is the
+//!   viewer's own control and not a fact about how the frame is going, and
+//!   because a person who has just pressed a key is looking at the panel they
+//!   opened. Written as the multiplier rather than in stops, because the
+//!   multiplier is what the shader applies.
 //! * **Every skip, spelled the way stderr spells it.** `crate::app` prints them
 //!   once at start-up and the conversion logs them; a user who has scrolled
 //!   past that, or who started the viewer from a file manager and has no
@@ -137,9 +146,16 @@ enum Line {
 /// Built once, from the [`Model`], because nothing in this milestone can change
 /// the document under it: there is no hot reload yet and no way to open a second
 /// file. When milestone 3's reload lands, a reloaded model is a new [`Listing`].
+///
+/// The one line that is not the document's is `exposure`, and it is the one line
+/// that is rewritten after construction — see [`Listing::set_exposure`].
 #[derive(Clone, Debug)]
 pub struct Listing {
     lines: Vec<Line>,
+    /// Where the `exposure` row sits in [`Listing::lines`], so
+    /// [`Listing::set_exposure`] rewrites a row rather than searching for one by
+    /// its label.
+    exposure_row: usize,
     visible: bool,
 }
 
@@ -207,6 +223,16 @@ impl Listing {
             format!("{:.3}, {:.3}, {:.3}", centre.x, centre.y, centre.z),
         ));
 
+        // Seeded with the renderer's own default and overwritten by the first
+        // `crate::app::Viewer::draw`, which is where the exposure actually in
+        // force can be asked for. Written down here rather than left blank so
+        // that a panel is never a row short of the one the layout measured.
+        let exposure_row = lines.len();
+        lines.push(row(
+            "exposure",
+            exposure_value(crcbl::shaders::tonemap::DEFAULT_EXPOSURE),
+        ));
+
         let skipped = model.skipped();
         if skipped.is_empty() {
             lines.push(Line::Heading("nothing was skipped".to_string()));
@@ -217,7 +243,22 @@ impl Listing {
 
         Self {
             lines,
+            exposure_row,
             visible: false,
+        }
+    }
+
+    /// Rewrites the `exposure` row.
+    ///
+    /// Called every frame from `crate::app::Viewer::draw` with what the renderer
+    /// answered — not with what a key asked for — so the panel reports the value
+    /// after the renderer's clamp and says plainly when the control has reached
+    /// an end of its range.
+    pub fn set_exposure(&mut self, exposure: f32) {
+        let value = exposure_value(exposure);
+        match &mut self.lines[self.exposure_row] {
+            Line::Row { value: slot, .. } => *slot = value,
+            other => unreachable!("the exposure row is a row, and is a {other:?}"),
         }
     }
 
@@ -371,6 +412,15 @@ fn row(label: &str, value: String) -> Line {
         label: label.to_string(),
         value,
     }
+}
+
+/// The `exposure` row's value column.
+///
+/// Two decimals and an `x`, because it is a multiplier: the range runs from a
+/// thirty-second to thirty-two, and two decimals is what tells the bottom of
+/// that range apart from the step below it.
+fn exposure_value(exposure: f32) -> String {
+    format!("{exposure:.2}x")
 }
 
 /// The line drawn in place of the lines that did not fit.
@@ -533,6 +583,39 @@ mod tests {
         );
     }
 
+    /// **The `exposure` row is rewritten, and it is the only row that is.**
+    ///
+    /// [`Listing::set_exposure`] writes by index rather than by searching for a
+    /// label, so the failure it can have is writing over a neighbour — a panel
+    /// reporting the model's centre as `2.00x`, which still draws. Asserting the
+    /// rest of the panel is untouched is what catches that; asserting the row
+    /// alone would not.
+    #[test]
+    fn setting_the_exposure_rewrites_that_row_and_no_other() {
+        let (_dir, mut listing) = shown("panel.glb", &fixture::quad_glb(fixture::QUAD_CENTRE));
+        let before = drawn(&listing, ROOMY);
+        assert_eq!(
+            value_of(&before, "exposure"),
+            "1.00x",
+            "the row starts at the renderer's default",
+        );
+
+        listing.set_exposure(0.5);
+        let after = drawn(&listing, ROOMY);
+        assert_eq!(value_of(&after, "exposure"), "0.50x");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "a rewrite is not a line added or removed",
+        );
+        for (was, now) in before.iter().zip(&after) {
+            assert!(
+                was == now || was == "1.00x",
+                "{was:?} became {now:?}, and the exposure was the only row that may move",
+            );
+        }
+    }
+
     /// **A skipped feature is named on the panel**, not counted on it.
     ///
     /// The line `docs/plan/sample/05-viewer.md`'s exit criterion is about: the
@@ -630,12 +713,12 @@ mod tests {
     ///
     /// The numbers are exact rather than "fewer than before", which is what
     /// makes the tail's arithmetic checkable: the skewed fixture's listing is a
-    /// heading, eight rows, the skip heading and one skip; a window holding ten
-    /// lines spends one of them on the tail, so nine are drawn and two go.
+    /// heading, nine rows, the skip heading and one skip; a window holding ten
+    /// lines spends one of them on the tail, so nine are drawn and three go.
     #[test]
     fn a_short_window_drops_the_tail_and_says_how_much_it_dropped() {
         let (_dir, listing) = shown("skewed.glb", &fixture::skewed_glb());
-        assert_eq!(listing.lines.len(), 11, "{:#?}", listing.lines);
+        assert_eq!(listing.lines.len(), 12, "{:#?}", listing.lines);
 
         let padding = DebugStyle::default().padding;
         let short = Vec2::new(1280.0, 2.0 * (MARGIN + padding) + 10.0 * LINE_HEIGHT);
@@ -648,12 +731,12 @@ mod tests {
         );
         assert_eq!(
             cut.last().map(String::as_str),
-            Some("+2 more, all of them on stderr"),
+            Some("+3 more, all of them on stderr"),
             "the last line has to account for exactly what is missing: {cut:#?}",
         );
         assert!(
             !cut.iter().any(|line| line == "skipped 1"),
-            "the two dropped lines are the skip section, which is last: {cut:#?}",
+            "the dropped lines are the exposure row and the skip section, which are last: {cut:#?}",
         );
         assert_eq!(
             value_of(&cut, "centre"),

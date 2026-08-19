@@ -2,6 +2,12 @@
 
 @binding(1) @group(0) var sceneSampler_0 : sampler;
 
+struct TonemapParams_std140_0
+{
+    @align(16) exposure_0 : f32,
+};
+
+@binding(2) @group(0) var<uniform> params_0 : TonemapParams_std140_0;
 struct FullscreenOutput_0
 {
     @builtin(position) position_0 : vec4<f32>,
@@ -18,9 +24,9 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32) -> FullscreenOutput_0
     return output_0;
 }
 
-fn tonemap_0( color_0 : vec3<f32>) -> vec3<f32>
+fn tonemap_0( color_0 : vec3<f32>,  exposure_1 : f32) -> vec3<f32>
 {
-    return saturate(color_0);
+    return saturate(color_0 * vec3<f32>(exposure_1));
 }
 
 struct pixelOutput_0
@@ -36,7 +42,7 @@ struct pixelInput_0
 @fragment
 fn fragmentMain( _S2 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) -> pixelOutput_0
 {
-    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_0((textureSample((scene_0), (sceneSampler_0), (_S2.uv_1))).xyz), 1.0f) );
+    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_0((textureSample((scene_0), (sceneSampler_0), (_S2.uv_1))).xyz, params_0.exposure_0), 1.0f) );
     return _S3;
 }
 

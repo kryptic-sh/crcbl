@@ -8,11 +8,11 @@
 //!     ──────────────────────────────→ Viewer::button_event   (pan press)
 //!     ──────────────────────────────→ Viewer::wheel_event    (zoom)
 //!     ──────────────────────────────→ Viewer::pointer_event  (orbit press, drag)
-//!     ──────────────────────────────→ Viewer::key_event      (F, I, W)
+//!     ──────────────────────────────→ Viewer::key_event      (F, I, W, -, =)
 //!   run_ticks  ─────────────────────→ Viewer::tick           (nothing at all)
 //!   draw_list.clear()
 //!     ──────────────────────────────→ Viewer::draw           (re-frame, camera,
-//!                                                             wireframe,
+//!                                                             wireframe, exposure,
 //!                                                             listing panel)
 //!     menu, debug overlay             ← the engine's
 //!   gpu.frame()
@@ -63,9 +63,9 @@ use crate::model::{self, LoadError, Model};
 
 /// Frames the model again, fitting it in the view from wherever the camera is.
 ///
-/// One of the three keys this application binds. None of them is one of the
-/// loop's, so all three arrive through [`HostedGame::key_event`] like any other
-/// game's.
+/// One of the keys this application binds. None of them is one of the loop's, so
+/// every one arrives through [`HostedGame::key_event`] like any other game's,
+/// and `no_two_bindings_claim_the_same_key` is what keeps that true.
 pub const REFRAME_KEY: KeyCode = KeyCode::KeyF;
 
 /// Shows or hides [`crate::listing`]'s panel. Off to begin with.
@@ -91,6 +91,45 @@ pub const LISTING_KEY: KeyCode = KeyCode::KeyI;
 /// [`crate::controls`] — so `W` is not the half of a `WASD` set the way it would
 /// be in a game.
 pub const WIREFRAME_KEY: KeyCode = KeyCode::KeyW;
+
+/// Darkens the picture: one press divides the tonemap's exposure by
+/// [`exposure_step`].
+///
+/// `-` and `=` in their US-QWERTY positions, which is where every browser, every
+/// image viewer and every map puts "less" and "more" — so the pair needs no
+/// learning, and it is free on [`LISTING_KEY`]'s terms: neither is one of the
+/// loop's three reserved keys, one of the three it arbitrates for a menu, or one
+/// of the three this application already binds. The physical key rather than the
+/// shifted glyph, so `+` needs no modifier and a layout that puts `+` elsewhere
+/// still works.
+pub const EXPOSURE_DOWN_KEY: KeyCode = KeyCode::Minus;
+
+/// Brightens the picture, by [`EXPOSURE_DOWN_KEY`]'s factor the other way.
+pub const EXPOSURE_UP_KEY: KeyCode = KeyCode::Equal;
+
+/// How much of a stop one press of [`EXPOSURE_UP_KEY`] moves the exposure.
+///
+/// A third, which is the increment every camera's exposure-compensation dial
+/// has: fine enough that a press is an adjustment rather than a jump, coarse
+/// enough that crossing the whole of
+/// [`EXPOSURE_MIN`](crcbl::render::EXPOSURE_MIN) to
+/// [`EXPOSURE_MAX`](crcbl::render::EXPOSURE_MAX) — ten stops — is thirty
+/// presses, which a held key covers in a second or so.
+pub const EXPOSURE_STOPS_PER_PRESS: f32 = 1.0 / 3.0;
+
+/// What one press of [`EXPOSURE_UP_KEY`] multiplies the exposure by.
+///
+/// **A ratio, not a difference.** Exposure is a scale, so equal ratios are what
+/// feel like equal steps: adding a tenth would be a doubling at the bottom of
+/// the range and invisible at the top. Two to the power of
+/// [`EXPOSURE_STOPS_PER_PRESS`], because a *stop* is a doubling — which is what
+/// makes three presses exactly twice as bright wherever they start.
+///
+/// A function rather than a `const`, because `f32::powf` is not one.
+#[must_use]
+pub fn exposure_step() -> f32 {
+    2.0f32.powf(EXPOSURE_STOPS_PER_PRESS)
+}
 
 /// What a finished run reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,6 +274,29 @@ pub struct Viewer {
     wireframe_pending: bool,
     /// Whether [`WIREFRAME_KEY`] is currently held, for `listing_held`'s reason.
     wireframe_held: bool,
+    /// Net presses of [`EXPOSURE_UP_KEY`] less [`EXPOSURE_DOWN_KEY`] since the
+    /// last frame drew, applied in [`Viewer::draw`].
+    ///
+    /// Deferred on `wireframe_pending`'s terms — the exposure lives on the
+    /// renderer, and a hosted game is handed the GPU only in `tick` and `draw`.
+    ///
+    /// **There is no `_held` guard beside it, and that is the point.** The loop
+    /// forwards a key's auto-repeats as further presses — `MenuPump::observe`
+    /// does not fold them away — which the three toggles above have to defend
+    /// against because flipping a switch thirty times a second is a strobe. Here
+    /// it is the feature: holding the key keeps changing the value, which is
+    /// what makes ten stops reachable without thirty separate presses. Counted
+    /// rather than flagged so that a frame which saw several repeats moves by
+    /// several steps instead of one.
+    exposure_steps: i32,
+    /// The exposure the last [`Viewer::draw`] left in force, as the renderer
+    /// answered it.
+    ///
+    /// [`Viewer::wireframe`]'s distinction: the renderer clamps, so this holds
+    /// what the frame is drawn with rather than the product of every press —
+    /// which is what lets the listing panel say that a key has reached the end
+    /// of its range.
+    exposure: f32,
     /// `docs/plan/sample/05-viewer.md` milestone 2's listing — see
     /// [`crate::listing`]. Hidden until [`LISTING_KEY`] is pressed.
     listing: Listing,
@@ -330,6 +392,10 @@ pub fn with_shell<S: Shell + ?Sized>(
     // change it afterwards — see `Listing::of`.
     let listing = Listing::of(&model);
 
+    // Read before the GPU is handed to the loop, and off the renderer rather
+    // than from a constant: the default exposure is the renderer's to choose.
+    let exposure = gpu.exposure();
+
     Ok(Loop::new(
         Booted {
             shell,
@@ -349,6 +415,8 @@ pub fn with_shell<S: Shell + ?Sized>(
             wireframe: false,
             wireframe_pending: false,
             wireframe_held: false,
+            exposure_steps: 0,
+            exposure,
             listing,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
@@ -396,11 +464,19 @@ impl HostedGame for Viewer {
     fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {}
 
     /// `F` frames the model again, `I` shows the listing and `W` draws it as
-    /// lines — each once per press.
+    /// lines — each once per press — and `-`/`=` step the exposure, once per
+    /// press *and once per auto-repeat*.
     ///
-    /// Framing and the wireframe are deferred to [`Viewer::draw`], which is
-    /// where this application is handed the aspect and the GPU; the panel needs
-    /// neither, so it flips here.
+    /// Framing, the wireframe and the exposure are deferred to [`Viewer::draw`],
+    /// which is where this application is handed the aspect and the GPU; the
+    /// panel needs neither, so it flips here.
+    ///
+    /// **The exposure pair deliberately has no held guard.** The loop forwards
+    /// auto-repeats as further presses, which the three toggles fold away
+    /// because a switch flipped every frame is a strobe — and which the exposure
+    /// *wants*, because holding a key to sweep a range is how a continuous value
+    /// is driven from a keyboard. The presses are counted rather than flagged,
+    /// so a frame that saw several repeats moves by several steps.
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
         match key {
             REFRAME_KEY => {
@@ -420,6 +496,8 @@ impl HostedGame for Viewer {
                 }
                 self.wireframe_held = pressed;
             }
+            EXPOSURE_UP_KEY => self.exposure_steps += i32::from(pressed),
+            EXPOSURE_DOWN_KEY => self.exposure_steps -= i32::from(pressed),
             _ => {}
         }
     }
@@ -473,7 +551,17 @@ impl HostedGame for Viewer {
         if std::mem::take(&mut self.wireframe_pending) {
             self.wireframe = gpu.set_wireframe(self.wireframe);
         }
+        // The answer again, not the request — see [`Viewer::exposure`]. One
+        // multiply per net step, so a frame that saw three repeats moves three
+        // times as far, and the renderer's clamp decides where it stops.
+        let steps = std::mem::take(&mut self.exposure_steps);
+        if steps != 0 {
+            self.exposure = gpu.scale_exposure(exposure_step().powi(steps));
+        }
         gpu.set_camera(self.orbit.camera());
+        // Every frame rather than only on a step, so the row cannot disagree
+        // with the frame after anything else moves the exposure.
+        self.listing.set_exposure(self.exposure);
         // Laid out against the same extent, and with the atlas the UI pass will
         // actually draw with: a panel measured with a second atlas is a
         // background rect the wrong size for the text inside it.
@@ -1270,10 +1358,105 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **`-` and `=` step the exposure through the loop, and the listing panel
+    /// reports the value the renderer answered with.**
+    ///
+    /// Three claims a unit test of the mapping could not make: that the keys are
+    /// routed at all, that a *held* key keeps stepping where the three toggles
+    /// deliberately stop, and that the panel's row follows.
+    ///
+    /// The row is the observable rather than the field, for the wireframe
+    /// toggle's reason: the row is what a user reads, and the field behind it
+    /// holds what the renderer clamped to rather than the product of the presses.
+    ///
+    /// Three presses is exactly one stop, because the step is a third of one —
+    /// so `1.00x` becoming `2.00x` also says the step is the size it claims.
+    #[test]
+    fn the_exposure_keys_step_the_renderer_and_the_panel_reports_it() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 128);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+
+        // The row lives on the listing panel, which is off until it is asked
+        // for.
+        tap(&mut engine, window, LISTING_KEY);
+        assert_eq!(
+            row_value(&ui_text(&engine), "exposure"),
+            "1.00x",
+            "the default is the renderer's, and it is what the panel shows",
+        );
+
+        for _ in 0..3 {
+            tap(&mut engine, window, EXPOSURE_UP_KEY);
+        }
+        assert_eq!(
+            row_value(&ui_text(&engine), "exposure"),
+            "2.00x",
+            "three presses of {EXPOSURE_UP_KEY:?} is a stop, and a stop is a doubling",
+        );
+
+        // **The auto-repeats are further steps, not swallowed edges.** A press
+        // and two repeats, all while the key is down, is three steps down — back
+        // where it started.
+        engine
+            .shell_mut()
+            .key_press(window, EXPOSURE_DOWN_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        for _ in 0..2 {
+            engine
+                .shell_mut()
+                .key_repeat(window, EXPOSURE_DOWN_KEY)
+                .expect("the window is live");
+            engine.frame().expect("a frame");
+        }
+        assert_eq!(
+            row_value(&ui_text(&engine), "exposure"),
+            "1.00x",
+            "the repeats were folded away, so a held key does not sweep the range",
+        );
+        engine
+            .shell_mut()
+            .key_release(window, EXPOSURE_DOWN_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "exposure"),
+            "1.00x",
+            "letting go stepped once more",
+        );
+
+        // **The range has an end, and it is one a user can come back from.**
+        // Five stops up is fifteen presses; twenty of them therefore have to
+        // stop at the top rather than run past it.
+        for _ in 0..20 {
+            tap(&mut engine, window, EXPOSURE_UP_KEY);
+        }
+        assert!(
+            (engine.gpu().exposure() - crcbl::render::EXPOSURE_MAX).abs() < 1e-4,
+            "twenty presses reached {} rather than the clamp at {}",
+            engine.gpu().exposure(),
+            crcbl::render::EXPOSURE_MAX,
+        );
+        // And fifteen back down is the default again — which it could not be if
+        // the presses past the top had wound a value up behind the clamp.
+        for _ in 0..15 {
+            tap(&mut engine, window, EXPOSURE_DOWN_KEY);
+        }
+        assert_eq!(
+            row_value(&ui_text(&engine), "exposure"),
+            "1.00x",
+            "the picture could not be brought back from the top of the range",
+        );
+
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// **No two bindings claim the same key.**
     ///
     /// Three of these are the loop's reserved keys and three more are the ones
-    /// it arbitrates for a menu that is showing; the other three are this
+    /// it arbitrates for a menu that is showing; the rest are this
     /// application's. A collision is silent — the loop would swallow the key
     /// and the viewer's half would simply never run — so it is checked rather
     /// than argued about in a comment.
@@ -1283,6 +1466,8 @@ mod tests {
             ("reframe", REFRAME_KEY),
             ("listing", LISTING_KEY),
             ("wireframe", WIREFRAME_KEY),
+            ("exposure down", EXPOSURE_DOWN_KEY),
+            ("exposure up", EXPOSURE_UP_KEY),
             ("pause", PAUSE_KEY),
             ("debug overlay", DEBUG_OVERLAY_KEY),
             ("fullscreen", FULLSCREEN_KEY),

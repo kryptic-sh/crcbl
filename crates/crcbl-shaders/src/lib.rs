@@ -278,6 +278,9 @@ pub mod ssao;
 /// `ssao.slang`.
 pub mod ssr;
 
+/// The uniform block `tonemap.slang` reads, in the layout that shader declares.
+pub mod tonemap;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct

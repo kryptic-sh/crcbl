@@ -244,16 +244,16 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [tonemap]
 source = shaders/tonemap.slang
-source-sha256 = b72ed0862cfb5a22c339e767c6913c161759d128d1fac83c33a8fce3b4a08645
+source-sha256 = 6e8a1868e36d1db204e3f88462fd964bd1faec6791a2c072fc76fc0469f6b150
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/tonemap.spv
-spirv-sha256 = 178957f0fee6362ab5c31a5312f289251af2c0d731ff0bf6a2353e06fab03598
+spirv-sha256 = 792c0564639166fd83579d432f83c188a5f596808c72241b2dddec52fa20b75a
 wgsl = wgsl/tonemap.wgsl
-wgsl-sha256 = 579856509aad67e6249eb4b0489bb393e9e6e3c77e9676221ac98a03dc121a41
+wgsl-sha256 = 95ac0ea54e89186795eaf07874f85e4ff2473f4fe1023fe2911ee6afbd908e2a
 msl = msl/tonemap.metal
-msl-sha256 = 37304f18db97f6344b68cd39ac260bfd7da4052538591f19327b8496f89eca31
+msl-sha256 = 06672bba9eb3fce3711e4e9ed8c6ccc51c270e5d47c5a0d12a972c340f5e4e8c
 dxil = vertexMain:dxil/tonemap.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/tonemap.fragmentMain.dxil:9eb37f71b174b8651b910c3e60f0c4c82dc91f97ef3a62ec3925595403b94bc5
+dxil = fragmentMain:dxil/tonemap.fragmentMain.dxil:37041a12ba7691bcadefe568b03e5433a73834c17f771547c69d3b3483c6ad82
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [triangle]

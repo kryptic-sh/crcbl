@@ -180,7 +180,7 @@ pub use cull::{Aabb, Frustum, visible_instances};
 pub use cull_stats::{CullStats, CullStatsRing};
 pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use effects::{EffectOverride, EffectRequest, RenderEffects};
-pub use forward::{ForwardRenderer, SHADOW_LOD_BIAS};
+pub use forward::{EXPOSURE_MAX, EXPOSURE_MIN, ForwardRenderer, SHADOW_LOD_BIAS};
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
     GraphError, GraphImageBarrier, ImageId, ImportedBuffer, ImportedImage, PassBuilder,

@@ -146,7 +146,7 @@ use crcbl_hal::{
     SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
     StoreOp, Viewport, check_portable_storage_buffers,
 };
-use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao, ssr};
+use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao, ssr, tonemap};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
@@ -185,6 +185,32 @@ pub const SCENE_CLEAR: [f32; 4] = [0.012, 0.016, 0.030, 1.0];
 /// How many frames of uniform buffers to keep. Matches the frame loop's
 /// frames-in-flight.
 pub const FRAMES_IN_FLIGHT: usize = 2;
+
+/// The darkest exposure [`ForwardRenderer::set_exposure`] will accept: **five
+/// stops below** [`crcbl_shaders::tonemap::DEFAULT_EXPOSURE`].
+///
+/// The floor exists so that the control cannot be driven somewhere it cannot be
+/// driven back from. The operator clamps its own *output* to `[0, 1]`, so an
+/// unclamped input has two dead ends: far enough down and every pixel rounds to
+/// the same black byte, far enough up and every pixel saturates to white — and
+/// in both the picture stops carrying the information a user would need to see
+/// which way to go. Five stops is well inside either: it is a sixteenth of the
+/// scene's brightness, dark but plainly still a picture, and it is the range a
+/// camera's exposure-compensation dial covers.
+pub const EXPOSURE_MIN: f32 = 1.0 / 32.0;
+
+/// The brightest exposure [`ForwardRenderer::set_exposure`] will accept: **five
+/// stops above** [`crcbl_shaders::tonemap::DEFAULT_EXPOSURE`], for
+/// [`EXPOSURE_MIN`]'s reason.
+pub const EXPOSURE_MAX: f32 = 32.0;
+
+/// The default has to be reachable from both ends of the range, or a control
+/// that steps by a ratio starts somewhere it can only leave in one direction.
+const _: () = assert!(
+    EXPOSURE_MIN > 0.0
+        && EXPOSURE_MIN < crcbl_shaders::tonemap::DEFAULT_EXPOSURE
+        && EXPOSURE_MAX > crcbl_shaders::tonemap::DEFAULT_EXPOSURE
+);
 
 /// The format the frame's depth buffer is created with, taken from the
 /// description that creates it rather than written down a second time.
@@ -831,10 +857,30 @@ pub struct ForwardRenderer {
     tonemap_pipeline_layout: PipelineLayoutHandle,
     tonemap_pipeline: GraphicsPipelineHandle,
     sampler: SamplerHandle,
-    /// Rebuilt only when the scene target's view changes, which is only on a
-    /// resize. The graph hands the view to the pass body; caching against it is
-    /// what keeps a steady-state frame free of descriptor writes.
-    tonemap_group: Option<(Vec<ImageViewHandle>, BindGroupHandle)>,
+    /// `[frame]`: `tonemap.slang`'s exposure block, written by
+    /// [`begin_frame`](ForwardRenderer::begin_frame).
+    ///
+    /// One per frame in flight for the frame uniforms' reason exactly — the
+    /// previous frame may still be reading last frame's while this one is
+    /// written.
+    tonemap_uniforms: Vec<BufferHandle>,
+    /// `[frame]`: the tonemap group, cached against the scene target's view.
+    ///
+    /// Rebuilt only when that view changes, which is only on a resize. The graph
+    /// hands the view to the pass body; caching against it is what keeps a
+    /// steady-state frame free of descriptor writes.
+    ///
+    /// **One per frame in flight**, for [`crate::ssao`]'s reason: this group
+    /// names [`ForwardRenderer::tonemap_uniforms`] as well as the scene
+    /// transient, and that is a ring — a single cache keyed on the view alone
+    /// would hand the even frames' block to the odd frames.
+    tonemap_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+    /// The multiplier the tonemap pass applies before its clamp — see
+    /// [`set_exposure`](ForwardRenderer::set_exposure).
+    ///
+    /// Always within [`EXPOSURE_MIN`]`..=`[`EXPOSURE_MAX`], because the setter is
+    /// the only thing that writes it and it clamps.
+    exposure: f32,
 
     /// The format the tonemap pipeline was built for. A swapchain format change
     /// needs a new pipeline, which is why it is remembered rather than assumed.
@@ -3091,6 +3137,26 @@ impl ForwardRenderer {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            // The exposure — see [`set_exposure`](Self::set_exposure). A uniform
+            // buffer rather than a push constant, which is [`crate::ui_pass`]'s
+            // decision restated: WebGPU has no push constants at all, so a range
+            // here would split this pass into a tier A and a tier B form —
+            // two layouts, two buffers and, because one Slang entry point reads
+            // either a `[[vk::push_constant]]` block or a `[[vk::binding]]`ed
+            // one and never both, a second copy of `tonemap.slang`. Four bytes
+            // once a frame do not buy that.
+            //
+            // `FRAGMENT` alone, and the artifact agrees: `spirv/tonemap.spv`
+            // lists `%params` in the fragment `OpEntryPoint`'s interface and not
+            // in the vertex one, because the vertex stage generates three
+            // corners out of `SV_VertexID` and reads nothing.
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let tonemap_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("tonemap scene"),
@@ -3151,6 +3217,21 @@ impl ForwardRenderer {
             ..SamplerDesc::default()
         })?;
         rollback.samplers.push(sampler);
+
+        // The exposure block, one per frame in flight for the frame uniforms'
+        // reason exactly — the previous frame may still be reading last frame's
+        // while this one is written. See the module docs on the ring.
+        let mut tonemap_uniforms = Vec::with_capacity(instance_buffers.len());
+        for _ in 0..instance_buffers.len() {
+            let buffer = device.create_buffer(&BufferDesc {
+                label: Some("tonemap params"),
+                size: tonemap::PARAMS_SIZE as u64,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })?;
+            rollback.buffers.push(buffer);
+            tonemap_uniforms.push(buffer);
+        }
 
         // --- the screen-space occlusion pair ---
         //
@@ -3283,7 +3364,12 @@ impl ForwardRenderer {
             tonemap_pipeline_layout,
             tonemap_pipeline,
             sampler,
-            tonemap_group: None,
+            tonemap_uniforms,
+            tonemap_groups: vec![None; instance_buffers.len()],
+            // The value `tonemap.slang`'s `EXPOSURE` constant held, so a
+            // renderer nobody has called `set_exposure` on writes the frame it
+            // wrote before the block existed.
+            exposure: tonemap::DEFAULT_EXPOSURE,
             target_format,
             ambient_occlusion_placeholder,
             mesh_group_entries,
@@ -3748,6 +3834,19 @@ impl ForwardRenderer {
             probes: self.probe_volume,
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
+
+        // The tonemap's one number, written here rather than in `add_passes` for
+        // every other block's reason: a pass body runs at execute time, and the
+        // buffer it reads has to have been written before the frame was
+        // submitted.
+        device.write_buffer(
+            self.tonemap_uniforms[self.frame],
+            0,
+            &tonemap::TonemapParams {
+                exposure: self.exposure,
+            }
+            .to_bytes(),
+        )?;
 
         // `docs/plan/18-render-features.md`'s occlusion block. **The projection
         // alone, not the view-projection**: the occlusion integral asks what is
@@ -4760,7 +4859,8 @@ impl ForwardRenderer {
         let layout = self.tonemap_layout;
         let pipeline_layout = self.tonemap_pipeline_layout;
         let tonemap_pipeline = self.tonemap_pipeline;
-        let cached = &mut self.tonemap_group;
+        let exposure_block = self.tonemap_uniforms[self.frame];
+        let cached = &mut self.tonemap_groups[self.frame];
 
         graph
             .add_render_pass("tonemap")
@@ -4791,6 +4891,11 @@ impl ForwardRenderer {
                         binding: 1,
                         array_index: 0,
                         resource: BindingResource::Sampler(sampler),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(exposure_block),
                     },
                 ];
                 let Some(group) = cached_group(
@@ -5174,6 +5279,43 @@ impl ForwardRenderer {
             .map(GroundGrid::style)
     }
 
+    /// Sets the multiplier the tonemap pass applies before its clamp, clamped
+    /// into [`EXPOSURE_MIN`]`..=`[`EXPOSURE_MAX`].
+    ///
+    /// **The default is [`crcbl_shaders::tonemap::DEFAULT_EXPOSURE`]**, which is
+    /// the value `tonemap.slang` held as a compile-time constant until this
+    /// became a runtime one — so a renderer nobody calls this on draws the frame
+    /// it always drew, and every golden image is untouched.
+    ///
+    /// It takes effect on the next
+    /// [`begin_frame`](Self::begin_frame), which is what writes the block: a
+    /// frame already recorded reads the value it was recorded with.
+    ///
+    /// **The clamp is here rather than at the call site** so that no caller can
+    /// reach a picture it cannot get back from, and so that a control which
+    /// steps by reading this back and setting a multiple of it — which is what
+    /// [`exposure`](Self::exposure) is for — cannot wind up past the end and
+    /// then need as many presses to come back.
+    pub const fn set_exposure(&mut self, exposure: f32) {
+        // `max` then `min` rather than `f32::clamp`: `clamp` propagates a NaN,
+        // and a NaN reaching the block is a frame of NaN pixels with no key to
+        // press to get out of it. `f32::max` returns the bound instead, so a NaN
+        // lands on `EXPOSURE_MIN` — dark, and one press from being bright again.
+        self.exposure = exposure.max(EXPOSURE_MIN).min(EXPOSURE_MAX);
+    }
+
+    /// The exposure in force, after the clamp
+    /// [`set_exposure`](Self::set_exposure) applied.
+    ///
+    /// The read-back half, on [`ground_grid`](Self::ground_grid)'s terms: what a
+    /// caller wants is the number the frame is drawn with, not the one it asked
+    /// for — which is also what makes a multiplicative step land on the end of
+    /// the range rather than run past it.
+    #[must_use]
+    pub const fn exposure(&self) -> f32 {
+        self.exposure
+    }
+
     /// Whether `device` can draw the wireframe view at all.
     ///
     /// The question [`set_wireframe`](Self::set_wireframe) answers with an
@@ -5523,8 +5665,11 @@ impl ForwardRenderer {
         if let Some(stats) = self.cull_stats {
             stats.destroy(device);
         }
-        if let Some((_, group)) = self.tonemap_group {
+        for (_, group) in self.tonemap_groups.into_iter().flatten() {
             device.destroy_bind_group(group);
+        }
+        for buffer in self.tonemap_uniforms {
+            device.destroy_buffer(buffer);
         }
         device.destroy_sampler(self.sampler);
         device.destroy_graphics_pipeline(self.tonemap_pipeline);
@@ -6045,6 +6190,105 @@ mod tests {
             "consecutive frames must not share a buffer"
         );
         assert_eq!(seen[0], seen[FRAMES_IN_FLIGHT], "and the ring must wrap");
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **The tonemap's block is a ring too, and it carries the exposure the
+    /// caller set.**
+    ///
+    /// The bytes are the observable rather than the field, because the field is
+    /// what a renderer that never wired the block up would also have: the claim
+    /// is that the number reaches the buffer `tonemap.slang` reads, and only the
+    /// null recorder's write log can say so.
+    ///
+    /// The default is checked first, and it is the check that says every golden
+    /// image is unmoved — a renderer nobody has called
+    /// [`ForwardRenderer::set_exposure`] on writes the value the shader's
+    /// `EXPOSURE` constant held.
+    #[test]
+    fn the_tonemap_block_holds_the_exposure_and_rotates_with_the_frame() {
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        let camera = Camera::default();
+        let light = DirectionalLight::default();
+
+        renderer
+            .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+            .expect("write");
+        assert_eq!(
+            recorder
+                .buffer_bytes(renderer.tonemap_uniforms[renderer.frame])
+                .expect("begin_frame wrote the block"),
+            crcbl_shaders::tonemap::TonemapParams {
+                exposure: crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
+            }
+            .to_bytes(),
+            "an untouched renderer must write the exposure the constant used to hold",
+        );
+
+        // A value that is neither the default nor a bound, so a block left at
+        // either would fail.
+        renderer.set_exposure(3.5);
+        let mut slots = Vec::new();
+        for _ in 0..FRAMES_IN_FLIGHT * 2 {
+            renderer
+                .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                .expect("write");
+            slots.push(renderer.tonemap_uniforms[renderer.frame]);
+            assert_eq!(
+                recorder
+                    .buffer_bytes(renderer.tonemap_uniforms[renderer.frame])
+                    .expect("begin_frame wrote the block"),
+                crcbl_shaders::tonemap::TonemapParams { exposure: 3.5 }.to_bytes(),
+                "the frame's own block must carry the exposure in force",
+            );
+        }
+        assert_ne!(
+            slots[0], slots[1],
+            "consecutive frames must not share a block"
+        );
+        assert_eq!(slots[0], slots[FRAMES_IN_FLIGHT], "and the ring must wrap");
+
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **The exposure is clamped where it is set**, so no caller can reach a
+    /// frame it cannot get back from.
+    ///
+    /// Each case is a different way of leaving the range, and the NaN one is the
+    /// reason [`ForwardRenderer::set_exposure`] does not use `f32::clamp`: that
+    /// propagates a NaN into the block, which is a frame of NaN pixels with no
+    /// key to press to escape it.
+    #[test]
+    fn the_exposure_setter_clamps_to_a_range_a_caller_can_come_back_from() {
+        let (_, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        assert!(
+            (renderer.exposure() - crcbl_shaders::tonemap::DEFAULT_EXPOSURE).abs() < f32::EPSILON,
+            "the default is {}",
+            renderer.exposure(),
+        );
+
+        for (asked, expected) in [
+            (2.0, 2.0),
+            (EXPOSURE_MAX * 4.0, EXPOSURE_MAX),
+            (f32::INFINITY, EXPOSURE_MAX),
+            (EXPOSURE_MIN / 4.0, EXPOSURE_MIN),
+            (0.0, EXPOSURE_MIN),
+            (-8.0, EXPOSURE_MIN),
+            (f32::NEG_INFINITY, EXPOSURE_MIN),
+            (f32::NAN, EXPOSURE_MIN),
+        ] {
+            renderer.set_exposure(asked);
+            assert!(
+                (renderer.exposure() - expected).abs() < f32::EPSILON,
+                "{asked} was clamped to {}, not {expected}",
+                renderer.exposure(),
+            );
+        }
+
         renderer.destroy(device.as_ref());
     }
 

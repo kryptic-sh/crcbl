@@ -65,6 +65,11 @@ CONTROLS:
                          begin with. Needs a device with a line fill mode, which
                          a browser has not got; the debug panel's 'wireframe' row
                          is what the frame is actually drawn with.
+    - / =                Exposure down / up, a third of a stop a press. Held,
+                         they keep going. The range is five stops either side of
+                         1.00x; the listing panel's 'exposure' row is what the
+                         frame is actually drawn with, so it says when an end of
+                         that range has been reached.
     ESC                  Open the menu — the only way to reach the two below
                          without a keyboard
     F11                  Fullscreen

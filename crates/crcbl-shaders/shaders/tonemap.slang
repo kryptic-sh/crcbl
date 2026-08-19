@@ -20,6 +20,11 @@
 // unchanged, and the only pixels this pass moves are the ones a `Rgba8` target
 // could not have held in the first place.
 //
+// That argument is about the *operator* and survives the exposure becoming a
+// runtime value: at the default it is still the identity on `[0, 1]`, and a
+// caller who moves it has asked for the picture to change. What it rules out is
+// a curve that would shift every display-referred colour whatever the exposure.
+//
 // It is still a tonemap and not a no-op: the lit pass's Blinn highlight
 // genuinely exceeds 1.0, and this is where that stops being representable. The
 // `crcbl-vk` e2e suite reads the HDR target back and asserts a value above 1.0
@@ -33,11 +38,36 @@
 // triangles would rasterise a seam down the diagonal where the two halves meet,
 // and would need geometry — which `crcbl-hal` has no way to bind anyway.
 
+/// Everything the pass takes from the CPU, which is one number.
+///
+/// `crcbl_shaders::tonemap::TonemapParams` is the Rust mirror and
+/// `crcbl_render::forward` is what writes the buffer, once per frame.
+struct TonemapParams
+{
+    /// The multiplier applied to the scene colour before the clamp.
+    ///
+    /// A **runtime** value rather than the compile-time constant this was until
+    /// 2026-08. The operator is unchanged and so is its default —
+    /// `crcbl_shaders::tonemap::DEFAULT_EXPOSURE` is 1.0, which is the value the
+    /// constant held and the reason every golden image is untouched — but the
+    /// number now arrives per frame, so an application can put it on a key or a
+    /// slider without a second pipeline. Auto-exposure, which would compute it
+    /// from the scene rather than take it from a caller, is still topic 18.
+    float exposure;
+};
+
+// Declaration order is binding order and it is load-bearing on Metal — see
+// `crcbl_shaders::declaration_order`, which lints it over every source. The
+// block is numbered last and therefore declared last: it is the buffer table's
+// only entry either way, and the rule is checked globally rather than per table.
 [[vk::binding(0, 0)]]
 Texture2D<float4> scene;
 
 [[vk::binding(1, 0)]]
 SamplerState sceneSampler;
+
+[[vk::binding(2, 0)]]
+ConstantBuffer<TonemapParams> params;
 
 struct FullscreenOutput
 {
@@ -45,17 +75,10 @@ struct FullscreenOutput
     float2 uv : TEXCOORD0;
 };
 
-/// Exposure multiplier applied before the clamp.
-///
-/// `1.0` at P1: nothing in the engine produces a scene whose average luminance
-/// needs correcting yet, and a value other than 1 would make this pass move
-/// pixels for a reason no golden image could explain. Auto-exposure is topic 18.
-static const float EXPOSURE = 1.0;
-
 /// The operator. **Replace this function, and only this function, at P7.**
-float3 tonemap(float3 color)
+float3 tonemap(float3 color, float exposure)
 {
-    return saturate(color * EXPOSURE);
+    return saturate(color * exposure);
 }
 
 [shader("vertex")]
@@ -86,5 +109,5 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // (`CompositeAlpha::Opaque`), and carrying a scene alpha into it would make
     // the window's transparency depend on the geometry that happened to be
     // drawn.
-    return float4(tonemap(color), 1.0);
+    return float4(tonemap(color, params.exposure), 1.0);
 }
