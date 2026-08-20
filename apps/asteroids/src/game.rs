@@ -2166,14 +2166,13 @@ impl Game {
 
     /// How many entities are queued for destruction and not yet swept.
     ///
-    /// **Not an implementation detail — a number the counts above cannot be
-    /// read without.** `crcbl::ecs::World::sweep` runs at the end of
-    /// `World::tick`, and `crcbl-server` calls `GameModule::tick` *after* that,
-    /// so everything this game destroys — and it destroys a great deal — waits
-    /// one tick before the pool lets go of it. A caller comparing
-    /// [`Game::entity_count`] against what it believes exists has to add this,
-    /// or it reads a leak on every tick something died. Recorded in
-    /// `docs/backlog.md` as a finding against the module hook's placement.
+    /// **Zero between ticks, and the panel row exists to say so.**
+    /// `crcbl_server::Server::tick` sweeps after the game module has run and
+    /// before it serialises the snapshot, so nothing this game destroys
+    /// survives the tick that destroyed it. A non-zero reading here means a
+    /// despawn happened outside the tick — `Game::stage_rock`, the test
+    /// fixture, is the only caller that does that — and [`Game::entity_count`]
+    /// is correspondingly high until the next tick sweeps it.
     #[must_use]
     pub fn pending_despawns(&mut self) -> usize {
         self.session.server_mut().world_mut().dead_queue_len()
@@ -2397,19 +2396,21 @@ mod tests {
         /// This is the leak detector. An entity or a collider that outlived
         /// what it belonged to shows up here on the tick it happened.
         ///
-        /// `pending` is in the entity sum because destruction is *deferred*:
-        /// the ECS sweeps at the end of `World::tick` and the game module runs
-        /// after that, so everything destroyed this tick is still in the pool
-        /// until the next one. See [`Game::pending_despawns`].
+        /// **An exact equality with no allowance for the dead queue.** It used
+        /// to carry a `+ pending_despawns()` term, because the ECS swept at the
+        /// end of `World::tick` while the game module ran after that — so
+        /// everything destroyed on a tick sat in the pool until the next one.
+        /// `crcbl_server::Server::tick` now sweeps between the module and the
+        /// snapshot, so the queue is empty by the time a tick returns and the
+        /// compensation term was only ever hiding that ordering.
         fn assert_nothing_leaked(&mut self) {
             let rocks = self.game.rock_count();
             let bullets = self.game.bullet_count();
-            let pending = self.game.pending_despawns();
             assert_eq!(
                 self.game.entity_count(),
-                1 + rocks + bullets + pending,
-                "tick {}: {rocks} rocks, {bullets} bullets and {pending} awaiting the \
-                 sweep do not account for the world",
+                1 + rocks + bullets,
+                "tick {}: {rocks} rocks and {bullets} bullets do not account for \
+                 the world",
                 self.ticks,
             );
             // An equality, not a bound: every collider in the world is a

@@ -155,13 +155,24 @@ impl World {
         self.schedule.non_contributing_systems()
     }
 
-    /// Number of live entities.
+    /// Number of entities in the pool, **including** those already queued for
+    /// deferred destruction.
+    ///
+    /// Between [`sweep`](Self::sweep)s this is larger than the number of
+    /// entities that will survive. In a `crcbl-server` run that window does not
+    /// exist between ticks — `Server::tick` sweeps after the game module and
+    /// before the snapshot — so a caller reading this between ticks is reading
+    /// an exact count. A caller that despawns *outside* a tick and reads before
+    /// the next sweep is not, and wants [`dead_queue_len`](Self::dead_queue_len).
     #[must_use]
     pub fn entity_count(&self) -> usize {
         self.pool.len()
     }
 
-    /// Number of entities queued for deferred destruction.
+    /// Number of entries in the deferred-destruction queue.
+    ///
+    /// Counts *queue entries*, not distinct entities: [`despawn`](Self::despawn)
+    /// pushes one per call, so despawning the same handle twice queues it twice.
     #[must_use]
     pub fn dead_queue_len(&self) -> usize {
         self.dead.len()

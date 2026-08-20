@@ -146,8 +146,8 @@ impl<T: Transport> Server<T> {
     }
 
     /// Run one tick: consume inputs from transport (including acks), tick the
-    /// world (ECS schedule), tick the game module (if any), emit delta-encoded
-    /// snapshot.
+    /// world (ECS schedule), tick the game module (if any), sweep what the
+    /// module destroyed, emit delta-encoded snapshot.
     fn tick(&mut self) {
         let was_connected = self.session.state() == SessionState::Connected;
         self.drain_inputs();
@@ -156,6 +156,14 @@ impl<T: Transport> Server<T> {
         if let Some(ref mut module) = self.module {
             module.tick(&mut self.world);
         }
+        // `World::despawn` only marks: the entity stays in the pool and in
+        // every system's storage until a sweep. `World::tick` sweeps at its own
+        // end, which is *before* the module ran — so without this second sweep
+        // the snapshot below serialises everything the module just destroyed
+        // and the client is told about entities the server no longer has. The
+        // queue is almost always empty here and `sweep` returns immediately
+        // when it is.
+        self.world.sweep();
         if was_connected && self.session.state() == SessionState::Connected {
             self.emit_snapshot();
         }
@@ -607,6 +615,12 @@ impl<T: Transport> Server<T> {
     /// The module's [`GameModule::tick`] is called every server tick after the
     /// ECS schedule runs. Only one module can be attached at a time; calling
     /// this again replaces any existing module.
+    ///
+    /// Whatever the module despawns is swept before the tick's snapshot is
+    /// serialised, so a destruction is replicated on the tick it happened.
+    /// Within one call to [`GameModule::tick`] a despawned entity is still
+    /// readable — the sweep runs once that call returns — but it is gone by the
+    /// next tick, and no snapshot ever carries it.
     pub fn set_module(&mut self, module: Box<dyn GameModule>) {
         self.module = Some(module);
     }
@@ -834,6 +848,82 @@ mod tests {
             .len()
     }
 
+    /// A world whose one system replicates real per-entity blobs, plus the
+    /// entities in it.
+    ///
+    /// `System<T>` does not replicate, so a snapshot of one carries a synthetic
+    /// entity *count* and no ids at all — it cannot answer "which entity is on
+    /// the wire". `PhysicsSystem` publishes a transform per entity keyed by
+    /// entity bits, which is what a client decodes.
+    fn world_with_replicated_entities(n: usize) -> (World, Vec<crcbl_ecs::Entity>) {
+        let mut world = World::new();
+        let mut phys = crcbl_phys::PhysicsSystem::new();
+        let entities: Vec<_> = (0..n).map(|_| world.spawn()).collect();
+        for (i, &entity) in entities.iter().enumerate() {
+            phys.set_transform(
+                entity,
+                crcbl_phys::Transform::from_position(glam::DVec3::new(i as f64, 0.0, 0.0)),
+            );
+        }
+        world.register_system(Box::new(phys));
+        (world, entities)
+    }
+
+    /// A [`GameModule`] that despawns `victim` on the first tick after the test
+    /// arms it.
+    ///
+    /// Armed from outside rather than counting its own ticks, so a test says
+    /// exactly which `Server::update` call is the one that kills the entity
+    /// without having to know how the clock maps elapsed time onto ticks.
+    struct DespawnWhenArmed {
+        victim: crcbl_ecs::Entity,
+        armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl GameModule for DespawnWhenArmed {
+        fn name(&self) -> &str {
+            "despawn-when-armed"
+        }
+
+        fn register(&self, _world: &mut World) {}
+
+        fn tick(&mut self, world: &mut World) {
+            if self.armed.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                world.despawn(self.victim);
+            }
+        }
+    }
+
+    /// Unseal and decode one snapshot payload the way a client does.
+    fn open_delta(crypto: &mut SessionCrypto, payload: &[u8]) -> crcbl_net::Delta {
+        let opened = crypto.open(payload).expect("server seals its snapshots");
+        crcbl_net::decode_delta(opened, Trust::Authenticated).expect("valid delta")
+    }
+
+    /// Every entity a client would hold state for after applying `delta`:
+    /// keyframe contents, newly added entities, and updated ones.
+    ///
+    /// Unchanged entities are deliberately absent — they are not on the wire —
+    /// so this answers "does this packet describe entity X", which is the
+    /// question the despawn tests ask of it.
+    fn entities_described(delta: &crcbl_net::Delta) -> Vec<u64> {
+        delta
+            .systems
+            .iter()
+            .flat_map(|system| system.added.iter().chain(system.modified.iter()))
+            .map(|entity| entity.entity_bits)
+            .collect()
+    }
+
+    /// Every entity `delta` tombstones.
+    fn entities_removed(delta: &crcbl_net::Delta) -> Vec<u64> {
+        delta
+            .systems
+            .iter()
+            .flat_map(|system| system.removed.iter().copied())
+            .collect()
+    }
+
     // ── Construction ───────────────────────────────────────────────────────
 
     #[test]
@@ -991,6 +1081,144 @@ mod tests {
         server.update(4 * TICK);
 
         assert_eq!(drain_payloads(&mut peer).len(), 3);
+    }
+
+    #[test]
+    fn a_snapshot_never_carries_an_entity_the_module_destroyed_on_that_tick() {
+        // `World::despawn` only marks, and `World::tick` sweeps before
+        // `GameModule::tick` runs — so the tick's snapshot used to serialise
+        // the module's freshly destroyed entities out of storage that had not
+        // been swept yet, and a client was told about entities the server no
+        // longer had.
+        let (world, entities) = world_with_replicated_entities(2);
+        let (survivor, victim) = (entities[0], entities[1]);
+
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world, transport);
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        server.set_module(Box::new(DespawnWhenArmed {
+            victim,
+            armed: std::sync::Arc::clone(&armed),
+        }));
+        let mut crypto = connect(&mut server, &mut peer);
+
+        server.update(2 * TICK);
+        drain_payloads(&mut peer);
+
+        armed.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.update(3 * TICK);
+
+        let payloads = drain_payloads(&mut peer);
+        assert_eq!(payloads.len(), 1, "one tick ran, so one snapshot was sent");
+        let delta = open_delta(&mut crypto, &payloads[0]);
+        let described = entities_described(&delta);
+        assert!(
+            described.contains(&survivor.to_bits()),
+            "the snapshot describes {described:?}, which does not include the \
+             surviving entity {:#x} — the check below would pass vacuously",
+            survivor.to_bits(),
+        );
+        assert!(
+            !described.contains(&victim.to_bits()),
+            "the snapshot for tick {:?} describes entity {:#x}, which the module \
+             destroyed on that tick",
+            delta.tick,
+            victim.to_bits(),
+        );
+    }
+
+    #[test]
+    fn a_module_despawn_reaches_the_client_as_a_tombstone_on_the_same_tick() {
+        // **Removals are replicated explicitly.** A snapshot delta-encoded
+        // against a baseline the client acked carries the destroyed entity in
+        // `SystemDelta::removed`; absence is the encoding only in a keyframe,
+        // which has no baseline to tombstone against. This test acks every
+        // snapshot so the server stays on the delta path, and asserts the
+        // tombstone arrives on the tick the module despawned — not a tick
+        // later, and never with the entity silently gone from a snapshot that
+        // says nothing about it.
+        let (world, entities) = world_with_replicated_entities(2);
+        let victim = entities[1];
+
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world, transport);
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        server.set_module(Box::new(DespawnWhenArmed {
+            victim,
+            armed: std::sync::Arc::clone(&armed),
+        }));
+        let mut crypto = connect(&mut server, &mut peer);
+
+        // Tick 2: the keyframe that puts both entities in the client's baseline.
+        server.update(2 * TICK);
+        let payloads = drain_payloads(&mut peer);
+        assert_eq!(payloads.len(), 1);
+        let keyframe = open_delta(&mut crypto, &payloads[0]);
+        assert!(keyframe.is_keyframe);
+        assert!(
+            entities_described(&keyframe).contains(&victim.to_bits()),
+            "the entity has to be replicated before its removal can be"
+        );
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &crcbl_net::encode_ack(SectorId::ZERO, keyframe.tick),
+        );
+
+        // Tick 3: nothing died, so the delta tombstones nothing.
+        server.update(3 * TICK);
+        let payloads = drain_payloads(&mut peer);
+        assert_eq!(payloads.len(), 1);
+        let quiet = open_delta(&mut crypto, &payloads[0]);
+        assert!(
+            !quiet.is_keyframe,
+            "the acked baseline must put the server on the delta path"
+        );
+        assert!(
+            entities_removed(&quiet).is_empty(),
+            "tick {:?} removed {:?} with nothing despawned",
+            quiet.tick,
+            entities_removed(&quiet),
+        );
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &crcbl_net::encode_ack(SectorId::ZERO, quiet.tick),
+        );
+
+        // Tick 4: the module destroys the entity, and this tick's delta is what
+        // tells the client so.
+        armed.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.update(4 * TICK);
+        let payloads = drain_payloads(&mut peer);
+        assert_eq!(payloads.len(), 1);
+        let despawn = open_delta(&mut crypto, &payloads[0]);
+        assert!(!despawn.is_keyframe);
+        assert_eq!(
+            entities_removed(&despawn),
+            vec![victim.to_bits()],
+            "tick {:?} must tombstone the destroyed entity and nothing else",
+            despawn.tick,
+        );
+        assert!(
+            !entities_described(&despawn).contains(&victim.to_bits()),
+            "the same packet must not also carry state for it"
+        );
+
+        // And it stays gone: the next tick says nothing more about it.
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &crcbl_net::encode_ack(SectorId::ZERO, despawn.tick),
+        );
+        server.update(5 * TICK);
+        let payloads = drain_payloads(&mut peer);
+        assert_eq!(payloads.len(), 1);
+        let after = open_delta(&mut crypto, &payloads[0]);
+        assert!(entities_removed(&after).is_empty());
+        assert!(!entities_described(&after).contains(&victim.to_bits()));
+        assert_eq!(server.processing_error_count(), 0);
+        assert_eq!(server.auth_failure_count(), 0);
     }
 
     #[test]

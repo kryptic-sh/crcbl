@@ -808,6 +808,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The server no longer replicates entities it has already destroyed.**
+  `crcbl_server::Server::tick` ran `World::tick` (which sweeps), then
+  `GameModule::tick`, then serialised the snapshot — so anything a game module
+  despawned was still in the pool and in every system's storage when the
+  snapshot was built, and the client was told about entities the server no
+  longer had. On the delta path they were tombstoned a tick late; on a keyframe,
+  which has no baseline to diff against, they simply appeared and then vanished
+  with nothing to explain it. The tick now sweeps between the module and the
+  snapshot, so a destruction is replicated on the tick it happens. A module can
+  still read a despawned entity back inside its own `tick` call; it cannot after
+  that call returns.
+
 - **`apps/viewer` hot reload no longer stops while the `ESC` pause panel is
   up.** `crate::watch` was polled from `Viewer::tick`, and a paused frame runs
   no ticks, so a re-export from Blender went unnoticed until the panel was

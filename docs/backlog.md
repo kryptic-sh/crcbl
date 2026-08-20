@@ -5837,49 +5837,38 @@ it costs is **tree quality**, not answers.
   the query-cost difference between the two. The horde sample (P8, 10k bodies)
   is where that stops being academic.
 
-## DECISION NEEDED — `GameModule::tick` runs after the ECS sweep, and the snapshot ships the dead
+## Leak assertions that tolerated the deferred-sweep defect (2026-08-20)
 
-`crcbl_ecs::World::tick` runs the schedule and then `sweep`s the deferred
-destruction queue. `crcbl_server::Server::tick` calls `world.tick()` **and
-then** `module.tick(&mut world)`. So every entity a `GameModule` despawns sits
-in the pool for one more tick before the pool lets go of it — and a game reading
-`World::entity_count()` between ticks sees a count that is high by however many
-things died last tick.
+The server used to ship destroyed entities to clients — `Server::tick` swept
+before `GameModule::tick` and serialised after it. That is fixed. **Kept because
+of how it survived: every test in reach of it asserted the wrong thing.**
 
-Found by asteroids, whose leak test compares `entity_count()` against
-`1 + rocks + bullets` on every tick and failed immediately; it now adds
-`World::dead_queue_len()` to the sum. `apps/flappy`'s equivalent test asserts a
-`<=` ceiling, which tolerated this without noticing it.
+- **asteroids** compared `entity_count()` against
+  `1 + rocks + bullets + dead_queue_len()`, adding the queue back in. It was
+  written that way _because_ the test failed when it was first written — the
+  compensation was the fix. It is an exact equality now and goes red on the
+  defect at ticks 18, 49 and 401.
+- **horde** carried the identical `+ pending` term, with a doc comment
+  explaining the old ordering as though it were intended. Exact now, and red on
+  many ticks of the soak.
+- **flappy**'s `a_long_run_keeps_the_world_the_same_size` asserts a `<=`
+  ceiling, and **the `<=` is not what hid it**: measured `worst = 11` against
+  `ceiling = 11` both with and without the fix. It samples `entity_count()` once
+  every 60 ticks — 40 samples over the run — so the peak is undersampled and
+  never landed on a cull tick. The `<=` is right there (the pipe count breathes
+  by one as the window slides); **sampling every tick is what would make it a
+  leak detector**, and that is the change worth making if anyone returns to it.
 
-**The snapshot half is a defect, not a surprise, and that was checked rather
-than assumed.** `World::despawn` only _marks_: it pushes to the dead queue and
-the entity stays in the pool **and in every system's storage** until `sweep`.
-`Server::tick` runs `world.tick()`, then `module.tick(&mut world)`, then
-`emit_snapshot()` — so a snapshot is serialised in the window where the module's
-destroyed entities are still live storage, and a client receives entities the
-server has already destroyed. One tick later they vanish with no despawn having
-been replicated in between.
+The shape to carry forward: a leak invariant that _compensates_ for a queue is
+one that cannot see the queue being wrong. If a count needs a correction term to
+balance, the question is why the term is non-zero, not what to add to the sum.
 
-That collapses one of the two options rather than choosing between them:
-
-- **Sweep after the module** — `Server::tick` calls `world.sweep()` between the
-  module and `emit_snapshot`. One line, and it is the only option that fixes the
-  wire. What it changes: a game that despawns in `GameModule::tick` and then
-  reads the entity back before the next tick stops being able to, which is a
-  semantic dependency no test here asserts but a game could hold.
-- **Leave it and document it**, giving `World::entity_count` a sibling that
-  excludes the queue. This is worth doing either way for the count, but on its
-  own it leaves the snapshot wrong — so it is no longer an alternative to the
-  first, only a companion to it.
-
-**Why this is still the owner's call and not a drive-by fix:** it changes when
-replication observes a destruction, which is engine semantics rather than a bug
-in one call site.
-
-Not worked around in asteroids beyond making the test honest. **Horde hits it
-harder**: its leak invariant is checked on every tick of a soak, and the queue
-is non-empty on any tick something died — which at a hundred spawns a second is
-most of them.
+**Considered and declined: `World::entity_count_after_sweep`.** Added while
+fixing this, then removed before committing — after the sweep moved, the queue
+is empty between ticks for every reader in this workspace, verified by asserting
+`dead_queue_len() == 0` at every leak check across asteroids' and horde's full
+suites. It had no caller but its own test. `entity_count` is exact between ticks
+and its doc now says under what condition; `dead_queue_len` answers the rest.
 
 ## What `crcbl-phys` owes at scale, found by writing horde
 

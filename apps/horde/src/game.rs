@@ -3616,12 +3616,13 @@ impl Game {
 
     /// How many entities are queued for destruction and not yet swept.
     ///
-    /// **Not an implementation detail — a number the counts above cannot be read
-    /// without.** `crcbl::ecs::World::sweep` runs at the end of `World::tick`,
-    /// and `crcbl-server` calls `GameModule::tick` *after* that, so everything
-    /// this game destroys — and it destroys a great deal — waits one tick before
-    /// the pool lets go of it. Recorded in `docs/backlog.md` as a finding
-    /// against the module hook's placement.
+    /// **Zero between ticks, and the tests here assert that rather than
+    /// compensating for it.** `crcbl_server::Server::tick` sweeps between the
+    /// game module and the snapshot, so a destruction this game takes is
+    /// applied on the tick it happens. This used to be a term in
+    /// `Harness::assert_nothing_leaked`'s entity sum, back when the sweep ran
+    /// before the module and everything destroyed waited a tick; that sum is an
+    /// exact equality now and this is what proves the queue drains.
     #[must_use]
     pub fn pending_despawns(&mut self) -> usize {
         self.session.server_mut().world_mut().dead_queue_len()
@@ -4168,20 +4169,21 @@ mod tests {
         /// they were, rather than gaining a term each and a second `Vec` for a
         /// reader to convince themselves accounts for itself.
         ///
-        /// `pending` is in the entity sum because destruction is *deferred*: the
-        /// ECS sweeps at the end of `World::tick` and the game module runs after
-        /// that, so everything destroyed this tick is still in the pool until
-        /// the next one. See [`Game::pending_despawns`].
+        /// **An exact equality, with no term for the destruction queue.**
+        /// `crcbl_server::Server::tick` sweeps between the game module and the
+        /// snapshot, so nothing this game destroys survives the tick that
+        /// destroyed it. The sum used to carry a `pending` term for entities
+        /// awaiting the sweep; carrying it now would make this assertion
+        /// tolerate the very defect it is here to catch.
         fn assert_nothing_leaked(&mut self) {
             let enemies = self.game.enemy_count();
             let bolts = self.game.bolt_count();
             let pickups = self.game.pickup_count();
-            let pending = self.game.pending_despawns();
             assert_eq!(
                 self.game.entity_count(),
-                1 + enemies + bolts + pickups + pending,
-                "tick {}: {enemies} enemies, {bolts} bolts, {pickups} pickups and \
-                 {pending} awaiting the sweep do not account for the world",
+                1 + enemies + bolts + pickups,
+                "tick {}: {enemies} enemies, {bolts} bolts and {pickups} pickups \
+                 do not account for the world",
                 self.ticks,
             );
             // An equality, not a bound: every collider in the world is an enemy
@@ -6285,8 +6287,9 @@ mod tests {
             "the broadphase kept {BODIES} invisible walls",
         );
 
-        // The ECS sweeps at the end of `World::tick` and the module runs after
-        // it, so the pool needs a tick to let go.
+        // Extra ticks so a death that lands on the last one is still counted;
+        // the sweep itself is immediate, since `Server::tick` runs it between
+        // the module and the snapshot.
         harness.run_ticks(harness.ticks + 3, &[]);
         assert_eq!(
             harness.game.pending_despawns(),
