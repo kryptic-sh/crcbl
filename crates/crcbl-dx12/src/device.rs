@@ -5466,6 +5466,26 @@ pub(crate) mod tests {
             )
         }
 
+        /// The attachment itself — cleared to [`crcbl_hal::depth::CLEAR`] by
+        /// [`ClearValue::default`] and stored, so the copy has something to
+        /// read.
+        ///
+        /// Handed back on its own as well as through [`Self::pass`], because a
+        /// pass with a colour attachment beside this one cannot use that
+        /// descriptor: [`MeshProbe::frame`] builds its own and asks for this
+        /// half.
+        fn attachment(&self) -> crcbl_hal::DepthStencilAttachment {
+            crcbl_hal::DepthStencilAttachment {
+                view: self.view,
+                read_only: false,
+                depth_load: LoadOp::Clear,
+                depth_store: StoreOp::Store,
+                stencil_load: LoadOp::DontCare,
+                stencil_store: StoreOp::Discard,
+                clear: ClearValue::default(),
+            }
+        }
+
         /// The pass every depth-only probe here draws through: no colour
         /// attachment, a cleared and stored depth attachment, and the whole
         /// [`SQUARE`].
@@ -5473,15 +5493,7 @@ pub(crate) mod tests {
             RenderPassDesc {
                 label: Some(label),
                 color_attachments: &[],
-                depth_stencil_attachment: Some(crcbl_hal::DepthStencilAttachment {
-                    view: self.view,
-                    read_only: false,
-                    depth_load: LoadOp::Clear,
-                    depth_store: StoreOp::Store,
-                    stencil_load: LoadOp::DontCare,
-                    stencil_store: StoreOp::Discard,
-                    clear: ClearValue::default(),
-                }),
+                depth_stencil_attachment: Some(self.attachment()),
                 render_area: Rect2d::from_size(SQUARE.width, SQUARE.height),
                 timestamp_writes: None,
             }
@@ -5544,15 +5556,15 @@ pub(crate) mod tests {
         }
     }
 
-    /// The three texels of a depth attachment both depth-only mesh probes
-    /// assert, and the one place the discipline is written down.
+    /// The three texels of a depth attachment every depth probe here asserts,
+    /// and the one place the discipline is written down.
     ///
     /// The centre must hold `emitted` and both corners the clear. **The centre
     /// is what makes a pass mean something**: a device that survived the
     /// dispatch and rasterised nothing leaves the clear in all three, which is
     /// the failure a "the frame came back" assertion cannot see. The corners are
-    /// what makes it a triangle rather than a full-target write. Both triangles
-    /// here are flat in Z, so these are equalities and there is deliberately no
+    /// what makes it a triangle rather than a full-target write. Every triangle
+    /// here is flat in Z, so these are equalities and there is deliberately no
     /// tolerance, skip or catch on either side of a call to this.
     fn assert_depth_triangle(depths: &[f32], emitted: f32, what: &str) {
         assert_eq!(
@@ -5575,8 +5587,142 @@ pub(crate) mod tests {
         assert_eq!(
             at(centre.0, centre.1),
             emitted,
-            "{what}: the mesh stage rasterised nothing over the centre of the target"
+            "{what}: nothing rasterised over the centre of the target"
         );
+    }
+
+    /// The NDC depth a flat triangle of `positions` rasterises to, **derived
+    /// from the shader's own vertices rather than written here**.
+    ///
+    /// Every depth probe here asserts this value at the centre texel, over
+    /// `crcbl_shaders::mesh_shader`'s vertices or `crcbl_shaders::triangle`'s,
+    /// so the derivation lives in one place: two copies could disagree about
+    /// what the same triangle emits and still both pass.
+    ///
+    /// The two assertions are what keep it honest: all three vertices must carry
+    /// one clip-space depth, or the centre texel would hold an interpolation
+    /// instead of a constant, and that depth must differ from
+    /// [`crcbl_hal::depth::CLEAR`], or the centre assertion would pass on a
+    /// device that rasterised nothing. Both run before any device work.
+    fn flat_triangle_depth(positions: [[f32; 4]; 3], what: &str) -> f32 {
+        // Clip-space depth over `w`, which is the NDC depth the attachment
+        // holds.
+        let emitted: Vec<f32> = positions
+            .iter()
+            .map(|position| position[2] / position[3])
+            .collect();
+        assert!(
+            emitted.iter().all(|depth| *depth == emitted[0]),
+            "{what} is no longer flat in Z ({emitted:?}), so the centre texel holds an \
+             interpolation and the equalities on it are the wrong assertion"
+        );
+        assert_ne!(
+            emitted[0],
+            crcbl_hal::depth::CLEAR,
+            "{what} must emit a depth the clear could not have left, or the centre texel is \
+             satisfied by a frame that rasterised nothing"
+        );
+        emitted[0]
+    }
+
+    /// **A `D32Float` attachment cleared and copied back with no pipeline at
+    /// all — the depth machinery on its own, with no mesh shading anywhere near
+    /// it.**
+    ///
+    /// [`a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device`]
+    /// removes the WARP device, and it changes several things at once against
+    /// the colour-target probes that pass: `fragment: None`, an empty
+    /// `color_targets`, a `D32Float` attachment, and a copy through
+    /// [`ImageAspect::DEPTH`]. This test is the first of three that take those
+    /// apart, and it is the one that owes nothing to mesh shading: no pipeline
+    /// is created, nothing is bound, and no draw or dispatch is recorded. The
+    /// render pass clears the attachment and ends.
+    ///
+    /// So what runs is `crate::conv::copy_footprint_format` on a depth format,
+    /// `crate::command`'s `plan_copy` on a depth aspect, the `DSV` this
+    /// backend creates for the attachment, and `ClearDepthStencilView`.
+    ///
+    /// # What each outcome says
+    ///
+    /// * **The device goes away.** None of this investigation is about mesh
+    ///   shading. The defect is the depth image, its view or its copy, and the
+    ///   bisect moves out of pipeline construction entirely.
+    /// * **It reads back as the clear.** The depth attachment and its readback
+    ///   are sound on their own, and the two siblings below decide whether the
+    ///   trigger is `fragment: None`, the mesh pipeline, or the pair.
+    ///
+    /// # What makes it able to fail
+    ///
+    /// [`DepthProbe`]'s readback is created by [`readback_buffer`], which fills
+    /// it with [`POISON`] first. "Every texel is the clear" is therefore a claim
+    /// about a copy that *happened*: a frame whose copy was dropped comes back
+    /// as poison, not as zeros. The first assertion below is that check spelled
+    /// out — it fails if [`POISON`] ever becomes a byte pattern that reads as
+    /// [`crcbl_hal::depth::CLEAR`], which would make the whole-surface assertion
+    /// vacuous — and it runs before the device does any work.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_cleared_depth_attachment_copies_back_as_the_clear_with_no_pipeline() {
+        // The value a texel holds if the copy never wrote it. Asserted rather
+        // than assumed, because it is the whole reason the assertion below can
+        // fail.
+        let primed = f32::from_le_bytes([POISON; size_of::<f32>()]);
+        assert_ne!(
+            primed,
+            crcbl_hal::depth::CLEAR,
+            "the readback is primed with POISON, and a primed word that already read as the \
+             clear would make every assertion below pass on a copy that never happened"
+        );
+
+        let (_instance, device) = open_device();
+        let depth = DepthProbe::new(&device);
+        let pass = depth.pass("depth clear only");
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                images: &[depth.acquire()],
+                ..Barriers::default()
+            });
+            // Opened and closed with nothing between them: the clear is the
+            // whole frame, and no pipeline is ever created or bound.
+            encoder.begin_render_pass(&pass);
+            encoder.end_render_pass();
+            encoder.pipeline_barrier(&Barriers {
+                images: &[depth.release()],
+                ..Barriers::default()
+            });
+            depth.resolve(encoder);
+        });
+
+        // Between the submit and the `Map`, for the reason [`MeshProbe::frame`]
+        // gives: `DXGI_ERROR_DEVICE_REMOVED` is reported at the *next* call.
+        still_alive(&device, "depth clear only");
+
+        let depths = depth.read(&device);
+        assert_eq!(
+            depths.len(),
+            SQUARE_BYTES / size_of::<f32>(),
+            "the readback is not the whole depth attachment"
+        );
+        if let Some((at, found)) = depths
+            .iter()
+            .enumerate()
+            .find(|(_, texel)| **texel != crcbl_hal::depth::CLEAR)
+        {
+            panic!(
+                "texel ({}, {}) is {found} rather than the clear, and the readback was primed \
+                 with {primed}",
+                at % SQUARE.width as usize,
+                at / SQUARE.width as usize
+            );
+        }
+
+        depth.destroy(&device);
     }
 
     /// Everything the mesh probes below share: `mesh_shader.slang`'s geometry,
@@ -5742,12 +5888,27 @@ pub(crate) mod tests {
         /// pair `zero_dispatch_probe.slang`'s stage with this module's mesh and
         /// fragment containers unchanged. [`Self::entry`] spells the ordinary
         /// case.
+        ///
+        /// `depth` adds a [`DepthProbe`]'s attachment *beside* the colour
+        /// target — the pipeline gains a
+        /// [`crcbl_hal::DepthStencilState`], the pass gains the attachment, and
+        /// the frame gains its barriers and its copy. Every caller but
+        /// [`a_mesh_pipeline_with_a_fragment_stage_and_a_depth_attachment_draws_both`]
+        /// passes `None` and gets the colour-only frame it always got.
+        ///
+        /// A parameter here rather than a third method, unlike
+        /// [`Self::depth_frame`]: adding depth to a colour frame is purely
+        /// *additive*, where removing the colour target changes the pipeline,
+        /// the pass, both barriers and the copy at once. The depth texels come
+        /// back through the caller's own [`DepthProbe::read`], so the return
+        /// type is the colour readback either way.
         fn frame(
             &self,
             device: &Dx12Device,
             label: &'static str,
             task: Option<ShaderEntry<'static>>,
             entry: &'static str,
+            depth: Option<&DepthProbe>,
             dispatch: impl FnOnce(&mut dyn CommandEncoder),
         ) -> Vec<u8> {
             // Off `self` and into locals, so the body below is the closure it was
@@ -5796,40 +5957,61 @@ pub(crate) mod tests {
                     // default's winding and cull mode are what the three
                     // vertices were authored for.
                     primitive: PrimitiveState::default(),
-                    depth_stencil: None,
+                    // Reversed-Z, depth writes on, `GREATER` — the same state
+                    // `depth_frame` builds, so the two differ in the colour
+                    // target and not in how depth is tested.
+                    depth_stencil: depth.map(|_| crcbl_hal::DepthStencilState::default()),
                     multisample: MultisampleState::default(),
                     color_targets: &targets,
                 })
                 .unwrap_or_else(|error| panic!("stage=create_mesh_pipeline {label}: {error:?}"));
 
-            let pass = clear_pass(
+            // The pass descriptor is built here rather than through
+            // [`clear_pass`], which has no depth attachment to offer. The colour
+            // half is the same clear it always was.
+            let colour = ColorAttachment {
                 view,
-                CLEAR,
-                LoadOp::Clear,
-                Rect2d::from_size(SQUARE.width, SQUARE.height),
-            );
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR),
+            };
+            let pass = RenderPassDesc {
+                label: Some(label),
+                color_attachments: core::slice::from_ref(&colour),
+                depth_stencil_attachment: depth.map(DepthProbe::attachment),
+                render_area: Rect2d::from_size(SQUARE.width, SQUARE.height),
+                timestamp_writes: None,
+            };
+            // The colour target's transition, and the depth attachment's beside
+            // it when there is one — which is why `DepthProbe::acquire` hands a
+            // barrier back rather than recording it.
+            let mut acquire = vec![ImageBarrier::new(
+                target,
+                ImageSubresourceRange::all(Format::Rgba8Unorm),
+                ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            )];
+            acquire.extend(depth.map(DepthProbe::acquire));
+            let mut release = vec![ImageBarrier::new(
+                target,
+                ImageSubresourceRange::all(Format::Rgba8Unorm),
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )];
+            release.extend(depth.map(DepthProbe::release));
             run(device, |encoder| {
                 encoder.pipeline_barrier(&Barriers {
-                    images: &[ImageBarrier::new(
-                        target,
-                        ImageSubresourceRange::all(Format::Rgba8Unorm),
-                        ResourceState::Undefined,
-                        ResourceState::ColorAttachment,
-                    )],
+                    images: &acquire,
                     ..Barriers::default()
                 });
-                encoder.begin_render_pass(&pass.desc());
+                encoder.begin_render_pass(&pass);
                 encoder.bind_graphics_pipeline(pipeline);
                 encoder.bind_group(0, group, &[], pipeline_layout);
                 dispatch(encoder);
                 encoder.end_render_pass();
                 encoder.pipeline_barrier(&Barriers {
-                    images: &[ImageBarrier::new(
-                        target,
-                        ImageSubresourceRange::all(Format::Rgba8Unorm),
-                        ResourceState::ColorAttachment,
-                        ResourceState::TransferSrc,
-                    )],
+                    images: &release,
                     ..Barriers::default()
                 });
                 encoder.copy_image_to_buffer(&BufferImageCopy {
@@ -5847,6 +6029,9 @@ pub(crate) mod tests {
                     image_offset: Offset3d::default(),
                     image_extent: SQUARE,
                 });
+                if let Some(depth) = depth {
+                    depth.resolve(encoder);
+                }
             });
 
             // Between the submit and the `Map`, because `DXGI_ERROR_DEVICE_REMOVED`
@@ -6003,12 +6188,13 @@ pub(crate) mod tests {
         // `[numthreads(3, 1, 1)]`, one thread per vertex, and `taskMain`
         // is `[numthreads(1, 1, 1)]` and dispatches one mesh group.
         let dispatch = |encoder: &mut dyn CommandEncoder| encoder.draw_mesh_tasks(1, 1, 1);
-        let plain = probe.frame(&device, "mesh_shader", None, "meshMain", dispatch);
+        let plain = probe.frame(&device, "mesh_shader", None, "meshMain", None, dispatch);
         let amplified = probe.frame(
             &device,
             "mesh_shader amplified",
             Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
+            None,
             dispatch,
         );
 
@@ -6115,6 +6301,7 @@ pub(crate) mod tests {
             "mesh_shader indirect",
             None,
             "meshMain",
+            None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
                     args,
@@ -6196,6 +6383,7 @@ pub(crate) mod tests {
             "mesh_shader amplified indirect",
             Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
+            None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
                     args,
@@ -6265,6 +6453,7 @@ pub(crate) mod tests {
             "mesh_shader amplified indirect at scale",
             Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
+            None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
                     args,
@@ -6374,6 +6563,7 @@ pub(crate) mod tests {
                 entry_point: "culledTaskMain",
             }),
             "amplifiedMeshMain",
+            None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
                     args,
@@ -6587,6 +6777,7 @@ pub(crate) mod tests {
                 entry_point: "writingTaskMain",
             }),
             "amplifiedMeshMain",
+            None,
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
                     args,
@@ -6756,12 +6947,9 @@ pub(crate) mod tests {
     /// already samples at the same texel on the colour path — so
     /// [`assert_depth_triangle`] reads the centre and both corners.
     ///
-    /// The expected depth is **derived from `crcbl_shaders::mesh_shader`'s own
-    /// positions rather than written here**, and two assertions below keep that
-    /// derivation honest: all three vertices must carry one clip-space depth, or
-    /// the centre texel would hold an interpolation instead of a constant, and
-    /// that depth must differ from [`crcbl_hal::depth::CLEAR`], or the centre
-    /// assertion would pass on a device that rasterised nothing.
+    /// The expected depth comes from [`flat_triangle_depth`], which derives it
+    /// from `crcbl_shaders::mesh_shader`'s own positions and carries the two
+    /// assertions that keep the derivation honest.
     ///
     /// # What only CI can settle
     ///
@@ -6771,24 +6959,12 @@ pub(crate) mod tests {
     #[ignore = "known-red: a depth-only mesh pipeline removes the WARP device (docs/backlog.md)"]
     fn a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device() {
         // What the rasteriser must leave at the centre, taken from the toy
-        // shader's own vertices rather than written here — clip-space depth over
-        // `w`, which is the NDC depth the attachment holds. Both assertions are
-        // about this test being able to fail, so they run before the device
-        // does any work.
-        let emitted: Vec<f32> = crcbl_shaders::mesh_shader::POSITIONS
-            .iter()
-            .map(|position| position[2] / position[3])
-            .collect();
-        assert!(
-            emitted.iter().all(|depth| *depth == emitted[0]),
-            "the toy triangle is no longer flat in Z ({emitted:?}), so the centre texel holds an \
-             interpolation and the equality below is the wrong assertion"
-        );
-        assert_ne!(
-            emitted[0],
-            crcbl_hal::depth::CLEAR,
-            "the toy triangle must emit a depth the clear could not have left, or the centre \
-             texel below is satisfied by a frame that rasterised nothing"
+        // shader's own vertices rather than written here. The guards that make
+        // this test able to fail are in `flat_triangle_depth`, and run before
+        // the device does any work.
+        let emitted = flat_triangle_depth(
+            crcbl_shaders::mesh_shader::POSITIONS,
+            "the toy mesh triangle",
         );
 
         let (_instance, device) = open_device();
@@ -6820,9 +6996,122 @@ pub(crate) mod tests {
             },
         );
 
-        assert_depth_triangle(&depths, emitted[0], "the toy shader with no fragment stage");
+        assert_depth_triangle(&depths, emitted, "the toy shader with no fragment stage");
 
         device.destroy_buffer(args);
+        probe.destroy(&device);
+    }
+
+    /// **The same mesh stages keeping their fragment stage and their colour
+    /// target, and gaining a depth attachment — which separates
+    /// `fragment: None` from depth.**
+    ///
+    /// The second of the three probes that take
+    /// [`a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device`]
+    /// apart. That one changes two things at once against
+    /// [`an_indirect_dispatch_through_the_amplification_stage_draws_the_same_triangle`],
+    /// which passes: it drops the fragment stage and the colour target, *and* it
+    /// adds a `D32Float` attachment. This adds the attachment and keeps
+    /// everything else — `taskMain`, `amplifiedMeshMain`, `fragmentMain`, the
+    /// colour target, the same `ExecuteIndirect` of one amplification group.
+    ///
+    /// # What each outcome says
+    ///
+    /// * **It draws both.** A mesh pipeline with a depth attachment is fine, so
+    ///   the trigger is `fragment: None` and the empty `color_targets` — the
+    ///   null pixel shader and the `DSVFormat`-without-`RTVFormats` state stream
+    ///   this backend builds for it — rather than depth.
+    /// * **The device goes away.** The depth attachment is the trigger on a mesh
+    ///   pipeline, whatever the fragment stage does. Paired with
+    ///   [`a_cleared_depth_attachment_copies_back_as_the_clear_with_no_pipeline`]
+    ///   passing, that is depth-plus-mesh rather than depth alone.
+    ///
+    /// # What it asserts
+    ///
+    /// Both halves of the frame, because either alone would be satisfied by a
+    /// device that half-worked:
+    ///
+    /// * **The three colour texels every mesh probe here asserts** — both
+    ///   corners the clear, the centre not — so the fragment stage still reached
+    ///   the colour target.
+    /// * **The three depth texels [`assert_depth_triangle`] asserts**, at
+    ///   [`flat_triangle_depth`], so the rasteriser wrote depth too. The centre is
+    ///   what makes this mean something: a device that survived and drew nothing
+    ///   leaves [`crcbl_hal::depth::CLEAR`] there, and the readback was primed
+    ///   with [`POISON`] before that.
+    ///
+    /// Depth writes are on and the compare is `GREATER` against a clear of
+    /// [`crcbl_hal::depth::CLEAR`], so nothing the triangle emits is rejected —
+    /// see [`crcbl_hal::DepthStencilState::default`].
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_mesh_pipeline_with_a_fragment_stage_and_a_depth_attachment_draws_both() {
+        let emitted = flat_triangle_depth(
+            crcbl_shaders::mesh_shader::POSITIONS,
+            "the toy mesh triangle",
+        );
+
+        let (_instance, device) = open_device();
+        let probe = MeshProbe::new(&device, &[]);
+        let depth = DepthProbe::new(&device);
+
+        // The one `D3D12_DISPATCH_MESH_ARGUMENTS` every amplified probe here
+        // writes, so the dispatch is what does *not* vary between this and the
+        // depth-only probe above.
+        let args = indirect_buffer(
+            &device,
+            "colour and depth mesh dispatch extents",
+            &pack_words(&[1, 1, 1]),
+        );
+
+        let drawn = probe.frame(
+            &device,
+            "mesh_shader colour and depth",
+            Some(probe.entry("taskMain")),
+            "amplifiedMeshMain",
+            Some(&depth),
+            |encoder| {
+                encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                    args,
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 0,
+                });
+            },
+        );
+
+        // The colour half: the same three texels the passing amplified indirect
+        // probe asserts, in the same order.
+        assert_eq!(texel(&drawn, 0, 0), CLEAR_TEXEL, "top-left corner");
+        assert_eq!(
+            texel(
+                &drawn,
+                SQUARE.width as usize - 1,
+                SQUARE.height as usize - 1
+            ),
+            CLEAR_TEXEL,
+            "bottom-right corner"
+        );
+        assert_ne!(
+            texel(&drawn, 32, 32),
+            CLEAR_TEXEL,
+            "the fragment stage emitted nothing over the centre of the colour target"
+        );
+
+        // The depth half: the same three texels the depth-only probes assert.
+        assert_depth_triangle(
+            &depth.read(&device),
+            emitted,
+            "the toy shader with a fragment stage and a depth attachment",
+        );
+
+        device.destroy_buffer(args);
+        depth.destroy(&device);
         probe.destroy(&device);
     }
 
@@ -8015,6 +8304,83 @@ pub(crate) mod tests {
             bytes
         }
 
+        /// [`Self::run`]'s **depth-only** twin, and the raster half of
+        /// [`MeshProbe::depth_frame`]: the same geometry, root signature, bind
+        /// group, module and index buffer through a pipeline with
+        /// `fragment: None` and no colour targets, rasterising into a
+        /// [`DepthProbe`].
+        ///
+        /// Drives
+        /// [`a_depth_only_raster_pipeline_draws_the_triangle_into_depth`] and
+        /// nothing else, but it is a method here rather than a body in that test
+        /// so the *only* difference from the frame [`Self::run`] draws is the
+        /// pipeline shape — which is the whole claim the probe makes.
+        ///
+        /// [`Self::target`] and [`Self::left_in`] are untouched: this frame
+        /// writes a depth image the probe owns, so a [`Self::run`] before or
+        /// after it still sees the colour target in the state it left it.
+        ///
+        /// Returns the attachment's texels, one `f32` each, in row order.
+        fn depth_run(
+            &self,
+            device: &Dx12Device,
+            label: &'static str,
+            record: impl FnOnce(&mut dyn CommandEncoder),
+        ) -> Vec<f32> {
+            let depth = DepthProbe::new(device);
+            let pipeline = device
+                .create_graphics_pipeline(&GraphicsPipelineDesc {
+                    label: Some(label),
+                    layout: self.pipeline_layout,
+                    vertex: ShaderEntry {
+                        module: self.module,
+                        entry_point: "vertexMain",
+                    },
+                    // The whole point of this method. `triangle.slang`'s
+                    // `fragmentMain` exists and is deliberately not named: what
+                    // is under test is the pipeline D3D12 builds without one.
+                    fragment: None,
+                    primitive: PrimitiveState::default(),
+                    depth_stencil: Some(crcbl_hal::DepthStencilState::default()),
+                    multisample: MultisampleState::default(),
+                    color_targets: &[],
+                })
+                .unwrap_or_else(|error| {
+                    panic!("stage=create_graphics_pipeline {label}: {error:?}")
+                });
+
+            let pass = depth.pass(label);
+            run(device, |encoder| {
+                encoder.pipeline_barrier(&Barriers {
+                    images: &[depth.acquire()],
+                    ..Barriers::default()
+                });
+                encoder.begin_render_pass(&pass);
+                // Pipeline before group, for the reason [`Self::run`] gives:
+                // setting a root signature resets every root argument.
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, self.group, &[], self.pipeline_layout);
+                encoder.bind_index_buffer(self.indices, 0, IndexFormat::Uint32);
+                record(encoder);
+                encoder.end_render_pass();
+                encoder.pipeline_barrier(&Barriers {
+                    images: &[depth.release()],
+                    ..Barriers::default()
+                });
+                depth.resolve(encoder);
+            });
+
+            // Between the submit and the `Map`, for the reason
+            // [`MeshProbe::frame`] gives: `DXGI_ERROR_DEVICE_REMOVED` is
+            // reported at the *next* call.
+            still_alive(device, label);
+
+            let depths = depth.read(device);
+            device.destroy_graphics_pipeline(pipeline);
+            depth.destroy(device);
+            depths
+        }
+
         fn destroy(self, device: &Dx12Device) {
             device.destroy_graphics_pipeline(self.pipeline);
             device.destroy_shader_module(self.module);
@@ -8149,6 +8515,70 @@ pub(crate) mod tests {
             encoder.draw_indexed(0..FIRST_INDEX, 0, 0..1);
         });
         assert_nothing_drawn(&decoy, "an indexed draw of the decoy's three zeros");
+
+        triangle.destroy(&device);
+    }
+
+    /// **The depth-only pipeline shape on an ordinary *vertex* pipeline — which
+    /// separates the shape from mesh shading.**
+    ///
+    /// The third of the three probes that take
+    /// [`a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device`]
+    /// apart, and the one that holds the depth-only shape fixed while changing
+    /// the pipeline kind. `fragment: None`, an empty `color_targets`, a
+    /// `D32Float` attachment and the same [`DepthProbe`] copy — over
+    /// `triangle.slang`'s `vertexMain` and the indexed draw
+    /// [`a_d3d12_indexed_draw_reads_the_index_buffer_it_was_bound`] above
+    /// already draws to a colour target on this device.
+    ///
+    /// # What each outcome says
+    ///
+    /// * **It draws.** A depth-only *raster* pipeline is fine, so the defect is
+    ///   the combination of a mesh pipeline with a depth-only pass rather than
+    ///   either alone — the null pixel shader on a mesh state stream, or the
+    ///   `DSVFormat` subobject `crate::stream` packs for one.
+    /// * **The device goes away.** The defect has nothing to do with mesh
+    ///   shading at all: any depth-only pipeline this backend builds removes the
+    ///   device, and the bisect moves to
+    ///   [`crate::pipeline`]'s handling of `fragment: None` and an empty
+    ///   `color_targets`.
+    ///
+    /// # What it asserts
+    ///
+    /// The same three texels every depth probe here asserts, at the depth
+    /// [`flat_triangle_depth`] derives from `crcbl_shaders::triangle`'s own
+    /// vertices. The raster triangle is apex-**up** where the mesh one is
+    /// apex-down, and both cover the centre with both sampled corners outside
+    /// them, which is what lets one assertion serve both.
+    ///
+    /// The centre is what makes a pass mean something: a device that survived
+    /// the draw and rasterised nothing leaves [`crcbl_hal::depth::CLEAR`] there,
+    /// and the readback was primed with [`POISON`] before that.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_depth_only_raster_pipeline_draws_the_triangle_into_depth() {
+        // The guards that make this test able to fail are in
+        // `flat_triangle_depth`, and run before the device does any work.
+        let emitted = flat_triangle_depth(
+            crcbl_shaders::triangle::VERTICES.map(|vertex| vertex.position),
+            "the raster triangle",
+        );
+
+        let (_instance, device) = open_device();
+        let triangle = IndexedTriangle::new(&device);
+
+        // The same range the colour probe above draws, decoy and all, so the
+        // draw call is what does *not* vary between the two frames.
+        let depths = triangle.depth_run(&device, "triangle depth", |encoder| {
+            encoder.draw_indexed(FIRST_INDEX..FIRST_INDEX + 3, 0, 0..1);
+        });
+
+        assert_depth_triangle(&depths, emitted, "a vertex pipeline with no fragment stage");
 
         triangle.destroy(&device);
     }
