@@ -40,6 +40,43 @@ So the choice is boilerplate against a dependency, with no safety difference —
 which is a smaller question than it looked, and is why it is stated plainly
 rather than argued.
 
+### Which suite runs on which backend, measured
+
+Read out of `ci.yml` by mapping every `run: …run-*.sh` step to the `CRCBL_GPU`
+in its own `env` block, 2026-08-20. Recorded because "the agnostic suites run
+everywhere" is a claim this project rests a lot on, and it had never been read
+off the workflow rather than believed:
+
+| runner                | backends            |
+| --------------------- | ------------------- |
+| `run-hal-seam-e2e.sh` | dx12, mtl, vk, wgpu |
+| `run-render-e2e.sh`   | dx12, mtl, vk, wgpu |
+| `run-forward-e2e.sh`  | dx12, mtl, vk, wgpu |
+| `run-draw-gen-e2e.sh` | dx12, mtl, vk, wgpu |
+| `run-sprite-e2e.sh`   | dx12, mtl, vk, wgpu |
+| `run-mesh-e2e.sh`     | dx12, mtl, vk, wgpu |
+| `run-tiling-e2e.sh`   | dx12, mtl, vk, wgpu |
+| `run-gltf-e2e.sh`     | dx12, mtl, vk, wgpu |
+| `run-lumen-golden.sh` | vk                  |
+| `run-quarry-e2e.sh`   | vk                  |
+
+**Every agnostic suite really does run on all four.** The two exceptions are the
+sample golden suites, and quarry's is vk-only for a reason that was measured
+rather than assumed: `CRCBL_GPU=wgpu` fails 12 of its 23 tests, and the first
+failure is the harness's own
+`"{path:?} was asked for by withholding features and {selected:?} opened"` — the
+fixture forces all three `GeometryPath` values by subtracting features, and a
+backend with no mesh path lands one rung lower than asked. That assertion is the
+fixture working, not a defect: a green run comparing `IndirectPerBatch` against
+itself under the name `MeshShader` is exactly what it exists to stop.
+
+**So making quarry travel is a redesign, not a job edit** — the same shape
+`vk_e2e/mesh.rs` needed: split each test's backend-agnostic claim (which levels
+the descent chose, how many clusters survived) from its mesh-path claim. Not
+attempted, and worth weighing against what it buys: the mesh path exists on one
+backend today, so three of the four arms would be running the indirect half
+twice.
+
 ### The sweep for a runner nobody invokes
 
 Every `#[ignore]` in this workspace names the script that reaches it — 398 of
