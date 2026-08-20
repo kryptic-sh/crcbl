@@ -1335,6 +1335,42 @@ defect** — which is why the macOS leg carries no `--expect-fail` at all and is
 the strongest of the three. If Metal turns out to differ on a scene, the answer
 is a measured excuse on that leg, not a wider tolerance.
 
+**Measured on the runners, 2026-08-20, run 32387226623:**
+
+| gate                 | Linux                        | macOS                | Windows                   |
+| -------------------- | ---------------------------- | -------------------- | ------------------------- |
+| seam probe           | pass                         | pass                 | pass, `X,Y,Z,AA` excused  |
+| golden pixel harness | 9/11, `ssr` and `ui` excused | **11/11**, no excuse | 11/11 rendered, see below |
+| demo gates (7)       | all pass                     | **all pass**         | **impossible — removed**  |
+
+**The Windows demo gates were added and taken out the same day, and the harness
+diagnosed itself.** A GPU-less `windows-latest` cannot serve one at all:
+
+```
+..   control page under "hardware": adapter none, readback no adapter
+..   control page under "swiftshader": adapter google swiftshader, readback rgb(0,0,0)
+FAIL a known-colour clear reads back as that colour —
+     tried hardware, swiftshader; none returned pixels
+web e2e: this browser cannot report canvas pixels with any adapter mode;
+         refusing to run the render checks, because passing them would mean nothing
+```
+
+Both modes are dead ends for different reasons — hardware has no adapter, and
+SwiftShader's canvas reads back as uninitialised memory, the same
+`ReadPixels: Source shared image is not accessible` that costs the probe its
+four excused groups. Every demo gate reads the canvas, so there was no
+configuration left to try. **This is a real gap in Windows coverage**, not
+something the other two platforms make good: what goes untested there is the
+demo gates' own subject — real input, touch, focus, and the canvas a visitor
+looks at. What would close it is a Windows runner with a GPU, or a Chrome whose
+SwiftShader canvas can be read; neither is available.
+
+**The Windows harness leg works and is only slow.** Its first run was cancelled
+at 45m20s having reached `11/11 scene(s) rendered and saved`, with the clock
+running out inside the _native_ comparator's cargo build — a Windows runner
+compiles this workspace twice, once to wasm and once for the host. Its timeout
+is 90 minutes now, per leg rather than for the job.
+
 **Still owed: the cross-backend step on macOS and Windows.** `--reference mtl`
 and `--reference dx12` would each hold a browser against its own platform's
 native backend on the same machine — no committed reference to drift — which is

@@ -509,8 +509,9 @@ jobs:
     name: probe the seam on Windows
     needs: build
     runs-on: windows-latest
-    # Was 20 while this job ran the probe alone; see the macOS twin.
-    timeout-minutes: 60
+    # Back to 20: this job runs the probe alone again, the demo gates having
+    # been measured impossible here — see the note below the probe step.
+    timeout-minutes: 20
     env:
       # THE PAIRING THAT READS AS A CONTRADICTION AND IS NOT. `--headless` below
       # tells **the script** not to go looking for an Xvfb Windows cannot have;
@@ -600,71 +601,35 @@ jobs:
           SITE_DIR="$(pwd -W)/target/site" ./web/run-probe-e2e.sh --headless
           --adapter swiftshader --expect-fail X,Y,Z,AA
 
-      # **THE DEMO GATES, ON THE THIRD OPERATING SYSTEM.** See the macOS job's
-      # note for why a browser backend needs all three; what differs here is the
-      # adapter, and it is the interesting part.
+      # **THE DEMO GATES DO NOT RUN HERE, AND THAT IS A MEASUREMENT.** They were
+      # added on 2026-08-20 and taken out the same day, because a GPU-less
+      # `windows-latest` cannot serve one at all. The harness said so itself, in
+      # its own words, from run 32387226623:
       #
-      # **`--adapter swiftshader` is NOT carried over from the probe step above,
-      # and that is deliberate.** Forcing Dawn onto SwiftShader while Chromium's
-      # shared-image device stays on D3D11 is exactly what breaks a canvas
-      # readback on this runner — the `ReadPixels: Source shared image is not
-      # accessible` that costs the probe its X, Y, Z and AA. Every demo gate
-      # reads the canvas, in group A's readback control, in group D and in group
-      # G, so forcing that mode here would fail all seven for a reason that is
-      # already understood and already excused one job up.
+      #     ..   control page under "hardware": adapter none, readback no adapter
+      #     ..   control page under "swiftshader": adapter google swiftshader, readback rgb(0,0,0)
+      #     ok   a WebGPU adapter is granted — google swiftshader
+      #     FAIL a known-colour clear reads back as that colour —
+      #          tried hardware, swiftshader; none returned pixels
+      #     web e2e: this browser cannot report canvas pixels with any adapter
+      #              mode; refusing to run the render checks, because passing
+      #              them would mean nothing
       #
-      # `auto` is the mode written for this: it tries hardware, falls back to
-      # SwiftShader, and takes the first whose readback control passes. If
-      # neither can report canvas pixels on this image, breakout says so in the
-      # first demo — which is a finding about Chrome on Windows worth having,
-      # not a reason to force a mode that is known not to read back.
+      # Both modes are dead ends and for different reasons: hardware has no
+      # adapter on a runner with no GPU, and SwiftShader has one whose canvas
+      # reads back as uninitialised memory — the same
+      # `ReadPixels: Source shared image is not accessible` that costs the probe
+      # step above its X, Y, Z and AA. Every demo gate reads the canvas in group
+      # A's readback control, in group D and in group G, so there is no
+      # configuration left to try.
       #
-      # `SITE_DIR` is spelled through `pwd -W` for the reason the probe step
-      # above gives: this is Git Bash, and the driver hands the path to a native
-      # Chrome.
-      - name: Render breakout in a real browser
-        shell: bash
-        run: >-
-          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=breakout
-          ./web/run-browser-e2e.sh --headless
-
-      - name: Render flappy in a real browser
-        shell: bash
-        run: >-
-          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=flappy
-          ./web/run-browser-e2e.sh --headless
-
-      - name: Render asteroids in a real browser
-        shell: bash
-        run: >-
-          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=asteroids
-          ./web/run-browser-e2e.sh --headless
-
-      - name: Render horde in a real browser
-        shell: bash
-        run: >-
-          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=horde
-          ./web/run-browser-e2e.sh --headless
-
-      - name: Render hud in a real browser
-        shell: bash
-        run: >-
-          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=hud
-          ./web/run-browser-e2e.sh --headless
-
-      - name: Render quarry in a real browser
-        shell: bash
-        timeout-minutes: 12
-        run: >-
-          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=quarry
-          ./web/run-browser-e2e.sh --headless
-
-      - name: Render lumen in a real browser
-        shell: bash
-        timeout-minutes: 12
-        run: >-
-          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=lumen
-          ./web/run-browser-e2e.sh --headless
+      # **What still covers this platform**: the probe step above, which reads
+      # its pixels out of wasm memory rather than off a canvas, and the
+      # `render-harness` job's Windows leg, which renders offscreen for the same
+      # reason. What is *not* covered here is the demo gates' own subject — real
+      # input, touch, focus and the canvas a visitor looks at — and that is a
+      # gap in this OS's coverage rather than something the other two make good.
+      # `docs/backlog.md` carries it with the numbers.
 
   # THE WebGPU PARITY GATE — the only thing anywhere that holds a browser's
   # *pixels* against the goldens the native suites compare against.
@@ -752,6 +717,7 @@ jobs:
             label: linux
             adapter: swiftshader
             excuse: --expect-fail ssr,ui
+            timeout: 45
           # **macOS runs on the machine's own GPU, and gates all eleven.** Not a
           # preference — Chrome's Dawn has no Vulkan backend on macOS and so has
           # no software adapter at all, which is why `web/tools/probe-e2e.mjs`'s
@@ -767,6 +733,7 @@ jobs:
             label: macos
             adapter: hardware
             excuse: ''
+            timeout: 45
           # Windows takes SwiftShader like Linux, so it asks the same rasteriser
           # the same question on a different OS: what it can catch is the wasm,
           # the browser and the platform plumbing, not a third rasteriser.
@@ -779,10 +746,19 @@ jobs:
             label: windows
             adapter: swiftshader
             excuse: --expect-fail ssr,ui
+            # **Twice the others, measured rather than padded.** The first run of
+            # this leg was cancelled at 45m20s — and it had got all the way to
+            # `11/11 scene(s) rendered and saved`, with the clock running out
+            # inside the *native* comparator's cargo build. Nothing about it was
+            # stuck: a Windows runner compiles this workspace twice, once to wasm
+            # and once for the host, and that is simply slower here.
+            timeout: 90
     runs-on: ${{ matrix.os }}
     # Longer than `build`'s: this one compiles `render-harness` twice, once to
     # wasm and once for the host, and the host half pulls in the native backend.
-    timeout-minutes: 45
+    # Per leg, because Windows needs twice what the other two do — see the
+    # matrix entry.
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@v7
 
