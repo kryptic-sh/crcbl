@@ -5407,28 +5407,14 @@ pub(crate) mod tests {
         device.destroy_image(target);
     }
 
-    /// **The mesh path, end to end: a packed subobject stream, `DispatchMesh`,
-    /// and a triangle read back — twice, so the amplification stage is a
-    /// difference rather than an assumption.**
+    /// Everything the mesh probes below share: `mesh_shader.slang`'s geometry,
+    /// the root signature and bind group that reach it, and the one module all
+    /// four entry points come out of.
     ///
-    /// This is what proves [`crate::stream`]'s arithmetic against a real
-    /// runtime. Every other check on it is arithmetic checked against
-    /// arithmetic; a subobject packed at the wrong offset still adds up, and
-    /// what disagrees is `CreatePipelineState` — which on this job runs with the
-    /// debug layer on, so a malformed stream arrives as a named message in the
-    /// info queue `open_device`'s `Validated` asserts is clean on drop, rather
-    /// than as a wrong picture.
-    ///
-    /// # Why it is run twice
-    ///
-    /// `taskMain` tints every colour by `(0, 1, 1, 1)`, so a frame drawn through
-    /// the amplification stage has the **red channel killed** and nothing else
-    /// changed. Drawing without it and with it and comparing the same texel is
-    /// what makes the `AS` subobject observable: a stream that dropped it, or
-    /// packed it where the runtime did not look, draws the identical picture the
-    /// mesh-only pipeline does — which is exactly the failure a single
-    /// "something was drawn" assertion cannot see. `crcbl-shaders`'
-    /// `mesh_shader.slang` says the same thing about its own payload.
+    /// The same shape [`IndexedTriangle`] has, and for the same reason — what
+    /// the tests vary is the *dispatch* and nothing else, so a picture is
+    /// evidence about which call produced it. The attachment, readback and
+    /// pipeline are per-frame rather than shared: see [`Self::frame`].
     ///
     /// # The bind group is `ShaderStages::ALL`, not `MESH`
     ///
@@ -5440,77 +5426,116 @@ pub(crate) mod tests {
     /// `D3D12_SHADER_VISIBILITY_ALL`, which does reach the amplification and
     /// mesh stages; the slice that reports the flag is what lets this say `MESH`
     /// and get `D3D12_SHADER_VISIBILITY_MESH` instead.
-    #[test]
-    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
-    fn a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible() {
-        use crcbl_shaders::{MESH_SHADER, mesh_shader};
+    struct MeshProbe {
+        vertices: BufferHandle,
+        set_layout: BindGroupLayoutHandle,
+        pipeline_layout: PipelineLayoutHandle,
+        group: BindGroupHandle,
+        module: ShaderModuleHandle,
+    }
 
-        let (_instance, device) = open_device();
+    impl MeshProbe {
+        fn new(device: &Dx12Device) -> Self {
+            use crcbl_shaders::{MESH_SHADER, mesh_shader};
 
-        let geometry = mesh_shader::vertex_bytes();
-        let vertices = device
-            .create_buffer(&BufferDesc {
-                label: Some("mesh_shader vertices"),
-                size: geometry.len() as u64,
-                usage: BufferUsage::STORAGE,
-                memory: MemoryLocation::HostUpload,
-            })
-            .expect("a vertex storage buffer");
-        device
-            .write_buffer(vertices, 0, &geometry)
-            .expect("an upload-heap buffer is host-visible");
+            let geometry = mesh_shader::vertex_bytes();
+            let vertices = device
+                .create_buffer(&BufferDesc {
+                    label: Some("mesh_shader vertices"),
+                    size: geometry.len() as u64,
+                    usage: BufferUsage::STORAGE,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("a vertex storage buffer");
+            device
+                .write_buffer(vertices, 0, &geometry)
+                .expect("an upload-heap buffer is host-visible");
 
-        let set_layout = device
-            .create_bind_group_layout(&BindGroupLayoutDesc {
-                label: Some("mesh_shader geometry"),
-                entries: &[BindGroupLayoutEntry {
-                    binding: 0,
-                    // See the doc comment on why this is not `MESH`.
-                    visibility: ShaderStages::ALL,
-                    kind: BindingKind::StorageBuffer {
-                        read_only: true,
-                        dynamic: false,
-                    },
-                    count: 1,
-                    flags: BindingFlags::empty(),
-                }],
-            })
-            .expect("one read-only storage buffer");
-        let pipeline_layout = device
-            .create_pipeline_layout(&PipelineLayoutDesc {
-                label: Some("mesh_shader"),
-                bind_group_layouts: &[set_layout],
-                push_constants: None,
-            })
-            .expect("a root signature with one descriptor table");
-        let group = device
-            .create_bind_group(&BindGroupDesc {
-                label: Some("mesh_shader geometry"),
-                layout: set_layout,
-                entries: &[BindGroupEntry {
-                    binding: 0,
-                    array_index: 0,
-                    resource: BindingResource::whole_buffer(vertices),
-                }],
-                variable_count: None,
-            })
-            .expect("a bind group over the vertex buffer");
+            let set_layout = device
+                .create_bind_group_layout(&BindGroupLayoutDesc {
+                    label: Some("mesh_shader geometry"),
+                    entries: &[BindGroupLayoutEntry {
+                        binding: 0,
+                        // See the doc comment on why this is not `MESH`.
+                        visibility: ShaderStages::ALL,
+                        kind: BindingKind::StorageBuffer {
+                            read_only: true,
+                            dynamic: false,
+                        },
+                        count: 1,
+                        flags: BindingFlags::empty(),
+                    }],
+                })
+                .expect("one read-only storage buffer");
+            let pipeline_layout = device
+                .create_pipeline_layout(&PipelineLayoutDesc {
+                    label: Some("mesh_shader"),
+                    bind_group_layouts: &[set_layout],
+                    push_constants: None,
+                })
+                .expect("a root signature with one descriptor table");
+            let group = device
+                .create_bind_group(&BindGroupDesc {
+                    label: Some("mesh_shader geometry"),
+                    layout: set_layout,
+                    entries: &[BindGroupEntry {
+                        binding: 0,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(vertices),
+                    }],
+                    variable_count: None,
+                })
+                .expect("a bind group over the vertex buffer");
 
-        // One module for all four entry points, as everywhere else in this
-        // backend. `mesh_shader.slang` declares no WGSL target, so the
-        // descriptor carries DXIL alone.
-        let module = device
-            .create_shader_module(&ShaderModuleDesc {
-                label: Some("mesh_shader.slang"),
-                dxil: &MESH_SHADER.dxil_containers(),
-                ..ShaderModuleDesc::default()
-            })
-            .unwrap_or_else(|error| panic!("stage=create_shader_module: {error:?}"));
+            // One module for all four entry points, as everywhere else in this
+            // backend. `mesh_shader.slang` declares no WGSL target, so the
+            // descriptor carries DXIL alone.
+            let module = device
+                .create_shader_module(&ShaderModuleDesc {
+                    label: Some("mesh_shader.slang"),
+                    dxil: &MESH_SHADER.dxil_containers(),
+                    ..ShaderModuleDesc::default()
+                })
+                .unwrap_or_else(|error| panic!("stage=create_shader_module: {error:?}"));
 
-        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
-        // One frame: its own attachment and readback, so the two runs never
-        // share an image whose state the second barrier would have to guess.
-        let frame = |label: &'static str, task: Option<&'static str>, entry: &'static str| {
+            Self {
+                vertices,
+                set_layout,
+                pipeline_layout,
+                group,
+                module,
+            }
+        }
+
+        /// Draws one frame through a mesh pipeline over `entry` — with `task` as
+        /// its amplification stage when there is one — and reads it back.
+        ///
+        /// `dispatch` is the *only* thing a caller varies. It is recorded with the
+        /// pipeline and the bind group already bound, inside the render pass, where
+        /// [`a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible`]
+        /// records a direct `DispatchMesh` and
+        /// [`an_indirect_mesh_dispatch_of_the_same_extents_draws_the_same_triangle`]
+        /// records an `ExecuteIndirect` of the same three extents.
+        fn frame(
+            &self,
+            device: &Dx12Device,
+            label: &'static str,
+            task: Option<&'static str>,
+            entry: &'static str,
+            dispatch: impl FnOnce(&mut dyn CommandEncoder),
+        ) -> Vec<u8> {
+            // Off `self` and into locals, so the body below is the closure it was
+            // and the encoder closure captures three `Copy` handles rather than
+            // borrowing the probe.
+            let Self {
+                pipeline_layout,
+                group,
+                module,
+                ..
+            } = *self;
+            let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+            // One frame: its own attachment and readback, so the two runs never
+            // share an image whose state the second barrier would have to guess.
             let target = device
                 .create_image(&image(
                     Format::Rgba8Unorm,
@@ -5521,7 +5546,7 @@ pub(crate) mod tests {
             let view = device
                 .create_image_view(&whole(target, Format::Rgba8Unorm))
                 .expect("a render target view");
-            let readback = readback_buffer(&device, SQUARE_BYTES);
+            let readback = readback_buffer(device, SQUARE_BYTES);
             let pipeline = device
                 .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
                     label: Some(label),
@@ -5560,7 +5585,7 @@ pub(crate) mod tests {
                 LoadOp::Clear,
                 Rect2d::from_size(SQUARE.width, SQUARE.height),
             );
-            run(&device, |encoder| {
+            run(device, |encoder| {
                 encoder.pipeline_barrier(&Barriers {
                     images: &[ImageBarrier::new(
                         target,
@@ -5573,10 +5598,7 @@ pub(crate) mod tests {
                 encoder.begin_render_pass(&pass.desc());
                 encoder.bind_graphics_pipeline(pipeline);
                 encoder.bind_group(0, group, &[], pipeline_layout);
-                // One workgroup: `meshMain` and `amplifiedMeshMain` are
-                // `[numthreads(3, 1, 1)]`, one thread per vertex, and `taskMain`
-                // is `[numthreads(1, 1, 1)]` and dispatches one mesh group.
-                encoder.draw_mesh_tasks(1, 1, 1);
+                dispatch(encoder);
                 encoder.end_render_pass();
                 encoder.pipeline_barrier(&Barriers {
                     images: &[ImageBarrier::new(
@@ -5604,6 +5626,12 @@ pub(crate) mod tests {
                 });
             });
 
+            // Between the submit and the `Map`, because `DXGI_ERROR_DEVICE_REMOVED`
+            // is reported at the *next* call: a frame that took the device down
+            // otherwise arrives as `ID3D12Resource::Map failed` and a code, where
+            // `still_alive` names `GetDeviceRemovedReason` and DRED's breadcrumbs.
+            still_alive(device, label);
+
             let request = device
                 .request_readback(&ReadbackDesc {
                     label: Some("crcbl-dx12 mesh readback"),
@@ -5613,7 +5641,7 @@ pub(crate) mod tests {
                     after: None,
                 })
                 .expect("a readback of a HostReadback buffer");
-            let bytes = drain(&device, request, SQUARE_BYTES);
+            let bytes = drain(device, request, SQUARE_BYTES);
 
             device.destroy_readback(request);
             device.destroy_graphics_pipeline(pipeline);
@@ -5621,13 +5649,64 @@ pub(crate) mod tests {
             device.destroy_image_view(view);
             device.destroy_image(target);
             bytes
-        };
+        }
 
-        let plain = frame("mesh_shader", None, "meshMain");
-        let amplified = frame(
+        fn destroy(self, device: &Dx12Device) {
+            device.destroy_shader_module(self.module);
+            device.destroy_bind_group(self.group);
+            device.destroy_pipeline_layout(self.pipeline_layout);
+            device.destroy_bind_group_layout(self.set_layout);
+            device.destroy_buffer(self.vertices);
+        }
+    }
+
+    /// **The mesh path, end to end: a packed subobject stream, `DispatchMesh`,
+    /// and a triangle read back — twice, so the amplification stage is a
+    /// difference rather than an assumption.**
+    ///
+    /// This is what proves [`crate::stream`]'s arithmetic against a real
+    /// runtime. Every other check on it is arithmetic checked against
+    /// arithmetic; a subobject packed at the wrong offset still adds up, and
+    /// what disagrees is `CreatePipelineState` — which on this job runs with the
+    /// debug layer on, so a malformed stream arrives as a named message in the
+    /// info queue `open_device`'s `Validated` asserts is clean on drop, rather
+    /// than as a wrong picture.
+    ///
+    /// # Why it is run twice
+    ///
+    /// `taskMain` tints every colour by `(0, 1, 1, 1)`, so a frame drawn through
+    /// the amplification stage has the **red channel killed** and nothing else
+    /// changed. Drawing without it and with it and comparing the same texel is
+    /// what makes the `AS` subobject observable: a stream that dropped it, or
+    /// packed it where the runtime did not look, draws the identical picture the
+    /// mesh-only pipeline does — which is exactly the failure a single
+    /// "something was drawn" assertion cannot see. `crcbl-shaders`'
+    /// `mesh_shader.slang` says the same thing about its own payload.
+    ///
+    /// # The pipeline is [`MeshProbe`]'s
+    ///
+    /// Geometry, root signature, bind group and module all come from there, and
+    /// so does the frame; the line this test owns is the `draw_mesh_tasks` below.
+    /// That is what lets
+    /// [`an_indirect_mesh_dispatch_of_the_same_extents_draws_the_same_triangle`]
+    /// differ from it in one call and nothing else.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible() {
+        let (_instance, device) = open_device();
+        let probe = MeshProbe::new(&device);
+
+        // One workgroup: `meshMain` and `amplifiedMeshMain` are
+        // `[numthreads(3, 1, 1)]`, one thread per vertex, and `taskMain`
+        // is `[numthreads(1, 1, 1)]` and dispatches one mesh group.
+        let dispatch = |encoder: &mut dyn CommandEncoder| encoder.draw_mesh_tasks(1, 1, 1);
+        let plain = probe.frame(&device, "mesh_shader", None, "meshMain", dispatch);
+        let amplified = probe.frame(
+            &device,
             "mesh_shader amplified",
             Some("taskMain"),
             "amplifiedMeshMain",
+            dispatch,
         );
 
         // The triangle is apex-*down* and covers the centre of the target; both
@@ -5665,11 +5744,110 @@ pub(crate) mod tests {
              {tinted:?}"
         );
 
-        device.destroy_shader_module(module);
-        device.destroy_bind_group(group);
-        device.destroy_pipeline_layout(pipeline_layout);
-        device.destroy_bind_group_layout(set_layout);
-        device.destroy_buffer(vertices);
+        probe.destroy(&device);
+    }
+
+    /// **`ExecuteIndirect` of a `DISPATCH_MESH` signature, drawing the triangle
+    /// the direct `DispatchMesh` above already draws — the one call the D3D12
+    /// mesh failure is narrowed to.**
+    ///
+    /// # What it distinguishes
+    ///
+    /// `docs/backlog.md` records a WARP that reports `MeshShaderTier = TIER_1`,
+    /// passes every mesh test this crate has, and then loses the device inside
+    /// `crcbl-render`'s frame — `DXGI_ERROR_DEVICE_REMOVED` out of
+    /// `ID3D12Resource::Map`, no debug-layer error, no DRED breadcrumb. The two
+    /// paths differ in exactly one call:
+    ///
+    /// * [`a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible`]
+    ///   — the probe that passes — records `draw_mesh_tasks`, a **direct**
+    ///   `DispatchMesh` of three CPU scalars.
+    /// * `crcbl_render::forward`'s mesh arm — the frame that dies — records
+    ///   `draw_mesh_tasks_indirect`, an **`ExecuteIndirect`** through a
+    ///   `D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH` signature whose extents a
+    ///   compute pass wrote.
+    ///
+    /// Nothing had ever *executed* the second one on this backend. Where
+    /// `draw_mesh_tasks_indirect` appears elsewhere in this suite it is
+    /// [`the_entry_points_that_landed_never_answer_unsupported_again`], whose
+    /// subject is that recording it with a dead handle refuses — nothing is ever
+    /// submitted. So this is the first indirect mesh dispatch the crate has run.
+    ///
+    /// # What each outcome says
+    ///
+    /// * **It draws.** `ExecuteIndirect` of `DISPATCH_MESH` is fine on this
+    ///   device, and the blocker is something larger in the renderer's frame —
+    ///   the amplification stage descending the cluster DAG, the bind groups it
+    ///   reads, or the extents the culling pass wrote — not the call itself.
+    /// * **The device goes away.** The blocker narrows from "our renderer" to one
+    ///   call with a minimal repro: the same module, layout, bind group, target
+    ///   and workgroup count as the passing probe, differing only in how the
+    ///   three extents reach the mesh stage. That is a bug report someone else
+    ///   can run, and it is why this test carries no skip and no tolerance — a
+    ///   removal is the measurement, so it must be a red test and not a quiet
+    ///   one. [`MeshProbe::frame`]'s `still_alive` names the removal reason and
+    ///   DRED's breadcrumbs, so the log says more than `Map` failed.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux, so nothing here has ever executed outside a CI runner.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn an_indirect_mesh_dispatch_of_the_same_extents_draws_the_same_triangle() {
+        let (_instance, device) = open_device();
+        let probe = MeshProbe::new(&device);
+
+        // One `D3D12_DISPATCH_MESH_ARGUMENTS`: the three `u32`s the direct probe
+        // passes to `DispatchMesh` as scalars, in GPU memory instead. Written
+        // through `indirect_buffer`, so they arrive device-local and in
+        // `ResourceState::IndirectArgument` by the transition a GPU-driven frame
+        // makes — which is the state `ExecuteIndirect` requires and the one the
+        // renderer's culling pass leaves behind.
+        let extents: Vec<u8> = [1u32, 1, 1].iter().flat_map(|n| n.to_le_bytes()).collect();
+        let args = indirect_buffer(&device, "mesh dispatch extents", &extents);
+
+        let drawn = probe.frame(
+            &device,
+            "mesh_shader indirect",
+            None,
+            "meshMain",
+            |encoder| {
+                encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                    args,
+                    offset: 0,
+                    draw_count: 1,
+                    // A single structure is read at the offset and never strided
+                    // over, so this is what a one-command caller passes;
+                    // `crate::draw::plan_indirect` fills the signature's
+                    // `ByteStride` in from the structure's own width.
+                    stride: 0,
+                });
+            },
+        );
+
+        // The three texels the direct probe asserts on its mesh-only frame, in the
+        // same order. Surviving the dispatch is not the claim — a device that
+        // executed nothing survives too — so the centre is what makes a pass mean
+        // the indirect path drew.
+        assert_eq!(texel(&drawn, 0, 0), CLEAR_TEXEL, "top-left corner");
+        assert_eq!(
+            texel(
+                &drawn,
+                SQUARE.width as usize - 1,
+                SQUARE.height as usize - 1
+            ),
+            CLEAR_TEXEL,
+            "bottom-right corner"
+        );
+        assert_ne!(
+            texel(&drawn, 32, 32),
+            CLEAR_TEXEL,
+            "the indirect mesh dispatch emitted nothing over the centre of the target"
+        );
+
+        device.destroy_buffer(args);
+        probe.destroy(&device);
     }
 
     /// The index pool every indexed draw below reads, and the decoy in front of

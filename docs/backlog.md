@@ -1893,13 +1893,30 @@ That fits the evidence that otherwise made no sense: zero debug-layer errors and
 zero DRED breadcrumbs are what a fault _inside_ WARP's `ExecuteIndirect`
 implementation would look like, before any command-list work is recorded.
 
-**The experiment**, written the same day: a sibling of the passing probe whose
-only difference is the indirect dispatch, one workgroup, same shader, same
-attachment, asserting the same pixels. It is expected to remove the device, and
-it is deliberately written without a skip or a tolerance that would let it pass
-on a device that removed itself. A failure narrows this entry from "our
-renderer" to one call with a minimal repro; a pass eliminates the suspect and
-says the renderer's larger use really is the subject.
+**The experiment is in the tree**:
+`an_indirect_mesh_dispatch_of_the_same_extents_draws_the_same_triangle` in
+`crates/crcbl-dx12/src/device.rs`. Both mesh tests now go through one shared
+`MeshProbe`, so the difference is structural rather than two copies staying in
+step: same module, layout, bind group, attachment and one workgroup, and the
+_only_ thing that varies is the dispatch closure — `draw_mesh_tasks(1, 1, 1)`
+against `draw_mesh_tasks_indirect` reading three `u32`s from a device-local
+buffer in `ResourceState::IndirectArgument`.
+
+It asserts the same three texels the direct probe does, and the centre one is
+what makes a pass mean something: a device that survived the dispatch and
+executed nothing still leaves the clear there. There is deliberately no skip,
+catch or tolerance that would let it pass on a device that removed itself.
+
+`MeshProbe::frame` also calls `still_alive` between the submit and the readback,
+so a removal surfaces as `GetDeviceRemovedReason` plus DRED breadcrumbs against
+the frame's label rather than as `ID3D12Resource::Map failed` — `DEVICE_REMOVED`
+is reported at the next call, and the `Map` was that call.
+
+**A failure narrows this entry from "our renderer" to one call with a minimal
+repro; a pass eliminates the suspect** and says the renderer's larger use really
+is the subject. Nothing here has executed: the test is Windows-gated and
+`#[ignore]`d, so the only local evidence is that it type-checks under
+`x86_64-pc-windows-msvc`.
 
 So the decision:
 
