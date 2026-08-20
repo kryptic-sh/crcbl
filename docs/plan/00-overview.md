@@ -80,18 +80,27 @@ is an orthographic projection with `z` as z-index.
 
 ## Stages
 
-| Stage | Doc                                                      | Theme                                                        |
-| ----- | -------------------------------------------------------- | ------------------------------------------------------------ |
-| 1     | [01-foundations.md](01-foundations.md)                   | Workspace, crates, core types, HAL seam, window/event loop   |
-| 2     | [02-vulkan-backend.md](02-vulkan-backend.md)             | Vulkan device, swapchain, render graph, first triangle       |
-| 3     | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) | Bindless, geometry pools, indirect draws, GPU culling        |
-| 4     | [04-ecs-server-client.md](04-ecs-server-client.md)       | ECS, tick loop, transport seam, replication                  |
-| 5     | [05-physics.md](05-physics.md)                           | From-scratch physics: sector space, forces/orbits, CCD       |
-| 6     | [06-assets-scenes.md](06-assets-scenes.md)               | glTF import, scene format, asset ids, hot reload             |
-| 7     | [07-ui-debug.md](07-ui-debug.md)                         | Immediate-mode GUI, debug draw, profiler, inspector          |
-| 8     | [08-editor.md](08-editor.md)                             | Scene editor built on the engine, gizmos, play-in-editor     |
-| 9     | [09-backends-metal-dx12.md](09-backends-metal-dx12.md)   | Metal and DX12 implementations of the HAL                    |
-| 10    | [10-wasm-webgpu.md](10-wasm-webgpu.md)                   | Wasm target: wgpu backend, browser platform, capability gaps |
+| Stage | Doc                                                      | Theme                                                          |
+| ----- | -------------------------------------------------------- | -------------------------------------------------------------- |
+| 1     | [01-foundations.md](01-foundations.md)                   | Workspace, crates, core types, HAL seam, window/event loop     |
+| 2     | [02-vulkan-backend.md](02-vulkan-backend.md)             | Vulkan device, swapchain, render graph, first triangle         |
+| 3     | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) | Bindless, geometry pools, indirect draws, GPU culling          |
+| 4     | [04-ecs-server-client.md](04-ecs-server-client.md)       | ECS, tick loop, transport seam, replication                    |
+| 5     | [05-physics.md](05-physics.md)                           | From-scratch physics: sector space, forces/orbits, CCD         |
+| 6     | [06-assets-scenes.md](06-assets-scenes.md)               | glTF import, scene format, asset ids, hot reload               |
+| 7     | [07-ui-debug.md](07-ui-debug.md)                         | Immediate-mode GUI, debug draw, profiler, inspector            |
+| 8     | [08-editor.md](08-editor.md)                             | Scene editor built on the engine, gizmos, play-in-editor       |
+| 9     | [09-backends-metal-dx12.md](09-backends-metal-dx12.md)   | Metal and DX12 implementations of the HAL — **deferred**       |
+| 10    | [10-wasm-webgpu.md](10-wasm-webgpu.md)                   | Wasm target: WebGPU backend, browser platform, capability gaps |
+
+> **Stage 9 is deferred as of 2026-08-21.** `crcbl-mtl` and `crcbl-dx12` stay in
+> the tree and their CI jobs keep running and passing, but no new backend work
+> is done on them. Development is on `crcbl-vk` and `crcbl-webgpu`, which are
+> the two backends that can be exercised in full both locally and in CI — Vulkan
+> against real hardware here and lavapipe on Linux and Windows, WebGPU in a real
+> browser on all three runners. See
+> [09-backends-metal-dx12.md](09-backends-metal-dx12.md) for what that parks and
+> what it costs.
 
 Cross-cutting topic docs (identity, no ordering implied):
 

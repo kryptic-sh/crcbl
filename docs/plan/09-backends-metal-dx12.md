@@ -1,5 +1,29 @@
 # Stage 9 — Metal + DX12 Backends
 
+> **DEFERRED, 2026-08-21.** Work on both backends is stopped for now by the
+> owner's decision. Neither crate is deleted and neither CI job is removed —
+> `dx12 e2e (software adapter)` and `mtl e2e (macos-latest)` keep running and
+> keep passing, so what exists stays honest and a regression still shows up.
+> What stops is new implementation: closing capability rows, chasing the WARP
+> device removal, and writing the Metal features no runner here can execute.
+>
+> Effort goes to `crcbl-vk` and `crcbl-webgpu`, the two backends that carry a
+> shipping platform each — Linux and Windows through Vulkan, the browser through
+> WebGPU.
+>
+> **What this parks, all of it recorded in `docs/backlog.md` and resumable:** a
+> depth-only mesh pipeline removing the WARP device, narrowed by seven probes to
+> the mesh-plus-zero-render-targets shape with two repros in the tree; the D3D12
+> register-assignment collision, which is a real defect in the renderer's mesh
+> pipeline and independent of the removal; and the four Metal capability rows
+> that are written but have never executed.
+>
+> **What it costs, stated plainly:** `parity_blockers()` cannot reach empty
+> while this holds, because every remaining row belongs to one of these two
+> backends. Full parity is now bounded by a scope decision rather than by work
+> outstanding, and the parity report keeps saying so rather than quietly
+> redefining done.
+
 Implement the frozen HAL on Metal (macOS) and DX12 (Windows). The renderer, ECS,
 UI, and editor don't change — that's the point of the seam. Vulkan also runs
 natively on Windows, so DX12 is there for the Xbox door and for first-class

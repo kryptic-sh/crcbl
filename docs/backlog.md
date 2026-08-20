@@ -1719,7 +1719,7 @@ asserting precedence between those two errors would flip. Judged unlikely and
 the cleaner factoring kept; it compiles under the darwin gate and no macOS test
 has run.
 
-## DECISION NEEDED — D3D12 registers are assigned by counting, and the mesh path collides
+## DEFERRED — D3D12 registers are assigned by counting, and the mesh path collides
 
 **Found 2026-08-21 while building the cluster-shader probe, by checking an
 assumption rather than by running anything.** It is almost certainly the WARP
@@ -1818,7 +1818,40 @@ registers is still required — as it stands the renderer's mesh pipeline reads 
 texture descriptor as a structured buffer — but it will not by itself make the
 mesh path work.
 
-## DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
+## DEFERRED — dx12 mesh shading: WARP claims it and dies, hardware works
+
+**Deferred 2026-08-21, mid-investigation and one step from the answer.** Work on
+`crcbl-dx12` and `crcbl-mtl` is stopped by the owner's decision; see
+`docs/plan/09-backends-metal-dx12.md`. Everything below stands and the state is
+resumable, so this records the exact next step rather than leaving it to be
+re-derived.
+
+**Where it got to.** Seven probes narrowed the removal from "the renderer's mesh
+path" to one shape: **a mesh pipeline with zero render targets**. The same mesh
+stages draw with a colour target; the same depth-only pass draws over a vertex
+pipeline; a depth attachment cleared and copied back with no pipeline at all
+draws. Only the combination fails.
+
+**One hypothesis was tested and is dead.** Presenting the pixel-shader subobject
+empty rather than omitting it — matching the raster path — changed nothing: run
+32421732642 removed the device exactly as before. That change stayed anyway, as
+consistency, and its comment says it is not the fix.
+
+**The next step, for whoever picks this up.** `NumRenderTargets = 0` with an
+all-`UNKNOWN` `RTFormats` array is what the failing pipeline hands
+`CreatePipelineState`, and `blend_state` is built from an empty target list
+beside it. The cheap probe is a mesh pipeline with **one dummy colour target
+that nothing writes**, keeping the depth attachment and `fragment: None`: if it
+draws, zero render targets is the trigger and the fix is in `crate::pipeline`'s
+mesh stream rather than anywhere near a shader.
+
+**Two repros are in the tree**, both excluded by name in
+`crates/crcbl-dx12/tests/run-dx12-e2e.sh`'s `KNOWN_RED`:
+`a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device` is the
+minimal one, and `the_cluster_shaders_dag_descent_draws_the_cut_it_chose` drives
+`mesh_cluster.slang`'s own containers. The second one's synthetic data and
+expected values have never been checked against a device that survived, so it
+should not be trusted as a signal until the first one passes.
 
 **Option (d) has been tried, and it does not fix it.** Run 32297440428 on
 `diagnose/dx12-warp-redist` gave the runner `Microsoft.Direct3D.WARP` 1.0.20 and
@@ -4449,6 +4482,15 @@ canvas byte-identical to the direct draw. Had that been believed rather than
 measured, the whole approach would have been abandoned for a stall.
 
 ## What each remaining blocker row would take
+
+**All six rows are now deferred (2026-08-21).** Every one belongs to
+`crcbl-dx12` or `crcbl-mtl`, and work on both stopped — see
+`docs/plan/09-backends-metal-dx12.md`. So `parity_blockers()` will not reach
+empty, and that is a scope decision rather than work outstanding. The mechanism
+is unaffected and stays enforced: the `Capability` enum is still exhaustive,
+every backend still answers every row through a `match`, and a capability added
+to `crcbl-vk` or `crcbl-webgpu` still fails to compile until the deferred
+backends answer for it too. What changed is only which rows anybody is working.
 
 `REVIEWED_BLOCKERS` in `crates/crcbl-hal/src/capability.rs` is the answer at any
 moment; this says what stands between each row and zero. Every row belongs to

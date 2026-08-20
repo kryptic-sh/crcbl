@@ -155,17 +155,18 @@ echo "crcbl dx12 e2e: CRCBL_DX12_VALIDATION=${CRCBL_DX12_VALIDATION}"
 # entry would otherwise be an exclusion that silently matches nothing, which
 # reads as "excluded" while the test it names has been renamed or deleted.
 KNOWN_RED=(
-    # docs/backlog.md, "dx12 mesh shading: WARP claims it and dies". This drives
-    # mesh_cluster.slang's own containers through a depth-only mesh pipeline.
-    # The pipeline half of that is fixed -- crate::pipeline now always presents
-    # the pixel-shader subobject -- and the toy probe that isolated it has left
-    # this list to prove the fix. This one stays a round longer because its data
-    # and expected values have never been checked against a device that
-    # survived, so it failing again would say nothing about the fix.
+    # docs/backlog.md, "DEFERRED -- dx12 mesh shading: WARP claims it and dies".
+    # Both drive a depth-only mesh pipeline, which removes the WARP device; the
+    # second runs the toy stages six colour-target probes pass on, which is what
+    # says the defect is the pipeline shape rather than either shader.
     #
-    # This list is meant to shrink, and an entry outliving the backlog entry
-    # that explains it means the job has quietly stopped covering what it
-    # claims to.
+    # **These are parked rather than in progress.** dx12 work stopped on
+    # 2026-08-21 (docs/plan/09-backends-metal-dx12.md), so this list is not
+    # expected to shrink on its own. The repros are kept because they are the
+    # investigation's most valuable output and they cost this job nothing while
+    # excluded. They leave the list when the backlog entry's next step is taken,
+    # and that entry going away without them going away means the job has
+    # quietly stopped covering what it claims to.
     the_cluster_shaders_dag_descent_draws_the_cut_it_chose
     a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device
 )
