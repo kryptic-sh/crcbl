@@ -12309,21 +12309,34 @@ half seconds is not a batch fold plus a log drain. Same defect as
 wall-clock budget in this harness was calibrated on this desktop**, and fixing
 them one at a time buys one red run each.
 
-**So the fix generalises: one measured slowdown, applied to all of them.** The
-beat is already measured, and its nominal value is one simulated second, so
-`slowdown = max(1, beat / 1000)` is the factor this machine is behind by — 1
-here, 27 on that runner. Scale every fixed budget by it rather than deriving
-each one separately. Two properties to keep: never scale _below_ the existing
-constant, so no machine gets a shorter window than today; and note which budgets
-are polls (where a longer deadline is free, since the poll returns on success)
-against which are sleeps watching nothing happen (where a longer window costs
-real time and is strictly stronger). `PADDLE_SETTLE_MS` is both — its own doc
-comment says so.
+**That is now done: one measured slowdown, applied to all of them.**
+`slowdown = max(1, beat / NOMINAL_BEAT_MS)` is the factor this machine is behind
+by — 1 here, 27 on that runner — and group F takes `settleMs`, `lifeMs`,
+`climbMs` and `walkMs` through `budget()` rather than the bare constants, with
+its two `TICK_WINDOW_MS` pauses taking `windowMs`. The heartbeat control prints
+the factor on every run (`every later budget scaled 27.0x`), so a later check
+failing on a slow machine says in the same log how slow it was.
 
-Also untouched and worth knowing: group F still pauses for the bare
-`TICK_WINDOW_MS` twice, in horde's two-finger checks — those wait for a
-_stopped_ thing to stay stopped, so a fixed window is not the same defect, but
-it is the same constant.
+Verified: breakout 47/47, flappy 43/43, horde 47/47, hud 37/37, quarry 37/37 —
+all at `1.0x`, so nothing on this desktop moved. Red-checked by keeping every
+twentieth HUD line to stretch the beat: the control reported `20.0x` and both of
+group E's windows came out at 40012 ms, which is the factor reaching the budgets
+rather than only the message.
+
+**`TAP_INTERVAL_MS` is deliberately not scaled**, and that is the one untested
+assumption. It is the gap between two synthetic taps — an input cadence, not a
+budget for observing a result — and the loops that tap are bounded by `climbMs`
+and `lifeMs`, so a slow machine already gets more taps rather than fewer. If a
+tap sequence ever fails on a slow runner where the deadline plainly did not
+expire, event coalescing is the first thing to suspect.
+
+**What the scaling costs, since it is not free.** The poll deadlines cost
+nothing on success — a poll returns when its condition holds. The sleeps do:
+group E's two windows are `2 * beat` each, so on that runner they are 54s
+apiece, and quarry's step was already 5m58s with them. quarry has no `touch` row
+in `EXPECTATIONS`, so group F's walk and climb sections do not run for it and
+the two `windowMs` pauses there are not in its path; a demo that has one and is
+also that slow would be. The step timeouts are what would catch it.
 
 **Both stale prose claims are fixed**: `web/pages/index.html`'s excusing clause
 and `web/pages/lumen.html`'s "This one wants a real GPU" note, which said the

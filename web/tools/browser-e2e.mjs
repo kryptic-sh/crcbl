@@ -492,6 +492,18 @@ const TICK_WINDOW_MS = 4_000;
 const TICK_WINDOW_BEATS = 2;
 
 /**
+ * What one heartbeat is *supposed* to take, in wall-clock milliseconds.
+ *
+ * The samples log one every sixtieth tick, and sixty ticks is a second of
+ * simulated time — so on a machine keeping up, the beat and this number are the
+ * same. The ratio between them is therefore how far behind real time this
+ * machine is running the demo, which is the one factor every fixed budget in
+ * this file needs and none of them had: they were all chosen on a desktop where
+ * the ratio is 1.
+ */
+const NOMINAL_BEAT_MS = 1_000;
+
+/**
  * How long the run waits for two heartbeats before calling the tick loop dead.
  *
  * Generous, because the whole point is that this machine's pace is unknown; the
@@ -608,6 +620,11 @@ const PADDLE_TOLERANCE = 0.015;
  * happen for, and a negative claim has no observable to poll. The control inside
  * that check — the first contact moving, inside this same window — is what stops
  * a window too short to show a move from making it pass for free.
+ *
+ * **This is the value at a slowdown of 1**, and group F scales it: see `budget`.
+ * The bare constant expired on a GitHub runner before the two contacts it waits
+ * for were logged, which is what put every fixed budget in this file under the
+ * measured beat.
  */
 const PADDLE_SETTLE_MS = 1_500;
 
@@ -1908,13 +1925,32 @@ try {
   // tick loop that emits nothing fails here, loudly, instead of the pause check
   // passing for free on a run where no heartbeat could have appeared anyway.
   const beat = await heartbeatMs();
+
+  // **How far behind real time this machine is running the demo**, and the one
+  // number every later budget is scaled by. `TICK_WINDOW_MS` was not the only
+  // constant calibrated on a fast desktop — `PADDLE_SETTLE_MS` is 1500 ms for a
+  // batch fold plus a log drain, and on a runner advancing a simulated second
+  // every 27 seconds it expired before the two lifts it waits for arrived, which
+  // is one red CI run per constant if they are fixed one at a time.
+  //
+  // Never below 1, so a machine that keeps up is unchanged and no budget can
+  // come out *shorter* than the constant already gave it — that direction would
+  // weaken every check watching nothing happen. A machine faster than nominal
+  // therefore reports `1.0x` rather than a fraction: the ratio is a curiosity,
+  // the factor actually applied is what a reader needs when a later check fails.
+  // `beat === null` means the control below has already failed, so the run is
+  // red whatever this says.
+  const slowdown = beat ? Math.max(1, beat.beat / NOMINAL_BEAT_MS) : 1;
+  const budget = (ms) => Math.round(ms * slowdown);
+
   check(
     'E',
     'a running demo logs its HUD from inside the tick',
     beat !== null,
     beat === null
       ? `no second HUD line in ${Math.min(HEARTBEAT_DEADLINE_MS, TIMEOUT_MS)} ms`
-      : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms`
+      : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms — ` +
+          `every later budget scaled ${slowdown.toFixed(1)}x`
   );
 
   // **Never shorter than the constant used to give.** `TICK_WINDOW_MS` is the
@@ -1926,6 +1962,7 @@ try {
     TICK_WINDOW_MS,
     (beat?.beat ?? 0) * TICK_WINDOW_BEATS
   );
+
   const heartbeats = async () => {
     const before = hud().length;
     await pause(windowMs);
@@ -2056,6 +2093,25 @@ try {
   );
 
   group('F — a finger');
+
+  // **Every wall-clock budget below is this machine's, not this desktop's.**
+  // Each of these was a bare constant until 2026-08-20, chosen where the
+  // slowdown is 1, and `PADDLE_SETTLE_MS`'s 1500 ms was the one that failed on a
+  // GitHub runner: the two contacts it waits to see lift had not been logged
+  // yet. Scaling them all by the measured `slowdown` is what stops the next one
+  // costing its own red run. `TICK_WINDOW_MS`'s two uses here take `windowMs`,
+  // which is the same number arrived at one step earlier.
+  //
+  // **`TAP_INTERVAL_MS` is deliberately not scaled.** It is the gap between two
+  // synthetic taps — an input cadence rather than a budget for observing a
+  // result — and the loops that tap are bounded by `climbMs` and `lifeMs`, so a
+  // slow machine already gets *more* taps rather than fewer. Untested at a
+  // slowdown above 1: if a tap sequence ever fails on a slow runner where the
+  // deadline plainly did not expire, coalescing is the first thing to suspect.
+  const settleMs = budget(PADDLE_SETTLE_MS);
+  const lifeMs = budget(LIFE_MS);
+  const climbMs = budget(CLIMB_MS);
+  const walkMs = budget(WALK_MS);
 
   // **Nothing above this line has ever sent a touch.**
   // `Input.dispatchMouseEvent` is a mouse all the way down: it arrives as a
@@ -2319,7 +2375,7 @@ try {
     }
     const ended = endedIn(seen);
     return ended.has(firstId) && ended.has(secondId) ? seen : null;
-  }, PADDLE_SETTLE_MS);
+  }, settleMs);
   await evaluate(page, `crcbl.logLevel(${LOG_INFO})`);
 
   const seen = contactsFrom(contactMark);
@@ -2376,7 +2432,7 @@ try {
         return last?.count > 0 && Math.abs(last.at - target) <= PADDLE_TOLERANCE
           ? last
           : null;
-      }, PADDLE_SETTLE_MS);
+      }, settleMs);
       return { reached: Boolean(reached), last };
     };
 
@@ -2437,7 +2493,7 @@ try {
       const anchored = await paddleReaches(FIRST_DRAG.to);
       await touch('touchStart', [contact(held, 1), contact(second, 2)]);
       await touch('touchMove', [contact(held, 1), contact(moved, 2)]);
-      await pause(PADDLE_SETTLE_MS);
+      await pause(settleMs);
       const fumbled = await paddleAt();
       await touch('touchMove', [
         contact(spot(FIRST_DRAG.from, PADDLE_BAND), 1),
@@ -2472,7 +2528,7 @@ try {
     await tap(spot(0.5, 0.5));
     const startedByTap = await until(
       async () => fresh().slice(startMark).find(EXPECTED.started),
-      LIFE_MS
+      lifeMs
     );
     check(
       'F',
@@ -2511,13 +2567,13 @@ try {
           fresh().find(
             (line) => EXPECTED.waiting(line) && lives(line) < startingLives
           ),
-        LIFE_MS
+        lifeMs
       );
       const afterCancel = fresh().length;
       await tap(spot(PARK_X, PADDLE_BAND));
       const servedAfterCancel = await until(
         async () => fresh().slice(afterCancel).find(EXPECTED.started),
-        LIFE_MS
+        lifeMs
       );
       check(
         'F',
@@ -2525,7 +2581,7 @@ try {
         Boolean(lostOne) && Boolean(servedAfterCancel),
         lostOne
           ? (servedAfterCancel ?? 'the tap raised no edge').trim()
-          : `no life was lost inside ${LIFE_MS} ms, so there was never a tap to make`
+          : `no life was lost inside ${lifeMs} ms, so there was never a tap to make`
       );
 
       // **Two taps in a row.** The second is the one that matters: a tap is one
@@ -2540,13 +2596,13 @@ try {
               (line) =>
                 EXPECTED.waiting(line) && lives(line) < startingLives - 1
             ),
-        LIFE_MS
+        lifeMs
       );
       const afterSecond = fresh().length;
       await tap(spot(PARK_X, PADDLE_BAND));
       const servedAgain = await until(
         async () => fresh().slice(afterSecond).find(EXPECTED.started),
-        LIFE_MS
+        lifeMs
       );
       check(
         'F',
@@ -2554,7 +2610,7 @@ try {
         Boolean(lostTwo) && Boolean(servedAgain),
         lostTwo
           ? (servedAgain ?? 'the second tap raised no edge').trim()
-          : `no second life was lost inside ${LIFE_MS} ms`
+          : `no second life was lost inside ${lifeMs} ms`
       );
     }
 
@@ -2582,14 +2638,14 @@ try {
           .map(height)
           .find((y) => y > bar);
         return above === undefined ? null : { above };
-      }, CLIMB_MS);
+      }, climbMs);
       check(
         'F',
         'a tap lifts the bird',
         Boolean(climbed),
         climbed
           ? `y reached ${climbed.above}, over the ${bar} one flap could manage`
-          : `y never passed ${bar} in ${CLIMB_MS} ms of tapping, which is ` +
+          : `y never passed ${bar} in ${climbMs} ms of tapping, which is ` +
               'what the flap the run started with does on its own'
       );
     }
@@ -2611,7 +2667,7 @@ try {
       // starts the run standing at exactly zero.
       const found = await until(
         async () => (Number.isFinite(wizardX()) ? { at: wizardX() } : null),
-        WALK_MS
+        walkMs
       );
       const start = found?.at ?? NaN;
 
@@ -2625,13 +2681,13 @@ try {
       const walked = await until(async () => {
         const at = wizardX();
         return at > start + WALK_MARGIN ? at : null;
-      }, WALK_MS);
+      }, walkMs);
       check(
         'F',
         'a thumb on the field walks the wizard',
         walked !== null,
         walked === null
-          ? `x stayed at ${start} for ${WALK_MS} ms with a thumb pushing right`
+          ? `x stayed at ${start} for ${walkMs} ms with a thumb pushing right`
           : `x ${start} -> ${walked}, pushed right`
       );
 
@@ -2656,7 +2712,7 @@ try {
         const bothDown = await until(async () => {
           const at = wizardX();
           return at > beforeSecond + WALK_MARGIN ? at : null;
-        }, WALK_MS);
+        }, walkMs);
         // **Only the second finger lifts**, which is what makes the pause the
         // *second* one's doing. `Input.dispatchTouchEvent`'s `touchEnd` takes
         // the points being **released** — an empty list is the "release
@@ -2666,9 +2722,9 @@ try {
         const paused = await until(async () => {
           const status = await evaluate(page, `crcbl.status()`);
           return status === STATUS_PAUSED ? status : null;
-        }, WALK_MS);
+        }, walkMs);
         const stoppedAt = wizardX();
-        await pause(TICK_WINDOW_MS);
+        await pause(windowMs);
         const stillStopped = wizardX();
         check(
           'F',
@@ -2702,7 +2758,7 @@ try {
         const unlocked = await until(async () => {
           const status = await evaluate(page, `crcbl.status()`);
           return status === STATUS_RUNNING ? status : null;
-        }, WALK_MS);
+        }, walkMs);
         check(
           'F',
           'a second finger taps the pause menu shut while the first holds the stick',
@@ -2725,13 +2781,13 @@ try {
         const walkedAgain = await until(async () => {
           const at = wizardX();
           return at > regrabbed + WALK_MARGIN ? at : null;
-        }, WALK_MS);
+        }, walkMs);
         check(
           'F',
           'the thumb that never lifted walks again once the panel has gone',
           walkedAgain !== null,
           walkedAgain === null
-            ? `x stayed at ${regrabbed} for ${WALK_MS} ms with a thumb that ` +
+            ? `x stayed at ${regrabbed} for ${walkMs} ms with a thumb that ` +
                 'never left the glass pushing right'
             : `x ${regrabbed} -> ${walkedAgain} without lifting`
         );
@@ -2746,7 +2802,7 @@ try {
         await until(async () => {
           const status = await evaluate(page, `crcbl.status()`);
           return status === STATUS_PAUSED ? status : null;
-        }, WALK_MS);
+        }, walkMs);
 
         // **The thumb that was already down lifts, over a panel it never
         // pressed.** It is the primary contact, so its lift is also a
@@ -2760,7 +2816,7 @@ try {
         // fast test that came out of it.
         const strayMark = consoleLines.length;
         await touch('touchEnd');
-        await pause(TICK_WINDOW_MS);
+        await pause(windowMs);
         const strayLines = consoleLines
           .slice(strayMark)
           .filter((line) => STRAY_MENU_ACTION.test(line));
@@ -2818,7 +2874,7 @@ try {
         await pause(TAP_INTERVAL_MS);
         const status = await evaluate(page, `crcbl.status()`);
         return status === STATUS_PAUSED ? status : null;
-      }, LIFE_MS);
+      }, lifeMs);
       check(
         'F',
         'a tap on the pause button stops the run',
@@ -2826,7 +2882,7 @@ try {
         pausedByButton === STATUS_PAUSED
           ? `status ${pausedByButton} after a tap ${PAUSE_INSET} px inside the corner`
           : `status ${await evaluate(page, `crcbl.status()`)} — the corner ` +
-              `was tapped for ${LIFE_MS} ms and the loop never stopped`
+              `was tapped for ${lifeMs} ms and the loop never stopped`
       );
 
       // …and out again, which leaves the demo running as every other group here
