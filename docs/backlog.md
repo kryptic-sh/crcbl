@@ -5851,13 +5851,33 @@ of how it survived: every test in reach of it asserted the wrong thing.**
 - **horde** carried the identical `+ pending` term, with a doc comment
   explaining the old ordering as though it were intended. Exact now, and red on
   many ticks of the soak.
-- **flappy**'s `a_long_run_keeps_the_world_the_same_size` asserts a `<=`
-  ceiling, and **the `<=` is not what hid it**: measured `worst = 11` against
-  `ceiling = 11` both with and without the fix. It samples `entity_count()` once
-  every 60 ticks — 40 samples over the run — so the peak is undersampled and
-  never landed on a cull tick. The `<=` is right there (the pipe count breathes
-  by one as the window slides); **sampling every tick is what would make it a
-  leak detector**, and that is the change worth making if anyone returns to it.
+- **flappy**'s `a_long_run_keeps_the_world_the_same_size` asserts a `<=` ceiling
+  and **cannot see this defect at all**, which is worth stating precisely
+  because two plausible explanations are both wrong. It is not the `<=`, and it
+  is not the sampling. Measured 2026-08-20, four ways:
+
+  | sampling        | sweep    | peak | ceiling |
+  | --------------- | -------- | ---- | ------- |
+  | every 60th tick | fixed    | 11   | 11      |
+  | every tick      | fixed    | 11   | 11      |
+  | every 60th tick | reverted | 11   | 11      |
+  | every tick      | reverted | 11   | 11      |
+
+  Sampling every tick reads the same simulation — `travelled` came out
+  bit-identical at `239.8999904040058` — and finds the same peak. **The reason
+  is that the peak and the culls never coincide**: the window holds at most
+  eleven entities, the count reaches eleven only between culls, and the two
+  entities a deferred pipe-despawn leaves behind are therefore never added to a
+  frame that was already at the ceiling. So the assertion is honest for what it
+  claims (the world does not grow without bound) and is structurally incapable
+  of catching a one-tick destruction delay.
+
+  **Left unchanged deliberately.** The sampling change was written and reverted:
+  it costs 2400 harness calls instead of 40 and buys nothing measurable. What
+  would catch it here is asserting the destruction queue is empty between ticks,
+  which flappy has no accessor for — and asteroids, horde and `crcbl-server`'s
+  two new tests already catch it directly and go red on it, so a fourth detector
+  is not worth new API.
 
 The shape to carry forward: a leak invariant that _compensates_ for a queue is
 one that cannot see the queue being wrong. If a count needs a correction term to
