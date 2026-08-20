@@ -3119,11 +3119,26 @@ path now, red-checked the same way.
 different shape from the `features.contains` one already recorded above: a
 capability branch can be written as an early return with no `if features` in
 sight. Both queries are clean as of 2026-08-20 — no feature branch in the tree
-has an `else` that only prints, and the remaining print-and-return sites are
-either a genuinely bimodal exercise whose other arm **asserts a refusal**
-(`vk_e2e/compute.rs`'s `update_bind_group`, `vk_e2e/indirect.rs`'s indirect
-count), a `Null`-backend guard in `apps/quarry`, or a helper binary's usage
-message.
+has an `else` that only prints, and every remaining print-and-return site was
+read and falls into one of four healthy shapes:
+
+- **A bimodal exercise whose other arm asserts a refusal** —
+  `vk_e2e/compute.rs`'s `update_bind_group` and `vk_e2e/indirect.rs`'s indirect
+  count both `assert!(matches!(error, HalError::Unsupported { .. }))` before
+  returning, so the lesser device is tested rather than excused.
+- **A device-limit guard in `hal_seam_e2e` that returns a _classified_ outcome**
+  rather than passing: `exercise_msaa_resolve` answers
+  `Exercise::Unexercised(NO_MULTISAMPLING)` and the anisotropy exercise answers
+  `Exercise::SilentlyIgnored`. Both are legitimate — a Vulkan device may
+  genuinely offer fewer than four samples — and **neither has ever fired**:
+  checked across all four backend jobs of run 32366511311, where the two strings
+  appear zero times while `hal seam e2e` appears 38 to 50 times, so the channel
+  was open and the exercises really ran. Left alone deliberately: unlike the
+  mesh branches above, these guard a limit the specification permits rather than
+  a feature every adapter grants.
+- **A `Null`-backend guard** in `apps/quarry`'s device suite, which names the
+  backend and the flag to rerun with.
+- **A helper binary's usage message** in `crcbl-shell`'s `tests/bin/`.
 
 ### The Windows probe gate has no adapter; macOS is proven
 
