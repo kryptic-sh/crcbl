@@ -11,11 +11,11 @@
 //!
 //! # What is here so far
 //!
-//! Milestone 1, and the first half of milestone 2. [`face`] generates the
-//! content, [`scene`] describes it as one flat mesh and [`dag`] as a cluster
-//! hierarchy, and `tests/residency.rs` draws both through the real renderer on
-//! an offscreen context — so the `MeshShader` path rendering the scene is
-//! asserted rather than looked at.
+//! Milestones 1 to 3, and the first half of 4. [`face`] generates the content,
+//! [`scene`] describes it as one flat mesh and [`dag`] as a cluster hierarchy,
+//! and `tests/device/residency.rs` draws both through the real renderer on an
+//! offscreen context — so the `MeshShader` path rendering the scene is asserted
+//! rather than looked at.
 //!
 //! Per-cluster selection over that hierarchy is asserted too: the face draws
 //! from more than one level at once, and no level dominates the cut.
@@ -25,6 +25,8 @@
 //!
 //! All three [`GeometryPath`](crcbl::hal::GeometryPath) values draw it, forced
 //! by subtracting features from one adapter, and they agree about the frame.
+//! Six golden frames — three paths at each end of the dolly — are committed
+//! under `tests/golden/`.
 //!
 //! One assertion is not a count — that the face is shaded by the light it is
 //! given — because every other one would survive a face lit from the wrong side.
@@ -32,12 +34,46 @@
 //! [`tile`] is milestone 4's modular wall piece: two tiles decimated apart still
 //! meet, bit for bit.
 //!
-//! Still owed, from that document's milestones: the LOD tint and heatmap
-//! overlays, and the Pages demo. The skinned prop is behind an engine feature
-//! that does not exist — nothing here does skinning. There is no window, so
-//! there are no golden frames yet.
+//! **And there is a window.** [`run`] opens one over the cluster DAG, with the
+//! two cameras [`camera`] holds — the goldens' dolly and a free-fly camera sized
+//! for a face 180 metres deep — the LOD tint overlay, `--lod-budget`, the path
+//! forcing rule 12 asks for and the debug panel rule 4 asks for. A run with
+//! `--headless --frames N` prints which paths its frames took, the triangle
+//! count and how the cut split between instance and cluster culling, which is
+//! what `docs/plan/sample/14-quarry.md`'s exit criteria ask be recorded.
+//!
+//! Still owed, from that document's milestones: the screen-error heatmap and the
+//! freeze-selection camera, and the Pages demo. The skinned prop is behind an
+//! engine feature that does not exist — nothing here does skinning.
+//!
+//! # Rule 11 does not apply
+//!
+//! No `.crpix` art. The charter exempts this sample explicitly: the subject is
+//! 3D geometry density, and pixel art in front of it would be showing the wrong
+//! system.
+//!
+//! # One library, one front end so far
+//!
+//! `src/main.rs` is argv, an exit code and the device-free `--report`;
+//! everything else is here, so `tests/device/` renders the same face the binary
+//! does and flies the same dolly. The browser front end the charter's fourth
+//! milestone owes is not written yet.
 
+mod app;
+mod args;
+pub mod camera;
 pub mod dag;
 pub mod face;
+mod gpu;
+mod menu;
 pub mod scene;
 pub mod tile;
+
+pub use app::{Loop, PendingLoop, Quarry, QuarryError, Summary, cull_row, run, start, with_shell};
+pub use args::{
+    DEFAULT_TICK_HZ, Invocation, Options, USAGE, binding_from_name, geometry_from_name, parse,
+};
+pub use gpu::{CELLS, Forced, Gpu, GpuError, Paths};
+pub use menu::{
+    CAMERA_ID, CameraMode, LOD_VIEW_ID, Menus, QuarryAction, action_for, menus, pause_menu,
+};

@@ -1,0 +1,1037 @@
+//! Quarry's start-up, and the methods the engine's loop calls.
+//!
+//! ```text
+//! Loop::frame()                     ← the engine's
+//!   pump, input, menu, pause, resize
+//!   run_ticks  ─────────────────────→ Quarry::tick     (the free camera)
+//!   draw_list.clear()
+//!     ─────────────────────────────→ Quarry::draw      (hands the camera over)
+//!     menu ───────────────────────→ Quarry::menu_kind
+//!     debug overlay ──────────────→ Quarry::debug_sections
+//!   gpu.frame()
+//! ```
+//!
+//! There is no loop in this file, and no simulation: a geometry fixture's only
+//! moving part is a camera somebody flies. It is stepped inside `run_ticks`'s
+//! `while`, not after it — anything stepped once per frame has a speed
+//! proportional to the frame rate.
+//!
+//! # The numbers are copied out of the GPU each frame
+//!
+//! [`HostedGame::debug_sections`] is handed a panel and `&self`, and no GPU: the
+//! panel is gathered before the frame runs, and the bundle is the loop's to
+//! hold. So [`Quarry`] keeps what the panel and the summary report — the
+//! [`Paths`] the device resolved, the triangle count, the budget in force, and
+//! the frame's culling — copied in [`HostedGame::draw`], which is where a GPU is
+//! in hand. The culling has to be re-read every frame rather than once at
+//! start-up: `crcbl::render::CullStatsRing` answers a few frames behind, so a
+//! value copied at `assemble` would be [`None`] for the whole run.
+
+use crcbl::core::input::KeyCode;
+use crcbl::engine::{
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, open_window,
+    wait_for_configure,
+};
+use crcbl::prelude::*;
+use crcbl::render::{CullStats, Flyer};
+use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowDesc, WindowId};
+use crcbl::ui::draw_list::DrawList;
+
+use crate::args::Options;
+use crate::camera;
+use crate::gpu::{Gpu, Paths};
+use crate::menu::{self, CameraMode, Menus, QuarryAction};
+
+/// How often [`Quarry::log_heartbeat`] logs, in ticks.
+///
+/// A second of simulated time at [`crate::DEFAULT_TICK_HZ`], which is what every
+/// other sample's heartbeat is spaced at.
+const HEARTBEAT_TICKS: u64 = 60;
+
+/// What a completed run did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summary {
+    /// Which shell backend ran.
+    pub backend: Backend,
+    /// Frames presented.
+    pub frames: u64,
+    /// Fixed simulation steps executed.
+    pub ticks: u64,
+    /// Shell events observed, of every kind.
+    pub events: u64,
+    /// The swapchain's size when the loop stopped.
+    pub extent: (u32, u32),
+    /// Why it stopped.
+    pub exit: ExitReason,
+    /// Whether the simulation was stopped when the loop ended.
+    pub paused: bool,
+    /// The mode the window system actually had the window in, **not** the one
+    /// the run last asked for.
+    pub mode: DisplayMode,
+    /// **Which of the three selectors the frames were drawn through**, and
+    /// whether the run forced any of them.
+    ///
+    /// `docs/plan/sample/00-samples-overview.md` rule 12: the selected paths
+    /// appear in the debug panel *and* in the headless summary line. This is the
+    /// second of those — the panel is a windowed run's answer, and a CI job has
+    /// no window.
+    pub paths: Paths,
+    /// Which camera the run ended on.
+    pub camera: CameraMode,
+    /// Triangles in the face at level 0 — what a cut is a reduction *of*.
+    pub triangles: usize,
+    /// The screen-space error budget the cut was selected under, in pixels.
+    pub lod_budget: f32,
+    /// What the last frame whose readback landed kept, or [`None`] where the
+    /// ring never came round — a run of a handful of frames.
+    pub cull: Option<CullStats>,
+}
+
+/// The cut in one line: `12 instance(s), 431 cluster(s), from frame 57`.
+///
+/// `docs/plan/sample/14-quarry.md`'s exit criterion asks for "how much of the
+/// reduction is instance culling and how much is cluster culling, because a
+/// single total hides which one is working" — so the two are printed apart, and
+/// a path with no amplification stage says so rather than printing the zero the
+/// clearing pass left. The frame number is part of the line because
+/// `crcbl::render::CullStatsRing` answers a few frames behind, and a number
+/// printed as this frame's would be a stale one presented as current.
+///
+/// One function, called by the summary line and by the heartbeat, so the two
+/// cannot describe the same cut two ways.
+#[must_use]
+pub fn cull_row(cull: Option<CullStats>) -> String {
+    match cull {
+        None => "cull not read back yet".to_string(),
+        Some(stats) => {
+            let clusters = match stats.clusters {
+                Some(clusters) => format!("{clusters} cluster(s)"),
+                None => "no cluster stage".to_string(),
+            };
+            format!(
+                "{} instance(s), {clusters}, from frame {}",
+                stats.instances, stats.frame
+            )
+        }
+    }
+}
+
+/// Anything that can stop quarry before it starts.
+///
+/// An alias rather than an enum: [`crcbl::engine::LoopError`] owns these
+/// variants for every sample. A geometry fixture has no simulation of its own to
+/// fail, so it takes the default type parameter and its `Game` variant is
+/// uninhabited.
+pub type QuarryError = crcbl::engine::LoopError;
+
+/// Quarry, as the engine's loop hosts it.
+#[derive(Debug)]
+pub struct Quarry {
+    /// Which camera the next frame is drawn from.
+    camera: CameraMode,
+    /// The free camera, whether or not it is the one in use — kept across a
+    /// swap so a reviewer who looks at the dolly pose and swaps back is where
+    /// they left off.
+    flyer: Flyer,
+    /// What the device resolved, copied once — see the module docs.
+    paths: Paths,
+    /// Triangles in the face at level 0, copied once: it cannot change mid-run.
+    triangles: usize,
+    /// The budget the cut is selected under, in pixels.
+    ///
+    /// Starts as what the command line asked for and is replaced in
+    /// [`HostedGame::draw`] by what a frame was *actually* selected under —
+    /// `Gpu::frame_lod_budget` — so a setting that never reached `begin_frame`
+    /// is reported as the renderer's own default rather than as the number that
+    /// was asked for.
+    lod_budget: f32,
+    /// Whether the LOD tint is on. **Owned here rather than read off the
+    /// renderer**, because the pause menu's row is applied in
+    /// [`HostedGame::apply`], which is handed no GPU; [`HostedGame::draw`] is
+    /// where it reaches one.
+    lod_view: bool,
+    /// What the last frame whose readback landed kept — re-read every
+    /// [`HostedGame::draw`], because the ring answers a few frames behind.
+    cull: Option<CullStats>,
+    /// The values the pause panel was last built for — `None` until the first
+    /// pause, so the panel is always rebuilt once with the real ones.
+    shown: Option<(CameraMode, bool)>,
+    /// Whether the loop has the simulation stopped, recorded in
+    /// [`HostedGame::menu_kind`].
+    ///
+    /// The loop owns the pause and this is a *copy* of it, kept for one caller:
+    /// [`HostedGame::pointer_mode`] is asked with no argument and has to answer
+    /// "is a panel up", and `menu_kind` is the one place the loop says so.
+    paused: bool,
+    /// Fixed steps run, for [`Quarry::log_heartbeat`]'s cadence.
+    ticks: u64,
+}
+
+impl Quarry {
+    /// A fixture starting on `camera`, drawn through `paths`, over a face of
+    /// `triangles` selected at `lod_budget` pixels, with the free camera at the
+    /// dolly's start pose.
+    #[must_use]
+    pub fn new(
+        camera: CameraMode,
+        paths: Paths,
+        triangles: usize,
+        lod_budget: f32,
+        lod_view: bool,
+    ) -> Self {
+        Self {
+            camera,
+            flyer: camera::flyer(),
+            paths,
+            triangles,
+            lod_budget,
+            lod_view,
+            cull: None,
+            shown: None,
+            paused: false,
+            ticks: 0,
+        }
+    }
+
+    /// The `[HUD]` line, on the cadence every other sample's heartbeat uses:
+    /// every [`HEARTBEAT_TICKS`] steps, which is a second of simulated time at
+    /// the default rate.
+    ///
+    /// What it names is what a run of this sample is *for*: the geometry path
+    /// the frames are taking, and how much of the reduction each stage did. A
+    /// browser gate has no debug panel to read, and neither has a CI log.
+    fn log_heartbeat(&self) {
+        if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
+            return;
+        }
+        crcbl::log::info!(
+            "[HUD] tick: {}  geometry: {:?}  binding: {:?}  camera: {}  budget: {}px  \
+             lod view: {}  cull: {}",
+            self.ticks,
+            self.paths.geometry,
+            self.paths.binding,
+            self.camera.label(),
+            self.lod_budget,
+            self.lod_view,
+            cull_row(self.cull),
+        );
+    }
+
+    /// Which camera the next frame is drawn from.
+    #[must_use]
+    pub const fn camera_mode(&self) -> CameraMode {
+        self.camera
+    }
+
+    /// Whether the frame is tinted by DAG level rather than shaded.
+    #[must_use]
+    pub const fn lod_view(&self) -> bool {
+        self.lod_view
+    }
+
+    /// The free camera, whether or not it is the one in use.
+    #[must_use]
+    pub const fn flyer(&self) -> &Flyer {
+        &self.flyer
+    }
+
+    /// The camera this frame is seen through.
+    ///
+    /// Both modes share the fixed camera's projection, which is what makes the
+    /// pair comparable: a free camera with a lens of its own would produce a
+    /// frame a reviewer cannot hold against the goldens.
+    #[must_use]
+    pub fn camera(&self) -> crcbl::render::Camera {
+        let fixed = camera::dolly(camera::DOLLY_START);
+        match self.camera {
+            CameraMode::Fixed => fixed,
+            CameraMode::Free => self.flyer.camera(fixed.projection),
+        }
+    }
+}
+
+/// The loop quarry runs in. A type alias, because the loop is the engine's.
+pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Quarry>;
+
+/// Runs the full loop.
+///
+/// # Errors
+///
+/// [`QuarryError`] if the shell or the GPU refused. Teardown runs on every path:
+/// a failing frame must still release the swapchain, the surface and the window,
+/// or `crcbl-vk`'s device teardown logs objects still alive.
+pub fn run(options: &Options) -> Result<Summary, QuarryError> {
+    crcbl::engine::drive(start(options)?)
+}
+
+/// Opens a shell, a window, a GPU and the face.
+///
+/// # Errors
+///
+/// [`QuarryError`] if any of them refused.
+pub fn start(options: &Options) -> Result<Loop, QuarryError> {
+    let shell = crcbl::engine::open_shell(options.common.headless)?;
+    with_shell(shell, options)
+}
+
+/// Builds the loop on an already-open shell, blocking on both waits.
+///
+/// The browser cannot use this — a main thread may not sit in
+/// [`wait_for_configure`] — and takes [`PendingLoop`] instead. What the two
+/// share is everything after the waiting, which is `assemble`.
+///
+/// # Errors
+///
+/// [`QuarryError`] if the window never configured or the HAL seam failed.
+pub fn with_shell<S: Shell + ?Sized>(
+    mut shell: Box<S>,
+    options: &Options,
+) -> Result<Loop<S>, QuarryError> {
+    let clock_source = Clock::new(options.common.headless);
+    let window = open_the_window(shell.as_mut(), &clock_source, options)?;
+
+    let mut events = 0;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+
+    let gpu = Gpu::open(
+        shell.as_ref(),
+        window,
+        extent,
+        options.common.gpu(),
+        options.forced,
+        options.lod_budget,
+        options.lod_view,
+    )?;
+
+    Ok(assemble(
+        Booted {
+            shell,
+            window,
+            gpu,
+            clock_source,
+            events,
+        },
+        options,
+    ))
+}
+
+/// Creates the one window this sample has: its title, its app id, its size.
+///
+/// # Errors
+///
+/// [`QuarryError`] if the shell refused it.
+fn open_the_window<S: Shell + ?Sized>(
+    shell: &mut S,
+    clock_source: &Clock,
+    options: &Options,
+) -> Result<WindowId, QuarryError> {
+    Ok(open_window(
+        shell,
+        clock_source,
+        &WindowDesc {
+            title: "Crucible — quarry",
+            app_id: "sh.kryptic.crcbl.quarry",
+            size: crcbl::engine::requested_window_size(options.common.size),
+            mode: options.common.display_mode(),
+            ..WindowDesc::default()
+        },
+    )?)
+}
+
+/// The half of start-up that is the same however the GPU arrived.
+///
+/// [`Booted`] is what both bring-up paths hand over, so the fixture is built and
+/// the loop assembled in one place rather than one per path — a second copy is
+/// how the browser build would come to run a subtly different sample.
+fn assemble<S: Shell + ?Sized>(booted: Booted<S, Gpu>, options: &Options) -> Loop<S> {
+    // Read before the bundle moves into the loop: what the device resolved, how
+    // big the face is, and the two LOD settings as the renderer has them.
+    let paths = booted.gpu.paths();
+    let triangles = booted.gpu.triangles();
+    let lod_budget = booted.gpu.lod_budget();
+    let lod_view = booted.gpu.lod_view();
+
+    Loop::new(
+        booted,
+        Quarry::new(options.camera, paths, triangles, lod_budget, lod_view),
+        options.common.loop_config(),
+    )
+}
+
+impl HostedGame for Quarry {
+    /// A geometry fixture has nothing of its own to fail at.
+    type Error = core::convert::Infallible;
+    type Gpu = Gpu;
+    /// Paused or not, which is the whole of its state machine.
+    type MenuKind = bool;
+    type MenuAction = QuarryAction;
+    type Summary = Summary;
+
+    const NAME: &'static str = "quarry";
+
+    fn menus() -> Menus {
+        menu::menus()
+    }
+
+    fn tick(&mut self, _gpu: &mut Gpu, tick_dt: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        let dt = tick_dt as f32;
+        self.ticks += 1;
+        // The camera integrates whether or not it is the one being drawn from:
+        // a reviewer who swaps to the dolly pose, flies, and swaps back should
+        // arrive where the keys took them.
+        self.flyer.advance(dt);
+        self.log_heartbeat();
+    }
+
+    /// Every key the loop's own three did not claim goes to the camera.
+    fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        self.flyer.key(key, pressed);
+    }
+
+    /// The mouse look, and the one condition it is bound under.
+    ///
+    /// **`at.is_none()` is what says the pointer is really captured.**
+    /// [`PointerUpdate::motion`] states that shape: under
+    /// [`PointerMode::Locked`] there is no absolute position at all, so a locked
+    /// frame carries a motion and no `at`, and an unlocked one that moved
+    /// carries both. Binding the look to that rather than to the request
+    /// [`pointer_mode`](HostedGame::pointer_mode) makes is the whole point — a
+    /// request is not a grant, and a camera that turned anyway would swing the
+    /// view while a visible cursor walked out of the window.
+    fn pointer_event(&mut self, pointer: PointerUpdate) {
+        let Some(motion) = pointer.motion.filter(|_| pointer.at.is_none()) else {
+            return;
+        };
+        self.flyer.look(motion);
+    }
+
+    /// [`PointerMode::Locked`] while the face is being flown, free while the
+    /// pause panel is up.
+    ///
+    /// Answered from the pause alone — not from [`CameraMode`] — because the
+    /// free camera integrates whether or not it is the one being drawn from,
+    /// exactly as the keyboard's walk does.
+    fn pointer_mode(&self) -> PointerMode {
+        if self.paused {
+            PointerMode::Free
+        } else {
+            PointerMode::Locked
+        }
+    }
+
+    fn menu_action(id: crcbl::ui::WidgetId) -> Option<QuarryAction> {
+        menu::action_for(id)
+    }
+
+    fn apply(&mut self, action: QuarryAction) {
+        match action {
+            QuarryAction::ToggleCamera => {
+                self.camera = self.camera.toggled();
+                // Leaving the free camera is also how a reviewer gets back to
+                // the goldens' framing, so it is put back there — otherwise
+                // "look at the reference pose" would be a flight rather than a
+                // press.
+                if self.camera == CameraMode::Fixed {
+                    self.flyer = camera::flyer();
+                }
+                // And nothing is held down after a menu press: the press
+                // happened while the menu owned the keyboard, so a key that was
+                // down when the panel opened has no release coming.
+                self.flyer.release_all();
+            }
+            // Recorded here and handed to the renderer in `draw`, which is the
+            // method with a GPU in it.
+            QuarryAction::ToggleLodView => self.lod_view = !self.lod_view,
+        }
+    }
+
+    fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> bool {
+        // Recorded for `pointer_mode`, which the loop polls immediately after
+        // this: a panel that went up on this frame must free the pointer on this
+        // frame, or the cursor comes back one frame into a menu the reviewer is
+        // already trying to click.
+        self.paused = paused;
+        if paused && self.shown != Some((self.camera, self.lod_view)) {
+            // A row's label changed (or this is the first pause): rebuild the
+            // panel with the values in force, restoring the selection so a press
+            // on a row does not throw the reviewer back to the top.
+            let selected = menus
+                .current()
+                .and_then(crcbl::ui::menu::Menu::selected_item)
+                .map(|item| item.id);
+            menus.replace(true, menu::pause_menu(self.camera, self.lod_view));
+            if let Some(id) = selected {
+                menus
+                    .current_mut()
+                    .expect("the pause menu is in the set")
+                    .select_id(id);
+            }
+            self.shown = Some((self.camera, self.lod_view));
+        }
+        paused
+    }
+
+    fn draw(&mut self, gpu: &mut Gpu, _draw_list: &mut DrawList, _frame: FrameInfo) {
+        // The fixture draws no HUD of its own: everything it has to say about a
+        // frame is a debug-panel row. What `draw` does is hand over the camera
+        // the ticks moved and the tint the menu set, and read this frame's
+        // numbers back.
+        gpu.set_camera(self.camera());
+        // Here rather than in `tick`, which does not run while paused: the row
+        // that was just pressed is on a panel over a frame that has to change
+        // behind it.
+        gpu.set_lod_view(self.lod_view);
+        self.paths = gpu.paths();
+        // The budget a frame was really selected under, not the one the flag
+        // asked for — see the field. Zero is what the renderer holds before its
+        // first `begin_frame`, and reporting that would be a row about nothing,
+        // so the requested value stands until a frame has run.
+        let selected_under = gpu.frame_lod_budget();
+        if selected_under > 0.0 {
+            self.lod_budget = selected_under;
+        }
+        // Every frame, not once: the ring answers a few frames behind, so this
+        // is `None` for the first handful of frames of every run and then stops
+        // being.
+        self.cull = gpu.cull_stats();
+    }
+
+    /// Two sections, and each is something the charter asks for.
+    ///
+    /// Rule 12's path reporting is the first, and this is the sample it matters
+    /// most in: three paths is the widest selector in the engine, and the mesh
+    /// path's per-cluster cut and the indirect paths' per-instance one are not
+    /// the same picture. The second is this sample's own subject —
+    /// `docs/plan/sample/14-quarry.md`'s "amplification-stage culling is doing
+    /// work", on the screen, beside the budget that decided the cut and the
+    /// camera position it was decided from.
+    fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        panel.add(&self.paths);
+        panel.add(self);
+    }
+
+    fn summary(&self, run: RunSummary) -> Summary {
+        Summary {
+            backend: run.backend,
+            frames: run.frames,
+            ticks: run.ticks,
+            events: run.events,
+            extent: run.extent,
+            exit: run.exit,
+            paused: run.paused,
+            mode: run.mode,
+            paths: self.paths,
+            camera: self.camera,
+            triangles: self.triangles,
+            lod_budget: self.lod_budget,
+            cull: self.cull,
+        }
+    }
+
+    fn log_summary(summary: &Summary) {
+        crcbl::log::info!(
+            "quarry: {} frames, {} ticks on the {} shell at {}x{} ({:?}), {:?} / {:?} / {:?}, \
+             {} triangles at a {}px budget, {}",
+            summary.frames,
+            summary.ticks,
+            summary.backend,
+            summary.extent.0,
+            summary.extent.1,
+            summary.exit,
+            summary.paths.geometry,
+            summary.paths.binding,
+            summary.paths.lighting,
+            summary.triangles,
+            summary.lod_budget,
+            cull_row(summary.cull),
+        );
+    }
+}
+
+/// Where the camera is and what the cut cost, as a panel section.
+///
+/// On [`Quarry`] itself because that is what owns the numbers — the rule
+/// [`crcbl::ui::DebugModule`] states.
+///
+/// **The cull rows are the sample's own claim.**
+/// `docs/plan/sample/14-quarry.md` asks for "per-cluster frustum and normal-cone
+/// rejection counts on the debug panel". They are read out of
+/// `crcbl::render::CullStatsRing`, which is deliberately a few frames behind —
+/// topic 03 §3.6 permits exactly one readback and this is it — so the rows name
+/// the frame they came from rather than printing an old number as this frame's,
+/// and say `pending` until the ring has come round rather than showing a zero.
+/// A path with no amplification stage has no cluster count at all, and that is
+/// said in words: reporting its zero would claim every cluster was rejected in a
+/// frame that drew all of them.
+impl crcbl::ui::DebugModule for Quarry {
+    fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
+        let eye = self.camera().eye;
+        section.set_title("quarry");
+        section.row_str("camera", self.camera.label());
+        section.row(
+            "eye",
+            format_args!("{:.1} {:.1} {:.1}", eye.x, eye.y, eye.z),
+        );
+        section.row_str(
+            "pose",
+            if self.flyer.has_moved() && self.camera == CameraMode::Free {
+                "flown"
+            } else {
+                "dolly start"
+            },
+        );
+        section.row("triangles", format_args!("{} at level 0", self.triangles));
+        section.row("lod budget", format_args!("{} px", self.lod_budget));
+        section.row_str("lod view", if self.lod_view { "on" } else { "off" });
+        match self.cull {
+            None => {
+                section.row_str("instances kept", "pending — the ring is frames behind");
+                section.row_str("clusters kept", "pending — the ring is frames behind");
+            }
+            Some(stats) => {
+                section.row(
+                    "instances kept",
+                    format_args!("{} (frame {})", stats.instances, stats.frame),
+                );
+                match stats.clusters {
+                    Some(clusters) => section.row(
+                        "clusters kept",
+                        format_args!("{clusters} (frame {})", stats.frame),
+                    ),
+                    None => section.row_str("clusters kept", "no amplification stage on this path"),
+                }
+            }
+        }
+    }
+}
+
+// ---- polled start-up ---------------------------------------------------------
+
+/// A [`Loop`] being started one poll at a time, for a caller that may not
+/// block — which on a browser main thread is every caller.
+///
+/// The state machine, the pump and the resize-during-start-up race are
+/// [`crcbl::engine::PolledBoot`]'s; all that is left here is this sample's
+/// `Options` and the `assemble` call the engine deliberately stops short of.
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    boot: crcbl::engine::PolledBoot<S, Gpu>,
+    options: Options,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// `clock_source` is the caller's because the browser's cannot be
+    /// [`Clock::new`]'s: `std::time::Instant::now` panics on
+    /// `wasm32-unknown-unknown`, so a page drives the loop from
+    /// `performance.now()` instead.
+    ///
+    /// # Errors
+    ///
+    /// [`QuarryError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+    ) -> Result<Self, QuarryError> {
+        let window = open_the_window(shell.as_mut(), &clock_source, options)?;
+        Ok(Self {
+            boot: crcbl::engine::PolledBoot::request(
+                shell,
+                window,
+                clock_source,
+                options.common.gpu(),
+            ),
+            options: options.clone(),
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`QuarryError`] if the window went away before it had a size, or if the
+    /// device request failed.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, QuarryError> {
+        let Some(booted) = self.boot.poll::<QuarryError>()? else {
+            return Ok(None);
+        };
+        Ok(Some(assemble(booted, &self.options)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crcbl::engine::{Flow, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, PAUSE_KEY};
+    use crcbl::shell::HeadlessShell;
+
+    use super::*;
+
+    /// A loop over a *concrete* `HeadlessShell`, so a test can play compositor.
+    fn scripted(options: &Options) -> Loop<HeadlessShell> {
+        with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+    }
+
+    /// Always `--backend null`. These run on every CI leg, including ones with
+    /// no Vulkan loader at all, and they are about the *loop* — the camera, the
+    /// menu, determinism — not about a driver. The picture is
+    /// `tests/device/goldens.rs`'s.
+    fn headless(frames: u64) -> Options {
+        let mut options = Options::default();
+        options.common.headless = true;
+        options.common.frames = Some(frames);
+        options.common.backend = Some(crcbl::backend::GpuBackend::Null);
+        options
+    }
+
+    /// Walks `downs` rows down the open panel and presses ENTER on the row it
+    /// lands on.
+    ///
+    /// **The selection persists across a pause** — `menu_kind` rebuilds the
+    /// panel and restores the selected id — so a second visit to the same row is
+    /// `downs` of zero.
+    fn press_row(engine: &mut Loop<HeadlessShell>, window: WindowId, downs: usize) {
+        for _ in 0..downs {
+            engine
+                .shell_mut()
+                .key_press(window, MENU_DOWN_KEY)
+                .expect("the window is live");
+        }
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+    }
+
+    /// Every `Text` command the frame handed to the UI pass.
+    fn ui_text(engine: &Loop<HeadlessShell>) -> Vec<String> {
+        use crcbl::ui::draw_list::DrawCommand;
+        engine
+            .gpu()
+            .draw_list()
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The CI-visible promise: a headless run terminates, and terminates with
+    /// the same numbers every time.
+    #[test]
+    fn a_headless_run_is_deterministic() {
+        let first = run(&headless(16)).expect("headless runs everywhere");
+        let second = run(&headless(16)).expect("headless runs everywhere");
+        assert_eq!(first, second, "two identical runs must agree exactly");
+        assert_eq!(first.frames, 16);
+        assert_eq!(first.exit, ExitReason::FrameBudget);
+        assert_eq!(first.camera, CameraMode::Fixed);
+    }
+
+    /// **The summary names the paths the frames were drawn through**, and the
+    /// two numbers the charter asks be recorded beside them.
+    ///
+    /// The null backend registers `NullInstance::gpu_driven`, whose bundle
+    /// carries `DRAW_INDIRECT_COUNT` and `DESCRIPTOR_INDEXING` and **not**
+    /// `MESH_SHADER` — so the answer here is the middle geometry path and the
+    /// better binding model. Two different values rather than two defaults,
+    /// which is what makes this an assertion about a device rather than about a
+    /// struct literal.
+    #[test]
+    fn the_headless_summary_names_the_selected_paths_and_the_counts() {
+        let summary = run(&headless(4)).expect("headless runs everywhere");
+        assert_eq!(
+            summary.paths.geometry,
+            crcbl::hal::GeometryPath::IndirectCount,
+            "the null device has a GPU-side draw count and no mesh stage",
+        );
+        assert_eq!(summary.paths.binding, crcbl::hal::BindingModel::Bindless);
+        assert_eq!(
+            summary.paths.lighting,
+            crcbl::hal::LightingPath::Rasterised,
+            "no device in this engine can trace anything yet",
+        );
+        assert_eq!(summary.paths.forced, crate::gpu::Forced::default());
+        assert_eq!(
+            summary.triangles,
+            crate::face::quarry_face(crate::gpu::CELLS).triangles(),
+            "the summary must report the face the window actually made resident",
+        );
+        assert_eq!(summary.lod_budget, Options::default().lod_budget);
+    }
+
+    /// **Forcing a lesser path really opens a lesser device**, and the summary
+    /// says the run asked for it.
+    ///
+    /// The observable is the path the *device* selected, not the flag: a flag
+    /// that reached `Options` and never reached `DeviceDesc` would leave this
+    /// reporting the device's own path while claiming to have forced something.
+    #[test]
+    fn forcing_a_path_reaches_the_device_and_the_summary() {
+        let mut options = headless(4);
+        options.forced.geometry = Some(crcbl::hal::GeometryPath::IndirectPerBatch);
+        options.forced.binding = Some(crcbl::hal::BindingModel::ArrayPages);
+        let summary = run(&options).expect("a lesser device still runs");
+        assert_eq!(
+            summary.paths.geometry,
+            crcbl::hal::GeometryPath::IndirectPerBatch
+        );
+        assert_eq!(summary.paths.binding, crcbl::hal::BindingModel::ArrayPages);
+        assert_eq!(summary.paths.forced, options.forced);
+    }
+
+    /// **`--lod-budget` reaches the frame the renderer drew**, not just
+    /// `Options`.
+    ///
+    /// The observable is `ForwardRenderer::lod_params`, which is what
+    /// `begin_frame` wrote into the frame block — **not** a field this crate
+    /// stored. A flag that reached [`Options`] and never reached
+    /// `set_lod_error_budget` would leave every frame selecting under the
+    /// renderer's own default while the panel and the summary reported the
+    /// number that was asked for, and a test reading back the request would
+    /// pass either way.
+    #[test]
+    fn the_lod_budget_flag_reaches_the_frame_and_the_summary() {
+        const COARSE: f32 = 64.0;
+        assert_ne!(
+            COARSE,
+            Options::default().lod_budget,
+            "this test compares against the default and they are equal",
+        );
+
+        let mut options = headless(4);
+        options.lod_budget = COARSE;
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.gpu().frame_lod_budget(),
+            COARSE,
+            "the frame selected under {} px, so the flag never reached begin_frame",
+            engine.gpu().frame_lod_budget(),
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+
+        let summary = run(&options).expect("a coarser budget still runs");
+        assert_eq!(summary.lod_budget, COARSE);
+    }
+
+    /// **`--lod-view` reaches the renderer**, and the pause row moves it back.
+    #[test]
+    fn the_lod_view_flag_and_its_row_reach_the_renderer() {
+        let mut options = headless(400);
+        options.lod_view = true;
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert!(engine.gpu().lod_view(), "the flag never reached the frame");
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        // Four rows down from RESUME is LOD VIEW: the loop's three, then CAMERA.
+        press_row(&mut engine, window, 4);
+        assert!(
+            !engine.gpu().lod_view(),
+            "the row did not reach the renderer",
+        );
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "LOD VIEW: OFF"),
+            "the row's label must show what the frame now draws: {:?}",
+            ui_text(&engine),
+        );
+
+        press_row(&mut engine, window, 0);
+        assert!(engine.gpu().lod_view(), "the row did not put it back");
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "LOD VIEW: ON"),
+            "{:?}",
+            ui_text(&engine),
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **F3 shows the path report and this sample's own numbers.**
+    ///
+    /// Rule 4 and rule 12 in one test: the panel opens, and the rows that make
+    /// this a *fixture* rather than a picture — which path drew it, and what the
+    /// cut cost — are on it.
+    #[test]
+    fn f3_shows_the_path_report_and_the_cut() {
+        use crcbl::engine::DEBUG_OVERLAY_KEY;
+
+        let mut options = headless(16);
+        options.common.debug_overlay = Some(false);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+        assert!(
+            ui_text(&engine).is_empty(),
+            "the fixture draws no UI at all while the panel is off",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, DEBUG_OVERLAY_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+
+        let titles: Vec<&str> = engine
+            .debug()
+            .panel
+            .sections()
+            .iter()
+            .map(crcbl::ui::DebugSection::title)
+            .collect();
+        for section in ["paths", "quarry"] {
+            assert!(
+                titles.contains(&section),
+                "no {section} section on the panel: {titles:?}"
+            );
+        }
+        // And the rows really reached the draw list, not just the panel.
+        let drawn = ui_text(&engine);
+        for row in ["geometry", "lod budget", "clusters kept", "triangles"] {
+            assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
+        }
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The camera row swaps the camera, and swapping back restores the dolly
+    /// pose.**
+    ///
+    /// The observable is the camera's eye, not the mode: a toggle that flipped
+    /// the enum and left `camera()` returning the same pose would pass every
+    /// assertion about the mode alone.
+    #[test]
+    fn the_camera_row_swaps_the_camera_and_returns_it_to_the_dolly_pose() {
+        let fixed = camera::dolly(camera::DOLLY_START);
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+        for _ in 0..2 {
+            assert_eq!(engine.frame().expect("a frame"), Flow::Continue);
+        }
+        assert_eq!(engine.game().camera().eye, fixed.eye);
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        // Three rows down from RESUME is CAMERA; the second visit is already on
+        // it, which is what `press_row`'s docs are about.
+        press_row(&mut engine, window, 3);
+        assert_eq!(engine.game().camera_mode(), CameraMode::Free);
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "CAMERA: FREE"),
+            "the row's label must show the new value: {:?}",
+            ui_text(&engine),
+        );
+
+        // Resume, fly, and confirm the free camera actually moved.
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::KeyW)
+            .expect("the window is live");
+        for _ in 0..30 {
+            engine.frame().expect("a frame");
+        }
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::KeyW)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        let flown = engine.game().camera().eye;
+        assert_ne!(flown, fixed.eye, "W did not fly");
+        assert!(engine.game().flyer().has_moved());
+
+        // And the row puts it back where the goldens were taken from.
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        press_row(&mut engine, window, 0);
+        assert_eq!(engine.game().camera_mode(), CameraMode::Fixed);
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "CAMERA: FIXED"),
+            "the row's label must show the value it went back to: {:?}",
+            ui_text(&engine),
+        );
+        assert_eq!(
+            engine.game().camera().eye,
+            fixed.eye,
+            "swapping back did not return to the dolly's start pose",
+        );
+        // **The flyer, not `camera()`.** In `Fixed` the frame is drawn from the
+        // dolly whatever the free camera is doing, so the assertion above passes
+        // for a row that swapped the mode and left the flown position where it
+        // was — and the next swap to `Free` would then land the reviewer back
+        // out in the rock instead of at the goldens' framing.
+        assert_eq!(
+            engine.game().flyer().eye(),
+            fixed.eye,
+            "the row swapped the mode and left the free camera where it was flown to",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The free camera flies on the **clock** rather than on the frame count,
+    /// and at this sample's own speed.
+    ///
+    /// The whole reason the camera is stepped inside `run_ticks`: one advanced
+    /// once per frame would cross the face at a rate that depends on how fast
+    /// the machine is.
+    #[test]
+    fn the_free_camera_flies_on_the_simulation_clock() {
+        let mut options = headless(400);
+        options.camera = CameraMode::Free;
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        let from = engine.game().camera().eye;
+        let ticks = engine.ticks();
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::KeyW)
+            .expect("the window is live");
+        for _ in 0..40 {
+            engine.frame().expect("a frame");
+        }
+        let ran = engine.ticks() - ticks;
+        let flew = (engine.game().camera().eye - from).length();
+        #[allow(clippy::cast_precision_loss)]
+        let expected = camera::FLY_SPEED * ran as f32 / crate::args::DEFAULT_TICK_HZ as f32;
+        assert!(
+            (flew - expected).abs() < expected * 0.1,
+            "{ran} ticks flew {flew} m, and {} m/s for {ran}/{} s is {expected} m",
+            camera::FLY_SPEED,
+            crate::args::DEFAULT_TICK_HZ,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+}

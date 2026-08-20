@@ -37,7 +37,7 @@ use crcbl::hal::{
     ImageSubresourceLayers, MemoryLocation, ReadbackDesc, ReadbackState, ResourceState,
 };
 use crcbl::render::scene::InstanceDesc;
-use crcbl::render::{Camera, ForwardRenderer, ImportedImage, RenderGraph, TransientPool};
+use crcbl::render::{ForwardRenderer, ImportedImage, RenderGraph, TransientPool};
 use crcbl_quarry::{dag, face, scene};
 
 /// Quads per side. Smaller than the binary's 256: these assert that the scene
@@ -161,34 +161,15 @@ pub(crate) struct Uniform {
     pub(crate) triangles: u32,
 }
 
-/// Where the dolly starts: outside the near edge, above the face.
+/// The dolly: **the library's**, so the window and the goldens fly the same
+/// path.
 ///
-/// The face occupies X ∈ ±`WIDTH_METRES`/2, Y ∈ 0..`HEIGHT_METRES` and Z ∈
-/// 0..`DEPTH_METRES`, and its winding is counter-clockwise seen from +Y — so a
-/// camera has to be above it and looking along +Z or it sees the back of every
-/// triangle, which is the difference between an empty frame and a picture.
-pub(crate) const DOLLY_START: f32 = 0.0;
-
-/// Where the dolly ends: most of the way down the face, so the near clusters
-/// have gone past the camera and the far ones have come close.
-pub(crate) const DOLLY_END: f32 = 1.0;
-
-/// The camera `at` along the dolly, `0.0` at [`DOLLY_START`] and `1.0` at
-/// [`DOLLY_END`].
-///
-/// A straight run down the face's own axis, which is the shape
-/// `docs/plan/sample/14-quarry.md` asks for: "the fixed dolly". It stays the
-/// same height throughout so that what changes between frames is distance and
-/// nothing else.
-pub(crate) fn dolly(at: f32) -> Camera {
-    let z = -30.0 + at * face::DEPTH_METRES * 0.5;
-    Camera {
-        eye: crcbl::math::Vec3::new(0.0, face::HEIGHT_METRES, z),
-        target: crcbl::math::Vec3::new(0.0, 0.0, z + face::DEPTH_METRES * 0.5),
-        up: crcbl::math::Vec3::Y,
-        projection: crcbl::render::Projection::default(),
-    }
-}
+/// It used to be three items here. A windowed run whose fixed pose is not the
+/// pose `tests/golden/` was blessed from is a picture nobody can hold against
+/// the committed one, and two copies of a camera is exactly how that happens —
+/// so `crcbl_quarry::camera` owns them and this re-exports them under the names
+/// every module in this suite already reaches for.
+pub(crate) use crcbl_quarry::camera::{DOLLY_END, DOLLY_START, dolly};
 
 /// Which description of the same face to make resident.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

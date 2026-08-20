@@ -895,6 +895,18 @@ mod tests {
             room::fixed_camera().eye,
             "swapping back did not return to the golden pose",
         );
+        // **The flyer, not `camera()`.** In `Fixed` the frame is drawn from the
+        // golden pose whatever the free camera is doing, so the assertion above
+        // passes for a row that swapped the mode and left the walked position
+        // where it was — and the next swap to `Free` would then drop the
+        // reviewer back where they wandered to rather than at the reference
+        // framing. Verified vacuous without this: deleting the reset in
+        // `HostedGame::apply` left the test green.
+        assert_eq!(
+            engine.game().flyer().eye(),
+            room::fixed_camera().eye,
+            "the row swapped the camera and left the free one where it was walked to",
+        );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

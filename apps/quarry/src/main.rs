@@ -1,32 +1,89 @@
-//! Reports what the quarry face is, and what the builders make of it.
+//! Quarry — the native front end.
 //!
-//! **A measuring tool rather than a viewer**, and it opens no window and no
-//! adapter on purpose: a sample binary that needed a GPU to tell you how many
-//! triangles it generates would be unrunnable in every job this repository has
-//! on a machine without one.
+//! ```text
+//! quarry [--camera fixed|free] [--force-geometry P] [--force-binding B]
+//!        [--lod-budget PX] [--lod-view] [--headless] [--report]
+//! ```
 //!
-//! `docs/plan/sample/14-quarry.md`'s exit criteria ask for "triangle count and
-//! draw count per path, at a stated camera position, recorded". The counts that
-//! need no device are here. **The ones that need one are measured and asserted
-//! rather than printed** — `tests/device/` draws the face on every
-//! `GeometryPath`, reads back what covered the frame, and reports the drawn
-//! level and triangle count per path. Run it with
-//! `CRCBL_GPU=vk apps/quarry/tests/run-quarry-e2e.sh`.
+//! Argv in, exit code out: the fixture itself is the `crcbl_quarry` library this
+//! binary links.
+//!
+//! # `--report` opens no device
+//!
+//! One thing here is not a run. This binary used to be a *measuring tool* with
+//! no window at all, printing the face's counts, the meshlet total and the
+//! per-level DAG breakdown — and those numbers are what
+//! `docs/plan/sample/14-quarry.md`'s "triangle count per path" leans on, they
+//! need no adapter, and they have to stay runnable in every job this repository
+//! has on a machine without one. So they are still here, behind `--report`, and
+//! answered before the front end opens anything. The counts that *do* need a
+//! device are measured and asserted rather than printed: `tests/device/` draws
+//! the face on every `GeometryPath` and reports the drawn level and triangle
+//! count per path. Run it with `CRCBL_GPU=vk apps/quarry/tests/run-quarry-e2e.sh`.
+//!
+//! Exit codes: 0 ran, 1 it failed, 2 bad arguments.
 
-use crcbl_quarry::{dag, face, scene};
+use std::process::ExitCode;
 
-/// Quads per side of the reported face.
+use crcbl_quarry::{Invocation, USAGE, cull_row, dag, face, parse, run, scene};
+
+/// Quads per side of the **reported** face.
 ///
 /// 256 is 131,072 triangles — dense enough that a cluster hierarchy has
-/// something to collapse, small enough that generating it is not a wait. The
-/// renderer will want its own figure and can pass one.
-const CELLS: u32 = 256;
+/// something to collapse, and this path renders nothing, so the eight seconds
+/// it takes to coarsen buys a count rather than a wait in front of a window.
+/// The face the window makes resident is smaller and says why:
+/// [`crcbl_quarry::CELLS`].
+const REPORT_CELLS: u32 = 256;
 
-fn main() {
-    let face = face::quarry_face(CELLS);
+fn main() -> ExitCode {
+    let invocation = parse(std::env::args().skip(1));
+    // Answered before `run_front_end`, which would open a shell and an adapter:
+    // the whole point of this flag is that it needs neither.
+    if let Invocation::Run(options) = &invocation
+        && options.report
+    {
+        return report();
+    }
+
+    crcbl::args::run_front_end("quarry", USAGE, invocation, run, |summary| {
+        format!(
+            "quarry: {} frames, {} ticks on the {} shell at {}x{}, {} \
+             (camera {}, {:?} / {:?} / {:?}, {} triangles at a {}px budget, {}, {:?})",
+            summary.frames,
+            summary.ticks,
+            summary.backend,
+            summary.extent.0,
+            summary.extent.1,
+            // What the window system actually did, not what `--fullscreen`
+            // asked for. It is free to refuse.
+            summary.mode,
+            summary.camera.label(),
+            // Rule 12's headless half: the three selectors this run's frames
+            // were actually drawn through.
+            summary.paths.geometry,
+            summary.paths.binding,
+            summary.paths.lighting,
+            // And the charter's "triangle count ... at a stated camera
+            // position, recorded — including how much of the reduction is
+            // instance culling and how much is cluster culling".
+            summary.triangles,
+            summary.lod_budget,
+            cull_row(summary.cull),
+            summary.exit,
+        )
+    })
+}
+
+/// Prints what the face is and what the builders make of it, and exits.
+///
+/// Every number here is computed on the CPU from [`REPORT_CELLS`], so this runs
+/// on a machine with no driver at all.
+fn report() -> ExitCode {
+    let face = face::quarry_face(REPORT_CELLS);
     println!(
         "quarry: {cells}x{cells} cells — {vertices} vertices, {triangles} triangles",
-        cells = CELLS,
+        cells = REPORT_CELLS,
         vertices = face.positions.len(),
         triangles = face.triangles(),
     );
@@ -35,7 +92,7 @@ fn main() {
         Ok(scene) => scene,
         Err(error) => {
             eprintln!("quarry: the face could not be partitioned into meshlets: {error}");
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
     };
 
@@ -60,7 +117,7 @@ fn main() {
         Ok(dag) => dag,
         Err(error) => {
             eprintln!("quarry: the face could not be coarsened into a cluster DAG: {error}");
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
     };
     let per_level: Vec<String> = dag
@@ -85,4 +142,5 @@ fn main() {
          entries",
         levelled.vertices, levelled.indices, levelled.meshes,
     );
+    ExitCode::SUCCESS
 }

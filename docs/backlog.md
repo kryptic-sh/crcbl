@@ -1812,7 +1812,7 @@ What would make it worth doing: a fourth copy. Two fixtures with different
 requirements are a resemblance; a third caller needing the same extras is
 duplicated knowledge.
 
-### quarry (S4C): what is left is a window, a heatmap and the skinned case
+### quarry (S4C): what is left is the browser, two overlays and the skinned case
 
 The phase table's S4C row asks for "meshlet clusters, QEM cluster LOD, and all
 three `GeometryPath` values on one dense scene", gated by "golden frames per
@@ -1826,13 +1826,33 @@ it, forced by subtracting features from one adapter.
 
 **What is left, and it is what makes the gate rather than the milestones:**
 
-- **The goldens are committed; the window is not.** Six images —
+- **The goldens are committed and the window is built.** Six images —
   `apps/quarry/tests/golden/`, one per `GeometryPath` at each end of the fixed
   dolly, at `MIXING_BUDGET` where the paths genuinely disagree. Blessed on an RX
   7900 XTX and verified on lavapipe locally at a max channel delta of 1, nothing
   over `Tolerance::RASTERISER`, so the runner that gates them agrees with the
-  machine that made them. What is still owed is the window and the
-  human-reviewed three-way comparison written down here.
+  machine that made them.
+
+  The window is `apps/quarry/src/{app,args,gpu,menu}.rs` and it flies **the
+  goldens' own dolly**: `crcbl_quarry::camera` owns `dolly`, and
+  `tests/device/harness.rs` re-exports it rather than keeping a copy, so the two
+  cannot drift. The six goldens are bit-identical across that move — 0 pixels
+  differ on all six, verified against a pristine clone of the commit before it.
+
+  **No real window has ever been opened.** This machine has no display session
+  the work could rely on, so every path was exercised headless and through
+  `HeadlessShell`. That is a coverage gap, stated as one: the swapchain, resize
+  and present path of a windowed quarry run is unverified.
+
+  **The window and a golden share the camera but not the light.**
+  `tests/device/goldens.rs` pins its own sun so a change to the engine default
+  fails there instead of silently re-blessing six images; the window takes
+  `DirectionalLight::default()`. A reviewer holding a screenshot against a
+  committed golden is comparing two different lights, and `gpu::sun` says so.
+
+  What is still owed is the human-reviewed three-way comparison written down
+  here.
+
 - **The generator's golden is a digest; the seam review is not done.** The exit
   criteria pair "golden meshes prove the generator is deterministic" with "the
   seam review is recorded with the content it was done against", and only the
@@ -1915,10 +1935,10 @@ it, forced by subtracting features from one adapter.
   shader work.
 
 - **Milestone 4: the tiling case is done, the skinned one is blocked, the Pages
-  demo is untouched.** `crcbl_quarry::tile` is the modular wall piece, and two
-  tiles decimated independently still meet — asserted bit-for-bit. **The skinned
-  prop cannot be built**: the sample wants "skinned weights carried through
-  collapses" and the engine has no skinning at all (`crcbl-render` and
+  demo is the next slice.** `crcbl_quarry::tile` is the modular wall piece, and
+  two tiles decimated independently still meet — asserted bit-for-bit. **The
+  skinned prop cannot be built**: the sample wants "skinned weights carried
+  through collapses" and the engine has no skinning at all (`crcbl-render` and
   `crcbl-scene` carry none), so that criterion is behind an unbuilt engine
   feature rather than behind sample work.
 - **The draw-count split is recorded and the answer is degenerate.**
@@ -1928,6 +1948,26 @@ it, forced by subtracting features from one adapter.
   stage keeps 27 to 47 clusters. All of the reduction is cluster culling —
   because quarry places **one** instance of one mesh, so the instance cull has
   one thing to decide about. See the design question below.
+
+- **`CullStats` counts survivors, not rejections, so one charter line cannot be
+  met without an engine change.** `docs/plan/sample/14-quarry.md` asks for
+  "per-cluster frustum and normal-cone rejection counts on the debug panel".
+  `crcbl::render::CullStats` carries `instances`, `clusters` and `frame` and no
+  split by cause, so the panel quarry now ships can say how many clusters
+  survived and cannot say which test rejected the rest. The two are different
+  claims: "27 of 338 survived" is consistent with the normal cone doing all the
+  work and with it doing none.
+
+  This is an engine item, not a sample one — the counters are written by the
+  amplification stage in `mesh_cluster.slang` and summed into `CullStats`. What
+  it would take: a second atomic per cause, and a matching pair of fields. Not
+  costed against the other backends, and the seam rule applies.
+
+- **The freeze-selection-from-here camera is still owed.** Topic 25's third
+  overlay, beside the LOD tint (built) and the screen-error heatmap (above).
+  Nothing in `apps/quarry` or `crcbl-render` holds a cut across a camera move
+  today, and it is what makes "the selection is per cluster" checkable by
+  walking away from a frozen cut rather than by reading a count.
 
 **DECIDED 2026-08-20 — the other three, so the gate has one shape.**
 

@@ -884,6 +884,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/quarry` has a windowed front end**, so the geometry acceptance fixture
+  is something a reviewer can look at rather than only measure. It draws the
+  face's cluster DAG through `ForwardRenderer` with the pause menu and the debug
+  panel, and adds `--camera fixed|free`, `--force-geometry`, `--force-binding`,
+  `--lod-budget <PX>` (zero, negative and NaN are refused — each expands every
+  group to the bottom of the DAG), `--lod-view` and `--report`. The debug panel
+  names the geometry, binding and lighting paths, whether the run forced any of
+  them, the budget the frame was actually selected under, and what the frame's
+  culling kept — instances and clusters apart, naming the frame the readback
+  came from, because that ring runs a few frames behind. `--headless --frames N`
+  prints the same paths beside the triangle count, the budget and the cut.
+
+  The device-free counts the binary used to print unconditionally are unchanged
+  and now live behind `--report`, which opens no shell and no adapter.
+
+- **`crcbl_quarry::camera`** owns `DOLLY_START`, `DOLLY_END` and `dolly`, moved
+  out of the device suite so **the window and the committed goldens fly one
+  path** — a windowed pose that is not the pose `apps/quarry/tests/golden/` was
+  blessed from is a picture nobody can hold against the reference. Beside them
+  `FLY_SPEED`, the free camera's speed, derived from the face's depth rather
+  than typed in: the engine's room-sized default would take 75 seconds to cross
+  it.
+
 - **`crcbl::render::Flyer` is the engine's free-fly camera**, moved out of
   `apps/lumen` so a second sample can fly the same one. It is the same
   controller — WASD and Space/Shift on a fixed timestep, arrow keys and
