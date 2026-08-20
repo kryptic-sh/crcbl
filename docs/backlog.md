@@ -120,6 +120,32 @@ taken back to back, spanning a few milliseconds, so they were eight looks at one
 frame rather than eight frames. They are spaced now, and the spacing is scaled
 by the measured slowdown like every other budget.
 
+### The wasm rustdoc gate cannot see two whole backends
+
+**Measured 2026-08-21, and it had already cost three real breakages.**
+`ci.yml`'s `rustdoc` job ran one command —
+`cargo doc … --target wasm32-unknown-unknown` — and `crcbl-mtl` is
+`#[cfg(target_os = "macos")]` from its crate root down while `crcbl-dx12` is the
+same on Windows, so that run compiles **not one line** of either. A broken
+intra-doc link in `crcbl-mtl` passes it.
+
+Proved rather than argued: a link to a non-existent item put inside a
+`cfg(macos)` impl left the `wasm32` command reporting success and made
+`aarch64-apple-darwin` report `unresolved link`. The Metal counter-query slice
+hit exactly this — three `public documentation for X links to private item Y`
+errors that the prescribed gate did not see.
+
+**Fixed**: the `rustdoc` job now also runs `-p crcbl-mtl` against
+`aarch64-apple-darwin` and `-p crcbl-dx12` against `x86_64-pc-windows-msvc`.
+Just those two crates rather than the workspace again — everything else is
+already covered by the wasm run, and cross-target rustdoc is not free.
+
+**The general shape, which is worth more than the fix:** a gate run against one
+target says nothing about code that target does not compile. The same reasoning
+already applies to `cargo clippy`, which is why this repo runs it on darwin and
+msvc too; rustdoc simply never got the same treatment. Any _third_ per-target
+gate added later needs the same question asked of it.
+
 ### The sweep for a runner nobody invokes
 
 Every `#[ignore]` in this workspace names the script that reaches it — 398 of

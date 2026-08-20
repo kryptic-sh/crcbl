@@ -330,6 +330,32 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # **The wasm run above is structurally blind to two whole backends, and
+      # that was measured rather than suspected.** `crcbl-mtl` is
+      # `#[cfg(target_os = "macos")]` from its crate root down and `crcbl-dx12`
+      # is the same on Windows, so a `wasm32` rustdoc compiles not one line of
+      # either — a broken intra-doc link in `crcbl-mtl` passes that command and
+      # fails this one. Checked on 2026-08-21 by putting a link to a
+      # non-existent item inside a `cfg(macos)` impl: `wasm32` reported success,
+      # `aarch64-apple-darwin` reported `unresolved link`. Three real breakages
+      # in the Metal counter-query slice were found this way and none of them by
+      # the line above.
+      #
+      # Documenting only the two crates the other target cannot see, rather than
+      # the workspace again: everything else is already covered, and rustdoc on a
+      # cross target is not free.
+      - run: >-
+          cargo doc --locked --all-features --no-deps -p crcbl-mtl --target
+          aarch64-apple-darwin
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - run: >-
+          cargo doc --locked --all-features --no-deps -p crcbl-dx12 --target
+          x86_64-pc-windows-msvc
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   # Linux is the developer's daily driver, so it carries the full gate.
   test-linux:
     name: test (linux)
