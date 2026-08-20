@@ -18,7 +18,7 @@ Two hard rules govern the ordering:
 breakout onward ships as a browser demo on GitHub Pages. The demo site is the
 engine's public face and its continuous cross-backend regression test.
 
-## Status (as of 2026-08-19)
+## Status (as of 2026-08-20)
 
 **Since 2026-08-15 the work has been backend parity and the viewer sample**, and
 neither has a phase row of its own: parity cuts across P2, P10 and P14, and the
@@ -71,6 +71,27 @@ viewer is `sample/05-viewer.md`'s own milestones.
   vertex no longer shrinks a bounding box, displaces a cluster sphere, or
   shrinks a physics BVH node — `glam`'s `Vec3::min`/`max` are bare comparisons
   that yield the right-hand side on a `NaN`, which is not `f32::min`.
+
+- **A newer WARP does not fix D3D12 mesh shading** (2026-08-20). The
+  redistributable `Microsoft.Direct3D.WARP` 1.0.20 was researched for two
+  release notes that land on the symptom and had never been run. It loaded —
+  both dx12 steps log `driver="D3D12 UMD 1.0.20.0"` against the OS WARP's
+  `10.0.26100.33158` — and the device was removed exactly as before, from `Map`,
+  with no debug-layer error and no DRED breadcrumb. The crate's own D3D12 suite
+  passed with both mesh flags reported, so it is `render_e2e`'s frame alone, and
+  a symptom that survives two WARP versions is far more likely ours than
+  Microsoft's. That narrows the open decision rather than settling it.
+
+- **Three test arms that were asserted only in the source now run**
+  (2026-08-20). A test branching on what the device reports covers both arms in
+  its text and one arm in any run: the bindless refusal, the `update_bind_group`
+  refusal and the timestamp-set refusal each keyed on a feature every adapter
+  here reports, so each ran nowhere while a doc, a test name and a backlog entry
+  all said both were covered. Reaching them needed no hardware — opening a
+  device _without_ the feature is the same move `mesh.rs` already used for
+  `GeometryPath::IndirectPerBatch` — and each now carries a guard that the
+  subtraction happened, because without one the test asserts the capable
+  device's answer under the lesser arm's name.
 
 - **`crcbl-wgpu` is slated for deletion** once the parity list closes. The bar
   and the trade are in `docs/backlog.md`, awaiting a decision.
