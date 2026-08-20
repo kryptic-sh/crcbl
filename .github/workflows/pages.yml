@@ -417,7 +417,9 @@ jobs:
     # Pinned to `15` rather than `macos-latest` so the image this gate is proven
     # on does not change under it while it is still unproven.
     runs-on: macos-15
-    timeout-minutes: 20
+    # Was 20 while this job ran the probe alone; seven demo gates follow it now,
+    # and the two 3D ones took 5–6 minutes each on the Linux runner.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -454,11 +456,61 @@ jobs:
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         run: ./web/run-probe-e2e.sh --headless
 
+      # **THE DEMO GATES, ON THE SECOND OF THE THREE OPERATING SYSTEMS WE
+      # SUPPORT.** `crcbl-webgpu` is the browser backend and a browser is not one
+      # platform: which adapter Dawn picks, what `getPreferredCanvasFormat()`
+      # answers, the limits an adapter advertises and how the canvas is
+      # composited are all decided per OS. Until 2026-08-20 every demo gate in
+      # this repository ran on `ubuntu-latest` alone, so the backend the samples
+      # ship on had its whole browser-side evidence from one OS and one Chromium.
+      #
+      # **After the probe, never before it.** A failing step ends the job, so the
+      # probe — the older gate, and the one that holds this backend's
+      # `supports()` matrix against `DIVERGENCES` in group AB — reports first and
+      # cannot be masked by a demo.
+      #
+      # **The adapter is left at `auto` on purpose.** That mode tries hardware,
+      # falls back to SwiftShader, and takes the first whose *readback control*
+      # passes — an adapter that renders but whose pixels cannot be read is no
+      # use here, and this runner has a real GPU where the Linux one does not.
+      # Forcing a mode would be guessing at which of the two this image serves.
+      #
+      # `--headless` rather than Xvfb, which is an X server and does not exist
+      # here; the script would fall back to it anyway and this says so out loud.
+      # breakout goes first because it is the richest gate at 48 checks and the
+      # first thing it does is that readback control, so if this platform cannot
+      # report canvas pixels the job says so in its first demo rather than its
+      # seventh. The two 3D demos go last and carry their own timeouts: they are
+      # the heaviest frames the site ships.
+      - name: Render breakout in a real browser
+        run: CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh --headless
+
+      - name: Render flappy in a real browser
+        run: CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh --headless
+
+      - name: Render asteroids in a real browser
+        run: CRCBL_WEB_E2E_DEMO=asteroids ./web/run-browser-e2e.sh --headless
+
+      - name: Render horde in a real browser
+        run: CRCBL_WEB_E2E_DEMO=horde ./web/run-browser-e2e.sh --headless
+
+      - name: Render hud in a real browser
+        run: CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh --headless
+
+      - name: Render quarry in a real browser
+        timeout-minutes: 12
+        run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh --headless
+
+      - name: Render lumen in a real browser
+        timeout-minutes: 12
+        run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh --headless
+
   probe-windows:
     name: probe the seam on Windows
     needs: build
     runs-on: windows-latest
-    timeout-minutes: 20
+    # Was 20 while this job ran the probe alone; see the macOS twin.
+    timeout-minutes: 60
     env:
       # THE PAIRING THAT READS AS A CONTRADICTION AND IS NOT. `--headless` below
       # tells **the script** not to go looking for an Xvfb Windows cannot have;
@@ -547,6 +599,72 @@ jobs:
         run: >-
           SITE_DIR="$(pwd -W)/target/site" ./web/run-probe-e2e.sh --headless
           --adapter swiftshader --expect-fail X,Y,Z,AA
+
+      # **THE DEMO GATES, ON THE THIRD OPERATING SYSTEM.** See the macOS job's
+      # note for why a browser backend needs all three; what differs here is the
+      # adapter, and it is the interesting part.
+      #
+      # **`--adapter swiftshader` is NOT carried over from the probe step above,
+      # and that is deliberate.** Forcing Dawn onto SwiftShader while Chromium's
+      # shared-image device stays on D3D11 is exactly what breaks a canvas
+      # readback on this runner — the `ReadPixels: Source shared image is not
+      # accessible` that costs the probe its X, Y, Z and AA. Every demo gate
+      # reads the canvas, in group A's readback control, in group D and in group
+      # G, so forcing that mode here would fail all seven for a reason that is
+      # already understood and already excused one job up.
+      #
+      # `auto` is the mode written for this: it tries hardware, falls back to
+      # SwiftShader, and takes the first whose readback control passes. If
+      # neither can report canvas pixels on this image, breakout says so in the
+      # first demo — which is a finding about Chrome on Windows worth having,
+      # not a reason to force a mode that is known not to read back.
+      #
+      # `SITE_DIR` is spelled through `pwd -W` for the reason the probe step
+      # above gives: this is Git Bash, and the driver hands the path to a native
+      # Chrome.
+      - name: Render breakout in a real browser
+        shell: bash
+        run: >-
+          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=breakout
+          ./web/run-browser-e2e.sh --headless
+
+      - name: Render flappy in a real browser
+        shell: bash
+        run: >-
+          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=flappy
+          ./web/run-browser-e2e.sh --headless
+
+      - name: Render asteroids in a real browser
+        shell: bash
+        run: >-
+          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=asteroids
+          ./web/run-browser-e2e.sh --headless
+
+      - name: Render horde in a real browser
+        shell: bash
+        run: >-
+          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=horde
+          ./web/run-browser-e2e.sh --headless
+
+      - name: Render hud in a real browser
+        shell: bash
+        run: >-
+          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=hud
+          ./web/run-browser-e2e.sh --headless
+
+      - name: Render quarry in a real browser
+        shell: bash
+        timeout-minutes: 12
+        run: >-
+          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=quarry
+          ./web/run-browser-e2e.sh --headless
+
+      - name: Render lumen in a real browser
+        shell: bash
+        timeout-minutes: 12
+        run: >-
+          SITE_DIR="$(pwd -W)/target/site" CRCBL_WEB_E2E_DEMO=lumen
+          ./web/run-browser-e2e.sh --headless
 
   # THE WebGPU PARITY GATE — the only thing anywhere that holds a browser's
   # *pixels* against the goldens the native suites compare against.

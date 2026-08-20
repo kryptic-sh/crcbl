@@ -1252,6 +1252,47 @@ one and asserting a colour per quadrant. What a real file can still hit:
 
 ### Run the WebGPU browser gates on Windows and macOS, not just Linux
 
+**The demo gates went to all three on 2026-08-20**, so what is left of this
+entry is the golden parity harness. Two of the three obstacles it listed were
+already gone when they were checked rather than believed:
+
+- "`run-browser-e2e.sh` wires Xvfb unconditionally for Linux and will need a
+  per-OS branch" — **it already falls back to `--headless`** when no `Xvfb` is
+  on the path, the same line the probe runner has.
+- "nine of eleven scenes need more storage buffers per stage than a software
+  adapter offers until the draw-args reduction lands" — **that reduction
+  landed**: `crcbl-render`'s draw-argument pass binds eight now, WebGPU's
+  guaranteed minimum.
+
+And the third was cheaper than stated: the two probe jobs `needs: build` and
+download the `site` artifact into `target/site`, which is exactly where
+`run-browser-e2e.sh` looks, so the demo gates needed **no Rust toolchain and no
+rebuild** on either runner.
+
+**Where they were put, and why after the probe.** Into the existing
+`probe-macos` and `probe-windows` jobs rather than two new ones, so nothing
+re-downloads the artifact — and _after_ the probe step, because a failing step
+ends a job and the probe is the older gate and the one holding this backend's
+`supports()` matrix against `DIVERGENCES` in group AB. A demo must not be able
+to mask it.
+
+**The adapter is `auto` on both, and on Windows that is a deliberate departure
+from the probe step above it.** Forcing Dawn onto SwiftShader while Chromium's
+shared-image device stays on D3D11 is the exact cause of that job's excused
+`X,Y,Z,AA` — `ReadPixels: Source shared image is not accessible`. Every demo
+gate reads the canvas (group A's readback control, group D, group G), so
+carrying the flag over would fail all seven for a reason already understood.
+`auto` tries hardware, falls back to SwiftShader and takes the first whose
+readback control passes.
+
+**Still owed: `web/run-render-harness-e2e.sh` on macOS and Windows.** It is the
+only gate anywhere that holds a browser's _pixels_ against the committed
+goldens, and it is still Linux-only. It is the harder one for a reason its own
+job records: it neither `needs: build` nor downloads the `site` artifact,
+because `web/build.sh` does not build `apps/render-harness` at all — so unlike
+the demo gates it would bring a Rust toolchain, a wasm build and a native
+comparator to each runner.
+
 ~~Every WebGPU browser test in the repository runs in one job~~ — **the probe
 now runs on three platforms.** What is still true, and is the live half:,
 `pages/build` on `ubuntu-latest`: the five demo gates, the seam probe groups and
