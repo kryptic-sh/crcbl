@@ -657,61 +657,49 @@ scores **33 of 34** with group G the only failure, while group D's "the canvas
 is not one flat colour" passes on `rgb(8,8,16)` at 89.2%. The same broken build
 fails the probe gate too, so neither gate is load-bearing alone.
 
-### DECISION NEEDED — does "parity holds" mean zero blockers, or a reviewed list?
+### The `crcbl-wgpu` deletion bar was already answered — what it costs, measured
 
-**This decides whether `crcbl-wgpu` can go now or not at all**, so it is worth
-settling rather than re-deriving. The standing instruction is "delete
-`crcbl-wgpu` once parity holds", and the entry below defines parity as a
-mechanism _plus_ "a parity report forcing real divergence onto a reviewed
-exception list". Those two readings give opposite answers:
+**This was filed on 2026-08-20 as a decision needing the owner, and that was
+wrong: it had been answered on 2026-08-19.** "DECIDED — the `crcbl-wgpu`
+deletion bar, and quarry is next" below carries it, and the bar is
+**`parity_blockers()` empty**, explicitly _"empty rather than explained"_, plus
+a replacement for the cross-backend oracle. Re-opening a settled question is the
+same defect this file keeps catching in other entries, so the correction is kept
+here rather than quietly deleted. What follows is the measurement that entry did
+not have.
 
-- **Zero blockers.** `REVIEWED_BLOCKERS` must be empty. Every row left needs
-  hardware nobody here has — a hardware D3D12 GPU for the two dx12 mesh rows, a
-  Metal 3 Mac for Metal's two, and a Metal device that reports any counter set
-  at all for Metal's two query rows (CI's paravirtual device reports
-  `counterSets=0`). So on this reading `crcbl-wgpu` stays indefinitely, and the
-  deletion is blocked on buying or borrowing machines.
-- **The mechanism holds and divergence is reviewed.** Steps 1 to 4 are built and
-  green: `Capability` is exhaustive, every backend answers through a `match`
-  under `#[deny(clippy::wildcard_enum_match_arm)]`, `hal_seam_e2e` drives it in
-  both directions (the second direction really firing, since
-  `CRCBL_SEAM_WITHHOLD=all` manufactures the lesser device), and
-  `the_parity_blockers_are_exactly_the_reviewed_list` fails the moment the set
-  moves. On this reading the goal is met **today** and the remaining rows are
-  exactly what the exception list is for.
+**The second half of the bar is met.** `web/run-cross-backend-e2e.sh` holds the
+browser against a native backend and runs in `pages.yml` — on Linux against vk,
+and since 2026-08-20 on macOS against **Metal on the same device**, which is
+stronger than the vk↔wgpu job it replaces: eleven scenes rather than three, and
+a genuinely separate implementation rather than a second abstraction over one
+driver.
 
-**What the deletion is worth, measured rather than estimated.** Dropping
-`crcbl`'s dependency on `crcbl-wgpu` removes **43 of the workspace's 254
-resolved packages** — 17% of the dependency graph — including the whole `wgpu`
-family (`wgpu`, `wgpu-core`, `wgpu-hal`, `wgpu-types`, the three
-`wgpu-core-deps-*`), `glow`, `khronos-egl`, `gl_generator`, `gpu-allocator`,
-`parking_lot`, `raw-window-handle` and `raw-window-metal`. Plus a CI job, a
-runner script, a registry entry and `CRCBL_GPU=wgpu`.
+**The first half is not, and every row needs hardware nobody here has** — dx12's
+two mesh rows, Metal's two mesh rows and Metal's two counter-sampled query rows.
+Read `REVIEWED_BLOCKERS`; this file does not restate the count, having had it
+wrong twice.
 
-**`naga` does not leave, and the goal statement says it should.** It is a
+**What the deletion is worth, counted rather than estimated.** Dropping
+`crcbl`'s dependency removes **43 of the workspace's 254 resolved packages** —
+17% of the graph — including the whole `wgpu` family (`wgpu`, `wgpu-core`,
+`wgpu-hal`, `wgpu-types`, the three `wgpu-core-deps-*`), `glow`, `khronos-egl`,
+`gl_generator`, `gpu-allocator`, `parking_lot`, `raw-window-handle` and
+`raw-window-metal`. Plus a CI job, a runner script, a registry entry and
+`CRCBL_GPU=wgpu`.
+
+**`naga` does not leave, and the standing instruction says it should.** It is a
 **dev-dependency of `crcbl-shaders`**, not a `crcbl-wgpu` transitive: it
 validates the WGSL that `crcbl-webgpu` ships to a real browser. That manifest
-already argues the case in full and concludes "expect the pin to become a
-package of its own in the lockfile when `wgpu` goes — that is the cost, and it
-is worth paying". Deleting it too would remove the only check that the shipped
-WGSL parses before a browser sees it, which is how the uniformity bug shipped.
-Recorded here because the instruction names `naga` and the tree disagrees with
-it.
+already argues the case and concludes "expect the pin to become a package of its
+own in the lockfile when `wgpu` goes — that is the cost, and it is worth
+paying". Deleting it would remove the only check that shipped WGSL parses before
+a browser sees it, which is how the uniformity bug shipped. Recorded because the
+instruction names `naga` and the tree disagrees with it.
 
-**What is not in question either way.** `crcbl-wgpu` is not a conformance oracle
-and this entry does not argue it should be kept as one: on Linux it runs Vulkan
-underneath, so agreement with `crcbl-vk` proves less than it looks. The one
-thing that genuinely goes is the direct `vk`-versus-`wgpu` pixel compare, whose
-bound is tighter than golden tolerance and which also refuses two blank frames;
-the entry below records the two options for that job and neither has been
-chosen.
-
-**Recommendation, if one is wanted:** the second reading. The rot the mechanism
-was built to stop is a feature landing on one backend and silently missing on
-three, and that is now a compile error. Hardware-gated rows on a reviewed list
-are the mechanism working, not the mechanism incomplete — and keeping a second
-abstraction over the same Vulkan driver until three specific machines appear
-buys nothing that the list does not already say out loud.
+**What is not in question.** `crcbl-wgpu` is not a conformance oracle and this
+entry does not argue for keeping it as one: on Linux it runs Vulkan underneath,
+so agreement with `crcbl-vk` proves less than it looks.
 
 ### TOP PRIORITY — backend feature parity, enforced so it cannot rot
 
