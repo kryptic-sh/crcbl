@@ -1719,6 +1719,89 @@ asserting precedence between those two errors would flip. Judged unlikely and
 the cleaner factoring kept; it compiles under the darwin gate and no macOS test
 has run.
 
+## DECISION NEEDED — D3D12 registers are assigned by counting, and the mesh path collides
+
+**Found 2026-08-21 while building the cluster-shader probe, by checking an
+assumption rather than by running anything.** It is almost certainly the WARP
+device removal, and it is ours rather than Microsoft's.
+
+**The mechanism.** A D3D12 register is a position among _that HLSL source's own
+declarations of that class_. `crcbl-dx12` reproduces it in
+`root::assign_registers`, which sorts the **layout's** entries by binding number
+and hands out `registers.take(class, …)` in order — so a resource's register is
+decided by how many same-class entries precede it **in the bind group layout**.
+That agrees with the shader only when the layout's binding set is exactly the
+set that source file declares.
+
+**On the raster path it is, which is why nothing has ever caught this.**
+`ForwardRenderer::mesh_layout` minus its mesh-only rows is precisely what
+`mesh.slang` declares, so every register lines up and WARP renders the non-mesh
+frame correctly.
+
+**On the mesh path it is not, and the two stages cannot even agree with each
+other.** Read straight out of the generated HLSL the build already writes to
+`target/debug/build/crcbl-shaders-*/out/*.check.hlsl`:
+
+| source                  | resource         | register |
+| ----------------------- | ---------------- | -------- |
+| `mesh_cluster.taskMain` | `clusters`       | `t6`     |
+| `mesh.fragmentMain`     | `shadow_atlas`   | `t6`     |
+| `mesh_cluster.taskMain` | `cluster_select` | `t10`    |
+| `mesh.fragmentMain`     | `probes`         | `t10`    |
+
+One root signature serves both stages of one pipeline, so `t6` cannot be both a
+`StructuredBuffer<Meshlet>` and a `Texture2D<float>`. The renderer's mesh
+pipeline borrows its fragment stage from `mesh.slang` while its task and mesh
+stages come from `mesh_cluster.slang`, and those two files declare different
+binding sets. **No single bind group layout can make this correct** — the fix
+cannot be a layout change.
+
+**What that predicts, and it matches every measurement in the WARP entry.** On
+the mesh path `taskMain` reads `cluster_select` out of the shadow-atlas texture
+descriptor and `group_state` out of the `cluster_select` buffer — a texture SRV
+read as a structured buffer, unconditionally, on the first thing the
+amplification stage does. A descriptor-type mismatch is not something the debug
+layer catches without GPU-based validation, which is why there are **zero**
+debug-layer errors; the fault is inside the shader before any command-list work
+completes, which is why DRED reports **zero** breadcrumbs. Vulkan is unaffected
+because SPIR-V uses the `[[vk::binding]]` numbers directly and never counts.
+Nobody has seen it on hardware D3D12 because nobody has run the mesh path there.
+
+**The options, and the trade-off is real:**
+
+- **(a) Make the two shaders declare the same binding set.**
+  `mesh_cluster.slang` gains the rows it does not use and `mesh.slang` gains the
+  mesh-path rows, so both files' declaration order matches one layout. Cheapest
+  to reason about and needs no change to `crcbl-dx12`. The cost is dead
+  declarations in both files that exist only to hold a register position, and
+  nothing stops the next shader from drifting again — the invariant stays
+  unenforced.
+- **(b) Make registers follow the binding number instead of the count.** Emit
+  `register(t17)` from `[[vk::binding(17)]]` so both sides agree by construction
+  and a layout that omits a row cannot shift anything. This is what the
+  collision argues for and it cannot rot. The cost is every shader gains
+  explicit register annotations, `binding::ranges` and `root::assign_registers`
+  change shape, and register numbers become sparse — root signatures grow
+  descriptor ranges with gaps, which is legal but is a real change to how every
+  D3D12 pipeline is built.
+- **(c) Give the mesh path its own fragment shader in `mesh_cluster.slang`.**
+  Removes the cross-file half of the problem, leaving only the layout-vs-source
+  question that (a) or (b) still has to answer for a single file. Not a fix on
+  its own.
+
+**Whatever is chosen, it needs a gate that fails**, because nothing today
+compares a layout's assigned registers against what the containers declare.
+`crcbl-dx12/src/dxil.rs` already parses the PSV0 resource table, so the check is
+available: assert the renderer's layouts agree with every container they are
+used with. Written today it would be red, which is why it is not in the tree — a
+green test pinning this defect would be worse than none.
+
+**What is measured and what is inferred.** The registers above are read from the
+generated HLSL and confirmed against the containers' PSV0 tables; the counting
+rule is read from `root::assign_registers`. That the mismatch is what removes
+the device is the inference — strong, and consistent with every observation, but
+the probe that would confirm it needs the fix first.
+
 ## DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
 
 **Option (d) has been tried, and it does not fix it.** Run 32297440428 on
