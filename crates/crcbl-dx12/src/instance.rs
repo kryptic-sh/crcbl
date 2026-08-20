@@ -837,7 +837,19 @@ pub(crate) mod tests {
     /// suite that skips itself into green is how "compile-verified only"
     /// backends happen — the trap `docs/plan/09-backends-metal-dx12.md` names in
     /// its risk list. WARP ships in Windows, so there is always something.
+    ///
+    /// It is also where the process gets a logger, for the reason
+    /// `crcbl-vk`'s `vk_e2e::harness::instance` carries one: this crate routes
+    /// the D3D12 info queue's messages into [`crcbl_core::log::error!`] and
+    /// [`crcbl_core::log::warn!`] (see [`crate::debug`]), and with no `log::Log`
+    /// installed the facade drops every one of them. A suite that reports "the
+    /// info queue was silent" over a closed channel has not observed anything.
     pub(crate) fn open() -> Dx12Instance {
+        // `crcbl-core` already owns a `log::Log` and its `CRCBL_LOG` filtering,
+        // so this is the engine's own sink rather than a second one written for
+        // the tests. Idempotent, and it loses gracefully to a logger already
+        // installed.
+        crcbl_core::log::init_logging();
         Dx12Instance::open().expect("a Windows machine reports at least WARP")
     }
 

@@ -10288,11 +10288,28 @@ it is emitted rather than only as a count at teardown.
 
 Still open, and not touched here:
 
-- **`crcbl-wgpu`, `crcbl-dx12` and `crcbl-mtl`'s e2e trees have the same hole.**
-  None of them calls `init_logging` anywhere under `tests/`. `crcbl-shell`'s
-  suites and `crcbl/tests/render_e2e.rs` do. Grep for `init_logging` under a
-  crate's `tests/` to check; the fix is the one line `harness::instance` now
-  carries.
+- **Closed for `crcbl-dx12` and `crcbl-mtl`; `crcbl-wgpu` is left to the
+  deletion.** Both now call `crcbl_core::log::init_logging()` in their
+  `instance::tests::open`, which is the single funnel every device test in each
+  crate opens through — the one line `crcbl-vk`'s `harness::instance` carries.
+  **The check named here was the wrong one and found nothing for that reason:**
+  neither crate has an e2e tree under `tests/` at all (only a `run-*-e2e.sh`),
+  because their device tests live in `#[cfg(test)] mod tests` inside `src/`.
+  Grep a crate for `log::error!` to find whether it has a channel, then for
+  `init_logging` to find whether anything is listening.
+
+  **Unverified, and it cannot be verified here:** both funnels are on
+  platform-gated code, so the evidence is a cross-target
+  `cargo clippy --all-targets --all-features` on `aarch64-apple-darwin` and
+  `x86_64-pc-windows-msvc` — which type-checks the call and says nothing about
+  what reaches a job log. The observable is a D3D12 info-queue message or a
+  Metal command-buffer failure appearing in the `dx12 e2e` / `mtl e2e` output;
+  read one of those runs to close it.
+
+  `crcbl-webgpu` is **not** in this hole: it emits no `log::error!` or
+  `log::warn!` anywhere, so there is no channel to leave closed. `crcbl-wgpu`
+  does emit them and is deliberately untouched — it goes with the crate.
+
 - **The messenger asks the layer for `ERROR` and `WARNING` only**
   (`debug::messenger_create_info`), so `INFO`/`VERBOSE` never arrive whatever
   `CRCBL_LOG` says. Deliberate — the comment there explains that `INFO` is where

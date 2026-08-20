@@ -355,7 +355,21 @@ pub(crate) mod tests {
     /// that skips itself into green is how "compile-verified only" backends
     /// happen — the trap `docs/plan/09-backends-metal-dx12.md` names in its
     /// risk list.
+    ///
+    /// It is also where the process gets a logger, for the reason
+    /// `crcbl-vk`'s `vk_e2e::harness::instance` carries one: this crate reports
+    /// a failed command buffer and a lost device through
+    /// [`crcbl_core::log::error!`] and [`crcbl_core::log::warn!`] (see
+    /// [`crate::fault`] and [`crate::device`]), and with no `log::Log` installed
+    /// the facade drops every one of them. `Validated`'s `Drop` still asserts,
+    /// so no verdict changes; what changes is that the driver's own words are
+    /// readable at the moment they are emitted rather than only as a count.
     pub(crate) fn open() -> MetalInstance {
+        // `crcbl-core` already owns a `log::Log` and its `CRCBL_LOG` filtering,
+        // so this is the engine's own sink rather than a second one written for
+        // the tests. Idempotent, and it loses gracefully to a logger already
+        // installed.
+        crcbl_core::log::init_logging();
         MetalInstance::open().expect("a Mac reports at least one Metal device")
     }
 
