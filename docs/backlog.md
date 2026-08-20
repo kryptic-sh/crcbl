@@ -648,15 +648,25 @@ mechanism exists to prevent, and the mechanism had one in it.**
 
 **Order of work:**
 
-1. Finish migrating the white-box tests to the agnostic suites, so all four
-   backends actually run them (`lights`, `shadow`, `depth_probe` are mechanical;
-   `mesh` and the sprite cluster need the golden-blessing decision first).
-2. Build the capability enum and the exhaustive per-backend answer.
-3. Drive the suites from it, both directions, plus the parity report.
-4. Close the divergences it surfaces — starting with the ones already known:
-   `fill_buffer` (narrow it to a zero fill, which is what its own doc says it is
-   for), the timeline-signal and double-acquire disagreements, and the WebGPU
-   commands still refused.
+**Steps 1 to 4 are done except where noted; only step 5 is open.** The list is
+kept because it says what "done" meant, and each line now says where it stands —
+an order of work that still reads as future when it is past is how this file
+rots.
+
+1. ~~Finish migrating the white-box tests to the agnostic suites~~ — the
+   mechanical three landed: `lights`, `shadow` and `depth_probe` are
+   `crates/crcbl/tests/forward_e2e/`, so all four backends run them. **`mesh`
+   and the sprite cluster did not** and are still `crcbl-vk`-only —
+   `crates/crcbl-vk/tests/vk_e2e/mesh.rs` is the largest file in that tree. They
+   need the golden-blessing decision first, which is why they were carved out
+   rather than forgotten.
+2. ~~Build the capability enum and the exhaustive per-backend answer.~~
+3. ~~Drive the suites from it, both directions, plus the parity report.~~
+4. ~~Close the divergences it surfaces~~ — every one this list named by name has
+   closed: `fill_buffer` narrowed to a zero fill and then became `clear_buffer`
+   with no value at all, and the timeline-signal, double-acquire and refused
+   WebGPU rows are gone from `REVIEWED_BLOCKERS`. What is left there is only
+   rows that need hardware nobody here has; read the list rather than this line.
 5. **Then delete `crcbl-wgpu` entirely** — crate, `wgpu-e2e` suite, CI job,
    registry entry, `CRCBL_GPU=wgpu`, and `wgpu` from the dependency graph.
 
