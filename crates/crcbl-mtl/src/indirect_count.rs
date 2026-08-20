@@ -63,7 +63,7 @@
 //! `crcbl_mtl::device` compiles the kernel, and `crcbl_mtl::command` records
 //! the dispatch and the draws.
 
-use crcbl_hal::{DrawIndirectCount, HalError};
+use crcbl_hal::{DrawIndirect, DrawIndirectCount, HalError};
 
 /// Draws one [`draw_indirect_count`](crcbl_hal::CommandEncoder::draw_indirect_count)
 /// on this backend may issue, and therefore this backend's
@@ -137,6 +137,18 @@ pub(crate) const DRAW_ARGS_BYTES: u64 = 16;
 /// Bytes of one `MTLDrawIndexedPrimitivesIndirectArguments`: five 32-bit
 /// fields. See [`DRAW_ARGS_BYTES`].
 pub(crate) const DRAW_INDEXED_ARGS_BYTES: u64 = 20;
+
+/// Bytes of one `MTLDispatchThreadgroupsIndirectArguments`: three 32-bit
+/// fields, which is what `drawMeshThreadgroupsWithIndirectBuffer:` reads.
+///
+/// Fixed by the API, and identical to Vulkan's
+/// `VkDrawMeshTasksIndirectCommandEXT` and D3D12's
+/// `D3D12_DISPATCH_MESH_ARGUMENTS` — the seam's
+/// [`draw_mesh_tasks_indirect`](crcbl_hal::CommandEncoder::draw_mesh_tasks_indirect)
+/// documents the three words for that reason. Nothing in this module packs one:
+/// there is no count-limited mesh draw on the seam, because mesh work is culled
+/// by the amplification stage rather than by a count somebody wrote.
+pub(crate) const MESH_DISPATCH_ARGS_BYTES: u64 = 12;
 
 /// Which word of an argument structure the instance count is.
 ///
@@ -351,6 +363,93 @@ impl CountPlan {
     }
 }
 
+/// A validated indirect draw: where the first argument structure is, how far
+/// apart the rest are, and how many there are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IndirectPlan {
+    pub(crate) first: u64,
+    pub(crate) stride: u64,
+    pub(crate) count: u32,
+}
+
+impl IndirectPlan {
+    /// The byte offset of argument structure `index`.
+    pub(crate) const fn offset(self, index: u32) -> u64 {
+        self.first + self.stride * index as u64
+    }
+}
+
+/// [`plan_indirect`](crate::draw::plan_indirect) for a **mesh** draw, whose argument
+/// structure is
+/// [`MESH_DISPATCH_ARGS_BYTES`] rather than a draw's.
+///
+/// Every other rule is identical — same four-byte offset alignment, same
+/// stride rule, same bound — because they are all rules about *stepping an
+/// array of structures in a buffer* rather than about what the structures say.
+/// A separate entry point rather than a third `bool`, because the two callers
+/// name different Metal calls and a boolean at the call site says nothing.
+pub(crate) fn plan_mesh_indirect(
+    draw: &DrawIndirect,
+    length: u64,
+) -> Result<Option<IndirectPlan>, HalError> {
+    plan_structures(draw, MESH_DISPATCH_ARGS_BYTES, length)
+}
+
+/// The shared body of every indirect *draw* plan: `args` bytes per structure,
+/// and nothing that reads them.
+///
+/// Here rather than in `crcbl_mtl::draw` for this module's stated reason — the
+/// widths are numbers the API fixes and the rules are arithmetic Metal reports
+/// wrong by raising, so they are compiled and tested on every host rather than
+/// on the one Mac in CI.
+pub(crate) fn plan_structures(
+    draw: &DrawIndirect,
+    args: u64,
+    length: u64,
+) -> Result<Option<IndirectPlan>, HalError> {
+    if draw.draw_count == 0 {
+        return Ok(None);
+    }
+    if !draw.offset.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "an indirect draw's argument offset {} is not a multiple of {INDIRECT_OFFSET_ALIGNMENT}",
+            draw.offset
+        )));
+    }
+    // A single draw reads one structure at `offset` and never strides, so its
+    // `stride` is not a value Metal is ever told — checking it would refuse the
+    // tightly-packed `stride: 0` a one-draw caller may well pass.
+    let stride = if draw.draw_count == 1 {
+        args
+    } else {
+        let stride = u64::from(draw.stride);
+        if stride < args || !stride.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "an indirect draw of {} structures has a stride of {stride}, and one argument \
+                 structure is {args} bytes on a {INDIRECT_OFFSET_ALIGNMENT}-byte alignment",
+                draw.draw_count
+            )));
+        }
+        stride
+    };
+    let span = u64::from(draw.draw_count - 1)
+        .checked_mul(stride)
+        .and_then(|span| span.checked_add(args))
+        .and_then(|span| draw.offset.checked_add(span));
+    if span.is_none_or(|span| span > length) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "an indirect draw of {} structures {stride} bytes apart from offset {} runs past a \
+             {length}-byte buffer",
+            draw.draw_count, draw.offset
+        )));
+    }
+    Ok(Some(IndirectPlan {
+        first: draw.offset,
+        stride,
+        count: draw.draw_count,
+    }))
+}
+
 /// Bytes of one argument structure for the indexed or non-indexed form.
 const fn structure_bytes(indexed: bool) -> u64 {
     if indexed {
@@ -498,6 +597,103 @@ mod tests {
     /// Reads one `u32` field of a packed uniform block.
     fn word(params: &[u8; PARAMS_SIZE], slot: usize) -> u32 {
         u32::from_le_bytes(params[slot * 4..slot * 4 + 4].try_into().expect("4 bytes"))
+    }
+
+    /// One indirect draw, as `plan_structures` is asked for it.
+    fn indirect(offset: u64, draw_count: u32, stride: u32) -> DrawIndirect {
+        DrawIndirect {
+            args: buffer(),
+            offset,
+            draw_count,
+            stride,
+        }
+    }
+
+    /// **The mesh argument structure is three words, and every offset the loop
+    /// draws from is stepped by that width.**
+    ///
+    /// Table-driven, because the whole of `draw_mesh_tasks_indirect` on Metal
+    /// is this arithmetic: the encoder makes one
+    /// `drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:` per
+    /// structure, and an offset past the buffer raises — which aborts the
+    /// process rather than returning an error a caller could report.
+    ///
+    /// **What turns it red.** Giving `plan_mesh_indirect` a draw's
+    /// [`DRAW_ARGS_BYTES`] instead of [`MESH_DISPATCH_ARGS_BYTES`]: the tight
+    /// stride becomes 16, so the second offset is 16 rather than 12 and the
+    /// four-structure bound stops fitting a 48-byte buffer. Dropping the
+    /// alignment check, the stride check or the bound each turns one row of the
+    /// refusal table green.
+    #[test]
+    fn a_mesh_indirect_draw_steps_three_words_per_structure() {
+        assert_eq!(
+            MESH_DISPATCH_ARGS_BYTES,
+            3 * size_of::<u32>() as u64,
+            "VkDrawMeshTasksIndirectCommandEXT, D3D12_DISPATCH_MESH_ARGUMENTS and \
+             MTLDispatchThreadgroupsIndirectArguments are the same three words"
+        );
+
+        // A draw of nothing reads no structure and is not an error, which is
+        // the answer `plan_indirect` gives a zero count too.
+        assert_eq!(
+            plan_mesh_indirect(&indirect(0, 0, 12), 0).expect("a draw of nothing"),
+            None
+        );
+
+        // `stride: 0` from a one-draw caller is legal and never told to Metal,
+        // so the plan reports the structure's own width.
+        let one = plan_mesh_indirect(&indirect(4, 1, 0), 16)
+            .expect("one structure at offset 4 of a 16-byte buffer")
+            .expect("a draw of one");
+        assert_eq!(one.first, 4);
+        assert_eq!(one.stride, MESH_DISPATCH_ARGS_BYTES);
+        assert_eq!(one.count, 1);
+        assert_eq!(one.offset(0), 4);
+
+        // Tightly packed, and every offset the loop will draw from.
+        let tight = plan_mesh_indirect(&indirect(0, 4, 12), 48)
+            .expect("four tight structures fill a 48-byte buffer exactly")
+            .expect("a draw of four");
+        let offsets: Vec<u64> = (0..tight.count).map(|index| tight.offset(index)).collect();
+        assert_eq!(offsets, vec![0, 12, 24, 36]);
+
+        // A padded stride is honoured rather than assumed away, which is what
+        // `Capability::IndirectArgumentPaddedStride` means here.
+        let padded = plan_mesh_indirect(&indirect(8, 3, 16), 8 + 16 * 2 + 12)
+            .expect("three structures 16 bytes apart from offset 8")
+            .expect("a draw of three");
+        let offsets: Vec<u64> = (0..padded.count)
+            .map(|index| padded.offset(index))
+            .collect();
+        assert_eq!(offsets, vec![8, 24, 40]);
+
+        for (draw, length, what) in [
+            (
+                indirect(2, 1, 0),
+                64,
+                "an offset that is not a multiple of four",
+            ),
+            (indirect(0, 2, 8), 64, "a stride below one structure"),
+            (
+                indirect(0, 2, 14),
+                64,
+                "a stride that is not a multiple of four",
+            ),
+            (indirect(0, 4, 12), 47, "four tight structures in 47 bytes"),
+            (
+                indirect(40, 1, 0),
+                48,
+                "one structure that starts 8 bytes from the end",
+            ),
+        ] {
+            let Err(error) = plan_mesh_indirect(&draw, length) else {
+                panic!("{what} must be refused");
+            };
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: {error:?}"
+            );
+        }
     }
 
     /// **The kernel gets word indices, and they are the caller's byte offsets

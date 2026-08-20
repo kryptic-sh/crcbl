@@ -1259,6 +1259,16 @@ impl Device for MetalDevice {
         let gated = |feature: Features, why: &'static str| -> Support {
             Support::granted(has, feature, why)
         };
+        // One sentence for both mesh rows, shared for `METAL_NO_DRAW_INDIRECT_COUNT`'s
+        // reason: the declaration a caller reads and the parity record a
+        // reviewer reads drifted apart last time they were written twice. The
+        // amplification stage is not separately missing — it is behind the same
+        // unrun code.
+        const NO_MESH_RUN: &str = "the object and mesh stages are built — crcbl_mtl::pipeline fills an \
+             MTLMeshRenderPipelineDescriptor and crcbl_mtl::command records \
+             drawMeshThreadgroups: — but no device has run them: mesh shading needs \
+             supportsFamily:MTLGPUFamilyMetal3 and the Mac CI runs this backend on answers false \
+             to it. This backend reports no Features::MESH_SHADER until one does";
 
         match capability {
             // `MTLBlitCommandEncoder fillBuffer:range:value:` takes a `uint8_t`,
@@ -1291,13 +1301,24 @@ impl Device for MetalDevice {
             // A multi-draw is a loop over the argument structures, so a stride
             // larger than one of them is exactly what the loop steps by.
             Capability::IndirectArgumentPaddedStride => Support::Yes,
-            Capability::MeshShading => Support::No(
-                "Metal has the object/mesh stages and Slang emits them, but this backend builds \
-                 no MTLMeshRenderPipelineDescriptor (the Metal mesh slice)",
-            ),
-            Capability::TaskShaderStage => Support::No(
-                "no mesh pipeline to put an object stage in front of (the Metal mesh slice)",
-            ),
+            // **The calls are written; the flag is not reported, and no device
+            // has run them.** `crate::pipeline`'s `create_mesh_pipeline_impl`
+            // fills an `MTLMeshRenderPipelineDescriptor` with the object, mesh
+            // and fragment functions, and `crate::command` records
+            // `drawMeshThreadgroups:` and its indirect twin. What is missing is
+            // an execution: mesh shading is gated on
+            // `supportsFamily:MTLGPUFamilyMetal3`, the Mac CI runs this backend
+            // on answers `false` to it, and no Mac in this workspace answers
+            // `true` — so the code below has been type-checked and never run.
+            //
+            // Until one runs it this stays `No`, for two reasons that both
+            // point the same way. `Support::Yes` is defined as "the backend
+            // performs it exactly as the seam documents it", which is a claim
+            // nothing here can back; and a `gated` arm would answer
+            // `NotOnThisDevice` off a flag `crate::adapter` never sets, which
+            // `parity_verdict` calls `FalseDeviceGate` and fails — rightly,
+            // because the device withheld nothing.
+            Capability::MeshShading | Capability::TaskShaderStage => Support::No(NO_MESH_RUN),
             Capability::UpdateBindGroup => Support::Yes,
             // `create_pipeline_layout` places the block at the buffer index the
             // committed MSL puts it at — one past every binding, which
@@ -2122,27 +2143,30 @@ impl Device for MetalDevice {
         self.create_graphics_pipeline_impl(desc)
     }
 
-    /// Still refused, and the obstacle is this backend rather than Metal.
+    /// Builds an `MTLMeshRenderPipelineDescriptor`; see `crcbl_mtl::pipeline`.
     ///
-    /// Metal 3 has the object/mesh stages and Slang emits them for
-    /// `-target metal` — `crates/crcbl-shaders/msl/mesh_shader.metal` is
-    /// committed proof, with `[[mesh]]` and `[[object]]` functions in it. What
-    /// is missing here is the backend: a mesh pipeline is built from an
-    /// `MTLMeshRenderPipelineDescriptor` rather than the
-    /// `MTLRenderPipelineDescriptor` `create_graphics_pipeline_impl` fills, and
-    /// the dispatch is `drawMeshThreadgroups:`.
+    /// **Deliberately not gated on `Features::MESH_SHADER`**, and this backend
+    /// deliberately still reports the flag clear — the same split
+    /// `crcbl-dx12`'s mesh path is in, for the same reason. The gate this call
+    /// does apply is the device's own: `crcbl_mtl::quirk`'s `check_mesh_support`
+    /// asks whether the OS has the selector and whether the device answers to
+    /// `supportsFamily:MTLGPUFamilyMetal3`, and refuses by name when either
+    /// says no.
     ///
-    /// This backend accordingly reports no `Features::MESH_SHADER`, so the
-    /// capability model keeps a caller away from here; the refusal is what a
-    /// caller that ignored it gets.
+    /// Reporting the flag is a separate change with a separate obligation:
+    /// `Features::MESH_SHADER` is what
+    /// [`GeometryPath::from_features`](crcbl_hal::GeometryPath::from_features)
+    /// reads, so it moves every Metal device onto the mesh path and re-keys
+    /// every golden image — and, more to the point, none of the code below has
+    /// ever been executed by a device. `Device::supports` therefore still
+    /// answers [`Support::No`] for both mesh capabilities and
+    /// `crcbl_hal::DIVERGENCES` still carries both rows; a Mac that runs this
+    /// is what retires them.
     fn create_mesh_pipeline(
         &self,
-        _desc: &crcbl_hal::MeshPipelineDesc<'_>,
+        desc: &crcbl_hal::MeshPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        Err(not_yet(
-            "mesh pipelines: Metal has the object/mesh stages and Slang emits them, but this \
-             backend builds no MTLMeshRenderPipelineDescriptor (the Metal mesh slice)",
-        ))
+        self.create_mesh_pipeline_impl(desc)
     }
 
     fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {

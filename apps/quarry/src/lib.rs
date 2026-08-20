@@ -52,13 +52,17 @@
 //! [`crcbl::hal::GeometryPath::IndirectPerBatch`] can be looked at without
 //! forcing it.
 //!
-//! Still owed, from that document's milestones: the freeze-selection camera, of
-//! milestone 2. Its two siblings are built — `--lod-view` tints each cluster by
-//! the DAG level it was decimated to, `--heatmap` shades it by the projected
-//! error the selection judged it on — and both are mesh-path only, because a
-//! per-cluster number exists only where selection is per cluster. The skinned
-//! prop is behind an engine feature that does not exist — nothing here does
-//! skinning.
+//! Milestone 2's three debug overlays are all built. `--lod-view` tints each
+//! cluster by the DAG level it was decimated to and `--heatmap` shades it by the
+//! projected error the selection judged it on — both mesh-path only, because a
+//! per-cluster number exists only where selection is per cluster. [`FREEZE_KEY`]
+//! is the third: it pins the eye the cut is chosen from, so a reviewer can fly
+//! away from that viewpoint and look at the boundaries the cut drew. It is not
+//! an overlay and composes with both of the others, which is the combination it
+//! is for.
+//!
+//! Still owed, from that document's milestones: the skinned prop, which is
+//! behind an engine feature that does not exist — nothing here does skinning.
 //!
 //! # Rule 11 does not apply
 //!
@@ -96,6 +100,6 @@ pub use args::{
 };
 pub use gpu::{CELLS, Forced, Gpu, GpuError, Paths};
 pub use menu::{
-    CAMERA_ID, CameraMode, HEATMAP_ID, LOD_VIEW_ID, Menus, QuarryAction, action_for, menus,
-    pause_menu, toggled_to,
+    CAMERA_ID, CameraMode, FREEZE_ID, FREEZE_KEY, HEATMAP_ID, LOD_VIEW_ID, Menus, QuarryAction,
+    action_for, menus, pause_menu, toggled_to,
 };

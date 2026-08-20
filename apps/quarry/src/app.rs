@@ -40,6 +40,7 @@ use crcbl::engine::{
     Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, open_window,
     wait_for_configure,
 };
+use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{CullStats, DebugView, Flyer};
 use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowDesc, WindowId};
@@ -239,12 +240,21 @@ pub struct Quarry {
     /// One value rather than a flag per overlay, which is what makes the panel's
     /// rows exclusive — see [`menu::toggled_to`].
     view: DebugView,
+    /// Where the LOD selection is pinned, or [`None`] while it follows the
+    /// camera. **Owned here** on [`Self::view`]'s terms, and written to the
+    /// renderer every [`HostedGame::draw`].
+    ///
+    /// The *position* rather than a `bool`, because that is what the panel has
+    /// to print: "frozen" on its own tells a reviewer the cut is not the one for
+    /// where they are standing and not where it is the cut for, which is the
+    /// only half they can act on.
+    frozen: Option<Vec3>,
     /// What the last frame whose readback landed kept — re-read every
     /// [`HostedGame::draw`], because the ring answers a few frames behind.
     cull: Option<CullStats>,
     /// The values the pause panel was last built for — `None` until the first
     /// pause, so the panel is always rebuilt once with the real ones.
-    shown: Option<(CameraMode, DebugView)>,
+    shown: Option<(CameraMode, DebugView, bool)>,
     /// Whether the loop has the simulation stopped, recorded in
     /// [`HostedGame::menu_kind`].
     ///
@@ -276,6 +286,12 @@ impl Quarry {
             triangles,
             lod_budget,
             view,
+            // Following the camera. There is no flag for it and deliberately
+            // none: freezing is a thing a reviewer does *at* a viewpoint they
+            // flew to, so a run that started frozen would be frozen at the
+            // dolly's start pose, which is the one place the cut is already
+            // being looked at from.
+            frozen: None,
             cull: None,
             shown: None,
             paused: false,
@@ -328,6 +344,13 @@ impl Quarry {
         self.view
     }
 
+    /// Where the LOD selection is pinned, or [`None`] while it follows the
+    /// camera.
+    #[must_use]
+    pub const fn frozen_selection_eye(&self) -> Option<Vec3> {
+        self.frozen
+    }
+
     /// The free camera, whether or not it is the one in use.
     #[must_use]
     pub const fn flyer(&self) -> &Flyer {
@@ -347,6 +370,24 @@ impl Quarry {
             CameraMode::Dolly => camera::dolly(dolly_at(self.dolly_elapsed)),
             CameraMode::Free => self.flyer.camera(fixed.projection),
         }
+    }
+
+    /// Pins the LOD selection where the camera is standing, or unpins it.
+    ///
+    /// **[`Self::camera`]'s eye, not the flyer's**: the pose to pin is the one
+    /// the reviewer is looking through, and while [`CameraMode::Dolly`] is
+    /// running that is not where the free camera was left. Pinning a viewpoint
+    /// that is not on screen would give a cut nobody can hold against a picture.
+    ///
+    /// Unfreezing throws the pinned position away rather than keeping it for a
+    /// second press. Somewhere to fly *back* to is what [`CameraMode::Fixed`]
+    /// already is, and a remembered eye that the next freeze silently did not
+    /// use would be worse than none.
+    fn toggle_freeze(&mut self) {
+        self.frozen = match self.frozen {
+            Some(_) => None,
+            None => Some(self.camera().eye),
+        };
     }
 }
 
@@ -491,8 +532,24 @@ impl HostedGame for Quarry {
         self.log_heartbeat();
     }
 
-    /// Every key the loop's own three did not claim goes to the camera.
+    /// [`menu::FREEZE_KEY`] pins the selection; every other key the loop's own
+    /// three did not claim goes to the camera.
+    ///
+    /// **On the press and not the release**, and it is not passed on: the flyer
+    /// does not bind this key, so forwarding it would be forwarding a key
+    /// nothing reads, and acting on the release as well would freeze and
+    /// immediately unfreeze.
+    ///
+    /// The panel does not have to be up. A reviewer flying the face pins the cut
+    /// where they are standing and keeps flying, which is the gesture the whole
+    /// feature is — see [`menu::FREEZE_KEY`] on why `F` was free.
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        if key == menu::FREEZE_KEY {
+            if pressed {
+                self.toggle_freeze();
+            }
+            return;
+        }
         self.flyer.key(key, pressed);
     }
 
@@ -558,6 +615,7 @@ impl HostedGame for Quarry {
             QuarryAction::ToggleHeatmap => {
                 self.view = menu::toggled_to(self.view, DebugView::Heatmap);
             }
+            QuarryAction::ToggleFreeze => self.toggle_freeze(),
         }
     }
 
@@ -567,7 +625,8 @@ impl HostedGame for Quarry {
         // frame, or the cursor comes back one frame into a menu the reviewer is
         // already trying to click.
         self.paused = paused;
-        if paused && self.shown != Some((self.camera, self.view)) {
+        let showing = (self.camera, self.view, self.frozen.is_some());
+        if paused && self.shown != Some(showing) {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a press
             // on a row does not throw the reviewer back to the top.
@@ -575,14 +634,17 @@ impl HostedGame for Quarry {
                 .current()
                 .and_then(crcbl::ui::menu::Menu::selected_item)
                 .map(|item| item.id);
-            menus.replace(true, menu::pause_menu(self.camera, self.view));
+            menus.replace(
+                true,
+                menu::pause_menu(self.camera, self.view, self.frozen.is_some()),
+            );
             if let Some(id) = selected {
                 menus
                     .current_mut()
                     .expect("the pause menu is in the set")
                     .select_id(id);
             }
-            self.shown = Some((self.camera, self.view));
+            self.shown = Some(showing);
         }
         paused
     }
@@ -597,6 +659,11 @@ impl HostedGame for Quarry {
         // that was just pressed is on a panel over a frame that has to change
         // behind it.
         gpu.set_debug_view(self.view);
+        // Here for the same reason, and unconditionally rather than on the
+        // frames it changed: a `None` written every frame is the renderer's own
+        // default written every frame, which is the state every golden was
+        // blessed in.
+        gpu.set_frozen_selection_eye(self.frozen);
         self.paths = gpu.paths();
         // The budget a frame was really selected under, not the one the flag
         // asked for — see the field. Zero is what the renderer holds before its
@@ -702,6 +769,18 @@ impl crcbl::ui::DebugModule for Quarry {
         // lane and resolve to one picture, so a panel with a row per switch
         // could say `on` twice about a frame that drew one of them.
         section.row_str("view", self.view.label());
+        // **Where it is frozen, not that it is.** The cut under a frozen
+        // selection belongs to a viewpoint that is deliberately not this one, so
+        // a row saying only `frozen` leaves a reviewer unable to tell a cut
+        // chosen two metres back from one chosen at the other end of the face —
+        // which is the difference they froze it to look at.
+        match self.frozen {
+            None => section.row_str("selection", "follows the camera"),
+            Some(at) => section.row(
+                "selection",
+                format_args!("frozen at {:.1} {:.1} {:.1}", at.x, at.y, at.z),
+            ),
+        }
         match self.cull {
             None => {
                 section.row_str("instances kept", "pending — the ring is frames behind");
@@ -1053,6 +1132,101 @@ mod tests {
         // makes each row its own off switch.
         press_row(&mut engine, window, 0);
         assert_eq!(engine.gpu().debug_view(), DebugView::Shaded);
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The freeze key and its row pin the selection at the camera, and the
+    /// renderer is what says so.**
+    ///
+    /// The observable is `ForwardRenderer::frozen_selection_eye` — what the next
+    /// `begin_frame` will actually select from — rather than this fixture's own
+    /// field, on `--lod-budget`'s terms: a key that reached [`Quarry::frozen`]
+    /// and never reached `set_frozen_selection_eye` would leave every frame
+    /// selecting from the live camera while the panel said `frozen`, and a test
+    /// reading back the request would pass either way.
+    ///
+    /// **And it composes.** The last two assertions are the whole reason
+    /// freezing is not a fourth [`DebugView`]: a reviewer pins the cut *in order
+    /// to* look at it through the LOD tint, so switching the tint on must not
+    /// unpin the selection and pinning must not clear the tint.
+    #[test]
+    fn the_freeze_key_and_row_pin_the_selection_at_the_renderer() {
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.gpu().frozen_selection_eye(),
+            None,
+            "a run nobody pressed the key in must select from the live camera",
+        );
+
+        let standing_at = engine.game().camera().eye;
+        engine
+            .shell_mut()
+            .key_press(window, menu::FREEZE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.gpu().frozen_selection_eye(),
+            Some(standing_at),
+            "the key never reached the renderer, or pinned somewhere the camera is not",
+        );
+
+        // The release must not undo it — a freeze that lasted as long as the key
+        // was held would be unusable and would pass every assertion above.
+        engine
+            .shell_mut()
+            .key_release(window, menu::FREEZE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(engine.gpu().frozen_selection_eye(), Some(standing_at));
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+        assert!(
+            ui_text(&engine)
+                .iter()
+                .any(|text| text == "FREEZE SELECTION: ON"),
+            "{:?}",
+            ui_text(&engine),
+        );
+
+        // Six rows down from RESUME is FREEZE SELECTION. Pressing it releases
+        // the pin.
+        press_row(&mut engine, window, 6);
+        assert_eq!(
+            engine.gpu().frozen_selection_eye(),
+            None,
+            "the row did not reach the renderer",
+        );
+        assert!(
+            ui_text(&engine)
+                .iter()
+                .any(|text| text == "FREEZE SELECTION: OFF"),
+            "{:?}",
+            ui_text(&engine),
+        );
+
+        // Back on, then the tint on top of it: two rows that must both hold.
+        press_row(&mut engine, window, 0);
+        assert_eq!(engine.gpu().frozen_selection_eye(), Some(standing_at));
+        // FREEZE SELECTION is the last of seven rows and the selection wraps, so
+        // five more downs from it lands on LOD VIEW.
+        press_row(&mut engine, window, 5);
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::LodTint,
+            "five rows down from FREEZE SELECTION is LOD VIEW",
+        );
+        assert_eq!(
+            engine.gpu().frozen_selection_eye(),
+            Some(standing_at),
+            "switching an overlay on unpinned the selection — freezing is not one of the views",
+        );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

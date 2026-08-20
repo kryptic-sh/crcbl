@@ -1376,7 +1376,67 @@ decision already taken safer rather than shakier: a mechanism whose smallest
 probe silently draws nothing on some runs is not one to have built the indirect
 count on, and `crcbl_mtl::indirect_count` does not.
 
-### DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
+### The Metal mesh slice is written and has never executed (2026-08-20)
+
+`crcbl-mtl` builds `MTLMeshRenderPipelineDescriptor` and records
+`drawMeshThreadgroups:` and its indirect form. **No Metal 3 device has run a
+line of it**, so it reports no `Features::MESH_SHADER`, `supports` still answers
+`Support::No`, and both Metal mesh rows stay in `DIVERGENCES` and
+`REVIEWED_BLOCKERS` — `parity_blockers()` is still six. Only the rows' `why`
+text changed: the obstacle moved from _unwritten_ to _unrun_.
+
+**CI cannot close this.** The macOS runner's device answers `false` to
+`supportsFamily:MTLGPUFamilyMetal3`, so the gate refuses before anything runs.
+It needs a real Metal 3 Mac.
+
+**The checklist for whoever has one**, in order:
+
+1. `cargo test -p crcbl-mtl` on the Mac — the macOS-only device tests compile
+   and have never run against this code.
+2. Add a device test shaped on `crcbl_dx12`'s
+   `a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible`:
+   draw `mesh_shader.slang` with and without `taskMain` and assert the tint
+   kills red. Use `ShaderStages::ALL`, not `MESH` — `check_entries` still
+   refuses a mesh-visible layout while the flag is unreported.
+3. **Settle the depth-only question.** Apple's header says the mesh descriptor
+   needs either a non-nil `fragmentFunction` or `rasterizationEnabled = NO`; the
+   classic descriptor carries no such sentence. A nil fragment function is
+   passed through deliberately, because obeying it literally would make
+   `crcbl-render`'s shadow and prepass mesh pipelines write no depth. If
+   `newRenderPipelineStateWithMeshDescriptor:` rejects it, that is a design
+   decision to bring back here.
+4. Confirm the draws actually draw, and that the indirect form reads three words
+   at the offsets `plan_mesh_indirect` computes.
+5. Re-verify the argument-table indices on hardware. The layout fix makes them
+   match the committed MSL by inspection; nothing has executed it.
+6. **Then** report the flag, switch `supports` to `gated(…)`, delete both
+   `DIVERGENCES` rows and both `REVIEWED_BLOCKERS` rows, and
+   `the_parity_blockers_are_exactly_the_reviewed_list` goes from six to four.
+7. Expect a golden re-bless: reporting the flag moves every Metal device onto
+   `GeometryPath::MeshShader`.
+
+**`crcbl-mtl`'s Metal index rule is sound only over a complete layout.** It
+computes an index by counting the layout's same-table entries below a binding;
+Slang counts the _module's_ declarations. Those agree only when the layout is
+the shader's whole declaration set. **No arithmetic recovers from an incomplete
+one** — the obvious candidate (binding minus other-table bindings below) was
+checked against the real numbers and survives omitted buffers while breaking
+texture indices (`shadow_atlas` moves from `texture(1)` to `texture(3)`). So the
+invariant lives in the caller, guarded by
+`the_mesh_layout_declares_the_same_bindings_with_and_without_a_task_stage`.
+
+**Considered and declined: a "paravirtual" device-name gate on mesh support.**
+There is no measurement behind it here — CI's device already answers `false` to
+Metal3 — and a gate that fires on nothing is a check that proves nothing.
+
+**One refactor worth a reviewer's eye.** Sharing the raster path's target checks
+with the mesh path moved the per-target depth/stencil-format refusal _earlier_
+in `create_graphics_pipeline`, ahead of entry-point resolution. A macOS test
+asserting precedence between those two errors would flip. Judged unlikely and
+the cleaner factoring kept; it compiles under the darwin gate and no macOS test
+has run.
+
+## DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
 
 **Option (d) has been tried, and it does not fix it.** Run 32297440428 on
 `diagnose/dx12-warp-redist` gave the runner `Microsoft.Direct3D.WARP` 1.0.20 and
@@ -1826,7 +1886,7 @@ What would make it worth doing: a fourth copy. Two fixtures with different
 requirements are a resemblance; a third caller needing the same extras is
 duplicated knowledge.
 
-### quarry (S4C): what is left is one overlay and the skinned case
+### quarry (S4C): what is left is the skinned case and two reviews
 
 The phase table's S4C row asks for "meshlet clusters, QEM cluster LOD, and all
 three `GeometryPath` values on one dense scene", gated by "golden frames per
@@ -1957,14 +2017,6 @@ it, forced by subtracting features from one adapter.
   setter is an API decision, and an orthographic camera legitimately writes
   negative infinity through the same field.
 
-- **The mesh-without-task-shader path's Metal indices are already wrong**, and
-  the heatmap neither caused nor fixed it. `crcbl-mtl` counts layout entries,
-  and a `MESH_SHADER`-without-`TASK_SHADER` layout omits bindings 13, 14, 18 and
-  19 — so `cluster_select` would land at `buffer(11)` while the MSL says
-  `buffer(13)`. Unreachable today because that backend refuses mesh pipelines
-  outright (`crcbl_mtl::device::create_mesh_pipeline`). Noticed while checking
-  the new binding; not verified on hardware.
-
 - **Milestone 4: the tiling case and the Pages demo are done, the skinned one is
   blocked.** `crcbl_quarry::tile` is the modular wall piece, and two tiles
   decimated independently still meet — asserted bit-for-bit. **The skinned prop
@@ -2017,11 +2069,16 @@ it, forced by subtracting features from one adapter.
   it would take: a second atomic per cause, and a matching pair of fields. Not
   costed against the other backends, and the seam rule applies.
 
-- **The freeze-selection-from-here camera is still owed.** Topic 25's third
-  overlay, beside the LOD tint and the screen-error heatmap, both built. Nothing
-  in `apps/quarry` or `crcbl-render` holds a cut across a camera move today, and
-  it is what makes "the selection is per cluster" checkable by walking away from
-  a frozen cut rather than by reading a count.
+- **All three of topic 25's overlays are built.** The LOD tint, the screen-error
+  heatmap and `ForwardRenderer::set_frozen_selection_eye`, which pins the eye
+  the cut is selected from while the frustum, the normal cone and the frame stay
+  on the live camera — so a reviewer flies away from the pinned point and looks
+  at the cut that point chose. `apps/quarry/tests/device/freeze.rs` asserts the
+  cut stops moving, that an unpinned one does not (or the first claim is about a
+  renderer ignoring the camera), and that the culls keep following the camera.
+  Nothing in `apps/quarry` or `crcbl-render` holds a cut across a camera move
+  today, and it is what makes "the selection is per cluster" checkable by
+  walking away from a frozen cut rather than by reading a count.
 
 **DECIDED 2026-08-20 — the other three, so the gate has one shape.**
 

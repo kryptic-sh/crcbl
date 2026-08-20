@@ -1167,8 +1167,40 @@ pub struct MeshPipelineDesc<'a> {
     /// device may have the mesh stage without it, which is why the seam reports
     /// the two separately.
     pub task: Option<ShaderEntry<'a>>,
+    /// Invocations per **task** workgroup — the same numbers the task stage's
+    /// own `[numthreads(x, y, z)]` declares. Ignored when
+    /// [`task`](Self::task) is `None`, and
+    /// [`check_workgroup_sizes`](Self::check_workgroup_sizes) checks it only
+    /// then.
+    ///
+    /// Here for [`mesh_workgroup_size`](Self::mesh_workgroup_size)'s reason.
+    pub task_workgroup_size: [u32; 3],
     /// Mesh stage. Emits vertices and primitives; there is no vertex stage.
     pub mesh: ShaderEntry<'a>,
+    /// Invocations per **mesh** workgroup — the same numbers the mesh stage's
+    /// own `[numthreads(x, y, z)]` declares.
+    ///
+    /// # Why this is on the descriptor, exactly as it is for compute
+    ///
+    /// [`ComputePipelineDesc::workgroup_size`] gives the whole argument and it
+    /// is the same one here, one stage along: SPIR-V, DXIL and WGSL bake the
+    /// declared size into the module — `vkCmdDrawMeshTasksEXT` and
+    /// `DispatchMesh` therefore take workgroup *counts* and nothing else —
+    /// while **MSL has nowhere to declare it**. Slang's Metal target drops the
+    /// `[numthreads(…)]` entirely: `msl/mesh_shader.metal` emits
+    /// `[[mesh]] void meshMain(uint3 index [[thread_position_in_grid]], …)`
+    /// with no thread count anywhere in the artifact, and
+    /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`
+    /// takes both sizes at the **call**. A Metal backend holding only a module
+    /// and an entry point has no number to pass and cannot draw at all.
+    ///
+    /// So this is the second field of this seam `crcbl-mtl` is the reason for,
+    /// and it carries the same obligation: **take it from the crate that owns
+    /// the shader source rather than writing a literal**, because a value that
+    /// disagrees with the `[numthreads(…)]` is invisible on the three backends
+    /// that read the size out of the module and launches the wrong number of
+    /// threads only on Metal.
+    pub mesh_workgroup_size: [u32; 3],
     /// Fragment stage; `None` for a depth-only pass, as on
     /// [`GraphicsPipelineDesc`].
     pub fragment: Option<ShaderEntry<'a>>,
@@ -1229,6 +1261,62 @@ pub struct ComputePipelineDesc<'a> {
     pub workgroup_size: [u32; 3],
 }
 
+impl MeshPipelineDesc<'_> {
+    /// Checks [`mesh_workgroup_size`](Self::mesh_workgroup_size), and
+    /// [`task_workgroup_size`](Self::task_workgroup_size) when there is a task
+    /// stage to launch.
+    ///
+    /// **Takes no [`Limits`], unlike
+    /// [`ComputePipelineDesc::check_workgroup_size`], because the seam models
+    /// no mesh or task workgroup ceiling** — and borrowing the compute one
+    /// would be wrong in both directions: Vulkan reports
+    /// `maxTaskWorkGroupSize` and `maxMeshWorkGroupSize` separately from
+    /// compute's, and D3D12 caps a mesh `[numthreads(…)]` product at 128
+    /// whatever a compute one may be. So this is the half every backend can
+    /// perform with nothing to consult, and the device's own ceiling stays the
+    /// backend's to check where it can see one — `crcbl-mtl` does, against the
+    /// `maxTotalThreadsPerObjectThreadgroup` and
+    /// `maxTotalThreadsPerMeshThreadgroup` the built `MTLRenderPipelineState`
+    /// reports, because on Metal exceeding it is a raise and a raise aborts the
+    /// process.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`], naming the stage and the dimension.
+    pub fn check_workgroup_sizes(&self) -> Result<(), HalError> {
+        workgroup_invocations(self.mesh_workgroup_size, "mesh_workgroup_size")?;
+        if self.task.is_some() {
+            workgroup_invocations(self.task_workgroup_size, "task_workgroup_size")?;
+        }
+        Ok(())
+    }
+}
+
+/// A declared workgroup size multiplied out, or why it describes no workgroup.
+///
+/// The half of a workgroup-size check that needs no device to make: a zero
+/// extent runs nothing and no shader declares one, and a product that overflows
+/// a `u32` is a number no API has a field for. `what` names the field, because
+/// a mesh pipeline has two of them and the message has to say which.
+fn workgroup_invocations(size: [u32; 3], what: &str) -> Result<u32, HalError> {
+    for (axis, extent) in size.into_iter().enumerate() {
+        if extent == 0 {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{what} {size:?} is zero in dimension {axis}: a workgroup with no invocations runs \
+                 nothing, and no shader declares one"
+            )));
+        }
+    }
+    size[0]
+        .checked_mul(size[1])
+        .and_then(|product| product.checked_mul(size[2]))
+        .ok_or_else(|| {
+            HalError::InvalidDescriptor(format!(
+                "{what} {size:?} overflows a u32 when multiplied out"
+            ))
+        })
+}
+
 impl ComputePipelineDesc<'_> {
     /// Checks [`workgroup_size`](Self::workgroup_size) against what the device
     /// can actually launch.
@@ -1245,17 +1333,15 @@ impl ComputePipelineDesc<'_> {
     /// exceeded.
     pub fn check_workgroup_size(&self, limits: &Limits) -> Result<(), HalError> {
         let size = self.workgroup_size;
+        // The zero and overflow halves are shared with
+        // `MeshPipelineDesc::check_workgroup_sizes`; the per-axis ceiling below
+        // is compute's own and has no mesh equivalent in `Limits`.
+        let invocations = workgroup_invocations(size, "workgroup_size")?;
         for (axis, (extent, max)) in size
             .into_iter()
             .zip(limits.max_compute_workgroup_size)
             .enumerate()
         {
-            if extent == 0 {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "workgroup_size {size:?} is zero in dimension {axis}: a workgroup with no \
-                     invocations runs nothing, and no shader declares one"
-                )));
-            }
             if extent > max {
                 return Err(HalError::InvalidDescriptor(format!(
                     "workgroup_size {size:?} exceeds this device's \
@@ -1264,14 +1350,6 @@ impl ComputePipelineDesc<'_> {
                 )));
             }
         }
-        let invocations = size[0]
-            .checked_mul(size[1])
-            .and_then(|product| product.checked_mul(size[2]))
-            .ok_or_else(|| {
-                HalError::InvalidDescriptor(format!(
-                    "workgroup_size {size:?} overflows a u32 when multiplied out"
-                ))
-            })?;
         if invocations > limits.max_compute_invocations_per_workgroup {
             return Err(HalError::InvalidDescriptor(format!(
                 "workgroup_size {size:?} is {invocations} invocations, over this device's \

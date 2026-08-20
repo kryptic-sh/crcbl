@@ -72,6 +72,26 @@
 //! until `draw` reads it, and a draw with nothing bound is refused rather than
 //! guessing at triangles.
 //!
+//! # A mesh pipeline is the same object from a different descriptor
+//!
+//! `MTLMeshRenderPipelineDescriptor` produces an `MTLRenderPipelineState` like
+//! any other, bound with `setRenderPipelineState:` and destroyed the same way —
+//! which is what makes `crcbl_hal::MeshPipelineDesc`'s decision to share
+//! [`GraphicsPipelineHandle`] true on this backend and not only on the other
+//! two. So [`GraphicsPipelineEntry`] is one type with one extra field:
+//! [`MeshThreadgroups`], `Some` on the mesh path and `None` on the raster one.
+//!
+//! **That field is doing two jobs, and the second is a check.** It carries the
+//! two threadgroup sizes `drawMeshThreadgroups:` takes — Metal's third place of
+//! taking at the call something the other APIs bake into the module — and its
+//! presence is the only thing that can tell a mesh pipeline from a raster one
+//! at the draw, which `crcbl_mtl::command`'s `mesh_draw_target` needs because
+//! Metal answers the mismatch by raising.
+//!
+//! **Nothing below has run on a device.** The crate docs say what that means
+//! for what this backend reports; here it means the doc comments say what the
+//! code does and never that it works.
+//!
 //! # Reversed-Z crosses unchanged
 //!
 //! [`CompareOp::Greater`](crcbl_hal::CompareOp) reaches
@@ -87,11 +107,12 @@ use crcbl_hal::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::NSString;
+use objc2_foundation::{NSProcessInfo, NSString};
 use objc2_metal::{
     MTLCompareFunction, MTLComputePipelineDescriptor, MTLComputePipelineState, MTLCullMode,
     MTLDepthClipMode, MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLFunction,
-    MTLLibrary, MTLPipelineOption, MTLPrimitiveType, MTLRenderPipelineDescriptor,
+    MTLGPUFamily, MTLLibrary, MTLMeshRenderPipelineDescriptor, MTLPipelineOption, MTLPixelFormat,
+    MTLPrimitiveType, MTLRenderPipelineColorAttachmentDescriptorArray, MTLRenderPipelineDescriptor,
     MTLRenderPipelineState, MTLSize, MTLStencilDescriptor, MTLStencilOperation,
     MTLTriangleFillMode, MTLWinding,
 };
@@ -145,6 +166,24 @@ pub(crate) struct RasterState {
     pub(crate) bias: [f32; 3],
 }
 
+/// The two threadgroup sizes `drawMeshThreadgroups:` takes, which Metal will
+/// not take any earlier.
+///
+/// The mesh path's twin of [`ComputePipelineEntry::threads_per_threadgroup`],
+/// and here for the same reason: MSL declares no thread count, the draw call is
+/// where Metal asks for one, and the encoder has only the *bound* pipeline to
+/// ask. See
+/// [`MeshPipelineDesc::mesh_workgroup_size`](crcbl_hal::MeshPipelineDesc::mesh_workgroup_size).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MeshThreadgroups {
+    /// `threadsPerObjectThreadgroup`. Metal ignores it when the pipeline has no
+    /// object function, and a pipeline with none carries the descriptor's value
+    /// anyway rather than a second `Option` nothing reads.
+    pub(crate) object: MTLSize,
+    /// `threadsPerMeshThreadgroup`.
+    pub(crate) mesh: MTLSize,
+}
+
 /// A graphics pipeline: the Metal object, plus the state Metal would not take.
 #[derive(Debug)]
 pub(crate) struct GraphicsPipelineEntry {
@@ -156,6 +195,14 @@ pub(crate) struct GraphicsPipelineEntry {
     /// [`default_depth_stencil_state`].
     pub(crate) depth_stencil: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     pub(crate) raster: RasterState,
+    /// `Some` for a pipeline built from an `MTLMeshRenderPipelineDescriptor`,
+    /// and `None` for a raster one.
+    ///
+    /// **Also what tells the two apart at the draw.** The seam gives both kinds
+    /// one [`GraphicsPipelineHandle`] — `crcbl_hal::MeshPipelineDesc` argues
+    /// why — so this is the only thing `draw_mesh_tasks` has to check before
+    /// it makes a call Metal would otherwise answer by raising.
+    pub(crate) mesh: Option<MeshThreadgroups>,
 }
 
 /// A compute pipeline, and the threadgroup size Metal will not take until the
@@ -191,6 +238,8 @@ pub(crate) struct BoundPipeline {
     /// Never absent, as [`GraphicsPipelineEntry::depth_stencil`] says.
     pub(crate) depth_stencil: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     pub(crate) raster: RasterState,
+    /// As [`GraphicsPipelineEntry::mesh`].
+    pub(crate) mesh: Option<MeshThreadgroups>,
 }
 
 impl DeviceInner {
@@ -205,6 +254,7 @@ impl DeviceInner {
             raw: entry.raw.clone(),
             depth_stencil: entry.depth_stencil.clone(),
             raster: entry.raster,
+            mesh: entry.mesh,
         })
     }
 
@@ -345,25 +395,7 @@ impl MetalDevice {
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
         self.check_pipeline_layout(desc.layout)?;
-        // A pipeline with no fragment stage is Metal's depth-only pipeline, and
-        // it must declare no colour attachment: Metal raises on a nil fragment
-        // function beside a colour format. The seam already calls that
-        // combination out ("`None` for a depth-only pass"), so this is a caller
-        // bug being caught before it becomes an abort.
-        if desc.fragment.is_none() && !desc.color_targets.is_empty() {
-            return Err(HalError::InvalidDescriptor(format!(
-                "a pipeline with no fragment stage declares {} colour target(s); Metal permits a \
-                 nil fragment function only for a depth-only pipeline",
-                desc.color_targets.len()
-            )));
-        }
-        let ceiling = self.inner.caps.limits.max_color_attachments as usize;
-        if desc.color_targets.len() > ceiling {
-            return Err(HalError::InvalidDescriptor(format!(
-                "{} colour targets exceed this device's limit of {ceiling}",
-                desc.color_targets.len()
-            )));
-        }
+        self.check_color_targets(desc.fragment.is_some(), desc.color_targets)?;
         // The other half of `crcbl_mtl::quirk`'s withheld `Features::DEPTH_CLAMP`,
         // and the half without which withholding it would be worse than not: a
         // backend that declares the capability absent and then sets
@@ -385,66 +417,15 @@ impl MetalDevice {
         descriptor.setFragmentFunction(fragment.as_deref());
         descriptor.setRasterSampleCount(to_ns(u64::from(samples)));
         descriptor.setAlphaToCoverageEnabled(desc.multisample.alpha_to_coverage);
+        fill_color_attachments(&descriptor.colorAttachments(), desc.color_targets);
 
-        for (index, target) in desc.color_targets.iter().enumerate() {
-            if target.format.is_depth_stencil() {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "colour target {index} is {:?}, which is a depth/stencil format",
-                    target.format
-                )));
-            }
-            // SAFETY: `objc2` marks the subscript unsafe because Metal does not
-            // bounds-check the attachment index. `index` was just bounded by
-            // `ceiling`, this device's `max_color_attachments`, which sits at
-            // the seam's floor and so is at or below the array's own length —
-            // the same argument `begin_render_pass` makes for the render pass
-            // descriptor's identical array.
-            let slot = unsafe {
-                descriptor
-                    .colorAttachments()
-                    .objectAtIndexedSubscript(index)
-            };
-            slot.setPixelFormat(conv::pixel_format(target.format));
-            slot.setWriteMask(conv::color_write_mask(target.write_mask));
-            if let Some(blend) = target.blend {
-                slot.setBlendingEnabled(true);
-                slot.setSourceRGBBlendFactor(conv::blend_factor(blend.color_src));
-                slot.setDestinationRGBBlendFactor(conv::blend_factor(blend.color_dst));
-                slot.setRgbBlendOperation(conv::blend_operation(blend.color_op));
-                slot.setSourceAlphaBlendFactor(conv::blend_factor(blend.alpha_src));
-                slot.setDestinationAlphaBlendFactor(conv::blend_factor(blend.alpha_dst));
-                slot.setAlphaBlendOperation(conv::blend_operation(blend.alpha_op));
-            }
+        let plan = self.depth_stencil_plan(desc.depth_stencil, desc.label)?;
+        if let Some(format) = plan.depth {
+            descriptor.setDepthAttachmentPixelFormat(format);
         }
-
-        let depth_stencil = match desc.depth_stencil {
-            // The device's shared always-pass state, not nil. Which object a
-            // no-depth pipeline binds is decided here, once per pipeline,
-            // rather than at every bind — see
-            // [`DeviceInner::default_depth_stencil`].
-            None => self.inner.default_depth_stencil.clone(),
-            Some(state) => {
-                if !state.format.is_depth_stencil() {
-                    return Err(HalError::InvalidDescriptor(format!(
-                        "DepthStencilState::format is {:?}, which has no depth plane",
-                        state.format
-                    )));
-                }
-                descriptor.setDepthAttachmentPixelFormat(conv::pixel_format(state.format));
-                // Keyed off the format exactly as `begin_render_pass` is: a
-                // `D32Float` pipeline has no stencil plane to declare, and
-                // declaring one whose format has no stencil raises.
-                if state.format.has_stencil() {
-                    descriptor.setStencilAttachmentPixelFormat(conv::pixel_format(state.format));
-                } else if state.stencil.is_some() {
-                    return Err(HalError::InvalidDescriptor(format!(
-                        "a stencil state on a {:?} pipeline, which has no stencil plane to test",
-                        state.format
-                    )));
-                }
-                self.depth_stencil_state(&state, desc.label)?
-            }
-        };
+        if let Some(format) = plan.stencil {
+            descriptor.setStencilAttachmentPixelFormat(format);
+        }
 
         let label = desc.label.unwrap_or("<unlabelled>");
         let raw = self
@@ -458,30 +439,298 @@ impl MetalDevice {
                 ))
             })?;
 
-        let primitive = desc.primitive;
         let handle = self
             .state()
             .graphics_pipelines
             .insert(GraphicsPipelineEntry {
                 owner: self.inner.id,
                 raw,
-                depth_stencil,
-                raster: RasterState {
-                    primitive: conv::primitive_type(primitive.topology),
-                    cull: conv::cull_mode(primitive.cull_mode),
-                    winding: conv::winding(primitive.front_face),
-                    fill: conv::fill_mode(primitive.polygon_mode),
-                    clip: conv::depth_clip_mode(primitive.depth_clamp),
-                    bias: desc.depth_stencil.map_or([0.0; 3], |state| {
-                        [
-                            state.bias.constant,
-                            state.bias.slope_scale,
-                            state.bias.clamp,
-                        ]
-                    }),
-                },
+                depth_stencil: plan.state,
+                raster: raster_state(desc.primitive, desc.depth_stencil),
+                mesh: None,
             });
         Ok(self.stamp(handle))
+    }
+
+    /// Builds an `MTLRenderPipelineState` from an
+    /// `MTLMeshRenderPipelineDescriptor` — the object/mesh path.
+    ///
+    /// **Everything after the geometry stages is
+    /// [`create_graphics_pipeline_impl`](Self::create_graphics_pipeline_impl)'s,
+    /// through the same helpers**, because Metal's two descriptors agree
+    /// about all of it: the colour attachment array is literally the same
+    /// `MTLRenderPipelineColorAttachmentDescriptorArray` type, the depth and
+    /// stencil formats are the same two properties, and the result is one
+    /// `MTLRenderPipelineState` bound with `setRenderPipelineState:` like any
+    /// other. What differs is the two or three functions, the two threadgroup
+    /// ceilings below, and the creation selector.
+    ///
+    /// # The threadgroup sizes are declared here and taken at the draw
+    ///
+    /// [`MeshPipelineDesc::mesh_workgroup_size`](crcbl_hal::MeshPipelineDesc::mesh_workgroup_size)
+    /// argues why the seam carries them at all. This is what the numbers are
+    /// for on the way in: `maxTotalThreadsPer{Object,Mesh}Threadgroup` default
+    /// to whatever `[[max_total_threads_per_threadgroup(N)]]` the function
+    /// declares, **and Slang's Metal target emits no such attribute** — the
+    /// committed `msl/mesh_shader.metal` has none on either `[[mesh]]` entry
+    /// point — so leaving them at zero would give Metal nothing to validate the
+    /// draw against. Setting them makes an over-large size an `NSError` from
+    /// this call rather than a raise at `drawMeshThreadgroups:`, and a raise
+    /// aborts the process; it is the same trade `create_compute_pipeline_impl`
+    /// makes with `maxTotalThreadsPerThreadgroup`.
+    ///
+    /// # A depth-only mesh pipeline is built and not refused
+    ///
+    /// Apple's header says of the mesh descriptor's `fragmentFunction` that "to
+    /// create a pipeline, you must either set fragmentFunction to non-nil, or
+    /// set rasterizationEnabled to NO" — a sentence the classic
+    /// `MTLRenderPipelineDescriptor` does not carry, and one this workspace has
+    /// no Mac to test. It is **not** acted on here: `rasterizationEnabled = NO`
+    /// drops every primitive before rasterisation, so obeying it literally
+    /// would turn `crcbl-render`'s shadow and depth-prepass mesh pipelines into
+    /// passes that write no depth — a wrong picture with a clean log. A nil
+    /// fragment function is passed through instead, and if Metal does reject it
+    /// the refusal arrives as [`HalError::PipelineCreation`] carrying Metal's
+    /// own message, which is a loud failure a reader can act on.
+    pub(crate) fn create_mesh_pipeline_impl(
+        &self,
+        desc: &crcbl_hal::MeshPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        // First, and before any handle is resolved: a caller on a device or an
+        // OS that has no mesh stage needs to hear which of the two it was, not
+        // which handle was stale. `crcbl_mtl::quirk` owns both questions.
+        crate::quirk::check_mesh_support(
+            self.inner.raw.supportsFamily(MTLGPUFamily::Metal3),
+            NSProcessInfo::processInfo()
+                .operatingSystemVersion()
+                .majorVersion as i64,
+        )?;
+        // The half of the workgroup-size check that needs no device. The other
+        // half is against the built pipeline's own ceilings, below.
+        desc.check_workgroup_sizes()?;
+        self.check_pipeline_layout(desc.layout)?;
+        self.check_color_targets(desc.fragment.is_some(), desc.color_targets)?;
+        crate::quirk::check_depth_clamp(desc.primitive, self.inner.caps.features)?;
+        let samples = raster_sample_count(&desc.multisample);
+
+        let descriptor = MTLMeshRenderPipelineDescriptor::new();
+        if let Some(label) = desc.label {
+            descriptor.setLabel(Some(&NSString::from_str(label)));
+        }
+        // "object" and "mesh" rather than "task" and "mesh", because the
+        // message names the slot Metal was asked for and MSL calls the first
+        // one `[[object]]`.
+        let object = match desc.task {
+            Some(entry) => Some(self.function(entry, "object")?),
+            None => None,
+        };
+        let mesh = self.function(desc.mesh, "mesh")?;
+        let fragment = match desc.fragment {
+            Some(entry) => Some(self.function(entry, "fragment")?),
+            None => None,
+        };
+        // SAFETY: `objc2` marks these three unsafe because a function put in a
+        // stage's slot must be one that stage can run and Metal does not check
+        // it at the setter. Each came from `function`, which resolved it by
+        // name out of an `MTLLibrary` this device compiled, and a name that is
+        // not a function of that library is the `None` that call already turned
+        // into an error. A function of the wrong *kind* — `fragmentMain` in the
+        // mesh slot — is what `newRenderPipelineStateWithMeshDescriptor:` below
+        // returns an `NSError` for, which is where the seam reports it.
+        unsafe {
+            descriptor.setObjectFunction(object.as_deref());
+            descriptor.setMeshFunction(Some(&mesh));
+            descriptor.setFragmentFunction(fragment.as_deref());
+        }
+        // SAFETY: `objc2` marks this unsafe because Metal does not bounds-check
+        // the sample count. `raster_sample_count` answers the seam's own
+        // `MultisampleState::samples`, which `check_color_targets` above shares
+        // with the raster path and which the classic descriptor takes through
+        // the identical property.
+        unsafe { descriptor.setRasterSampleCount(to_ns(u64::from(samples))) };
+        descriptor.setAlphaToCoverageEnabled(desc.multisample.alpha_to_coverage);
+        fill_color_attachments(&descriptor.colorAttachments(), desc.color_targets);
+
+        let plan = self.depth_stencil_plan(desc.depth_stencil, desc.label)?;
+        if let Some(format) = plan.depth {
+            descriptor.setDepthAttachmentPixelFormat(format);
+        }
+        if let Some(format) = plan.stencil {
+            descriptor.setStencilAttachmentPixelFormat(format);
+        }
+
+        // `check_workgroup_sizes` above ruled out the zero and the overflow, so
+        // both products are a positive `u32` and the casts widen.
+        let object_threads = threadgroup_size(desc.task_workgroup_size);
+        let mesh_threads = threadgroup_size(desc.mesh_workgroup_size);
+        if desc.task.is_some() {
+            descriptor.setMaxTotalThreadsPerObjectThreadgroup(to_ns(u64::from(
+                threadgroup_product(desc.task_workgroup_size),
+            )));
+        }
+        descriptor.setMaxTotalThreadsPerMeshThreadgroup(to_ns(u64::from(threadgroup_product(
+            desc.mesh_workgroup_size,
+        ))));
+
+        let label = desc.label.unwrap_or("<unlabelled>");
+        let raw = self
+            .inner
+            .raw
+            .newRenderPipelineStateWithMeshDescriptor_options_reflection_error(
+                &descriptor,
+                MTLPipelineOption::None,
+                None,
+            )
+            .map_err(|error| {
+                HalError::PipelineCreation(format!(
+                    "MTLDevice::newRenderPipelineStateWithMeshDescriptor:options:reflection:error: \
+                     rejected `{label}`: {error}"
+                ))
+            })?;
+
+        // The other half of the size check, against what this device compiled
+        // the functions into — the mesh twin of the compute path's
+        // `maxTotalThreadsPerThreadgroup` guard, and it exists for the same
+        // reason: Metal answers an over-large threadgroup at the draw by
+        // raising, and a raise aborts the process.
+        check_threadgroup_ceiling(
+            label,
+            "Mesh",
+            desc.mesh_workgroup_size,
+            raw.maxTotalThreadsPerMeshThreadgroup() as u64,
+        )?;
+        if desc.task.is_some() {
+            check_threadgroup_ceiling(
+                label,
+                "Object",
+                desc.task_workgroup_size,
+                raw.maxTotalThreadsPerObjectThreadgroup() as u64,
+            )?;
+        }
+
+        let handle = self
+            .state()
+            .graphics_pipelines
+            .insert(GraphicsPipelineEntry {
+                owner: self.inner.id,
+                raw,
+                depth_stencil: plan.state,
+                // The topology in here is **not** read by a mesh draw — the
+                // mesh shader's own `[outputtopology(…)]` decides it, which is
+                // what `MeshPipelineDesc::primitive` says — but every other
+                // field is: cull mode, winding, fill mode, depth clip and depth
+                // bias are encoder state on Metal whichever stage produced the
+                // primitive.
+                raster: raster_state(desc.primitive, desc.depth_stencil),
+                mesh: Some(MeshThreadgroups {
+                    object: object_threads,
+                    mesh: mesh_threads,
+                }),
+            });
+        Ok(self.stamp(handle))
+    }
+
+    /// The colour-target rules both pipeline kinds obey, checked before either
+    /// descriptor is touched.
+    ///
+    /// Three of them, and all three are Metal's rather than the seam's:
+    ///
+    /// * **A nil fragment function may sit beside no colour attachment.** That
+    ///   pairing is Metal's depth-only pipeline, and a colour format beside a
+    ///   nil fragment function raises. The seam already calls the combination
+    ///   out (`fragment` is "`None` for a depth-only pass"), so this is a
+    ///   caller bug caught before it becomes an abort.
+    /// * **The attachment count fits the array.** What makes
+    ///   [`fill_color_attachments`]'s unchecked subscript sound.
+    /// * **No target is a depth/stencil format**, which
+    ///   `setPixelFormat:` on a colour slot has no meaning for.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`], naming which rule and which target.
+    fn check_color_targets(
+        &self,
+        has_fragment: bool,
+        targets: &[crcbl_hal::ColorTargetState],
+    ) -> Result<(), HalError> {
+        if !has_fragment && !targets.is_empty() {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a pipeline with no fragment stage declares {} colour target(s); Metal permits a \
+                 nil fragment function only for a depth-only pipeline",
+                targets.len()
+            )));
+        }
+        let ceiling = self.inner.caps.limits.max_color_attachments as usize;
+        if targets.len() > ceiling {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} colour targets exceed this device's limit of {ceiling}",
+                targets.len()
+            )));
+        }
+        for (index, target) in targets.iter().enumerate() {
+            if target.format.is_depth_stencil() {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "colour target {index} is {:?}, which is a depth/stencil format",
+                    target.format
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The depth/stencil object a pipeline binds, and the attachment formats
+    /// its descriptor must declare.
+    ///
+    /// Shared by both pipeline kinds because Metal's two descriptors carry the
+    /// same two format properties; the caller sets whichever of them this
+    /// answers `Some` for, since the property is the one thing the two types do
+    /// not share a Rust name for.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`] for a `format` with no depth plane, or a
+    /// stencil state on a format with no stencil plane —
+    /// `setStencilAttachmentPixelFormat:` with such a format raises.
+    fn depth_stencil_plan(
+        &self,
+        state: Option<DepthStencilState>,
+        label: Option<&str>,
+    ) -> Result<DepthStencilPlan, HalError> {
+        let Some(state) = state else {
+            // The device's shared always-pass state, not nil. Which object a
+            // no-depth pipeline binds is decided here, once per pipeline,
+            // rather than at every bind — see
+            // [`DeviceInner::default_depth_stencil`].
+            return Ok(DepthStencilPlan {
+                state: self.inner.default_depth_stencil.clone(),
+                depth: None,
+                stencil: None,
+            });
+        };
+        if !state.format.is_depth_stencil() {
+            return Err(HalError::InvalidDescriptor(format!(
+                "DepthStencilState::format is {:?}, which has no depth plane",
+                state.format
+            )));
+        }
+        // Keyed off the format exactly as `begin_render_pass` is: a `D32Float`
+        // pipeline has no stencil plane to declare, and declaring one whose
+        // format has no stencil raises.
+        let stencil = if state.format.has_stencil() {
+            Some(conv::pixel_format(state.format))
+        } else if state.stencil.is_some() {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a stencil state on a {:?} pipeline, which has no stencil plane to test",
+                state.format
+            )));
+        } else {
+            None
+        };
+        Ok(DepthStencilPlan {
+            state: self.depth_stencil_state(&state, label)?,
+            depth: Some(conv::pixel_format(state.format)),
+            stencil,
+        })
     }
 
     /// Builds an `MTLComputePipelineState`.
@@ -741,6 +990,131 @@ fn stencil_face(stencil: &StencilState, front: bool) -> Retained<MTLStencilDescr
     descriptor.setReadMask(stencil.read_mask);
     descriptor.setWriteMask(stencil.write_mask);
     descriptor
+}
+
+/// What [`MetalDevice::depth_stencil_plan`] answers: the object the encoder
+/// binds, and the two attachment formats the pipeline descriptor declares.
+///
+/// The formats come back rather than being set, because they are the one part
+/// of the depth/stencil decision `MTLRenderPipelineDescriptor` and
+/// `MTLMeshRenderPipelineDescriptor` do not share a Rust method name for.
+struct DepthStencilPlan {
+    state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
+    /// `None` for a pipeline with no depth attachment, which is
+    /// `MTLPixelFormatInvalid` — the descriptor's own default, so it is left
+    /// alone rather than written.
+    depth: Option<MTLPixelFormat>,
+    /// `None` for a depth format with no stencil plane, on the same terms.
+    stencil: Option<MTLPixelFormat>,
+}
+
+/// Fills a pipeline descriptor's colour attachments from the seam's targets.
+///
+/// Shared by both pipeline kinds because `colorAttachments` is literally the
+/// same `MTLRenderPipelineColorAttachmentDescriptorArray` on both descriptors.
+///
+/// Infallible, because every rule that could refuse a target is
+/// [`MetalDevice::check_color_targets`]'s and runs before this — which is also
+/// what makes the subscript below sound.
+fn fill_color_attachments(
+    attachments: &MTLRenderPipelineColorAttachmentDescriptorArray,
+    targets: &[crcbl_hal::ColorTargetState],
+) {
+    for (index, target) in targets.iter().enumerate() {
+        // SAFETY: `objc2` marks the subscript unsafe because Metal does not
+        // bounds-check the attachment index. `check_color_targets` bounded
+        // `targets.len()` by this device's `max_color_attachments`, which sits
+        // at the seam's floor and so is at or below the array's own length —
+        // the same argument `begin_render_pass` makes for the render pass
+        // descriptor's identical array.
+        let slot = unsafe { attachments.objectAtIndexedSubscript(index) };
+        slot.setPixelFormat(conv::pixel_format(target.format));
+        slot.setWriteMask(conv::color_write_mask(target.write_mask));
+        if let Some(blend) = target.blend {
+            slot.setBlendingEnabled(true);
+            slot.setSourceRGBBlendFactor(conv::blend_factor(blend.color_src));
+            slot.setDestinationRGBBlendFactor(conv::blend_factor(blend.color_dst));
+            slot.setRgbBlendOperation(conv::blend_operation(blend.color_op));
+            slot.setSourceAlphaBlendFactor(conv::blend_factor(blend.alpha_src));
+            slot.setDestinationAlphaBlendFactor(conv::blend_factor(blend.alpha_dst));
+            slot.setAlphaBlendOperation(conv::blend_operation(blend.alpha_op));
+        }
+    }
+}
+
+/// The half of a pipeline Metal keeps on the encoder, for either kind.
+///
+/// [`RasterState::primitive`] is meaningless on a mesh pipeline — the mesh
+/// shader's `[outputtopology(…)]` decides the topology and no mesh draw reads
+/// this — but every other field applies to both, so the conversion is one
+/// function rather than two that agree today.
+fn raster_state(
+    primitive: crcbl_hal::PrimitiveState,
+    depth_stencil: Option<DepthStencilState>,
+) -> RasterState {
+    RasterState {
+        primitive: conv::primitive_type(primitive.topology),
+        cull: conv::cull_mode(primitive.cull_mode),
+        winding: conv::winding(primitive.front_face),
+        fill: conv::fill_mode(primitive.polygon_mode),
+        clip: conv::depth_clip_mode(primitive.depth_clamp),
+        bias: depth_stencil.map_or([0.0; 3], |state| {
+            [
+                state.bias.constant,
+                state.bias.slope_scale,
+                state.bias.clamp,
+            ]
+        }),
+    }
+}
+
+/// A declared workgroup size as the `MTLSize` a draw or dispatch passes.
+fn threadgroup_size([x, y, z]: [u32; 3]) -> MTLSize {
+    MTLSize {
+        width: to_ns(u64::from(x)),
+        height: to_ns(u64::from(y)),
+        depth: to_ns(u64::from(z)),
+    }
+}
+
+/// Invocations one workgroup of that size holds.
+///
+/// Cannot overflow where this is called: `MeshPipelineDesc::check_workgroup_sizes`
+/// has already refused a size whose product does not fit a `u32`, so the
+/// saturating multiply is a total function rather than a swallowed failure —
+/// and it saturates *upward*, so a size that somehow reached here without that
+/// check would fail the ceiling comparison rather than pass it.
+fn threadgroup_product([x, y, z]: [u32; 3]) -> u32 {
+    x.saturating_mul(y).saturating_mul(z)
+}
+
+/// Refuses a mesh or object threadgroup Metal compiled the functions too large
+/// for.
+///
+/// `selector` is spelled as Metal spells it — `Mesh` or `Object` — because the
+/// message names the property a reader would go and look at.
+///
+/// # Errors
+///
+/// [`HalError::PipelineCreation`] naming both numbers. It is an error rather
+/// than a debug assertion because Metal answers an over-large threadgroup at
+/// the *draw* by raising, and a raise from Objective-C aborts the process.
+fn check_threadgroup_ceiling(
+    label: &str,
+    selector: &str,
+    size: [u32; 3],
+    allowed: u64,
+) -> Result<(), HalError> {
+    let invocations = u64::from(threadgroup_product(size));
+    if invocations > allowed {
+        return Err(HalError::PipelineCreation(format!(
+            "`{label}` asks for {invocations} threads per {} threadgroup ({size:?}), and this \
+             pipeline's maxTotalThreadsPer{selector}Threadgroup is {allowed} — Metal raises at the \
+             draw rather than reporting it, and a raise aborts the process",
+            selector.to_lowercase()
+        )));
+    }
+    Ok(())
 }
 
 /// The sample count a pipeline rasterises at.

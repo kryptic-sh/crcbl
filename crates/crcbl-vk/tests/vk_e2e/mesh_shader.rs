@@ -240,10 +240,16 @@ impl MeshShaderResources {
             label: Some(label),
             layout: pipeline_layout,
             task,
+            // `mesh_shader.slang`'s own numbers: `[numthreads(1, 1, 1)]` on
+            // `taskMain` and `[numthreads(3, 1, 1)]` on both mesh entry
+            // points. Vulkan reads them out of the SPIR-V and ignores these;
+            // they are here because Metal cannot.
+            task_workgroup_size: [1, 1, 1],
             mesh: ShaderEntry {
                 module,
                 entry_point: mesh_entry,
             },
+            mesh_workgroup_size: [3, 1, 1],
             fragment: Some(ShaderEntry {
                 module,
                 entry_point: "fragmentMain",
@@ -657,10 +663,12 @@ fn a_mesh_pipeline_naming_a_fragment_entry_point_as_its_mesh_stage_is_refused() 
             label: Some("wrong stage"),
             layout,
             task: None,
+            task_workgroup_size: [1, 1, 1],
             mesh: ShaderEntry {
                 module,
                 entry_point: "fragmentMain",
             },
+            mesh_workgroup_size: [3, 1, 1],
             fragment: Some(ShaderEntry {
                 module,
                 entry_point: "fragmentMain",

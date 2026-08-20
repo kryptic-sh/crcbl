@@ -67,6 +67,31 @@
 //! the SPIR-V it compiles — so a number disagreeing with `[numthreads(…)]`
 //! fails there rather than launching the wrong thread count here.
 //!
+//! **The mesh slice builds the object/mesh path, and nothing claims it works.**
+//! `create_mesh_pipeline` fills an `MTLMeshRenderPipelineDescriptor` — object
+//! function, mesh function, fragment function, colour attachments, depth and
+//! stencil formats, sample count — through the same helpers the raster pipeline
+//! uses, and `draw_mesh_tasks` and `draw_mesh_tasks_indirect` record
+//! `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`
+//! and `drawMeshThreadgroupsWithIndirectBuffer:…`. The threadgroup sizes those
+//! calls take come from
+//! [`MeshPipelineDesc::mesh_workgroup_size`](crcbl_hal::MeshPipelineDesc::mesh_workgroup_size),
+//! which the seam grew for this backend's sake exactly as it grew the compute
+//! one, because Slang's Metal target drops `[numthreads(…)]` entirely.
+//!
+//! **None of it has ever executed.** Mesh shading is gated on
+//! `supportsFamily:MTLGPUFamilyMetal3`, the Mac CI runs this backend on answers
+//! `false` to that, and nobody here has a Mac that answers `true`. So
+//! `crcbl_mtl::adapter` reports no
+//! [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER),
+//! [`Device::supports`](crcbl_hal::Device::supports) still answers
+//! [`Support::No`](crcbl_hal::Support::No) for both mesh capabilities, and
+//! `crcbl_hal::DIVERGENCES` still carries both rows — the whole difference from
+//! the previous state is that the obstacle is now "unrun" rather than
+//! "unwritten". `crcbl_mtl::quirk`'s `check_mesh_support` is what refuses by
+//! name on a device or an OS that cannot run it, so the path fails loudly
+//! rather than raising inside Objective-C.
+//!
 //! **Push constants arrived with `crcbl_mtl::argument`**, which answers the
 //! question the binding slice sharpened rather than closed. Metal has no push
 //! constants, so Slang lowers the block to an ordinary buffer argument, and
@@ -98,7 +123,8 @@
 //! the one [`Capability`](crcbl_hal::Capability) draws: this variant means **the
 //! operation is real and this backend cannot perform it**, whether because Metal
 //! has not got it (the byte-wide fill) or because a slice here has not built it
-//! (mesh pipelines). Both send a caller to the same place — take the fallback —
+//! (a counter-sampled query set). Both send a caller to the same place — take
+//! the fallback —
 //! which is why they share a variant, and
 //! `crcbl_mtl::instance::MetalInstance::unsupported` and `…::not_yet` are the
 //! two sentences that say which.

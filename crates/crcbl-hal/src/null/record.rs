@@ -650,6 +650,16 @@ pub(super) struct State {
     /// One entry per `create_shader_module`, surviving the module's
     /// destruction. See [`Recorder::shader_modules_created`].
     pub(super) shader_modules_created: Vec<(Option<String>, ShaderSources)>,
+    /// Every bind-group layout created, with its label — a log rather than a
+    /// lookup, for [`shader_modules_created`](Self::shader_modules_created)'s
+    /// reason exactly: a caller destroys its layouts once its pipelines exist,
+    /// so by the time a test can assert anything the handles are dead.
+    ///
+    /// What it is for: the **binding numbers** a caller declared, which is the
+    /// one thing about a layout no other observable carries and which
+    /// `crcbl-mtl` turns into Metal argument-table indices by counting. See
+    /// [`Recorder::bind_group_layouts_created`].
+    pub(super) bind_group_layouts_created: Vec<(Option<String>, Vec<BindGroupLayoutEntry>)>,
     /// Queued out-of-band device errors. See [`Recorder::report_device_error`].
     pub(super) device_errors: std::collections::VecDeque<String>,
     /// How many `reconfigure_swapchain` calls fail before succeeding again. See
@@ -674,6 +684,7 @@ impl State {
             readback_latency: 0,
             device_latency: 0,
             shader_modules_created: Vec::new(),
+            bind_group_layouts_created: Vec::new(),
             device_errors: std::collections::VecDeque::new(),
             reconfigure_failures: 0,
             swapchain_out_of_date: false,
@@ -903,6 +914,19 @@ impl Recorder {
         self.lock().shader_modules_created.clone()
     }
 
+    /// Every bind-group layout created, label and declared entries, in order.
+    ///
+    /// The assertion this exists for is about **which binding numbers a layout
+    /// declares**, and it is not cosmetic on one backend: `crcbl-mtl` gives a
+    /// resource the next index in its Metal argument table by counting the
+    /// same-table entries of this list, so two layouts for one shader that
+    /// declare different subsets of its bindings place every resource above the
+    /// difference at different indices — silently, and only there.
+    #[must_use]
+    pub fn bind_group_layouts_created(&self) -> Vec<(Option<String>, Vec<BindGroupLayoutEntry>)> {
+        self.lock().bind_group_layouts_created.clone()
+    }
+
     /// Total live objects across every kind.
     #[must_use]
     pub fn total_live_objects(&self) -> usize {
@@ -919,6 +943,7 @@ impl Recorder {
         state.events.clear();
         state.validation.clear();
         state.shader_modules_created.clear();
+        state.bind_group_layouts_created.clear();
     }
 
     /// Makes the next `poll_readback` calls report

@@ -518,6 +518,23 @@ impl Gpu {
         set_debug_view(&mut self.renderer, view);
     }
 
+    /// Pins the LOD selection at `eye`, or lets it follow the camera again —
+    /// [`ForwardRenderer::set_frozen_selection_eye`](crcbl::render::ForwardRenderer::set_frozen_selection_eye).
+    ///
+    /// Written every frame from `crate::app`'s own copy rather than toggled
+    /// here, on [`set_debug_view`](Self::set_debug_view)'s terms: the row is
+    /// pressed in a method that is handed no GPU.
+    pub const fn set_frozen_selection_eye(&mut self, eye: Option<crcbl::math::Vec3>) {
+        self.renderer.set_frozen_selection_eye(eye);
+    }
+
+    /// Where the renderer has the selection pinned, or [`None`] while it follows
+    /// the camera.
+    #[must_use]
+    pub const fn frozen_selection_eye(&self) -> Option<crcbl::math::Vec3> {
+        self.renderer.frozen_selection_eye()
+    }
+
     /// What the last completed frame's culling kept.
     ///
     /// [`None`] until the readback ring has come round, which is a few frames —

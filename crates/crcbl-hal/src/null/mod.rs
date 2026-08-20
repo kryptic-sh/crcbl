@@ -1182,6 +1182,10 @@ impl Device for NullDevice {
             .iter()
             .find(|entry| entry.flags.contains(crate::BindingFlags::VARIABLE_COUNT))
             .map(|entry| entry.binding);
+        self.recorder
+            .lock()
+            .bind_group_layouts_created
+            .push((desc.label.map(ToOwned::to_owned), desc.entries.to_vec()));
         Ok(self.insert(
             ObjectKind::BindGroupLayout,
             desc.label,
@@ -1342,6 +1346,10 @@ impl Device for NullDevice {
         if desc.task.is_some() && !self.caps.features.contains(Features::TASK_SHADER) {
             return Err(self.unsupported("a task stage without Features::TASK_SHADER"));
         }
+        // The half of a workgroup-size check that needs no device, which this
+        // recorder is exactly the shape to perform; see
+        // `MeshPipelineDesc::check_workgroup_sizes`.
+        desc.check_workgroup_sizes()?;
         self.check_stage(desc.mesh)?;
         if let Some(task) = desc.task {
             self.check_stage(task)?;

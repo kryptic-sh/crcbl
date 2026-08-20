@@ -1497,10 +1497,12 @@ fn mesh_pipeline_desc() -> crcbl_hal::MeshPipelineDesc<'static> {
         label: None,
         layout: Handle::from_bits((1 << 32) | 3).expect("a real handle"),
         task: None,
+        task_workgroup_size: [1, 1, 1],
         mesh: crcbl_hal::ShaderEntry {
             module: Handle::from_bits((1 << 32) | 4).expect("a real handle"),
             entry_point: "main",
         },
+        mesh_workgroup_size: [1, 1, 1],
         fragment: None,
         primitive: crcbl_hal::PrimitiveState::default(),
         depth_stencil: None,

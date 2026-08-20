@@ -853,6 +853,24 @@ pub struct ForwardRenderer {
     /// holds this side to it.
     heatmap: bool,
 
+    /// Where [`begin_frame`](ForwardRenderer::begin_frame) projects
+    /// `docs/plan/25-lod.md`'s selection from, when that is not the camera's own
+    /// eye — see
+    /// [`set_frozen_selection_eye`](ForwardRenderer::set_frozen_selection_eye).
+    ///
+    /// **[`None`] is not a position, it is "follow the camera"**, and it is what
+    /// every frame the engine has drawn so far did: the eye handed to
+    /// [`DrawGen::begin_frame`] is `camera.eye`, byte for byte, so a caller that
+    /// never sets this writes the parameter block it wrote before this field
+    /// existed.
+    ///
+    /// **Not a [`DebugView`]**, and deliberately: the three views are one
+    /// picture chosen between, while this is a change to what the *selection*
+    /// answers and leaves the picture's choice alone. A reviewer freezing the
+    /// cut and then reading it off the LOD tint is the combination the feature
+    /// exists for, so the two cannot be alternatives.
+    frozen_selection_eye: Option<Vec3>,
+
     /// Topic 18's shadow atlas: one `D32Float` image holding
     /// [`shadow::TILES`] square tiles in a fixed grid — the sun's cascades
     /// first, then one per shadowed light.
@@ -1254,7 +1272,6 @@ struct SharedBindings<'a> {
     /// `Some` on [`GeometryPath::MeshShader`] and on no other path, which is
     /// what decides whether bindings 9 to 12 and 17 exist at all.
     clusters: Option<&'a ClusterPool>,
-    culls_clusters: bool,
     shadow_sampler: SamplerHandle,
     /// Bindings [`LIGHT_LIST_BINDING`] and [`LIGHT_GRID_BINDING`], this frame's
     /// slots of the light ring.
@@ -1441,7 +1458,15 @@ impl MeshGroup {
                 },
             ]);
         }
-        if shared.culls_clusters {
+        // **Keyed on the cluster pool, not on the amplification stage**, for
+        // the reason binding 17 and the layout give: `mesh_cluster.slang`
+        // declares 13 and 14 on every path, and Slang's Metal target numbers
+        // every buffer in that module's declaration order — so a group that
+        // omitted them would put 17 two buffer slots below where
+        // `msl/mesh_cluster.metal` reads it. On a device with the mesh stage
+        // and no task stage `meshMain` never dereferences either, and takes
+        // both as arguments regardless.
+        if shared.clusters.is_some() {
             entries.extend([
                 BindGroupEntry {
                     binding: 13,
@@ -1534,6 +1559,14 @@ impl MeshGroup {
         entries
     }
 }
+
+/// What the mesh pass's bind-group layout is called.
+///
+/// Named rather than written twice because a test asserts on it: the layout's
+/// *binding numbers* are what `crcbl-mtl` turns into Metal argument-table
+/// indices by counting, so `the_mesh_layout_declares_the_same_bindings_with_and_without_a_task_stage`
+/// has to find this one layout among the recorder's.
+const MESH_LAYOUT_LABEL: &str = "mesh frame";
 
 /// Everything a geometry pass needs to record one indirect call per bucket.
 ///
@@ -1669,7 +1702,6 @@ fn read_draw_sources<'g, 'a>(
     pass: PassBuilder<'g, 'a>,
     draws: &GeneratedDraws,
     emit: EmitTail,
-    culls_clusters: bool,
 ) -> PassBuilder<'g, 'a> {
     // The buffers the draws come out of. Declaring them is what makes the graph
     // transition them out of the compute pass's `ShaderReadWrite`.
@@ -1689,22 +1721,25 @@ fn read_draw_sources<'g, 'a>(
         let pass = pass
             .read_buffer(draws.args_id)
             .use_buffer(draws.counts_id, ResourceState::IndirectArgument);
-        if culls_clusters {
-            // The amplification stage counts its survivors into the culling
-            // statistics, which the draw-argument pass read a moment ago — so this
-            // is a write-after-read the graph has to order, and declaring it is
-            // the whole of how it learns to.
-            //
-            // `docs/plan/25-lod.md`'s hysteresis state is read here and written by
-            // the draw-argument pass a moment ago. Declaring it is what orders the
-            // two — and what puts it back into `ShaderReadWrite` at the end of the
-            // graph, which is where the next frame's draw-argument pass expects to
-            // find it.
-            pass.use_buffer(draws.visible_count_id, ResourceState::ShaderReadWrite)
-                .read_buffer(draws.group_state_id)
-        } else {
-            pass
-        }
+        // The amplification stage counts its survivors into the culling
+        // statistics, which the draw-argument pass read a moment ago — so this
+        // is a write-after-read the graph has to order, and declaring it is
+        // the whole of how it learns to.
+        //
+        // `docs/plan/25-lod.md`'s hysteresis state is read here and written by
+        // the draw-argument pass a moment ago. Declaring it is what orders the
+        // two — and what puts it back into `ShaderReadWrite` at the end of the
+        // graph, which is where the next frame's draw-argument pass expects to
+        // find it.
+        //
+        // **Declared on the whole mesh path, not only where there is an
+        // amplification stage**, because that is where the bind group now
+        // names both — see the layout, which is where the Metal argument-table
+        // arithmetic that forced it is argued. A buffer bound writable and
+        // never transitioned is a descriptor in the wrong resource state, which
+        // is what the graph exists to prevent.
+        pass.use_buffer(draws.visible_count_id, ResourceState::ShaderReadWrite)
+            .read_buffer(draws.group_state_id)
     } else {
         pass.use_buffer(draws.args_id, ResourceState::IndirectArgument)
             .use_buffer(draws.counts_id, ResourceState::IndirectArgument)
@@ -2385,11 +2420,17 @@ impl ForwardRenderer {
         // `ForwardRenderer::shadow_selection` for why a view cannot share the
         // buffer above.
         let mut tile_selection: Vec<Vec<BufferHandle>> = Vec::new();
-        if culls_clusters {
+        // Allocated on the whole mesh path rather than only where there is an
+        // amplification stage to write them, because the layout declares
+        // binding 18 there — see the layout, which is where that is argued. On
+        // a device with no task stage nothing writes them and
+        // `ForwardRenderer::cluster_selection` still answers `None`, so the
+        // cost is the allocation and nothing else.
+        if emit.is_mesh() {
             let count = rollback
                 .clusters
                 .as_ref()
-                .unwrap_or_else(|| unreachable!("an amplification stage implies a cluster pool"))
+                .unwrap_or_else(|| unreachable!("the mesh path implies a cluster pool"))
                 .count();
             let mut ring = |label: &str| -> Result<Vec<BufferHandle>, HalError> {
                 let mut buffers = Vec::with_capacity(instance_buffers.len());
@@ -2598,10 +2639,22 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             }));
         }
-        if culls_clusters {
-            // §3.5's per-cluster cull needs two things `meshMain` does not, and
-            // they exist only where an amplification stage does: the frustum,
-            // and somewhere to count what survived.
+        // **`emit.is_mesh()`, not `culls_clusters`, and that is a fix rather
+        // than a widening.** §3.5's per-cluster cull is the only thing that
+        // *reads* these two — the frustum, and somewhere to count what survived
+        // — so gating them on the amplification stage was the obvious shape.
+        // It was wrong on Metal: `mesh_cluster.slang` declares them
+        // unconditionally, Slang's Metal target ignores `[[vk::binding]]` and
+        // hands each resource the next index in its stage's flat table in
+        // declaration order, and `crcbl-mtl` derives that index by counting the
+        // same-table entries of *this list*. A layout that skipped 13 and 14
+        // therefore placed binding 17 at `buffer(11)` while
+        // `msl/mesh_cluster.metal` reads it at `buffer(13)`, and every binding
+        // above it was off by two — a wrong picture with a clean log, on the
+        // one backend nobody here can debug on. Bindings 6, 7, 8, 20, 21 and 23
+        // are declared by that shader for exactly this reason and this is the
+        // same rule applied to the layout side.
+        if emit.is_mesh() {
             mesh_entries.push(BindGroupLayoutEntry {
                 binding: 13,
                 visibility: geometry,
@@ -2687,7 +2740,11 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             });
         }
-        if culls_clusters {
+        // Both on the whole mesh path, for the two above's reason exactly: the
+        // amplification stage is the only writer and the only reader, and the
+        // Metal argument table counts entries rather than reading binding
+        // numbers.
+        if emit.is_mesh() {
             mesh_entries.push(BindGroupLayoutEntry {
                 binding: 18,
                 visibility: geometry,
@@ -2822,7 +2879,7 @@ impl ForwardRenderer {
         }
 
         let mesh_desc = BindGroupLayoutDesc {
-            label: Some("mesh frame"),
+            label: Some(MESH_LAYOUT_LABEL),
             entries: &mesh_entries,
         };
         // **This layout is at the guaranteed limit with no headroom on the
@@ -3118,7 +3175,6 @@ impl ForwardRenderer {
                 page: base_color_page.view,
                 page_sampler: base_color_sampler,
                 clusters: rollback.clusters.as_ref(),
-                culls_clusters,
                 shadow_sampler,
                 lights: lights.lights(frame),
                 light_grid: lights.grid(frame),
@@ -3140,7 +3196,7 @@ impl ForwardRenderer {
                 cull_params: cull_params[frame],
                 cull_stats: cull_stats[frame],
                 cluster_selection: cluster_selection.get(frame).copied(),
-                group_state: culls_clusters.then(|| draws.group_state()),
+                group_state: emit.is_mesh().then(|| draws.group_state()),
                 // The colour pass reads the finished atlas. Its own pass writes
                 // nothing to it, so there is no conflict to avoid here.
                 shadow_map: shadow_atlas_view,
@@ -3192,7 +3248,7 @@ impl ForwardRenderer {
                 cull_params: cull_params[frame],
                 cull_stats: stats,
                 cluster_selection: cluster_selection.get(frame).copied(),
-                group_state: culls_clusters.then(|| draws.group_state()),
+                group_state: emit.is_mesh().then(|| draws.group_state()),
                 shadow_map: shadow_atlas_view,
                 ambient_occlusion: ambient_occlusion_placeholder.view,
             }
@@ -3252,7 +3308,7 @@ impl ForwardRenderer {
                     cluster_selection: tile_selection.get(view).map(|ring| ring[frame]),
                     // Its cull's — see `TileBuffers::group_state`, which is
                     // where that budget is argued.
-                    group_state: culls_clusters.then_some(buffers.group_state),
+                    group_state: emit.is_mesh().then_some(buffers.group_state),
                     shadow_map: shadow_placeholder_view,
                     // A cascade shades nothing — the pipeline has no fragment
                     // stage — so this slot exists only because Metal
@@ -3532,6 +3588,11 @@ impl ForwardRenderer {
             normals_view: false,
             lod_view: false,
             heatmap: false,
+            // Following the camera, on the line above's terms: the selection eye
+            // is the camera's until a caller pins it, so a renderer nobody calls
+            // `set_frozen_selection_eye` on hands `begin_frame` exactly what it
+            // handed before this field existed.
+            frozen_selection_eye: None,
             shadow_atlas,
             shadow_atlas_view,
             shadow_placeholder,
@@ -4103,12 +4164,21 @@ impl ForwardRenderer {
         // mesh path's per-cluster descent runs off the block, and a frame that
         // selected detail against one camera while drawing with another is a
         // difference nothing in the frame can see.
+        //
+        // **The eye is the selection's, which is the camera's unless a caller
+        // pinned it** — `set_frozen_selection_eye`, and the whole of what that
+        // feature is. It reaches this parameter block and nothing else: the
+        // frustum handed over with it is extracted from this frame's own
+        // view-projection, and the frame block written above carries
+        // `camera.eye`, so a pinned selection changes which cut is chosen and
+        // nothing about what is culled, faced or drawn.
+        let selection_eye = self.frozen_selection_eye.unwrap_or(camera.eye);
         self.draws.begin_frame(
             device,
             self.frame,
             &Frustum::from_view_projection(view_projection),
             instance_count,
-            [camera.eye.x, camera.eye.y, camera.eye.z],
+            [selection_eye.x, selection_eye.y, selection_eye.z],
             self.lod_params,
         )?;
 
@@ -4159,7 +4229,11 @@ impl ForwardRenderer {
         if !self.frame_effects.contains(RenderEffects::SHADOWS) {
             return Ok(());
         }
-        let eye = [camera.eye.x, camera.eye.y, camera.eye.z];
+        // The cascades select for the camera, so they take the camera's
+        // selection eye — pinned along with the colour pass's, or a frozen cut
+        // would draw under a shadow silhouette that was still following the
+        // reviewer around.
+        let eye = [selection_eye.x, selection_eye.y, selection_eye.z];
         let write_view = |view: usize, view_proj: Mat4, from: Vec3| -> Result<(), HalError> {
             // The spread carries the normals view's switch into these blocks too,
             // and nothing reads it: `MeshModules::depth_pipeline` names no
@@ -4888,7 +4962,7 @@ impl ForwardRenderer {
         // `read_draw_sources` declares the *camera's* statistics buffer, because
         // that is the one the arguments came out of; the prepass writes its own
         // instead, so both are declared and the graph barriers both.
-        let prepass = read_draw_sources(prepass, &generated, emit, self.culls_clusters)
+        let prepass = read_draw_sources(prepass, &generated, emit)
             .use_buffer(prepass_stats, ResourceState::ShaderReadWrite);
         // The camera's own cut, written here and again by the forward pass with
         // the same camera and the same budget. Shared rather than a buffer of its
@@ -4896,7 +4970,7 @@ impl ForwardRenderer {
         // anything could read it — because the second write is the one that stands
         // and it writes the same words.
         let prepass = match selection {
-            Some(selection) if emit.is_mesh() && self.culls_clusters => {
+            Some(selection) if emit.is_mesh() => {
                 prepass.use_buffer(selection, ResourceState::ShaderReadWrite)
             }
             _ => prepass,
@@ -4996,14 +5070,14 @@ impl ForwardRenderer {
             // without the declaration the fragment stage reads a buffer the
             // compute pass may still be writing.
             .read_buffer(light_grid);
-        let pass = read_draw_sources(pass, &generated, emit, self.culls_clusters);
+        let pass = read_draw_sources(pass, &generated, emit);
         let pass = match selection {
             // The colour pass's own, which no cascade writes — the cascades
             // record into buffers of their own, so what survives a frame here is
             // the camera's cut and what survives there is each cascade's. The
             // depth prepass above writes this one too, with the same camera and
             // the same budget, and is ordered before this pass by the graph.
-            Some(selection) if emit.is_mesh() && self.culls_clusters => {
+            Some(selection) if emit.is_mesh() => {
                 pass.use_buffer(selection, ResourceState::ShaderReadWrite)
             }
             _ => pass,
@@ -5342,7 +5416,7 @@ impl ForwardRenderer {
             pass = pass.use_buffer(buffer, ResourceState::ShaderReadWrite);
         }
         for (_, draws) in &generated {
-            pass = read_draw_sources(pass, draws, self.emit, self.culls_clusters);
+            pass = read_draw_sources(pass, draws, self.emit);
         }
 
         let groups = self.shadow_groups[self.frame].clone();
@@ -5769,6 +5843,99 @@ impl ForwardRenderer {
     #[must_use]
     pub const fn heatmap(&self) -> bool {
         self.heatmap
+    }
+
+    /// Pins the eye `docs/plan/25-lod.md`'s selection is projected from, so the
+    /// cut stops following the camera.
+    ///
+    /// [`None`] is the default and means "the camera's own eye", which is what
+    /// every frame before this existed did. `Some(eye)` selects detail for a
+    /// viewer standing at `eye` while the frame is still drawn, culled and lit
+    /// from wherever the camera actually is.
+    ///
+    /// # What it is for
+    ///
+    /// Per-cluster LOD is only checkable from somewhere other than the point
+    /// that chose it. Looked at from the selecting eye, a cut that is far too
+    /// coarse and a cut that is exactly right produce the same silhouette —
+    /// that is what a screen-space error budget *means* — so the one viewpoint
+    /// where a wrong cut cannot be seen is the viewpoint every unfrozen frame is
+    /// judged from. Pin the eye and fly away from it, and the boundaries between
+    /// levels become geometry a reviewer can walk up to and look at edge-on.
+    ///
+    /// # Only the selection freezes
+    ///
+    /// The frame has three places a viewer position is read, and this moves
+    /// exactly one of them:
+    ///
+    /// * **the selection** — `draw_gen.slang`'s `select_level`, which reads
+    ///   `DrawGenParams::camera_position` and is the only thing that decides the
+    ///   cut. It writes the group hysteresis state that the mesh path's
+    ///   amplification stage then descends, so freezing this one field freezes
+    ///   the cut on the per-cluster path and the two indirect paths alike. This
+    ///   is what moves.
+    /// * **the frustum culls** — `cull.slang`'s instance test and
+    ///   `mesh_cluster.slang`'s per-cluster one, whose planes are extracted from
+    ///   the frame's own view-projection and never read a camera position at
+    ///   all. Unaffected, and it has to be: a frame culled against a frustum the
+    ///   reviewer has flown out of would draw nothing.
+    /// * **the normal cone** — `mesh_cluster.slang`'s `cluster_survives`, which
+    ///   reads [`FrameUniforms::camera_position`] and asks which way a cluster
+    ///   faces *relative to the viewer*. That question is about the eye the
+    ///   picture is drawn from, not the eye it was selected for; frozen, a
+    ///   reviewer who flew round to the other side of the face would have every
+    ///   cluster now facing them rejected for facing away from a viewpoint
+    ///   nobody is standing at. It stays live.
+    ///
+    /// The split is not new. `DrawGenParams::camera_position` and
+    /// [`FrameUniforms::camera_position`] are already separate fields carrying
+    /// different values on a shadow cascade — that one holds the sun while this
+    /// one stays the camera, because detail is denominated in the camera's
+    /// pixels and facing is asked about the light. This freezes the same seam
+    /// from the other side, and needs no new binding, no new shader input and no
+    /// shader change of any kind.
+    ///
+    /// # It freezes the cascades' selection too
+    ///
+    /// [`begin_frame`](Self::begin_frame) hands the same eye to every shadow
+    /// cascade's draw generator, because a cascade selects detail for the
+    /// *camera* — see [`SHADOW_LOD_BIAS`]. A frozen camera cut over a live
+    /// shadow cut would be a shadow silhouette sliding under a fixed one, which
+    /// is a difference in the picture that belongs to neither.
+    ///
+    /// # The heatmap reads the live eye, and says so
+    ///
+    /// [`set_heatmap`](Self::set_heatmap) shades a cluster by its producing
+    /// group's projected error, computed in the mesh stage from
+    /// [`FrameUniforms::camera_position`] — the eye that stays live. So under a
+    /// frozen selection the two overlays answer different questions: the cut is
+    /// the one chosen at the pinned eye, and the heat is what the error would be
+    /// if it were chosen from here now. That is readable — flying towards the
+    /// face brightens the clusters the frozen cut is not refining, which is the
+    /// selection's sensitivity made visible — but it does mean the ramp's
+    /// contours stop coinciding with the level boundaries while frozen.
+    /// [`set_lod_view`](Self::set_lod_view) is the overlay that composes
+    /// unconditionally: a cluster's level is a property of the cut and of
+    /// nothing else.
+    ///
+    /// Carrying the pinned eye into the mesh stage as well would need a second
+    /// position in the frame block, which is a new shader input in every backend
+    /// for one overlay's benefit; `docs/backlog.md` holds that trade-off.
+    ///
+    /// [`FrameUniforms::camera_position`]: crcbl_shaders::mesh::FrameUniforms::camera_position
+    pub const fn set_frozen_selection_eye(&mut self, eye: Option<Vec3>) {
+        self.frozen_selection_eye = eye;
+    }
+
+    /// Where the selection is pinned, or [`None`] while it follows the camera.
+    ///
+    /// The read-back half of
+    /// [`set_frozen_selection_eye`](Self::set_frozen_selection_eye), and what a
+    /// debug panel says "frozen at" out of — "frozen" without the position is a
+    /// row nobody can act on.
+    #[must_use]
+    pub const fn frozen_selection_eye(&self) -> Option<Vec3> {
+        self.frozen_selection_eye
     }
 
     /// Which of the debug views the next frame will actually draw.
@@ -6215,6 +6382,24 @@ impl MeshModules {
         ColorTargetState::opaque(Format::Rgba8Unorm),
     ];
 
+    /// Invocations per mesh workgroup, which is `mesh_cluster.slang`'s
+    /// `[numthreads(THREADS, 1, 1)]` — and `THREADS` is
+    /// `MAX_CLUSTER_VERTICES`, one lane per vertex a cluster can hold.
+    ///
+    /// Taken from the crate that owns the shader source rather than written
+    /// out, as
+    /// [`MeshPipelineDesc::mesh_workgroup_size`](crcbl_hal::MeshPipelineDesc::mesh_workgroup_size)
+    /// requires: only Metal reads this field, so a literal that disagreed with
+    /// the shader would launch the wrong number of threads on one backend and
+    /// nowhere else.
+    const MESH_WORKGROUP_SIZE: [u32; 3] =
+        [crcbl_shaders::meshlet::MAX_CLUSTER_VERTICES as u32, 1, 1];
+
+    /// Invocations per task workgroup: `taskMain` is `[numthreads(1, 1, 1)]`,
+    /// one invocation per cluster group, which is what lets the payload be a
+    /// plain local. See `mesh_cluster.slang`.
+    const TASK_WORKGROUP_SIZE: [u32; 3] = [1, 1, 1];
+
     /// Loads whichever modules `emit` needs and resolves their entry points.
     ///
     /// # Errors
@@ -6354,10 +6539,12 @@ impl MeshModules {
                     module: cluster.module,
                     entry_point,
                 }),
+                task_workgroup_size: Self::TASK_WORKGROUP_SIZE,
                 mesh: ShaderEntry {
                     module: cluster.module,
                     entry_point: cluster.mesh,
                 },
+                mesh_workgroup_size: Self::MESH_WORKGROUP_SIZE,
                 fragment,
                 primitive,
                 depth_stencil: Self::depth_stencil(),
@@ -6410,10 +6597,12 @@ impl MeshModules {
                     module: cluster.module,
                     entry_point,
                 }),
+                task_workgroup_size: Self::TASK_WORKGROUP_SIZE,
                 mesh: ShaderEntry {
                     module: cluster.module,
                     entry_point: cluster.mesh,
                 },
+                mesh_workgroup_size: Self::MESH_WORKGROUP_SIZE,
                 fragment: None,
                 primitive,
                 depth_stencil: Self::depth_stencil(),
@@ -8544,6 +8733,88 @@ mod tests {
         );
         let queue = device.queue(QueueKind::Graphics).expect("always present");
         (device, queue)
+    }
+
+    /// **The mesh layout declares the same binding numbers with and without a
+    /// task stage, and that is a correctness property on Metal.**
+    ///
+    /// Slang's Metal target ignores `[[vk::binding]]` and gives each resource
+    /// the next index in its stage's flat argument table, in the order
+    /// `mesh_cluster.slang` declares them — so `msl/mesh_cluster.metal` puts
+    /// `cluster_select` (binding 17) at `buffer(13)` and every buffer above it
+    /// at a fixed index. `crcbl-mtl` reaches the same numbers by counting the
+    /// same-table entries of the layout **below** each binding, which agrees
+    /// only while the layout declares everything the shader does.
+    ///
+    /// It did not. Bindings 13, 14, 18 and 19 were gated on
+    /// [`ForwardRenderer::culls_clusters`], so a device with
+    /// `Features::MESH_SHADER` and no `Features::TASK_SHADER` built a layout
+    /// missing four buffers below 17 — placing it at `buffer(11)` while the MSL
+    /// read `buffer(13)`, and shifting every binding above it by two. Nothing
+    /// on any other backend can see that: Vulkan and D3D12 read the binding
+    /// number, and WebGPU never takes this path.
+    ///
+    /// **What turns it red.** Putting either `if emit.is_mesh()` in the layout
+    /// back to `if culls_clusters`: the no-task arm then declares 17 fewer than
+    /// two buffers below where the amplified arm does, and the sets stop
+    /// matching.
+    #[test]
+    fn the_mesh_layout_declares_the_same_bindings_with_and_without_a_task_stage() {
+        let mut declared: Vec<Vec<(u32, BindingKind)>> = Vec::new();
+        for optional in [Features::TASK_SHADER, Features::empty()] {
+            let recorder = Recorder::new();
+            let (device, queue) = open_mesh_path(&recorder, optional);
+            let renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+                .expect("the forward renderer builds on both device shapes");
+            assert_eq!(
+                renderer.culls_clusters(),
+                optional.contains(Features::TASK_SHADER),
+                "the two arms must actually differ, or this compares a device with itself"
+            );
+            let (label, entries) = recorder
+                .bind_group_layouts_created()
+                .into_iter()
+                .find(|(label, _)| label.as_deref() == Some(MESH_LAYOUT_LABEL))
+                .expect("the mesh pass declares its layout by name");
+            assert_eq!(label.as_deref(), Some(MESH_LAYOUT_LABEL));
+            declared.push(
+                entries
+                    .iter()
+                    .map(|entry| (entry.binding, entry.kind))
+                    .collect(),
+            );
+        }
+
+        let [amplified, plain] = declared
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("two arms were run"));
+        assert_eq!(
+            amplified, plain,
+            "the mesh layout's bindings changed with the task stage, which moves every Metal \
+             argument-table index above the difference"
+        );
+        // Not a vacuous comparison: the four bindings the gate used to hide are
+        // the ones that have to be there, and 17 is the one whose index the
+        // committed MSL pins.
+        for binding in [13, 14, 17, 18, 19] {
+            assert!(
+                plain.iter().any(|(number, _)| *number == binding),
+                "binding {binding} is declared by mesh_cluster.slang and must be in the layout"
+            );
+        }
+        // **And no gaps**, which is the other half of what makes `crcbl-mtl`'s
+        // count agree with Slang's declaration order. Counting the same-table
+        // entries below a binding yields the index Slang assigned only while
+        // the layout is the shader's whole declaration set, contiguous from
+        // zero; a gap means some resource the module declares is missing, and
+        // every index above the gap is off by as many as are missing.
+        let numbers: Vec<u32> = plain.iter().map(|(binding, _)| *binding).collect();
+        assert_eq!(
+            numbers,
+            (0..numbers.len() as u32).collect::<Vec<u32>>(),
+            "the mesh layout must declare every binding mesh.slang and mesh_cluster.slang do, \
+             ascending from zero with no gaps"
+        );
     }
 
     /// **`Features::TASK_SHADER` is what decides whether §3.5's per-cluster cull

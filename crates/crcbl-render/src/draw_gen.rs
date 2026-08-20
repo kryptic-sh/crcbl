@@ -1042,6 +1042,15 @@ impl DrawGen {
     /// rather than re-derived here for the reason the frustum is: a pass that
     /// selects detail against one camera while another draws is a difference
     /// nothing in a frame can see.
+    ///
+    /// **Which is why the one caller allowed to break that is a deliberate
+    /// setting rather than an accident of what was in scope.**
+    /// [`ForwardRenderer::set_frozen_selection_eye`] hands this a pinned eye
+    /// while the frame block keeps the live camera, so the cut a reviewer is
+    /// looking at is the one chosen for somewhere they are no longer standing —
+    /// which is the only vantage point a cut can be judged from.
+    ///
+    /// [`ForwardRenderer::set_frozen_selection_eye`]: crate::ForwardRenderer::set_frozen_selection_eye
     pub fn begin_frame(
         &self,
         device: &dyn Device,

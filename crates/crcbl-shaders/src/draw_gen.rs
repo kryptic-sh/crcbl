@@ -91,10 +91,20 @@ pub struct Params {
     pub level_meshes_at: u32,
     /// The eye the uniform cut is selected from, in world space.
     ///
-    /// The same three floats a frame writes into
+    /// Ordinarily the same three floats a frame writes into
     /// [`FrameUniforms::camera_position`](crate::mesh::FrameUniforms::camera_position):
     /// the two geometry paths select at different granularities and must never
     /// select from different cameras.
+    ///
+    /// **The two do separate on purpose in two cases, and neither is a
+    /// disagreement.** A shadow cascade's frame block holds the *light*, because
+    /// what that block feeds is a facing test whose viewer is the light, while
+    /// detail stays denominated in the camera's pixels and keeps this field on
+    /// the camera. And `crcbl_render::ForwardRenderer::set_frozen_selection_eye`
+    /// pins this field alone, so a reviewer can fly away from the viewpoint a
+    /// cut was chosen for and look at it — the only place a wrong cut is
+    /// visible, since from the selecting eye every cut inside the budget has the
+    /// same silhouette.
     pub camera_position: [f32; 3],
     /// How many pixels one unit of length subtends one unit from the eye, the
     /// pixel budget a group's projected error is compared against, and the

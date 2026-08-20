@@ -335,6 +335,26 @@ enum RenderCommand {
         args: Retained<ProtocolObject<dyn MTLBuffer>>,
         offset: NSUInteger,
     },
+    /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`.
+    ///
+    /// All three sizes are `MTLSize`: the seam's `x`/`y`/`z` are the
+    /// *threadgroup grid*, and the two threadgroup sizes come off the bound
+    /// pipeline — see `crcbl_mtl::pipeline`'s `MeshThreadgroups`.
+    DrawMeshTasks {
+        groups: objc2_metal::MTLSize,
+        object: objc2_metal::MTLSize,
+        mesh: objc2_metal::MTLSize,
+    },
+    /// One argument structure of an indirect mesh draw, on
+    /// [`DrawIndirect`](Self::DrawIndirect)'s terms exactly: Metal has one call
+    /// per structure here too, so the multi-draw loop records one of these per
+    /// structure.
+    DrawMeshTasksIndirect {
+        args: Retained<ProtocolObject<dyn MTLBuffer>>,
+        offset: NSUInteger,
+        object: objc2_metal::MTLSize,
+        mesh: objc2_metal::MTLSize,
+    },
     /// [`DrawIndirect`](Self::DrawIndirect) with the bound index buffer, which
     /// Metal takes as an argument of the draw.
     DrawIndexedIndirect {
@@ -534,6 +554,36 @@ fn replay(encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>, command: &Rende
         } => unsafe {
             encoder.drawPrimitives_indirectBuffer_indirectBufferOffset(*primitive, args, *offset);
         },
+        RenderCommand::DrawMeshTasks {
+            groups,
+            object,
+            mesh,
+        } => {
+            encoder.drawMeshThreadgroups_threadsPerObjectThreadgroup_threadsPerMeshThreadgroup(
+                *groups, *object, *mesh,
+            );
+        }
+        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
+        // the indirect offset nor the buffer's contents.
+        // `crate::draw::plan_indirect` checked every structure recorded against
+        // the argument buffer's own length, at the `MTLDispatchThreadgroupsIndirectArguments`
+        // width, and the buffer is kept alive by the `Retained` this command
+        // holds. What Metal cannot check, and neither can this, is the three
+        // words themselves — a threadgroup count from GPU memory is the whole
+        // nature of the call.
+        RenderCommand::DrawMeshTasksIndirect {
+            args,
+            offset,
+            object,
+            mesh,
+        } => unsafe {
+            encoder.drawMeshThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerObjectThreadgroup_threadsPerMeshThreadgroup(
+                args,
+                *offset,
+                *object,
+                *mesh,
+            );
+        },
         // SAFETY: as above, plus the index buffer's offset — which
         // `bind_index_buffer` checked against its allocation.
         RenderCommand::DrawIndexedIndirect {
@@ -592,6 +642,16 @@ pub(crate) struct MetalCommandEncoder {
     /// not survive `endEncoding` — keeping it would let a draw in the *next*
     /// pass proceed with no pipeline set and let Metal raise.
     bound_primitive: Option<objc2_metal::MTLPrimitiveType>,
+    /// The two threadgroup sizes of the bound **mesh** pipeline, which Metal
+    /// takes at the draw call rather than in the pipeline object.
+    ///
+    /// `None` means the bound pipeline is a raster one, or that nothing is
+    /// bound — the seam gives both kinds one handle type, so this is also what
+    /// [`draw_mesh_tasks`](CommandEncoder::draw_mesh_tasks) checks before
+    /// making a call Metal would answer by raising. Cleared by
+    /// [`Self::close_open`] with [`Self::bound_primitive`] and for the same
+    /// reason.
+    bound_mesh: Option<crate::pipeline::MeshThreadgroups>,
     /// The threadgroup size of the bound compute pipeline, which Metal takes at
     /// the dispatch call rather than in the pipeline object.
     ///
@@ -667,6 +727,7 @@ impl MetalCommandEncoder {
             render_pass_label: false,
             compute_pass_label: false,
             bound_primitive: None,
+            bound_mesh: None,
             bound_threads: None,
             index: None,
             push_constants: None,
@@ -752,9 +813,10 @@ impl MetalCommandEncoder {
             Open::Render(recording) => self.encode_render_pass(&recording),
         }
         // Pipeline state and argument tables belong to the encoder that is
-        // going away; see `bound_primitive`, `bound_threads` and
+        // going away; see `bound_primitive`, `bound_mesh`, `bound_threads` and
         // `push_constants`.
         self.bound_primitive = None;
+        self.bound_mesh = None;
         self.bound_threads = None;
         self.push_constants = None;
     }
@@ -1588,8 +1650,10 @@ impl CommandEncoder for MetalCommandEncoder {
         };
         // The topology is read at the *draw* rather than sent to Metal, so it
         // stays encoder state here; `replay` makes every call the rest of this
-        // binding becomes.
+        // binding becomes. A mesh pipeline's two threadgroup sizes stay for the
+        // same reason and are read by the same kind of call.
         self.bound_primitive = Some(bound.raster.primitive);
+        self.bound_mesh = bound.mesh;
         self.record(RenderCommand::BindPipeline(bound));
     }
 
@@ -1895,23 +1959,85 @@ impl CommandEncoder for MetalCommandEncoder {
         self.indirect_count(draw, true);
     }
 
-    /// Refused for the same reason `create_mesh_pipeline` is: there is no mesh
-    /// pipeline for this to have been recorded against.
-    fn draw_mesh_tasks(&mut self, _x: u32, _y: u32, _z: u32) {
-        self.fail(crate::MetalInstance::not_yet(
-            "drawMeshThreadgroups: (the Metal mesh slice)",
-        ));
+    /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`.
+    ///
+    /// The seam's `x`, `y` and `z` are **threadgroups**, not threads — Vulkan's
+    /// rule for `vkCmdDrawMeshTasksEXT`, D3D12's for `DispatchMesh` and Metal's
+    /// for this call, which is why the seam adopted it and why the three agree
+    /// argument for argument. The two *threadgroup sizes* Metal wants beside
+    /// them are the ones the bound pipeline was built with; `crcbl_mtl::pipeline`
+    /// says why they have to travel on the pipeline at all, and MSL declaring
+    /// none is the whole of it.
+    ///
+    /// `threadsPerObjectThreadgroup` is passed whether or not there is an
+    /// object stage, because Metal documents itself as ignoring it when there
+    /// is none — a branch here would be a second rule with nothing behind it.
+    ///
+    /// A draw with **no mesh pipeline bound is refused**, and a raster one
+    /// counts as none: the seam gives both kinds one
+    /// [`GraphicsPipelineHandle`] deliberately (`crcbl_hal::MeshPipelineDesc`
+    /// argues it), so this is the one place the pairing can be checked, and
+    /// Metal's answer to the mismatch is a raise — which aborts the process.
+    fn draw_mesh_tasks(&mut self, x: u32, y: u32, z: u32) {
+        let Some(threads) = self.mesh_draw_target("draw_mesh_tasks") else {
+            return;
+        };
+        // A draw of no threadgroups renders nothing, and Metal raises on a zero
+        // extent — the same trade `crcbl_mtl::indirect_count` makes for a
+        // dispatch of nothing.
+        if x == 0 || y == 0 || z == 0 {
+            return;
+        }
+        self.record(RenderCommand::DrawMeshTasks {
+            groups: objc2_metal::MTLSize {
+                width: to_ns(u64::from(x)),
+                height: to_ns(u64::from(y)),
+                depth: to_ns(u64::from(z)),
+            },
+            object: threads.object,
+            mesh: threads.mesh,
+        });
     }
 
-    /// Refused with [`draw_mesh_tasks`](Self::draw_mesh_tasks). Metal's own
-    /// form is `drawMeshThreadgroupsWithIndirectBuffer:`, whose buffer holds
-    /// the `MTLDispatchThreadgroupsIndirectArguments` the seam documents —
-    /// there is simply no mesh pipeline here for either to be recorded
-    /// against.
-    fn draw_mesh_tasks_indirect(&mut self, _draw: &DrawIndirect) {
-        self.fail(crate::MetalInstance::not_yet(
-            "drawMeshThreadgroupsWithIndirectBuffer: (the Metal mesh slice)",
-        ));
+    /// One `drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:…` per
+    /// argument structure.
+    ///
+    /// The same loop the raster indirect draws take and for the same reason:
+    /// Metal emits one draw per GPU-written structure and
+    /// [`DrawIndirect::draw_count`] is a CPU value by definition, so N calls
+    /// *are* the multi-draw rather than an approximation of it. `crcbl_mtl::draw`
+    /// argues that in full; what differs here is only the structure's width —
+    /// three words, which is `MTLDispatchThreadgroupsIndirectArguments` and is
+    /// `VkDrawMeshTasksIndirectCommandEXT` and `D3D12_DISPATCH_MESH_ARGUMENTS`
+    /// field for field, as the seam says.
+    ///
+    /// There is no count-limited twin because the seam has none: mesh work is
+    /// culled by the amplification stage rather than by a count somebody wrote.
+    fn draw_mesh_tasks_indirect(&mut self, draw: &DrawIndirect) {
+        let Some(threads) = self.mesh_draw_target("draw_mesh_tasks_indirect") else {
+            return;
+        };
+        let Some(args) = self.buffer(draw.args) else {
+            return;
+        };
+        let plan = match crate::indirect_count::plan_mesh_indirect(draw, args.length() as u64) {
+            Ok(Some(plan)) => plan,
+            // A draw of nothing, which the seam permits and which reads no
+            // argument structure at all.
+            Ok(None) => return,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        for structure in 0..plan.count {
+            self.record(RenderCommand::DrawMeshTasksIndirect {
+                args: args.clone(),
+                offset: to_ns(plan.offset(structure)),
+                object: threads.object,
+                mesh: threads.mesh,
+            });
+        }
     }
 
     // --- compute scope ---
@@ -2264,6 +2390,36 @@ impl MetalCommandEncoder {
             return None;
         };
         Some(primitive)
+    }
+
+    /// The threadgroup sizes a mesh draw needs, or the failure that says why
+    /// there are none.
+    ///
+    /// [`draw_target`](Self::draw_target)'s mesh twin, and it asks a strictly
+    /// stronger question: a mesh draw needs a *mesh* pipeline bound, and the
+    /// seam's one handle type means a raster pipeline can be bound where one
+    /// was meant. `crcbl_mtl::pipeline`'s `MeshThreadgroups` is present on
+    /// exactly the pipelines built from an `MTLMeshRenderPipelineDescriptor`,
+    /// so it answers both halves at once.
+    fn mesh_draw_target(&mut self, what: &str) -> Option<crate::pipeline::MeshThreadgroups> {
+        if !self.ok() {
+            return None;
+        }
+        if !self.recording() {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} outside a render pass; the seam places every draw inside one"
+            )));
+            return None;
+        }
+        let Some(threads) = self.bound_mesh else {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} with no mesh pipeline bound: Metal takes both threadgroup sizes at \
+                 drawMeshThreadgroups: and has neither from a raster pipeline or from nothing, \
+                 and it answers the mismatch by raising — which aborts the process"
+            )));
+            return None;
+        };
+        Some(threads)
     }
 
     /// Which kind of pass is open, or the failure that says none is.

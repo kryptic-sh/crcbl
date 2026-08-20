@@ -806,13 +806,16 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::MeshShading,
         backend: BackendKind::Metal,
         kind: DivergenceKind::Unwritten,
-        why: "Metal has the object and mesh stages — MTLMeshRenderPipelineDescriptor and \
-              drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup: — and \
-              Slang emits them, but this backend builds no such pipeline (the Metal mesh slice). \
-              Writing it would not be verifiable here: mesh shading is a Metal 3 feature gated on \
-              supportsFamily:MTLGPUFamilyMetal3, and the Mac CI runs this backend on answers false \
-              to Metal3 and to every Apple family above 5 — measured by \
-              a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling",
+        why: "the calls exist — crcbl_mtl::pipeline fills an MTLMeshRenderPipelineDescriptor with \
+              the object, mesh and fragment functions and crcbl_mtl::command records \
+              drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup: and its \
+              indirect twin — but no device has ever run them, so crcbl_mtl::adapter reports no \
+              Features::MESH_SHADER and the capability cannot answer Yes. Mesh shading is a Metal \
+              3 feature gated on supportsFamily:MTLGPUFamilyMetal3, and the Mac CI runs this \
+              backend on answers false to Metal3 and to every Apple family above 5 — measured by \
+              a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling. \
+              Retiring this row takes a Metal 3 Mac running crcbl_mtl's mesh path and the flag \
+              being reported off the back of it",
     },
     Divergence {
         capability: Capability::MeshShading,
@@ -846,7 +849,9 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::TaskShaderStage,
         backend: BackendKind::Metal,
         kind: DivergenceKind::Unwritten,
-        why: "no mesh pipeline to put an object stage in front of; see the MeshShading entry",
+        why: "MeshPipelineDesc::task reaches Metal's object stage through the same descriptor the \
+              mesh one does — setObjectFunction: beside setMeshFunction: — and it is behind the \
+              same unreported flag and the same unrun code; see the MeshShading entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,

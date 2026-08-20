@@ -101,9 +101,90 @@ pub(crate) fn check_depth_clamp(
     Ok(())
 }
 
+/// The macOS major version `MTLMeshRenderPipelineDescriptor` and
+/// `newRenderPipelineStateWithMeshDescriptor:options:reflection:error:` arrive
+/// in.
+///
+/// The same shape as `crate::adapter`'s `gpu_address_is_available` and for the
+/// same reason: what a *selector* needs is the OS it shipped in, which is a
+/// different question from what a *device* can do.
+pub(crate) const MESH_MACOS_MAJOR: i64 = 13;
+
+/// Whether this device and this OS can build a Metal mesh pipeline at all.
+///
+/// Two questions, asked separately because they fail for different reasons and
+/// a caller reading the refusal needs to know which:
+///
+/// * **The OS.** The mesh descriptor and its creation selector are macOS 13
+///   APIs. On anything older the message would arrive as an unrecognised
+///   selector, which in Objective-C is a raise — and a raise aborts the
+///   process rather than returning an error a caller can branch on.
+/// * **The device.** Mesh shading is a Metal 3 feature, gated on
+///   `supportsFamily:MTLGPUFamilyMetal3` — Apple's own check. `docs/backlog.md`
+///   records the measurement that makes this more than a formality: the
+///   `Apple Paravirtual device` every Mac CI job here runs on answers `false`
+///   to `Metal3` and to every Apple family above `Apple5`, so it is a device
+///   that cannot create one of these pipelines however new its OS is.
+///
+/// # Errors
+///
+/// [`HalError::Unsupported`] — never [`HalError::InvalidDescriptor`] — naming
+/// the requirement that was not met, for `check_depth_clamp`'s reason exactly:
+/// the descriptor is not malformed and there is no field to correct.
+pub(crate) fn check_mesh_support(metal3: bool, os_major: i64) -> Result<(), HalError> {
+    if os_major < MESH_MACOS_MAJOR {
+        return Err(HalError::Unsupported {
+            backend: BackendKind::Metal,
+            what: "mesh shading on a macOS older than 13: MTLMeshRenderPipelineDescriptor and \
+                   newRenderPipelineStateWithMeshDescriptor:options:reflection:error: arrive in \
+                   macOS 13, and sending an unrecognised selector raises rather than failing",
+        });
+    }
+    if !metal3 {
+        return Err(HalError::Unsupported {
+            backend: BackendKind::Metal,
+            what: "mesh shading on a device that answers no to \
+                   supportsFamily:MTLGPUFamilyMetal3: the object and mesh stages are a Metal 3 \
+                   feature, and Apple's own query is the one that decides it",
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both requirements, in both directions — a gate that refused everything
+    /// would pass a test that only asked about the refusal, and one that
+    /// refused nothing is the "not supported here reported as passed" failure
+    /// this module exists to avoid.
+    #[test]
+    fn a_mesh_pipeline_needs_macos_13_and_a_metal_3_device() {
+        check_mesh_support(true, MESH_MACOS_MAJOR)
+            .expect("a Metal 3 device on the OS the selector arrives in");
+        check_mesh_support(true, MESH_MACOS_MAJOR + 13).expect("and on every OS after it");
+
+        for (metal3, os_major, expected) in [
+            (true, MESH_MACOS_MAJOR - 1, "macOS older than 13"),
+            (false, MESH_MACOS_MAJOR, "supportsFamily:MTLGPUFamilyMetal3"),
+            // The OS is reported first, because a caller on macOS 12 cannot
+            // learn anything about the device from a call that would raise.
+            (false, MESH_MACOS_MAJOR - 1, "macOS older than 13"),
+        ] {
+            let Err(error) = check_mesh_support(metal3, os_major) else {
+                panic!("metal3={metal3}, os_major={os_major} must be refused");
+            };
+            let HalError::Unsupported { backend, what } = error else {
+                panic!("a capability refusal must be Unsupported, not {error}");
+            };
+            assert_eq!(backend, BackendKind::Metal);
+            assert!(
+                what.contains(expected),
+                "the refusal must name the requirement that failed: {what}"
+            );
+        }
+    }
 
     /// The name is Apple's, and the match has to survive its capitalisation
     /// changing — "Paravirtual" is the spelling CI reports today and nothing

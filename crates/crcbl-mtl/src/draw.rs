@@ -76,13 +76,17 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLIndexType};
 
-// The argument-structure geometry, which this module and
-// `crcbl_mtl::indirect_count` both step by — one buffer offset at a time here,
-// and one *word index* at a time there, because the packing kernel is told the
-// layout rather than declaring it. It lives in that module because it is
+// The argument-structure geometry and the plan built from it, which this module
+// and `crcbl_mtl::indirect_count` both step by — one buffer offset at a time
+// here, and one *word index* at a time there, because the packing kernel is told
+// the layout rather than declaring it. It lives in that module because it is
 // compiled on every host: these are numbers the API fixes, and a test that can
-// only run on a Mac is a test that runs on one machine in CI.
-use crate::indirect_count::{DRAW_ARGS_BYTES, DRAW_INDEXED_ARGS_BYTES, INDIRECT_OFFSET_ALIGNMENT};
+// only run on a Mac is a test that runs on one machine in CI. The mesh path's
+// own entry point is there too, for that reason and no other — see
+// `plan_mesh_indirect`, which this module has no `MTLBuffer` to add to.
+use crate::indirect_count::{
+    DRAW_ARGS_BYTES, DRAW_INDEXED_ARGS_BYTES, IndirectPlan, plan_structures,
+};
 
 /// The index buffer a later draw will read, held because Metal takes it at the
 /// draw call. See the module docs.
@@ -167,22 +171,6 @@ pub(crate) fn plan_index_binding(
     Ok((length - offset) / format.size())
 }
 
-/// A validated indirect draw: where the first argument structure is, how far
-/// apart the rest are, and how many there are.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct IndirectPlan {
-    pub(crate) first: u64,
-    pub(crate) stride: u64,
-    pub(crate) count: u32,
-}
-
-impl IndirectPlan {
-    /// The byte offset of argument structure `index`.
-    pub(crate) const fn offset(self, index: u32) -> u64 {
-        self.first + self.stride * index as u64
-    }
-}
-
 /// Checks an indirect draw against Metal's rules and the buffer it reads, or
 /// says why it cannot be encoded.
 ///
@@ -204,52 +192,15 @@ pub(crate) fn plan_indirect(
     indexed: bool,
     length: u64,
 ) -> Result<Option<IndirectPlan>, HalError> {
-    if draw.draw_count == 0 {
-        return Ok(None);
-    }
-    let args = if indexed {
-        DRAW_INDEXED_ARGS_BYTES
-    } else {
-        DRAW_ARGS_BYTES
-    };
-    if !draw.offset.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
-        return Err(HalError::InvalidDescriptor(format!(
-            "an indirect draw's argument offset {} is not a multiple of {INDIRECT_OFFSET_ALIGNMENT}",
-            draw.offset
-        )));
-    }
-    // A single draw reads one structure at `offset` and never strides, so its
-    // `stride` is not a value Metal is ever told — checking it would refuse the
-    // tightly-packed `stride: 0` a one-draw caller may well pass.
-    let stride = if draw.draw_count == 1 {
-        args
-    } else {
-        let stride = u64::from(draw.stride);
-        if stride < args || !stride.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
-            return Err(HalError::InvalidDescriptor(format!(
-                "an indirect draw of {} structures has a stride of {stride}, and one argument \
-                 structure is {args} bytes on a {INDIRECT_OFFSET_ALIGNMENT}-byte alignment",
-                draw.draw_count
-            )));
-        }
-        stride
-    };
-    let span = u64::from(draw.draw_count - 1)
-        .checked_mul(stride)
-        .and_then(|span| span.checked_add(args))
-        .and_then(|span| draw.offset.checked_add(span));
-    if span.is_none_or(|span| span > length) {
-        return Err(HalError::InvalidDescriptor(format!(
-            "an indirect draw of {} structures {stride} bytes apart from offset {} runs past a \
-             {length}-byte buffer",
-            draw.draw_count, draw.offset
-        )));
-    }
-    Ok(Some(IndirectPlan {
-        first: draw.offset,
-        stride,
-        count: draw.draw_count,
-    }))
+    plan_structures(
+        draw,
+        if indexed {
+            DRAW_INDEXED_ARGS_BYTES
+        } else {
+            DRAW_ARGS_BYTES
+        },
+        length,
+    )
 }
 
 #[cfg(test)]

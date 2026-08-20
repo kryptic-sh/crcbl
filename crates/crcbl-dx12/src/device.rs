@@ -3401,6 +3401,14 @@ impl Device for Dx12Device {
                 desc.color_targets.len()
             )));
         }
+        // D3D12 reads the declared size out of the DXIL and takes workgroup
+        // *counts* at `DispatchMesh`, so these two fields say nothing here —
+        // `crcbl_hal::MeshPipelineDesc::mesh_workgroup_size` explains that they
+        // exist for Metal, which has no declaration to read. What this backend
+        // can still do is refuse the values no API has a field for, so a
+        // descriptor that is wrong everywhere fails here too rather than only
+        // on the one backend that reads it.
+        desc.check_workgroup_sizes()?;
         let mut state = self.state();
         let layout = handle::lookup(
             &state.pipeline_layouts,
@@ -5522,10 +5530,15 @@ pub(crate) mod tests {
                         module,
                         entry_point,
                     }),
+                    // `mesh_shader.slang`'s own numbers. D3D12 reads them out
+                    // of the DXIL and ignores these; they are here because
+                    // Metal cannot.
+                    task_workgroup_size: [1, 1, 1],
                     mesh: ShaderEntry {
                         module,
                         entry_point: entry,
                     },
+                    mesh_workgroup_size: [3, 1, 1],
                     fragment: Some(ShaderEntry {
                         module,
                         entry_point: "fragmentMain",
@@ -8361,10 +8374,12 @@ pub(crate) mod tests {
                         label: None,
                         layout: unissued(),
                         task: None,
+                        task_workgroup_size: [1, 1, 1],
                         mesh: ShaderEntry {
                             module: unissued(),
                             entry_point: "meshMain",
                         },
+                        mesh_workgroup_size: [1, 1, 1],
                         fragment: None,
                         primitive: PrimitiveState::default(),
                         depth_stencil: None,
@@ -8799,10 +8814,12 @@ pub(crate) mod tests {
                 label: None,
                 layout: unissued(),
                 task: None,
+                task_workgroup_size: [1, 1, 1],
                 mesh: ShaderEntry {
                     module: unissued(),
                     entry_point: "meshMain",
                 },
+                mesh_workgroup_size: [1, 1, 1],
                 fragment: None,
                 primitive: PrimitiveState::default(),
                 depth_stencil: None,

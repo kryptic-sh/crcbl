@@ -379,7 +379,8 @@ struct DrawGenParams
     uint level_meshes_at;
     /// The eye this frame's selection is projected from, in world space, in
     /// `xyz`. **The camera's**, on every pass this shader runs for, including the
-    /// shadow cascades.
+    /// shadow cascades — unless the host pinned it, for which see the second
+    /// half of this comment.
     ///
     /// A cascade's copy of `mesh.slang`'s `FrameUniforms::camera_position` holds
     /// the *sun* instead, and the two are answering different questions rather
@@ -389,6 +390,18 @@ struct DrawGenParams
     /// coarser caster costs is a shadow edge displaced by the group's error, and
     /// that displacement is seen by the camera at the camera's distance. A
     /// directional sun has no position to measure a distance from at all.
+    ///
+    /// **The same split, read the other way, is what lets a host freeze the
+    /// cut.** `crcbl_render::ForwardRenderer::set_frozen_selection_eye` pins
+    /// this field at one viewpoint and changes nothing else: the frustum planes
+    /// beside it in `cull.slang` come from the frame's view-projection, and
+    /// `mesh_cluster.slang`'s normal cone asks `FrameUniforms::camera_position`
+    /// which way a cluster faces the *viewer* — so a reviewer flies away from
+    /// the pinned eye and the frame is still culled, faced and drawn from where
+    /// they actually are, while the cut stays the one that eye chose. That is
+    /// the only way a cut can be checked at all: from the eye that chose it, a
+    /// cut too coarse and a cut exactly right have the same silhouette, which
+    /// is what a screen-space error budget means.
     float4 camera_position;
     /// `docs/plan/25-lod.md`'s selection numbers: `x` is how many pixels one
     /// unit of length subtends one unit from the eye, `y` is the pixel budget an

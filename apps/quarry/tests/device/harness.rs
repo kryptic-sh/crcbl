@@ -290,13 +290,32 @@ impl Quarry {
         self.lit_frame(at, &crcbl::render::DirectionalLight::default())
     }
 
+    /// The same, from a camera of the caller's own rather than a pose on the
+    /// dolly — and **without the coverage assertion**.
+    ///
+    /// The two halves go together. A caller reaching for this is aiming the
+    /// camera somewhere the dolly does not go, and `freeze.rs` turns it away
+    /// from the face on purpose: a frame that draws nothing is the *observable*
+    /// there, so demanding that a fifth of it be covered would refuse the
+    /// measurement rather than make it. Everything else the fixture asserts —
+    /// that the graph compiled a forward pass and that a draw reached it — still
+    /// holds, and the cut and the cull statistics still come back.
+    pub(crate) fn frame_from(&mut self, camera: &crcbl::render::Camera) -> Frame {
+        frame_body(
+            self,
+            camera,
+            &crcbl::render::DirectionalLight::default(),
+            Coverage::Unchecked,
+        )
+    }
+
     /// The same, under a light of the caller's choosing.
     ///
     /// The one thing quarry measures that is not a count. See
     /// `shading::the_face_is_shaded_by_the_light_it_is_given`, which is the
     /// caller and the reason this exists.
     pub(crate) fn lit_frame(&mut self, at: f32, light: &crcbl::render::DirectionalLight) -> Frame {
-        frame_body(self, at, light)
+        frame_body(self, &dolly(at), light, Coverage::Required)
     }
 
     /// Unwinds in reverse order of creation. Nothing here has a `Drop`, and a
@@ -316,8 +335,25 @@ pub(crate) fn draw_and_measure(levels: Levels, budget: f32) -> Option<Vec<usize>
     cut
 }
 
-/// The body of one frame: renders at `at` along the dolly and measures it.
-fn frame_body(quarry: &mut Quarry, at: f32, light: &crcbl::render::DirectionalLight) -> Frame {
+/// Whether a frame is required to have the face in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Coverage {
+    /// A fifth of the frame must differ from its most common colour — see
+    /// [`frame_body`]. Every pose on the dolly is aimed at the face, so a frame
+    /// that came out nearly empty there is the draw failing.
+    Required,
+    /// The camera may be aimed anywhere, including away from the face. Only
+    /// [`Quarry::frame_from`] passes this, and its header says why.
+    Unchecked,
+}
+
+/// The body of one frame: renders from `camera` and measures it.
+fn frame_body(
+    quarry: &mut Quarry,
+    camera: &crcbl::render::Camera,
+    light: &crcbl::render::DirectionalLight,
+    coverage: Coverage,
+) -> Frame {
     let (width, height) = EXTENT;
     let bytes = u64::from(width) * u64::from(height) * 4;
 
@@ -341,7 +377,7 @@ fn frame_body(quarry: &mut Quarry, at: f32, light: &crcbl::render::DirectionalLi
 
     quarry
         .renderer
-        .begin_frame(device, &dolly(at), light, EXTENT)
+        .begin_frame(device, camera, light, EXTENT)
         .expect("the uniform buffer is writable");
 
     let mut encoder = device.create_command_encoder(&crcbl::hal::CommandEncoderDesc {
@@ -435,7 +471,7 @@ fn frame_body(quarry: &mut Quarry, at: f32, light: &crcbl::render::DirectionalLi
         // of the frame from a camera aimed at it, so anything under a fifth is
         // the geometry failing rather than the camera being generous.
         assert!(
-            covered * 5 > pixels,
+            coverage == Coverage::Unchecked || covered * 5 > pixels,
             "only {covered} of {pixels} pixels differ from {background:?}, so what drew is not \
              the face — the graph recorded the frame, so this is the draw producing almost \
              nothing"

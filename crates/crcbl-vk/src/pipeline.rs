@@ -652,6 +652,24 @@ impl VkDevice {
             None => None,
         };
         let (mesh_name, mesh_module) = entry_name(&state, &inner, desc.mesh, ShaderStages::MESH)?;
+        // The same guard the compute path applies, for the same reason and on
+        // the two stages a mesh pipeline has: the seam's workgroup sizes exist
+        // because Metal takes them at `drawMeshThreadgroups:` and has no
+        // declaration to compare them with, and this backend is compiling the
+        // module that declares one. Both sizes are checked here rather than
+        // only the mesh one, because a wrong task size launches the wrong
+        // number of amplification threads and nothing on Vulkan would notice.
+        desc.check_workgroup_sizes()?;
+        for (entry, declared) in desc
+            .task
+            .map(|task| (task, desc.task_workgroup_size))
+            .into_iter()
+            .chain([(desc.mesh, desc.mesh_workgroup_size)])
+        {
+            let module = lookup(&state.shader_modules, "shader module", entry.module, &inner)?;
+            spirv::require_workgroup_size(&module.words, entry.entry_point, declared)
+                .map_err(HalError::ShaderCompilation)?;
+        }
         let fragment_name = match desc.fragment {
             Some(entry) => Some(entry_name(&state, &inner, entry, ShaderStages::FRAGMENT)?),
             None => None,

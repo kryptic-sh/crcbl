@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`MeshPipelineDesc` gains `mesh_workgroup_size` and `task_workgroup_size`.**
+  Metal takes both threadgroup sizes at the **draw** —
+  `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`
+  — and Slang's Metal target drops `[numthreads(…)]` entirely, so a backend
+  holding a module and an entry point has no number to pass and cannot draw at
+  all. The same argument `ComputePipelineDesc::workgroup_size` already carries,
+  one stage along. `crcbl-vk` verifies both against the SPIR-V, so a value that
+  disagrees with the shader is caught there rather than launching the wrong
+  thread count on the one backend that reads it from the descriptor.
+
 - **`crcbl::engine::FrameInfo` gained a public field, `render_dt: Duration`** —
   the frame's wall-clock delta, straight from
   `crcbl_core::FrameClock::render_dt`. It advances on **every** frame, including
@@ -808,6 +818,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The mesh bind-group layout declares bindings 13, 14, 18 and 19 on every mesh
+  path**, not only where there is an amplification stage. Slang's Metal target
+  ignores `[[vk::binding]]` and hands each resource the next index in its
+  stage's flat table in declaration order, and `crcbl-mtl` derives that index by
+  counting the layout's entries — so a layout that skipped 13 and 14 put binding
+  17 at `buffer(11)` where `msl/mesh_cluster.metal` reads it at `buffer(13)`,
+  and everything above it was off by two. A wrong picture with a clean log, on
+  the one backend nobody here can debug on. Unreachable until now only because
+  Metal refused mesh pipelines outright.
+
 - **The server no longer replicates entities it has already destroyed.**
   `crcbl_server::Server::tick` ran `World::tick` (which sweeps), then
   `GameModule::tick`, then serialised the snapshot — so anything a game module
@@ -911,6 +931,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   spent only on the path that would otherwise fail.
 
 ### Added
+
+- **`crcbl-mtl` builds mesh pipelines and records the mesh draws.** A real
+  `MTLMeshRenderPipelineDescriptor` — object, mesh and fragment functions,
+  colour attachments, depth and stencil, sample count — sharing the raster
+  path's target checks and state rather than copying them, plus
+  `drawMeshThreadgroups:` and its indirect form. An OS or family that cannot
+  host it is refused by name (macOS 13 and `MTLGPUFamilyMetal3`) rather than
+  crashing.
+
+  **It is not reported as `Features::MESH_SHADER`, and both parity rows stay.**
+  No Metal 3 device has executed a line of it, and `Support::Yes` means the
+  backend performs the capability as the seam documents it. `crcbl-dx12` is the
+  precedent: its mesh path is written and its adapter withholds the flag for the
+  same reason. The rows move after a real device runs it, not before.
+
+- **`ForwardRenderer::set_frozen_selection_eye`** — topic 25's third debug
+  overlay, and the last one `docs/plan/sample/14-quarry.md` owed. It pins the
+  eye the cluster cut is selected from and changes nothing else: the frustum,
+  the normal cone and the frame are all still the live camera's, so a reviewer
+  flies away from the pinned point and looks at the cut that point chose. That
+  is the only vantage a cut can be judged from — from the eye that selected it,
+  a cut far too coarse and a cut exactly right have the same silhouette, which
+  is what a screen-space error budget promises. `None` hands the descent the
+  camera's own eye, exactly as before the field existed. `quarry` gains the key,
+  a pause row and a panel row naming where it is pinned.
+
+- **`crcbl_hal::null::Recorder::bind_group_layouts_created`**, for asserting on
+  the layouts a renderer declares rather than only the modules it compiles.
 
 - **`ForwardRenderer::set_heatmap`/`heatmap()`, and `DebugView`.** Topic 25's
   second debug overlay: each cluster shaded by the projected screen-space error

@@ -604,10 +604,14 @@ fn mesh_desc<'a>(
         label: Some("mesh triangle"),
         layout,
         task,
+        // `mesh_shader.slang`'s own numbers: `[numthreads(3, 1, 1)]` on both
+        // mesh entry points, `[numthreads(1, 1, 1)]` on `taskMain`.
+        task_workgroup_size: [1, 1, 1],
         mesh: ShaderEntry {
             module,
             entry_point: "meshMain",
         },
+        mesh_workgroup_size: [3, 1, 1],
         fragment: Some(ShaderEntry {
             module,
             entry_point: "fragmentMain",

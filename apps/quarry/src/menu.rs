@@ -1,18 +1,20 @@
-//! Quarry's menu: the pause panel, and the two rows of its own.
+//! Quarry's menu: the pause panel, and the rows of its own.
 //!
 //! Smaller than a game's, for `apps/lumen/src/menu.rs`'s reason: this is a
 //! fixture, not a game — there is no run to start, no score to lose and nothing
 //! to win, so a `GAME OVER` panel would be a screen it could never show.
 //!
-//! The rows it does have are the two things a reviewer of a *geometry* fixture
-//! keeps reaching for. The camera, because the face is looked at from three
-//! places — wherever the reviewer flew to, the pose `tests/golden/` was blessed
-//! from, and the slow run down the face that shows detail arriving — and
-//! getting back to any of them should be a keypress. And the LOD view, because
+//! The rows it does have are the things a reviewer of a *geometry* fixture keeps
+//! reaching for. The camera, because the face is looked at from three places —
+//! wherever the reviewer flew to, the pose `tests/golden/` was blessed from, and
+//! the slow run down the face that shows detail arriving — and getting back to
+//! any of them should be a keypress. The two overlays, because
 //! `docs/plan/sample/14-quarry.md`'s "one mesh spanning several levels across
 //! its own surface" is a claim nobody can see in a shaded frame: the tint is
 //! what makes it a claim anyone can check, and holding it against the shaded
-//! picture is the comparison.
+//! picture is the comparison. And the freeze, because a cut looked at from the
+//! eye that chose it is a cut nobody can find a fault in — that is what a
+//! screen-space error budget promises.
 //!
 //! `docs/plan/sample/00-samples-overview.md` rule 4 is why there is a panel at
 //! all, and it is the same reason there is this: a sample that cannot show the
@@ -100,6 +102,16 @@ pub enum QuarryAction {
     /// that could both read `ON` while one picture is drawn would be a panel
     /// that lies about the frame under it.
     ToggleHeatmap,
+    /// Pin the LOD selection at the camera's current position, or let it follow
+    /// the camera again —
+    /// [`ForwardRenderer::set_frozen_selection_eye`](crcbl::render::ForwardRenderer::set_frozen_selection_eye).
+    ///
+    /// **Not one of the overlays, and it must not become one.** The three views
+    /// are one picture chosen between, so pressing one row replaces the others;
+    /// this changes what the *selection* answers and leaves the picture's choice
+    /// alone. Freezing the cut and then reading it off the LOD tint is the whole
+    /// point of having both, so [`toggled_to`] does not know about this row.
+    ToggleFreeze,
 }
 
 /// The view a row leaves in force: `on` if it was not already showing, and the
@@ -133,6 +145,25 @@ pub const LOD_VIEW_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 1;
 /// The id carrying [`QuarryAction::ToggleHeatmap`].
 pub const HEATMAP_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 2;
 
+/// The id carrying [`QuarryAction::ToggleFreeze`].
+pub const FREEZE_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 3;
+
+/// The key that pins and unpins the selection without opening the panel.
+///
+/// **`F`, and it was free**: `crcbl::render::Flyer` claims `WSAD`, `Space`,
+/// `Shift` and the four arrows, and the loop reserves `Escape`, `F3`, `F11` and
+/// `Enter`. Reachable with the left hand while the right one is flying, which is
+/// the gesture this feature is: pin the cut where you are standing, then fly
+/// off and look at it.
+pub const FREEZE_KEY: crcbl::core::input::KeyCode = crcbl::core::input::KeyCode::KeyF;
+
+/// How the freeze row spells [`FREEZE_KEY`] in its shortcut column.
+///
+/// Beside the key rather than inline in the row, so
+/// `the_freeze_row_names_the_key_that_fires_it` can hold the two together — a
+/// panel offering a key that does nothing is worse than one offering none.
+const FREEZE_KEY_HINT: &str = "F";
+
 /// The action a widget id names, or `None` for an id this sample's menus do not
 /// use.
 #[must_use]
@@ -143,18 +174,24 @@ pub const fn action_for(id: crcbl::ui::WidgetId) -> Option<QuarryAction> {
         Some(QuarryAction::ToggleLodView)
     } else if id == HEATMAP_ID {
         Some(QuarryAction::ToggleHeatmap)
+    } else if id == FREEZE_ID {
+        Some(QuarryAction::ToggleFreeze)
     } else {
         None
     }
 }
 
-/// The pause panel: the loop's own three rows, then the camera in force and one
-/// row per overlay.
+/// The pause panel: the loop's own three rows, then the camera in force, one
+/// row per overlay, and whether the LOD selection is pinned.
 ///
 /// Each overlay row says whether *it* is the view being drawn, so at most one of
-/// them reads `ON` — see [`toggled_to`].
+/// them reads `ON` — see [`toggled_to`]. The freeze row is outside that
+/// exclusivity and can read `ON` beside any of them, which is
+/// [`QuarryAction::ToggleFreeze`]'s whole point; the *position* it is frozen at
+/// is a debug-panel row rather than a menu label, because a label wide enough
+/// for three coordinates is a label nothing else on the panel can line up with.
 #[must_use]
-pub fn pause_menu(camera: CameraMode, view: DebugView) -> Menu {
+pub fn pause_menu(camera: CameraMode, view: DebugView, frozen: bool) -> Menu {
     use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
     let state = |row: DebugView| if view == row { "ON" } else { "OFF" };
     Menu::new(
@@ -173,6 +210,11 @@ pub fn pause_menu(camera: CameraMode, view: DebugView) -> Menu {
                 HEATMAP_ID,
                 format!("HEATMAP: {}", state(DebugView::Heatmap)),
                 "ENTER",
+            ),
+            MenuItem::new(
+                FREEZE_ID,
+                format!("FREEZE SELECTION: {}", if frozen { "ON" } else { "OFF" }),
+                FREEZE_KEY_HINT,
             ),
         ],
     )
@@ -195,7 +237,7 @@ pub fn menus() -> Menus {
         false,
         vec![(
             true,
-            pause_menu(CameraMode::default(), DebugView::default()),
+            pause_menu(CameraMode::default(), DebugView::default(), false),
         )],
     )
 }
@@ -254,9 +296,33 @@ mod tests {
             MenuAction::Game(QuarryAction::ToggleCamera),
             MenuAction::Game(QuarryAction::ToggleLodView),
             MenuAction::Game(QuarryAction::ToggleHeatmap),
+            MenuAction::Game(QuarryAction::ToggleFreeze),
         ] {
             assert!(actions.contains(&expected), "no row fires {expected:?}");
         }
+    }
+
+    /// **The freeze row prints the key that does the same thing**, and the two
+    /// are one statement rather than two.
+    ///
+    /// A shortcut column is a promise. `FREEZE_KEY` and [`FREEZE_KEY_HINT`] sit
+    /// beside each other and would still drift — a key moved to `KeyG` with the
+    /// label left at `F` compiles, runs, and tells every reviewer to press a
+    /// key that does nothing. `KeyCode`'s own debug spelling is what ties them.
+    #[test]
+    fn the_freeze_row_names_the_key_that_fires_it() {
+        assert_eq!(
+            format!("{FREEZE_KEY:?}"),
+            format!("Key{FREEZE_KEY_HINT}"),
+            "the freeze row offers a key the fixture does not listen for",
+        );
+        let rows = pause_menu(CameraMode::default(), DebugView::default(), false);
+        let row = rows
+            .items()
+            .iter()
+            .find(|item| item.id == FREEZE_ID)
+            .expect("the freeze row is on the panel");
+        assert_eq!(row.hint, FREEZE_KEY_HINT);
     }
 
     /// **Each row labels the value it is set to**, so a reviewer reads the
@@ -276,12 +342,43 @@ mod tests {
                 (DebugView::LodTint, "LOD VIEW: ON", "HEATMAP: OFF"),
                 (DebugView::Heatmap, "LOD VIEW: OFF", "HEATMAP: ON"),
             ] {
-                let rows = labels(&pause_menu(camera, view));
-                assert!(rows.contains(&camera_row.to_string()), "{rows:?}");
-                assert!(rows.contains(&lod_row.to_string()), "{rows:?}");
-                assert!(rows.contains(&heat_row.to_string()), "{rows:?}");
+                for (frozen, freeze_row) in [
+                    (false, "FREEZE SELECTION: OFF"),
+                    (true, "FREEZE SELECTION: ON"),
+                ] {
+                    let rows = labels(&pause_menu(camera, view, frozen));
+                    assert!(rows.contains(&camera_row.to_string()), "{rows:?}");
+                    assert!(rows.contains(&lod_row.to_string()), "{rows:?}");
+                    assert!(rows.contains(&heat_row.to_string()), "{rows:?}");
+                    assert!(rows.contains(&freeze_row.to_string()), "{rows:?}");
+                }
             }
         }
+    }
+
+    /// **Freezing is orthogonal to the overlays**, which the panel has to show
+    /// rather than merely permit.
+    ///
+    /// The combination a reviewer actually wants is a frozen cut *and* the LOD
+    /// tint, so the freeze row has to be able to read `ON` beside an overlay row
+    /// reading `ON`. Folding freezing into [`toggled_to`]'s exclusivity — the
+    /// obvious way to add a fourth row to a panel that already has three — would
+    /// make the two mutually exclusive and the feature unusable, and every
+    /// single-row assertion above would still pass.
+    #[test]
+    fn the_freeze_row_reads_on_beside_a_live_overlay() {
+        for view in [DebugView::Shaded, DebugView::LodTint, DebugView::Heatmap] {
+            let rows = labels(&pause_menu(CameraMode::default(), view, true));
+            assert!(
+                rows.contains(&"FREEZE SELECTION: ON".to_string()),
+                "the freeze row went off when {view:?} was drawn: {rows:?}",
+            );
+        }
+        assert!(
+            labels(&pause_menu(CameraMode::default(), DebugView::LodTint, true))
+                .contains(&"LOD VIEW: ON".to_string()),
+            "and the tint stayed on while the selection was frozen",
+        );
     }
 
     /// **The two overlay rows are mutually exclusive**, and each one is its own
