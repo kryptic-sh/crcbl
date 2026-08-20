@@ -1927,12 +1927,30 @@ drives it, so all four combinations of {direct, indirect} × {mesh only,
 amplified} are now covered here and the last one is the smallest step from a
 frame WARP survives to the frame it does not.
 
-If that fails, the fault is `ExecuteIndirect(DISPATCH_MESH)` reaching an
-amplification stage — one call and one stage rather than a renderer. If it
-passes, the pipeline _shape_ is eliminated entirely and what remains is scale
-(the renderer dispatches many groups, these dispatch one),
-`mesh_cluster.slang`'s own size and groupshared use, and the bindless descriptor
-heap.
+**It passed too**, `PASS [0.101s] (39/80)`, again confirmed by name in the job
+log. So **the pipeline shape is eliminated entirely**: WARP survives every
+combination of {direct, indirect} × {mesh only, amplified}.
+
+**Two suspects down, and the search is now about size or content rather than
+shape.** Each of those four dispatches **one** group; `crcbl-render`'s frame
+dispatches one per (cluster, surviving instance).
+`many_indirect_amplification_groups_do_not_remove_the_device` asks a single
+`ExecuteIndirect` for `MANY_GROUPS` (1024) amplification groups — well inside
+D3D12's bound of 65535 per axis and 2^22 in product, so it is a size a
+conforming device must serve rather than a limit being probed.
+
+- **If that fails**, the renderer's mesh frame dies of _size_, and the fix is a
+  dispatch bound rather than a call to avoid.
+- **If it passes**, scale goes too, and what is left is `mesh_cluster.slang`
+  itself against this toy shader: its groupshared use, its payload, and the
+  bindless descriptor heap — none of which `mesh_shader.slang` touches.
+
+**Worth stating because it is the shape of the whole exercise:** every one of
+these is a _negative_ result, and each is still progress. The entry started at
+"the renderer's larger use of one kills it", which named no call; it is now
+"every pipeline shape survives at one group, and here is the next variable".
+None of it needed hardware nobody has — only a test that runs where the failure
+lives.
 
 So the decision:
 
