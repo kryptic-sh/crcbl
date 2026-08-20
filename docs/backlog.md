@@ -688,14 +688,15 @@ wrong twice.
 `raw-window-metal`. Plus a CI job, a runner script, a registry entry and
 `CRCBL_GPU=wgpu`.
 
-**`naga` does not leave, and the standing instruction says it should.** It is a
-**dev-dependency of `crcbl-shaders`**, not a `crcbl-wgpu` transitive: it
-validates the WGSL that `crcbl-webgpu` ships to a real browser. That manifest
-already argues the case and concludes "expect the pin to become a package of its
-own in the lockfile when `wgpu` goes — that is the cost, and it is worth
-paying". Deleting it would remove the only check that shipped WGSL parses before
-a browser sees it, which is how the uniformity bug shipped. Recorded because the
-instruction names `naga` and the tree disagrees with it.
+**DECIDED 2026-08-21 by the owner: `naga` stays**, because it is what validates
+the shaders `crcbl-webgpu` ships. It is a **dev-dependency of `crcbl-shaders`**,
+not a `crcbl-wgpu` transitive, so nothing about the deletion touches it — what
+changes is only that it stops riding `wgpu`'s resolution and becomes a pin of
+its own in the lockfile. `crates/crcbl-shaders/Cargo.toml` already argued
+exactly that and called the cost worth paying; this settles it. Dropping it
+would have removed the only check that shipped WGSL parses before a browser sees
+it, which is how the uniformity bug shipped, and the standing "remove
+`wgpu`/`naga` from the dependency graph" no longer applies to the second name.
 
 **What is not in question.** `crcbl-wgpu` is not a conformance oracle and this
 entry does not argue for keeping it as one: on Linux it runs Vulkan underneath,
