@@ -1812,7 +1812,7 @@ What would make it worth doing: a fourth copy. Two fixtures with different
 requirements are a resemblance; a third caller needing the same extras is
 duplicated knowledge.
 
-### quarry (S4C): milestones 1 to 3 are done; what is left is a window and goldens
+### quarry (S4C): what is left is a window, a heatmap and the skinned case
 
 The phase table's S4C row asks for "meshlet clusters, QEM cluster LOD, and all
 three `GeometryPath` values on one dense scene", gated by "golden frames per
@@ -1826,51 +1826,24 @@ it, forced by subtracting features from one adapter.
 
 **What is left, and it is what makes the gate rather than the milestones:**
 
-- **No window and no goldens.** The exit criteria want "golden frames per
-  `GeometryPath` from the fixed dolly, and the human-reviewed three-way
-  comparison recorded here". The frames exist and are measured; nothing blesses
-  or commits an image. This is the largest remaining piece and it needs a
-  decision — see the entry below.
-- **No LOD tint or heatmap overlay** (milestone 2's last item), and the sizing
-  here was wrong twice over — corrected 2026-08-20 by reading rather than
-  assuming.
+- **The goldens are committed; the window is not.** Six images —
+  `apps/quarry/tests/golden/`, one per `GeometryPath` at each end of the fixed
+  dolly, at `MIXING_BUDGET` where the paths genuinely disagree. Blessed on an RX
+  7900 XTX and verified on lavapipe locally at a max channel delta of 1, nothing
+  over `Tolerance::RASTERISER`, so the runner that gates them agrees with the
+  machine that made them. What is still owed is the window and the
+  human-reviewed three-way comparison written down here.
+- **The LOD tint is built; the heatmap is not.** `ForwardRenderer::set_lod_view`
+  tints each cluster by the DAG level it was decimated to, and
+  `the_lod_view_tints_the_mesh_path_by_level_and_the_indirect_paths_flat`
+  measures it: three colours on the mesh path at `MIXING_BUDGET` — background
+  plus levels 1 and 2 — against exactly two on the per-batch path, which has no
+  per-cluster level to tint by.
 
-  **The debug-view mechanism already exists.** `mesh.slang` reads a view switch
-  out of `frame.ambient.w` against a threshold —
-  `static const float NORMALS_VIEW = 0.5` — so a second view is another sentinel
-  in a lane that is already there, with no new binding, no layout change and no
-  `set_normals_view`-shaped API to invent. My earlier claim that "nothing in the
-  engine has one" was simply false.
-
-  **And the shader can nearly tell the levels apart already.**
-  `ClusterSelect::vertex_base` is per cluster and differs per level by
-  construction, since a DAG's levels are separate vertex ranges. It is an
-  _offset_ rather than an ordinal, so tinting by it would give distinct colours
-  without giving meaningful ones — level 3 would not read as "three levels
-  coarse".
-
-  **So the real cost is a shader change, and it is smaller than "a struct
-  change".** The obvious form — a `level` field on `ClusterSelect` — moves
-  `CLUSTER_SELECT_STRIDE` from 16 to 20 and with it every index into the
-  selection buffer, which is a GPU-visible layout change on the mesh path for
-  every backend. **It is avoidable.** `ClusterSelect::flags` carries exactly two
-  bits today, `HAS_PRODUCER` and `HAS_CONTAINER`, and quarry's own DAG is twelve
-  levels — so the level fits in the spare thirty bits with room for any mesh
-  anyone will build. Packing it there needs a named accessor and a documented
-  bit layout on both sides, and changes no stride, no buffer size and no index.
-
-  **The toolchain is verified, which was the other unknown.**
-  `CRCBL_SLANGC=~/.local/slang/bin/slangc CRCBL_DXC=~/.local/dxc/bin/dxc crates/crcbl-shaders/tools/compile-shaders.sh --check`
-  answers "every artifact matches its source (slangc 2026.14, dxc
-  1.9(1-0d3ee6b5)(1.9.0.1))" on this machine, so re-blessing produces exactly
-  what the `shaders (committed artifacts match their sources)` CI job expects.
-
-  **The six steps, in order**: pack the level into `flags` with accessors on
-  both sides; set it in `ClusterDag::selection_records`; add a view sentinel
-  beside `NORMALS_VIEW` in `mesh.slang` and tint by the unpacked level; expose
-  `ForwardRenderer::set_lod_view`; re-bless every artifact; then verify the
-  render, mesh and forward suites unchanged, since the tint is off by default
-  and no golden should move.
+  **The screen-error heatmap is the half still owed**, and it is a different
+  shape: the tint reads a level that was already in the record, while a heatmap
+  needs the error the selection judged, which is per group rather than per
+  cluster and is not in `ClusterSelect` at all.
 
 - **Milestone 4: the tiling case is done, the skinned one is blocked, the Pages
   demo is untouched.** `crcbl_quarry::tile` is the modular wall piece, and two

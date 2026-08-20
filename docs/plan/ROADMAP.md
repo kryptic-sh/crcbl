@@ -93,6 +93,17 @@ viewer is `sample/05-viewer.md`'s own milestones.
   subtraction happened, because without one the test asserts the capable
   device's answer under the lesser arm's name.
 
+- **quarry's gate has its pixels** (2026-08-20). Six goldens, one per
+  `GeometryPath` at each end of the fixed dolly, blessed on an RX 7900 XTX and
+  checked against lavapipe locally — max channel delta 1, nothing over
+  `Tolerance::RASTERISER`. And a LOD view that tints each cluster by the DAG
+  level it was decimated to, which is what makes "one mesh spans several levels
+  across its own surface" a thing to look at rather than only a thing to assert:
+  the mesh path draws a mosaic, the two indirect paths draw one flat grey
+  because they select per instance. What the sample still owes is the window,
+  the screen-error heatmap, and the skinned case — the last behind skeletal
+  animation, which is also what `puppet` waits on.
+
 - **`crcbl-wgpu` is slated for deletion** once the parity list closes. The bar
   and the trade are in `docs/backlog.md`, awaiting a decision.
 
