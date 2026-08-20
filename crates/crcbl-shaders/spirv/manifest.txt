@@ -283,3 +283,14 @@ msl-sha256 = 7e1c20bbde3c08cfc200b72f5a69e3edf59e3321faa02893d55a9294779861de
 dxil = vertexMain:dxil/ui.vertexMain.dxil:e0c0a9bea6c938720bb4af00ab290cd612fb295cccb05fffb85280981bf60196
 dxil = fragmentMain:dxil/ui.fragmentMain.dxil:3b8d3e9798e8673ba67a5ab96ef54cf064b01854c44bed06b957362700df52d1
 entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[zero_dispatch_probe]
+source = shaders/zero_dispatch_probe.slang
+source-sha256 = abc48dcabe1622f0171461d5bc28c9940bf2480cdf25b910a68bcd5dbb389bf3
+targets = spirv, msl, dxil
+spirv = spirv/zero_dispatch_probe.spv
+spirv-sha256 = 67b8083e49690bd4b06e555d89d0402abf1eccc41fdb87151eefa3688f1a8673
+msl = msl/zero_dispatch_probe.metal
+msl-sha256 = d386bea72e1257448b3e1f0fbd50fc6744d63bc77e49f512c4a96e98a64fe5b0
+dxil = culledTaskMain:dxil/zero_dispatch_probe.culledTaskMain.dxil:0d19b339bbadf3257f1e628f05e16d9f6dbc93f41f1f754c666d6f189538e0b8
+entry-points = culledTaskMain:taskext

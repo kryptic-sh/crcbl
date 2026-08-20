@@ -5507,6 +5507,14 @@ pub(crate) mod tests {
             }
         }
 
+        /// One stage of a pipeline, named in this probe's own module.
+        fn entry(&self, entry_point: &'static str) -> ShaderEntry<'static> {
+            ShaderEntry {
+                module: self.module,
+                entry_point,
+            }
+        }
+
         /// Draws one frame through a mesh pipeline over `entry` — with `task` as
         /// its amplification stage when there is one — and reads it back.
         ///
@@ -5516,11 +5524,20 @@ pub(crate) mod tests {
         /// records a direct `DispatchMesh` and
         /// [`an_indirect_mesh_dispatch_of_the_same_extents_draws_the_same_triangle`]
         /// records an `ExecuteIndirect` of the same three extents.
+        ///
+        /// `task` is a whole [`ShaderEntry`] rather than an entry-point name
+        /// because the amplification stage is the one stage a caller here may
+        /// take from a *different* module: D3D12 resolves each stage's DXIL
+        /// container on its own, and
+        /// [`a_zero_group_dispatch_mesh_does_not_remove_the_device`] uses that to
+        /// pair `zero_dispatch_probe.slang`'s stage with this module's mesh and
+        /// fragment containers unchanged. [`Self::entry`] spells the ordinary
+        /// case.
         fn frame(
             &self,
             device: &Dx12Device,
             label: &'static str,
-            task: Option<&'static str>,
+            task: Option<ShaderEntry<'static>>,
             entry: &'static str,
             dispatch: impl FnOnce(&mut dyn CommandEncoder),
         ) -> Vec<u8> {
@@ -5551,10 +5568,7 @@ pub(crate) mod tests {
                 .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
                     label: Some(label),
                     layout: pipeline_layout,
-                    task: task.map(|entry_point| ShaderEntry {
-                        module,
-                        entry_point,
-                    }),
+                    task,
                     // `mesh_shader.slang`'s own numbers. D3D12 reads them out
                     // of the DXIL and ignores these; they are here because
                     // Metal cannot.
@@ -5704,7 +5718,7 @@ pub(crate) mod tests {
         let amplified = probe.frame(
             &device,
             "mesh_shader amplified",
-            Some("taskMain"),
+            Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
             dispatch,
         );
@@ -5891,7 +5905,7 @@ pub(crate) mod tests {
         let drawn = probe.frame(
             &device,
             "mesh_shader amplified indirect",
-            Some("taskMain"),
+            Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
@@ -5960,7 +5974,7 @@ pub(crate) mod tests {
         let drawn = probe.frame(
             &device,
             "mesh_shader amplified indirect at scale",
-            Some("taskMain"),
+            Some(probe.entry("taskMain")),
             "amplifiedMeshMain",
             |encoder| {
                 encoder.draw_mesh_tasks_indirect(&DrawIndirect {
@@ -5994,8 +6008,119 @@ pub(crate) mod tests {
         probe.destroy(&device);
     }
 
+    /// **A zero-group `DispatchMesh`: the first difference in shader *content*
+    /// between the toy amplification stage WARP survives and the one
+    /// `crcbl-render` runs.**
+    ///
+    /// The four probes above drive every combination of {direct, indirect} x
+    /// {mesh only, amplified}, at one group and at [`MANY_GROUPS`], and WARP
+    /// survives all of them — so pipeline shape and dispatch scale are both
+    /// eliminated and what is left is what the shaders *do*. This is the first
+    /// feature taken off that list, and it is one line: `mesh_shader.slang`'s
+    /// `taskMain` ends with `DispatchMesh(1, 1, 1, payload)`, while
+    /// `mesh_cluster.slang`'s ends with `DispatchMesh(keep, 1, 1, payload)`
+    /// where `keep` is `0` on a culled cluster. Every frame the renderer culls
+    /// anything, it asks D3D12 for a zero-group `DispatchMesh` — and no probe
+    /// here had ever asked for one on its own.
+    ///
+    /// # What differs from its sibling
+    ///
+    /// The amplification entry point, and nothing else. The extents, the
+    /// `ExecuteIndirect`, the layout, the bind group, the target and the mesh
+    /// and fragment DXIL containers are
+    /// [`many_indirect_amplification_groups_do_not_remove_the_device`]'s —
+    /// `zero_dispatch_probe.slang`'s `culledTaskMain` dispatches one mesh group
+    /// for odd `SV_GroupID` and **zero** for even, so with [`MANY_GROUPS`]
+    /// groups both arms run in the one dispatch and half of them ask for
+    /// nothing.
+    ///
+    /// It is a second module because Slang 2026.14's Metal backend miscompiles
+    /// any module holding two amplification entry points — the shader source
+    /// says what it emits — and D3D12 takes one DXIL container per stage, so
+    /// the mesh and fragment stages here are the same *bytes* the passing
+    /// sibling runs.
+    ///
+    /// # What each outcome says
+    ///
+    /// * **It draws.** A zero-group `DispatchMesh` is not what removes the
+    ///   device, and the bisect moves to the next difference in content: the
+    ///   cluster shader's groupshared use, its payload, and the bindless heap
+    ///   this shader does not touch.
+    /// * **The device goes away.** The removal has a four-line repro with no
+    ///   renderer in it, and the fix is a shape the amplification stage must
+    ///   avoid rather than a call.
+    ///
+    /// The three texels are its siblings', for the reason they give: surviving
+    /// is not the claim, so the centre is what makes a pass mean the groups that
+    /// *did* dispatch drew.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it — this crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_zero_group_dispatch_mesh_does_not_remove_the_device() {
+        let (_instance, device) = open_device();
+        let probe = MeshProbe::new(&device);
+        let culled = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("zero_dispatch_probe.slang"),
+                dxil: &crcbl_shaders::ZERO_DISPATCH_PROBE.dxil_containers(),
+                ..ShaderModuleDesc::default()
+            })
+            .unwrap_or_else(|error| panic!("stage=create_shader_module: {error:?}"));
+
+        let extents: Vec<u8> = [MANY_GROUPS, 1, 1]
+            .iter()
+            .flat_map(|n| n.to_le_bytes())
+            .collect();
+        let args = indirect_buffer(&device, "zero-count amplification groups", &extents);
+
+        let drawn = probe.frame(
+            &device,
+            "mesh_shader zero-count dispatch",
+            Some(ShaderEntry {
+                module: culled,
+                entry_point: "culledTaskMain",
+            }),
+            "amplifiedMeshMain",
+            |encoder| {
+                encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                    args,
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 0,
+                });
+            },
+        );
+
+        // The groups that dispatch draw the triangle every other mesh frame here
+        // draws, over the same pixels, so the picture is the sibling's.
+        assert_eq!(texel(&drawn, 0, 0), CLEAR_TEXEL, "top-left corner");
+        assert_eq!(
+            texel(
+                &drawn,
+                SQUARE.width as usize - 1,
+                SQUARE.height as usize - 1
+            ),
+            CLEAR_TEXEL,
+            "bottom-right corner"
+        );
+        assert_ne!(
+            texel(&drawn, 32, 32),
+            CLEAR_TEXEL,
+            "the amplification groups that dispatched a mesh group emitted nothing over the centre"
+        );
+
+        device.destroy_shader_module(culled);
+        device.destroy_buffer(args);
+        probe.destroy(&device);
+    }
+
     /// Amplification groups [`many_indirect_amplification_groups_do_not_remove_the_device`]
-    /// asks one `ExecuteIndirect` for.
+    /// and [`a_zero_group_dispatch_mesh_does_not_remove_the_device`] each ask one
+    /// `ExecuteIndirect` for.
     ///
     /// Well inside D3D12's `DispatchMesh` bound — each of X, Y and Z is capped
     /// at 65535 and their product at 2^22 — so this is a size a conforming
