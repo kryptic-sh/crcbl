@@ -90,23 +90,8 @@ crcbl-webgpu = { workspace = true }
 # and a feature that must be remembered is a feature that will be forgotten.
 # `src/backend.rs` gates the matching registry entry with the same `cfg`, so the
 # browser's table contains only backends that exist.
-#
-# `crcbl-wgpu` is here for a *different* reason, and it is the newer of the two.
-# It compiles for wasm32 perfectly well — that is how the demos reached a
-# browser GPU before `crcbl-webgpu` existed — so this line is not about what can
-# build. It is about what a browser build should *contain*: `crcbl-webgpu` is
-# the browser's backend now, the whole demo site and the golden-scene parity
-# harness render through it, and a second GPU backend linked beside it was
-# nothing but weight. `wgpu` reaches the browser through `web-sys`, so linking
-# it also made `wasm-bindgen` a mandatory post-processing step for an engine
-# whose own ABI is hand-written `extern "C"` exports.
-#
-# It stays a first-class **native** backend: `CRCBL_GPU=wgpu` on every desktop
-# platform, its own `wgpu-e2e` suite, and the agnostic seam suite
-# (`tests/run-hal-seam-e2e.sh`) runs against it. Only the browser lost it.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crcbl-vk = { workspace = true }
-crcbl-wgpu = { workspace = true }
 
 # Metal, and only where Metal exists. `crcbl-mtl` is `#[cfg(target_os =
 # "macos")]` from its crate root down and its `objc2-*` dependencies are pinned

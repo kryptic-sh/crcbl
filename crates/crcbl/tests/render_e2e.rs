@@ -19,7 +19,7 @@
 //! acyclic — `crcbl-render`'s manifest takes `crcbl-hal` and nothing below it —
 //! but it would have to rebuild the offscreen surface, swapchain, readback and
 //! row-unpadding that [`crate::screenshot`](crcbl::screenshot) already owns and
-//! that `tests/run-cross-backend-e2e.sh` already drives, and it could not assert
+//! that `web/run-cross-backend-e2e.sh` already drives, and it could not assert
 //! the thing a Metal run most needs asserted: that the *registry* picked Metal.
 //!
 //! # One test per scene, every backend
@@ -43,8 +43,8 @@
 //! `docs/backlog.md`'s "Decided: the four-backend compare is more scenes in
 //! `render_e2e`, not a new job". This file used to draw [`Scene::Cube`] alone,
 //! which exercises `mesh.slang` and `tonemap.slang`; `sprite.slang` and
-//! `ui.slang` were compared across targets only by
-//! `tests/run-cross-backend-e2e.sh`, which runs Vulkan against wgpu. Those two
+//! `ui.slang` were compared across targets only by the vk-against-wgpu gate
+//! that went with `crcbl-wgpu`. Those two
 //! shaders are precisely the ones that have diverged per target here —
 //! `SV_InstanceID` in the sprite pass, `SV_VertexID` in the mesh pool — so MSL
 //! and DXIL had no comparison at all for the code with the actual history.
@@ -74,8 +74,8 @@ const EXTENT: (u32, u32) = (256, 192);
 /// awkward rather than round.
 ///
 /// Neither dimension is a multiple of 64, and neither is a multiple of 4.
-/// `tests/run-cross-backend-e2e.sh` is where this size came from and its
-/// `CRCBL_CROSS_SIZES` says what it is for: a readback whose rows are padded to
+/// The vk-against-wgpu gate is where this size came from, and its
+/// `CRCBL_CROSS_SIZES` said what it is for: a readback whose rows are padded to
 /// a backend's own alignment — the 256-byte row pitch wgpu enforces and Vulkan
 /// does not — hands back an image whose stride is wider than its width, and code
 /// that assumes the two are equal produces a sheared frame at this size and a
@@ -87,8 +87,8 @@ const EXTENT_ODD: (u32, u32) = (97, 61);
 /// must contain.
 ///
 /// Two blank frames compare perfectly, so a tolerance alone cannot tell "the
-/// same picture" from "no picture". Measured by `run-cross-backend-e2e.sh` on
-/// both ICDs at both of its sizes: the cube scene has 44-49 distinct colours and
+/// same picture" from "no picture". Measured by that same gate on both ICDs at
+/// both of its sizes: the cube scene has 44-49 distinct colours and
 /// a cleared frame has one. This floor is that harness's own
 /// `CRCBL_CROSS_MIN_COLORS_CUBE`, so losing the cube, the pyramid or the
 /// tonemap trips it.
@@ -1801,8 +1801,8 @@ fn nothing_measured_at_this_extent(_image: &Image) {}
 
 /// The cube at [`EXTENT_ODD`] — the row-pitch case, on `mesh.slang`.
 ///
-/// The three tests here are what `tests/run-cross-backend-e2e.sh` covered by
-/// rendering every scene at a second, deliberately awkward size. Same scenes,
+/// The three tests here are what the vk-against-wgpu gate covered by rendering
+/// every scene at a second, deliberately awkward size. Same scenes,
 /// same floors, against goldens blessed at [`EXTENT_ODD`].
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]

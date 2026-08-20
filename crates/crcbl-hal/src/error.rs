@@ -176,11 +176,11 @@ mod tests {
         assert!(text.contains("BUFFER_DEVICE_ADDRESS"), "{text}");
 
         let text = HalError::Unsupported {
-            backend: BackendKind::Wgpu,
+            backend: BackendKind::WebGpu,
             what: "push constants",
         }
         .to_string();
-        assert_eq!(text, "unsupported by the wgpu backend: push constants");
+        assert_eq!(text, "unsupported by the webgpu backend: push constants");
     }
 
     #[test]

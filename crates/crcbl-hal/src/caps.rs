@@ -34,14 +34,12 @@ use core::fmt;
 pub enum BackendKind {
     /// `crcbl-vk` — Vulkan 1.3.
     Vulkan,
-    /// `crcbl-wgpu` — wgpu, native or WebGPU.
-    Wgpu,
-    /// `crcbl-webgpu` — WebGPU reached directly from wasm, without wgpu.
+    /// `crcbl-webgpu` — WebGPU reached directly from wasm.
     ///
-    /// Distinct from [`Wgpu`](Self::Wgpu) on purpose: the two are meant to be
-    /// selectable apart while `crcbl-webgpu` grows into the browser backend
-    /// `crcbl-wgpu` currently is there, and a shared name would make a log line
-    /// unable to say which one drew the frame.
+    /// The browser's only GPU backend. It shared this enum with a `Wgpu` variant
+    /// until 2026-08-21, kept selectable apart so a log line could say which of
+    /// the two drew the frame; `crcbl-wgpu` was deleted once this one had
+    /// replaced it everywhere.
     WebGpu,
     /// `crcbl-mtl` — Metal (P14).
     Metal,
@@ -57,38 +55,22 @@ impl BackendKind {
     /// [`Null`](Self::Null) records commands instead of executing them, so it is
     /// outside the parity model in [`crate::capability`]: a recorder accepting
     /// everything is not evidence that anything works, and listing it beside the
-    /// five real backends would make a parity sweep read one wider than it is.
+    /// four real backends would make a parity sweep read one wider than it is.
+    ///
+    /// **This is also what [`crate::parity_blockers`] filters on.** It used to
+    /// filter on a separate `is_parity_target`, which excluded `Wgpu` — the
+    /// bridge backend that was always going to be deleted, and whose divergences
+    /// were therefore not work anybody would do. With that crate gone the two
+    /// predicates were the same function, and the second was deleted rather than
+    /// kept as a place for a hypothetical successor to declare itself.
     ///
     /// A `match` rather than `!matches!(self, Self::Null)`, so a backend added
     /// later has to say which side it is on.
     #[must_use]
     pub const fn is_gpu(self) -> bool {
         match self {
-            Self::Vulkan | Self::Wgpu | Self::WebGpu | Self::Metal | Self::Dx12 => true,
-            Self::Null => false,
-        }
-    }
-
-    /// Whether parity is measured against this backend.
-    ///
-    /// Every GPU backend except [`Wgpu`](Self::Wgpu), which is the bridge
-    /// `crcbl-webgpu` is being written to replace and which is deleted when it
-    /// does. A divergence of its own is therefore not work anybody will do, and
-    /// counting one would make the remaining distance to the goal look longer
-    /// than it is — so
-    /// [`parity_blockers`](crate::parity_blockers) filters on this rather than
-    /// on a reader remembering which backend is temporary.
-    ///
-    /// [`Null`](Self::Null) is outside the parity model altogether; see
-    /// [`is_gpu`](Self::is_gpu).
-    ///
-    /// A `match` rather than a comparison against one variant, so a backend
-    /// added later has to say which side it is on.
-    #[must_use]
-    pub const fn is_parity_target(self) -> bool {
-        match self {
             Self::Vulkan | Self::WebGpu | Self::Metal | Self::Dx12 => true,
-            Self::Wgpu | Self::Null => false,
+            Self::Null => false,
         }
     }
 }
@@ -97,7 +79,6 @@ impl fmt::Display for BackendKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::Vulkan => "vulkan",
-            Self::Wgpu => "wgpu",
             Self::WebGpu => "webgpu",
             Self::Metal => "metal",
             Self::Dx12 => "dx12",
@@ -1366,17 +1347,16 @@ mod tests {
     fn backend_kind_displays_lowercase() {
         assert_eq!(BackendKind::Vulkan.to_string(), "vulkan");
         assert_eq!(BackendKind::Null.to_string(), "null");
-        // `crcbl-wgpu` and `crcbl-webgpu` are two backends that both reach
-        // WebGPU in a browser, and the whole point of the second variant is
-        // that a log line can say which one drew. An `as_str` arm copied from
-        // its neighbour would make them indistinguishable.
-        assert_eq!(BackendKind::Wgpu.to_string(), "wgpu");
         assert_eq!(BackendKind::WebGpu.to_string(), "webgpu");
         // Exhaustive on purpose: a variant added without a name of its own
-        // would otherwise share one silently.
+        // would otherwise share one silently. This mattered most while a `Wgpu`
+        // variant sat beside `WebGpu` — two backends both reaching WebGPU in a
+        // browser, where an `as_str` arm copied from its neighbour would have
+        // made a log line unable to say which one drew. That crate is gone, and
+        // the check is kept because the hazard is about copied arms rather than
+        // about those two names.
         let every = [
             BackendKind::Vulkan,
-            BackendKind::Wgpu,
             BackendKind::WebGpu,
             BackendKind::Metal,
             BackendKind::Dx12,

@@ -11,7 +11,7 @@
 # the two backends are held against each other rather than each against a
 # reference that could have drifted with them.
 #
-# That is what `crates/crcbl/tests/run-cross-backend-e2e.sh` does for vk against
+# That is what `the native vk-against-wgpu gate` does for vk against
 # wgpu, and it is the one thing `crcbl-wgpu` is still kept for. This is its
 # replacement, and a wider one: eleven scenes rather than three, and against a
 # backend that is a genuinely separate implementation instead of a second

@@ -5,8 +5,8 @@
 //! cargo run -p crcbl-golden --example compare-png -- <left.png> <right.png> [options]
 //! ```
 //!
-//! This is the comparator half of the cross-backend gate
-//! (`crates/crcbl/tests/run-cross-backend-e2e.sh`), and it is a *binary* rather
+//! This is the comparator half of a cross-backend gate — today
+//! `web/run-cross-backend-e2e.sh` — and it is a *binary* rather
 //! than a `#[test]` for one reason: the two frames it compares are rendered by
 //! two separate processes. Which Vulkan ICD a process gets is decided by
 //! `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` when the instance is created, so

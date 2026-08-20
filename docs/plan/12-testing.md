@@ -88,15 +88,14 @@ interesting part is the order of many.
   harnesses keep their own copies of the same logic, which `docs/backlog.md`
   records as the remaining place it can drift.
 - **The harness that drives no nextest guards on its own count instead, and that
-  is the right shape rather than a gap.**
-  `crates/crcbl/tests/run-cross-backend-e2e.sh` never invokes nextest: it drives
-  `crcbl screenshot` per scene per size and compares the pairs, so there is no
-  summary line to parse. What it guards is the number the run is _supposed_ to
-  produce — it refuses an empty scene list outright, computes the expected
-  comparison count from the scene and size lists, and fails when a scene
-  completed fewer comparisons than there are sizes. The property is the same one
-  `nextest-summary.sh` protects: a run that silently did less work than it
-  claimed cannot pass.
+  is the right shape rather than a gap.** `web/run-cross-backend-e2e.sh` never
+  invokes nextest: it drives `crcbl screenshot` per scene per size and compares
+  the pairs, so there is no summary line to parse. What it guards is the number
+  the run is _supposed_ to produce — it refuses an empty scene list outright,
+  computes the expected comparison count from the scene and size lists, and
+  fails when a scene completed fewer comparisons than there are sizes. The
+  property is the same one `nextest-summary.sh` protects: a run that silently
+  did less work than it claimed cannot pass.
 - **Software GPU in CI**: render e2e runs on **lavapipe** (Vulkan) and wgpu's
   GL/software fallbacks — every commit exercises real render paths without
   hardware runners. The mac and Windows arms did not wait for a scheduled
@@ -352,11 +351,11 @@ validation-report assertion once, for all of them.
   currently covers two backends and one scene. Extending it to every engine
   shader and every backend is a testing deliverable, not a rendering one.
 
-  **Half closed, 2026-08-15.** `crates/crcbl/tests/run-cross-backend-e2e.sh`
-  defaults to the cube, sprite and UI scenes, each at every size in its size
-  list and each with its own colour floor. Still two backends: it drives `vk`
-  and `wgpu`, so the target-semantics bug class is unchecked on Metal and D3D12,
-  whose own jobs compare against a golden rather than against each other.
+  **Half closed, 2026-08-15.** `web/run-cross-backend-e2e.sh` defaults to the
+  cube, sprite and UI scenes, each at every size in its size list and each with
+  its own colour floor. Still two backends: it drives `vk` and `wgpu`, so the
+  target-semantics bug class is unchecked on Metal and D3D12, whose own jobs
+  compare against a golden rather than against each other.
 
 ## Superseded (2026-08-10)
 

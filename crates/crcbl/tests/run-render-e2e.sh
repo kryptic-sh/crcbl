@@ -14,8 +14,8 @@
 #
 # One test per scene — cube, sprite and UI — because `sprite.slang` and
 # `ui.slang` are the two shaders that have diverged per target in this repo, and
-# before those scenes were here they were compared across targets only by
-# `run-cross-backend-e2e.sh`, which runs Vulkan against wgpu. See
+# before those scenes were here they were compared across targets only by the
+# vk-against-wgpu gate that went with `crcbl-wgpu`. See
 # `docs/backlog.md`'s "the four-backend compare is more scenes in `render_e2e`".
 #
 # # Why the backend must be named

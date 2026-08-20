@@ -12,7 +12,7 @@
 //! `@builtin(instance_index)` on WGSL, which is why every sprite batch after the
 //! first drew the first batch's instances while every gate stayed green. The
 //! only detector is rendering the same scene through two backends and comparing
-//! pixels, which is what `tests/run-cross-backend-e2e.sh` does — and it can only
+//! pixels, which is what `web/run-cross-backend-e2e.sh` does — and it can only
 //! catch what it draws. [`Scene::Cube`] exercises `mesh.slang` and
 //! `tonemap.slang`; [`Scene::Sprite`] and [`Scene::Ui`] are here so
 //! `sprite.slang` and `ui.slang` — the two with an actual history of divergence

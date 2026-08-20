@@ -870,9 +870,9 @@ rots.
      `crates/crcbl/Cargo.toml`'s dependency. The `crcbl-mtl` and `crcbl-shaders`
      manifests only mention it in comments.
    - **Two CI jobs**: `wgpu e2e (lavapipe, Xvfb)` (nine suites) and
-     `cross-backend image compare (vk vs wgpu)`, plus
-     `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh` and the `CRCBL_GPU=wgpu` lines in
-     roughly ten harness scripts' usage text.
+     `cross-backend image compare (vk vs wgpu)`, plus the `wgpu-e2e` suite
+     (deleted 2026-08-21) and the `CRCBL_GPU=wgpu` lines in roughly ten harness
+     scripts' usage text.
 
    **Removing the enum variant is the anti-rot mechanism proving itself.**
    `BackendKind::Wgpu` is matched exhaustively, so the compiler names every site
@@ -881,7 +881,7 @@ rots.
 
    **A second CI job goes with it, and the inventory above did not name it:**
    `cross-backend image compare (vk vs wgpu)`, which runs
-   `crates/crcbl/tests/run-cross-backend-e2e.sh`. Its own header calls it
+   `web/run-cross-backend-e2e.sh`. Its own header calls it
    `docs/plan/12-testing.md`'s "the tier system's regression net" and the P5
    gate, P5 being "when a _second_ backend implements the seam". After the
    deletion **no two backends share a runner** — vk on Linux, dx12 on Windows,
@@ -5916,8 +5916,8 @@ which is what carries a texture's state across submissions (read in wgpu-core
 30.0.0, the resolved version).
 
 `reusing_an_offscreen_wgpu_ring_image_is_ordered_against_the_frame_that_had_it`
-in `crates/crcbl-wgpu/tests/wgpu_e2e.rs` is the check: a one-image ring, trip
-one clears and copies out, trip two clears the same image to the reversed
+in `crcbl-wgpu`'s own suite (deleted 2026-08-21) is the check: a one-image ring,
+trip one clears and copies out, trip two clears the same image to the reversed
 colour, and the staging buffer must still hold trip one's. Green on radv, on
 lavapipe and on the GL backend. Falsified both ways — writing trip two's colour
 in trip one, and deleting the copy — each red, and each for its own reason.
@@ -9284,10 +9284,11 @@ satisfied nor a timeout.
 
 The backends disagree, and both answers are defensible:
 
-- `crates/crcbl-wgpu/src/device.rs` returns `HalError::Unsupported` naming the
-  cause, because wgpu has no standalone semaphore that could signal the value
-  later, so waiting would hang until the deadline and then lie by calling it a
-  timeout. That error is **not in the seam's documented set**.
+- `crcbl-wgpu`'s device module (deleted 2026-08-21) returns
+  `HalError::Unsupported` naming the cause, because wgpu has no standalone
+  semaphore that could signal the value later, so waiting would hang until the
+  deadline and then lie by calling it a timeout. That error is **not in the
+  seam's documented set**.
 - `crcbl-mtl` treats the same case as an ordinary unsatisfied wait.
 
 **Decided: the seam grows the third outcome rather than wgpu losing it.**
@@ -9313,9 +9314,9 @@ was forgotten.
 
 ## `crcbl-wgpu` owner tagging: what the tests do not reach
 
-Obligation 3 is now implemented in `crcbl-wgpu` —
-`crates/crcbl-wgpu/src/handle.rs` holds the tag/id pair, and every pool entry is
-an `Owned<T>` — so the "Decided: `crcbl-wgpu` gets owner tagging" entry above is
+Obligation 3 is now implemented in `crcbl-wgpu` — `crcbl-wgpu`'s handle module
+(deleted 2026-08-21) holds the tag/id pair, and every pool entry is an
+`Owned<T>` — so the "Decided: `crcbl-wgpu` gets owner tagging" entry above is
 answered. Two things about that work are worth carrying rather than
 rediscovering.
 
@@ -9336,9 +9337,9 @@ The hole opens only after `OWNER_TAG_COUNT` owners in one process.
 `dead_or_foreign`, which keeps a dead handle reporting `SurfaceError::Lost`
 (what callers retry on) and reports a foreign one as
 `SurfaceError::Hal(ForeignObject)`. **Nothing asserts that split.**
-`crates/crcbl-wgpu/tests/wgpu_e2e.rs` is offscreen-only by construction and the
-harness's Xvfb half runs `apps/sandbox` and `apps/breakout` rather than checking
-errors, so no test hands `acquire_next_frame`, `present` or
+`crcbl-wgpu`'s own suite (deleted 2026-08-21) is offscreen-only by construction
+and the harness's Xvfb half runs `apps/sandbox` and `apps/breakout` rather than
+checking errors, so no test hands `acquire_next_frame`, `present` or
 `reconfigure_swapchain` a swapchain from another device or a surface from
 another instance. The three new e2e tests cover buffers, the queue handle and
 surfaces at `Instance` level only. Closing it needs either a windowed test
@@ -10206,8 +10207,8 @@ the old reason is worth not re-deriving.
 at all: `create_bind_group` keyed every entry on `binding` alone and
 `BindGroupEntry::array_index` appeared nowhere in the crate, so a bindless slice
 would have selected the bindless path on wgpu (it reports `DESCRIPTOR_INDEXING`)
-and then failed to build the group. `crates/crcbl-wgpu/src/binding.rs` now does
-the bucketing, and
+and then failed to build the group. `crcbl-wgpu`'s binding module (deleted
+2026-08-21) now does the bucketing, and
 `a_wgpu_shader_reads_the_array_element_the_bind_group_put_in_each_slot` reads
 both elements out of a two-texture array on lavapipe. All four backends honour
 `array_index`.
@@ -10229,11 +10230,11 @@ game.
 
 ## What `crcbl-wgpu`'s binding work still leaves, after the refusals landed
 
-The three silent drops found while writing `crates/crcbl-wgpu/src/binding.rs`
-are fixed — `BindingFlags` and the `VARIABLE_COUNT` ordering rule are checked at
-layout creation, `variable_count` is checked against the layout's variable
-binding and the entries supplied, `count: 0` is refused, and
-`create_bind_group_layout` is error-scoped. What is left:
+The three silent drops found while writing `crcbl-wgpu`'s binding module
+(deleted 2026-08-21) are fixed — `BindingFlags` and the `VARIABLE_COUNT`
+ordering rule are checked at layout creation, `variable_count` is checked
+against the layout's variable binding and the entries supplied, `count: 0` is
+refused, and `create_bind_group_layout` is error-scoped. What is left:
 
 - **`update_bind_group` is still `Unsupported` on wgpu** — WebGPU bind groups
   are immutable and there is no update-after-bind path, so the seam's streaming
@@ -11763,10 +11764,10 @@ left:
   rule the doc defends binds a caller that must run on whatever device it finds,
   and no shipping caller violates it; the doc now says that, and the callers are
   unchanged.
-- **`crates/crcbl/tests/run-cross-backend-e2e.sh` does not echo its ICD pin**
-  the way `run-render-e2e.sh` does, so which adapter it used is not observable
-  from its output. It passed 6/6, but with `CRCBL_VK_ICD` set it still drew vk
-  on the discrete card here.
+- **`web/run-cross-backend-e2e.sh` does not echo its ICD pin** the way
+  `run-render-e2e.sh` does, so which adapter it used is not observable from its
+  output. It passed 6/6, but with `CRCBL_VK_ICD` set it still drew vk on the
+  discrete card here.
 - **Lavapipe reports `VK_EXT_mesh_shader`** (Mesa 23.2 and later), so CI's Linux
   and Windows vk jobs take the mesh path too — verified locally with
   `VK_DRIVER_FILES=…/lvp_icd.json vulkaninfo` and by a full local run on

@@ -119,9 +119,9 @@ wants in the layout and which Vulkan, Metal and D3D12 read off the view and
 drop. And `crcbl-wgpu` could not fill an array binding at all: its
 `create_bind_group` ignored `BindGroupEntry::array_index` and emitted one scalar
 resource per entry, so a second array element collided on the binding number.
-`crates/crcbl-wgpu/src/binding.rs` now buckets entries by binding and emits
-wgpu's array spellings, so all four backends honour `array_index` and the
-bindless form is writable whenever it is wanted.
+`crcbl-wgpu`'s binding module (deleted 2026-08-21) now buckets entries by
+binding and emits wgpu's array spellings, so all four backends honour
+`array_index` and the bindless form is writable whenever it is wanted.
 
 The observable is `crates/crcbl/tests/golden/cube.png`, which now holds
 **three** instances of one mesh: one plain, one whose row differs from it in the

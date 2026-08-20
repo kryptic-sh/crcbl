@@ -16,6 +16,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl-wgpu` is deleted.** The crate, its `wgpu-e2e` suite, both of its CI
+  jobs, the native vk↔wgpu image compare, the `GpuBackend::Wgpu` and
+  `BackendKind::Wgpu` variants and `CRCBL_GPU=wgpu` are all gone. It was the
+  bridge that got this engine into a browser before `crcbl-webgpu` existed, and
+  every sample now builds on vk and WebGPU without it.
+
+  `CRCBL_GPU=wgpu` is **rejected** rather than aliased onto another backend —
+  the same rule that stopped `webgpu` silently opening wgpu, applied in the
+  other direction, so a stale environment variable says so instead of quietly
+  running something else.
+
+  **51 of 254 resolved packages leave with it**, including the whole `wgpu`
+  family, `glow`, `khronos-egl`, `gl_generator`, `gpu-allocator` and
+  `parking_lot`, and five `cargo deny` duplicate-skips became unnecessary.
+  `naga` stays: it is a `crcbl-shaders` dev-dependency that validates the WGSL
+  `crcbl-webgpu` ships to a browser, and it simply becomes its own pin.
+
+  `BackendKind::is_parity_target` went too. Its only `false` arm besides `Null`
+  was `Wgpu` — the backend whose divergences were never going to be worked — so
+  with that gone it was `is_gpu` under another name, and `parity_blockers`
+  filters on `is_gpu` now.
+
 - **`CullStats::clusters` is `Option<ClusterCull>`, not `Option<u64>`.** The
   amplification stage counted survivors and nothing else, so a panel could say
   "30 of 58 clusters survived" and could not say which test rejected the other

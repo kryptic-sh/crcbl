@@ -52,12 +52,11 @@ multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
 skip = [
-  # `cpal` → `ndk` → `num_enum` → `proc-macro-crate` pulls the `toml` 1.x
-  # stack, while `crcbl-store` uses `toml` 0.8. Neither is chosen here: both are
-  # transitive, and the fix belongs upstream.
-  { crate = "toml_edit@0.22.27", reason = "toml 0.8 via crcbl-store; the 1.x copy comes from ndk/num_enum" },
-  { crate = "toml_datetime@0.6.11", reason = "same toml 0.8 stack" },
-  { crate = "winnow@0.7.15", reason = "same toml 0.8 stack" },
+  # The `toml` 0.8-versus-1.x duplication and both `hashbrown`/`foldhash` pairs
+  # were skipped here until 2026-08-21 and are gone: every one of them was a
+  # second copy that only `crcbl-wgpu`'s dependency tree pulled in, so deleting
+  # that crate resolved them upstream-of-us rather than by a skip. `cargo deny`
+  # reports an unmatched skip as a warning, which is what caught all five.
   # `getrandom` 0.4 is the workspace's own pin (crcbl-rand's native entropy).
   # 0.2 arrives under a transitive user that has not migrated, and 0.3 under
   # `rand_core`'s `os_rng` feature — which `--all-features` turns on and cargo's
@@ -73,10 +72,6 @@ skip = [
   # workspace uses the 2.0 pin from `[workspace.dependencies]`.
   { crate = "thiserror@1.0.69", reason = "transitive; the workspace pins 2.0" },
   { crate = "thiserror-impl@1.0.69", reason = "transitive; follows thiserror 1.x" },
-  # Transitive-only, resolved by whichever upstream bumps first.
-  { crate = "hashbrown@0.15.5", reason = "transitive" },
-  { crate = "hashbrown@0.16.1", reason = "transitive" },
-  { crate = "foldhash@0.1.5", reason = "transitive; follows hashbrown" },
   { crate = "jni-sys@0.3.1", reason = "transitive; the android backends of cpal/ndk" },
   { crate = "syn@2.0.119", reason = "transitive; proc-macro crates mid-migration to syn 3" },
 ]

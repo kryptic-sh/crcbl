@@ -678,12 +678,10 @@ mod tests {
         for name in ["null", "none"] {
             assert_eq!(parsed(&["--backend", name]).backend, Some(GpuBackend::Null));
         }
-        assert_eq!(
-            parsed(&["--backend", "wgpu"]).backend,
-            Some(GpuBackend::Wgpu)
-        );
-        // Two backends, not two spellings — `webgpu` reaches `crcbl-webgpu`,
-        // which is the point of it having a name at all.
+        // `wgpu` named `crcbl-wgpu`, deleted 2026-08-21. It must now be
+        // *rejected* rather than quietly resolving to the browser backend
+        // beside it — a stale `CRCBL_GPU=wgpu` in someone's shell should say so.
+        assert!(rejected(&["--backend", "wgpu"]).contains("wgpu"));
         assert_eq!(
             parsed(&["--backend", "webgpu"]).backend,
             Some(GpuBackend::WebGpu)

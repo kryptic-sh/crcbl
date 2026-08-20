@@ -872,11 +872,11 @@ jobs:
       # golden"; this asks "does the browser draw what vk draws, right now",
       # with no reference between them that could have drifted with both.
       #
-      # That is what `crates/crcbl/tests/run-cross-backend-e2e.sh` does for vk
-      # against wgpu, and it is the one thing `crcbl-wgpu` is still kept for —
-      # so this is its replacement, and a wider one: eleven scenes rather than
-      # three, against a genuinely separate implementation rather than a second
-      # abstraction over the same Vulkan driver.
+      # That is what the native vk-against-wgpu gate did, and it was the one
+      # thing `crcbl-wgpu` was kept for — so this is its replacement, and a wider
+      # one: eleven scenes rather than three, against a genuinely separate
+      # implementation rather than a second abstraction over one Vulkan driver.
+      # Both the crate and that gate went on 2026-08-21.
       #
       # It reuses the readbacks the step above produced, so the wasm build and
       # the browser run are not repeated. Measured on radv against

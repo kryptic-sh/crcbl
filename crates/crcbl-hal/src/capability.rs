@@ -790,13 +790,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::IndirectArgumentPaddedStride,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "wgpu's multi_draw_indirect family reads its own tightly packed argument structs and \
-              takes no stride, so a padded one would read the wrong words silently",
-    },
-    Divergence {
-        capability: Capability::IndirectArgumentPaddedStride,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::ApiAbsence,
         why: "GPURenderPassEncoder.drawIndirect(indirectBuffer, indirectOffset) reads one tightly \
@@ -830,15 +823,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::MeshShading,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::Unwritten,
-        why: "the resolved wgpu has mesh shaders natively — Features::EXPERIMENTAL_MESH_SHADER, \
-              Device::create_mesh_pipeline and RenderPass::draw_mesh_tasks — and this backend \
-              enables none of them, so there is no mesh pipeline to build. Absent in a browser, \
-              which is where this backend is being replaced rather than extended",
-    },
-    Divergence {
-        capability: Capability::MeshShading,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::ApiAbsence,
         why: "WebGPU has no mesh stage: GPUDevice creates render and compute pipelines only and \
@@ -863,13 +847,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::TaskShaderStage,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::Unwritten,
-        why: "wgpu's mesh pipelines carry the task stage with the rest, and this backend enables \
-              none of it; see the MeshShading entry",
-    },
-    Divergence {
-        capability: Capability::TaskShaderStage,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::ApiAbsence,
         why: "WebGPU has no mesh stage to put an amplification stage in front of; see the \
@@ -878,23 +855,9 @@ pub const DIVERGENCES: &[Divergence] = &[
     // --- bindings ---
     Divergence {
         capability: Capability::UpdateBindGroup,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "WebGPU bind groups are immutable once created and wgpu exposes no update-after-bind \
-              path; a caller rebuilds the group instead",
-    },
-    Divergence {
-        capability: Capability::UpdateBindGroup,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::ApiAbsence,
         why: WEBGPU_BIND_GROUPS_ARE_IMMUTABLE,
-    },
-    Divergence {
-        capability: Capability::PushConstants,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::Unwritten,
-        why: "wgpu calls them immediates and gates them behind its own IMMEDIATES feature, which \
-              this backend does not enable, so a pipeline layout has no immediate block to write",
     },
     Divergence {
         capability: Capability::PushConstants,
@@ -911,18 +874,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     // reports `DESCRIPTOR_INDEXING`.
     Divergence {
         capability: Capability::BindlessDescriptorArray,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "a wgpu binding array's length is the layout's fixed count and the length of the \
-              slice a group is created with, and this backend has no update_bind_group — so \
-              nothing chooses a length at group creation or fills a slot afterwards, which is the \
-              whole of what VARIABLE_COUNT means. It is refused at create_bind_group_layout \
-              rather than downgraded to a fixed array. (wgpu does offer partial binding, behind \
-              PARTIALLY_BOUND_BINDING_ARRAY, which this backend requires before reporting \
-              DESCRIPTOR_INDEXING at all; that half is not what is missing)",
-    },
-    Divergence {
-        capability: Capability::BindlessDescriptorArray,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::ApiAbsence,
         why: "GPUBindGroupLayoutEntry carries a binding, a visibility and one resource layout and \
@@ -934,15 +885,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     // descriptor, and `BindingKind::StorageImage` now carries the `view_type`
     // and `format` `GPUStorageTextureBindingLayout` demands, so `crcbl-webgpu`
     // answers `Support::Yes`. What is left is the backend nobody is finishing.
-    Divergence {
-        capability: Capability::StorageImageBinding,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::Unwritten,
-        why: "wgpu's BindingType::StorageTexture takes the view dimension and texel format the \
-              seam's BindingKind::StorageImage now carries, and this backend never grew the arm \
-              that reads them; it is scheduled for deletion once the other four reach parity, so \
-              the field was spent on crcbl-webgpu instead",
-    },
     // --- rasteriser state ---
     //
     // Only one entry, and that is the point: `PolygonModeLine`, `DepthClamp` and
@@ -988,13 +930,6 @@ pub const DIVERGENCES: &[Divergence] = &[
               per device, and not what leaves the row open. What leaves it open is that no \
               MTLCounterSampleBuffer is built on any device (the Metal query slice)",
     },
-    Divergence {
-        capability: Capability::TimestampQuery,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::Unwritten,
-        why: "this backend enables neither wgpu's TIMESTAMP_QUERY nor its statistics features, so \
-              no query set can be created even on an adapter that has them",
-    },
     // The WebGPU TimestampQuery row that used to sit here is gone, and it left
     // the way `StorageImageBinding`'s did: the gap was the seam's own verb. It
     // had a free-standing `write_timestamp` naming an arbitrary point in the
@@ -1004,12 +939,6 @@ pub const DIVERGENCES: &[Divergence] = &[
     // `GPURenderPassDescriptor.timestampWrites`' own shape, so the browser
     // backend passes it straight through and answers `Support::Yes`. `crcbl-webgpu`
     // now diverges from nothing.
-    Divergence {
-        capability: Capability::OcclusionQuery,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::Unwritten,
-        why: "no query sets are built on this backend; see the TimestampQuery entry",
-    },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
         backend: BackendKind::Metal,
@@ -1029,12 +958,6 @@ pub const DIVERGENCES: &[Divergence] = &[
               the seam grows a shape for them or this backend reports one of the eight. The Mac \
               in CI advertises counterSets=0, so it could not run either way; that is a device \
               fact reported per device, not what leaves the row open (the Metal query slice)",
-    },
-    Divergence {
-        capability: Capability::PipelineStatisticsQuery,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::Unwritten,
-        why: "no query sets are built on this backend; see the TimestampQuery entry",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,
@@ -1067,26 +990,11 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         capability: Capability::CpuTimelineSignal,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "wgpu has no standalone semaphore object to signal. The counter behind a timeline \
-              here is this crate's own record of what each submission will have completed, so a \
-              host signal would move a number nothing on the queue can see",
-    },
-    Divergence {
-        capability: Capability::CpuTimelineSignal,
         backend: BackendKind::WebGpu,
         kind: DivergenceKind::ApiAbsence,
         why: "create_semaphore refuses the timeline kind, so there is no counter for a host signal \
               to advance; WebGPU has no signalable object of any kind — see the TimelineSemaphore \
               entry",
-    },
-    Divergence {
-        capability: Capability::TimelineWaitBeforeSignal,
-        backend: BackendKind::Wgpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "wgpu has no standalone semaphore object; a timeline here is per-submission \
-              completion, so a wait on a value nothing submitted will signal can only hang",
     },
     Divergence {
         capability: Capability::TimelineWaitBeforeSignal,
@@ -1101,7 +1009,7 @@ pub const DIVERGENCES: &[Divergence] = &[
 /// parity.
 ///
 /// The answer to "what is left?", derived rather than maintained. A row is here
-/// when its backend is a [parity target](BackendKind::is_parity_target) and its
+/// when its backend [drives a GPU](BackendKind::is_gpu) and its
 /// [`kind`](Divergence::kind) [blocks parity](DivergenceKind::blocks_parity) —
 /// so `crcbl-wgpu`, which is deleted once `crcbl-webgpu` replaces it, is
 /// excluded by the first half rather than by a reader remembering to skip it,
@@ -1112,7 +1020,7 @@ pub const DIVERGENCES: &[Divergence] = &[
 pub fn parity_blockers() -> impl Iterator<Item = &'static Divergence> {
     DIVERGENCES
         .iter()
-        .filter(|entry| entry.backend.is_parity_target() && entry.kind.blocks_parity())
+        .filter(|entry| entry.backend.is_gpu() && entry.kind.blocks_parity())
 }
 
 /// The [`DIVERGENCES`] entry for this pair, if the pair is a known divergence.
@@ -1248,9 +1156,8 @@ mod tests {
     /// than derived, so that a new [`BackendKind`] fails
     /// [`every_gpu_backend_is_in_this_sweep`] instead of silently escaping the
     /// parity model.
-    const GPU_BACKENDS: [BackendKind; 5] = [
+    const GPU_BACKENDS: [BackendKind; 4] = [
         BackendKind::Vulkan,
-        BackendKind::Wgpu,
         BackendKind::WebGpu,
         BackendKind::Metal,
         BackendKind::Dx12,
@@ -1263,11 +1170,10 @@ mod tests {
         }
         assert!(!BackendKind::Null.is_gpu());
         // The count comes from `is_gpu`'s own match rather than from a literal,
-        // so a sixth backend makes this fail instead of quietly sitting outside
+        // so a fifth backend makes this fail instead of quietly sitting outside
         // every sweep below.
         let every = [
             BackendKind::Vulkan,
-            BackendKind::Wgpu,
             BackendKind::WebGpu,
             BackendKind::Metal,
             BackendKind::Dx12,
@@ -1747,33 +1653,33 @@ mod tests {
         );
     }
 
-    /// The exclusion `crcbl-wgpu` gets is [`BackendKind::is_parity_target`]
-    /// answering `false`, not a reader remembering — and it is doing work, so
-    /// the filter is not a sieve over an empty set.
+    /// **Every backend in the model is now a parity target, and the filter that
+    /// said otherwise is gone.**
+    ///
+    /// `parity_blockers` used to filter on `BackendKind::is_parity_target`,
+    /// whose only `false` arm besides `Null` was `Wgpu` — the bridge backend
+    /// that was always going to be deleted, and whose divergences were therefore
+    /// not work anybody would do. `crcbl-wgpu` went on 2026-08-21 and the two
+    /// predicates became the same function, so the second was deleted rather
+    /// than kept for a hypothetical successor.
+    ///
+    /// What is asserted here is the property that replaced it: the filter is
+    /// `is_gpu`, every GPU backend passes it, and `Null` does not — so a row on
+    /// any real backend reaches the blocker set and cannot be excluded by
+    /// anything except its own kind.
     #[test]
-    fn crcbl_wgpu_is_outside_the_goal_by_construction() {
-        assert!(!BackendKind::Wgpu.is_parity_target());
-        assert!(
-            parity_blockers().all(|entry| entry.backend != BackendKind::Wgpu),
-            "a wgpu row reached the blocker set"
-        );
-        let hidden = DIVERGENCES
-            .iter()
-            .filter(|entry| entry.backend == BackendKind::Wgpu && entry.kind.blocks_parity())
-            .count();
-        assert!(
-            hidden > 0,
-            "wgpu has no row of a blocking kind, so this exclusion is a filter that removes \
-             nothing and the test above proves nothing"
-        );
+    fn every_gpu_backend_is_inside_the_goal() {
         for backend in GPU_BACKENDS {
-            assert_eq!(
-                backend.is_parity_target(),
-                backend != BackendKind::Wgpu,
-                "{backend} is on the wrong side of the goal"
+            assert!(
+                backend.is_gpu(),
+                "{backend} is a GPU backend and must reach the blocker set"
             );
         }
-        assert!(!BackendKind::Null.is_parity_target());
+        assert!(!BackendKind::Null.is_gpu());
+        assert!(
+            parity_blockers().all(|entry| entry.backend.is_gpu()),
+            "a non-GPU row reached the blocker set"
+        );
     }
 
     /// The rule the query is built on, as a table: the failure mode is a

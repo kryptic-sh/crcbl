@@ -109,8 +109,10 @@
 //!
 //! ## P5.12 re-measured it across *backends*, and the same shape held
 //!
-//! The cross-backend gate (`crates/crcbl/tests/run-cross-backend-e2e.sh`) sends
-//! one frame through `crcbl-vk` and through `crcbl-wgpu` and compares the two.
+//! The cross-backend gate of the day sent one frame through `crcbl-vk` and one
+//! through the since-deleted `crcbl-wgpu` and compared the two. (Its heir is
+//! `web/run-cross-backend-e2e.sh`, which holds a browser against a native
+//! backend instead.)
 //! Both backends reaching the same ICD produce **byte-identical** frames — the
 //! `256x192` screenshot hashes to `14ba337e…` through either on radv and
 //! `559f4594…` through either on lavapipe — so the interesting measurement is

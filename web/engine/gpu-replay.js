@@ -160,7 +160,7 @@ import {
 // THIS IS THE ONE PLACE THE TRANSLATION HAPPENS, and it lives here rather than
 // in Rust on purpose. This file is the WebGPU-facing half, so it is the half
 // that should own "what a `GPUFeatureName` means in `crcbl_hal::Features`" —
-// exactly as `crates/crcbl-wgpu/src/instance.rs` owns it for wgpu's enum. The
+// exactly as `crcbl-wgpu's instance module (deleted 2026-08-21)` owns it for wgpu's enum. The
 // wire then speaks the seam's vocabulary end to end, as it already does for
 // load ops, store ops and handles, instead of carrying one foreign spelling.
 //

@@ -198,10 +198,9 @@ workaround. Recorded in `docs/backlog.md` rather than argued again here.
    bare `@builtin(instance_index)` on WGSL; the source compiles cleanly to both
    and draws different pictures, which is why every batch after the first
    rendered the first batch's instances. No lint can find this class. The only
-   thing that can is `crates/crcbl/tests/run-cross-backend-e2e.sh`, and it
-   currently covers two backends and one scene — **extend it to every engine
-   shader and every backend**, which is also what sample rule 12 asks of the
-   samples.
+   thing that can is `web/run-cross-backend-e2e.sh`, and it currently covers two
+   backends and one scene — **extend it to every engine shader and every
+   backend**, which is also what sample rule 12 asks of the samples.
 
 > **Where the five rules stand, 2026-08-15.** The first four have landed; the
 > fifth is half done. Recorded here rather than by editing the rules, which are

@@ -1193,10 +1193,10 @@ would be wrong within a slice and would still read as verified.
 | `crates/crcbl-shell/tests/run-wayland-e2e.sh` | nested headless sway     |
 | `crates/crcbl-shell/tests/run-x11-e2e.sh`     | Xvfb                     |
 | `crates/crcbl-vk/tests/run-vk-e2e.sh`         | any Vulkan ICD           |
-| `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`     | a wgpu adapter, Xvfb     |
+| the `wgpu-e2e` suite (deleted 2026-08-21)     | a wgpu adapter, Xvfb     |
 | `crates/crcbl-mtl/tests/run-mtl-e2e.sh`       | a Metal device (macOS)   |
 | `crates/crcbl-dx12/tests/run-dx12-e2e.sh`     | a D3D12 device (Windows) |
-| `crates/crcbl/tests/run-cross-backend-e2e.sh` | both backends            |
+| `web/run-cross-backend-e2e.sh`                | both backends            |
 | `crates/crcbl/tests/run-render-e2e.sh`        | a GPU the renderer opens |
 | `crates/crcbl-cli/tests/run-cli-e2e.sh`       | nothing                  |
 | `apps/lumen/tests/run-lumen-golden.sh`        | a GPU (lighting goldens) |
@@ -2001,7 +2001,7 @@ from them.
   links `crcbl-webgpu` alone and auto-selects it because the target says so.
   There is no `webgpu` feature left; it existed only to choose between the two.
 - **A second native backend**, selectable as `CRCBL_GPU=wgpu`, whose real job is
-  the cross-backend image gate in `crates/crcbl/tests/run-cross-backend-e2e.sh`.
+  the cross-backend image gate in `web/run-cross-backend-e2e.sh`.
 
 Natively it is otherwise redundant: `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12`
 already cover Linux, macOS and Windows.
