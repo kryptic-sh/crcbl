@@ -23,5 +23,11 @@ path = "src/main.rs"
 # path, so the crate that builds them is not optional here.
 crcbl = { workspace = true, features = ["scene"] }
 
+# `crcbl-golden` is a dev-dependency because only the device suite reads it: the
+# sample itself renders frames and never compares them. Same shape as `crcbl`
+# and `crcbl-vk`, which is where the comparison and its measured tolerance live.
+[dev-dependencies]
+crcbl-golden = { workspace = true }
+
 [lints]
 workspace = true

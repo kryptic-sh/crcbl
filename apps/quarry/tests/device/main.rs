@@ -25,6 +25,7 @@
 // `tests/device/main.rs`, so Cargo compiles the directory as one test binary
 // named `device` and every `mod` here resolves beside the root.
 mod dolly;
+mod goldens;
 mod paths;
 mod residency;
 mod shading;
