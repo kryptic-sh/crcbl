@@ -2066,19 +2066,27 @@ it, forced by subtracting features from one adapter.
   because quarry places **one** instance of one mesh, so the instance cull has
   one thing to decide about. See the design question below.
 
-- **`CullStats` counts survivors, not rejections, so one charter line cannot be
-  met without an engine change.** `docs/plan/sample/14-quarry.md` asks for
-  "per-cluster frustum and normal-cone rejection counts on the debug panel".
-  `crcbl::render::CullStats` carries `instances`, `clusters` and `frame` and no
-  split by cause, so the panel quarry now ships can say how many clusters
-  survived and cannot say which test rejected the rest. The two are different
-  claims: "27 of 338 survived" is consistent with the normal cone doing all the
-  work and with it doing none.
+- **The rejection split shipped, and the cone's value is pinned by no device
+  number.** `CullStats::clusters` is a `ClusterCull` carrying `survivors`,
+  `frustum_rejects` and `cone_rejects`, the panel has the row
+  `docs/plan/sample/14-quarry.md` asked for, and
+  `the_three_cluster_counts_add_up_to_the_cut_they_were_taken_over` asserts the
+  three partition the cut on hardware.
 
-  This is an engine item, not a sample one — the counters are written by the
-  amplification stage in `mesh_cluster.slang` and summed into `CullStats`. What
-  it would take: a second atomic per cause, and a matching pair of fields. Not
-  costed against the other backends, and the seam rule applies.
+  **What that leaves: the cone bucket has never held a non-zero number here.**
+  Measured 2026-08-20 at `DOLLY_END` on an RX 7900 XTX — 30 kept, 28 frustum, 0
+  cone — which agrees with `freeze.rs`'s 44-against-42 measurement and is the
+  correct answer for this face. So the cone word's _value_ is pinned by the unit
+  tests and by the shader's `return` site, and by nothing that has executed a
+  cone rejection end to end. Closing it needs geometry whose clusters have cones
+  narrower than a hemisphere;
+  `crcbl_shaders::meshlet::ClusterBounds::cone_cutoff` records a cutoff at or
+  below zero for the rest, and `cluster_survives` skips those outright.
+
+  **`crcbl_render::counters` was left alone deliberately.** Its `clusters drawn`
+  row is still exactly the survivor count, and widening it reaches `ui_pass.rs`
+  and every sample's panel rather than quarry's. If the engine-wide panel should
+  carry the split too, that is its own slice.
 
 - **All three of topic 25's overlays are built.** The LOD tint, the screen-error
   heatmap and `ForwardRenderer::set_frozen_selection_eye`, which pins the eye
@@ -12199,25 +12207,43 @@ the bundled SwiftShader — this job's own configuration:
 | quarry | amd rdna-3 (headless) | 34/34  |
 | lumen  | google swiftshader    | 34/34  |
 
-**The one remaining unknown is runner speed**, and it is the whole of the
-decision. Neither demo has been run on a GitHub runner. A software rasteriser on
-a shared runner is several times slower than the desktop above, and these are
-the two heaviest frames the site ships — under SwiftShader locally quarry logged
-roughly half the heartbeats per wall-clock second that it did on hardware.
+**Runner speed was the one remaining unknown**, and it is now measured rather
+than guessed — see below. A software rasteriser on a shared runner is several
+times slower than the desktop above, and these are the two heaviest frames the
+site ships; under SwiftShader locally quarry logged roughly half the heartbeats
+per wall-clock second that it did on hardware.
 
-**quarry's step is now enabled, so the unknown is being measured rather than
-argued.** It was the middle of the three options — the other two were "add both"
-and "leave both out" — and it is the one that answers the question at the cost
-of one demo's runtime: quarry goes first because its own exit criterion names
-the browser. The step carries `timeout-minutes: 8` so a runner too slow to host
-it fails **that step** with a readable number, instead of running into the job's
-30-minute timeout with nothing to read.
+**The runner has now been measured, and the answer is not the one the options
+were written for.** quarry's step was enabled on `main`, ran as
+`build the demo site` in Pages run **32363651779**, and scored **32 of 34** in
+3m39s — against 22–41s for each of the five 2D demos. It is not too heavy to
+render: it booted, opened the SwiftShader device, resolved `IndirectPerBatch`
+with `ArrayPages`, drew 64 distinct colours, changed between all 16 sampled
+frames, and got its culling statistics back off the GPU.
 
-**What is still owed here is the number and lumen's line.** Read the step's
-duration off a Pages run on `main` and put it in this entry; then either add
-lumen's step beside it or record here what the measurement ruled out. Until that
-is written down this entry stays open, because "we turned it on" is not the
-answer the decision needed.
+**It failed on the gate's clock, and the failure is the useful part.** Both
+failures are group E's, `0 HUD line(s) in 4000 ms`. The heartbeat is logged
+every sixtieth tick — one second of _simulated_ time — and this runner advanced
+the demo's clock to 22s over roughly 40s of wall clock, so `TICK_WINDOW_MS`'s
+fixed four seconds does not reliably contain one. The step is reverted; the two
+lines are commented in `pages.yml` with this beside them.
+
+**Bumping the constant is the wrong fix and is recorded as declined.** It buys
+this runner and loses the next slower one, and it weakens "a paused demo runs no
+ticks at all" for every demo — that check counts zero heartbeats in the same
+window, so a longer window is a longer chance for a paused demo to leak one.
+Note the sharper version of the same problem: on this run the paused check
+**passed for free**, because no heartbeat could appear in any state.
+`TICK_WINDOW_MS`'s own comment says the group's first check exists to stop
+exactly that, and it did — it is what went red.
+
+**What closes this: derive the window from the demo's observed heartbeat.** Poll
+for the first two HUD lines against a generous deadline, take the interval
+between them, and size both the running and the paused windows from it. That is
+stronger than the constant on every machine rather than tuned for one, and it is
+what makes the paused check mean something on a slow runner. Both demos' steps
+go back in once it is in — lumen's evidence is the same 34/34 local run quarry's
+was, and neither has been tried on a runner since.
 
 **Both stale prose claims are fixed**: `web/pages/index.html`'s excusing clause
 and `web/pages/lumen.html`'s "This one wants a real GPU" note, which said the
