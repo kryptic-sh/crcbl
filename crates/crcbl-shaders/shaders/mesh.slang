@@ -369,6 +369,21 @@ struct FrameUniforms
 /// which is where the two values are named.
 static const float NORMALS_VIEW = 0.5;
 
+/// What `FrameUniforms::ambient`'s `w` must reach for the LOD view.
+///
+/// The same lane as `NORMALS_VIEW`, one sentinel further out:
+/// `crcbl_shaders::mesh::FrameUniforms::LOD_VIEW_ON` is the `2.0` the host
+/// writes. `fragmentMain` tests this **before** the normals threshold, because
+/// a `2.0` clears both and the outer one has to win.
+///
+/// The tint itself is produced in `mesh_cluster.slang`, which is the only stage
+/// that knows a cluster's level; this file's job is to show the colour it was
+/// handed rather than to shade it. On the two indirect paths there is no cluster
+/// — selection is per instance — so `vertexMain` writes one flat colour, and
+/// that difference is the thing worth seeing: the mesh path is a mosaic and the
+/// indirect paths are not.
+static const float LOD_VIEW = 1.5;
+
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
 ///
 /// `docs/plan/03-gpu-driven-rendering.md` §3.2's "transform, mesh id, material
@@ -905,7 +920,13 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // `GpuInstance::transform` rather than shipping a second matrix per
     // instance that nothing needs until non-uniform scale exists.
     output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
-    output.color = vertex.color;
+    // **No cluster here, and that is the honest picture.** These two paths
+    // select one level per *instance*, so there is no per-cluster level to tint
+    // by; a flat grey says so, and standing it beside the mesh path's mosaic is
+    // the comparison the LOD view exists to make.
+    output.color = frame.ambient.w >= LOD_VIEW
+        ? float4(0.45, 0.45, 0.48, 1.0)
+        : vertex.color;
     // The instance names its material exactly as it names its mesh, so two
     // instances of one mesh can be two colours with no CPU in the loop and no
     // second draw. Passed on rather than resolved here: the table is the
@@ -1666,6 +1687,17 @@ FragmentOutput fragmentMain(VertexOutput input)
     // The branch is on a **uniform**, so it is wave-uniform on every target and
     // returning before the texture fetch below costs no derivative anything else
     // needs.
+    if (frame.ambient.w >= LOD_VIEW)
+    {
+        FragmentOutput tint;
+        // Straight through, exactly as the normals view does: the colour was
+        // chosen by the stage that knew the level and this one must not shade
+        // it, or two levels with similar tints become one under a light.
+        tint.lit = float4(input.color.rgb, 1.0);
+        tint.reflectivity = float4(0.0, 0.0, 0.0, 0.0);
+        return tint;
+    }
+
     if (frame.ambient.w >= NORMALS_VIEW)
     {
         FragmentOutput normals;

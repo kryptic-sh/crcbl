@@ -648,6 +648,13 @@ impl ClusterDag {
         for (depth, level) in self.levels.iter().enumerate() {
             let mut records = vec![
                 ClusterSelect {
+                    // The level is packed into the spare `flags` bits here, at
+                    // the one place that knows it: the two group flags are
+                    // OR-ed in below and occupy bits 0 and 1.
+                    flags: ClusterSelect::level_bits(
+                        u32::try_from(depth)
+                            .unwrap_or_else(|_| unreachable!("a DAG of a few dozen levels")),
+                    ),
                     vertex_base: level_vertex_bases[depth],
                     ..ClusterSelect::ALWAYS
                 };
@@ -1624,6 +1631,15 @@ mod tests {
                     .iter()
                     .all(|record| record.vertex_base == bases[depth]),
                 "level {depth}'s records did not take the base they were given"
+            );
+            // The level rides in the spare `flags` bits, so this also asserts
+            // the two group flags did not land on top of it: `HAS_CONTAINER` is
+            // OR-ed into most of these records after the level is packed.
+            assert!(
+                records[depth]
+                    .iter()
+                    .all(|record| record.level() as usize == depth),
+                "level {depth}'s records did not carry their own level"
             );
         }
 

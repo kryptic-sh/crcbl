@@ -254,6 +254,51 @@ impl ClusterSelect {
     /// The same, for the containing group.
     pub const HAS_CONTAINER: u32 = 2;
 
+    /// The first [`flags`](Self::flags) bit the DAG level occupies.
+    ///
+    /// Bits 0 and 1 are [`HAS_PRODUCER`](Self::HAS_PRODUCER) and
+    /// [`HAS_CONTAINER`](Self::HAS_CONTAINER); everything above them is the
+    /// level this cluster's geometry was decimated to, which the LOD tint reads
+    /// so a viewer can see a cut spanning several levels of one mesh.
+    ///
+    /// **Packed rather than given a field of its own**, because a fifth word
+    /// moves [`CLUSTER_SELECT_STRIDE`] from 16 to 20 and with it every index
+    /// into the selection buffer — a GPU-visible layout change on the mesh path
+    /// for every backend, to carry a number that fits in bits nothing uses.
+    ///
+    /// Held in step with `mesh_cluster.slang` by
+    /// `the_shader_declares_the_same_selection_flags`.
+    pub const LEVEL_SHIFT: u32 = 2;
+
+    /// The deepest level [`flags`](Self::flags) can carry.
+    ///
+    /// A DAG deep enough to overflow this would have more levels than a mesh has
+    /// triangles: quarry's face, which is the densest content in the repository,
+    /// builds twelve.
+    pub const MAX_LEVEL: u32 = (1 << (u32::BITS - Self::LEVEL_SHIFT)) - 1;
+
+    /// The [`flags`](Self::flags) bits that carry `level`.
+    ///
+    /// # Panics
+    ///
+    /// If `level` exceeds [`MAX_LEVEL`](Self::MAX_LEVEL), which is a DAG built
+    /// wrong rather than a runtime condition.
+    #[must_use]
+    pub const fn level_bits(level: u32) -> u32 {
+        assert!(
+            level <= Self::MAX_LEVEL,
+            "a DAG level past what ClusterSelect::flags can carry"
+        );
+        level << Self::LEVEL_SHIFT
+    }
+
+    /// The DAG level this cluster's geometry was decimated to, zero for the
+    /// finest and for a mesh with no DAG at all.
+    #[must_use]
+    pub const fn level(&self) -> u32 {
+        self.flags >> Self::LEVEL_SHIFT
+    }
+
     /// The record for a cluster of a mesh with no DAG: neither group, so the
     /// descent draws it from every camera and neither index is ever read.
     ///
@@ -396,6 +441,7 @@ mod tests {
         for (name, value) in [
             ("HAS_PRODUCER", ClusterSelect::HAS_PRODUCER),
             ("HAS_CONTAINER", ClusterSelect::HAS_CONTAINER),
+            ("LEVEL_SHIFT", ClusterSelect::LEVEL_SHIFT),
         ] {
             let declaration = format!("static const uint {name} = {value};");
             assert!(

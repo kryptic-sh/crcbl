@@ -335,6 +335,20 @@ impl FrameUniforms {
     /// `==`. `crcbl_render::ForwardRenderer::set_normals_view` is what writes it.
     pub const NORMALS_VIEW_ON: f32 = 1.0;
 
+    /// [`ambient`](Self::ambient)`.w` for the LOD view: `mesh_cluster.slang`'s
+    /// mesh stage replaces each cluster's vertex colour with a hue chosen by the
+    /// DAG level that cluster was decimated to, and `mesh.slang`'s fragment
+    /// stage passes it through unshaded.
+    ///
+    /// **Two sentinels in one lane**, so the shader tests this threshold before
+    /// the normals one — a `2.0` clears both. The two indirect paths have no
+    /// per-cluster level at all and draw one flat grey, which is the difference
+    /// this view exists to show: cluster LOD selects across a single mesh and
+    /// per-instance LOD cannot.
+    ///
+    /// `crcbl_render::ForwardRenderer::set_lod_view` is what writes it.
+    pub const LOD_VIEW_ON: f32 = 2.0;
+
     /// The bytes a uniform buffer holds, in `std140` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; FRAME_UNIFORMS_SIZE] {
@@ -1441,6 +1455,56 @@ mod tests {
         }
     }
 
+    /// **The LOD view's threshold lies above the normals view's**, and both
+    /// shaders that declare it agree.
+    ///
+    /// One float lane carries three states, so the thresholds have to be
+    /// ordered as well as separated: a `2.0` clears the normals threshold on its
+    /// way past, and only the order of the two tests keeps it out of the normals
+    /// branch. That order is asserted here rather than left to a reader.
+    #[test]
+    fn the_lod_view_threshold_lies_above_the_normals_view() {
+        for (name, source) in [
+            ("mesh.slang", include_str!("../shaders/mesh.slang")),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+            ),
+        ] {
+            let literal = source
+                .split_once("static const float LOD_VIEW = ")
+                .unwrap_or_else(|| panic!("{name} declares the LOD view's threshold"))
+                .1
+                .split_once(';')
+                .expect("a declaration ends in a semicolon")
+                .0;
+            let threshold: f32 = literal
+                .parse()
+                .unwrap_or_else(|_| panic!("`{literal}` is not a float"));
+            assert!(
+                FrameUniforms::NORMALS_VIEW_ON < threshold
+                    && threshold < FrameUniforms::LOD_VIEW_ON,
+                "{name} switches at {threshold}, which does not separate the \
+             normals view's {} from the LOD view's {}",
+                FrameUniforms::NORMALS_VIEW_ON,
+                FrameUniforms::LOD_VIEW_ON,
+            );
+        }
+
+        let mesh = include_str!("../shaders/mesh.slang");
+        let lod = mesh
+            .find("if (frame.ambient.w >= LOD_VIEW)")
+            .expect("mesh.slang's fragment stage tests the LOD view");
+        let normals = mesh
+            .find("if (frame.ambient.w >= NORMALS_VIEW)")
+            .expect("mesh.slang's fragment stage tests the normals view");
+        assert!(
+            lod < normals,
+            "the LOD test must come first, or a frame asking for it is caught by \
+         the normals threshold instead"
+        );
+    }
+
     /// **The shader's normals-view threshold really separates the two values the
     /// host writes**, and it is `ambient`'s `w` that it compares.
     ///
@@ -1471,6 +1535,7 @@ mod tests {
             FrameUniforms::NORMALS_VIEW_OFF,
             FrameUniforms::NORMALS_VIEW_ON,
         );
+
         assert!(
             mesh.contains("if (frame.ambient.w >= NORMALS_VIEW)"),
             "mesh.slang no longer compares the ambient's `w` against the threshold, so this crate \

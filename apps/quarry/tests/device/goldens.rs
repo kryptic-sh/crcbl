@@ -144,3 +144,62 @@ golden_test!(
     DOLLY_END,
     "indirect-per-batch-dolly-end"
 );
+
+/// How many distinct colours a frame holds, capped so a shaded frame does not
+/// count every gradient step.
+fn colours(path: GeometryPath, lod_view: bool) -> usize {
+    let mut quarry = Quarry::open_on(Levels::Dag, MIXING_BUDGET, path);
+    quarry.renderer.set_lod_view(lod_view);
+    let frame = quarry.lit_frame(DOLLY_START, &sun());
+    quarry.finish();
+    let (width, height) = EXTENT;
+    let image = crcbl_golden::Image::from_rgba8(width, height, frame.pixels_rgba)
+        .expect("the readback is one RGBA8 frame of the ring's extent");
+    let count = image.distinct_colors(64);
+    eprintln!("quarry lod view: {path:?} lod_view={lod_view} — {count} distinct colour(s)");
+    count
+}
+
+/// **The LOD tint shows a mosaic on the mesh path and cannot on the others.**
+///
+/// The claim cluster LOD makes is that one mesh spans several levels across its
+/// own surface, and every other assertion in this suite is a count that a flat
+/// tint would satisfy just as well. This is the one that looks.
+///
+/// The two indirect paths are not a shortfall here: they select one level per
+/// *instance*, so there is no per-cluster level for them to tint by and
+/// `mesh.slang`'s vertex stage writes one flat grey instead. Standing the two
+/// beside each other is the comparison.
+#[test]
+fn the_lod_view_tints_the_mesh_path_by_level_and_the_indirect_paths_flat() {
+    if drew_nothing("the LOD view") {
+        return;
+    }
+
+    let mesh = colours(GeometryPath::MeshShader, true);
+    let per_batch = colours(GeometryPath::IndirectPerBatch, true);
+    let shaded = colours(GeometryPath::MeshShader, false);
+
+    // Measured on radv at `MIXING_BUDGET`: the mesh path holds 3 — the
+    // background and two level hues, which is the same "levels 1 and 2" the
+    // coverage tests find at this budget — the per-batch path holds 2, and a
+    // shaded frame saturates the 64 cap. The bars are written against those
+    // numbers rather than as bare inequalities, because "more than the other
+    // one" would pass on a tint that produced two hues by accident.
+    assert!(
+        mesh >= 3,
+        "the mesh path tints per cluster, so a cut spanning two levels must show \
+         the background and both hues — {mesh} colour(s) is a flat tint wearing \
+         a mosaic's name"
+    );
+    assert_eq!(
+        per_batch, 2,
+        "the per-batch path has no per-cluster level, so its frame is the \
+         background and one flat grey and nothing else"
+    );
+    assert!(
+        shaded > mesh,
+        "a shaded frame is a gradient and a tinted one is a handful of flat \
+         hues, so shading must hold more colours: {shaded} against {mesh}"
+    );
+}

@@ -271,6 +271,53 @@ static const uint HAS_PRODUCER = 1;
 /// The same, for the containing group.
 static const uint HAS_CONTAINER = 2;
 
+/// The first `ClusterSelect::flags` bit carrying the DAG level this cluster was
+/// decimated to. Bits 0 and 1 are the two flags above; everything over them is
+/// the level, which the LOD tint reads so a cut spanning several levels of one
+/// mesh can be seen rather than only asserted. The same number as
+/// `crcbl_shaders::cluster_select::ClusterSelect::LEVEL_SHIFT`, held in step
+/// with it by `the_shader_declares_the_same_selection_flags`.
+static const uint LEVEL_SHIFT = 2;
+
+/// What `FrameUniforms::ambient`'s `w` must reach for the LOD view.
+///
+/// The same lane the normals view rides in, one sentinel further out:
+/// `crcbl_shaders::mesh::FrameUniforms::LOD_VIEW_ON` is the `2.0` the host
+/// writes, and this threshold sits between it and the normals view's `1.0`. The
+/// fragment stage tests this one **first**, or a `2.0` would be caught by the
+/// normals threshold on its way past. `mesh.slang` declares the same constant
+/// and `the_lod_view_threshold_lies_above_the_normals_view` holds the two files
+/// in step.
+static const float LOD_VIEW = 1.5;
+
+/// A distinct colour per DAG level, for the LOD view.
+///
+/// **A `switch` rather than an array index**, and that is not style. `level`
+/// varies per cluster inside one wave, and this repository has already paid for
+/// a divergent index into constant storage once: RADV emitted
+/// `v_readfirstlane_b32` on the offset and every lane read element zero, so a
+/// tint that should have shown a mosaic would have shown one flat colour — the
+/// exact failure this view exists to make visible. See
+/// `shaders/push_constant_probe.slang`, which carries the measurement.
+///
+/// Eight hues, cycling: a DAG deeper than eight repeats rather than fading to
+/// something unreadable. quarry's face builds twelve levels, so 8 to 11 repeat 0
+/// to 3, which still reads as "these clusters are not the ones beside them".
+float3 lod_tint(uint level)
+{
+    switch (level % 8u)
+    {
+        case 0u: return float3(0.90, 0.25, 0.25);
+        case 1u: return float3(0.95, 0.60, 0.20);
+        case 2u: return float3(0.90, 0.90, 0.25);
+        case 3u: return float3(0.30, 0.85, 0.35);
+        case 4u: return float3(0.25, 0.80, 0.85);
+        case 5u: return float3(0.30, 0.45, 0.95);
+        case 6u: return float3(0.65, 0.35, 0.90);
+        default: return float3(0.95, 0.45, 0.80);
+    }
+}
+
 /// One cluster's half of `docs/plan/25-lod.md`'s DAG descent, matching
 /// `crcbl_shaders::cluster_select::ClusterSelect`.
 ///
@@ -797,7 +844,13 @@ void emit_cluster(
         // — the obligation `GpuInstance::transform` carries, and the same line
         // `mesh.slang`'s vertex stage writes.
         output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
-        output.color = vertex.color;
+        // Under the LOD view the cluster's own level replaces the vertex
+        // colour, which is what makes a cut spanning several levels of one mesh
+        // visible. A uniform branch: every lane of every cluster reads the same
+        // `frame.ambient.w`, so the two sides cost nothing at runtime.
+        output.color = frame.ambient.w >= LOD_VIEW
+            ? float4(lod_tint(cluster_select[cluster_index].flags >> LEVEL_SHIFT), 1.0)
+            : vertex.color;
         output.material = instance.material;
         output.uv = vertex.uv.xy;
         verts[v] = output;

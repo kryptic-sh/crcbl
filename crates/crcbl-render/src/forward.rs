@@ -763,6 +763,16 @@ pub struct ForwardRenderer {
     /// [`FrameUniforms::NORMALS_VIEW_ON`]: crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_ON
     normals_view: bool,
 
+    /// Whether the colour pass tints each cluster by its DAG level instead of
+    /// shading — see [`set_lod_view`](ForwardRenderer::set_lod_view).
+    ///
+    /// **Wins over [`normals_view`](Self::normals_view) when both are set**,
+    /// because one uniform lane carries both switches and the fragment stage
+    /// tests the LOD threshold first. `crcbl_shaders`'
+    /// `the_lod_view_threshold_lies_above_the_normals_view` is what keeps that
+    /// order true.
+    lod_view: bool,
+
     /// Topic 18's shadow atlas: one `D32Float` image holding
     /// [`shadow::TILES`] square tiles in a fixed grid — the sun's cascades
     /// first, then one per shadowed light.
@@ -3384,6 +3394,7 @@ impl ForwardRenderer {
             // `set_normals_view` existed. It builds nothing, so there is no
             // second field here.
             normals_view: false,
+            lod_view: false,
             shadow_atlas,
             shadow_atlas_view,
             shadow_placeholder,
@@ -3871,7 +3882,9 @@ impl ForwardRenderer {
             // which is what makes every golden image untouched by the feature.
             ambient: light
                 .ambient
-                .extend(if self.normals_view {
+                .extend(if self.lod_view {
+                    mesh::FrameUniforms::LOD_VIEW_ON
+                } else if self.normals_view {
                     mesh::FrameUniforms::NORMALS_VIEW_ON
                 } else {
                     mesh::FrameUniforms::NORMALS_VIEW_OFF
@@ -5513,6 +5526,32 @@ impl ForwardRenderer {
     /// [`FrameUniforms::NORMALS_VIEW_ON`]: crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_ON
     pub const fn set_normals_view(&mut self, on: bool) {
         self.normals_view = on;
+    }
+
+    /// Draws each cluster tinted by the DAG level it was decimated to, instead
+    /// of shading it.
+    ///
+    /// **The picture cluster LOD's whole claim rests on**: one mesh spanning
+    /// several levels across its own surface is a statement a test can assert
+    /// and nobody can see, and this is what makes it visible. The mesh path
+    /// tints per cluster; the two indirect paths select one level per instance
+    /// and have no per-cluster level at all, so they draw one flat grey — which
+    /// is the comparison rather than a shortfall.
+    ///
+    /// Costs what [`set_normals_view`](Self::set_normals_view) costs: one lane
+    /// of the frame's uniform block, read by a branch every device already runs.
+    /// Nothing to build, nothing to refuse, nothing to release.
+    ///
+    /// **Wins over the normals view when both are on**, because the two share a
+    /// lane and the fragment stage tests this one first.
+    pub const fn set_lod_view(&mut self, on: bool) {
+        self.lod_view = on;
+    }
+
+    /// Whether the colour pass tints clusters by their DAG level.
+    #[must_use]
+    pub const fn lod_view(&self) -> bool {
+        self.lod_view
     }
 
     /// Whether the colour pass draws world-space normals instead of shading.
