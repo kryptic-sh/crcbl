@@ -158,13 +158,20 @@ tests, all fixed). `crcbl-dx12` and `crcbl-mtl` now carry the same warning.
   would be — the browser side reporting objects the stream never freed — is not
   designed.
 
-**The dx12 half has now run, and reports nothing.** Run 32292785037's
-`dx12 e2e (software adapter)` job is green and its log contains no
-`object(s) still alive at device teardown` line from any backend, so the WARP
-suites leak nothing the reporter can see. That is a weaker result than it
-sounds: the warning does not fail a job, so a green run never proved this on its
-own and the log had to be read. What remains open is only the mtl and webgpu
-halves above.
+**All three reporters have now run and been read, in one sweep over run
+32366511311's job logs.** `vk e2e (lavapipe)`, `dx12 e2e (software adapter)` and
+`wgpu e2e (lavapipe, Xvfb)` carry **no**
+`object(s) still alive at device teardown` line at all; `mtl e2e (macos-latest)`
+carried two, from the one test named above, now fixed. That is a weaker result
+than it sounds and is worth saying so: the warning does not fail a job, so a
+green run never proves it and the log has to be read — which is the only reason
+the Metal one was found rather than sitting there.
+
+**Nothing re-reads these logs on its own.** A leak introduced tomorrow warns and
+passes. Making it fail is a real option and is not taken: the suites
+deliberately leave objects alive in places (a test asserting a refusal has
+nothing to destroy), so a hard failure needs a per-suite expectation before it
+can exist.
 
 ### `render_e2e` never runs against dx12's own e2e job, and that hid a step
 
