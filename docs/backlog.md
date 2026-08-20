@@ -1939,11 +1939,37 @@ dispatches one per (cluster, surviving instance).
 D3D12's bound of 65535 per axis and 2^22 in product, so it is a size a
 conforming device must serve rather than a limit being probed.
 
-- **If that fails**, the renderer's mesh frame dies of _size_, and the fix is a
-  dispatch bound rather than a call to avoid.
-- **If it passes**, scale goes too, and what is left is `mesh_cluster.slang`
-  itself against this toy shader: its groupshared use, its payload, and the
-  bindless descriptor heap — none of which `mesh_shader.slang` touches.
+**It passed as well** — `PASS [0.084s] (54/81)`, 1024 amplification groups
+through one `ExecuteIndirect`, no removal. **So shape and scale are both
+eliminated**, on three negative results and no hardware.
+
+**DECISION NEEDED — which of the two remaining paths is worth the budget.** What
+still differs between the four frames WARP survives and the frame it does not is
+no longer a call or a count. It is the content:
+
+- `mesh_cluster.slang` against `mesh_shader.slang` — groupshared memory, an
+  amplification **payload**, the cluster-DAG descent, and a far larger DXIL;
+- the **bindless descriptor heap**, which the toy shader does not touch at all;
+- the rest of the renderer's frame — the culling compute pass that writes the
+  indirect args, and several draws per frame rather than one.
+
+Neither next step is small:
+
+- **(a) Grow the probe shader toward the real one.** Add a payload, then
+  groupshared, then the heap, one at a time, each a separate CI round trip.
+  Keeps every result a clean bisect and needs no golden changes, but it is
+  several slices and each one is a shader plus a test.
+- **(b) Report `Features::MESH_SHADER` from `crcbl_dx12::adapter` and let the
+  renderer's own frame fail.** This is the change we actually want to ship, and
+  the failure it produces is the real one rather than a proxy. The cost is the
+  one this entry has always named: every D3D12 adapter moves onto
+  `GeometryPath::MeshShader` and **every golden image re-keys**, which is its
+  own slice before any diagnosis starts.
+
+**What is no longer in question either way**: WARP's `ExecuteIndirect` of
+`DISPATCH_MESH`, its amplification stage, and both together at a thousand groups
+all work. Anything that begins "WARP cannot do mesh shading" is contradicted by
+`crates/crcbl-dx12/src/device.rs`'s four probes.
 
 **Worth stating because it is the shape of the whole exercise:** every one of
 these is a _negative_ result, and each is still progress. The entry started at
