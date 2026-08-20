@@ -203,3 +203,53 @@ fn the_lod_view_tints_the_mesh_path_by_level_and_the_indirect_paths_flat() {
          hues, so shading must hold more colours: {shaded} against {mesh}"
     );
 }
+
+/// The committed golden for one path at one dolly stop.
+fn golden_path(tag: &str, stop: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(format!("{tag}-dolly-{stop}.png"))
+}
+
+/// **The three paths' committed frames agree**, which is the sample's own
+/// three-way comparison, asserted rather than eyeballed.
+///
+/// # Why this needs no device
+///
+/// The six goldens are in the repository, so the comparison is between files and
+/// runs on any machine — including a CI job with no GPU at all. That matters
+/// more than it sounds: the exit criteria ask for the three-way comparison to be
+/// *recorded*, and a record that only a machine with a mesh stage can reproduce
+/// is a record most readers cannot check.
+///
+/// # What "agree" means here, and what it does not
+///
+/// [`Tolerance::RASTERISER`](crcbl_golden::Tolerance::RASTERISER), the same bar
+/// the per-path checks use. The three are **not** expected to be identical: at
+/// `MIXING_BUDGET` the mesh path selects a level per cluster while the other two
+/// select one per instance, so they are drawing different geometry and agreeing
+/// about the picture anyway. That is the claim. A test demanding equality would
+/// be asserting the paths are the same mechanism, which they are not.
+#[test]
+fn the_three_paths_committed_goldens_agree_at_both_dolly_stops() {
+    for stop in ["start", "end"] {
+        let reference = golden_path("mesh-shader", stop);
+        for tag in ["indirect-count", "indirect-per-batch"] {
+            let actual = crcbl_golden::Image::load_png(golden_path(tag, stop))
+                .expect("the committed golden is a readable PNG");
+            let outcome = crcbl_golden::Golden::new(&reference)
+                .with_tolerance(crcbl_golden::Tolerance::RASTERISER)
+                .check(&actual)
+                .expect("the reference is readable");
+            let comparison = outcome.into_result().unwrap_or_else(|message| {
+                panic!("mesh-shader against {tag} at the dolly {stop}: {message}")
+            });
+            // Printed on success: the numbers *are* the recorded comparison, and
+            // a run that passes silently records nothing.
+            eprintln!(
+                "quarry three-way: mesh-shader against {tag} at the dolly {stop} — {}",
+                comparison.summary()
+            );
+        }
+    }
+}

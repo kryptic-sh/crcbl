@@ -1833,6 +1833,34 @@ it, forced by subtracting features from one adapter.
   over `Tolerance::RASTERISER`, so the runner that gates them agrees with the
   machine that made them. What is still owed is the window and the
   human-reviewed three-way comparison written down here.
+- **The three-way comparison is measured, and a human still owes the looking.**
+  `the_three_paths_committed_goldens_agree_at_both_dolly_stops` compares the
+  committed goldens against each other at `Tolerance::RASTERISER` — no device
+  needed, because the images are in the repository, so any reader can reproduce
+  the number rather than only a machine with a mesh stage. Measured 2026-08-20
+  on the blessed set:
+
+  | stop  | mesh-shader against either indirect path     |
+  | ----- | -------------------------------------------- |
+  | start | 233 px differ (0.47%), max channel delta 118 |
+  | end   | 0 px differ                                  |
+
+  The two indirect paths are identical to each other at both stops, which is
+  expected: they run the same per-instance selection through different draw
+  machinery.
+
+  **The difference is at the far stop, not the near one, and that is the
+  interesting half.** Standing back, screen-space error varies most across a
+  face that recedes 180 m, so per-cluster selection has the most to disagree
+  with per-instance selection about; inside the quarry everything is at the
+  finest level and all three draw the same triangles. A reader expecting the gap
+  to grow with proximity has it backwards, and so did I.
+
+  What is still owed is the _review_: 233 pixels at a max delta of 118 is a real
+  silhouette difference, and whether it reads as "the same scene at the same
+  budget" is a judgement no tolerance makes. The images are
+  `apps/quarry/tests/golden/`.
+
 - **The LOD tint is built; the heatmap is not.** `ForwardRenderer::set_lod_view`
   tints each cluster by the DAG level it was decimated to, and
   `the_lod_view_tints_the_mesh_path_by_level_and_the_indirect_paths_flat`
