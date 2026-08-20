@@ -1965,13 +1965,24 @@ mod tests {
         let theirs = first
             .create_swapchain(&swapchain_desc(surface, Format::Rgba8Unorm, 2))
             .expect("a ring");
-        let _ours = second
+        let ours = second
             .create_swapchain(&swapchain_desc(surface, Format::Rgba8Unorm, 2))
             .expect("a ring on the second device too");
 
         let error = second
             .acquire_next_frame(theirs)
             .expect_err("that swapchain belongs to the other device");
+
+        // Each ring goes back to the device that made it, before the assertion
+        // rather than after it: a failing assertion takes the rest of the
+        // function with it, and this test opens **two** devices, so a leak here
+        // is reported twice and reads as two of them. Both were leaking until
+        // 2026-08-20, which is what `crcbl-mtl`'s new teardown report found on
+        // its first run — `5 object(s) still alive at device teardown (2 image,
+        // 2 image view, 1 swapchain)`, twice.
+        first.destroy_swapchain(theirs);
+        second.destroy_swapchain(ours);
+
         assert!(
             matches!(
                 error,

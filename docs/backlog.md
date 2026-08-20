@@ -137,10 +137,22 @@ tests, all fixed). `crcbl-dx12` and `crcbl-mtl` now carry the same warning.
   nothing said so. It takes no wait first, unlike dx12's, because an
   `MTLCommandBuffer` retains every resource it references — the same fact
   `crcbl_mtl::device`'s header gives as the reason there is no deletion queue.
-  **Never executed**: it is platform-gated, so the evidence is a cross-target
-  `cargo clippy --all-targets --all-features` on `aarch64-apple-darwin` and
-  nothing more. Whether Metal's suites leak is answered by reading an `mtl e2e`
-  job log for the line, exactly as the dx12 half was answered.
+  **It has now run, and it found one on its first pass.**
+  `swapchain::tests::a_swapchain_from_another_device_is_foreign` opened two
+  devices, created a ring on each and destroyed neither, so run 32366511311's
+  `mtl e2e (macos-latest)` log carries
+  `crcbl-mtl: 5 object(s) still alive at device teardown (2 image, 2 image view, 1 swapchain)`
+  **twice**, once per device. Fixed by returning each ring to the device that
+  made it, before the assertion rather than after — a failing assertion would
+  otherwise take the cleanup with it. That is the only such line anywhere in
+  that job's 2.5 million, so nothing else in the Metal suites leaks what this
+  reporter can see.
+
+  Worth noting how it became visible: the report is a `log::warn!`, and until
+  `instance::tests::open` installed a sink the facade dropped it. The reporter
+  and the sink landed within an hour of each other and neither would have shown
+  this on its own.
+
 - **`crcbl-webgpu` has no pools of this shape**, being a command stream rather
   than a handle table, so the check does not translate. What the equivalent
   would be — the browser side reporting objects the stream never freed — is not
