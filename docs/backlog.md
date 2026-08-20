@@ -4384,79 +4384,30 @@ executed a full vertex-and-fragment pipeline through an ICB on CI and produced a
 canvas byte-identical to the direct draw. Had that been believed rather than
 measured, the whole approach would have been abandoned for a stall.
 
-**So the question is what bar the deletion clears.** Three honest positions:
-
-1. **Every row closed.** Requires a hardware macOS runner for four Metal rows,
-   and possibly a hardware Windows runner for the two mesh rows. Real money, and
-   it would close the loop completely.
-2. **Every row either closed or _measured_ unprovable here**, with the
-   unprovable ones implemented and marked. `Support::NotOnThisDevice` and the
-   report's _unprovable here_ state already express this exactly — it is what
-   Metal's `DepthClamp` does today. The claim becomes "every backend implements
-   it, and the CI we have proves it wherever it can".
-3. **Delete now on the coverage argument.** `crcbl-wgpu` closes zero capability
-   gaps — every capability its 13 rows name is also refused by a keeper backend
-   — and on Linux it runs Vulkan underneath, so agreement with `crcbl-vk` proves
-   less than it appears. Two of the four exercises its deletion would have cost
-   are already re-homed; the other two are one slice each.
-
-**My reading, for what it is worth:** (2) is the honest bar and (1) is the same
-thing plus hardware. (3) is defensible on its own terms and is the only one that
-does not make the deletion wait on Metal's mesh support, which nothing in the
-engine uses on that backend today. But it is a scope call, not a technical one,
-and it is the last thing standing between here and goal 3.
-
 ## What each remaining blocker row would take
 
-The list is **six**, down from eleven, and it is worth seeing that **none** of
-the six is work anybody could finish here today:
+`REVIEWED_BLOCKERS` in `crates/crcbl-hal/src/capability.rs` is the answer at any
+moment; this says what stands between each row and zero. Every row belongs to
+dx12 or Metal.
 
-| rows                                              | what they are                                                                    | what closes them                                                                                     |
-| ------------------------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| dx12 `MeshShading`, `TaskShaderStage`             | the WARP device removal                                                          | **a Windows session.** Three hypotheses eliminated by reading; the branch that reproduces it is kept |
-| Metal `MeshShading`, `TaskShaderStage`            | the runner answers `Metal3 = false`                                              | **hardware.** Unprovable here whatever anyone writes                                                 |
-| Metal `TimestampQuery`, `PipelineStatisticsQuery` | no `MTLCounterSampleBuffer` is built, and the runner advertises no `counterSets` | writable, but **unverifiable here** — it would land as `NotOnThisDevice`                             |
+| rows                                              | kind        | what closes them                                                                  |
+| ------------------------------------------------- | ----------- | --------------------------------------------------------------------------------- |
+| dx12 `MeshShading`, `TaskShaderStage`             | `Unwritten` | the WARP device removal — `features_of` still never asks for `MeshShaderTier`     |
+| Metal `MeshShading`, `TaskShaderStage`            | `Unrun`     | **hardware.** The runner answers `Metal3 = false`, so nothing here can execute it |
+| Metal `TimestampQuery`, `PipelineStatisticsQuery` | `Unrun`     | **hardware.** Written and compiled; the runner advertises no `counterSets`        |
 
-So under bar (2), the reachable end state is **four rows**, not zero: writing
-Metal's counter sample buffer moves two rows to `NotOnThisDevice`, and the other
-four need hardware nobody here has. Under bar (3) the deletion happens now.
+**The two kinds are not the same distance from done, which is why `Unrun`
+exists.** Metal's four rows are written — `crcbl-mtl`'s `query.rs` builds the
+`MTLCounterSampleBuffer`, resolves it, and its `conv.rs` pins the result layouts
+against Apple's own structs at compile time — and they are blocked only on a
+device that will run them. dx12's two are not written at all: the adapter does
+not report `Features::MESH_SHADER`, because reporting it on a device that
+removes itself would be worse than not reporting it.
 
-**The two dx12 fill rows left this table by being deleted from the seam rather
-than closed**, which is a third way a row can go and worth naming: the seam
-promised a repeating 32-bit value that Metal, WebGPU and wgpu could never keep,
-so `CommandEncoder::fill_buffer` became `clear_buffer` with no value and both
-capabilities went with the parameter. Nothing called it. That is what took the
-list from eight to six, and it is not progress against the four that remain.
-
-**What is no longer an argument either way:** every seam-audit finding is
-closed, so `crcbl-wgpu` is not holding any contract honest that the other
-backends do not. It caught one real bug this session — a missing
-`max_bind_groups` guard that returned `Ok` plus a poisoned layout — which is a
-point _for_ its coverage, and that guard now exists and would survive its
-deletion.
-
-**What has changed since this was written, and it sharpens the question rather
-than answering it.** `crcbl-webgpu` now has **zero** divergences —
-`REVIEWED_BLOCKERS` does not name it at all, after `StorageImageBinding` gained
-the seam field it needed and `TimestampQuery` was closed by moving timestamps
-into the pass descriptor. The blocker list stood at **nine rows across two
-backends** on the day this was written, dx12 4 and Metal 5. Whatever it is
-today, `REVIEWED_BLOCKERS` is the answer — this heading said eight while the
-paragraph above it said six, which is what restating a count here buys.
-
-That matters because the browser backend is the one `crcbl-wgpu`'s deletion is
-_about_. The replacement for the path `crcbl-wgpu` used to serve now implements
-the whole seam with nothing outstanding, which is the strongest form position
-(3) could ever take: the question is no longer "is the replacement ready" but
-"does an unrelated backend's unfinished work gate an unrelated crate's removal".
-Every remaining row belongs to dx12 or Metal, neither of which `crcbl-wgpu` has
-ever served — it runs Vulkan underneath on Linux and is not built for macOS or
-Windows CI at all.
-
-Position (1) and (2) are now really about **when parity is declared done**, not
-about whether the deletion is safe. They can be separated: nothing about
-deleting `crcbl-wgpu` makes dx12's mesh reporting or Metal's counter sets
-harder, and keeping the crate does not make either easier.
+**So dx12's pair is the only one anybody can move without new hardware**, and it
+is the subject of "DECISION NEEDED — dx12 mesh shading: WARP claims it and dies,
+hardware works". The four Metal rows are unprovable here whatever anyone writes;
+the honest reachable state on this machine is four rows, not zero.
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
