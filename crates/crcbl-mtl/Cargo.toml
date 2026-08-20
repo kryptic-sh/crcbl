@@ -38,9 +38,10 @@ crcbl-shaders = { workspace = true }
 # Both framework crates are per-item feature-gated and their defaults are "all
 # of it" — `objc2-metal`'s default set is over ninety features covering every
 # encoder, pipeline and MTL4 type. Enabling only the ones this crate names keeps
-# the macOS build honest about what the backend actually touches, and stops this
-# crate widening the feature set `wgpu-hal` (which also depends on
-# `objc2-metal`, and also opts out of the defaults) resolved for itself.
+# the macOS build honest about what the backend actually touches. It used to
+# also avoid widening what `wgpu-hal` had resolved for itself; that crate left
+# the graph with `crcbl-wgpu` on 2026-08-21, so this crate is now the only
+# resolver and the narrow set is worth keeping on its own terms.
 #
 # `MTLDevice` brings the protocol, `MTLCopyAllDevices`, `MTLGPUFamily`,
 # `MTLArgumentBuffersTier` and `MTLDeviceLocation`; `MTLTypes` is what makes
@@ -218,9 +219,10 @@ crcbl-shaders = { workspace = true }
 # `objc2-quartz-core`; and its `drawableSize` is a `CGSize`, which lives in
 # `objc2-core-foundation`. Both are the same one-binding-per-ABI family
 # `docs/plan/09-backends-metal-dx12.md`'s FFI correction already sanctions for
-# `objc2-metal`, both are pinned to macOS beside it, and both were **already in
-# this workspace's lockfile** — `wgpu-hal` resolves them for `crcbl-wgpu` — so
-# naming them here adds features to the build graph and not crates.
+# `objc2-metal`, both are pinned to macOS beside it. They were **already in
+# this workspace's lockfile** when this was written, because `wgpu-hal` resolved
+# them for `crcbl-wgpu`; that crate is gone as of 2026-08-21, so naming them
+# here is now what puts them in the graph rather than what widens them.
 #
 # The alternative was hand-rolled `msg_send!` against a raw pointer, which is
 # the same FFI with the type checking taken out.
