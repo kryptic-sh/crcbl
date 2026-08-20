@@ -12,7 +12,7 @@
 //! start-up is polled rather than blocking, why the clock is the browser's, and
 //! why a sample's wasm module imports nothing of its own.
 //!
-//! What is left here is what is genuinely lumen's: the [`WebPending`] impl,
+//! What is left here is what is genuinely lumen's: the [`WebPending`](crcbl::web::WebPending) impl,
 //! which opens the fixture with its own [`Options`]. The symbol names stay here
 //! too, written out one per line — two demos can be open in one browser and the
 //! exports must not collide, so the macro takes each name as an argument rather

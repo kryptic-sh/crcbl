@@ -12,7 +12,7 @@
 //! start-up is polled rather than blocking, why the clock is the browser's, and
 //! why a sample's wasm module imports nothing of its own.
 //!
-//! What is left here is what is genuinely flappy's: the [`WebPending`] impl,
+//! What is left here is what is genuinely flappy's: the [`WebPending`](crcbl::web::WebPending) impl,
 //! which opens the game with its own [`Options`], and the two accessors
 //! `crate::best` reads a score through. The symbol names stay here too, written
 //! out one per line — two demos can be open in one browser and the exports must
