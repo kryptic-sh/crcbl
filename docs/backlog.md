@@ -10442,13 +10442,52 @@ culling bug is what happens when one of those goes unexamined for long enough.
 
 ## One primitive shades black on Windows lavapipe, intermittently
 
-**This is now the tree's only open intermittent failure.** Its sibling — an
-asteroids audio test that dropped a voice's release block — was closed by
-`777abb1` on 2026-08-17, and its entry sat here claiming to be undiagnosed until
-2026-08-20 because nobody deleted it. Worth knowing before reading this one: the
-audio entry's hypothesis (a timing assumption under load) was **wrong**, and the
-real cause was two consumers of one mixer. So "it only fails under a loaded run"
-is a correlation that pointed at the wrong thing once already.
+**This is now the tree's only open intermittent failure**, and two things this
+entry claimed are false as of 2026-08-20. Its sibling — an asteroids audio test
+that dropped a voice's release block — was closed by `777abb1` on 2026-08-17 and
+sat here claiming to be undiagnosed for three days; its hypothesis (a timing
+assumption under load) was wrong, the real cause being two consumers of one
+mixer. "Only under load" pointed at the wrong thing once already.
+
+**Correction 1: it has not cost a CI run since 2026-08-14.** All five
+occurrences fall in one ~8-hour burst — `e8d3dab` 16:19 through `bfc270c` 00:31
+— and this entry's "it now costs multiple CI runs per push" has been false ever
+since. Counted rather than felt: **79** completed CI runs on `main` between then
+and 2026-08-18 with the test still on that job, and of the 14 that failed, none
+was `vk e2e (lavapipe, windows)`. The one Windows-lavapipe failure in that
+window was four _mesh golden_ tests on `32079964500`, which is a different
+thing.
+
+**Correction 2, and it is why the silence since is worth nothing.** `ba0c49f`
+moved `depth_probe` into the agnostic `crates/crcbl/tests/forward_e2e/` on
+2026-08-18, and **`run-forward-e2e.sh` has no Vulkan-on-Windows arm**: it runs
+on `windows-latest` under **dx12/WARP**, on `ubuntu-latest` under vk and wgpu,
+and on `macos-latest` under Metal. The `vk e2e (lavapipe, windows)` job runs
+`run-vk-e2e.sh` and nothing else, so the test name appears **zero** times in its
+log. The burst had already stopped four days before the move, so the move did
+not cause the quiet — but from 2026-08-18 onward this configuration cannot
+report the failure at all, and any future "it has not recurred" is a closed
+channel rather than evidence.
+
+**DECISION — should the Windows Vulkan job run the forward suite?** It is the
+one configuration where a real defect has ever appeared there, and it is now the
+one agnostic suite that configuration does not run.
+
+- **Add `run-forward-e2e.sh` to `vk-e2e-windows`.** The job's own comment says
+  the likeliest failure on that leg is golden images blessed against a different
+  Mesa build — and that fear does not apply here: `forward_e2e` calls
+  `crcbl_golden::compare` **zero** times and names no `Tolerance`, which is why
+  it already ports to WARP, Metal and wgpu. It would need the ICD pointed at
+  `LAVAPIPE_ROOT` the way that job's own suite step does, not at the Linux
+  `lvp_icd.x86_64.json` path the Linux steps use.
+- **Leave it.** That job's header records that **nothing in it has ever executed
+  outside CI** — there is no Windows machine on this team — and that each round
+  trip costs about an hour. Adding a step written blind to a fragile hour-long
+  job is a real cost, and the defect it would re-expose has not been seen in six
+  days.
+
+Not taken either way here, because it trades CI budget against coverage of a
+configuration nobody can reproduce locally.
 
 `depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
 fails on `vk e2e (lavapipe, windows)` with `[0, 0, 0, 255]` at the centre pixel,
