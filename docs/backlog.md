@@ -1833,6 +1833,26 @@ it, forced by subtracting features from one adapter.
   over `Tolerance::RASTERISER`, so the runner that gates them agrees with the
   machine that made them. What is still owed is the window and the
   human-reviewed three-way comparison written down here.
+- **The generator's golden is a digest; the seam review is not done.** The exit
+  criteria pair "golden meshes prove the generator is deterministic" with "the
+  seam review is recorded with the content it was done against", and only the
+  first half is met. `the_face_digests_to_the_number_it_was_blessed_against`
+  folds the face's positions, normals and indices through
+  `crcbl::core::rand::hash_u64` over a defined encoding and compares against a
+  committed number, which is what a golden mesh is _for_ — catching a change —
+  at a size a reviewer can diff.
+
+  It replaces nothing: `the_same_size_gives_identical_geometry` still asserts
+  purity within one process, and that was all there was. Two calls agreeing
+  proves the function is pure, and stays true after someone changes `height_at`,
+  the hash it folds, or either constant.
+
+  **The seam review is the half a test cannot do.** UV and normal seams held,
+  material boundaries preserved through collapses — the criteria ask for a human
+  to look and for what they looked at to be written down. The content is
+  `quarry_face(CELLS)` and `quarry_tile`, and nothing here has been reviewed by
+  eye.
+
 - **The three-way comparison is measured, and a human still owes the looking.**
   `the_three_paths_committed_goldens_agree_at_both_dolly_stops` compares the
   committed goldens against each other at `Tolerance::RASTERISER` — no device

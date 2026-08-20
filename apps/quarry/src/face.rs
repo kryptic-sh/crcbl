@@ -270,6 +270,71 @@ mod tests {
         assert_eq!(quarry_face(CELLS), quarry_face(CELLS));
     }
 
+    /// A digest of a face, stable across builds and platforms.
+    ///
+    /// **Over a defined encoding, never over the values' memory.** Each `f32`
+    /// enters as its IEEE-754 bit pattern and each index as itself, folded
+    /// through [`crcbl::core::rand::hash_u64`], which documents that the same
+    /// `(seed, index)` gives the same answer on every platform and in every run.
+    /// Reading the `Vec`s' bytes instead would fold in capacity, allocation
+    /// addresses and any padding a future field adds.
+    ///
+    /// `-0.0` is normalised to `0.0` before it is folded. They are the same
+    /// number and must digest the same way, or a build that happened to produce
+    /// one where the last produced the other would report a generator change
+    /// that did not happen. `NaN` needs no such care here because
+    /// `every_position_and_normal_is_finite` refuses one.
+    fn digest(face: &Face) -> u64 {
+        fn fold(acc: u64, value: f32) -> u64 {
+            let normalised = if value == 0.0 { 0.0f32 } else { value };
+            crcbl::core::rand::hash_u64(acc, u64::from(normalised.to_bits()))
+        }
+
+        let mut acc = 0;
+        for position in &face.positions {
+            for value in position {
+                acc = fold(acc, *value);
+            }
+        }
+        for normal in &face.normals {
+            for value in normal {
+                acc = fold(acc, *value);
+            }
+        }
+        for index in &face.indices {
+            acc = crcbl::core::rand::hash_u64(acc, u64::from(*index));
+        }
+        acc
+    }
+
+    /// **The generator reproduces the mesh it was blessed against.**
+    ///
+    /// The exit criteria ask for golden meshes proving the generator is
+    /// deterministic, and
+    /// `the_same_size_gives_identical_geometry` does not do it: two calls inside one process agree whenever the function
+    /// is pure, which it would still be after someone changed `height_at`, the
+    /// hash it folds, or the constants either reads. This is the half that
+    /// notices — a committed number the generation has to land on.
+    ///
+    /// A digest rather than a committed mesh file: the face is 4225 vertices and
+    /// 24 576 indices, and what a golden mesh is *for* is catching a change,
+    /// which a number does exactly as well and a reviewer can diff.
+    ///
+    /// **When this fails and the change was intended**, put the printed value
+    /// here — but re-read `the_face_has_relief_and_it_differs_near_and_far`
+    /// first, because a generator that got flatter still passes this once it is
+    /// re-blessed.
+    #[test]
+    fn the_face_digests_to_the_number_it_was_blessed_against() {
+        const BLESSED: u64 = 0x6665_37df_5a20_6cc1;
+        let actual = digest(&quarry_face(CELLS));
+        assert_eq!(
+            actual, BLESSED,
+            "the quarry face generated a different mesh; if that was intended, \
+             the new digest is {actual:#018x}"
+        );
+    }
+
     /// **Nothing is `NaN` or infinite.** A single one poisons a bounding box,
     /// a cluster sphere and every normal that touches it — see
     /// `crcbl_core::bounds`, which exists because that happened.
