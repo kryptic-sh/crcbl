@@ -3,6 +3,48 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The sweep for arms that are asserted but never run
+
+A test that branches on what the device reports covers both arms in its source
+and one arm in any run. Three of them said "both are asserted" — in a doc, in a
+name, in a backlog entry — while the second arm executed on no machine here,
+because it keys on an optional feature every available adapter reports.
+
+**The sweep, and it is cheap:**
+
+```sh
+grep -rn 'features\.contains(' --include='*.rs' crates/*/tests crates/crcbl/tests
+```
+
+Then, per hit, ask which branch a local run takes rather than reading the source
+as coverage.
+
+**Fixed by subtracting the feature**, which manufactures the lesser device
+instead of waiting for hardware — the move `mesh.rs` already used to reach
+`GeometryPath::IndirectPerBatch`:
+
+- the bindless refusal in `vk_e2e/pipeline.rs`, recorded here as needing a Tier
+  B driver nobody has;
+- the `update_bind_group` refusal in `vk_e2e/compute.rs`, whose module doc said
+  both arms are asserted;
+- the timestamp-set refusal in `vk_e2e/queries.rs`, whose test name says "or are
+  refused cleanly".
+
+Each carries a guard that the subtraction happened, because without one the test
+asserts the capable device's answer under the lesser arm's name and passes.
+
+**Checked and already covered**, so no test was added: `hal_seam_e2e`'s
+`can_multi_draw` gate, whose other side the `CRCBL_SEAM_WITHHOLD=all` pass
+drives; and the "timestamps degrade rather than break" claim, which
+`crcbl-render`'s null-backend unit test covers for `PassTimers::new` declining
+and every mesh test covers for the frame, since `render_mesh` executes with
+`None` timers on real hardware.
+
+**Not reachable this way:** `crcbl-wgpu`'s push-constant overflow test needs
+`PUSH_CONSTANTS` _enabled_, and that backend never enables wgpu's `IMMEDIATES`,
+so it skips with the reason printed. Subtraction cannot add a feature. It leaves
+with the crate.
+
 ### Declined: extending the citation gate from paths to symbols
 
 `tools/check-doc-citations.sh` resolves the paths a doc cites and nothing else.
