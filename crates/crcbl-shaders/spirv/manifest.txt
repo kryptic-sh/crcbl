@@ -242,6 +242,17 @@ dxil = vertexMain:dxil/ssr_blur.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb
 dxil = fragmentMain:dxil/ssr_blur.fragmentMain.dxil:5883bccbf24760dfad8f298ec5b127fded78f225d4d4846ebf4886176bf4bd54
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[task_write_probe]
+source = shaders/task_write_probe.slang
+source-sha256 = e439cd019c96043d646c9a86e9c39f134d55168e6efe8f0a28df38b60328b58d
+targets = spirv, msl, dxil
+spirv = spirv/task_write_probe.spv
+spirv-sha256 = ca8f7a3d58bda347d22a7882ce99a8edc2e7e6d28fc52f0b16538c784f4a6f98
+msl = msl/task_write_probe.metal
+msl-sha256 = df3f78a987a1bf647e25300f63b5ffc6c4688e4b9de160eb68c21e20c7308ac1
+dxil = writingTaskMain:dxil/task_write_probe.writingTaskMain.dxil:7e48ae7ff1d4c341a331c3fc1c0c4801fcd48e647ceb8592bc6224f63c0ac649
+entry-points = writingTaskMain:taskext
+
 [tonemap]
 source = shaders/tonemap.slang
 source-sha256 = 6e8a1868e36d1db204e3f88462fd964bd1faec6791a2c072fc76fc0469f6b150

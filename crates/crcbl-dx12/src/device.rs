@@ -5435,7 +5435,17 @@ pub(crate) mod tests {
     }
 
     impl MeshProbe {
-        fn new(device: &Dx12Device) -> Self {
+        /// `writes` is the **writable** storage buffers this probe's set binds
+        /// after the geometry, at bindings 1 and up in the order given.
+        ///
+        /// Every probe whose shaders write nothing passes `&[]`, which builds
+        /// the one-binding layout and bind group this type has always built —
+        /// the same root signature, the same descriptor table, the same
+        /// registers. Only
+        /// [`storage_writes_from_the_amplification_stage_do_not_remove_the_device`]
+        /// passes anything, because its amplification stage is the first here
+        /// that writes.
+        fn new(device: &Dx12Device, writes: &[BufferHandle]) -> Self {
             use crcbl_shaders::{MESH_SHADER, mesh_shader};
 
             let geometry = mesh_shader::vertex_bytes();
@@ -5451,22 +5461,38 @@ pub(crate) mod tests {
                 .write_buffer(vertices, 0, &geometry)
                 .expect("an upload-heap buffer is host-visible");
 
+            // The geometry, then one writable binding per buffer the caller
+            // named. `task_write_probe.slang` declares its two in the same
+            // order, which is what puts them on the registers this layout
+            // assigns: a read-only storage binding is an SRV and a writable one
+            // a UAV, so the geometry is `t0` and these are `u0` and `u1`.
+            let mut layout_entries = vec![BindGroupLayoutEntry {
+                binding: 0,
+                // See the doc comment on why this is not `MESH`.
+                visibility: ShaderStages::ALL,
+                kind: BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            }];
+            layout_entries.extend((0..writes.len()).map(|index| BindGroupLayoutEntry {
+                binding: 1 + index as u32,
+                visibility: ShaderStages::ALL,
+                kind: BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            }));
             let set_layout = device
                 .create_bind_group_layout(&BindGroupLayoutDesc {
                     label: Some("mesh_shader geometry"),
-                    entries: &[BindGroupLayoutEntry {
-                        binding: 0,
-                        // See the doc comment on why this is not `MESH`.
-                        visibility: ShaderStages::ALL,
-                        kind: BindingKind::StorageBuffer {
-                            read_only: true,
-                            dynamic: false,
-                        },
-                        count: 1,
-                        flags: BindingFlags::empty(),
-                    }],
+                    entries: &layout_entries,
                 })
-                .expect("one read-only storage buffer");
+                .expect("a read-only storage buffer and the caller's writable ones");
             let pipeline_layout = device
                 .create_pipeline_layout(&PipelineLayoutDesc {
                     label: Some("mesh_shader"),
@@ -5474,18 +5500,29 @@ pub(crate) mod tests {
                     push_constants: None,
                 })
                 .expect("a root signature with one descriptor table");
+            let mut bound = vec![BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(vertices),
+            }];
+            bound.extend(
+                writes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, buffer)| BindGroupEntry {
+                        binding: 1 + index as u32,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(*buffer),
+                    }),
+            );
             let group = device
                 .create_bind_group(&BindGroupDesc {
                     label: Some("mesh_shader geometry"),
                     layout: set_layout,
-                    entries: &[BindGroupEntry {
-                        binding: 0,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(vertices),
-                    }],
+                    entries: &bound,
                     variable_count: None,
                 })
-                .expect("a bind group over the vertex buffer");
+                .expect("a bind group over the vertex buffer and the caller's writable ones");
 
             // One module for all four entry points, as everywhere else in this
             // backend. `mesh_shader.slang` declares no WGSL target, so the
@@ -5708,7 +5745,7 @@ pub(crate) mod tests {
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_mesh_pipeline_draws_through_d3d12_and_its_amplification_stage_is_visible() {
         let (_instance, device) = open_device();
-        let probe = MeshProbe::new(&device);
+        let probe = MeshProbe::new(&device, &[]);
 
         // One workgroup: `meshMain` and `amplifiedMeshMain` are
         // `[numthreads(3, 1, 1)]`, one thread per vertex, and `taskMain`
@@ -5810,7 +5847,7 @@ pub(crate) mod tests {
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn an_indirect_mesh_dispatch_of_the_same_extents_draws_the_same_triangle() {
         let (_instance, device) = open_device();
-        let probe = MeshProbe::new(&device);
+        let probe = MeshProbe::new(&device, &[]);
 
         // One `D3D12_DISPATCH_MESH_ARGUMENTS`: the three `u32`s the direct probe
         // passes to `DispatchMesh` as scalars, in GPU memory instead. Written
@@ -5893,7 +5930,7 @@ pub(crate) mod tests {
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn an_indirect_dispatch_through_the_amplification_stage_draws_the_same_triangle() {
         let (_instance, device) = open_device();
-        let probe = MeshProbe::new(&device);
+        let probe = MeshProbe::new(&device, &[]);
 
         // The same one `D3D12_DISPATCH_MESH_ARGUMENTS` the sibling writes.
         // `taskMain` is `[numthreads(1, 1, 1)]` and dispatches one mesh group,
@@ -5963,7 +6000,7 @@ pub(crate) mod tests {
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn many_indirect_amplification_groups_do_not_remove_the_device() {
         let (_instance, device) = open_device();
-        let probe = MeshProbe::new(&device);
+        let probe = MeshProbe::new(&device, &[]);
 
         let extents: Vec<u8> = [MANY_GROUPS, 1, 1]
             .iter()
@@ -6062,7 +6099,7 @@ pub(crate) mod tests {
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_zero_group_dispatch_mesh_does_not_remove_the_device() {
         let (_instance, device) = open_device();
-        let probe = MeshProbe::new(&device);
+        let probe = MeshProbe::new(&device, &[]);
         let culled = device
             .create_shader_module(&ShaderModuleDesc {
                 label: Some("zero_dispatch_probe.slang"),
@@ -6116,6 +6153,307 @@ pub(crate) mod tests {
         device.destroy_shader_module(culled);
         device.destroy_buffer(args);
         probe.destroy(&device);
+    }
+
+    /// **Two storage-buffer writes from the amplification stage — an atomic
+    /// and a plain indexed store — read back and asserted, rather than merely
+    /// survived.**
+    ///
+    /// The probes above eliminate pipeline shape, dispatch scale and a
+    /// zero-group `DispatchMesh`: WARP survives every one of them. What is left
+    /// is what the amplification stage *does*, and the next difference in
+    /// content is that `mesh_cluster.slang`'s `taskMain` writes to two storage
+    /// buffers before it dispatches while every shader those probes run writes
+    /// nothing at all from that stage. A UAV write from an amplification stage
+    /// — an atomic one above all — is a far less travelled path than the
+    /// dispatch it precedes.
+    ///
+    /// # What differs from [`a_zero_group_dispatch_mesh_does_not_remove_the_device`]
+    ///
+    /// The amplification stage writes, and the set it is bound through carries
+    /// two writable buffers for it to write to.
+    /// `task_write_probe.slang`'s `writingTaskMain` adds one to a single
+    /// contended counter on the odd groups and stores its own index plus one
+    /// into its own slot on the even ones — one atomic and one plain store,
+    /// each under its own branch, which is the shape `mesh_cluster.slang` has.
+    /// Its `DispatchMesh` is `mesh_shader.slang`'s unbranched one, because the
+    /// zero-group form is the probe above and the bisect takes one feature at a
+    /// time.
+    ///
+    /// It is a module of its own for the reason its source gives: Slang
+    /// 2026.14's Metal backend miscompiles any module holding two amplification
+    /// entry points. The mesh and fragment stages are still the passing
+    /// siblings' containers, byte for byte.
+    ///
+    /// # It asserts the writes, not only the picture
+    ///
+    /// That is what this says and its siblings cannot. Both buffers are primed
+    /// before the frame — the counter at zero, because an atomic add
+    /// accumulates onto whatever is there, and every slot at [`PROBE_SENTINEL`]
+    /// — and both are copied back after it. What they must hold follows from
+    /// the dispatch extent alone: half of [`MANY_GROUPS`] groups are odd, so
+    /// the counter holds exactly that many, and each even slot holds its own
+    /// index plus one while every odd slot still holds the sentinel. A device
+    /// that ran the stage with its writes dropped, or that sent them somewhere
+    /// else, therefore fails here rather than drawing the sibling's triangle
+    /// and passing.
+    ///
+    /// # What each outcome says
+    ///
+    /// * **It draws and both buffers read back.** Storage writes from an
+    ///   amplification stage are not what removes the device, and the bisect
+    ///   moves to what is left of `mesh_cluster.slang`: its payload, its
+    ///   `groupshared` use, and the bindless heap none of these probes touch.
+    /// * **The device goes away.** The removal has a repro with no renderer in
+    ///   it, and the fix is a write the amplification stage must not perform —
+    ///   the cull statistics would have to be counted by a later pass.
+    /// * **It draws and a buffer disagrees.** The stage ran and its writes did
+    ///   not land where the root signature says they should, which is a binding
+    ///   defect rather than a mesh-shading one — and one nothing else here
+    ///   would have caught, because the picture is the same either way.
+    ///
+    /// The three texels are its siblings', for the reason they give: surviving
+    /// is not the claim.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it — this crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn storage_writes_from_the_amplification_stage_do_not_remove_the_device() {
+        let (_instance, device) = open_device();
+
+        // One word for the atomic and one per group for the store, primed from
+        // a single upload buffer: the counter at zero because an add
+        // accumulates, every slot at the sentinel because a slot the shader
+        // skipped has to be distinguishable from one it wrote.
+        const COUNTER_BYTES: u64 = size_of::<u32>() as u64;
+        let slot_bytes = u64::from(MANY_GROUPS) * size_of::<u32>() as u64;
+        let mut primer = 0u32.to_le_bytes().to_vec();
+        primer.extend(
+            core::iter::repeat_n(PROBE_SENTINEL, MANY_GROUPS as usize).flat_map(u32::to_le_bytes),
+        );
+        let staged = device
+            .create_buffer(&BufferDesc {
+                label: Some("amplification writes primer"),
+                size: primer.len() as u64,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("an upload buffer");
+        device
+            .write_buffer(staged, 0, &primer)
+            .expect("an upload-heap buffer is host-visible");
+
+        // `DeviceLocal` because D3D12 admits an unordered access view on no
+        // other heap — `crcbl_dx12::buffer::check_unordered_access` refuses the
+        // rest by name — so a written buffer is reached by a copy at both ends.
+        let written = |label, size| {
+            device
+                .create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size,
+                    usage: BufferUsage::STORAGE
+                        | BufferUsage::TRANSFER_DST
+                        | BufferUsage::TRANSFER_SRC,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .unwrap_or_else(|error| panic!("stage=create_buffer({label}): {error:?}"))
+        };
+        let counter = written("amplification write counter", COUNTER_BYTES);
+        let slots = written("amplification write slots", slot_bytes);
+        let counter_staging = readback_buffer(&device, COUNTER_BYTES as usize);
+        let slot_staging = readback_buffer(&device, slot_bytes as usize);
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[
+                    buffer_barrier(
+                        counter,
+                        ResourceState::Undefined,
+                        ResourceState::TransferDst,
+                    ),
+                    buffer_barrier(slots, ResourceState::Undefined, ResourceState::TransferDst),
+                ],
+                ..Barriers::default()
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: staged,
+                src_offset: 0,
+                dst: counter,
+                dst_offset: 0,
+                size: COUNTER_BYTES,
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: staged,
+                src_offset: COUNTER_BYTES,
+                dst: slots,
+                dst_offset: 0,
+                size: slot_bytes,
+            });
+            // `ShaderReadWrite`, not `ShaderWrite`: a barrier names the access
+            // the *descriptor* permits rather than the one the source performs,
+            // and an unordered-access view is both.
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[
+                    buffer_barrier(
+                        counter,
+                        ResourceState::TransferDst,
+                        ResourceState::ShaderReadWrite,
+                    ),
+                    buffer_barrier(
+                        slots,
+                        ResourceState::TransferDst,
+                        ResourceState::ShaderReadWrite,
+                    ),
+                ],
+                ..Barriers::default()
+            });
+        });
+
+        let probe = MeshProbe::new(&device, &[counter, slots]);
+        let writing = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("task_write_probe.slang"),
+                dxil: &crcbl_shaders::TASK_WRITE_PROBE.dxil_containers(),
+                ..ShaderModuleDesc::default()
+            })
+            .unwrap_or_else(|error| panic!("stage=create_shader_module: {error:?}"));
+
+        let extents: Vec<u8> = [MANY_GROUPS, 1, 1]
+            .iter()
+            .flat_map(|n| n.to_le_bytes())
+            .collect();
+        let args = indirect_buffer(&device, "writing amplification groups", &extents);
+
+        let drawn = probe.frame(
+            &device,
+            "mesh_shader amplification writes",
+            Some(ShaderEntry {
+                module: writing,
+                entry_point: "writingTaskMain",
+            }),
+            "amplifiedMeshMain",
+            |encoder| {
+                encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                    args,
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 0,
+                });
+            },
+        );
+
+        // Every group dispatches one mesh group, so the picture is the one
+        // `many_indirect_amplification_groups_do_not_remove_the_device` draws.
+        assert_eq!(texel(&drawn, 0, 0), CLEAR_TEXEL, "top-left corner");
+        assert_eq!(
+            texel(
+                &drawn,
+                SQUARE.width as usize - 1,
+                SQUARE.height as usize - 1
+            ),
+            CLEAR_TEXEL,
+            "bottom-right corner"
+        );
+        assert_ne!(
+            texel(&drawn, 32, 32),
+            CLEAR_TEXEL,
+            "the amplification groups that wrote a storage buffer emitted nothing over the centre"
+        );
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[
+                    buffer_barrier(
+                        counter,
+                        ResourceState::ShaderReadWrite,
+                        ResourceState::TransferSrc,
+                    ),
+                    buffer_barrier(
+                        slots,
+                        ResourceState::ShaderReadWrite,
+                        ResourceState::TransferSrc,
+                    ),
+                ],
+                ..Barriers::default()
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: counter,
+                src_offset: 0,
+                dst: counter_staging,
+                dst_offset: 0,
+                size: COUNTER_BYTES,
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: slots,
+                src_offset: 0,
+                dst: slot_staging,
+                dst_offset: 0,
+                size: slot_bytes,
+            });
+        });
+
+        let words = |buffer, bytes: u64| -> Vec<u32> {
+            let request = device
+                .request_readback(&ReadbackDesc {
+                    label: Some("amplification writes readback"),
+                    buffer,
+                    offset: 0,
+                    size: bytes,
+                    after: None,
+                })
+                .expect("a readback of a HostReadback buffer");
+            let read = drain(&device, request, bytes as usize);
+            device.destroy_readback(request);
+            read.chunks_exact(size_of::<u32>())
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                .collect()
+        };
+
+        // The odd groups added one each and nothing else touched the word.
+        assert_eq!(
+            words(counter_staging, COUNTER_BYTES),
+            vec![MANY_GROUPS / 2],
+            "the atomic add from the amplification stage did not land the expected total"
+        );
+
+        let stored = words(slot_staging, slot_bytes);
+        assert_eq!(
+            stored.len(),
+            MANY_GROUPS as usize,
+            "the readback is not the whole slot buffer"
+        );
+        let expected: Vec<u32> = (0..MANY_GROUPS)
+            .map(|group| {
+                if group.is_multiple_of(2) {
+                    group + 1
+                } else {
+                    PROBE_SENTINEL
+                }
+            })
+            .collect();
+        if let Some((index, (got, want))) = stored
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .find(|(_, (got, want))| got != want)
+        {
+            panic!(
+                "slot {index} holds {got} ({got:#x}) and the amplification stage should have left \
+                 {want} ({want:#x}) there"
+            );
+        }
+
+        device.destroy_shader_module(writing);
+        device.destroy_buffer(args);
+        probe.destroy(&device);
+        device.destroy_buffer(slot_staging);
+        device.destroy_buffer(counter_staging);
+        device.destroy_buffer(slots);
+        device.destroy_buffer(counter);
+        device.destroy_buffer(staged);
     }
 
     /// Amplification groups [`many_indirect_amplification_groups_do_not_remove_the_device`]
