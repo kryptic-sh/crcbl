@@ -267,25 +267,41 @@ jobs:
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         run: ./web/run-probe-e2e.sh
 
-      # THERE IS NO `lumen` STEP HERE, AND ITS ABSENCE IS DELIBERATE.
+      # THERE ARE NO `lumen` AND `quarry` STEPS HERE, AND THE REASON HAS
+      # CHANGED — READ THIS BEFORE ADDING OR DELETING EITHER.
       #
-      # lumen is the sixth demo and the only one this job does not render. It is
-      # not slowness and it is not lumen's code: `crcbl-render`'s draw-argument
-      # pass binds fourteen storage buffers in one compute stage, and Chrome's
-      # SwiftShader adapter — the only WebGPU adapter a runner with no GPU has —
-      # reports a ceiling of ten, so the pipeline is never created and the canvas
-      # stays black. On real hardware the same artifact passes all 33 checks —
-      # measured on the wgpu site, before the deployed build moved to WebGpu.
+      # They are the two demos this job does not render, and until 2026-08 there
+      # was one cause for both: `crcbl-render`'s draw-argument pass bound
+      # fourteen storage buffers in a single compute stage, Chrome's SwiftShader
+      # adapter — the only WebGPU adapter a runner with no GPU has — reports a
+      # ceiling of ten, so the pipeline was never created and the canvas stayed
+      # black. Both samples draw through that pass: lumen because it is a lit
+      # room of mesh instances, quarry because a cluster DAG is nothing but mesh
+      # instances.
       #
-      # A step here would therefore be a red CI on every commit, and one that
-      # blamed the wrong thing. `docs/backlog.md`'s "lumen's browser gate needs a
-      # real GPU" carries the measurement, the Dawn error verbatim and the one
-      # line to add back the moment the pass fits. Everything else in this job
-      # does cover lumen: `build.sh` builds its wasm, checks its export contract
-      # and smoke-runs it under node.
+      # **That pass binds eight now** — see `crates/crcbl-render/src/draw_gen.rs`,
+      # whose module docs record the merges and say in as many words that it
+      # bound fourteen "until 2026-08 and could therefore not be created on a
+      # browser at the default limits, nor on SwiftShader". So the stated cause
+      # for these two absences no longer holds, and it was checked rather than
+      # assumed: on Chromium 151.0.7922.137 under Xvfb against the bundled
+      # SwiftShader — this job's own configuration — `CRCBL_WEB_E2E_DEMO=quarry`
+      # and `CRCBL_WEB_E2E_DEMO=lumen` each passed 34 of 34 checks, and quarry
+      # passed 34 of 34 against real hardware as well.
+      #
+      # They stay commented out for one remaining reason, and it is not the
+      # ceiling: nobody has run either of them on a GitHub runner. A software
+      # rasteriser on a shared runner is several times slower than the desktop
+      # the measurement above was taken on, and these are the two heaviest frames
+      # the site ships. `docs/backlog.md` carries this as a decision to make with
+      # a real run behind it rather than a guess; until then the two lines below
+      # are the whole of the change.
       #
       #     - name: Render lumen in a real browser
       #       run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
+      #
+      #     - name: Render quarry in a real browser
+      #       run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed

@@ -98,10 +98,12 @@ OPTIONS:
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.
     --camera <C>         Which camera to start on: 'fixed' (the dolly's start
-                         pose, the one the goldens are taken from, held still)
-                         or 'free' (fly it with WASD, Space/Shift and the arrow
+                         pose, the one the goldens are taken from, held still),
+                         'dolly' (that same run down the face and back, on the
+                         simulation clock, so detail can be watched arriving) or
+                         'free' (fly it with WASD, Space/Shift and the arrow
                          keys). Default: fixed. ENTER on the pause menu's CAMERA
-                         row swaps them.
+                         row cycles through all three.
     --force-geometry <P> Hold the geometry path at 'mesh-shader',
                          'indirect-count' or 'indirect-per-batch' by opening a
                          device without the features that select a better one.
@@ -148,7 +150,9 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
             "--camera" => match args.next().as_deref().map(CameraMode::from_name) {
                 Some(Some(camera)) => options.camera = camera,
                 Some(None) => {
-                    return Invocation::BadUsage("unknown camera — try `fixed` or `free`".into());
+                    return Invocation::BadUsage(
+                        "unknown camera — try `fixed`, `dolly` or `free`".into(),
+                    );
                 }
                 None => return Invocation::BadUsage("--camera needs a value".into()),
             },
@@ -299,6 +303,33 @@ mod tests {
         // consumed its own flags first would break.
         assert!(options.common.headless);
         assert_eq!(options.common.frames, Some(4));
+    }
+
+    /// **Every camera the pause row can reach can be asked for on the command
+    /// line, and the usage text offers it.**
+    ///
+    /// Walked round [`CameraMode::toggled`]'s cycle rather than written out, so
+    /// a fourth mode is covered the day it is added — a mode reachable only by
+    /// pressing ENTER the right number of times is one no `--camera` and no
+    /// `--help` reader ever finds. The quoted form is what the text prints, and
+    /// asserting on it is what stops the check passing on a stray `'free'`
+    /// inside some other flag's prose.
+    #[test]
+    fn every_camera_mode_can_be_asked_for_by_name() {
+        let mut mode = CameraMode::default();
+        for _ in 0..3 {
+            let name = mode.label().to_ascii_lowercase();
+            let Invocation::Run(options) = run(&["--camera", &name]) else {
+                panic!("--camera {name} is a run");
+            };
+            assert_eq!(options.camera, mode, "--camera {name}");
+            assert!(
+                USAGE.contains(&format!("'{name}'")),
+                "the usage text does not offer '{name}'",
+            );
+            mode = mode.toggled();
+        }
+        assert_eq!(mode, CameraMode::default(), "the cycle is not three long");
     }
 
     /// `--report` is a run's option and not a run: `src/main.rs` reads it and

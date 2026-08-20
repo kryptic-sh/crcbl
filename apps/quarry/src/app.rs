@@ -3,7 +3,7 @@
 //! ```text
 //! Loop::frame()                     ← the engine's
 //!   pump, input, menu, pause, resize
-//!   run_ticks  ─────────────────────→ Quarry::tick     (the free camera)
+//!   run_ticks  ─────────────────────→ Quarry::tick     (both moving cameras)
 //!   draw_list.clear()
 //!     ─────────────────────────────→ Quarry::draw      (hands the camera over)
 //!     menu ───────────────────────→ Quarry::menu_kind
@@ -12,9 +12,17 @@
 //! ```
 //!
 //! There is no loop in this file, and no simulation: a geometry fixture's only
-//! moving part is a camera somebody flies. It is stepped inside `run_ticks`'s
-//! `while`, not after it — anything stepped once per frame has a speed
-//! proportional to the frame rate.
+//! moving parts are its cameras — one a reviewer flies, and one that runs down
+//! the face on its own. Both are stepped inside `run_ticks`'s `while`, not after
+//! it — anything stepped once per frame has a speed proportional to the frame
+//! rate, and a headless run pinned to 1/60 s cannot see that.
+//!
+//! The second of them is [`CameraMode::Dolly`], and it is the charter's
+//! "**a slow dolly past the switch distance shows no boundary popping, on every
+//! path**" made watchable: `tests/device/dolly.rs` asserts that claim frame by
+//! frame on one renderer, and this is the same run with a window in front of it.
+//! It is also what the browser page opens on — see `src/web.rs`, which is
+//! compiled only for `wasm32`.
 //!
 //! # The numbers are copied out of the GPU each frame
 //!
@@ -47,6 +55,72 @@ use crate::menu::{self, CameraMode, Menus, QuarryAction};
 /// A second of simulated time at [`crate::DEFAULT_TICK_HZ`], which is what every
 /// other sample's heartbeat is spaced at.
 const HEARTBEAT_TICKS: u64 = 60;
+
+/// How long [`CameraMode::Dolly`] takes to run the face once, in seconds.
+///
+/// [`camera::dolly`] translates the eye by half of [`crate::face::DEPTH_METRES`]
+/// between [`camera::DOLLY_START`] and [`camera::DOLLY_END`] — ninety metres —
+/// so this is the input to [`DOLLY_SPEED`] rather than a number anybody reads on
+/// its own, exactly as [`camera::FLY_SPEED`] is derived from a stated time.
+///
+/// Thirty, and it was chosen against a measurement rather than picked. The
+/// charter's Proves section wants "a slow dolly past the switch distance" to
+/// show "no boundary popping", and a boundary arriving has to be *watchable* for
+/// that to be a claim anyone can check.
+///
+/// What was read, on `--headless --frames 2000 --backend vk --camera dolly`, is
+/// the heartbeat's own `cull:` row across a full traversal: the cut ran 331
+/// clusters at the start pose down to 151 at the far end over the thirty
+/// heartbeats between them, moving a handful of clusters per second and never
+/// more than fourteen. A traversal short enough to cross the face in a couple of
+/// seconds would put that whole descent into a few frames, which is the jump cut
+/// this sample exists to say does not happen. [`camera::FLY_SPEED`] is the other
+/// end of the same trade and five times as fast, because a camera being flown is
+/// aimed and one being watched is not.
+const DOLLY_SECONDS: f32 = 30.0;
+
+/// How fast the animated dolly travels, in metres a second.
+///
+/// Half of [`crate::face::DEPTH_METRES`] in [`DOLLY_SECONDS`] seconds, written
+/// as that division so the speed follows the face if the face ever changes size
+/// — the same rule [`camera::FLY_SPEED`] is written under.
+/// `the_dolly_speed_is_the_distance_over_the_stated_time` is the check.
+const DOLLY_SPEED: f32 = crate::face::DEPTH_METRES * 0.5 / DOLLY_SECONDS;
+
+/// **A watched camera is slower than a driven one**, checked at compile time.
+///
+/// A `const` assertion rather than a test, for [`camera::FLY_SPEED`]'s own
+/// reason: both sides are constants, so a [`DOLLY_SECONDS`] shortened until the
+/// dolly kept pace with a held `W` is something that can fail to build rather
+/// than fail to run. The charter asks for "a slow dolly", and this is the one
+/// place that word is given a floor.
+const _: () = assert!(
+    DOLLY_SPEED < camera::FLY_SPEED,
+    "a dolly nobody is steering must not run at the speed a reviewer flies",
+);
+
+/// How long one there-and-back cycle of [`CameraMode::Dolly`] takes, in seconds.
+const DOLLY_PERIOD: f32 = 2.0 * DOLLY_SECONDS;
+
+/// Where along [`camera::dolly`] the animated camera is after `elapsed` seconds.
+///
+/// **A triangle, not a sawtooth, and that is the whole of the design.** Running
+/// to [`camera::DOLLY_END`] and restarting at [`camera::DOLLY_START`] would put
+/// ninety metres of translation into one frame — a cut jump, in the sample whose
+/// entire subject is that the cut does not jump. So the camera turns round and
+/// walks back up the face instead: the position is continuous everywhere, only
+/// its direction reverses, and the reversal happens at the two ends where the
+/// cut is momentarily stationary. `the_dolly_turns_round_rather_than_jumping_back`
+/// is what holds it to that.
+#[must_use]
+pub fn dolly_at(elapsed: f32) -> f32 {
+    // 0 → 1 → 0 as the phase runs 0 → 1 → 2, and `rem_euclid` is what makes a
+    // negative or a many-periods-large `elapsed` land in the same place a small
+    // positive one would.
+    let phase = (elapsed / DOLLY_SECONDS).rem_euclid(2.0);
+    let along = 1.0 - (phase - 1.0).abs();
+    camera::DOLLY_START + (camera::DOLLY_END - camera::DOLLY_START) * along
+}
 
 /// What a completed run did.
 #[derive(Clone, Debug, PartialEq)]
@@ -133,6 +207,18 @@ pub struct Quarry {
     /// swap so a reviewer who looks at the dolly pose and swaps back is where
     /// they left off.
     flyer: Flyer,
+    /// How far into its there-and-back cycle [`CameraMode::Dolly`] is, in
+    /// seconds — see [`dolly_at`].
+    ///
+    /// **Advanced only while the dolly is the camera being drawn from**, which
+    /// is the opposite of [`Self::flyer`]'s rule and for the opposite reason: a
+    /// flown camera is somewhere the reviewer put it and should still be there
+    /// when they come back, while an animated one that ran on unwatched would
+    /// jump to wherever the clock had got to the moment it was selected. Frozen,
+    /// it resumes from the pose it was last showing, and its first pose of all
+    /// is [`camera::DOLLY_START`] — the one [`CameraMode::Fixed`] holds. Every
+    /// entry into this mode is therefore continuous.
+    dolly_elapsed: f32,
     /// What the device resolved, copied once — see the module docs.
     paths: Paths,
     /// Triangles in the face at level 0, copied once: it cannot change mid-run.
@@ -182,6 +268,7 @@ impl Quarry {
         Self {
             camera,
             flyer: camera::flyer(),
+            dolly_elapsed: 0.0,
             paths,
             triangles,
             lod_budget,
@@ -200,17 +287,26 @@ impl Quarry {
     /// What it names is what a run of this sample is *for*: the geometry path
     /// the frames are taking, and how much of the reduction each stage did. A
     /// browser gate has no debug panel to read, and neither has a CI log.
+    ///
+    /// **`eye z` is here for that gate specifically.** `web/tools/browser-e2e.mjs`
+    /// proves a page is simulating rather than merely presenting by watching one
+    /// number advance, and it has to be a number nothing on the JS side and no
+    /// frame counter can move. The camera's position down the face is that: it
+    /// changes only because [`HostedGame::tick`] moved it, and on the page —
+    /// which opens on [`CameraMode::Dolly`] — it is the thing a visitor is
+    /// actually watching.
     fn log_heartbeat(&self) {
         if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
             return;
         }
         crcbl::log::info!(
-            "[HUD] tick: {}  geometry: {:?}  binding: {:?}  camera: {}  budget: {}px  \
-             lod view: {}  cull: {}",
+            "[HUD] tick: {}  geometry: {:?}  binding: {:?}  camera: {}  eye z: {:.2}  \
+             budget: {}px  lod view: {}  cull: {}",
             self.ticks,
             self.paths.geometry,
             self.paths.binding,
             self.camera.label(),
+            self.camera().eye.z,
             self.lod_budget,
             self.lod_view,
             cull_row(self.cull),
@@ -237,14 +333,15 @@ impl Quarry {
 
     /// The camera this frame is seen through.
     ///
-    /// Both modes share the fixed camera's projection, which is what makes the
-    /// pair comparable: a free camera with a lens of its own would produce a
+    /// All three modes share the fixed camera's projection, which is what makes
+    /// them comparable: a free camera with a lens of its own would produce a
     /// frame a reviewer cannot hold against the goldens.
     #[must_use]
     pub fn camera(&self) -> crcbl::render::Camera {
         let fixed = camera::dolly(camera::DOLLY_START);
         match self.camera {
             CameraMode::Fixed => fixed,
+            CameraMode::Dolly => camera::dolly(dolly_at(self.dolly_elapsed)),
             CameraMode::Free => self.flyer.camera(fixed.projection),
         }
     }
@@ -381,6 +478,13 @@ impl HostedGame for Quarry {
         // a reviewer who swaps to the dolly pose, flies, and swaps back should
         // arrive where the keys took them.
         self.flyer.advance(dt);
+        // The animated dolly does not, and the field says why. Here rather than
+        // in `draw` for the reason the module docs give: a camera stepped once a
+        // frame runs at a speed proportional to how fast the machine is, and a
+        // headless run pinned to 1/60 s could not see that.
+        if self.camera == CameraMode::Dolly {
+            self.dolly_elapsed = (self.dolly_elapsed + dt).rem_euclid(DOLLY_PERIOD);
+        }
         self.log_heartbeat();
     }
 
@@ -427,12 +531,15 @@ impl HostedGame for Quarry {
     fn apply(&mut self, action: QuarryAction) {
         match action {
             QuarryAction::ToggleCamera => {
+                let left = self.camera;
                 self.camera = self.camera.toggled();
                 // Leaving the free camera is also how a reviewer gets back to
                 // the goldens' framing, so it is put back there — otherwise
                 // "look at the reference pose" would be a flight rather than a
-                // press.
-                if self.camera == CameraMode::Fixed {
+                // press. Keyed on the mode being *left*, not the one arrived at:
+                // the cycle is three long now, and a reviewer who flew away and
+                // pressed once has left the free camera whatever they landed on.
+                if left == CameraMode::Free {
                     self.flyer = camera::flyer();
                 }
                 // And nothing is held down after a menu press: the press
@@ -573,14 +680,14 @@ impl crcbl::ui::DebugModule for Quarry {
             "eye",
             format_args!("{:.1} {:.1} {:.1}", eye.x, eye.y, eye.z),
         );
-        section.row_str(
-            "pose",
-            if self.flyer.has_moved() && self.camera == CameraMode::Free {
-                "flown"
-            } else {
-                "dolly start"
-            },
-        );
+        match self.camera {
+            CameraMode::Dolly => section.row(
+                "pose",
+                format_args!("{:.2} along the dolly", dolly_at(self.dolly_elapsed)),
+            ),
+            CameraMode::Free if self.flyer.has_moved() => section.row_str("pose", "flown"),
+            CameraMode::Fixed | CameraMode::Free => section.row_str("pose", "dolly start"),
+        }
         section.row("triangles", format_args!("{} at level 0", self.triangles));
         section.row("lod budget", format_args!("{} px", self.lod_budget));
         section.row_str("lod view", if self.lod_view { "on" } else { "off" });
@@ -937,8 +1044,16 @@ mod tests {
         assert!(engine.is_paused());
 
         // Three rows down from RESUME is CAMERA; the second visit is already on
-        // it, which is what `press_row`'s docs are about.
+        // it, which is what `press_row`'s docs are about. The cycle is three
+        // long, so the free camera is two presses away from the goldens' pose.
         press_row(&mut engine, window, 3);
+        assert_eq!(engine.game().camera_mode(), CameraMode::Dolly);
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "CAMERA: DOLLY"),
+            "the row's label must show the new value: {:?}",
+            ui_text(&engine),
+        );
+        press_row(&mut engine, window, 0);
         assert_eq!(engine.game().camera_mode(), CameraMode::Free);
         assert!(
             ui_text(&engine).iter().any(|text| text == "CAMERA: FREE"),
@@ -995,6 +1110,113 @@ mod tests {
             engine.game().flyer().eye(),
             fixed.eye,
             "the row swapped the mode and left the free camera where it was flown to",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The speed is the distance over the stated time.**
+    ///
+    /// Arithmetic over constants, so this is the cheapest place the doc comment
+    /// can be held to what it says. The other half of that claim — that the
+    /// dolly is slower than a reviewer flies — is the `const` assertion above,
+    /// which fails the build rather than a test.
+    #[test]
+    fn the_dolly_speed_is_the_distance_over_the_stated_time() {
+        let travelled =
+            camera::dolly(camera::DOLLY_END).eye - camera::dolly(camera::DOLLY_START).eye;
+        assert!(
+            (DOLLY_SPEED * DOLLY_SECONDS - travelled.length()).abs() < 1e-3,
+            "{DOLLY_SPEED} m/s for {DOLLY_SECONDS}s does not cover the {} m the dolly moves",
+            travelled.length(),
+        );
+    }
+
+    /// **The dolly turns round at the ends rather than jumping back to the
+    /// start**, so the loop has no discontinuity in it.
+    ///
+    /// The artefact this sample exists to disprove is a cut that jumps, and a
+    /// sawtooth camera would produce one every [`DOLLY_SECONDS`] — ninety metres
+    /// of translation in a single tick — while satisfying every assertion about
+    /// the range being covered. So the observable is the *step between
+    /// consecutive ticks*, held to what one tick of travel can be, across a
+    /// period and a half: long enough to contain both turns and the wrap.
+    ///
+    /// The walk also has to reach both ends, or a function that never left the
+    /// start pose would pass the smoothness half on its own.
+    #[test]
+    fn the_dolly_turns_round_rather_than_jumping_back() {
+        let step = 1.0 / f64::from(crate::args::DEFAULT_TICK_HZ) as f32;
+        // One tick of travel, plus the slack a float sum accumulates over the
+        // thousands of steps below.
+        let most = step / DOLLY_SECONDS * 1.01;
+        let mut previous = dolly_at(0.0);
+        let (mut lowest, mut highest) = (previous, previous);
+        let mut elapsed = step;
+        while elapsed <= DOLLY_PERIOD * 1.5 {
+            let at = dolly_at(elapsed);
+            assert!(
+                (at - previous).abs() <= most,
+                "the dolly jumped from {previous} to {at} at {elapsed}s, and one tick is {most}",
+            );
+            lowest = lowest.min(at);
+            highest = highest.max(at);
+            previous = at;
+            elapsed += step;
+        }
+        assert!(
+            (lowest - camera::DOLLY_START).abs() < most,
+            "the dolly never came back to the start pose: it stopped at {lowest}",
+        );
+        assert!(
+            (highest - camera::DOLLY_END).abs() < most,
+            "the dolly never reached the far end: it stopped at {highest}",
+        );
+    }
+
+    /// **The animated dolly runs on the simulation clock**, and only while it is
+    /// the camera being drawn from.
+    ///
+    /// The observable is the camera's own position, not the accumulator: a mode
+    /// that advanced a field `camera()` never read would leave the frame frozen
+    /// while every number about it moved. The second half is what the field's
+    /// docs promise — an animated camera that ran on unwatched would jump to
+    /// wherever the clock had reached the moment it was selected, which is the
+    /// same discontinuity the ping-pong exists to avoid.
+    #[test]
+    fn the_dolly_runs_on_the_simulation_clock_only_while_it_is_selected() {
+        let mut options = headless(400);
+        options.camera = CameraMode::Dolly;
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let from = engine.game().camera().eye;
+        let ticks = engine.ticks();
+
+        for _ in 0..40 {
+            engine.frame().expect("a frame");
+        }
+        let ran = engine.ticks() - ticks;
+        let moved = (engine.game().camera().eye - from).length();
+        #[allow(clippy::cast_precision_loss)]
+        let expected = DOLLY_SPEED * ran as f32 / crate::args::DEFAULT_TICK_HZ as f32;
+        assert!(
+            (moved - expected).abs() < expected * 0.1,
+            "{ran} ticks moved {moved} m, and {DOLLY_SPEED} m/s for {ran}/{} s is {expected} m",
+            crate::args::DEFAULT_TICK_HZ,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+
+        // And the same run on the fixed camera does not move at all, which is
+        // what says the tick is stepping the mode rather than a clock.
+        let mut engine = scripted(&headless(400));
+        engine.frame().expect("a frame");
+        let held = engine.game().camera().eye;
+        for _ in 0..40 {
+            engine.frame().expect("a frame");
+        }
+        assert_eq!(
+            engine.game().camera().eye,
+            held,
+            "the fixed camera moved, so the dolly is advancing whatever the mode is",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

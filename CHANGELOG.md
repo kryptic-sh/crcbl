@@ -884,6 +884,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`quarry` has a browser demo**, at `/demos/quarry/`. The geometry acceptance
+  fixture compiled to `wasm32`, drawing its cluster DAG through WebGPU. A
+  browser exposes neither a mesh stage nor a GPU-side draw count, so the page
+  resolves to `GeometryPath::IndirectPerBatch` and `BindingModel::ArrayPages`
+  **by construction** — the level is chosen once per instance and the whole face
+  draws at one level at a time, which is the honest picture of what a browser
+  visitor gets. Measured 34/34 in the browser gate on an RX 7900 XTX and on
+  Chromium's SwiftShader.
+
+- **`quarry --camera dolly`**, a third camera that runs the goldens' own dolly
+  down the face and back on the simulation clock — 90 m in 30 s, slow enough
+  that a level boundary arriving is watchable, which is what "no boundary
+  popping" has to be for anyone to check it. The pause menu's `CAMERA` row is
+  now a three-way cycle (`FIXED` → `DOLLY` → `FREE`), and the browser page opens
+  on the dolly. It turns round at the far end rather than looping: restarting at
+  the near end would put 90 m of translation into one frame, which is the
+  artefact this sample exists to disprove.
+
 - **`apps/quarry` has a windowed front end**, so the geometry acceptance fixture
   is something a reviewer can look at rather than only measure. It draws the
   face's cluster DAG through `ForwardRenderer` with the pause menu and the debug
@@ -922,6 +940,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   `crcbl_lumen`'s public surface is unchanged — it re-exports `Flyer`, `SPEED`
   and `TURN` from the engine rather than defining them.
+
+### Changed
+
+- **quarry's `[HUD]` heartbeat gained `eye z:`**, the camera's position down the
+  face. Anything parsing that line needs updating. It is what the browser gate
+  reads to prove the page is simulating rather than merely presenting — a frame
+  counter or a wall clock cannot move it.
 
 - **`crcbl-webgpu`'s refusals are checked too, without a browser.** It is the
   one backend the native seam suite cannot open — `crcbl::backend::open` answers

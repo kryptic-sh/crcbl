@@ -155,9 +155,9 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * and `startedFailure` are then unused and left out. `waiting` and `moving` are
  * required of every row.
  *
- * Two rows use it and they are `null` for different reasons: hud takes no input
- * at all, and lumen takes plenty but has no run to begin — which is why this
- * says "no start key" rather than "no input".
+ * Three rows use it and they are `null` for different reasons: hud takes no
+ * input at all, while lumen and quarry take plenty but have no run to begin —
+ * which is why this says "no start key" rather than "no input".
  *
  * `backdrop` is the other optional key, and it is what group G reads. It names
  * the demo's clear colour twice over: `encoded` is the byte an sRGB target holds
@@ -166,13 +166,15 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * to count. `source` names the Rust constant the pair was computed from, so the
  * next reader can check the arithmetic rather than trust it.
  *
- * **A row without one is a demo whose clear colour never reaches the screen**,
- * and there are three: asteroids ends its run under the start menu's
- * full-screen scrim, so `art::SPACE` is only ever seen dimmed; horde tiles grass
- * sprites over every pixel of `art::GROUND`; and lumen has no `clear_color` pass
- * at all — it is a lit room, and the nearest thing to a flat region in its frame
- * is under a tenth of the canvas. None of the three can make this claim, and a
- * row that quietly skipped it would be the check passing for the wrong reason.
+ * **A row without one is a demo whose clear colour is not a constant it owns**,
+ * and there are four: asteroids ends its run under the start menu's full-screen
+ * scrim, so `art::SPACE` is only ever seen dimmed; horde tiles grass sprites
+ * over every pixel of `art::GROUND`; lumen has no `clear_color` pass at all —
+ * it is a lit room, and the nearest thing to a flat region in its frame is under
+ * a tenth of the canvas; and quarry has none either, and the flat region behind
+ * its face is whatever `crcbl-render` clears a 3D frame to rather than a byte
+ * this sample chose. None of the four can make this claim, and a row that
+ * quietly skipped it would be the check passing for the wrong reason.
  */
 const EXPECTATIONS = {
   breakout: {
@@ -335,17 +337,54 @@ const EXPECTATIONS = {
   // and still quick enough that consecutive heartbeats differ far above the two
   // decimal places the line prints them to.
   lumen: {
-    // **The only demo that draws mesh instances**, so the only one whose cull
-    // pass has anything to count. Every demo builds a `ForwardRenderer`, and
-    // the others fill their frames with sprites and text, which that pass does
-    // not see — so the stats readback correctly never arrives for them. See
-    // group D.
+    // **One of the two demos that draw mesh instances**, so one of the two whose
+    // cull pass has anything to count — quarry is the other. Every demo builds a
+    // `ForwardRenderer`, and the rest fill their frames with sprites and text,
+    // which that pass does not see — so the stats readback correctly never
+    // arrives for them. See group D.
     culls: true,
     key: null,
     waiting: (line) =>
       line.includes('[HUD] tick: 60') && line.includes('lighting: Rasterised'),
     moving: /lamp x: (-?[\d.]+)/,
     movingLabel: 'the lamp keeps orbiting under its own steam',
+  },
+  // **The third demo with no start key**, and the second that draws mesh
+  // geometry. `apps/quarry` is the geometry acceptance fixture: there is no run
+  // to begin and no state to leave, so there is nothing for a `Space` to do. It
+  // takes input — the free camera flies on WASD — but reaching that camera is a
+  // pause-menu row rather than a key, exactly as it is in lumen.
+  //
+  // `waiting` is this sample's own claim and it is the exit criterion the page
+  // exists to satisfy: "web demo renders the scene on `IndirectPerBatch` … and
+  // the summary line names the path it took". A browser has **no mesh stage and
+  // no GPU-side draw count**, so `GeometryPath::IndirectPerBatch` is the arm the
+  // selector resolves to by construction — the same shape of claim lumen's row
+  // makes about `LightingPath::Rasterised` — and the first heartbeat naming it
+  // is what separates a per-batch page from one that opened some other device or
+  // fell over before the first tick. `Quarry::log_heartbeat` prints the
+  // selector's own `Debug`, which is a deliberate coupling to
+  // `crates/crcbl-hal/src/caps.rs`: a renamed variant fails here loudly.
+  //
+  // `moving` is the camera's own position down the face, and it is the strictest
+  // value this sample has. The page opens on `CameraMode::Dolly`, whose
+  // accumulator is stepped in `HostedGame::tick` and nowhere else — so a page
+  // presenting frames without ticking, or stuck on its first tick, leaves it
+  // standing still. A frame counter, a wall clock and the heartbeat's own
+  // cadence cannot move it: the number is metres, read off the camera the frame
+  // was actually drawn from. `app::DOLLY_SECONDS` is slow enough to be watchable
+  // and still moves the eye three metres between consecutive heartbeats, which
+  // is far above the two decimal places the line prints it to.
+  quarry: {
+    // The other demo whose cull pass has something to count — see lumen's row
+    // and group D. This one is the sample that pass exists for.
+    culls: true,
+    key: null,
+    waiting: (line) =>
+      line.includes('[HUD] tick: 60') &&
+      line.includes('geometry: IndirectPerBatch'),
+    moving: /eye z: (-?[\d.]+)/,
+    movingLabel: 'the dolly keeps running down the face under its own steam',
   },
 };
 

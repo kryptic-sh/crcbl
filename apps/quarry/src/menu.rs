@@ -5,10 +5,10 @@
 //! to win, so a `GAME OVER` panel would be a screen it could never show.
 //!
 //! The rows it does have are the two things a reviewer of a *geometry* fixture
-//! keeps reaching for. The camera, because the face is looked at from two
-//! places — wherever the reviewer flew to, and the pose
-//! `tests/golden/` was blessed from — and getting back to the second should be
-//! a keypress. And the LOD view, because
+//! keeps reaching for. The camera, because the face is looked at from three
+//! places — wherever the reviewer flew to, the pose `tests/golden/` was blessed
+//! from, and the slow run down the face that shows detail arriving — and
+//! getting back to any of them should be a keypress. And the LOD view, because
 //! `docs/plan/sample/14-quarry.md`'s "one mesh spanning several levels across
 //! its own surface" is a claim nobody can see in a shaded frame: the tint is
 //! what makes it a claim anyone can check, and holding it against the shaded
@@ -31,26 +31,42 @@ pub enum CameraMode {
     /// references without anybody having to fly to the right place first.
     #[default]
     Fixed,
+    /// The same dolly, run down the face and back — [`crate::app::dolly_at`].
+    ///
+    /// `docs/plan/sample/14-quarry.md`'s Proves section asks that "a slow dolly
+    /// past the switch distance shows no boundary popping, on every path".
+    /// `tests/device/dolly.rs` asserts that headlessly, frame by frame on one
+    /// renderer; this is the same run made watchable, and it is what the
+    /// browser page opens on.
+    Dolly,
     /// [`crcbl::render::Flyer`], starting at that same pose.
     Free,
 }
 
 impl CameraMode {
-    /// Parses `fixed` / `free`.
+    /// Parses `fixed` / `dolly` / `free`.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "fixed" | "golden" => Some(Self::Fixed),
+            "dolly" | "animated" => Some(Self::Dolly),
             "free" | "fly" | "free-fly" => Some(Self::Free),
             _ => None,
         }
     }
 
-    /// The other one.
+    /// The next one round: the held pose, the moving one, then the reviewer's.
+    ///
+    /// A cycle rather than a swap, and in that order because it is the order a
+    /// reviewer wants them: the frame the goldens were blessed from, the same
+    /// frame moving on its own, and only then one they have to fly themselves.
+    /// It also makes each step continuous — [`Self::Dolly`] starts at the pose
+    /// [`Self::Fixed`] holds, and [`crate::camera::flyer`] starts there too.
     #[must_use]
     pub const fn toggled(self) -> Self {
         match self {
-            Self::Fixed => Self::Free,
+            Self::Fixed => Self::Dolly,
+            Self::Dolly => Self::Free,
             Self::Free => Self::Fixed,
         }
     }
@@ -60,6 +76,7 @@ impl CameraMode {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Fixed => "FIXED",
+            Self::Dolly => "DOLLY",
             Self::Free => "FREE",
         }
     }
@@ -197,12 +214,13 @@ mod tests {
     /// **Each row labels the value it is set to**, so a reviewer reads the
     /// state off the panel rather than guessing it from the picture.
     ///
-    /// One arm per row and both values of each, because a label wired to the
-    /// wrong field reads correctly for exactly one of the four combinations.
+    /// One arm per row and every value of each, because a label wired to the
+    /// wrong field reads correctly for exactly one of the six combinations.
     #[test]
     fn each_row_labels_the_value_it_is_set_to() {
         for (camera, camera_row) in [
             (CameraMode::Fixed, "CAMERA: FIXED"),
+            (CameraMode::Dolly, "CAMERA: DOLLY"),
             (CameraMode::Free, "CAMERA: FREE"),
         ] {
             for (lod_view, lod_row) in [(false, "LOD VIEW: OFF"), (true, "LOD VIEW: ON")] {
@@ -213,13 +231,41 @@ mod tests {
         }
     }
 
-    /// The two spellings of each mode round-trip, and nothing else parses.
+    /// Every spelling of every mode round-trips, and nothing else parses.
     #[test]
     fn the_camera_modes_parse_by_name() {
         assert_eq!(CameraMode::from_name("fixed"), Some(CameraMode::Fixed));
+        assert_eq!(CameraMode::from_name("golden"), Some(CameraMode::Fixed));
+        assert_eq!(CameraMode::from_name("dolly"), Some(CameraMode::Dolly));
+        assert_eq!(CameraMode::from_name("animated"), Some(CameraMode::Dolly));
         assert_eq!(CameraMode::from_name("free"), Some(CameraMode::Free));
+        assert_eq!(CameraMode::from_name("fly"), Some(CameraMode::Free));
+        assert_eq!(CameraMode::from_name("free-fly"), Some(CameraMode::Free));
         assert_eq!(CameraMode::from_name("sideways"), None);
-        assert_eq!(CameraMode::default().toggled(), CameraMode::Free);
-        assert_eq!(CameraMode::default().toggled().toggled(), CameraMode::Fixed);
+    }
+
+    /// **The row cycles through all three and comes back**, in the order
+    /// [`CameraMode::toggled`] documents.
+    ///
+    /// Written out as a walk rather than as three equalities: what a reviewer
+    /// presses is one button, and the claim is that pressing it three times
+    /// returns them to where they started rather than that any single step is
+    /// right. A cycle that visited two of the three would land back on the
+    /// default in two presses and pass every assertion about a single step.
+    #[test]
+    fn the_camera_row_cycles_through_every_mode() {
+        let mut seen = vec![CameraMode::default()];
+        for _ in 0..2 {
+            seen.push(seen.last().expect("seeded above").toggled());
+        }
+        assert_eq!(
+            seen,
+            vec![CameraMode::Fixed, CameraMode::Dolly, CameraMode::Free],
+        );
+        assert_eq!(
+            seen.last().expect("seeded above").toggled(),
+            CameraMode::default(),
+            "a third press must come back round to the goldens' pose",
+        );
     }
 }

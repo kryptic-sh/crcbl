@@ -152,11 +152,14 @@ meta-->
     off a disk, and the shaders and the font atlas are compiled into the module.
   </p>
   <div class="note">
-    <strong>This one wants a real GPU.</strong> The pass that builds the frame's
-    draw arguments binds fourteen storage buffers in a single compute stage, and
-    a software WebGPU adapter reports a ceiling well below that — Chrome's
-    SwiftShader stops at ten. On such an adapter the pipeline is never created
-    and this canvas stays black. It is the one demo here that is true of.
+    <strong>A software adapter runs this now.</strong> The pass that builds the
+    frame's draw arguments used to bind fourteen storage buffers in a single
+    compute stage, and a software WebGPU adapter reports a ceiling well below
+    that — Chrome's SwiftShader stops at ten — so the pipeline was never created
+    and this canvas stayed black. It binds eight today, which is the minimum
+    every conforming WebGPU implementation guarantees, and the room draws on
+    SwiftShader as well as on hardware. Expect it to be slow there: this is one
+    of the two heaviest frames on the site.
   </div>
   <!--include demo-console-note-->
 </section>

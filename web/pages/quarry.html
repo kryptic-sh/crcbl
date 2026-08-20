@@ -1,0 +1,182 @@
+<!--meta
+{
+  "out": "demos/quarry/index.html",
+  "slug": "quarry",
+  "name": "Quarry",
+  "title": "Quarry — Crucible",
+  "description": "quarry, the geometry acceptance fixture, compiled to wasm32 and drawing a cluster DAG through WebGPU on the per-batch indirect path.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/quarry", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/quarry\">apps/quarry</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/quarry/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S4C</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Quarry</span></h1>
+  <p class="tagline">
+    One quarry face, 120 metres across and receding 180, generated from hashed
+    noise and decimated into a hierarchy of clusters. The camera walks down it
+    and back, for ever. Not a game — the geometry is the content, and what it is
+    here to show is a mesh changing detail while you watch and never catching
+    your eye doing it.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="what-you-are-looking-at">
+  <h2>what you are looking at</h2>
+  <h3>A dolly, a cluster hierarchy, and the seam between them.</h3>
+  <p>
+    <strong
+      >The face recedes, and that is the whole reason it is shaped like
+      that.</strong
+    >
+    A flat wall sits at one distance from the camera, so every part of it wants
+    the same level of detail and there is nothing for a per-cluster decision to
+    decide. This one runs 180 metres away from you, so the near benches and the
+    far wall of the <em>same</em> mesh sit at screen-space errors an order of
+    magnitude apart.
+  </p>
+  <p>
+    <strong>The camera is the dolly, running on the simulation clock.</strong>
+    It covers ninety metres in thirty seconds — three metres a second, a fifth
+    of the speed the free camera flies at — and then turns round and walks back
+    up the face rather than cutting to the start. That is deliberate: a jump
+    back to the beginning would put ninety metres of translation into one frame,
+    which is precisely the artefact this sample exists to say does not happen.
+  </p>
+  <p>
+    <strong>Detail arrives, and it arrives without popping.</strong> The
+    hierarchy is a DAG of clusters, each a decimation of the ones below it, and
+    a level is chosen by comparing a group's projected error against a pixel
+    budget. As the camera closes, that error grows and finer geometry is
+    substituted in. The switch has hysteresis on it, so something sitting on the
+    boundary does not flip back and forth between two levels frame after frame —
+    which is what popping is, and which is the thing this whole sample exists to
+    say does not happen.
+  </p>
+  <p>
+    <strong>On this page the choice is made once for the whole face</strong>,
+    not once per cluster: see below for why a browser gets that arm and what it
+    costs. So the substitution you are watching for is the face as a whole
+    getting finer as the dolly closes, rather than a patch of rock a few metres
+    ahead changing on its own.
+  </p>
+  <p>
+    <strong>The LOD view is where you can look at the choice directly.</strong>
+    <kbd>ESC</kbd> and the <code>LOD VIEW</code> row tints geometry by the level
+    it was decimated to instead of shading it. Because the level here is chosen
+    per instance, that is one colour across the whole face rather than the
+    patchwork a machine with a mesh stage shows — which is the comparison rather
+    than a shortfall, and the clearest single picture of what the path
+    difference actually means.
+  </p>
+  <p>
+    <kbd>F3</kbd> is the receipts. The panel names the geometry path, the
+    binding model and the lighting path this frame was drawn through, where the
+    camera is, the triangle count the cut is a reduction of, the pixel budget it
+    was selected under, and how many instances survived culling — read back off
+    the GPU a few frames behind, and labelled with the frame they came from
+    rather than printed as if they were this one's. Against the cluster count it
+    says <code>no amplification stage on this path</code>, in words, rather than
+    printing the zero the clearing pass left: on this page there is no
+    per-cluster stage to count, and a zero there would claim every cluster had
+    been rejected in a frame that drew all of them.
+  </p>
+</section>
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>Nothing to play. There is a camera, and there is a tint.</h3>
+  <p>
+    The page opens already moving, on the dolly. The other two cameras — the
+    fixed pose the golden frames are taken from, and one you fly yourself — are
+    rows on the pause menu rather than keys, because all three share one lens: a
+    free camera with a lens of its own would give you a frame nobody could hold
+    against the reference.
+  </p>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Cycle the dolly, the free camera and the fixed golden pose</span>
+      <span><kbd>ESC</kbd>, then <kbd>ENTER</kbd> on <code>CAMERA</code></span>
+    </li>
+    <li class="key-row">
+      <span>Tint by decimation level instead of shading</span>
+      <span><kbd>ENTER</kbd> on <code>LOD VIEW</code>, same menu</span>
+    </li>
+    <li class="key-row">
+      <span>Fly the free camera, once you have swapped to it</span>
+      <span
+        ><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>,
+        <kbd>Space</kbd> and <kbd>Shift</kbd> for up and down, the arrows to
+        look</span
+      >
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="why-this-one">
+  <h2>why this one is worth publishing</h2>
+  <h3>Because a browser can only draw it one way, and that is the point.</h3>
+  <p>
+    The engine picks its geometry path from what the device offers, and it has
+    three. On a machine with a mesh stage it selects a level of detail
+    <em>per cluster</em>, so one mesh can be drawn from several levels at once
+    across its own surface. WebGPU exposes no mesh shader and no GPU-side draw
+    count, so this page takes the third arm —
+    <code>GeometryPath::IndirectPerBatch</code> — with no branch anywhere for it
+    to take instead. That means the level is chosen once per <em>instance</em>
+    and the whole face is drawn at one level at a time.
+  </p>
+  <p>
+    That is the honest picture of what a browser visitor gets, and it is the
+    reason the page is worth having: the detail still arrives as the camera
+    closes, the switch is still hysteretic, and the LOD view still shows you
+    which level you are looking at — one flat tint rather than a patchwork,
+    which is the comparison rather than a shortfall. Open the console and the
+    heartbeat names the arm it resolved to once a second, so you do not have to
+    take that on trust.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with three differences the browser forces.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. And the clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>.
+  </p>
+  <p>
+    There is no fourth difference about saved data: this demo keeps nothing,
+    because there is nothing to keep. It loads nothing either — the face is
+    generated from a hash of each lattice coordinate at start-up rather than
+    read off a disk, so it is the same rock on every machine, and the shaders
+    and the font atlas are compiled into the module.
+  </p>
+  <div class="note">
+    <strong>It will run without a GPU, and it will crawl.</strong> This is the
+    heaviest frame the site ships — thirty-two thousand triangles before the cut
+    even starts, and a cull pass over the hierarchy every frame. Driven under
+    Chromium's bundled SwiftShader it boots, opens a device and draws the face
+    correctly, at roughly half the simulation rate the same build reaches on a
+    discrete GPU. If the dolly is moving in slow motion, that is what you are
+    looking at.
+  </div>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

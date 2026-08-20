@@ -1812,7 +1812,7 @@ What would make it worth doing: a fourth copy. Two fixtures with different
 requirements are a resemblance; a third caller needing the same extras is
 duplicated knowledge.
 
-### quarry (S4C): what is left is the browser, two overlays and the skinned case
+### quarry (S4C): what is left is two overlays and the skinned case
 
 The phase table's S4C row asks for "meshlet clusters, QEM cluster LOD, and all
 three `GeometryPath` values on one dense scene", gated by "golden frames per
@@ -1934,13 +1934,36 @@ it, forced by subtracting features from one adapter.
   keeps lumen's browser gate off CI. That check is the first step, not the
   shader work.
 
-- **Milestone 4: the tiling case is done, the skinned one is blocked, the Pages
-  demo is the next slice.** `crcbl_quarry::tile` is the modular wall piece, and
-  two tiles decimated independently still meet — asserted bit-for-bit. **The
-  skinned prop cannot be built**: the sample wants "skinned weights carried
-  through collapses" and the engine has no skinning at all (`crcbl-render` and
+- **Milestone 4: the tiling case and the Pages demo are done, the skinned one is
+  blocked.** `crcbl_quarry::tile` is the modular wall piece, and two tiles
+  decimated independently still meet — asserted bit-for-bit. **The skinned prop
+  cannot be built**: the sample wants "skinned weights carried through
+  collapses" and the engine has no skinning at all (`crcbl-render` and
   `crcbl-scene` carry none), so that criterion is behind an unbuilt engine
   feature rather than behind sample work.
+
+  The browser demo is `/demos/quarry/`, and it satisfies the last exit
+  criterion: it draws through `GeometryPath::IndirectPerBatch` — measured on the
+  page, not predicted — with `BindingModel::ArrayPages`, at a recorded 1px
+  budget, and the heartbeat names the path it took. 34/34 in the browser gate on
+  SwiftShader and on an RX 7900 XTX. `CameraMode::Dolly` is what the page opens
+  on, because a page holding one still frame is not a demo and gives the gate no
+  quantity that moves under the simulation's own steam.
+
+  **Three coverage gaps in that gate, stated rather than implied:**
+  - The `waiting` row's `geometry: IndirectPerBatch` half **cannot be
+    red-checked**. A page has no `--force-geometry`, so there is no way to make
+    the browser resolve a different arm and watch the assertion fail. Its
+    `tick: 60` half is red-checkable and was checked.
+  - **The LOD-view tint has never been looked at in the browser.** The page says
+    it reads as one flat colour there, which follows from per-instance selection
+    having no per-cluster level to tint by — but that is an argument, not a
+    frame anybody saw.
+  - quarry has **no `backdrop` row** in `EXPECTATIONS`. Its flat region measured
+    `rgb(24, 32, 48)` over 22% of the canvas, but that is `crcbl-render`'s clear
+    rather than a constant this sample owns, so the sRGB-encode check group has
+    nothing of quarry's to assert against.
+
 - **The draw-count split is recorded and the answer is degenerate.**
   `ForwardRenderer::cull_stats` carries both numbers out of the frame, and
   `all_of_the_reduction_is_cluster_culling` asserts them: the camera's instance
@@ -11993,107 +12016,45 @@ fixed, and not obviously ours to fix** — if it recurs, the question to answer 
 whether the gate should demand a software GL/Vulkan fallback explicitly rather
 than taking whatever the image offers.
 
-## The draw-argument pass exceeds WebGPU's per-stage storage-buffer budget (2026-08-15)
+## DECISION NEEDED — add the `lumen` and `quarry` browser steps to Pages CI?
 
-`apps/lumen` shipped as the sixth Pages demo and it is the only one
-`.github/workflows/pages.yml` does **not** render in a browser. The step is
-missing on purpose, and a comment where it would go says so.
+**The blocker this used to be about is gone.** `crcbl-render`'s draw-argument
+pass bound fourteen storage buffers in one compute stage against SwiftShader's
+ceiling of ten, so neither 3D demo could build its pipeline in a GPU-less
+browser. `crates/crcbl-render/src/draw_gen.rs` now binds **eight** — WebGPU's
+guaranteed minimum `maxStorageBuffersPerShaderStage`, so every conforming
+implementation can host it, and the device survey that used to sit here is moot.
 
-**The measurement.** `crcbl-render`'s draw-argument pass — `draw_gen.rs`'s
-`gen_layout`, labelled `draw args` — binds one uniform and **fourteen** storage
-buffers in a single compute stage. Chrome's SwiftShader adapter reports a
-per-stage ceiling of ten, so Dawn refuses the bind group layout and every
-pipeline, bind group and submit built on it:
+**Measured 2026-08-20, not assumed.** Chromium 151.0.7922.137 under Xvfb against
+the bundled SwiftShader — this job's own configuration:
 
-```text
-The number of storage buffers (14) in the Compute stage exceeds the maximum
-per-stage limit (10).
- - While validating [BindGroupLayoutDescriptor ""draw args""]
- - While calling [Device "lumen"].CreateBindGroupLayout(…)
-```
+| demo   | adapter               | result |
+| ------ | --------------------- | ------ |
+| quarry | google swiftshader    | 34/34  |
+| quarry | amd rdna-3 (headless) | 34/34  |
+| lumen  | google swiftshader    | 34/34  |
 
-The demo reaches `STATUS_RUNNING`, draws nothing, and the run ends in
-`STATUS_FAILED`. Measured on Chromium under Xvfb with
-`--use-webgpu-adapter=swiftshader`, which is the configuration a GitHub runner
-with no GPU takes: 21 of 33 checks passed. The same artifact on the same machine
-against the real adapter (`--headless --hardware`, amd rdna-3) passes **33 of
-33**, including both of the `EXPECTATIONS` claims that are lumen's own.
+**The one remaining unknown is runner speed**, and it is the whole of the
+decision. Neither demo has been run on a GitHub runner. A software rasteriser on
+a shared runner is several times slower than the desktop above, and these are
+the two heaviest frames the site ships — under SwiftShader locally quarry logged
+roughly half the heartbeats per wall-clock second that it did on hardware.
 
-**Whose problem it is.** Not lumen's — nothing in `apps/lumen` chooses the
-binding count, and every geometry path (`MeshShader`, `IndirectCount`,
-`IndirectPerBatch`) goes through the same pass. `ForwardRenderer` builds a
-`DrawGen` unconditionally, so this is the first time any consumer of it has run
-on the wgpu backend against an adapter with WebGPU's ordinary ceilings. The
-engine does not check the limit either: `crcbl_wgpu::hal_limits_for` maps no
-per-stage storage-buffer count into `DeviceCaps::limits`, so nothing above the
-seam can refuse cleanly or select a smaller pass — the failure arrives as a Dawn
-error on the device callback, which `wgpu` does not turn into a `Result`.
+- **Add both steps.** The site's two 3D demos stop being the only ones nothing
+  renders in a browser on CI. Costs two more browser runs per Pages build, at an
+  unknown multiple of the local time.
+- **Add one (quarry) and watch it.** quarry is the newer and the one whose exit
+  criterion names the browser; lumen follows if the timing is tolerable.
+- **Leave both out and keep the local runs.** Cheapest, and the claim stays
+  verified only on a machine nobody else has.
 
-**What would fix it**, in increasing order of cost:
+The two commented-out lines are in `.github/workflows/pages.yml` with this
+evidence beside them; uncommenting is the whole of the change.
 
-- Pack the pass's buffers so the stage binds ten or fewer. Four of the fourteen
-  are `docs/plan/25-lod.md`'s selection tables and the hysteresis state, which a
-  `Geometry::Flat` scene never uses; merging pairs, or splitting the LOD half
-  into its own dispatch, are the two shapes. Either touches `draw_gen.slang` and
-  therefore the SHA-pinned SPIR-V, plus `crcbl-vk`'s draw-gen end-to-end.
-- Surface the limit through `DeviceCaps::limits` and fail at
-  `ForwardRenderer::new` with a message naming it, so a device that cannot host
-  the pass says so instead of drawing black. Cheap, and worth doing whichever
-  way the first bullet goes.
-
-**Then add the step back** — one line, and the `EXPECTATIONS` row it needs is
-already in `web/tools/browser-e2e.mjs`:
-
-```yaml
-- name: Render lumen in a real browser
-  run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
-```
-
-Two pieces of prose also claim the exception and want deleting with it:
-`web/pages/lumen.html`'s "This one wants a real GPU" note, and the clause on
-`web/pages/index.html` that excuses lumen from "every build is loaded in a real
-headless browser".
-
-**Not measured:** how slow lumen is under SwiftShader. The pipeline never
-builds, so there is no frame time to compare against the other five demos, and
-the timing question the CI step would have answered is still open.
-
-**Do not read this as "it needs a real GPU", which is the heading this entry
-first carried.** The limit has now been looked up, and it makes SwiftShader the
-generous one rather than the stingy one.
-
-**WebGPU's guaranteed minimum `maxStorageBuffersPerShaderStage` is 8** — the
-default in the specification's supported-limits table. SwiftShader's ten is
-already _above_ the floor, so no conforming WebGPU implementation is obliged to
-run this pass at all and an adapter that refuses it is not defective.
-
-What the field looks like, from web3dsurvey's survey of that limit (cumulative
-share of surveyed devices reporting **at least** each value):
-
-| value | share |
-| ----- | ----- |
-| 8     | 100%  |
-| 9     | 98%   |
-| 16    | 78%   |
-| 31    | 17%   |
-| 48    | 4%    |
-
-Fourteen falls between published buckets, so the share that can host the pass is
-**between 78% and 98%** and the survey cannot narrow it further. The pessimistic
-end is roughly one device in five. This is not a CI-runner problem wearing a
-browser costume; it is a portability ceiling on the GPU-driven path, invisible
-until now only because lumen is the first 3D demo to reach a browser.
-
-That settles the question this entry used to leave open: packing the pass is
-**not a nicety**, it is the browser tier's only path to 3D on the hardware that
-tier runs on. The cheap fix — surfacing the limit so `ForwardRenderer::new`
-refuses by name instead of drawing black — is still worth doing first and
-independently, because a device in that tail currently gets a black canvas and
-no diagnosis.
-
-Sources:
-[WebGPU specification, supported limits](https://www.w3.org/TR/webgpu/#limits) ·
-[web3dsurvey](https://web3dsurvey.com/webgpu/limits/maxStorageBuffersPerShaderStage)
+**Both stale prose claims are fixed**: `web/pages/index.html`'s excusing clause
+and `web/pages/lumen.html`'s "This one wants a real GPU" note, which said the
+canvas stays black on a software adapter and had been false since the pass was
+packed.
 
 ## The pinned shader compilers ARE installed here (2026-08-14)
 

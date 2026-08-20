@@ -34,6 +34,7 @@ DEMOS=(
   "horde:crcbl_horde:demos/horde"
   "hud:crcbl_hud:demos/hud"
   "lumen:crcbl_lumen:demos/lumen"
+  "quarry:crcbl_quarry:demos/quarry"
 )
 
 # NO wasm-bindgen. This script used to run it over every artifact, and the pin

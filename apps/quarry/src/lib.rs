@@ -11,8 +11,9 @@
 //!
 //! # What is here so far
 //!
-//! Milestones 1 to 3, and the first half of 4. [`face`] generates the content,
-//! [`scene`] describes it as one flat mesh and [`dag`] as a cluster hierarchy,
+//! Milestones 1 to 4, less the two overlays milestone 2 owes. [`face`]
+//! generates the content, [`scene`] describes it as one flat mesh and [`dag`]
+//! as a cluster hierarchy,
 //! and `tests/device/residency.rs` draws both through the real renderer on an
 //! offscreen context — so the `MeshShader` path rendering the scene is asserted
 //! rather than looked at.
@@ -35,15 +36,24 @@
 //! meet, bit for bit.
 //!
 //! **And there is a window.** [`run`] opens one over the cluster DAG, with the
-//! two cameras [`camera`] holds — the goldens' dolly and a free-fly camera sized
-//! for a face 180 metres deep — the LOD tint overlay, `--lod-budget`, the path
-//! forcing rule 12 asks for and the debug panel rule 4 asks for. A run with
-//! `--headless --frames N` prints which paths its frames took, the triangle
-//! count and how the cut split between instance and cluster culling, which is
-//! what `docs/plan/sample/14-quarry.md`'s exit criteria ask be recorded.
+//! three cameras the pause menu cycles — the goldens' dolly held still, that
+//! same dolly run down the face and back on the simulation clock, and a free-fly
+//! camera sized for a face 180 metres deep — the LOD tint overlay,
+//! `--lod-budget`, the path forcing rule 12 asks for and the debug panel rule 4
+//! asks for. A run with `--headless --frames N` prints which paths its frames
+//! took, where the camera is, the triangle count and how the cut split between
+//! instance and cluster culling, which is what
+//! `docs/plan/sample/14-quarry.md`'s exit criteria ask be recorded.
+//!
+//! **And there is a browser page.** `src/web.rs` is the second front end, compiled
+//! only on `wasm32`; it opens on the animated dolly, because a page showing one
+//! held frame proves nothing about a cut that follows the camera. WebGPU exposes
+//! neither a mesh stage nor a GPU-side draw count, so it is also the one place
+//! [`crcbl::hal::GeometryPath::IndirectPerBatch`] can be looked at without
+//! forcing it.
 //!
 //! Still owed, from that document's milestones: the screen-error heatmap and the
-//! freeze-selection camera, and the Pages demo. The skinned prop is behind an
+//! freeze-selection camera, both of milestone 2. The skinned prop is behind an
 //! engine feature that does not exist — nothing here does skinning.
 //!
 //! # Rule 11 does not apply
@@ -52,12 +62,14 @@
 //! 3D geometry density, and pixel art in front of it would be showing the wrong
 //! system.
 //!
-//! # One library, one front end so far
+//! # One library, two front ends
 //!
 //! `src/main.rs` is argv, an exit code and the device-free `--report`;
 //! everything else is here, so `tests/device/` renders the same face the binary
-//! does and flies the same dolly. The browser front end the charter's fourth
-//! milestone owes is not written yet.
+//! does and flies the same dolly. `src/web.rs` is the second front end — the
+//! `extern "C"` entry point a browser's JS shim drives once per
+//! `requestAnimationFrame`, compiled only on `wasm32`, which is why a host build
+//! does not link it.
 
 mod app;
 mod args;
@@ -69,7 +81,12 @@ mod menu;
 pub mod scene;
 pub mod tile;
 
-pub use app::{Loop, PendingLoop, Quarry, QuarryError, Summary, cull_row, run, start, with_shell};
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
+pub use app::{
+    Loop, PendingLoop, Quarry, QuarryError, Summary, cull_row, dolly_at, run, start, with_shell,
+};
 pub use args::{
     DEFAULT_TICK_HZ, Invocation, Options, USAGE, binding_from_name, geometry_from_name, parse,
 };

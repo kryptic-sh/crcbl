@@ -42,6 +42,7 @@ meta-->
     <a class="btn primary" href="demos/horde/">play horde →</a>
     <a class="btn primary" href="demos/hud/">watch hud →</a>
     <a class="btn primary" href="demos/lumen/">look at lumen →</a>
+    <a class="btn primary" href="demos/quarry/">look at quarry →</a>
     <a class="btn" href="https://www.kryptic.sh/projects/crcbl/"
       >about the engine</a
     >
@@ -57,8 +58,9 @@ meta-->
     broken wasm build is a broken CI, and a broken CI blocks the merge. Each
     build is loaded in a real headless browser that opens a WebGPU device,
     presses a key where there is one to press, and reads the canvas back before
-    it ships — every one a software rasteriser can run, which is all of them but
-    lumen. That one needs a real GPU, and its page says why.
+    it ships — all of them but lumen and quarry, the two heaviest frames here,
+    which are built and export-checked on every commit and driven in a browser
+    by hand. Their pages say what they cost.
   </p>
   <ul class="grid">
     <li>
@@ -132,6 +134,19 @@ meta-->
           orbits it. A browser has no ray query, so this page is the rasterised
           lighting path — shadow maps, occlusion, screen-space reflections and
           probes — with nothing else it could take.
+        </p>
+      </a>
+    </li>
+    <li>
+      <a class="feat" href="demos/quarry/">
+        <div class="icon">S4C · not a game</div>
+        <h4>Quarry</h4>
+        <p>
+          The geometry acceptance fixture: one face receding 180 metres, cut
+          into a cluster hierarchy, with the camera walking down it and back for
+          ever so detail can be watched arriving. A browser has no mesh stage,
+          so this page is the per-batch indirect path — one level for the whole
+          face at a time, which is the honest picture of what it gets.
         </p>
       </a>
     </li>
