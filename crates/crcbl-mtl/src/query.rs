@@ -41,9 +41,11 @@
 //! `MTLVisibilityResultMode::Counting`, not `MTLVisibilityResultMode::Boolean`:
 //! [`QueryKind::Occlusion`] is defined as "samples that passed the depth test
 //! between begin and end", which is a count, and crcbl's other two backends
-//! produce one — `crcbl-vk` sets `occlusion_query_precise` on the pool it
-//! creates, and D3D12's `D3D12_QUERY_TYPE_OCCLUSION` is the sample count rather
-//! than its `BINARY_OCCLUSION` sibling. `wgpu-hal` picks `Boolean` for the
+//! ask for one — D3D12's `D3D12_QUERY_TYPE_OCCLUSION` is the sample count
+//! rather than its `BINARY_OCCLUSION` sibling, and `crcbl-vk`'s
+//! `VK_QUERY_TYPE_OCCLUSION` pool yields one once a begin can pass
+//! `VK_QUERY_CONTROL_PRECISE_BIT`, which is blocked on the same missing verb
+//! this section is about. `wgpu-hal` picks `Boolean` for the
 //! opposite reason and it is the right call *there*: WebGPU documents its
 //! occlusion result as zero or one, so counting would be paying for precision
 //! the API discards.

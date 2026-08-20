@@ -350,9 +350,20 @@ pub(crate) fn features_of(
     if core.pipeline_statistics_query == vk::TRUE {
         features |= Features::PIPELINE_STATISTICS_QUERY;
     }
-    if core.occlusion_query_precise == vk::TRUE {
-        features |= Features::OCCLUSION_QUERY;
-    }
+    // Unconditional, because `VK_QUERY_TYPE_OCCLUSION` is core Vulkan: every
+    // conformant implementation answers an occlusion query, and there is no
+    // feature bit a device could clear to withhold one. `occlusionQueryPrecise`
+    // is a *different* question — it gates `VK_QUERY_CONTROL_PRECISE_BIT`, the
+    // exact sample count, and a device without it still answers the query, just
+    // with "any samples passed" rather than a number. This line used to read
+    // that bit, which reported a device lacking precision as having no
+    // occlusion queries at all. The seam has nowhere to put the distinction:
+    // `Capability::OcclusionQuery` is "a `QueryKind::Occlusion` query set" and
+    // nothing in `Features` or `Capability` names precision, so the bit is not
+    // read here rather than being folded into an answer it does not belong in.
+    // `docs/backlog.md`'s occlusion-query entry is where a vocabulary for it
+    // would come from.
+    features |= Features::OCCLUSION_QUERY;
     if core.depth_clamp == vk::TRUE {
         features |= Features::DEPTH_CLAMP;
     }
@@ -958,6 +969,39 @@ mod tests {
         // satisfies the bundle.
         assert!(!features.contains(Features::PRESENT_FEEDBACK));
         assert!(!Features::GPU_DRIVEN.contains(Features::PRESENT_FEEDBACK));
+    }
+
+    /// Occlusion queries are core Vulkan, so every device this backend opens
+    /// has them and the report must not be gated on anything.
+    ///
+    /// This backend used to report [`Features::OCCLUSION_QUERY`] from
+    /// `occlusionQueryPrecise`, which gates only `VK_QUERY_CONTROL_PRECISE_BIT`
+    /// — the exact sample count. A device without it still answers occlusion
+    /// queries, so that mapping told a caller the device had none. The second
+    /// half is the one that keeps the mapping honest: the seam has no flag for
+    /// precision, so the bit must move *nothing* here rather than move
+    /// something adjacent.
+    #[test]
+    fn occlusion_queries_are_reported_without_the_precise_feature() {
+        let device = |precise| {
+            features_of(
+                &vk::PhysicalDeviceFeatures::default().occlusion_query_precise(precise),
+                &fully_featured_vulkan_1_2(),
+                &desktop_limits(),
+                QueueFamilies::select(&[family(GRAPHICS, 1)]),
+                ExtensionSupport::default(),
+            )
+        };
+        assert!(
+            device(false).contains(Features::OCCLUSION_QUERY),
+            "a device without occlusionQueryPrecise still has occlusion queries"
+        );
+        assert!(device(true).contains(Features::OCCLUSION_QUERY));
+        assert_eq!(
+            device(true),
+            device(false),
+            "occlusionQueryPrecise is not a seam feature, so it may not change the report"
+        );
     }
 
     /// `PRESENT_FEEDBACK` comes from the extension probe and the feature query

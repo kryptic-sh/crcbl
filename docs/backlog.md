@@ -3499,11 +3499,6 @@ assert the invocation count equals `workgroups * workgroup_size`. That is why
 the five-bit statistics set must include `COMPUTE_SHADER_INVOCATIONS`, which the
 current hard-coded three do not.
 
-**A separate defect found and not folded in:** `crcbl-vk` maps
-`Features::OCCLUSION_QUERY` to Vulkan's `occlusionQueryPrecise`. Occlusion
-queries are core in Vulkan and only the _precise count_ is optional, so a device
-without it is currently reported as having no occlusion queries at all.
-
 ### `vk_e2e/mesh.rs` is a redesign, not a move — and the decision is taken
 
 The white-box migration is otherwise finished: the seam suite (16),

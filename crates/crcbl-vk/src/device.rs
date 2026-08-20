@@ -664,7 +664,14 @@ impl VkDevice {
             .multi_draw_indirect(granted.contains(Features::MULTI_DRAW_INDIRECT))
             .draw_indirect_first_instance(granted.contains(Features::INDIRECT_FIRST_INSTANCE))
             .pipeline_statistics_query(granted.contains(Features::PIPELINE_STATISTICS_QUERY))
-            .occlusion_query_precise(granted.contains(Features::OCCLUSION_QUERY))
+            // No `occlusionQueryPrecise` here, and it is not an omission:
+            // that feature gates `VK_QUERY_CONTROL_PRECISE_BIT`, which nothing
+            // in this backend passes because `crcbl_hal::CommandEncoder` has no
+            // begin/end-query verb to pass it from. Enabling it would be the
+            // cost with no caller the comment above rules out, and asking for
+            // it on a device that lacks it fails `vkCreateDevice` outright.
+            // Occlusion queries themselves need no feature at all — they are
+            // core Vulkan, which is what `adapter::features_of` reports.
             .depth_clamp(granted.contains(Features::DEPTH_CLAMP))
             .depth_bias_clamp(granted.contains(Features::DEPTH_BIAS_CLAMP))
             .fill_mode_non_solid(granted.contains(Features::POLYGON_MODE_LINE))
