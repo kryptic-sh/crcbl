@@ -904,31 +904,37 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::TimestampQuery,
         backend: BackendKind::Metal,
-        // Unclassified until 2026-08-19, and the probe adapter.rs was written to
-        // answer it with has now run. Its output on CI's Apple Paravirtual
-        // device: supportsCounterSampling AtStageBoundary=false,
-        // AtDrawBoundary=true, AtDispatchBoundary=true, AtBlitBoundary=true,
-        // counterSets=0, and sampleTimestamps:gpuTimestamp: not moving across a
-        // 50ms sleep. Metal expresses the feature — MTLCounterSampleBuffer and
-        // sampleCountersInBuffer:atSampleIndex:withBarrier: — so this is not an
-        // ApiAbsence; the code is simply unwritten, which is Unwritten.
+        // Unclassified until 2026-08-19, when the probe adapter.rs was written
+        // to answer it with ran on CI's Apple Paravirtual device:
+        // supportsCounterSampling AtStageBoundary=false, AtDrawBoundary=true,
+        // AtDispatchBoundary=true, AtBlitBoundary=true, counterSets=0, and
+        // sampleTimestamps:gpuTimestamp: not moving across a 50ms sleep. Metal
+        // expresses the feature, so this was never an ApiAbsence. The code was
+        // then written, and the row stays Unwritten for the reason the
+        // MeshShading entry above stays Unwritten: no device has executed it.
         kind: DivergenceKind::Unwritten,
-        why: "the occlusion kind is built here and this one is not, because the two need different \
-              Metal objects: a visibility-result buffer is a plain MTLBuffer, while a timestamp \
-              needs an MTLCounterSampleBuffer. crcbl_mtl::create_query_set refuses on the query \
-              kind alone and never reads MTLDevice.counterSets, so the refusal is the same on \
-              every Mac. The work is MTLCounterSampleBufferDescriptor over a set from \
-              MTLDevice.counterSets, plus a sample where each encoder opens and closes — which is \
-              exactly what PassTimestampWrites asks for, so the seam's verb and units owe nothing \
-              here. Reporting the flag once obliged a Limits::timestamp_period_ns Metal could not \
-              produce, because it correlates the GPU clock to the host at sample time rather than \
-              ticking at a fixed period; that field is gone, the seam returning nanoseconds and \
-              each backend converting where it knows how. This was Unclassified until \
-              adapter.rs's counter-sampling probe ran: the Mac in CI answers AtStageBoundary=false \
-              with AtDrawBoundary and AtDispatchBoundary true, and advertises counterSets=0, so \
-              nothing could be sampled there whatever this crate wrote — a device fact, reported \
-              per device, and not what leaves the row open. What leaves it open is that no \
-              MTLCounterSampleBuffer is built on any device (the Metal query slice)",
+        why: "the calls exist — crcbl_mtl::device's create_query_set builds an \
+              MTLCounterSampleBuffer over MTLCommonCounterSetTimestamp, crcbl_mtl::command puts it \
+              in a render or compute pass descriptor's sampleBufferAttachments at the two indices \
+              PassTimestampWrites names, resolve_query_set reaches it through the blit encoder's \
+              resolveCounters:inRange:destinationBuffer:destinationOffset:, and query_results \
+              reads it with resolveCounterRange: and converts to nanoseconds — but no device has \
+              ever run them. crcbl_mtl::adapter reports Features::TIMESTAMP_QUERY only for a \
+              device that advertises MTLCommonCounterSetTimestamp in MTLDevice::counterSets and \
+              answers supportsCounterSampling: at MTLCounterSamplingPointAtStageBoundary, which is \
+              the point a pass descriptor samples at and therefore the question the code depends \
+              on — not supportsFamily:, which describes a feature set rather than a selector's \
+              availability. The Mac CI runs this backend on answers counterSets=0 and \
+              AtStageBoundary=false, measured by \
+              a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation, so it \
+              reports the flag clear and every query path degrades there — a device fact, reported \
+              per device, and the gate working rather than what leaves the row open. Metal states \
+              no tick period at all, so the conversion is two sampleTimestamps:gpuTimestamp: \
+              correlations — one at device open, one at the read — and crcbl_mtl::query's \
+              timestamp_nanos is the arithmetic, unit-tested off macOS because it is the only part \
+              of the path a machine without Metal can check. Nothing has ever checked it against a \
+              real GPU clock. Retiring this row takes a Mac that reports the flag running \
+              crcbl_mtl's timestamp path and the numbers coming back ordered and non-zero",
     },
     // The WebGPU TimestampQuery row that used to sit here is gone, and it left
     // the way `StorageImageBinding`'s did: the gap was the seam's own verb. It
@@ -943,21 +949,33 @@ pub const DIVERGENCES: &[Divergence] = &[
         capability: Capability::PipelineStatisticsQuery,
         backend: BackendKind::Metal,
         // Reclassified with TimestampQuery on 2026-08-19, from the same probe
-        // output. `MTLCommonCounterSetStatistic` is a real counter set, so the
-        // API expresses this and it is not an ApiAbsence — but see the reason
-        // for the second obstacle, which the timestamp row does not have.
+        // output, and written with it. It stays Unwritten for the same reason —
+        // no device has run it — plus one this backend cannot fix on its own:
+        // see the second half of the reason.
         kind: DivergenceKind::Unwritten,
-        why: "the occlusion kind is built here and this one is not, for the reason the \
-              TimestampQuery entry gives: it needs an MTLCounterSampleBuffer rather than a plain \
-              buffer, and the refusal is unconditional on every Mac rather than a property of the \
-              one CI runs on. MTLCommonCounterSetStatistic names the invocation counters, so the \
-              API expresses this and the work is a counter set plus a sample buffer, as above. \
-              **This row owes a seam change the timestamp row does not**: a \
-              MTLCounterResultStatistic is eight u64s, and query_results reads one u64 per query, \
-              so there is nowhere for the other seven to go — whoever writes this decides whether \
-              the seam grows a shape for them or this backend reports one of the eight. The Mac \
-              in CI advertises counterSets=0, so it could not run either way; that is a device \
-              fact reported per device, not what leaves the row open (the Metal query slice)",
+        why: "the calls exist — crcbl_mtl::device's create_query_set builds an \
+              MTLCounterSampleBuffer over MTLCommonCounterSetStatistic and crcbl_mtl::command's \
+              resolve_query_set reaches it through the blit encoder's \
+              resolveCounters:inRange:destinationBuffer:destinationOffset: at the \
+              MTLCounterResultStatistic width crcbl_mtl::query derives — but no device has ever \
+              run them, and two of the seam's read paths cannot be written at all. **Nothing can \
+              sample one**: PassTimestampWrites names timestamps and crcbl_hal::CommandEncoder has \
+              no other query verb, so no work a caller records will ever write into this set — \
+              which is exactly what Capability::OcclusionQuery means on every backend, and why \
+              crcbl_mtl::device's supports claims the create, the resolve and the destroy and \
+              nothing more. **And query_results refuses it**: an MTLCounterResultStatistic is \
+              eight u64s while that call reads one u64 per query, so there is nowhere for the \
+              other seven to go, and returning the first would answer a different question in the \
+              shape of this one; crcbl-dx12 refuses the identical read of an eleven-field \
+              D3D12_QUERY_DATA_PIPELINE_STATISTICS in the same words, and the fix is a seam that \
+              carries a result width. crcbl_mtl::adapter reports \
+              Features::PIPELINE_STATISTICS_QUERY for a device advertising \
+              MTLCommonCounterSetStatistic, and gates it on that alone rather than on \
+              supportsCounterSampling:, because nothing samples this kind and a gate on an answer \
+              no line reads decides nothing. The Mac in CI advertises counterSets=0, so it reports \
+              the flag clear; that is a device fact reported per device, not what leaves the row \
+              open. Retiring this row takes a Mac that reports the flag creating and resolving a \
+              set, as the occlusion kind's absence from this list took",
     },
     Divergence {
         capability: Capability::PipelineStatisticsQuery,

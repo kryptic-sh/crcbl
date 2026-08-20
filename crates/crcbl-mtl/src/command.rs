@@ -119,6 +119,15 @@ use objc2_metal::{
     MTLCommandBuffer,
     MTLCommandEncoder as _,
     MTLComputeCommandEncoder,
+    // The compute pass's descriptor form, taken only when a pass carries
+    // timestamps: `sampleBufferAttachments` is the only place a compute encoder
+    // can be told to sample counters at its own boundaries.
+    MTLComputePassDescriptor,
+    // `MTLCounterDontSample` is the sentinel that keeps the stage boundaries the
+    // seam does *not* name from sampling — an index left at its default is a
+    // real index, not an absence.
+    MTLCounterDontSample,
+    MTLCounterSampleBuffer,
     // `newBufferWithLength:options:` for the buffer a count-limited draw's
     // prologue packs into, which this module allocates because no seam call
     // ever names it.
@@ -135,7 +144,7 @@ use objc2_metal::{
 };
 
 use crate::conv;
-use crate::device::{CommandBufferEntry, DeviceInner, ResolvedImage, to_ns};
+use crate::device::{CommandBufferEntry, DeviceInner, QuerySetRaw, ResolvedImage, to_ns};
 
 /// What a command buffer and its encoders are called when the seam gave no
 /// label, and the name the copy encoder always carries.
@@ -240,6 +249,82 @@ struct RenderRecording {
     scissor: Option<MTLScissorRect>,
     /// The pass's commands, in the order the seam recorded them.
     commands: Vec<RenderCommand>,
+}
+
+/// The sample buffer and the two sample indices a timed pass carries, in
+/// Metal's own types.
+///
+/// Built by [`MetalCommandEncoder::pass_timestamps`] from the seam's
+/// [`PassTimestampWrites`], which is where the pair is validated.
+struct PassSamples {
+    raw: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+    beginning_of_pass: NSUInteger,
+    end_of_pass: NSUInteger,
+}
+
+impl PassSamples {
+    /// Fills a render pass descriptor's first sample-buffer attachment.
+    ///
+    /// **`startOfVertexSampleIndex` and `endOfFragmentSampleIndex` are the two
+    /// the seam means**, and the other two indices are explicitly told not to
+    /// sample. Metal offers four stage boundaries per attachment — the start and
+    /// end of vertex processing and of fragment processing — while
+    /// [`PassTimestampWrites`] carries exactly two, "when the pass begins" and
+    /// "when the pass ends". The vertex stage runs first and the fragment stage
+    /// last, so those two boundaries are the outermost pair Metal has and the
+    /// closest thing it offers to Vulkan's `ALL_COMMANDS` pair.
+    /// `MTLCounterDontSample` on the inner two is what keeps them from
+    /// overwriting somebody else's queries: an index left at its default is a
+    /// real index, not an absence.
+    ///
+    /// Attachment `0` because the seam names one set per pass. Metal's array has
+    /// several slots so that a pass can sample several counter sets at once,
+    /// which nothing above this seam can ask for.
+    fn attach_render(&self, descriptor: &MTLRenderPassDescriptor) {
+        // SAFETY: `objc2` marks the subscript unsafe because Metal does not
+        // bounds-check the attachment index. Zero is inside every
+        // `MTLRenderPassSampleBufferAttachmentDescriptorArray` there is — the
+        // array is fixed-size and non-empty on every device.
+        let slot = unsafe {
+            descriptor
+                .sampleBufferAttachments()
+                .objectAtIndexedSubscript(0)
+        };
+        slot.setSampleBuffer(Some(&self.raw));
+        // SAFETY: `objc2` marks these unsafe because Metal does not bounds-check
+        // a sample index against the buffer's `sampleCount`.
+        // `crate::query::check_timestamp_pair` has bounded both against the
+        // set's own count, which is that `sampleCount`; `MTLCounterDontSample`
+        // is the API's own sentinel and is exempt from the bound by definition.
+        unsafe {
+            slot.setStartOfVertexSampleIndex(self.beginning_of_pass);
+            slot.setEndOfVertexSampleIndex(MTLCounterDontSample);
+            slot.setStartOfFragmentSampleIndex(MTLCounterDontSample);
+            slot.setEndOfFragmentSampleIndex(self.end_of_pass);
+        }
+    }
+
+    /// Fills a compute pass descriptor's first sample-buffer attachment.
+    ///
+    /// Simpler than the render side because a compute encoder has one stage:
+    /// `startOfEncoderSampleIndex` and `endOfEncoderSampleIndex` are the seam's
+    /// two boundaries with nothing to sit between them.
+    fn attach_compute(&self, descriptor: &MTLComputePassDescriptor) {
+        // SAFETY: as `attach_render` — zero is inside every
+        // `MTLComputePassSampleBufferAttachmentDescriptorArray`.
+        let slot = unsafe {
+            descriptor
+                .sampleBufferAttachments()
+                .objectAtIndexedSubscript(0)
+        };
+        slot.setSampleBuffer(Some(&self.raw));
+        // SAFETY: as `attach_render` — both indices were bounded against this
+        // buffer's `sampleCount` by `crate::query::check_timestamp_pair`.
+        unsafe {
+            slot.setStartOfEncoderSampleIndex(self.beginning_of_pass);
+            slot.setEndOfEncoderSampleIndex(self.end_of_pass);
+        }
+    }
 }
 
 /// One count-limited draw's packing dispatch, held until the render pass is
@@ -768,27 +853,67 @@ impl MetalCommandEncoder {
         }
     }
 
-    /// Refuses a pass that asked for timestamps, and says whether it did.
+    /// Resolves the sample buffer a pass's timestamps go into, or fails the
+    /// encoder saying why.
     ///
-    /// **A refusal rather than an accepted no-op**, because there is no set
-    /// these could name that a timestamp could go in: this backend reports no
-    /// [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) and
-    /// `Device::create_query_set` refuses the timestamp kind on every Mac, so
-    /// the handle is either dead or an occlusion pool. Dropping it silently
-    /// would leave the caller reading zeros out of a pool nothing wrote and
-    /// reporting them as timings, which is the shape the whole capability model
-    /// exists to prevent. `crcbl_render::PassTimers` never reaches here: it
-    /// gates on the feature bit and builds nothing without it.
-    fn refuse_timestamps(
+    /// `Ok(None)` is a pass that asked for no timestamps, which is every pass
+    /// but a timed one. `Err(())` means the encoder has already been failed and
+    /// the caller must return without opening anything.
+    ///
+    /// **A malformed pair fails rather than being dropped**, which is the seam's
+    /// rule (`crcbl_hal::null`'s recorder reports the identical two violations)
+    /// and `crcbl_mtl::query`'s `check_timestamp_pair` is where the three
+    /// conditions live so a machine without Metal can check them. Dropping one
+    /// silently would leave the caller reading zeros out of a set nothing wrote
+    /// and reporting them as timings, which is the shape the whole capability
+    /// model exists to prevent.
+    ///
+    /// **A device without the feature never reaches the failure path**, and it
+    /// is `Device::create_query_set` that makes that true rather than a check
+    /// here: it refuses [`QueryKind::Timestamp`](crcbl_hal::QueryKind::Timestamp)
+    /// on such a device, so no handle of that kind can exist to be named, and a
+    /// stale or foreign one is an invalid-handle failure instead. Above the
+    /// seam, `crcbl_render::PassTimers` gates on the feature bit and builds
+    /// nothing without it, so nothing records a timed pass there at all. That is
+    /// the whole of the seam's degrading rule on this backend: the HUD shows
+    /// blanks, the frame still renders.
+    fn pass_timestamps(
         &mut self,
         what: &'static str,
         writes: Option<PassTimestampWrites>,
-    ) -> bool {
-        if writes.is_none() {
-            return false;
+    ) -> Result<Option<PassSamples>, ()> {
+        let Some(writes) = writes else {
+            return Ok(None);
+        };
+        let resolved = match self.device.query_set_raw(writes.set) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.fail(error);
+                return Err(());
+            }
+        };
+        if let Err(error) =
+            crate::query::check_timestamp_pair(what, &writes, resolved.kind, resolved.count)
+        {
+            self.fail(error);
+            return Err(());
         }
-        self.fail(crate::device::timestamp_writes_unsupported(what));
-        true
+        let QuerySetRaw::Counters(raw) = resolved.raw else {
+            // Unreachable through `check_timestamp_pair`, which has just
+            // established the kind is `Timestamp` and therefore that the object
+            // is a counter sample buffer. Reported rather than asserted, because
+            // the alternative is a panic inside a seam call.
+            self.fail(HalError::Backend(format!(
+                "{what} named a timestamp set whose Metal object is not an \
+                 MTLCounterSampleBuffer"
+            )));
+            return Err(());
+        };
+        Ok(Some(PassSamples {
+            raw,
+            beginning_of_pass: to_ns(u64::from(writes.beginning_of_pass)),
+            end_of_pass: to_ns(u64::from(writes.end_of_pass)),
+        }))
     }
 
     /// Closes whatever encoder is open, leaving the command buffer ready to
@@ -1417,9 +1542,9 @@ impl CommandEncoder for MetalCommandEncoder {
             ));
             return;
         }
-        if self.refuse_timestamps("begin_render_pass", desc.timestamp_writes) {
+        let Ok(samples) = self.pass_timestamps("begin_render_pass", desc.timestamp_writes) else {
             return;
-        }
+        };
         if desc.color_attachments.is_empty() && desc.depth_stencil_attachment.is_none() {
             // Metal raises on a descriptor with no attachment at all, and the
             // pass would render nowhere in any case.
@@ -1430,6 +1555,9 @@ impl CommandEncoder for MetalCommandEncoder {
         }
 
         let descriptor = MTLRenderPassDescriptor::new();
+        if let Some(samples) = &samples {
+            samples.attach_render(&descriptor);
+        }
         // The attachment extent every scissor is clamped against, taken from
         // the first attachment. Metal derives the render target size from the
         // attachments the same way.
@@ -2062,16 +2190,33 @@ impl CommandEncoder for MetalCommandEncoder {
             ));
             return;
         }
-        if self.refuse_timestamps("begin_compute_pass", desc.timestamp_writes) {
+        let Ok(samples) = self.pass_timestamps("begin_compute_pass", desc.timestamp_writes) else {
             return;
-        }
+        };
         // Metal raises on a second encoder, so the copy encoder a preceding
         // upload left open goes first — which is also this backend's barrier.
         self.close_open();
         let Some(raw) = self.raw.as_ref() else {
             return;
         };
-        let Some(encoder) = raw.computeCommandEncoder() else {
+        // **Two ways to open the same encoder, and the descriptor form is taken
+        // only when there is something to put in a descriptor.**
+        // `MTLComputePassDescriptor` exists for exactly one reason here — its
+        // `sampleBufferAttachments` is the only place a compute encoder can be
+        // told to sample counters at its own boundaries — and its other
+        // property, `dispatchType`, defaults to the `Serial` that
+        // `computeCommandEncoder` gives. So the two are equivalent for an
+        // untimed pass, and the plain call is the one every existing test on
+        // this backend drives.
+        let encoder = match &samples {
+            None => raw.computeCommandEncoder(),
+            Some(samples) => {
+                let descriptor = MTLComputePassDescriptor::computePassDescriptor();
+                samples.attach_compute(&descriptor);
+                raw.computeCommandEncoderWithDescriptor(&descriptor)
+            }
+        };
+        let Some(encoder) = encoder else {
             self.fail(HalError::DeviceLost(
                 "MTLCommandBuffer::computeCommandEncoder returned nil".to_string(),
             ));
@@ -2202,16 +2347,29 @@ impl CommandEncoder for MetalCommandEncoder {
 
     // --- queries ---
 
-    /// Zeroes the range, which is what a reset means for a buffer.
+    /// Puts a defined value under every query in the range, which on Metal is
+    /// two different answers for the two objects.
     ///
-    /// Metal has no `vkCmdResetQueryPool`: an occlusion pool here is a plain
-    /// `MTLBuffer` (`crate::query` says why), and a fresh allocation's contents
-    /// are not promised to be anything. So "reset so it can be written again" is
-    /// a `fillBuffer:range:value:` of zero — the same call
-    /// [`clear_buffer`](CommandEncoder::clear_buffer) makes — and it is what puts a
-    /// defined value under every [`Device::query_results`](crcbl_hal::Device::query_results)
-    /// of a query nothing has counted into. Zero is the right one: it is what a
-    /// query that passed no samples reports.
+    /// **An occlusion pool is zeroed.** Metal has no `vkCmdResetQueryPool`: that
+    /// pool is a plain `MTLBuffer` (`crate::query` says why) and a fresh
+    /// allocation's contents are not promised to be anything. So "reset so it can
+    /// be written again" is a `fillBuffer:range:value:` of zero — the same call
+    /// [`clear_buffer`](CommandEncoder::clear_buffer) makes — and it is what puts
+    /// a defined value under every
+    /// [`Device::query_results`](crcbl_hal::Device::query_results) of a query
+    /// nothing has counted into. Zero is the right one: it is what a query that
+    /// passed no samples reports.
+    ///
+    /// **A counter sample buffer needs nothing, and there is nothing to do it
+    /// with.** An `MTLCounterSampleBuffer` is opaque — it has no contents a blit
+    /// can reach and no reset call of its own — and it needs neither: a sample
+    /// index is written wholesale by the pass that names it, and an index no pass
+    /// has written resolves to `MTLCounterErrorValue`, which
+    /// [`Device::query_results`](crcbl_hal::Device::query_results) already
+    /// reports as zero. That is the seam's "a no-op on backends that reset
+    /// implicitly", and it is why the range is still checked here: a caller's
+    /// out-of-range reset is a mistake worth reporting whichever object is
+    /// behind the handle.
     ///
     /// Recorded outside a pass, like every other command that needs the blit
     /// encoder; `crcbl_hal::null`'s recorder puts `ResetQuerySet` through the
@@ -2220,13 +2378,14 @@ impl CommandEncoder for MetalCommandEncoder {
         if !self.ok() {
             return;
         }
-        let (raw, count) = match self.device.query_set_raw(set) {
+        let resolved = match self.device.query_set_raw(set) {
             Ok(resolved) => resolved,
             Err(error) => {
                 self.fail(error);
                 return;
             }
         };
+        let count = resolved.count;
         if range.end > count {
             self.fail(HalError::InvalidDescriptor(format!(
                 "reset_query_set range {}..{} exceeds the set's {count} queries",
@@ -2237,31 +2396,62 @@ impl CommandEncoder for MetalCommandEncoder {
         if range.start >= range.end {
             return;
         }
+        // Before the kind is looked at, so the seam's scope rule is reported the
+        // same way whichever object is behind the handle — a check that applies
+        // to one kind and silently not the other is worse than none.
         if !self.outside_a_pass("reset_query_set") {
             return;
         }
+        let QuerySetRaw::Visibility(raw) = &resolved.raw else {
+            return;
+        };
         let Some(encoder) = self.blit() else {
             return;
         };
         let queries = u64::from(range.end - range.start);
+        let kind = resolved.kind;
         encoder.fillBuffer_range_value(
-            &raw,
+            raw,
             NSRange::new(
-                to_ns(crate::query::span_bytes(u64::from(range.start))),
-                to_ns(crate::query::span_bytes(queries)),
+                to_ns(crate::query::span_bytes(kind, u64::from(range.start))),
+                to_ns(crate::query::span_bytes(kind, queries)),
             ),
             0,
         );
     }
 
-    /// Copies the counts into a caller's buffer, which on Metal is an ordinary
-    /// blit.
+    /// Copies the results into a caller's buffer, which is an ordinary blit for
+    /// one object and Metal's own counter resolve for the other.
     ///
-    /// There is no `ResolveQueryData` to call and no stride to negotiate: the
-    /// pool is already one `u64` per query, which is the layout the seam's two
-    /// read paths assume, so this is `copyFromBuffer:…:size:` at
-    /// `crate::query`'s offsets. Both ends are bounds-checked here because Metal
-    /// checks neither and an overrun raises rather than failing.
+    /// An occlusion pool is already one `u64` per query, which is the layout the
+    /// seam's two read paths assume, so it is `copyFromBuffer:…:size:` at
+    /// `crate::query`'s offsets. A counter sample buffer is opaque and its values
+    /// come out through
+    /// `resolveCounters:inRange:destinationBuffer:destinationOffset:`, which
+    /// writes the counter set's own structure per query — one `u64` for a
+    /// timestamp, a whole `MTLCounterResultStatistic` for a statistics query.
+    ///
+    /// **The destination is bounds-checked at the kind's own width**, because
+    /// Metal checks neither call's bounds and an overrun raises rather than
+    /// failing — and because a caller that sized a buffer for one `u64` per query
+    /// is about to be written
+    /// [`STATISTIC_COUNTERS`](crate::query::STATISTIC_COUNTERS) times as far as
+    /// it expected. `crate::query`'s `check_destination` names the real stride in
+    /// the error rather than reporting a size mismatch.
+    ///
+    /// The counter resolve additionally has an **alignment** rule the copy does
+    /// not — `destinationOffset` "must be a multiple of the minimum constant
+    /// buffer alignment" — and the number this device promises for that is
+    /// [`Limits::min_uniform_buffer_offset_alignment`](crcbl_hal::Limits::min_uniform_buffer_offset_alignment),
+    /// which `crcbl_mtl::adapter` leaves at the seam's floor. Reading it rather
+    /// than spelling a constant is what keeps the check and the promise the same
+    /// number.
+    ///
+    /// **Values land as the device wrote them**, unconverted, which is what this
+    /// verb is documented to do: a timestamp resolved here is in the GPU's own
+    /// units and only
+    /// [`Device::query_results`](crcbl_hal::Device::query_results) reports
+    /// nanoseconds.
     fn resolve_query_set(
         &mut self,
         set: QuerySetHandle,
@@ -2272,7 +2462,7 @@ impl CommandEncoder for MetalCommandEncoder {
         if !self.ok() {
             return;
         }
-        let (raw, count) = match self.device.query_set_raw(set) {
+        let resolved = match self.device.query_set_raw(set) {
             Ok(resolved) => resolved,
             Err(error) => {
                 self.fail(error);
@@ -2282,6 +2472,7 @@ impl CommandEncoder for MetalCommandEncoder {
         let Some(destination) = self.buffer(dst) else {
             return;
         };
+        let count = resolved.count;
         if range.end > count {
             self.fail(HalError::InvalidDescriptor(format!(
                 "resolve_query_set range {}..{} exceeds the set's {count} queries",
@@ -2289,9 +2480,19 @@ impl CommandEncoder for MetalCommandEncoder {
             )));
             return;
         }
+        let kind = resolved.kind;
         let queries = u64::from(range.end.saturating_sub(range.start));
         if let Err(error) =
-            crate::query::check_destination(dst_offset, queries, destination.length() as u64)
+            crate::query::check_destination(kind, dst_offset, queries, destination.length() as u64)
+        {
+            self.fail(error);
+            return;
+        }
+        if matches!(resolved.raw, QuerySetRaw::Counters(_))
+            && let Err(error) = crate::query::check_resolve_alignment(
+                dst_offset,
+                self.device.caps.limits.min_uniform_buffer_offset_alignment,
+            )
         {
             self.fail(error);
             return;
@@ -2305,19 +2506,40 @@ impl CommandEncoder for MetalCommandEncoder {
         let Some(encoder) = self.blit() else {
             return;
         };
-        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
-        // offset nor size. The source span was bounded by the set's own query
-        // count and the destination span by the destination's own `length()`
-        // immediately above, and both objects are kept alive by the `Retained`
-        // held across the call.
-        unsafe {
-            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                &raw,
-                to_ns(crate::query::span_bytes(u64::from(range.start))),
-                &destination,
-                to_ns(dst_offset),
-                to_ns(crate::query::span_bytes(queries)),
-            );
+        match &resolved.raw {
+            QuerySetRaw::Visibility(raw) => {
+                // SAFETY: `objc2` marks this unsafe because Metal bounds-checks
+                // neither offset nor size. The source span was bounded by the
+                // set's own query count and the destination span by the
+                // destination's own `length()` immediately above, and both
+                // objects are kept alive by the `Retained` held across the call.
+                unsafe {
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        raw,
+                        to_ns(crate::query::span_bytes(kind, u64::from(range.start))),
+                        &destination,
+                        to_ns(dst_offset),
+                        to_ns(crate::query::span_bytes(kind, queries)),
+                    );
+                }
+            }
+            QuerySetRaw::Counters(raw) => {
+                // SAFETY: `objc2` marks this unsafe because Metal bounds-checks
+                // neither the sample range nor the destination offset. The range
+                // was bounded by the set's own `sampleCount` and the destination
+                // span by the destination's own `length()` at the kind's stride,
+                // both immediately above, and the offset was checked against the
+                // alignment this device promises. Both objects are kept alive by
+                // the `Retained` held across the call.
+                unsafe {
+                    encoder.resolveCounters_inRange_destinationBuffer_destinationOffset(
+                        raw,
+                        NSRange::new(to_ns(u64::from(range.start)), to_ns(queries)),
+                        &destination,
+                        to_ns(dst_offset),
+                    );
+                }
+            }
         }
     }
 

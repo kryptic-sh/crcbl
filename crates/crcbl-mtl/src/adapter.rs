@@ -31,10 +31,96 @@
 //! newer — but it is the reason a selector is not added here without checking
 //! when it landed.
 
-use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
+use std::ptr::NonNull;
+
+use crcbl_hal::{
+    AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits, QueryKind,
+};
+use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSProcessInfo, NSUInteger};
-use objc2_metal::{MTLDevice, MTLDeviceLocation, MTLGPUFamily};
+use objc2_metal::{
+    MTLCommonCounterSetStatistic, MTLCommonCounterSetTimestamp, MTLCounterSamplingPoint,
+    MTLCounterSet, MTLDevice, MTLDeviceLocation, MTLGPUFamily, MTLTimestamp,
+};
+
+/// The `MTLCounterSamplingPoint` this backend's timestamps are taken at.
+///
+/// Named rather than spelled at each use because two things have to agree about
+/// it and they are in different modules: [`features_of`] withholds
+/// [`Features::TIMESTAMP_QUERY`] from a device that does not support sampling
+/// here, and `crcbl_mtl::command` is what asks for a sample at this point — by
+/// filling a pass descriptor's `sampleBufferAttachments`, which is the *only*
+/// expression of stage-boundary sampling Metal has.
+///
+/// It is the weakest of Metal's five points and the one the seam needs: the two
+/// queries a pass writes are named on its descriptor by
+/// [`PassTimestampWrites`](crcbl_hal::PassTimestampWrites), so "where an encoder
+/// opens and closes" is the only placement this seam can ask for. A device that
+/// supports only `AtDrawBoundary` — which is what the Mac in CI answers — has
+/// nowhere to put them, and `MTLRenderPassDescriptor` documents a sample index
+/// set on such a device as failing render-pass creation outright.
+pub(crate) const TIMESTAMP_SAMPLING_POINT: MTLCounterSamplingPoint =
+    MTLCounterSamplingPoint::AtStageBoundary;
+
+/// One `sampleTimestamps:gpuTimestamp:` call, as the pair it writes.
+///
+/// The only way to put a Metal GPU timestamp on the host's clock: there is no
+/// tick period to ask for, so `crcbl_mtl::query`'s `timestamp_nanos` derives the
+/// rate from two of these — one taken when the device opens and one at the read.
+/// This module's counter probe takes two more, across a sleep, to print what a
+/// given device answers.
+pub(crate) fn sample_correlation(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> crate::query::Correlation {
+    let mut cpu: MTLTimestamp = 0;
+    let mut gpu: MTLTimestamp = 0;
+    // SAFETY: the selector's only obligation is that both arguments are valid
+    // pointers to writable `MTLTimestamp` storage, which is why `objc2-metal`
+    // declares it `unsafe` at all. Both point at locals that outlive the call
+    // and are borrowed nowhere else.
+    unsafe {
+        device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu), NonNull::from(&mut gpu));
+    }
+    crate::query::Correlation { cpu, gpu }
+}
+
+/// The `MTLCounterSet` a counter-sampled query kind is built over, if this
+/// device advertises one.
+///
+/// **One function, two callers, and that is the point.** [`features_of`] calls
+/// it to decide whether to report the kind's feature and
+/// `crcbl_mtl::device`'s `create_query_set` calls it to fill an
+/// `MTLCounterSampleBufferDescriptor`, so a device cannot be told it has a
+/// timestamp query and then be unable to name a set for one.
+///
+/// Apple documents an implementation as free to omit counters from a common set,
+/// so a set being present is not a promise about every counter in it — a
+/// resolved sample for an omitted counter reads back as
+/// [`COUNTER_ERROR`](crate::query::COUNTER_ERROR). The *set* is what
+/// `setCounterSet:` needs, and it is what this answers.
+///
+/// [`QueryKind::Occlusion`] has none at all: that pool is a plain `MTLBuffer`,
+/// which `crate::query` argues at length.
+pub(crate) fn counter_set(
+    device: &ProtocolObject<dyn MTLDevice>,
+    kind: QueryKind,
+) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
+    // SAFETY: each is an `NSString` constant exported by Metal.framework, which
+    // `objc2-metal` links unconditionally and which is loaded — the device
+    // argument came out of it. Reading one is `unsafe` only because it is an
+    // `extern` static, and it is never written.
+    let wanted = match kind {
+        QueryKind::Timestamp => unsafe { MTLCommonCounterSetTimestamp },
+        QueryKind::PipelineStatistics => unsafe { MTLCommonCounterSetStatistic },
+        QueryKind::Occlusion => return None,
+    };
+    let wanted = wanted.to_string();
+    device
+        .counterSets()?
+        .iter()
+        .find(|set| set.name().to_string() == wanted)
+}
 
 /// Sample counts to probe, coarsest first.
 ///
@@ -309,26 +395,52 @@ fn gpu_address_is_available() -> bool {
 ///   measurement — see `limits_of` below and `crcbl_mtl::indirect_count`'s
 ///   `MAX_DRAWS`.
 ///
-/// # Absent, with the reason for each
-///
 /// * [`Features::TIMESTAMP_QUERY`] and
-///   [`Features::PIPELINE_STATISTICS_QUERY`] — `supportsCounterSampling:` would
-///   answer both, but this backend builds no `MTLCounterSampleBuffer` on any
-///   device, so nothing would ever be sampled into one and the flags would be a
-///   claim with no measurement behind them. `crcbl_mtl::device`'s
-///   `NO_COUNTER_SAMPLED_SET` is the one sentence this and the refusal share;
-///   this module's
-///   `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
-///   is the probe that prints what each device would offer, rather than
-///   asserting either.
+///   [`Features::PIPELINE_STATISTICS_QUERY`] — **the two that moved from the
+///   list below to this one**, and the only flags here whose gate is a *pair* of
+///   device questions rather than one.
 ///
-///   The *unit* used to be a second reason — reporting the feature obliged a
-///   nanoseconds-per-tick limit, and Metal has no fixed tick period at all,
-///   since the GPU clock is correlated to the host's through
+///   Each is granted when [`counter_set`] finds this device advertising the
+///   `MTLCommonCounterSet` the kind is built over —
+///   `MTLCommonCounterSetTimestamp` and `MTLCommonCounterSetStatistic` — because
+///   `MTLCounterSampleBufferDescriptor::setCounterSet:` takes one and there is
+///   no sample buffer without it. `crcbl_mtl::device`'s `create_query_set` calls
+///   the same function, so the flag and the object cannot disagree.
+///
+///   The timestamp flag carries a second term, and **only** the timestamp flag
+///   does: `supportsCounterSampling:` at [`TIMESTAMP_SAMPLING_POINT`]. That is
+///   the point a pass descriptor's `sampleBufferAttachments` samples at, so it
+///   is the question `crcbl_mtl::command`'s
+///   [`PassTimestampWrites`](crcbl_hal::PassTimestampWrites) handling actually
+///   depends on — a device answering `false` there has the counter set and still
+///   cannot be told to sample at a pass boundary, and its
+///   `MTLRenderPassDescriptor` would fail to create. Nothing samples statistics
+///   through this seam at all (`crcbl_mtl::device`'s `supports` says what that
+///   capability does and does not claim), so asking the sampling-point question
+///   of *that* flag would be gating it on something no line of this crate reads.
+///
+///   **Not `supportsFamily:`**, for the reason
+///   [`Features::DESCRIPTOR_INDEXING`] above no longer uses it: a family query
+///   describes a feature set rather than a selector's availability, and CI's
+///   `Apple Paravirtual device` answers `Metal3 = false` while supporting things
+///   Metal 3 implies. This module's
+///   `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`
+///   is the probe that measured what each device answers; on that Mac it printed
+///   `AtStageBoundary=false`, `AtDrawBoundary=true`, `counterSets=0`, so both
+///   flags stay clear there and every query path degrades. That is the gate
+///   working, not a device being worked around.
+///
+///   The *unit* used to be a reason to withhold them — reporting the feature
+///   obliged a nanoseconds-per-tick limit, and Metal has no fixed tick period at
+///   all, since the GPU clock is correlated to the host's through
 ///   `sampleTimestamps:gpuTimestamp:` at sample time. That reason is gone:
 ///   [`Device::query_results`](crcbl_hal::Device::query_results) reports
-///   nanoseconds and each backend converts, so an implementation here would
-///   correlate at read time and owe the seam nothing it cannot measure.
+///   nanoseconds and each backend converts, so `crcbl_mtl::query`'s
+///   `timestamp_nanos` correlates at read time and owes the seam nothing it
+///   cannot measure.
+///
+/// # Absent, with the reason for each
+///
 /// * [`Features::ASYNC_COMPUTE_QUEUE`] and [`Features::TRANSFER_QUEUE`] —
 ///   Metal has one `MTLCommandQueue` type and no queue families at all, which
 ///   `crcbl_hal::QueueKind` already records as the reason it is not named
@@ -408,6 +520,20 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     // selectors that name one are core Metal, so there is nothing to ask. The
     // doc comment above says which calls back it.
     out |= Features::OCCLUSION_QUERY;
+    // The other two query kinds ask the device instead, and ask it exactly what
+    // the code depends on: `create_query_set` needs a counter set to name, and
+    // the pass descriptor that samples a timestamp needs sampling at
+    // `TIMESTAMP_SAMPLING_POINT`. Nothing samples statistics through this seam,
+    // so that flag is the set alone — the doc comment above argues both halves,
+    // including why neither is `supportsFamily:`.
+    if counter_set(device, QueryKind::Timestamp).is_some()
+        && device.supportsCounterSampling(TIMESTAMP_SAMPLING_POINT)
+    {
+        out |= Features::TIMESTAMP_QUERY;
+    }
+    if counter_set(device, QueryKind::PipelineStatistics).is_some() {
+        out |= Features::PIPELINE_STATISTICS_QUERY;
+    }
     // Likewise no query: every Metal device takes an indirect buffer on a draw
     // and reads `baseInstance` out of it, and the binding slice's `indirect`
     // loop is the call that makes both true of this backend.
@@ -473,8 +599,7 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
 /// because [`Features::PUSH_CONSTANTS`] is,
 /// `max_bindless_descriptors` is
 /// [`binding::MAX_BINDLESS_DESCRIPTORS`](crate::binding::MAX_BINDLESS_DESCRIPTORS)
-/// because [`Features::DESCRIPTOR_INDEXING`] is, and the timestamp period stays
-/// at the floor's zero because its feature is absent.
+/// because [`Features::DESCRIPTOR_INDEXING`] is.
 ///
 /// The push-constant figure is the **call's** documented ceiling rather than a
 /// share of anything: Apple's feature-set tables cap inlined buffer contents at
@@ -553,15 +678,12 @@ fn to_u64(value: NSUInteger) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::ptr::NonNull;
     use std::time::{Duration, Instant};
 
     use crcbl_hal::MemoryLocation;
     use objc2_metal::{
-        MTLCommonCounterSetStageUtilization, MTLCommonCounterSetStatistic,
-        MTLCommonCounterSetTimestamp, MTLCounter, MTLCounterSamplingPoint, MTLCounterSet,
-        MTLIndirectCommandBuffer, MTLIndirectCommandBufferDescriptor, MTLIndirectCommandType,
-        MTLTimestamp,
+        MTLCommonCounterSetStageUtilization, MTLCounter, MTLIndirectCommandBuffer,
+        MTLIndirectCommandBufferDescriptor, MTLIndirectCommandType,
     };
 
     use super::*;
@@ -683,20 +805,6 @@ mod tests {
     /// the command types or the count.
     const ICB_INHERITANCE: [(&str, bool, bool); 2] =
         [("inherit=YES", true, true), ("inherit=NO", false, false)];
-
-    /// One `sampleTimestamps:gpuTimestamp:` call, as the pair it writes.
-    fn sample_timestamps(device: &ProtocolObject<dyn MTLDevice>) -> (MTLTimestamp, MTLTimestamp) {
-        let mut cpu: MTLTimestamp = 0;
-        let mut gpu: MTLTimestamp = 0;
-        // SAFETY: the selector's only obligation is that both arguments are
-        // valid pointers to writable `MTLTimestamp` storage, which is why
-        // `objc2-metal` declares it `unsafe` at all. Both point at locals that
-        // outlive the call and are borrowed nowhere else.
-        unsafe {
-            device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu), NonNull::from(&mut gpu));
-        }
-        (cpu, gpu)
-    }
 
     /// **The measurement that settled the two counter-sampled query
     /// rows this backend carries** —
@@ -873,12 +981,12 @@ mod tests {
         }
 
         let wall = Instant::now();
-        let (cpu_first, gpu_first) = sample_timestamps(raw);
+        let first = sample_correlation(raw);
         std::thread::sleep(CORRELATION_SLEEP);
-        let (cpu_last, gpu_last) = sample_timestamps(raw);
+        let last = sample_correlation(raw);
         let wall_ns = wall.elapsed().as_nanos();
-        let cpu_delta = cpu_last.saturating_sub(cpu_first);
-        let gpu_delta = gpu_last.saturating_sub(gpu_first);
+        let cpu_delta = last.cpu.saturating_sub(first.cpu);
+        let gpu_delta = last.gpu.saturating_sub(first.gpu);
         println!(
             "crcbl-mtl counters: sampleTimestamps over {:?} wall_ns={wall_ns} \
              cpu_delta={cpu_delta} gpu_delta={gpu_delta}",

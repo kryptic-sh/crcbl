@@ -133,22 +133,39 @@ crcbl-shaders = { workspace = true }
 #   it upstream, so it is not optional. `crcbl_mtl::swapchain` argues there why
 #   a present is a command buffer rather than `MTLDrawable::present`.
 #
-# `MTLCounters` was deliberately absent until the counter probe, and it is
-# **present now for a measurement rather than for a feature**. Query sets still
-# refuse — `crcbl_mtl::device`'s `create_query_set` says why, and nothing this
-# crate ships creates an `MTLCounterSampleBuffer`. What needs the feature is
-# `crcbl_mtl::adapter`'s
-# `a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation`:
-# `MTLDevice::counterSets` is `cfg`-gated on `MTLCounters` upstream, and the
-# `MTLCommonCounterSetTimestamp` / `…StageUtilization` / `…Statistic` names it
-# compares each set against live in the same module. `supportsCounterSampling:`
-# and `MTLCounterSamplingPoint` are **not** gated on it — both are declared in
-# `MTLDevice` — so it is the counter-set half alone that this buys.
+# `MTLCounters` was deliberately absent until the counter probe, arrived for a
+# measurement, and is **now what the two counter-sampled query kinds are built
+# from**. `crcbl_mtl::device`'s `create_query_set` fills an
+# `MTLCounterSampleBufferDescriptor` and sends
+# `newCounterSampleBufferWithDescriptor:error:`; `crcbl_mtl::command` attaches
+# the result to a pass descriptor's `sampleBufferAttachments` and resolves it
+# through the blit encoder's
+# `resolveCounters:inRange:destinationBuffer:destinationOffset:`; and
+# `query_results` reads it back with `resolveCounterRange:`. Every one of those
+# is `cfg`-gated on this feature upstream, as are the `MTLCounterSet` protocol
+# `MTLDevice::counterSets` hands back and the `MTLCommonCounterSetTimestamp` /
+# `…StageUtilization` / `…Statistic` names each set is matched against.
+# `supportsCounterSampling:` and `MTLCounterSamplingPoint` are **not** gated on
+# it — both are declared in `MTLDevice` — so the counter-set half is what this
+# buys and the sampling-point half comes free.
 #
 # It adds no package to `Cargo.lock`. The feature's whole dependency list is
 # `objc2-foundation` features (`NSArray`, `NSData`, `NSError`, `NSObject`,
 # `NSRange`, `NSString`), of which only `NSData` and `NSObject` are new here and
 # neither pulls a crate — `NSData` wants `bitflags`, which `NSArray` already
+# switched on.
+#
+# `MTLComputePass` is what the *compute* half of that costs, and it is one type:
+# `MTLComputePassDescriptor`, whose `sampleBufferAttachments` is the only place
+# a compute encoder can be told to sample counters at its own boundaries.
+# `MTLCommandBuffer::computeCommandEncoderWithDescriptor:` is `cfg`-gated on it
+# upstream — together with `MTLCommandEncoder` and `MTLComputeCommandEncoder`,
+# both long since on — and so are `MTLComputePassSampleBufferAttachmentDescriptor`
+# and the array it is subscripted out of. The render half needs nothing new:
+# `MTLRenderPassSampleBufferAttachmentDescriptor` lives in `MTLRenderPass`.
+#
+# It adds nothing to `Cargo.lock` either: the feature's whole dependency list
+# upstream is `objc2-foundation/NSObject`, which `MTLCounters` above already
 # switched on.
 #
 # `MTLIndirectCommandBuffer` is here on the same terms, and the terms matter
@@ -257,6 +274,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLCommandEncoder",
   "MTLCommandQueue",
   "MTLComputeCommandEncoder",
+  "MTLComputePass",
   "MTLComputePipeline",
   "MTLCounters",
   "MTLDepthStencil",

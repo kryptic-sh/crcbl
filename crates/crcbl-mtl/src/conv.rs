@@ -34,15 +34,48 @@
 use crcbl_hal::{
     BlendFactor, BlendOp, BufferImageCopy, ColorWrites, CompareOp, CullMode, Extent3d, FilterMode,
     Format, FrontFace, ImageAspect, ImageType, ImageUsage, ImageViewType, LoadOp, MemoryLocation,
-    Offset3d, PolygonMode, PrimitiveTopology, SamplerAddressMode, StencilOp, StoreOp,
+    Offset3d, PolygonMode, PrimitiveTopology, QueryKind, SamplerAddressMode, StencilOp, StoreOp,
 };
 use objc2_foundation::NSUInteger;
 use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLCPUCacheMode, MTLClearColor, MTLColorWriteMask,
-    MTLCompareFunction, MTLCullMode, MTLDepthClipMode, MTLLoadAction, MTLOrigin, MTLPixelFormat,
-    MTLPrimitiveType, MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerMinMagFilter,
-    MTLSamplerMipFilter, MTLSize, MTLStencilOperation, MTLStorageMode, MTLStoreAction,
-    MTLTextureType, MTLTextureUsage, MTLTriangleFillMode, MTLWinding,
+    MTLCompareFunction, MTLCounterErrorValue, MTLCounterResultStatistic, MTLCounterResultTimestamp,
+    MTLCullMode, MTLDepthClipMode, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType,
+    MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerMinMagFilter, MTLSamplerMipFilter,
+    MTLSize, MTLStencilOperation, MTLStorageMode, MTLStoreAction, MTLTextureType, MTLTextureUsage,
+    MTLTriangleFillMode, MTLWinding,
+};
+
+/// [`crate::query`]'s query-result literals against the structures and the
+/// sentinel Metal actually resolves.
+///
+/// **The one thing `crate::query` cannot check itself.** That module is compiled
+/// on hosts with no Metal so its arithmetic can be tested at all, which means its
+/// widths and its error value are literals — and a literal that drifted from the
+/// ABI would size every resolve destination wrongly, or turn an unsampled query
+/// into a plausible-looking timing, while every test over it still passed. This
+/// is where the two meet, and it is a `const` block, so an `objc2-metal` upgrade
+/// that changed any of the three fails the build rather than a run.
+/// `crcbl-dx12`'s `crate::conv` carries the same block for the same reason.
+const _: () = {
+    assert!(
+        crate::query::result_bytes(QueryKind::Occlusion) == size_of::<u64>() as u64,
+        "an occlusion query counts into one uint64_t of a visibility-result buffer"
+    );
+    assert!(
+        crate::query::result_bytes(QueryKind::Timestamp)
+            == size_of::<MTLCounterResultTimestamp>() as u64,
+        "a timestamp query resolves as a whole MTLCounterResultTimestamp"
+    );
+    assert!(
+        crate::query::result_bytes(QueryKind::PipelineStatistics)
+            == size_of::<MTLCounterResultStatistic>() as u64,
+        "a statistics query resolves as a whole MTLCounterResultStatistic"
+    );
+    assert!(
+        crate::query::COUNTER_ERROR == MTLCounterErrorValue,
+        "a query nothing sampled resolves to MTLCounterErrorValue"
+    );
 };
 
 /// The seam's texel format as Metal spells it.

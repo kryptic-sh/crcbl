@@ -671,6 +671,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-mtl` implements `QueryKind::Timestamp` and
+  `QueryKind::PipelineStatistics`.** Both refused with "this device advertises
+  no counter-sampled set" before. `create_query_set` builds an
+  `MTLCounterSampleBuffer` over `MTLCommonCounterSetTimestamp` or
+  `MTLCommonCounterSetStatistic`, a timed pass carries it in the render or
+  compute descriptor's `sampleBufferAttachments` at the two indices
+  `PassTimestampWrites` names, `resolve_query_set` reaches it through the blit
+  encoder's counter resolve, and `query_results` converts Metal's GPU ticks to
+  the nanoseconds the seam owes.
+
+  `Features::TIMESTAMP_QUERY` is reported only when the device carries the
+  counter set **and** answers `supportsCounterSampling:` at the stage boundary
+  the attachments sample at — the question the code depends on, not a
+  `supportsFamily:` proxy. A device with neither reports neither flag and takes
+  the documented degrade path.
+
+  **Written against Apple's documentation and the installed bindings; no Metal
+  device has run any of it.** The two parity rows stay on the reviewed list for
+  that reason, with their text changed from "unwritten" to naming the calls that
+  now exist. What holds the ABI honest meanwhile is a `const` block that checks
+  this crate's own widths and sentinel against `MTLCounterResultTimestamp`,
+  `MTLCounterResultStatistic` and `MTLCounterErrorValue` — it fails to compile
+  on a macOS target if any of them is wrong.
+
 - **The browser gate reads a demo's clear colour while the demo is playing.**
   Group G sampled whatever frame group F left on screen, so flappy's death
   screen — which dims the whole sky — was read as the sRGB encode having failed,
