@@ -173,7 +173,8 @@ pub struct Summary {
 /// cone rejecting all 469 and with it rejecting none, so the two rejection
 /// counts are printed beside it.
 ///
-/// The `of` number is [`ClusterCull::tested`] — the clusters the amplification
+/// The `of` number is [`ClusterCull::tested`](crcbl::render::ClusterCull::tested)
+/// — the clusters the amplification
 /// stage actually put to a test, which is the cut it was handed. **Not the
 /// resident pool**: a cluster the DAG descent left to a coarser relative was
 /// never offered to either cull, and counting it as rejected would report the
