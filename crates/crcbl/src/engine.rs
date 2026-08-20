@@ -3840,8 +3840,16 @@ macro_rules! impl_polled_bundle {
 
 /// What one frame tells the game about the frame around it.
 ///
-/// Passed rather than queried because all four are the loop's own bookkeeping:
-/// a game that read them back would be reading its host's fields.
+/// Passed rather than queried because every one of them is the loop's own
+/// bookkeeping: a game that read them back would be reading its host's fields.
+///
+/// # Two clocks, and they are not interchangeable
+///
+/// [`ticks`](Self::ticks) and [`tick_dt`](Self::tick_dt) are the **simulation**
+/// clock, which a paused frame stops: `ticks` is zero and nothing derived from
+/// the pair moves. [`render_dt`](Self::render_dt) is the **wall** clock, which
+/// a paused frame does not stop. Anything that must keep happening while a
+/// panel is up is stepped on the second one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameInfo {
     /// Whether the simulation is stopped — see [`Loop::is_paused`].
@@ -3858,6 +3866,27 @@ pub struct FrameInfo {
     /// narrowing it here would be the engine deciding a precision on the game's
     /// behalf.
     pub tick_dt: f64,
+    /// Wall-clock time this frame covers, straight from
+    /// [`crcbl_core::FrameClock::render_dt`].
+    ///
+    /// [`Duration`] for the same reason [`tick_dt`](Self::tick_dt) is `f64`:
+    /// that is the shape the clock keeps it in, and it is the only lossless
+    /// one. The clock's two narrowings are named — `render_dt_secs` is `f32`,
+    /// `Duration::as_secs_f64` is `f64` — and choosing between them is the
+    /// game's call, not the engine's.
+    ///
+    /// **This advances on every frame, a paused one included.** That is the
+    /// whole of what makes it different from the pair above: `run_ticks` throws
+    /// a paused frame's ticks away, so a timer stepped on the simulation stops
+    /// dead the moment [`PAUSE_KEY`] is pressed. Anything driven by the wall
+    /// clock rather than by the simulation — a document the application
+    /// re-reads when it changes on disk, an animation on the pause panel itself
+    /// — has to be stepped on this.
+    ///
+    /// The failure it exists to fix: `apps/viewer` polled its re-export watch
+    /// from [`HostedGame::tick`], so an artist who re-exported from Blender
+    /// with the pause panel up saw nothing happen until they closed it.
+    pub render_dt: Duration,
 }
 
 /// The shared half of what a run reports.
@@ -4707,6 +4736,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             ticks: ran,
             alpha: self.frame_clock.alpha(),
             tick_dt,
+            // The clock was updated above the pause check, which is what makes
+            // this the one field here that a paused frame still moves.
+            render_dt: self.frame_clock.render_dt(),
         };
         self.draw_list.clear();
         self.game.draw(&mut self.gpu, &mut self.draw_list, info);

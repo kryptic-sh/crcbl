@@ -276,28 +276,28 @@ Every module's docs name its own omission; this is the list in one place.
 - **The browser drop target**, the other half of V-F5. It needs an `AssetSource`
   over a file a browser handed the page, which stage 10 owns.
 
-- **Hot reload has landed and leaves four.** `crate::watch` plus `Gpu::reload`,
-  driven from `Viewer::tick`.
+- **Hot reload has landed and leaves two.** `crate::watch` plus `Gpu::reload`,
+  driven from `Viewer::draw` — see `Viewer::poll_for_re_export` for why it is
+  not in the tick.
 
-  **It stops while the `ESC` panel is up.** `FrameInfo::ticks` is zero while the
-  loop calls itself paused, so no tick runs and nothing is polled — an artist
-  who re-exports with the panel open sees the new file when they close it. The
-  fix is a clock the frame carries rather than the tick: `FrameInfo` has
-  `tick_dt` and `ticks` and no wall-clock delta at all, so a viewer polling in
-  `draw` has nothing to advance a timer by. Adding one is an engine change every
-  sample would see.
+  **Both of the exporter write patterns are covered now.** The suite used to
+  write a `.glb` with `std::fs::write`, which is one `open`/`write`/`close`, and
+  nothing reproduced what the settle is actually _for_.
+  `a_temporary_file_renamed_onto_the_path_is_offered` grows a temp file in the
+  same directory — asserting the watched path is offered nothing throughout —
+  then renames onto the path. Its sibling —
+  `a_document_written_progressively_in_place_is_offered_only_when_it_stops_growing`
+  — holds one `File` open across eight polls and grows it. Both were red-checked
+  against a removed settle and against a settle that never offers.
 
-  **Verified against written files, not against Blender.** The tests write a
-  `.glb` with `std::fs::write`, which is one `open`/`write`/`close`. A real
-  exporter's write pattern — a temporary file and a rename, or a long
-  progressive write — is what the settle is _for_, and no test reproduces it.
-  `watch::tests::a_file_still_growing_is_never_offered` is the closest and is
-  still a synthetic sequence.
+  **The rename prediction this entry used to carry was right**, and is no longer
+  a guess: `stat` follows the path, the rename swaps a new inode under it, and
+  the next poll sees that inode's stamp.
 
-  **A rename onto the path is a stamp change and would be picked up**, which is
-  the common exporter pattern and is fine, but nothing here proves it: the
-  `stat` follows the path, so the new inode's stamp is what the next poll sees.
-  Untested.
+  **What is still not covered: Blender itself.** Both new tests model an
+  exporter rather than being one — the chunk sizes and the poll alignment are
+  chosen, not observed — so a real exporter whose write pattern differs from
+  both is still untested.
 
   **Neither half of the stamp is individually pinned by the suite.** A stamp is
   a modification time and a length, and each covers the other's blind spot — but
@@ -316,10 +316,24 @@ Every module's docs name its own omission; this is the list in one place.
   document with nothing to draw is already a `LoadError::NoGeometry` from
   `load`. The branch after it can therefore never run, and its
   `LoadError::NoGeometry(options.model.clone())` is dead. Found while writing
-  the reload path — `Viewer::tick` has the same shape and says in a comment why
-  it passes the flag on rather than hard-coding it. Not removed: it is start-up
-  behaviour this slice had no reason to touch, and the belt-and-braces reading
-  is defensible if `world_bounds` ever counts something the conversion skips.
+  the reload path — `Viewer::poll_for_re_export` has the same shape and says in
+  a comment why it passes the flag on rather than hard-coding it. Not removed:
+  it is start-up behaviour this slice had no reason to touch, and the
+  belt-and-braces reading is defensible if `world_bounds` ever counts something
+  the conversion skips.
+
+- **`--tick-hz` now paces nothing in `apps/viewer`.** The watch was the tick's
+  only consumer and `HostedGame::tick` has an empty body again, which is what
+  the module's charter-exception section already claimed. The flag is still
+  parsed and still sets the engine's tick rate, so it is inert rather than
+  broken. Drop it from this sample's args, or keep it for consistency with the
+  other samples — a decision, not a chore.
+
+- **`FrameInfo::render_dt` has exactly one consumer.** Only `apps/viewer` reads
+  it. Every other sample animates on `ticks`/`tick_dt`, which is correct for
+  simulation-driven motion — but anything that should keep moving while the
+  pause panel is up (a menu transition, a spinner, a throbber on a loading
+  screen) wants this one, and nothing does that yet.
 
 ### The hosted seam carries no modifiers
 

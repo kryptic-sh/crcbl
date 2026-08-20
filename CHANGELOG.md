@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::engine::FrameInfo` gained a public field, `render_dt: Duration`** —
+  the frame's wall-clock delta, straight from
+  `crcbl_core::FrameClock::render_dt`. It advances on **every** frame, including
+  a paused one, which is what separates it from `tick_dt` and `ticks`: a timer
+  stepped on the simulation stops dead while a pause panel is up. The struct is
+  not `#[non_exhaustive]`, so any out-of-tree code constructing one with a
+  struct literal must add the field — nothing in this workspace does, since the
+  loop is the only constructor.
+
 - **`CommandEncoder::fill_buffer` is `clear_buffer`, and it takes no value.**
   The seam promised "a repeating 32-bit value" that three of five backends could
   never keep: Metal's `fillBuffer:range:value:` repeats a _byte_, so only a word
@@ -798,6 +807,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Fixed
+
+- **`apps/viewer` hot reload no longer stops while the `ESC` pause panel is
+  up.** `crate::watch` was polled from `Viewer::tick`, and a paused frame runs
+  no ticks, so a re-export from Blender went unnoticed until the panel was
+  closed — which is the artist loop the sample exists to demonstrate. It is
+  polled from `Viewer::draw` on the new `FrameInfo::render_dt` now. The poll
+  interval (`watch::POLL_SECONDS`) and the unpaused behaviour are unchanged.
 
 - **`crcbl-wgpu::create_image` refuses one too**, and a new agnostic seam test
   is what found it. `create_texture` was not wrapped in `checked()`, unlike

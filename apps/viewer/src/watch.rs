@@ -48,6 +48,12 @@ use std::time::SystemTime;
 /// Also the settle time, since a stamp must survive one interval to be offered:
 /// a quarter of a second is under the threshold a re-export feels instant at,
 /// and long enough that a `stat` is not on any budget.
+///
+/// **It is the reason [`Watch::poll`] keeps a timer at all.** The caller hands
+/// it one frame's worth of wall clock, so a watch with no interval would `stat`
+/// once per frame — hundreds of syscalls a second for a path a person saves
+/// over about once a minute — and would offer a change on the frame after it
+/// landed, before the exporter had finished writing it.
 const POLL_SECONDS: f64 = 0.25;
 
 /// What one look at the file saw.
@@ -105,6 +111,12 @@ impl Watch {
     /// Advances the timer by `dt` seconds and reports whether the file should be
     /// read again.
     ///
+    /// **`dt` is wall-clock seconds, and it has to be.** Stepped on the
+    /// simulation instead — which is where this used to be driven from — the
+    /// timer stops the moment the pause panel is up, and an exporter writing
+    /// the file goes unnoticed for as long as the panel stays open. See
+    /// `Viewer::poll_for_re_export` in [`crate::app`].
+    ///
     /// True at most once per change, and never for a file that is still being
     /// written — see the [module docs](self). A path that does not exist reports
     /// false rather than an error: a document deleted out from under the viewer
@@ -148,10 +160,17 @@ fn stamp(path: &Path) -> Option<Stamp> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
-    /// Enough polls to cross [`POLL_SECONDS`] once, at a plausible tick.
+    /// One step big enough to cross [`POLL_SECONDS`], so a poll actually looks.
     const ONE_INTERVAL: f64 = POLL_SECONDS;
+
+    /// One write of a progressive export, sized so every chunk moves the
+    /// length — which is the half of a stamp no clock granularity can flatten,
+    /// for the reason the [module docs](self) give.
+    const CHUNK: [u8; 4096] = [0; 4096];
 
     /// A file, and the directory that has to outlive it.
     fn file(contents: &[u8]) -> (tempfile::TempDir, PathBuf) {
@@ -224,6 +243,97 @@ mod tests {
             watch.poll(ONE_INTERVAL),
             "the finished write was not offered"
         );
+    }
+
+    /// **An exporter that writes beside the document and renames onto it is
+    /// picked up.** The common pattern — Blender's glTF exporter, and anything
+    /// else that does not want a crash to leave a truncated file behind — and
+    /// the one the module docs reason about without ever exercising: `stat`
+    /// follows the *path*, so the rename swaps a new inode under it and the
+    /// next look sees that inode's stamp.
+    ///
+    /// The temporary file is written in the same directory, because a rename
+    /// across filesystems is a copy and would not be atomic; and it is written
+    /// in chunks with the watch polling all the way through, because the point
+    /// of the pattern is that none of that reaches the watched path at all.
+    #[test]
+    fn a_temporary_file_renamed_onto_the_path_is_offered() {
+        let (dir, path) = file(b"one");
+        let mut watch = Watch::new(&path);
+
+        let scratch = dir.path().join("panel.glb.tmp");
+        let mut writing = std::fs::File::create(&scratch).expect("the exporter's temporary file");
+        for _ in 0..4 {
+            writing.write_all(&CHUNK).expect("a chunk of the export");
+            assert!(
+                !watch.poll(ONE_INTERVAL),
+                "the document was offered while the export was still beside it",
+            );
+        }
+        drop(writing);
+
+        std::fs::rename(&scratch, &path).expect("the rename into place");
+        assert!(
+            !watch.poll(ONE_INTERVAL),
+            "the rename was offered before it had settled",
+        );
+        assert!(
+            watch.poll(ONE_INTERVAL),
+            "a document renamed onto the path was never offered",
+        );
+        for _ in 0..4 {
+            assert!(
+                !watch.poll(ONE_INTERVAL),
+                "the renamed document was offered more than once",
+            );
+        }
+    }
+
+    /// **A document written progressively into the path itself is offered only
+    /// once it stops growing** — the case the settle exists for, with an
+    /// exporter's write pattern rather than a synthetic one.
+    ///
+    /// The difference from `a_file_still_growing_is_never_offered`, which is
+    /// the closest thing here: that one calls `std::fs::write` per step, so
+    /// each step is a whole `open`/`write`/`close` and the sequence is a run of
+    /// *finished* files. This holds one handle open across every poll, starting
+    /// from the truncation that opening for writing performs — so the watch
+    /// sees an empty document, then a partial one, then a partial one again,
+    /// which is what a reader would have to parse if the settle were not there.
+    #[test]
+    fn a_document_written_progressively_in_place_is_offered_only_when_it_stops_growing() {
+        let (_dir, path) = file(b"one");
+        let mut watch = Watch::new(&path);
+
+        let mut writing = std::fs::File::create(&path).expect("the exporter opens the document");
+        assert!(
+            !watch.poll(ONE_INTERVAL),
+            "a document emptied by the open was offered",
+        );
+        for _ in 0..8 {
+            writing.write_all(&CHUNK).expect("a chunk of the export");
+            assert!(
+                !watch.poll(ONE_INTERVAL),
+                "a document still being written was offered",
+            );
+        }
+
+        // The exporter closes the file, which changes neither its length nor
+        // its modification time — so what makes the document offerable is the
+        // *interval passing with the stamp unchanged*, and nothing else. That
+        // is the whole of the settle, and it is why the poll below is the first
+        // one to say yes rather than the second.
+        drop(writing);
+        assert!(
+            watch.poll(ONE_INTERVAL),
+            "the finished document was never offered",
+        );
+        for _ in 0..4 {
+            assert!(
+                !watch.poll(ONE_INTERVAL),
+                "the finished document was offered twice",
+            );
+        }
     }
 
     /// **The interval is honoured.** Polling faster than [`POLL_SECONDS`] does

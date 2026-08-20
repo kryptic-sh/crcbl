@@ -11,7 +11,8 @@
 //!     ──────────────────────────────→ Viewer::key_event      (F, I, W, -, =)
 //!   run_ticks  ─────────────────────→ Viewer::tick           (nothing at all)
 //!   draw_list.clear()
-//!     ──────────────────────────────→ Viewer::draw           (re-frame, camera,
+//!     ──────────────────────────────→ Viewer::draw           (re-export poll,
+//!                                                             re-frame, camera,
 //!                                                             wireframe, exposure,
 //!                                                             listing panel)
 //!     menu, debug overlay             ← the engine's
@@ -487,39 +488,20 @@ impl Viewer {
     pub const fn bounds(&self) -> Aabb {
         self.bounds
     }
-}
 
-/// The viewer's half of the frame, and nothing else.
-impl HostedGame for Viewer {
-    /// The document is read before the loop exists — see [`ViewerError`] — so
-    /// there is nothing left here that can fail. Uninhabited rather than a
-    /// placeholder, which is the type system agreeing.
-    type Error = core::convert::Infallible;
-    type Gpu = Gpu;
-    type MenuKind = MenuKind;
-    /// Every button on this sample's one panel is the loop's; see
-    /// [`crate::menu`] for why there is no fourth.
-    type MenuAction = core::convert::Infallible;
-    type Summary = Summary;
-
-    const NAME: &'static str = "viewer";
-
-    fn menus() -> Menus {
-        crate::menu::menus()
-    }
-
-    /// Nothing is simulated, so nothing steps. See the [module docs](self) for
-    /// why that is a charter exception rather than an empty call site waiting to
-    /// be filled in: there is no state here to advance.
     /// **The re-export loop**: notices that the document has been written
     /// again, converts it, and swaps it into the frame.
     ///
-    /// `docs/plan/sample/05-viewer.md` V-F4. This sample steps no simulation —
-    /// it is the doc's sanctioned exception to rule 2, see [`crate`] — so the
-    /// tick had an empty body and `--tick-hz` paced nothing. It now paces the
-    /// only clock this application has: [`Watch::poll`] takes the tick's own
-    /// `dt` and looks at the file on a fixed interval of its own, so the rate a
-    /// document is noticed at does not move with the flag.
+    /// `docs/plan/sample/05-viewer.md` V-F4. `dt` is wall-clock seconds — the
+    /// frame's, not the tick's — and [`Watch::poll`] spends it against an
+    /// interval of its own, so the rate a document is noticed at moves neither
+    /// with `--tick-hz` nor with the frame rate. See [`crate::watch`] for what
+    /// that interval is and why a poll is enough.
+    ///
+    /// **Called from [`Viewer::draw`], not from [`Viewer::tick`]**, and the
+    /// difference is the whole feature: a paused frame runs no ticks, so an
+    /// artist who re-exported with the pause panel up used to see nothing
+    /// happen until they closed it.
     ///
     /// **Every failure keeps the frame that is already on screen** and says so
     /// once. A `.glb` caught mid-write, a document too large for the pools it
@@ -528,8 +510,8 @@ impl HostedGame for Viewer {
     /// would be a worse tool than one that kept drawing. The skips are printed
     /// to stderr as they are at start-up, for `load_and_report`'s reason: the
     /// person who just re-exported is the one who needs to read them.
-    fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
-        if !self.watch.poll(tick_dt) {
+    fn poll_for_re_export(&mut self, gpu: &mut Gpu, dt: f64) {
+        if !self.watch.poll(dt) {
             return;
         }
         let path = self.watch.path();
@@ -585,6 +567,39 @@ impl HostedGame for Viewer {
             self.skipped,
         );
     }
+}
+
+/// The viewer's half of the frame, and nothing else.
+impl HostedGame for Viewer {
+    /// The document is read before the loop exists — see [`ViewerError`] — so
+    /// there is nothing left here that can fail. Uninhabited rather than a
+    /// placeholder, which is the type system agreeing.
+    type Error = core::convert::Infallible;
+    type Gpu = Gpu;
+    type MenuKind = MenuKind;
+    /// Every button on this sample's one panel is the loop's; see
+    /// [`crate::menu`] for why there is no fourth.
+    type MenuAction = core::convert::Infallible;
+    type Summary = Summary;
+
+    const NAME: &'static str = "viewer";
+
+    fn menus() -> Menus {
+        crate::menu::menus()
+    }
+
+    /// Nothing is simulated, so nothing steps. See the [module docs](self) for
+    /// why that is a charter exception rather than an empty call site waiting to
+    /// be filled in: there is no state here to advance.
+    ///
+    /// **The re-export loop is deliberately not here**, and it used to be. The
+    /// tick was the only clock this application had, so `Watch::poll` was
+    /// stepped on `tick_dt` — and that made `ESC` switch the viewer's headline
+    /// feature off: [`crcbl::engine::run_ticks`] throws a paused frame's ticks
+    /// away, so a document re-exported while the pause panel was up went
+    /// unnoticed until the panel was closed. It runs from [`Viewer::draw`] now,
+    /// on [`FrameInfo::render_dt`], which a paused frame still advances.
+    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {}
 
     /// `F` frames the model again, `I` shows the listing, `W` draws it as lines
     /// and `N` draws its normals — each once per press — and `-`/`=` step the
@@ -710,7 +725,15 @@ impl HostedGame for Viewer {
     /// still no HUD. It goes in first, so the debug overlay the loop appends
     /// after this returns is the one on top where the two overlap. They are
     /// pinned to opposite corners, so today they do not.
-    fn draw(&mut self, gpu: &mut Gpu, draw_list: &mut DrawList, _frame: FrameInfo) {
+    ///
+    /// **This is also where the re-export loop runs** — see
+    /// `Viewer::poll_for_re_export` for why it is not in the tick.
+    fn draw(&mut self, gpu: &mut Gpu, draw_list: &mut DrawList, frame: FrameInfo) {
+        // Before anything else in the frame, which is the position the tick
+        // used to give it: the tick ran immediately before this, so a document
+        // that lands is framed and listed by the rest of this call rather than
+        // by the next one.
+        self.poll_for_re_export(gpu, frame.render_dt.as_secs_f64());
         // Read here rather than on resize, so it is the extent this frame is
         // actually drawn at — the loop has already applied any resize by now.
         self.extent = gpu.extent();
@@ -1933,6 +1956,79 @@ mod tests {
             engine.game().reloads,
             1,
             "a document nobody touched was reloaded again",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A re-export lands while the pause panel is up**, which is the whole of
+    /// what V-F4 is worth to an artist: they press `ESC`, tab to Blender, save,
+    /// tab back, and the new document is already on screen.
+    ///
+    /// This used not to work. `Watch::poll` was stepped from `Viewer::tick` on
+    /// the simulation clock, and `crcbl::engine::run_ticks` throws a paused
+    /// frame's ticks away — so `FrameInfo::ticks` was zero, the watch's timer
+    /// never advanced, and the file was not so much as `stat`ed until the panel
+    /// closed. The poll runs from `Viewer::draw` on `FrameInfo::render_dt` now,
+    /// which the loop updates above its pause check.
+    ///
+    /// **The assertion that matters is that the run is still paused when the
+    /// document has changed.** A test that unpaused first would pass against
+    /// the broken version, which is why the pause is re-checked after the
+    /// frames rather than only before them.
+    #[test]
+    fn a_re_export_while_paused_is_picked_up_without_unpausing() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4096);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(engine.game().reloads, 0, "nothing was written yet");
+        assert_eq!(engine.game().instances, 1);
+
+        tap(&mut engine, window, PAUSE_KEY);
+        assert!(engine.is_paused(), "ESC did not stop the simulation");
+        assert!(engine.menus().is_showing(), "ESC did not open the panel");
+
+        // The same pair of documents the unpaused test uses, and for the same
+        // reason: a different instance count, a different centre and a
+        // different length on disk.
+        std::fs::write(&options.model, fixture::two_quads_glb()).expect("the re-export");
+
+        // `Watch` looks at the file four times a second and needs two agreeing
+        // looks, so half a second of frames. A headless frame is
+        // `crcbl::engine::HEADLESS_FRAME_STEP` of wall clock, and this allows
+        // two seconds of them — bounded rather than open, so a reload that
+        // never happens fails here instead of hanging.
+        let frames = (2.0 / crcbl::engine::HEADLESS_FRAME_STEP.as_secs_f64()).ceil() as usize;
+        let ticks_before = engine.ticks();
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+            if engine.game().reloads > 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.ticks(),
+            ticks_before,
+            "a tick ran while the panel was up, so this proves nothing about the wall clock",
+        );
+        assert!(
+            engine.is_paused(),
+            "the re-export unpaused the run, so the reload says nothing about a paused frame",
+        );
+        assert_eq!(
+            engine.game().reloads,
+            1,
+            "two seconds of paused frames did not pick the re-export up",
+        );
+        assert_eq!(
+            engine.game().instances,
+            2,
+            "the scene was swapped and the instance count was not",
+        );
+        assert_eq!(
+            engine.game().bounds.center(),
+            Vec3::new(1.5, 0.0, 0.0),
+            "the scene was swapped but the bounds are still the old document's",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
