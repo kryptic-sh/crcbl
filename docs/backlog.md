@@ -1888,10 +1888,31 @@ it, forced by subtracting features from one adapter.
   plus levels 1 and 2 — against exactly two on the per-batch path, which has no
   per-cluster level to tint by.
 
-  **The screen-error heatmap is the half still owed**, and it is a different
-  shape: the tint reads a level that was already in the record, while a heatmap
-  needs the error the selection judged, which is per group rather than per
-  cluster and is not in `ClusterSelect` at all.
+  **The screen-error heatmap is the half still owed, and it is smaller than this
+  entry used to claim.** The claim was that a heatmap "needs the error the
+  selection judged, which is per group rather than per cluster and is not in
+  `ClusterSelect` at all". The second half is true and the conclusion does not
+  follow, re-derived by reading the shaders on 2026-08-20:
+  - `mesh_cluster.slang`'s `group_state` binding already reads
+    `group_state[base + select.producer_group]`, so the mesh stage has both the
+    group index and the table base.
+  - `draw_gen.slang`'s `LevelGroup` carries `error`, `center_x`/`y`/`z` and
+    `radius` — every input `GroupCost::projected_error` takes.
+  - `mesh_cluster.slang`'s `FrameUniforms` already carries `camera_position`.
+
+  What is genuinely missing is **one binding and one scalar**: `tables` is
+  declared in `draw_gen.slang` and not in `mesh_cluster.slang`, whose bindings
+  stop at `cluster_lights`, and `pixels_per_unit` lives in `draw_gen.slang`'s
+  own uniform block as `lod_params.x` rather than in the shared frame block.
+  Bind the first and carry the second and the fragment stage can project the
+  error itself, on the same path `lod_tint` already took.
+
+  **Not yet costed against the other backends.** The seam rule applies — a
+  binding added to the mesh pipeline is a binding on vk, dx12, Metal and WebGPU
+  — and nothing here has checked what that does to Metal's argument table or to
+  WebGPU's per-stage storage-buffer ceiling, which is the limit that already
+  keeps lumen's browser gate off CI. That check is the first step, not the
+  shader work.
 
 - **Milestone 4: the tiling case is done, the skinned one is blocked, the Pages
   demo is untouched.** `crcbl_quarry::tile` is the modular wall piece, and two
