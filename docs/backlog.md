@@ -102,6 +102,15 @@ step leaves the test looking covered. Making it a gate would mean parsing both
 sides, which is a `tools/` script somebody has to maintain against two file
 formats; recorded as declined for now rather than not considered.
 
+**The same question about environment variables is clean**, checked the same
+day: of the 17 `CRCBL_*` variables Rust reads, 16 are set by a workflow or a
+runner script. The seventeenth, `CRCBL_TRACE`, is set by nothing — and that is
+correct rather than a gap: `crcbl_core::trace`'s own test re-execs the test
+binary with it in the **child's** environment, which is the only way to exercise
+a process-wide switch without racing every other test in the process. The same
+reasoning is why nothing sets `BACKEND_ENV_VAR` in a test, recorded elsewhere in
+this file.
+
 ### The sweep for arms that are asserted but never run
 
 A test that branches on what the device reports covers both arms in its source
