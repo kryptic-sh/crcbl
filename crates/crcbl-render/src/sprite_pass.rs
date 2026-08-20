@@ -64,7 +64,7 @@
 //!
 //! They are recorder assertions: the instance bytes, the batching, the draw
 //! coverage, the teardown. The evidence that this draws the right *picture* is
-//! `crates/crcbl-vk/tests/vk_e2e.rs`'s sprite goldens, which run the real pass
+//! `crates/crcbl/tests/sprite_e2e`'s sprite goldens, which run the real pass
 //! against a real driver and read the pixels back — including the one assertion
 //! that pins the sharp-bilinear arithmetic, that a `Pixel` sprite at a whole
 //! scale is exactly flat inside each texel.

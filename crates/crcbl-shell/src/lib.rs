@@ -632,7 +632,7 @@ pub trait Shell: core::fmt::Debug {
     /// creation — internally consistent, so durations between two input events
     /// are already correct, but offset from a
     /// [`FrameClock`](crcbl_core::FrameClock) reading by however long startup
-    /// took. That offset is exactly what `docs/plan/26`'s input-to-photon
+    /// took. That offset is exactly what `docs/plan/26-prediction.md`'s input-to-photon
     /// latency measurement is a subtraction across.
     ///
     /// A provided method with a no-op default, because it is only meaningful

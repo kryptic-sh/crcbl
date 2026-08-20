@@ -647,7 +647,7 @@ pub struct ForwardRenderer {
     ///
     /// Kept rather than recomputed because the shadow pass's share is the number
     /// of **occupied** tiles, which [`ForwardRenderer::add_shadow_pass`] works
-    /// out from `docs/plan/18-lights.md`'s slot allocation and nothing outside
+    /// out from `docs/plan/18-render-features.md`'s slot allocation and nothing outside
     /// it can restate without becoming the second copy that drifts.
     recorded_draws: u64,
     /// Which call the forward pass records — the device's [`GeometryPath`],

@@ -316,7 +316,7 @@ fn read_bytes(device: &dyn Device, buffer: BufferHandle, size: u64) -> Vec<u8> {
 /// The hazard `crcbl-vk` had, asked of this backend: a ring image written again
 /// while the previous trip's copy is still reading it.
 ///
-/// `crates/crcbl-vk/tests/vk_e2e.rs` has
+/// `crates/crcbl-vk/tests/vk_e2e/swapchain.rs` has
 /// `reusing_an_offscreen_vulkan_ring_image_is_ordered_against_the_frame_that_had_it`,
 /// which records the same two trips and asserts the **validation layer** saw no
 /// write-after-read. That test exists because the Vulkan backend genuinely had

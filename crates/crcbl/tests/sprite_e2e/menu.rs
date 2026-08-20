@@ -28,7 +28,7 @@ use crcbl::hal::{CommandEncoderDesc, PresentInfo, ResourceState, SubmitInfo};
 /// The two framebuffers the menu golden is taken in.
 ///
 /// Different in **shape**, not only in size: 4:3 and then 8:3, which is the
-/// canvas ratio `web/index.html` clamps to on a short viewport. A menu that
+/// canvas ratio `web/style.css` clamps to on a short viewport. A menu that
 /// derived its position from one axis is off-centre in the other.
 const MENU_TALL_EXTENT: (u32, u32) = (416, 352);
 /// See [`MENU_TALL_EXTENT`].

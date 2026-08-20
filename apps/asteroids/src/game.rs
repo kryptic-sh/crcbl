@@ -1663,7 +1663,7 @@ pub struct RenderState {
 /// the entity pool.
 ///
 /// **This is the churn sample, and these are the numbers the churn is judged
-/// by.** `docs/plan/sample/04-asteroids.md`'s whole case is that a game which
+/// by.** `docs/plan/sample/02-asteroids.md`'s whole case is that a game which
 /// spawns and destroys forever must not grow forever, and the soak test asserts
 /// exactly the three counts at the bottom of this struct — until this section
 /// existed they were assertable and not *watchable*, so a leak in a real
