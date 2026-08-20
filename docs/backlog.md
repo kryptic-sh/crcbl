@@ -10469,25 +10469,34 @@ not cause the quiet — but from 2026-08-18 onward this configuration cannot
 report the failure at all, and any future "it has not recurred" is a closed
 channel rather than evidence.
 
-**DECISION — should the Windows Vulkan job run the forward suite?** It is the
-one configuration where a real defect has ever appeared there, and it is now the
-one agnostic suite that configuration does not run.
+**DECIDED 2026-08-20 — `vk-e2e-windows` runs the forward suite again.** The
+channel is reopened, so a recurrence is reportable rather than invisible.
 
-- **Add `run-forward-e2e.sh` to `vk-e2e-windows`.** The job's own comment says
-  the likeliest failure on that leg is golden images blessed against a different
-  Mesa build — and that fear does not apply here: `forward_e2e` calls
-  `crcbl_golden::compare` **zero** times and names no `Tolerance`, which is why
-  it already ports to WARP, Metal and wgpu. It would need the ICD pointed at
-  `LAVAPIPE_ROOT` the way that job's own suite step does, not at the Linux
-  `lvp_icd.x86_64.json` path the Linux steps use.
-- **Leave it.** That job's header records that **nothing in it has ever executed
-  outside CI** — there is no Windows machine on this team — and that each round
-  trip costs about an hour. Adding a step written blind to a fragile hour-long
-  job is a real cost, and the defect it would re-expose has not been seen in six
-  days.
+What made it the safe suite to add: `forward_e2e` calls `crcbl_golden::compare`
+**zero** times and names no `Tolerance` — its five mentions of "golden" are all
+prose in doc comments — so the "references blessed against another Mesa build"
+risk that job's header names does not reach it. It is 13 counted-property
+checks, and they pass on lavapipe, measured on Linux lavapipe before the step
+was written.
 
-Not taken either way here, because it trades CI budget against coverage of a
-configuration nobody can reproduce locally.
+Two details worth keeping. The step names **no ICD**: the lavapipe install step
+above it writes `CRCBL_VK_ICD`, `VK_DRIVER_FILES` and `VK_ICD_FILENAMES` into
+`GITHUB_ENV` from the manifest it actually found inside the archive, so naming a
+path would be a second copy of a discovered value — the opposite of the Linux
+arm, where the distribution's path is known. And `shell: bash` is not new risk
+on `windows-latest`: the dx12 job runs three of these harnesses that way, and
+`crcbl_pin_vk_icd` already converts the manifest through `cygpath` under MSYS,
+which `crates/crcbl-vk/tests/vulkan-icd.sh` records as a fight already had.
+
+**`draw_gen_e2e`, `hal_seam_e2e`, `gltf_e2e` and the tiling suite are
+golden-free on the same measurement** and could follow the same way.
+Deliberately left out of that change so a failure names one thing; worth adding
+once this step has been green for a while.
+
+**What is still not known is why the burst happened.** Nothing about the cause
+was learned — this only restores the configuration that can report it. If it
+fires again, what follows is what would settle it, and the depth-attachment
+readback is still the diagnostic nobody has built.
 
 `depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
 fails on `vk e2e (lavapipe, windows)` with `[0, 0, 0, 255]` at the centre pixel,

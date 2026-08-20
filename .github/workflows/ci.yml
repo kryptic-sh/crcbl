@@ -1697,6 +1697,45 @@ jobs:
           CRCBL_VK_EXPECT_ADAPTER: llvmpipe
           CRCBL_VK_SYNC_VALIDATION: '1'
         run: crates/crcbl-vk/tests/run-vk-e2e.ps1
+
+      # **The one agnostic suite this configuration lost, put back.** Until
+      # `ba0c49f` on 2026-08-18 `depth_probe` lived in `run-vk-e2e.ps1`'s suite
+      # above, and Vulkan-on-Windows is the only place its
+      # `reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
+      # has ever failed — five times in one evening, shading one primitive to the
+      # clear colour with zero validation errors and zero DRED breadcrumbs. The
+      # migration moved it into `forward_e2e`, which runs on Windows under
+      # **dx12/WARP**, on Linux under vk and wgpu and on macOS under Metal — every
+      # combination except this one. So the six quiet days since were a closed
+      # channel rather than evidence, and this step reopens it.
+      #
+      # **`shell: bash`, and it is not a new risk on this job.** The dx12 job runs
+      # three of these harnesses on `windows-latest` the same way, and
+      # `crcbl_pin_vk_icd` in `crates/crcbl-vk/tests/vulkan-icd.sh` already
+      # converts the manifest to a native path through `cygpath` under MSYS — a
+      # loader that reads `C:/...` as no pin at all is a fight this repository has
+      # already had and recorded there.
+      #
+      # **No ICD is named here on purpose.** The lavapipe step above writes
+      # `CRCBL_VK_ICD`, `VK_DRIVER_FILES` and `VK_ICD_FILENAMES` into `GITHUB_ENV`
+      # from the manifest it actually found in the archive, so naming a path here
+      # would be a second copy of a value that is discovered rather than known.
+      # That is the opposite of the Linux arm, which hardcodes its distribution's
+      # path because there it *is* known.
+      #
+      # **This suite carries no golden**, which is what makes it the safe one to
+      # add: `forward_e2e` calls `crcbl_golden::compare` zero times and names no
+      # `Tolerance`, so the "references blessed against another Mesa build" risk
+      # this job's header names does not reach it. It is 13 counted-property
+      # checks, and they pass on lavapipe — measured on Linux lavapipe before this
+      # step was written. `draw_gen_e2e`, `hal_seam_e2e`, `gltf_e2e` and the
+      # tiling suite are golden-free on the same measurement and could follow;
+      # they are left out of this change so that a failure here names one thing.
+      - name: Check the forward pass on lavapipe
+        shell: bash
+        env:
+          CRCBL_GPU: vk
+        run: crates/crcbl/tests/run-forward-e2e.sh
       # The golden images are the likeliest failure once the loader is reached,
       # and the one that cannot be diagnosed from a log: this leg renders on a
       # *different* Mesa build from the Linux leg, and `crcbl-golden`'s
