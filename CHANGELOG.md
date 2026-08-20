@@ -818,6 +818,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`sandbox --backend` offered four backends of six, and both rejection
+  messages are now built from the enum.** `apps/sandbox` named `vk`, `mtl`,
+  `dx12` and `null`, having never been updated when `wgpu` and `webgpu` were
+  added, so the flag refused a name its own `USAGE` block listed two lines
+  above. `crcbl::backend::GpuBackend::name_list` is the single source both it
+  and `crcbl::args` now format, and `GpuBackend::ALL` — held complete by an
+  exhaustive `match` — is what it is built from, so a seventh backend cannot
+  leave either message behind.
+
 - **The mesh bind-group layout declares bindings 13, 14, 18 and 19 on every mesh
   path**, not only where there is an amplification stage. Slang's Metal target
   ignores `[[vk::binding]]` and hands each resource the next index in its

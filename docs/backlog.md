@@ -13088,15 +13088,6 @@ whitelist** — every one passes `CRCBL_GPU` and `--backend` straight through an
 lets the Rust reject them — so these hints are documentation, not gates, and
 nothing fails if they lag.
 
-### `apps/sandbox`'s backend rejection message is stale
-
-Its `Invocation::BadUsage` arm suggests `vk`, `mtl`, `dx12` or `null`. It
-already omitted `wgpu` before this work and now also omits `webgpu`, while the
-`USAGE` text directly above it lists both. Pre-existing drift, left alone as
-outside the task. The other apps do not have the problem: they share
-`crcbl::args::COMMON_OPTIONS_HELP`, which has one rejection message, and a
-per-app test compares each copy against the engine's verbatim.
-
 ### The env-var path is not covered automatically
 
 The refusal is tested through `request_open_backend`, which `open()` funnels

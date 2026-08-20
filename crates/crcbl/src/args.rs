@@ -398,8 +398,8 @@ impl Common {
                     Some(backend) => self.backend = Some(backend),
                     None => {
                         return Consumed::Bad(format!(
-                            "unknown backend '{name}' — try `vk`, `mtl`, `dx12`, `null`, \
-                             `wgpu` or `webgpu`"
+                            "unknown backend '{name}' — try {}",
+                            GpuBackend::name_list()
                         ));
                     }
                 }

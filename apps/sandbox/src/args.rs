@@ -93,7 +93,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                     Some(backend) => options.backend = Some(backend),
                     None => {
                         return Invocation::BadUsage(format!(
-                            "unknown --backend `{name}`; try `vk`, `mtl`, `dx12` or `null`"
+                            "unknown --backend `{name}`; try {}",
+                            GpuBackend::name_list()
                         ));
                     }
                 },
@@ -212,6 +213,32 @@ mod tests {
         // Last flag wins, so a wrapper script can append an override.
         assert!(!options(&["--debug-overlay", "--no-debug-overlay"]).debug_overlay_visible());
         assert!(USAGE.contains("--debug-overlay"));
+    }
+
+    /// **Both places this app names a backend name every backend.**
+    ///
+    /// The rejection went stale first — it offered four of six for as long as
+    /// `wgpu` and `webgpu` had existed — and `USAGE` is the same hand-written
+    /// list one edit behind. The rejection is now built from
+    /// `GpuBackend::name_list`, so this holds it and the help text to the enum
+    /// rather than to each other: a seventh backend fails here until both
+    /// mention it.
+    #[test]
+    fn the_help_and_the_rejection_name_every_backend() {
+        let rejected = match parse_args(&["--backend", "opengl"]) {
+            Invocation::BadUsage(message) => message,
+            other => panic!("`--backend opengl` is not a backend: {other:?}"),
+        };
+        for backend in GpuBackend::ALL {
+            assert!(
+                rejected.contains(&format!("`{backend}`")),
+                "`{backend}` opens a GPU and the rejection does not offer it: {rejected}",
+            );
+            assert!(
+                USAGE.contains(&format!("`{backend}`")),
+                "`{backend}` opens a GPU and USAGE does not list it",
+            );
+        }
     }
 
     #[test]

@@ -193,6 +193,69 @@ impl GpuBackend {
             _ => None,
         }
     }
+
+    /// Every backend, in the order a user is offered them.
+    ///
+    /// Held complete by `position` below, whose `match` is exhaustive: a new
+    /// variant fails to compile there until it is placed, and
+    /// `every_backend_is_in_all_at_its_own_position` is what ties the two
+    /// together. An array on its own would not do it — adding a variant beside
+    /// a hand-written list compiles, which is exactly how the name lists this
+    /// exists to feed went stale.
+    pub const ALL: [Self; 6] = [
+        Self::Vulkan,
+        Self::Metal,
+        Self::Dx12,
+        Self::Null,
+        Self::Wgpu,
+        Self::WebGpu,
+    ];
+
+    /// Where `self` sits in [`ALL`](Self::ALL).
+    ///
+    /// A completeness device rather than an identity — nothing should depend on
+    /// a backend's ordinal — so it is private and compiled only for the test
+    /// that reads it. **That narrows where the compile failure lands and does
+    /// not remove it:** a seventh variant breaks this `match` under
+    /// `cargo test` and under `cargo clippy --all-targets`, which are two of
+    /// the three gates every change to this workspace goes through and both run
+    /// in CI. Left ungated it is dead code in a normal build, and `-D warnings`
+    /// is the other thing every gate here runs.
+    #[cfg(test)]
+    const fn position(self) -> usize {
+        match self {
+            Self::Vulkan => 0,
+            Self::Metal => 1,
+            Self::Dx12 => 2,
+            Self::Null => 3,
+            Self::Wgpu => 4,
+            Self::WebGpu => 5,
+        }
+    }
+
+    /// The canonical names as an English list, for the message shown when a
+    /// name is not one of them: `vk`, `mtl`, `dx12`, `null`, `wgpu` or
+    /// `webgpu`.
+    ///
+    /// Built from [`ALL`](Self::ALL) rather than written out, because it was
+    /// written out in two places and one of them named four backends of six.
+    /// The aliases [`from_name`](Self::from_name) also accepts are deliberately
+    /// absent: a rejection offering `vulkan` beside `vk` reads as more backends
+    /// rather than as one more spelling, and
+    /// [`COMMON_OPTIONS_HELP`](crate::args::COMMON_OPTIONS_HELP) is where every
+    /// spelling is listed.
+    #[must_use]
+    pub fn name_list() -> String {
+        let names: Vec<String> = Self::ALL
+            .iter()
+            .map(|backend| format!("`{}`", backend.as_str()))
+            .collect();
+        match names.split_last() {
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+            None => String::new(),
+        }
+    }
 }
 
 impl core::fmt::Display for GpuBackend {
@@ -1134,5 +1197,58 @@ mod tests {
             }
             other => panic!("wrong error: {other}"),
         }
+    }
+
+    /// **`ALL` really is all of them, and in the order `position` says.**
+    ///
+    /// The half a `match` cannot do. `GpuBackend::position` fails to compile
+    /// when a variant is added, which forces the author to give the new backend
+    /// an index — but nothing in the language then makes them put it in `ALL`,
+    /// and an index handed out twice or pointing past the array is the same
+    /// silence. Round-tripping every element through both directions is what
+    /// closes it: a variant missing from `ALL` leaves some index unclaimed, and
+    /// the length assertion is what notices.
+    #[test]
+    fn every_backend_is_in_all_at_its_own_position() {
+        for (index, backend) in GpuBackend::ALL.iter().enumerate() {
+            assert_eq!(
+                backend.position(),
+                index,
+                "{backend} sits at {index} in `ALL` and answers {} for its position",
+                backend.position(),
+            );
+            assert_eq!(
+                GpuBackend::from_name(backend.as_str()),
+                Some(*backend),
+                "`{backend}` does not parse back to itself",
+            );
+        }
+    }
+
+    /// **The rejection message names every backend and nothing else.**
+    ///
+    /// Not "the string is what it was last time" — that is a snapshot, and it
+    /// would pass a list that had gone stale in exactly the way this function
+    /// exists to prevent. The claim is against `ALL`, so adding a backend
+    /// changes both sides together.
+    #[test]
+    fn the_name_list_offers_every_backend() {
+        let listed = GpuBackend::name_list();
+        for backend in GpuBackend::ALL {
+            assert!(
+                listed.contains(&format!("`{backend}`")),
+                "`{backend}` is a backend and `{listed}` does not offer it",
+            );
+        }
+        assert_eq!(
+            listed.matches('`').count(),
+            GpuBackend::ALL.len() * 2,
+            "`{listed}` quotes something that is not one of the {} backends",
+            GpuBackend::ALL.len(),
+        );
+        assert!(
+            listed.ends_with("or `webgpu`"),
+            "the list must read as English, not as a comma-separated tail: `{listed}`",
+        );
     }
 }
