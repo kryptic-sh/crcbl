@@ -2004,18 +2004,41 @@ exact signature — so **there is now a repro with no renderer in it**, on
 run 32416192662. It was reverted from `main` rather than left red (`cd1f653`);
 the patch is recoverable from `76939d0`.
 
-**What it does not yet separate**, and the next slice is exactly this: the probe
-has no fragment stage, because `mesh_cluster.slang` has none and `mesh.slang`'s
-cannot share a root signature with it. It takes `depth_pipeline`'s shape —
-`fragment: None`, no colour targets, the depth attachment as the observable —
-and `crcbl-dx12` has never built a depth-only mesh pipeline or copied a
-`D32Float` image back before. So the removal is the cluster shader **or** that
-untried machinery. Driving the same depth-only shape with `mesh_shader.slang`'s
-toy stages answers it in one run: if the toy dies too, the pipeline shape is the
-defect and the cluster shader is still unjudged; if it draws, the cluster shader
-is it. It collapses the three remaining suspects into one experiment: if the
-device goes, the shader is it and the bisect continues inside one file; if it
-survives, what remains is the draw-gen pass that feeds it.
+**ANSWERED, and it is not either shader.** `mesh_cluster.slang` has no fragment
+stage, so that probe took `depth_pipeline`'s shape — `fragment: None`, no colour
+targets, a `D32Float` depth attachment as the observable — and `crcbl-dx12` had
+never built a depth-only mesh pipeline or copied a depth image back. The
+discriminator drove that same shape with `mesh_shader.slang`'s **toy** stages,
+the ones six colour-target probes pass on, through the same indirect amplified
+dispatch.
+
+**The toy died too**, on run 32418483641, with the identical signature:
+`ID3D12Resource::Map failed … DXGI_ERROR_DEVICE_REMOVED`, DRED reporting
+`0 command list(s) with recorded work`.
+
+So the defect is **the depth-only mesh pipeline**, not the cluster shader, not
+the DAG descent, not the 22 bindings, and not the register skew. The same stages
+draw correctly the moment there is a colour target and a fragment stage. Both
+probes are kept and both are excluded by name in
+`crates/crcbl-dx12/tests/run-dx12-e2e.sh`'s `KNOWN_RED` list, which announces
+them on every run.
+
+**That also explains the renderer**, which is the part worth noticing: the mesh
+frame does not fail somewhere exotic. `ForwardRenderer` renders its shadow
+cascades through `depth_pipeline` — depth-only, no colour target — so on the
+mesh path it builds exactly the pipeline these two probes build, every frame.
+
+**What is still not separated**, and it is three cheap probes rather than one:
+
+- **the `D32Float` readback itself** — clear a depth image and copy it back with
+  no pipeline at all. If that removes the device, none of this is about mesh
+  shading and `plan_copy`/`copy_footprint_format` is where to look;
+- **`fragment: None` on a mesh pipeline** — the same mesh stages with a fragment
+  stage and a colour target _plus_ a depth attachment. If that draws, the empty
+  fragment stage is the trigger;
+- **depth-only on a raster pipeline** — the same depth-only shape with an
+  ordinary vertex pipeline. If that draws, it is the combination of mesh and
+  depth-only rather than either alone.
 
 **What is no longer in question**: WARP's `ExecuteIndirect` of `DISPATCH_MESH`,
 its amplification stage, both together at a thousand groups, a dispatch count of
