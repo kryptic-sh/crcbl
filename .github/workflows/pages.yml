@@ -286,7 +286,9 @@ jobs:
       # 151.0.7922.137 under Xvfb against the bundled SwiftShader — this job's
       # own configuration — `CRCBL_WEB_E2E_DEMO=quarry` and
       # `CRCBL_WEB_E2E_DEMO=lumen` each passed 34 of 34 checks, and quarry passed
-      # 34 of 34 against real hardware as well.
+      # 34 of 34 against real hardware as well. **Every count on this page is the
+      # total that run had**: group H took the driver to 37, so a fresh run scores
+      # 37 of 37 and these older figures are history rather than drift.
       #
       # **A GitHub runner has now been measured, and it is not the ceiling that
       # keeps them out — it is `TICK_WINDOW_MS`.** quarry's step ran here on

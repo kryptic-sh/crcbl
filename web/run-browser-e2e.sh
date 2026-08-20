@@ -52,6 +52,15 @@
 #   with `+atomics`. Nothing else in the repository would notice those headers
 #   going missing, so the named-check guard below insists that assertion ran.
 #
+#   And it is the only gate on **its own reporting channels**. Three of the
+#   driver's checks assert that nothing was reported — no uncaught exception, no
+#   missing asset, no WebGPU device error — and each of them passes just as
+#   happily against a listener that was never attached, a filter that swallows
+#   everything, or a server that stopped recording its 404s. Group H breaks all
+#   three on purpose and asserts the break was seen, which is the shape
+#   `crcbl-vk`'s `validation_gate` had to grow after a green suite turned out to
+#   be reading a log sink nobody installed. The guard below insists it ran.
+#
 #   It is **not** the gate on `crcbl-webgpu`'s command stream. Those are the
 #   PROBE groups in `web/tools/probe-groups.mjs`, driven by
 #   `web/run-probe-e2e.sh` against a page with no engine running on it. This
@@ -410,6 +419,24 @@ case "$DEMO" in
         fi
         ;;
 esac
+
+# And the strongest form of the same argument, for group H. Three of the driver's
+# checks assert that *nothing* was reported — no uncaught exception, no missing
+# asset, no WebGPU device error — and every one of them passes just as happily
+# against a listener that was never attached. Group H breaks each channel on
+# purpose and asserts the break was seen, so its absence is not a smaller gate:
+# it is three checks going back to proving nothing while still printing `ok`.
+# Every demo runs it, so unlike group G above there is no per-demo case here.
+#
+# One name is matched rather than three, because they are one block in the driver
+# and cannot go missing separately. Renaming it there is meant to fail here and
+# be renamed here too.
+CHANNELS="$(grep -F 'a deliberate uncaught exception reaches the page-error channel' "${OUTPUT}.plain" || true)"
+if [ -z "$CHANNELS" ]; then
+    echo "crcbl web e2e: the driver never provoked its own reporting channels;" >&2
+    echo "               the three silences it asserts are unproven, and a closed channel reports silence too" >&2
+    exit 1
+fi
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2

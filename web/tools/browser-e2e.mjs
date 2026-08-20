@@ -16,7 +16,7 @@
 // a WebGPU device and puts pixels on the canvas. A black canvas passes every
 // check those two can make.
 //
-// WHAT IT ASSERTS. Seven groups, printed in order:
+// WHAT IT ASSERTS. Eight groups, printed in order:
 //
 //   A  the platform — `navigator.gpu`, an adapter, **that this browser can
 //      report canvas pixels at all** (see below; this one is not a formality),
@@ -35,6 +35,10 @@
 //   G  the frame is sRGB-encoded — the demo's own flat clear colour, read off
 //      the canvas as the browser composited it and compared against the byte an
 //      sRGB target holds. Only for a demo whose clear reaches the screen
+//   H  the reporting channels are open — three of the checks above assert a
+//      *silence*, and a closed channel reports silence too. This group breaks
+//      each of the three on purpose and asserts the break was seen. It runs
+//      last so that it cannot dirty the silences it is proving
 //
 // THE READBACK IS THE PART THAT NEEDED PROVING. Three ways to get a WebGPU
 // canvas's pixels into JS look equivalent and are not, measured on Chromium 150
@@ -739,6 +743,46 @@ const CONTROL_TOLERANCE = 8;
 
 /** Where the harness's own control page lives on its server. */
 const CONTROL_PATH = '/__crcbl-readback-control__';
+
+/**
+ * The string every one of group H's deliberate provocations carries.
+ *
+ * One string in three places — thrown out of a timer, asked of the server as a
+ * file name, and hung on a buffer's label — so each of that group's checks can
+ * insist the channel reported *its* provocation rather than something that
+ * happened to arrive alongside it. A channel that reports the wrong thing would
+ * not have reported the real failure either.
+ *
+ * It is also what the failure report at the bottom of this file matches on, to
+ * keep this group's own device error out of a dump of real ones.
+ */
+const PROVOCATION = 'crcbl-e2e-deliberate';
+
+/**
+ * How long each of group H's provocations is given to come back.
+ *
+ * A deadline on a poll and not a sleep, like every other window here. Each
+ * provocation is a single asynchronous hop — a timer firing, a request being
+ * answered, an `uncapturederror` being dispatched — so this is generous by
+ * orders of magnitude; the slowest of the three was measured at single-digit
+ * milliseconds, and the check that measured it says so. What the window buys is
+ * that a channel which is *closed* says so in seconds rather than spending the
+ * run's whole `--timeout` proving a negative.
+ */
+const PROVOCATION_MS = 5_000;
+
+/**
+ * Whether a 404 is the *page* asking for an asset it did not get.
+ *
+ * The pages declare `/favicon.svg`, which exists, so this is the belt to that
+ * braces: a browser that ignores the declaration and asks for `/favicon.ico`
+ * anyway is not the page wanting an asset. Every other 404 is.
+ *
+ * Named rather than written inline at group B's check because group H's control
+ * has to be a miss this filter **cannot** swallow, and the only way to be sure
+ * of that is to run the control's own path back through the same predicate.
+ */
+const isRealMiss = (path) => !path.endsWith('favicon.ico');
 
 function stopEverything() {
   for (const browser of running) browser.stop();
@@ -1560,10 +1604,9 @@ try {
       ? 'status 6 (PAUSED) — the canvas never had focus'
       : `status ${settled?.status ?? 'never settled'}`
   );
-  // The pages declare `/favicon.svg`, which exists, so this filter is now the
-  // belt to that braces: a browser that ignores the declaration and asks for
-  // `/favicon.ico` anyway is not the page wanting an asset. Every other 404 is.
-  const missing = site.misses.filter((m) => !m.endsWith('favicon.ico'));
+  // [`isRealMiss`] says which 404s are the page's own; group H's control is a
+  // path chosen so that predicate cannot drop it.
+  const missing = site.misses.filter(isRealMiss);
   check(
     'B',
     'every asset the page asked for exists',
@@ -2874,6 +2917,185 @@ try {
     );
   }
 
+  // **THREE OF THE CHECKS ABOVE ASSERT A SILENCE, AND A CLOSED CHANNEL REPORTS
+  // SILENCE TOO.** Group A's "the page raised no uncaught exception", group B's
+  // "every asset the page asked for exists" and group D's "the browser reported
+  // no WebGPU device errors" each read an array that a listener somewhere is
+  // supposed to fill. A listener that was never attached, a filter that swallows
+  // everything, a server that stopped recording its 404s: every one of those
+  // presents as an empty array, which is exactly what a passing run looks like.
+  //
+  // That is not hypothetical. `crcbl-vk`'s suites asserted the validation layer
+  // had been silent across a 66,836-line job log in which the layer's own
+  // deliberate-violation test also produced nothing, because no `log::Log` was
+  // installed — the whole suite green and proving nothing.
+  // `vk_e2e::validation_gate::a_deliberate_violation_is_caught_by_the_layer` is
+  // the fix and the precedent for this group: commit the violation, then assert
+  // the channel noticed.
+  //
+  // **IT RUNS LAST, AND THAT IS THE WHOLE OF ITS PLACEMENT.** Every provocation
+  // below deliberately dirties one of the three arrays, so all of them have to
+  // happen after the last check that reads one. It needs no `EXPECTATIONS` row
+  // either, and deliberately: nothing here is about the game, so every demo
+  // makes all three claims.
+  //
+  // **WHAT READS THOSE ARRAYS AFTERWARDS.** `pageErrors` and `site.misses` have
+  // no reader past their own check, so a deliberate entry in either is inert.
+  // `deviceErrors` has one — the failure report at the bottom of this file
+  // prints it in full whenever any check fails. It cannot turn a run red, since
+  // only `checks` decides that, but it would print this group's own error beside
+  // real ones, so that reader filters [`PROVOCATION`] out and says so there.
+  // **Nothing is removed from any of the three**: groups A, B and D have already
+  // read them, and an array edited behind a check that has run is the shape of
+  // trick this group exists to rule out.
+  group('H — the reporting channels are open');
+
+  // **Thrown from a timer rather than from the `evaluate` itself.** An
+  // expression that throws comes back as this file's own rejection —
+  // [`evaluate`] turns `exceptionDetails` into an `Error` — and never reaches
+  // the page's uncaught channel at all. A `setTimeout` callback has no caller to
+  // catch it, so it goes where a real bug in the shim would go:
+  // `Runtime.exceptionThrown`, which is the event the run subscribed to when it
+  // opened the page.
+  const errorsBefore = pageErrors.length;
+  const thrown = `${PROVOCATION} page exception`;
+  await evaluate(
+    page,
+    `(setTimeout(() => { throw new Error(${JSON.stringify(thrown)}); }, 0), true)`
+  );
+  const raised = await until(
+    async () =>
+      pageErrors.length > errorsBefore ? pageErrors.slice(errorsBefore) : null,
+    PROVOCATION_MS
+  );
+  check(
+    'H',
+    'a deliberate uncaught exception reaches the page-error channel',
+    raised !== null && raised.some((line) => String(line).includes(thrown)),
+    raised === null
+      ? `nothing arrived in ${PROVOCATION_MS} ms — group A's "the page raised ` +
+          'no uncaught exception" is reading an array nothing fills'
+      : raised.some((line) => String(line).includes(thrown))
+        ? String(raised.find((line) => String(line).includes(thrown)))
+            .split('\n')[0]
+            .trim()
+        : `${raised.length} entr(y/ies) arrived and none names "${thrown}": ` +
+          `${String(raised[0]).split('\n')[0].trim()}`
+  );
+
+  // A path under the demo's own directory, so the request goes to the server the
+  // page's assets come from and `serve.mjs` records it in the same `misses`
+  // array group B reads. **Not a `favicon.ico`**: [`isRealMiss`] drops that one
+  // name, and a provocation the check under test filters back out would be a
+  // control its own filter could swallow — so the name is deliberately chosen to
+  // survive that predicate, and the predicate is applied here to prove it did.
+  const missesBefore = site.misses.length;
+  const missingAsset = `${PROVOCATION}-missing-asset.bin`;
+  const missStatus = await evaluate(
+    page,
+    `fetch(${JSON.stringify(missingAsset)}).then((response) => response.status)`
+  );
+  const recorded = await until(
+    async () =>
+      site.misses.length > missesBefore
+        ? site.misses.slice(missesBefore).filter(isRealMiss)
+        : null,
+    PROVOCATION_MS
+  );
+  const missSeen =
+    recorded?.filter((path) => path.endsWith(missingAsset)) ?? [];
+  check(
+    'H',
+    'a request for an asset that is not there is recorded as a miss',
+    missStatus === 404 && missSeen.length > 0,
+    missStatus !== 404
+      ? `the server answered ${missStatus} for ${missingAsset}, so nothing was ` +
+          'missing and this control provoked nothing'
+      : missSeen.length > 0
+        ? missSeen[0]
+        : `the fetch 404'd and ${recorded?.length ?? 0} miss(es) were recorded ` +
+          `in ${PROVOCATION_MS} ms, none of them ${missingAsset} — group B's ` +
+          '"every asset the page asked for exists" is reading an array nothing fills'
+  );
+
+  // **A device this page opens for the purpose, and not the engine's.**
+  // `deviceErrors` is filled from one place: the `Log.entryAdded` handler above,
+  // for an entry whose `source` is `rendering` — Chrome's own report of an
+  // uncaptured WebGPU error, whichever device in this page raised it. So a
+  // throwaway device exercises the whole of what that array reads, from Dawn's
+  // validation through the browser's console to the handler and the array.
+  //
+  // Provoking the *engine's* device instead was the other candidate and is
+  // rejected on purpose. `crcbl.gpu.replayer.device` is reachable from here, but
+  // an error on it also travels a second path: `gpu-replay.js`'s
+  // `uncapturederror` listener files it in the replayer's error log, wasm drains
+  // that through `Command::TakeError`, and `Gpu::acquire` in
+  // `crates/crcbl/src/engine.rs` turns the next frame into a `GpuError` — so the
+  // control would end the run by taking the demo to FAILED, and the canvas and
+  // page log written a few lines below would be evidence for a demo the gate
+  // broke itself.
+  //
+  // **WHAT THIS THEREFORE DOES NOT PROVE**: that the engine's own device is
+  // reported through the same console. It would not be if something called
+  // `preventDefault()` on the `uncapturederror` event; nothing does — that
+  // listener in `web/engine/gpu-replay.js` only files the message — and there is
+  // no other listener on that device. That reasoning is the seam this control
+  // leaves uncovered, and reading the listener is the whole of the evidence for
+  // it.
+  //
+  // **THE TICK IS LOAD-BEARING.** Dawn queues an uncaptured error and dispatches
+  // it when the device next ticks, so a device given no work does not report for
+  // seconds — measured here at over four, and at nothing at all inside the
+  // window this check would have allowed it. `onSubmittedWorkDone` is a tick
+  // with nothing else attached to it: with the await in place the entry arrived
+  // 2–4 ms later on every run. **And no `pushErrorScope`**, which is the other
+  // half: an error inside a scope is *captured*, so the console never hears
+  // about it and this control would provoke a silence of its own.
+  const deviceErrorsBefore = deviceErrors.length;
+  const badBuffer = `${PROVOCATION} device error`;
+  const provoked = await evaluate(
+    page,
+    `(async () => {
+       const adapter = await navigator.gpu.requestAdapter();
+       if (!adapter) return 'no adapter';
+       const device = await adapter.requestDevice({
+         label: ${JSON.stringify(`${PROVOCATION} control device`)},
+       });
+       // MAP_READ may only be combined with COPY_DST and MAP_WRITE only with
+       // COPY_SRC, so the pair is a validation error in the call itself — no
+       // command is recorded and nothing is submitted, which is the same reason
+       // the Vulkan gate provokes its layer with a copy it throws away.
+       device.createBuffer({
+         label: ${JSON.stringify(badBuffer)},
+         size: 4,
+         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.MAP_WRITE,
+       });
+       await device.queue.onSubmittedWorkDone();
+       return 'provoked';
+     })()`
+  );
+  const reported = await until(
+    async () =>
+      deviceErrors.length > deviceErrorsBefore
+        ? deviceErrors.slice(deviceErrorsBefore)
+        : null,
+    PROVOCATION_MS
+  );
+  const named = reported?.filter((text) => text.includes(badBuffer)) ?? [];
+  check(
+    'H',
+    'a deliberate WebGPU validation error reaches the device-error channel',
+    provoked === 'provoked' && named.length > 0,
+    provoked !== 'provoked'
+      ? `no device to provoke: ${provoked}`
+      : named.length > 0
+        ? named[0].split('\n')[0].trim()
+        : `${reported?.length ?? 0} device error(s) arrived in ` +
+          `${PROVOCATION_MS} ms and none names "${badBuffer}" — group D's ` +
+          '"the browser reported no WebGPU device errors" is reading an array ' +
+          'nothing fills'
+  );
+
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.
@@ -2924,9 +3146,20 @@ if (failed.length) {
   console.error('\nweb e2e: FAILED');
   for (const c of failed)
     console.error(`  ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
-  if (deviceErrors.length) {
+  // **The one reader of `deviceErrors` past group D's check**, and the reason
+  // group H filters rather than deletes. That group provokes a validation error
+  // on purpose, on a device it opens for the purpose, and a run that fails
+  // anything at all would otherwise print it here among the real ones — the same
+  // error the check above reports as a *pass*, reappearing as evidence for a
+  // failure. It is filtered out by name; nothing is taken out of the array,
+  // because group D has already read it and an array edited behind a check that
+  // has run is what this whole exercise is about.
+  const realDeviceErrors = deviceErrors.filter(
+    (message) => !message.includes(PROVOCATION)
+  );
+  if (realDeviceErrors.length) {
     console.error('\nweb e2e: WebGPU device errors, in full:');
-    for (const message of deviceErrors.slice(0, 4)) {
+    for (const message of realDeviceErrors.slice(0, 4)) {
       console.error(
         message
           .split('\n')
@@ -2934,8 +3167,8 @@ if (failed.length) {
           .join('\n')
       );
     }
-    if (deviceErrors.length > 4)
-      console.error(`    … and ${deviceErrors.length - 4} more`);
+    if (realDeviceErrors.length > 4)
+      console.error(`    … and ${realDeviceErrors.length - 4} more`);
   }
   process.exit(1);
 }

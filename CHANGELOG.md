@@ -649,6 +649,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The browser gate proves its own reporting channels are open.** Three of its
+  checks assert a silence — no uncaught page exception, no missing asset, no
+  WebGPU device error — and each passed just as happily against a listener that
+  was never attached, a filter that swallowed everything, or a server that
+  stopped recording its 404s. A new group H breaks all three on purpose and
+  asserts the break was seen; `web/run-browser-e2e.sh` refuses a run in which it
+  did not appear, so the group cannot go missing quietly. Same shape as
+  `crcbl-vk`'s `validation_gate`, which exists for the same reason.
+
 - **`crcbl-mtl` reports objects a caller never destroyed.** `DeviceInner` had no
   `Drop` at all, so Metal was the one backend where a handle nobody destroyed
   was invisible — `crcbl-vk` has warned since it was written and `crcbl-dx12`

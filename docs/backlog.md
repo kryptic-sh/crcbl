@@ -12284,10 +12284,13 @@ cannot exceed twice that and the two windows cannot add more than four minutes
 to a step, on a machine where nothing would have passed anyway.
 
 Verified 2026-08-20: breakout 44/44 with the beat reported in the check's
-message. Red-checked twice — pointing `hud()` at a string nothing logs fails the
-control with `no second HUD line in 20000 ms`, and keeping every fortieth line
-to stretch the beat to 40 s produced an 80 s window on both later checks, with
-the paused one still reading zero and the resumed one two.
+message — 47/47 after group H landed later the same day, and **every count in
+this file is the total the run it describes had**, so the older figures are
+history rather than drift. Red-checked twice — pointing `hud()` at a string
+nothing logs fails the control with `no second HUD line in 20000 ms`, and
+keeping every fortieth line to stretch the beat to 40 s produced an 80 s window
+on both later checks, with the paused one still reading zero and the resumed one
+two.
 
 **Both steps went back in, the runner answered, and the answer is that group E
 is fixed and the pattern is bigger.** quarry's second run (2026-08-20 12:03,
