@@ -267,8 +267,8 @@ jobs:
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         run: ./web/run-probe-e2e.sh
 
-      # NEITHER 3D DEMO IS RENDERED HERE YET, AND THE REASON HAS CHANGED TWICE —
-      # READ THIS BEFORE ADDING OR DELETING EITHER.
+      # BOTH 3D DEMOS ARE RENDERED HERE, AND THE REASON THEY WERE NOT CHANGED
+      # TWICE — READ THIS BEFORE DELETING EITHER.
       #
       # They are the site's two 3D demos, and until 2026-08 neither ran here for
       # one cause: `crcbl-render`'s draw-argument pass bound fourteen storage
@@ -328,18 +328,29 @@ jobs:
       # every 27 seconds, one and a half seconds is not a batch fold plus a log
       # drain.
       #
-      # So the pattern generalises rather than being about one window, and the
-      # steps stay out until every wall-clock budget in the harness is scaled by
-      # the measured beat rather than calibrated on this desktop.
-      # `docs/backlog.md` carries it. Adding a step back is these two lines:
+      # **Every wall-clock budget in the harness is now scaled by the measured
+      # beat**, not just the tick window: `slowdown = max(1, beat / 1000)` is how
+      # far behind real time this machine is running the demo, and group F's four
+      # budgets go through it. The heartbeat control prints the factor, so a
+      # failure here says in the same log how slow the runner was. Clamped at 1,
+      # so nothing is shorter than the constants already gave.
       #
-      #     - name: Render quarry in a real browser
-      #       timeout-minutes: 10
-      #       run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
-      #
-      #     - name: Render lumen in a real browser
-      #       timeout-minutes: 10
-      #       run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
+      # These two steps are the measurement that closes it, and nothing else can
+      # take it: the machine that falsifies a wall-clock budget is the slow one,
+      # and there is not one here. Ten-minute timeouts against quarry's measured
+      # 5m58s. If one goes red, read **which** check failed before touching a
+      # number — a heartbeat control failing now means fewer than two HUD lines
+      # in a minute, which is a different claim from the four-second one it used
+      # to make.
+      - name: Render quarry in a real browser
+        timeout-minutes: 10
+        run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
+
+      # lumen last: it is the heaviest frame the site ships, and its local
+      # evidence is the same 34-of-34 SwiftShader run quarry's was.
+      - name: Render lumen in a real browser
+        timeout-minutes: 10
+        run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed

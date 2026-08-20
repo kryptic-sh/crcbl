@@ -12332,6 +12332,11 @@ and `lifeMs`, so a slow machine already gets more taps rather than fewer. If a
 tap sequence ever fails on a slow runner where the deadline plainly did not
 expire, event coalescing is the first thing to suspect.
 
+**Both steps are back in on the strength of it**, each with
+`timeout-minutes: 10` against quarry's measured 5m58s. That run is the
+measurement that closes this entry, and nothing here can take it in its place:
+the machine that falsifies a wall-clock budget is the slow one.
+
 **What the scaling costs, since it is not free.** The poll deadlines cost
 nothing on success — a poll returns when its condition holds. The sleeps do:
 group E's two windows are `2 * beat` each, so on that runner they are 54s
