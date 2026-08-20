@@ -907,19 +907,6 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
-- **A D3D12 mesh pipeline with no fragment stage removed the device.**
-  `crcbl-dx12` built its mesh pipeline state stream without a pixel-shader
-  subobject when the descriptor's fragment stage was `None`, leaving that stage
-  to the stream's default. On WARP such a pipeline takes the device down —
-  `ID3D12Resource::Map` fails with `DXGI_ERROR_DEVICE_REMOVED`, the debug layer
-  reports nothing and DRED records no breadcrumbs — so nothing named the cause.
-  The subobject is now always present, empty when there is no fragment stage,
-  which is what the raster path already did.
-
-  This is the pipeline `ForwardRenderer` builds for its shadow cascades, so it
-  was every frame of the D3D12 mesh path rather than a corner case. Anything
-  drawing depth-only through a mesh pipeline on D3D12 was affected.
-
 - **`sandbox --backend` offered four backends of six, and both rejection
   messages are now built from the enum.** `apps/sandbox` named `vk`, `mtl`,
   `dx12` and `null`, having never been updated when `wgpu` and `webgpu` were

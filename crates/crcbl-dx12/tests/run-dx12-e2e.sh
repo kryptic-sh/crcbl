@@ -167,6 +167,7 @@ KNOWN_RED=(
     # that explains it means the job has quietly stopped covering what it
     # claims to.
     the_cluster_shaders_dag_descent_draws_the_cut_it_chose
+    a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device
 )
 
 FILTER=()

@@ -871,19 +871,16 @@ pub(crate) fn mesh(
         add(&mut stream, TaskShader(dxil.bytecode()));
     }
     add(&mut stream, MeshShader(mesh_dxil.bytecode()));
-    // **Always present, empty when there is no fragment stage**, which is what
-    // the raster path above does with `unwrap_or_default()` and is not
-    // symmetry for its own sake. Omitting the subobject leaves the pixel stage
-    // to the stream's default, and on WARP a mesh pipeline built that way
-    // removes the device: `ID3D12Resource::Map` fails with
-    // `DXGI_ERROR_DEVICE_REMOVED` and DRED reports no breadcrumbs at all, with
-    // nothing from the debug layer. Measured by
-    // `a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device`, which
-    // runs stages six colour-target probes pass on, against
-    // `a_mesh_pipeline_with_a_fragment_stage_and_a_depth_attachment_draws_both`
-    // and `a_depth_only_raster_pipeline_draws_the_triangle_into_depth`, which
-    // both draw — so it is this subobject's absence rather than depth, the
-    // shader or the mesh stage.
+    // **Always present, empty when there is no fragment stage**, matching what
+    // the raster path above does with `unwrap_or_default()`. An omitted
+    // subobject and an empty one should mean the same thing — the stream's
+    // default for `PS` is a null bytecode — and being explicit costs nothing.
+    //
+    // **It is not the fix for the WARP device removal**, which is worth saying
+    // because it was written as one. `docs/backlog.md`'s dx12 mesh-shading entry
+    // has the measurement: with this subobject present and empty,
+    // `a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device` still
+    // removes the device on run 32421732642, exactly as it did without it.
     add(
         &mut stream,
         PixelShader(fragment_dxil.map(Dxil::bytecode).unwrap_or_default()),
