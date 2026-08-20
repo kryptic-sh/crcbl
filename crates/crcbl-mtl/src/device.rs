@@ -5429,11 +5429,15 @@ using namespace metal;\n\
     /// Every slice that has not arrived still refuses, by name — so none of
     /// them can be half-implemented without this saying so.
     ///
-    /// **The binding, dispatch and indirect-count slices emptied most of this
-    /// list.** What is left is the two **counter-sampled** query kinds, whose
-    /// obstacle is a device that advertises no counter set rather than a slice
-    /// nobody has written, and the two **mesh** draws, which are a slice nobody
-    /// has written. The occlusion kind is not among them any more —
+    /// **The binding, dispatch, indirect-count and mesh slices emptied this
+    /// list down to two.** What is left is the two **counter-sampled** query
+    /// kinds, whose obstacle is a device that advertises no counter set rather
+    /// than a slice nobody has written — which is why they are the two Metal
+    /// rows still on `crcbl_hal::parity_blockers`. The mesh draws left it when
+    /// `crcbl_mtl::pipeline` gained `MTLMeshRenderPipelineDescriptor`, and
+    /// their real errors are asserted in
+    /// `the_mesh_slice_replaced_refusals_with_real_errors` below. The occlusion
+    /// kind is not among them any more —
     /// `Device::create_query_set` builds it, and
     /// `crates/crcbl/tests/hal_seam_e2e.rs`'s `exercise_query_set_creation` is
     /// what drives it — and neither are the indirect-count draws, which
@@ -5485,45 +5489,11 @@ using namespace metal;\n\
             );
         }
 
-        // Recording works now, so the encoder's refusals moved to the commands
-        // that still need a pipeline. `create_command_encoder` returns a bare
-        // `Box`, so a draw has nowhere to report itself and `finish` carries it.
+        // The mesh draws used to be refused here; they are real errors now and
+        // `the_mesh_slice_replaced_refusals_with_real_errors` asserts them.
         let queue = device
             .queue(QueueKind::Graphics)
             .expect("the graphics queue exists");
-        /// One recording call that still has to refuse, and the name it must
-        /// refuse under.
-        type Refused = (&'static str, fn(&mut dyn CommandEncoder));
-
-        let recording: &[Refused] = &[
-            ("mesh draws", |encoder| encoder.draw_mesh_tasks(1, 1, 1)),
-            ("indirect mesh draws", |encoder| {
-                encoder.draw_mesh_tasks_indirect(&crcbl_hal::DrawIndirect {
-                    args: Handle::from_bits(1 << 32).expect("generation 1"),
-                    offset: 0,
-                    draw_count: 1,
-                    stride: 12,
-                });
-            }),
-        ];
-        assert!(!recording.is_empty(), "nothing to check");
-        for (what, record) in recording {
-            let mut encoder =
-                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
-            record(encoder.as_mut());
-            let Err(error) = encoder.finish() else {
-                panic!("{what} recorded successfully, so the encoder reported a lie");
-            };
-            assert!(
-                matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Metal),
-                "{what}: {error:?}"
-            );
-            let text = error.to_string();
-            assert!(
-                text.contains("metal") && text.contains("Metal") && text.contains("slice"),
-                "{what}: {text}"
-            );
-        }
 
         // An empty submission is legal now and does nothing, which is the only
         // honest answer: there is no work to run and nothing to signal.
@@ -5565,6 +5535,63 @@ using namespace metal;\n\
     /// and a call that kept the first message after gaining an implementation
     /// would send them to the wrong one forever.
     ///
+    /// **The mesh draws refuse for real reasons now, not for want of a slice.**
+    ///
+    /// They were in
+    /// `the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves`
+    /// until `crcbl_mtl::pipeline` gained `MTLMeshRenderPipelineDescriptor`, and
+    /// they are here rather than merely deleted from it — the same move the
+    /// binding and dispatch slices made, and for the same reason: a call that
+    /// stops refusing has to be asserted doing something, or the suite records
+    /// only that it stopped saying no.
+    ///
+    /// Both errors below are `InvalidDescriptor` rather than `Unsupported`,
+    /// which is the whole difference. `Unsupported` says this backend cannot do
+    /// it; these say the caller asked wrongly, and a caller that asks correctly
+    /// gets a draw.
+    #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn the_mesh_slice_replaced_refusals_with_real_errors() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        // Outside a render pass. The seam places every draw inside one, so this
+        // is the caller's mistake and not a missing capability.
+        for (what, record) in [
+            (
+                "draw_mesh_tasks",
+                (|encoder: &mut dyn CommandEncoder| encoder.draw_mesh_tasks(1, 1, 1))
+                    as fn(&mut dyn CommandEncoder),
+            ),
+            ("draw_mesh_tasks_indirect", |encoder| {
+                encoder.draw_mesh_tasks_indirect(&crcbl_hal::DrawIndirect {
+                    args: Handle::from_bits(1 << 32).expect("generation 1"),
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 12,
+                });
+            }),
+        ] {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} outside a render pass recorded successfully");
+            };
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what} must be the caller's error rather than an unsupported slice: {error:?}"
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains(what) && text.contains("render pass"),
+                "{what}: {text}"
+            );
+        }
+    }
+
     /// **What turns it red.** Any of these four regressing to `Unsupported`, or
     /// — for the first two — succeeding against a handle no device issued.
     #[test]
