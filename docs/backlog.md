@@ -12178,16 +12178,19 @@ a shared runner is several times slower than the desktop above, and these are
 the two heaviest frames the site ships — under SwiftShader locally quarry logged
 roughly half the heartbeats per wall-clock second that it did on hardware.
 
-- **Add both steps.** The site's two 3D demos stop being the only ones nothing
-  renders in a browser on CI. Costs two more browser runs per Pages build, at an
-  unknown multiple of the local time.
-- **Add one (quarry) and watch it.** quarry is the newer and the one whose exit
-  criterion names the browser; lumen follows if the timing is tolerable.
-- **Leave both out and keep the local runs.** Cheapest, and the claim stays
-  verified only on a machine nobody else has.
+**quarry's step is now enabled, so the unknown is being measured rather than
+argued.** It was the middle of the three options — the other two were "add both"
+and "leave both out" — and it is the one that answers the question at the cost
+of one demo's runtime: quarry goes first because its own exit criterion names
+the browser. The step carries `timeout-minutes: 8` so a runner too slow to host
+it fails **that step** with a readable number, instead of running into the job's
+30-minute timeout with nothing to read.
 
-The two commented-out lines are in `.github/workflows/pages.yml` with this
-evidence beside them; uncommenting is the whole of the change.
+**What is still owed here is the number and lumen's line.** Read the step's
+duration off a Pages run on `main` and put it in this entry; then either add
+lumen's step beside it or record here what the measurement ruled out. Until that
+is written down this entry stays open, because "we turned it on" is not the
+answer the decision needed.
 
 **Both stale prose claims are fixed**: `web/pages/index.html`'s excusing clause
 and `web/pages/lumen.html`'s "This one wants a real GPU" note, which said the

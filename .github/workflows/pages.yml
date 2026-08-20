@@ -267,41 +267,36 @@ jobs:
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         run: ./web/run-probe-e2e.sh
 
-      # THERE ARE NO `lumen` AND `quarry` STEPS HERE, AND THE REASON HAS
-      # CHANGED — READ THIS BEFORE ADDING OR DELETING EITHER.
+      # quarry IS RENDERED HERE AND lumen IS NOT — READ THIS BEFORE ADDING OR
+      # DELETING EITHER.
       #
-      # They are the two demos this job does not render, and until 2026-08 there
-      # was one cause for both: `crcbl-render`'s draw-argument pass bound
-      # fourteen storage buffers in a single compute stage, Chrome's SwiftShader
-      # adapter — the only WebGPU adapter a runner with no GPU has — reports a
-      # ceiling of ten, so the pipeline was never created and the canvas stayed
-      # black. Both samples draw through that pass: lumen because it is a lit
-      # room of mesh instances, quarry because a cluster DAG is nothing but mesh
-      # instances.
+      # They are the site's two 3D demos, and until 2026-08 neither ran here for
+      # one cause: `crcbl-render`'s draw-argument pass bound fourteen storage
+      # buffers in a single compute stage, Chrome's SwiftShader adapter — the
+      # only WebGPU adapter a runner with no GPU has — reports a ceiling of ten,
+      # so the pipeline was never created and the canvas stayed black. Both
+      # samples draw through that pass: lumen because it is a lit room of mesh
+      # instances, quarry because a cluster DAG is nothing but mesh instances.
       #
       # **That pass binds eight now** — see `crates/crcbl-render/src/draw_gen.rs`,
       # whose module docs record the merges and say in as many words that it
       # bound fourteen "until 2026-08 and could therefore not be created on a
       # browser at the default limits, nor on SwiftShader". So the stated cause
-      # for these two absences no longer holds, and it was checked rather than
-      # assumed: on Chromium 151.0.7922.137 under Xvfb against the bundled
-      # SwiftShader — this job's own configuration — `CRCBL_WEB_E2E_DEMO=quarry`
-      # and `CRCBL_WEB_E2E_DEMO=lumen` each passed 34 of 34 checks, and quarry
-      # passed 34 of 34 against real hardware as well.
+      # no longer holds, and it was checked rather than assumed: on Chromium
+      # 151.0.7922.137 under Xvfb against the bundled SwiftShader — this job's
+      # own configuration — `CRCBL_WEB_E2E_DEMO=quarry` and
+      # `CRCBL_WEB_E2E_DEMO=lumen` each passed 34 of 34 checks, and quarry passed
+      # 34 of 34 against real hardware as well.
       #
-      # They stay commented out for one remaining reason, and it is not the
-      # ceiling: nobody has run either of them on a GitHub runner. A software
-      # rasteriser on a shared runner is several times slower than the desktop
-      # the measurement above was taken on, and these are the two heaviest frames
-      # the site ships. `docs/backlog.md` carries this as a decision to make with
-      # a real run behind it rather than a guess; until then the two lines below
-      # are the whole of the change.
-      #
-      #     - name: Render lumen in a real browser
-      #       run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
-      #
-      #     - name: Render quarry in a real browser
-      #       run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
+      # What was never measured is a **GitHub runner**, which is a shared machine
+      # several times slower than the desktop those numbers came from, and these
+      # are the two heaviest frames the site ships. quarry goes first because its
+      # own exit criterion names the browser, and it carries a step timeout so
+      # the answer arrives as a number on one step rather than as the 30-minute
+      # job timeout with nothing to read. lumen follows once that number is in.
+      - name: Render quarry in a real browser
+        timeout-minutes: 8
+        run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
