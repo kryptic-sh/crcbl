@@ -121,20 +121,26 @@ hand; that is the right cost for this, not a standing gate.
 form the tree can confirm — say, always with its module path. That is a writing
 convention, and worth proposing only if this rots again.
 
-### Only two backends report a leak at device teardown
+### Three backends report a leak at device teardown; `crcbl-webgpu` does not
 
 `crcbl-vk` has always warned about objects a caller never destroyed, and on
 2026-08-19 it learned to name their kinds and formats — which found four real
 leaks the same afternoon (two in `hal_seam_e2e`, two in `crcbl-vk`'s own mesh
-tests, all fixed). `crcbl-dx12` now carries the same warning. The other two do
-not, and the reasons differ:
+tests, all fixed). `crcbl-dx12` and `crcbl-mtl` now carry the same warning.
+`crcbl-webgpu` does not, and the reason is structural:
 
-- **`crcbl-mtl` has no device `Drop` at all.** Metal objects are ARC-managed
-  through `objc2`, so dropping the pools releases them and nothing is actually
-  leaked in the C sense — but a caller that forgets `destroy_image` still holds
-  a texture for the device's whole life, and nothing says so. Adding the report
-  means adding a `Drop for DeviceInner` purely as a diagnostic. Worth doing;
-  more invasive than dx12's, which had a `Drop` already.
+- **`crcbl-mtl` now has one**, added 2026-08-20: `impl Drop for DeviceInner`
+  counting the same kinds dx12 does, plus `swapchains`, which dx12 has no pool
+  for. Metal objects are ARC-managed through `objc2`, so dropping the pools
+  releases them and nothing is leaked in the C sense — but a caller that forgets
+  `destroy_image` holds a texture for the device's whole life, and until now
+  nothing said so. It takes no wait first, unlike dx12's, because an
+  `MTLCommandBuffer` retains every resource it references — the same fact
+  `crcbl_mtl::device`'s header gives as the reason there is no deletion queue.
+  **Never executed**: it is platform-gated, so the evidence is a cross-target
+  `cargo clippy --all-targets --all-features` on `aarch64-apple-darwin` and
+  nothing more. Whether Metal's suites leak is answered by reading an `mtl e2e`
+  job log for the line, exactly as the dx12 half was answered.
 - **`crcbl-webgpu` has no pools of this shape**, being a command stream rather
   than a handle table, so the check does not translate. What the equivalent
   would be — the browser side reporting objects the stream never freed — is not
@@ -196,11 +202,14 @@ wrong the same way.
 
 **Swept, and this is the only one.** Every other `supportsFamily:` in
 `crcbl-mtl` is a probe printing what a device answers, not a gate deciding a
-capability. Metal's mesh rows in particular do **not** ride a family query —
-they are `Support::No` with "this backend builds no
-`MTLMeshRenderPipelineDescriptor`", which is honestly unwritten work. The
-runner's `Metal3 = false` is why writing them could not be _verified_ here, not
-why they are reported unsupported today, and those are different claims.
+capability. Metal's mesh rows in particular do **not** ride a family query. They
+did read "this backend builds no `MTLMeshRenderPipelineDescriptor`" until the
+mesh slice landed one; `DIVERGENCES` now says the calls exist and no device has
+run them, which is why `crcbl_mtl::adapter` reports no `Features::MESH_SHADER`
+and the rows stay `Unwritten`. The runner's `Metal3 = false` is why they cannot
+be _verified_ here, not why they are reported unsupported today, and those are
+different claims — read `crates/crcbl-hal/src/capability.rs` for the current
+wording rather than this file.
 
 ### What `apps/viewer` still owes sample 05
 

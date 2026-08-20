@@ -1134,6 +1134,64 @@ impl DeviceInner {
     }
 }
 
+impl Drop for DeviceInner {
+    /// **Names what the caller never destroyed.**
+    ///
+    /// `crcbl-vk` has reported this since it was written and found four real
+    /// leaks the afternoon it learned to name kinds rather than count;
+    /// `crcbl-dx12` carries the same message, and this backend had none, so a
+    /// handle nobody destroyed was invisible on Metal alone. Same wording and
+    /// same shape as the other two, so a reader who knows one knows all three.
+    ///
+    /// **Nothing is leaked in the C sense and this is still worth saying.**
+    /// Every pool entry holds a `Retained`, so dropping the pools releases the
+    /// objects and ARC frees them; what the count describes is a caller that
+    /// held a texture for the device's whole life, which on a long-lived device
+    /// is the same growth by another name.
+    ///
+    /// **There is no wait here, and that is the one difference from
+    /// `crcbl-dx12`.** That backend waits on its fence first because releasing
+    /// a D3D12 resource the queue is still reading is a use-after-free. Metal
+    /// does not have that hazard — an `MTLCommandBuffer` retains every resource
+    /// it references, which is the same fact this module's header gives as the
+    /// reason there is no deletion queue — so a resource released here outlives
+    /// the work reading it. That stops holding the day
+    /// `commandBufferWithUnretainedReferences` is used, and the header says so
+    /// in the same place.
+    fn drop(&mut self) {
+        let state = self.state();
+        let kinds = [
+            ("buffer", state.buffers.len()),
+            ("image", state.images.len()),
+            ("image view", state.views.len()),
+            ("sampler", state.samplers.len()),
+            ("command buffer", state.command_buffers.len()),
+            ("readback", state.readbacks.len()),
+            ("semaphore", state.semaphores.len()),
+            ("query set", state.query_sets.len()),
+            ("shader module", state.shader_modules.len()),
+            ("bind group layout", state.bind_group_layouts.len()),
+            ("bind group", state.bind_groups.len()),
+            ("pipeline layout", state.pipeline_layouts.len()),
+            ("graphics pipeline", state.graphics_pipelines.len()),
+            ("compute pipeline", state.compute_pipelines.len()),
+            ("swapchain", state.swapchains.len()),
+        ];
+        let live: usize = kinds.iter().map(|(_, count)| count).sum();
+        if live > 0 {
+            let named = kinds
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(kind, count)| format!("{count} {kind}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            crcbl_core::log::warn!(
+                "crcbl-mtl: {live} object(s) still alive at device teardown ({named})"
+            );
+        }
+    }
+}
+
 /// The "this slice has not arrived" answer, in one place so the voice is
 /// uniform across the whole trait.
 fn not_yet(what: &'static str) -> HalError {

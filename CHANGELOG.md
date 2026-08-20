@@ -631,6 +631,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-mtl` reports objects a caller never destroyed.** `DeviceInner` had no
+  `Drop` at all, so Metal was the one backend where a handle nobody destroyed
+  was invisible — `crcbl-vk` has warned since it was written and `crcbl-dx12`
+  since 2026-08. Same message and same kinds as the other two:
+  `N object(s) still alive at device teardown (7 image, 7 image view)`. ARC
+  frees the objects either way, so this is a diagnostic rather than a repair,
+  and it warns rather than failing anything.
+
 - **`crcbl-vk`'s teardown leak warning names what leaked.** It said
   `N object(s) still alive at device teardown`, which tells a reader that
   something leaked and nothing about where to look — the suites that trip it
