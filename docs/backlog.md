@@ -5675,7 +5675,7 @@ it costs is **tree quality**, not answers.
   the query-cost difference between the two. The horde sample (P8, 10k bodies)
   is where that stops being academic.
 
-## `GameModule::tick` runs after the ECS sweep, so a game's destructions lag
+## DECISION NEEDED — `GameModule::tick` runs after the ECS sweep, and the snapshot ships the dead
 
 `crcbl_ecs::World::tick` runs the schedule and then `sweep`s the deferred
 destruction queue. `crcbl_server::Server::tick` calls `world.tick()` **and
@@ -5689,13 +5689,30 @@ Found by asteroids, whose leak test compares `entity_count()` against
 `World::dead_queue_len()` to the sum. `apps/flappy`'s equivalent test asserts a
 `<=` ceiling, which tolerated this without noticing it.
 
-Two possible fixes, and the choice is the engine's:
+**The snapshot half is a defect, not a surprise, and that was checked rather
+than assumed.** `World::despawn` only _marks_: it pushes to the dead queue and
+the entity stays in the pool **and in every system's storage** until `sweep`.
+`Server::tick` runs `world.tick()`, then `module.tick(&mut world)`, then
+`emit_snapshot()` — so a snapshot is serialised in the window where the module's
+destroyed entities are still live storage, and a client receives entities the
+server has already destroyed. One tick later they vanish with no despawn having
+been replicated in between.
 
-- **Sweep after the module**, i.e. `Server::tick` calls `world.sweep()` between
-  the module and `emit_snapshot`. Arguably more correct anyway: today's snapshot
-  is emitted while entities the module destroyed are still in the pool.
-- **Leave it and document it**, and have `World::entity_count` grow a sibling
-  that excludes the queue, so a consumer is not obliged to know.
+That collapses one of the two options rather than choosing between them:
+
+- **Sweep after the module** — `Server::tick` calls `world.sweep()` between the
+  module and `emit_snapshot`. One line, and it is the only option that fixes the
+  wire. What it changes: a game that despawns in `GameModule::tick` and then
+  reads the entity back before the next tick stops being able to, which is a
+  semantic dependency no test here asserts but a game could hold.
+- **Leave it and document it**, giving `World::entity_count` a sibling that
+  excludes the queue. This is worth doing either way for the count, but on its
+  own it leaves the snapshot wrong — so it is no longer an alternative to the
+  first, only a companion to it.
+
+**Why this is still the owner's call and not a drive-by fix:** it changes when
+replication observes a destruction, which is engine semantics rather than a bug
+in one call site.
 
 Not worked around in asteroids beyond making the test honest. **Horde hits it
 harder**: its leak invariant is checked on every tick of a soak, and the queue
