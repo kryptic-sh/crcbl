@@ -10440,30 +10440,15 @@ Nothing observable is known to be wrong today, which is why this is a decision
 and not an incident. But it is a documented contract nothing enforces, and the
 culling bug is what happens when one of those goes unexamined for long enough.
 
-## An audio test fails intermittently under a loaded full-suite run
-
-`apps/asteroids`'
-`audio::tests::the_engine_is_one_looping_voice_that_outlives_its_buffer` fails
-inside a full `cargo test` with "the engine's release block was cut", and passes
-in isolation and on most full-suite runs. This entry previously said it had
-happened once and asked for a second sighting to make it a pattern. **The second
-sighting has arrived**: it fired again during a `cargo test --all-features`
-sweep, with the same assertion, and the very next run of the same command was
-green (`3402 passed`). Nothing near it had changed either time.
-
-Both sightings were under a **full workspace** run rather than a targeted one,
-which is the only correlation there is so far. That points at a timing
-assumption rather than at the audio maths: the assertion is about a release
-block surviving, and a suite that is loading every core is where a voice that
-depends on wall-clock progress would get cut. Nobody has read the test with that
-hypothesis in hand, and it is a cheap thing to do — the alternative is that it
-keeps costing a random CI run.
-
-Not diagnosed, and deliberately not "fixed" by rerunning: this is now the second
-intermittent failure in the tree whose entry says "recorded so a second sighting
-is a pattern", and both have since repeated.
-
 ## One primitive shades black on Windows lavapipe, intermittently
+
+**This is now the tree's only open intermittent failure.** Its sibling — an
+asteroids audio test that dropped a voice's release block — was closed by
+`777abb1` on 2026-08-17, and its entry sat here claiming to be undiagnosed until
+2026-08-20 because nobody deleted it. Worth knowing before reading this one: the
+audio entry's hypothesis (a timing assumption under load) was **wrong**, and the
+real cause was two consumers of one mixer. So "it only fails under a loaded run"
+is a correlation that pointed at the wrong thing once already.
 
 `depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
 fails on `vk e2e (lavapipe, windows)` with `[0, 0, 0, 255]` at the centre pixel,
