@@ -733,7 +733,10 @@ jobs:
             label: macos
             adapter: hardware
             excuse: ''
-            timeout: 45
+            # Ten more than Linux: this leg also builds `crcbl-cli` natively and
+            # renders eleven reference screenshots through Metal for the
+            # cross-backend step.
+            timeout: 55
           # Windows takes SwiftShader like Linux, so it asks the same rasteriser
           # the same question on a different OS: what it can catch is the wasm,
           # the browser and the platform plumbing, not a third rasteriser.
@@ -894,6 +897,32 @@ jobs:
         env:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: ./web/run-cross-backend-e2e.sh --reference vk --expect-fail ssr,ui
+
+      # **The strongest form of the same question, and the reason this leg is
+      # worth its runner minutes.** On Linux the browser renders on SwiftShader
+      # and the reference on lavapipe: two software rasterisers, so `ssr` and
+      # `ui` have to be excused there. Here both halves are **the same Metal
+      # device** — the harness above ran at `adapter hardware`, and this renders
+      # the same eleven scenes natively through `CRCBL_GPU=mtl` on the machine
+      # that just drew them. Same GPU, same driver, no committed reference
+      # between them that could have drifted with both.
+      #
+      # **So it carries no `--expect-fail`**, and that is a claim rather than an
+      # omission: run 32387226623's macOS leg matched **11 of 11** goldens with
+      # no excuse list, so a mismatch here is a disagreement between this
+      # backend and `crcbl-mtl` on one device, which is exactly what this gate
+      # is for. If one ever appears, the answer is to read the diff artifact,
+      # not to add a name here.
+      #
+      # This is also the heir to `cross-backend image compare (vk vs wgpu)` on a
+      # second platform: eleven scenes rather than three, and a browser against a
+      # genuinely separate implementation rather than a second abstraction over
+      # one driver. It reuses the readbacks the step above produced, so neither
+      # the wasm build nor the browser run is repeated — what it adds is a native
+      # `crcbl-cli` build and eleven screenshots.
+      - name: Hold the browser's pixels against Metal's
+        if: runner.os == 'macOS'
+        run: ./web/run-cross-backend-e2e.sh --reference mtl
 
       # The rendered frame, the golden and the diff, for every scene that did
       # not match — including the two excused ones, whose numbers are the record
