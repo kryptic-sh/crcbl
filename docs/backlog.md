@@ -629,8 +629,10 @@ carries `#[deny(clippy::wildcard_enum_match_arm)]` so a new variant fails to
 compile until each answers, `crates/crcbl/tests/hal_seam_e2e.rs` drives the enum
 in both directions, and `REVIEWED_BLOCKERS` plus
 `the_parity_blockers_are_exactly_the_reviewed_list` is the reviewed exception
-list. What is left of step 4 is the six rows in "The numbers, restated" below —
-none of which can be finished on the hardware available here — and step 5.
+list. What is left of step 4 is the rows in `REVIEWED_BLOCKERS` itself — none of
+which can be finished on the hardware available here — and step 5. The section
+that used to restate them here is gone, for the reason two paragraphs above
+gives.
 
 **"In both directions" was only half true until 2026-08-20**, and it is worth
 knowing how it was false, because the shape recurs. A backend that supports
@@ -2245,8 +2247,11 @@ reference's rasteriser.
 replaces compares three at two. Nothing has been deleted yet: the vk↔wgpu job
 stays until `crcbl-wgpu` goes, and this runs beside it.
 
-The remaining half of the deletion bar is the parity blockers, which are four
-rows of hardware nobody here has — see "The numbers, restated".
+The remaining half of the deletion bar is the parity blockers, all of them rows
+of hardware nobody here has. The count is deliberately not written here — it has
+been wrong in this file twice. `REVIEWED_BLOCKERS` in
+`crates/crcbl-hal/src/capability.rs` is the list, and
+`the_parity_blockers_are_exactly_the_reviewed_list` fails when it drifts.
 
 ### The render-harness job fails at browser launch about a third of the time
 
@@ -2758,8 +2763,10 @@ nothing on the queue will ever produce and opens it from the test thread.
 **`BindlessDescriptorArray` left it** when `bindless_probe.slang` and
 `exercise_bindless_descriptor_array` landed — the first committed artifact in
 the tree to declare a resource array. What that leaves open is one arm nobody
-here can run: see "The bindless exercise has never reached a D3D12 device"
-below.
+here can run — the exercise has reached no D3D12 device. The entry that carried
+it has been deleted; what is still true is that `crcbl-dx12` reports
+`Features::DESCRIPTOR_INDEXING` and no run here has driven the exercise through
+it, so the D3D12 half is compile-verified only.
 
 **The residual risk, written down rather than assumed away.** A backend that
 accepts such a wait and then never releases it stops its queue with nothing in
@@ -4450,11 +4457,12 @@ phase attached to it.
   a bug the compiler cannot see" — reintroduced knowingly when `Sprite` gained a
   constructor, because the alternative (defaulting `uv` to the whole sheet)
   trades a swapped-argument wrong picture for a silently-whole-sheet one. What
-  catches it today: `the_instance_layout_is_exactly_what_the_shader_reads`
-  asserts the two lanes at their byte offsets from distinct values, and the
-  sprite goldens catch it at any call site the golden scenes reach. **A call
-  site no golden covers is not covered** — every sample's `art.rs` is in that
-  set.
+  catches it today: `an_instance_is_four_float4s_in_the_order_the_shader_reads`
+  (`crates/crcbl-render/src/sprite_pass.rs`) asserts the two lanes at their byte
+  offsets from distinct values — built through `Sprite::new`, so the swap it
+  guards against is the constructor's own — and the sprite goldens catch it at
+  any call site the golden scenes reach. **A call site no golden covers is not
+  covered** — every sample's `art.rs` is in that set.
 
   The real fix is newtypes — a `WorldRect` and a `SheetUv`, so the compiler
   refuses the swap — and it ripples through every `[f32; 4]`-returning helper in
@@ -8639,11 +8647,14 @@ the rest of that entry's list still stands.
 ### Fixed sleeps left in tests the assert-nothing slice did not own
 
 The slice that gave the assert-nothing tests real assertions removed two fixed
-sleeps as part of the work — `jitter_does_not_panic`'s 50 ms in
-`crcbl-net/src/condition.rs` and `null_stream_runs_without_error`'s 20 ms in
-`crcbl-audio/src/lib.rs`, both now poll-with-deadline. Its brief named those two
-tests, so the neighbours that sleep the same way were left alone and are
-recorded here rather than left to be re-derived:
+sleeps as part of the work — `absurd_latency_and_jitter_do_not_panic`'s 50 ms in
+`crcbl-net/src/condition.rs` and
+`the_null_stream_fills_its_source_until_it_is_dropped`'s 20 ms in
+`crcbl-audio/src/lib.rs`, both now poll-with-deadline. (This entry named both by
+their pre-rename names until 2026-08-20, while quoting the second one's current
+name six lines further down.) Its brief named those two tests, so the neighbours
+that sleep the same way were left alone and are recorded here rather than left
+to be re-derived:
 
 - **`source_fill_receives_stereo_buffer`** (`crcbl-audio/src/lib.rs`) sleeps 30
   ms and drops the stream. Its `CheckSource::fill` asserts the rate and the
@@ -11652,9 +11663,15 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   because no device in this tree clamps any of the three effects. It is the same
   shape as the shadow-atlas rule considered and declined below: the arm exists
   and nothing can reach it here.
-- **The Pages web demo shipped**, and what is left of it is one thing: the
-  browser gate cannot run on a software adapter. See "lumen's browser gate needs
-  a real GPU" below.
+- **The Pages web demo shipped, and the software-adapter blocker is gone.** This
+  bullet pointed at an entry called "lumen's browser gate needs a real GPU",
+  which was deleted when the cause was: `crcbl-render`'s draw-argument pass
+  bound fourteen storage buffers against SwiftShader's ceiling of ten and binds
+  eight now. Measured 2026-08-20 — `CRCBL_WEB_E2E_DEMO=lumen` passes 34 of 34 on
+  Chromium under Xvfb against bundled SwiftShader. What is left is only whether
+  a GitHub runner is fast enough to host it; quarry's step went first to answer
+  that, and "DECISION NEEDED — add the `lumen` and `quarry` browser steps to
+  Pages CI?" carries it.
 - **Sound.** Rule 8 says no sample ships silent after P4A. lumen has no audio at
   all, and it is not obvious it should: it is an acceptance fixture with no
   events, and `hud` — the other fixture — is the precedent for a sample with no
@@ -11668,10 +11685,11 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
 - **The sun's shadow peter-pans at contacts.** A lit strip along the foot of
   every wall the sun should be shadowing, and a sawtoothed band at the head of
   the back wall where the ceiling should be. **Diagnosed and largely fixed** —
-  see "the sun's shadow still peter-pans" below. It was one defect rather than
-  the two this bullet used to claim, and the strip was 0.60 m rather than the
-  "metre wide" it said, a figure that had reached `room.rs`'s `SHADED_FLOOR` doc
-  comment and is corrected in both places.
+  see "The sun's shadow peter-pans on a facet seam, at 0.26 m (2026-08-14)"
+  below. It was one defect rather than the two this bullet used to claim, and
+  the strip was 0.60 m rather than the "metre wide" it said, a figure that had
+  reached `room.rs`'s `SHADED_FLOOR` doc comment and is corrected in both
+  places.
 - **A single-quad wall casts no shadow at all.** Back faces are culled in the
   shadow pass as well as the colour one, so an inward-facing quad is invisible
   to the sun. lumen's first frame was an evenly lit floor with a window that did
