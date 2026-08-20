@@ -63,6 +63,64 @@ selector in the engine.
    comparison.
 4. Skinned and tiling cases; Pages demo with recorded browser budget.
 
+## Measured
+
+Taken 2026-08-20 on an AMD Radeon RX 7900 XTX (RADV NAVI31, Mesa 26.1.7-arch1.1)
+by `apps/quarry/tests/device/`, which is where each number can be reproduced.
+The exit criteria below ask for them here rather than in a commit message, so
+here they are — and where a criterion asks for a **human** to look, this section
+says so instead of standing in for one.
+
+**The face.** 8192 triangles at level 0, one instance of one mesh. The uniform
+cut at a 16 px budget draws level 1, 4096 triangles.
+
+**Where the reduction comes from — `all_of_the_reduction_is_cluster_culling`.**
+Over seven reported frames down the fixed dolly the camera's instance cull kept
+**1 of 1 every time**, and the amplification stage kept 26 to 34 clusters. All
+of the reduction is cluster culling, and the reason is the scene rather than the
+renderer: quarry places one instance, so the instance cull has one thing to
+decide about. A scene wanting both numbers to be interesting needs more
+instances, which is horde's job and not this sample's.
+
+**Which test does the rejecting —
+`the_three_cluster_counts_add_up_to_the_cut_they_were_taken_over`.** Standing at
+the dolly's far end at a 256 px budget, the descent chose a cut of **58**
+clusters (`[15, 31, 12, …]` finest level first), and the amplification stage
+answered: **30 kept, 28 rejected by the frustum, 0 by the normal cone.** The
+three partition the cut, which is what that test asserts.
+
+**The cone rejects nothing on this face, and that is the correct answer.**
+Measured separately by pinning the eye underneath the surface so every cluster
+faces away from its viewer: clusters kept moved from 44 to 42, and covered
+pixels not at all. A rough surface gives clusters cones wider than a hemisphere,
+which `crcbl_shaders::meshlet::ClusterBounds::cone_cutoff` records as a cutoff
+at or below zero and `cluster_survives` skips outright. The value of the split
+is that the panel can now _say_ the cone did nothing; before it could only say
+30 of 58 survived, which is equally consistent with the cone doing all of the
+work.
+
+**The three paths against each other**, from the committed goldens rather than
+from a device, so any reader can reproduce it:
+
+| dolly stop            | mesh-shader against either indirect path     |
+| --------------------- | -------------------------------------------- |
+| start (standing back) | 233 px differ (0.47%), max channel delta 118 |
+| end (inside the face) | 0 px differ                                  |
+
+The two indirect paths are identical to each other at both stops, which is
+expected: they run the same per-instance selection through different draw
+machinery. The difference is at the **far** stop, not the near one — standing
+back, screen-space error varies most across a face that recedes 180 m, so
+per-cluster selection has the most to disagree with per-instance selection
+about; inside the quarry everything is at the finest level and all three draw
+the same triangles.
+
+**What no measurement can close, stated as owed rather than met:** whether those
+233 pixels read as "the same scene at the same budget" is a judgement, and the
+seam review — UV and normal seams held, material boundaries preserved through
+collapses — asks for a human to look at `quarry_face(CELLS)` and `quarry_tile`.
+Neither has been done. `docs/backlog.md` carries both.
+
 ## Exit criteria
 
 - Golden frames per `GeometryPath` from the fixed dolly, and the human-reviewed

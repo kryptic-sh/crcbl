@@ -2013,7 +2013,9 @@ it, forced by subtracting features from one adapter.
   What is still owed is the _review_: 233 pixels at a max delta of 118 is a real
   silhouette difference, and whether it reads as "the same scene at the same
   budget" is a judgement no tolerance makes. The images are
-  `apps/quarry/tests/golden/`.
+  `apps/quarry/tests/golden/`. The table itself now lives in
+  `docs/plan/sample/14-quarry.md`'s Measured section, which is where that
+  document's own exit criteria ask for it.
 
 - **The LOD tint and the screen-error heatmap are both built.**
   `ForwardRenderer::set_lod_view` tints each cluster by the DAG level it was
