@@ -85,14 +85,34 @@ function pause(ms) {
 
 // `findBrowser`, the flag builder and the kill are in
 // `web/tools/browser-launch.mjs`, shared with the two gates beside this one.
-// **`swiftshader` is pinned rather than left to resolve**: this harness renders
+//
+// **`swiftshader` is the default and stays the default**: this harness renders
 // offscreen and compares every scene against a golden image, so it is asking a
 // specific rasteriser for pixels a comparator will hold to a tolerance, and
 // which device produced them is not a detail to leave to the machine.
+//
+// **It is a default rather than a pin since 2026-08-20, and only because one
+// platform has no such device.** Chrome's Dawn has no Vulkan backend on macOS
+// and therefore no software adapter at all — `web/tools/probe-e2e.mjs` carries
+// that table — so a pinned SwiftShader is not "the deterministic choice" there,
+// it is "this harness cannot run". `hardware` exists for that case and changes
+// what the run means: the pixels come from the machine's own GPU, so comparing
+// them against a golden blessed on lavapipe is a tolerance question nobody has
+// answered. The intended use is to compare them against **that machine's own
+// native backend** instead — `web/run-cross-backend-e2e.sh --reference mtl` —
+// which needs no committed reference and so cannot drift with one.
+const ADAPTER = process.env.CRCBL_WEB_E2E_ADAPTER ?? 'swiftshader';
+if (!['hardware', 'swiftshader'].includes(ADAPTER)) {
+  fail(
+    `CRCBL_WEB_E2E_ADAPTER must be hardware or swiftshader, got "${ADAPTER}" ` +
+      `— there is no \`auto\` here, because a harness that silently changed ` +
+      `rasteriser would change what its comparison means without saying so`
+  );
+}
 
 async function launch(binary) {
   const profile = mkdtempSync(join(tmpdir(), 'crcbl-harness-e2e-'));
-  const flags = browserFlags({ profile, mode: 'swiftshader' });
+  const flags = browserFlags({ profile, mode: ADAPTER });
   const child = spawn(binary, [...flags, 'about:blank'], {
     stdio: ['ignore', 'ignore', 'pipe'],
     detached: true,
@@ -337,6 +357,12 @@ async function main() {
     fail(`${site}/harness/index.html not found — build the site first`);
   }
   mkdirSync(readbackDir, { recursive: true });
+
+  // **Printed, because which rasteriser produced these pixels decides what the
+  // comparison downstream means.** A run that quietly changed adapter would
+  // change the meaning of every scene's verdict without saying so, which is the
+  // whole reason there is no `auto` here.
+  console.log(`render-harness-e2e: adapter ${ADAPTER}`);
 
   const server = await serve(site, { host: '127.0.0.1' });
   const browser = await launch(findBrowser(fail));

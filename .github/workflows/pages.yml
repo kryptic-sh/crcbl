@@ -733,8 +733,53 @@ jobs:
   #
   # `docs/backlog.md` is where enabling either belongs until someone runs it.
   render-harness:
-    name: hold the browser's pixels against the goldens
-    runs-on: ubuntu-latest
+    name: hold the browser's pixels against the goldens (${{ matrix.label }})
+    # **Three operating systems, because `crcbl-webgpu` ships in a browser and a
+    # browser is not one platform.** Until 2026-08-20 this job was Linux-only, so
+    # the only gate anywhere that holds a browser's *pixels* against the goldens
+    # answered for one OS and one Chromium.
+    #
+    # `fail-fast: false` so a leg that goes red does not take the other two with
+    # it. Each leg is a different question, and losing two answers to learn one
+    # is a bad trade on runners this slow.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is the leg that has always run, and nothing about it changes:
+          # SwiftShader, and the two scenes a software rasteriser cannot serve.
+          - os: ubuntu-latest
+            label: linux
+            adapter: swiftshader
+            excuse: --expect-fail ssr,ui
+          # **macOS runs on the machine's own GPU, and gates all eleven.** Not a
+          # preference — Chrome's Dawn has no Vulkan backend on macOS and so has
+          # no software adapter at all, which is why `web/tools/probe-e2e.mjs`'s
+          # table says `auto` resolves to hardware there. Measured on 2026-08-20
+          # before this leg was written: the same harness in `hardware` mode on
+          # an RX 7900 XTX matches **11 of 11** goldens at `Tolerance::RASTERISER`
+          # — `ssr` and `ui` included, so those two are a SwiftShader limit and
+          # not a browser-backend defect. That is why this leg carries no excuse
+          # list and is the *stronger* of the three. If Metal turns out to differ
+          # on a scene, the answer is a measured excuse here, not a wider
+          # tolerance.
+          - os: macos-15
+            label: macos
+            adapter: hardware
+            excuse: ''
+          # Windows takes SwiftShader like Linux, so it asks the same rasteriser
+          # the same question on a different OS: what it can catch is the wasm,
+          # the browser and the platform plumbing, not a third rasteriser.
+          # Hardware is not an option — the probe job's first run died at
+          # `requestAdapter() returned no adapter`, so a GPU-less
+          # `windows-latest` exposes no WebGPU through D3D at all. This harness
+          # never touches a canvas, which is the one thing SwiftShader breaks
+          # there, so the probe's excused X, Y, Z and AA have no bearing here.
+          - os: windows-latest
+            label: windows
+            adapter: swiftshader
+            excuse: --expect-fail ssr,ui
+    runs-on: ${{ matrix.os }}
     # Longer than `build`'s: this one compiles `render-harness` twice, once to
     # wasm and once for the host, and the host half pulls in the native backend.
     timeout-minutes: 45
@@ -747,7 +792,7 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: render-harness
+          shared-key: render-harness-${{ matrix.label }}
 
       - uses: actions/setup-node@v7
         with:
@@ -765,14 +810,18 @@ jobs:
       # CI run failed there rather than on any golden. `mesa-vulkan-drivers` and
       # `libvulkan1` are the second comparison's: the cross-backend step below
       # renders each scene through `CRCBL_GPU=vk` on lavapipe, and this job had
-      # no Vulkan at all.
+      # no Vulkan at all. Linux only — the other two legs build the comparator
+      # against their own platform's audio and GPU stacks, which ship with the
+      # image.
       - name: Install the ALSA headers and a Vulkan driver
+        if: runner.os == 'Linux'
         timeout-minutes: 8
         uses: ./.github/actions/apt-packages
         with:
           packages: libasound2-dev libvulkan1 mesa-vulkan-drivers
 
       - name: Check the browser gate's assumptions
+        if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
@@ -782,8 +831,62 @@ jobs:
           fi
           echo "browser: $browser ($("$browser" --version))"
 
+      # The same discovery `probe-macos` does, and for the same reason: this
+      # image ships Chrome in `/Applications` rather than on the path.
+      - name: Check the browser gate's assumptions
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          if [ ! -x "$chrome" ]; then
+            echo "::error::no Google Chrome at $chrome. The macOS image is assumed to ship it."
+            exit 1
+          fi
+          echo "browser: $chrome ($("$chrome" --version))"
+          echo "CRCBL_CHROMIUM=$chrome" >> "$GITHUB_ENV"
+
+      # The same discovery `probe-windows` does, registry first. `chrome.exe
+      # --version` writes nothing to a console on Windows — it is a
+      # GUI-subsystem binary — so the version comes off the file itself.
+      - name: Check the browser gate's assumptions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $keys = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe'
+          )
+          $chrome = $null
+          foreach ($key in $keys) {
+            $value = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).'(default)'
+            if ($value -and (Test-Path -LiteralPath $value)) { $chrome = $value; break }
+          }
+          if (-not $chrome) {
+            $chrome = Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+          }
+          if (-not (Test-Path -LiteralPath $chrome)) {
+            Write-Output "::error::no Chrome in the registry under App Paths, and none at $chrome. The Windows image is assumed to ship it."
+            exit 1
+          }
+          $version = (Get-Item -LiteralPath $chrome).VersionInfo.ProductVersion
+          Write-Output "browser: $chrome ($version)"
+          "CRCBL_CHROMIUM=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # `shell: bash` on every leg, so one script runs everywhere; on Windows
+      # that is Git Bash. `SITE_DIR` is spelled through `pwd -W` there for the
+      # reason the probe job gives: Node is a native Windows binary and would
+      # resolve this shell's `/d/a/crcbl/...` against the current drive root.
       - name: Compare every golden scene rendered in a browser
-        run: ./web/run-render-harness-e2e.sh --expect-fail ssr,ui
+        shell: bash
+        env:
+          CRCBL_WEB_E2E_ADAPTER: ${{ matrix.adapter }}
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            export SITE_DIR="$(pwd -W)/target/render-harness-site"
+          fi
+          ./web/run-render-harness-e2e.sh ${{ matrix.excuse }}
 
       # **The same readbacks, held against a native backend instead of a
       # committed image.** The step above asks "does the browser draw the
@@ -802,7 +905,16 @@ jobs:
       # and the two that do not are the same `ssr` and `ui` — tighter than the
       # golden comparison rather than looser, `ssr` differing in 1355 pixels
       # here against 25611 there.
+      #
+      # **Linux only for now**, and that is a scope line rather than a limit:
+      # `--reference mtl` on macOS and `--reference dx12` on Windows would each
+      # compare a browser against its own platform's native backend on the same
+      # machine, which is stronger still. Measured on 2026-08-20 that the shape
+      # works with a hardware-rendered browser — the harness in `hardware` mode
+      # on an RX 7900 XTX matched native vk on **11 of 11** scenes — so what is
+      # left is the per-OS wiring, not the idea. `docs/backlog.md` carries it.
       - name: Hold the browser's pixels against vk's
+        if: runner.os == 'Linux'
         env:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: ./web/run-cross-backend-e2e.sh --reference vk --expect-fail ssr,ui
@@ -815,7 +927,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: render-harness-golden-diff
+          name: render-harness-golden-diff-${{ matrix.label }}
           path: target/golden-diff
           if-no-files-found: warn
           retention-days: 7
