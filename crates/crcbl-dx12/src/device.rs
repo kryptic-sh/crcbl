@@ -5923,6 +5923,87 @@ pub(crate) mod tests {
         probe.destroy(&device);
     }
 
+    /// **Scale, which is what is left once the pipeline shape is eliminated.**
+    ///
+    /// The three siblings above drive every combination of {direct, indirect} x
+    /// {mesh only, amplified} and WARP survives all four — but each dispatches
+    /// **one** group, and `crcbl-render`'s frame dispatches one per (cluster,
+    /// surviving instance). So "the shape is fine and the size is not" is the
+    /// next thing worth ruling in or out, and it is one number.
+    ///
+    /// [`MANY_GROUPS`] amplification groups, each running the same `taskMain`
+    /// that emits one mesh group, through the same indirect path. Every group
+    /// draws the same triangle over the same pixels, so the assertions do not
+    /// change: what changes is how much work one `ExecuteIndirect` asks for.
+    ///
+    /// A failure here says the renderer's mesh frame dies of *size* — which
+    /// would make the fix a dispatch bound rather than a call to avoid. A pass
+    /// leaves `mesh_cluster.slang` itself: its groupshared use, its payload, and
+    /// the bindless heap the toy shader here does not touch.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it — this crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn many_indirect_amplification_groups_do_not_remove_the_device() {
+        let (_instance, device) = open_device();
+        let probe = MeshProbe::new(&device);
+
+        let extents: Vec<u8> = [MANY_GROUPS, 1, 1]
+            .iter()
+            .flat_map(|n| n.to_le_bytes())
+            .collect();
+        let args = indirect_buffer(&device, "many amplified groups", &extents);
+
+        let drawn = probe.frame(
+            &device,
+            "mesh_shader amplified indirect at scale",
+            Some("taskMain"),
+            "amplifiedMeshMain",
+            |encoder| {
+                encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                    args,
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 0,
+                });
+            },
+        );
+
+        // Identical to the one-group case: every group draws the same triangle,
+        // so more of them changes the work and not the picture.
+        assert_eq!(texel(&drawn, 0, 0), CLEAR_TEXEL, "top-left corner");
+        assert_eq!(
+            texel(
+                &drawn,
+                SQUARE.width as usize - 1,
+                SQUARE.height as usize - 1
+            ),
+            CLEAR_TEXEL,
+            "bottom-right corner"
+        );
+        assert_ne!(
+            texel(&drawn, 32, 32),
+            CLEAR_TEXEL,
+            "{MANY_GROUPS} amplification groups emitted nothing over the centre"
+        );
+
+        device.destroy_buffer(args);
+        probe.destroy(&device);
+    }
+
+    /// Amplification groups [`many_indirect_amplification_groups_do_not_remove_the_device`]
+    /// asks one `ExecuteIndirect` for.
+    ///
+    /// Well inside D3D12's `DispatchMesh` bound — each of X, Y and Z is capped
+    /// at 65535 and their product at 2^22 — so this is a size a conforming
+    /// device must serve, not a limit being probed. It is chosen to be far more
+    /// than the one group the siblings dispatch and comparable to the cluster
+    /// counts `crcbl-render` reaches on a real scene.
+    const MANY_GROUPS: u32 = 1024;
+
     /// The index pool every indexed draw below reads, and the decoy in front of
     /// it.
     ///
