@@ -12237,13 +12237,32 @@ Note the sharper version of the same problem: on this run the paused check
 `TICK_WINDOW_MS`'s own comment says the group's first check exists to stop
 exactly that, and it did — it is what went red.
 
-**What closes this: derive the window from the demo's observed heartbeat.** Poll
-for the first two HUD lines against a generous deadline, take the interval
-between them, and size both the running and the paused windows from it. That is
-stronger than the constant on every machine rather than tuned for one, and it is
-what makes the paused check mean something on a slow runner. Both demos' steps
-go back in once it is in — lumen's evidence is the same 34/34 local run quarry's
-was, and neither has been tried on a runner since.
+**The window is now derived from the demo's observed heartbeat.** `heartbeatMs`
+in `web/tools/browser-e2e.mjs` waits for two HUD lines against a deadline and
+times the gap; `TICK_WINDOW_MS` became the **floor** and the window is
+`max(floor, beat * TICK_WINDOW_BEATS)`. A fast machine is unchanged — breakout
+measures a 97 ms beat here and still watches for the floor's four seconds — and
+a slow one watches longer. The floor is what stops it going the other way:
+shortening the window on a fast machine would make "a paused demo runs no ticks
+at all" easier to satisfy, which is the one direction this must not move.
+
+It is bounded rather than open-ended: the beat is measured under
+`HEARTBEAT_DEADLINE_MS` (60 s, itself clamped by `--timeout`), so the window
+cannot exceed twice that and the two windows cannot add more than four minutes
+to a step, on a machine where nothing would have passed anyway.
+
+Verified 2026-08-20: breakout 44/44 with the beat reported in the check's
+message. Red-checked twice — pointing `hud()` at a string nothing logs fails the
+control with `no second HUD line in 20000 ms`, and keeping every fortieth line
+to stretch the beat to 40 s produced an 80 s window on both later checks, with
+the paused one still reading zero and the resumed one two.
+
+**What is still owed: a runner run.** The change is proven on this desktop and
+on a synthetically slowed beat, not on the machine it was written for. Putting
+quarry's step back is the measurement, and lumen's follows it. Also untouched
+and worth knowing: group F still pauses for the bare `TICK_WINDOW_MS` twice, in
+horde's two-finger checks — those wait for a _stopped_ thing to stay stopped, so
+a fixed window is not the same defect, but it is the same constant.
 
 **Both stale prose claims are fixed**: `web/pages/index.html`'s excusing clause
 and `web/pages/lumen.html`'s "This one wants a real GPU" note, which said the

@@ -457,16 +457,45 @@ const BACKDROP_SAMPLES = 8;
 const CULL_STATS_LINE = /cull stats: frame \d+ kept \d+ instances/;
 
 /**
- * How long the focus/pause group watches for a HUD heartbeat.
+ * The **floor** on how long the focus/pause group watches for a HUD heartbeat.
  *
  * Both samples log one every sixty ticks — a second of *simulated* time. Under
  * SwiftShader a frame is slow enough that the accumulator's 64 ms clamp makes
  * simulated time run behind wall time, so the window is several times that
- * second rather than a hair over it. The group's first check is the control
- * that keeps this number honest: a window too short to hold a heartbeat fails
- * there rather than making "a paused demo runs no ticks" pass for free.
+ * second rather than a hair over it.
+ *
+ * **It used to be the whole window, and that was a constant tuned for one
+ * machine.** On a GitHub runner quarry's frames are slow enough that a
+ * heartbeat does not reliably land inside four seconds — measured 2026-08-20,
+ * Pages run 32363651779 — so both of this group's heartbeat checks read
+ * `0 HUD line(s) in 4000 ms`, and "a paused demo runs no ticks at all" passed
+ * for free on a run where no heartbeat could appear in any state. Raising the
+ * number would buy that runner and lose the next slower one, so the window is
+ * derived from the demo's own observed beat instead — see [`heartbeatMs`] — and
+ * this is only the lower bound, so no machine gets a *shorter* window than the
+ * constant already gave it.
  */
 const TICK_WINDOW_MS = 4_000;
+
+/**
+ * How many observed beats a watch window spans.
+ *
+ * Two rather than one because the phase is unknown: a window exactly one beat
+ * long, started at an arbitrary moment, holds a beat only if the timing is
+ * kind. Two guarantees one whichever way the phase falls, whatever it does to
+ * the "paused" check's patience.
+ */
+const TICK_WINDOW_BEATS = 2;
+
+/**
+ * How long the run waits for two heartbeats before calling the tick loop dead.
+ *
+ * Generous, because the whole point is that this machine's pace is unknown; the
+ * check it feeds is what fails when nothing arrives, so an over-long deadline
+ * costs time on a broken run and never turns a red one green. Bounded by
+ * `TIMEOUT_MS`, so `--timeout` still governs the run.
+ */
+const HEARTBEAT_DEADLINE_MS = 60_000;
 
 /**
  * How far inside the canvas group E clicks to hand the keyboard back.
@@ -1808,22 +1837,57 @@ try {
   // of the last paddle input, so a still board is the *normal* state by this
   // point in the run and "the picture stopped changing" passes whether or not
   // anything paused. A line that only the tick loop can emit does not.
-  const heartbeats = async () => {
-    const before = hud().length;
-    await pause(TICK_WINDOW_MS);
-    return hud().length - before;
+  // **The beat is measured, not assumed.** Waiting for two lines and timing the
+  // gap is what makes every window below fit this machine: a desktop answers in
+  // well under the floor and nothing changes, and a runner whose frames are
+  // slow enough to stretch a simulated second past four wall seconds gets a
+  // window that still holds a beat. Two lines rather than one because an
+  // interval needs two ends — the wait for the first one absorbs whatever phase
+  // the run happens to start in.
+  const heartbeatMs = async () => {
+    const start = hud().length;
+    const began = Date.now();
+    const first = await until(
+      async () => (hud().length > start ? Date.now() : null),
+      Math.min(HEARTBEAT_DEADLINE_MS, TIMEOUT_MS)
+    );
+    if (first === null) return null;
+    const second = await until(
+      async () => (hud().length > start + 1 ? Date.now() : null),
+      Math.min(HEARTBEAT_DEADLINE_MS, TIMEOUT_MS)
+    );
+    return second === null
+      ? null
+      : { beat: second - first, waited: second - began };
   };
 
-  // The control, and it is what makes the next check mean something: if the
-  // window below is ever too short to contain a heartbeat, this fails loudly
-  // instead of the pause check passing for free.
-  const running = await heartbeats();
+  // The control, and it is what makes every check after it mean something: a
+  // tick loop that emits nothing fails here, loudly, instead of the pause check
+  // passing for free on a run where no heartbeat could have appeared anyway.
+  const beat = await heartbeatMs();
   check(
     'E',
     'a running demo logs its HUD from inside the tick',
-    running > 0,
-    `${running} HUD line(s) in ${TICK_WINDOW_MS} ms`
+    beat !== null,
+    beat === null
+      ? `no second HUD line in ${Math.min(HEARTBEAT_DEADLINE_MS, TIMEOUT_MS)} ms`
+      : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms`
   );
+
+  // **Never shorter than the constant used to give.** `TICK_WINDOW_MS` is the
+  // floor, so a fast machine watches exactly as long as it did before this was
+  // adaptive; a slow one watches longer. Shortening it on a fast machine would
+  // make "a paused demo runs no ticks at all" easier to satisfy, which is the
+  // one direction this change must not move.
+  const windowMs = Math.max(
+    TICK_WINDOW_MS,
+    (beat?.beat ?? 0) * TICK_WINDOW_BEATS
+  );
+  const heartbeats = async () => {
+    const before = hud().length;
+    await pause(windowMs);
+    return hud().length - before;
+  };
 
   await evaluate(page, `document.getElementById('stop').focus()`);
   const paused = await until(async () => {
@@ -1842,7 +1906,7 @@ try {
     'E',
     'a paused demo runs no ticks at all',
     whilePaused === 0,
-    `${whilePaused} HUD line(s) in ${TICK_WINDOW_MS} ms`
+    `${whilePaused} HUD line(s) in ${windowMs} ms`
   );
 
   // Clicking back in deliberately does not resume — the pause menu is dismissed
@@ -1945,7 +2009,7 @@ try {
     'E',
     'the simulation runs again after resuming',
     afterResume > 0,
-    `${afterResume} HUD line(s) in ${TICK_WINDOW_MS} ms`
+    `${afterResume} HUD line(s) in ${windowMs} ms`
   );
 
   group('F — a finger');
