@@ -267,8 +267,8 @@ jobs:
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         run: ./web/run-probe-e2e.sh
 
-      # BOTH 3D DEMOS ARE RENDERED HERE, AND THEY WERE NOT FOR A LONG TIME —
-      # READ THIS BEFORE DELETING EITHER.
+      # NEITHER 3D DEMO IS RENDERED HERE YET, AND THE REASON HAS CHANGED TWICE —
+      # READ THIS BEFORE ADDING OR DELETING EITHER.
       #
       # They are the site's two 3D demos, and until 2026-08 neither ran here for
       # one cause: `crcbl-render`'s draw-argument pass bound fourteen storage
@@ -315,19 +315,29 @@ jobs:
       # the next slower one, and it weakens "a paused demo runs no ticks at all"
       # on every demo. `docs/backlog.md` carries the reasoning.
       #
-      # The step timeouts are what keep a regression in that machinery readable:
-      # the beat is measured under a 60-second deadline, so a demo whose tick
-      # loop dies costs two of those and fails on the control rather than sitting
-      # here. Ten minutes is roughly three times quarry's measured 3m39s.
-      - name: Render quarry in a real browser
-        timeout-minutes: 10
-        run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
-
-      # lumen last: it is the heaviest frame the site ships, and its local
-      # evidence is the same 34-of-34 SwiftShader run quarry's was.
-      - name: Render lumen in a real browser
-        timeout-minutes: 10
-        run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
+      # **That fixed group E, and group F has the same defect one budget along.**
+      # quarry's second run here (12:03 on 2026-08-20, 5m58s) scored **33 of 34**:
+      # group E went fully green — the beat measured **27204 ms**, the window came
+      # out at 54408 ms, the paused check saw zero heartbeats in it and the
+      # resumed check saw two — and what failed instead is group F's
+      # `a second contact arrives as its own contact and moves only itself`, which
+      # waits `PADDLE_SETTLE_MS` (1500 ms) for the two `Ended` contacts and saw
+      # only the `Began`s and a `Moved`. On a machine advancing a simulated second
+      # every 27 seconds, one and a half seconds is not a batch fold plus a log
+      # drain.
+      #
+      # So the pattern generalises rather than being about one window, and the
+      # steps stay out until every wall-clock budget in the harness is scaled by
+      # the measured beat rather than calibrated on this desktop.
+      # `docs/backlog.md` carries it. Adding a step back is these two lines:
+      #
+      #     - name: Render quarry in a real browser
+      #       timeout-minutes: 10
+      #       run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
+      #
+      #     - name: Render lumen in a real browser
+      #       timeout-minutes: 10
+      #       run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed

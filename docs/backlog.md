@@ -12270,13 +12270,33 @@ control with `no second HUD line in 20000 ms`, and keeping every fortieth line
 to stretch the beat to 40 s produced an 80 s window on both later checks, with
 the paused one still reading zero and the resumed one two.
 
-**Both steps went back in on the strength of it**, each with
-`timeout-minutes: 10` against quarry's measured 3m39s. That run is the real
-measurement — the change is otherwise proven only on this desktop and on a
-synthetically slowed beat, not on the machine it was written for. If a step goes
-red again, read which check failed before touching the window: a heartbeat
-control that fails now means the tick loop produced fewer than two lines in a
-minute, which is a different claim from the four-second one it used to make.
+**Both steps went back in, the runner answered, and the answer is that group E
+is fixed and the pattern is bigger.** quarry's second run (2026-08-20 12:03,
+5m58s) scored **33 of 34**. Group E is entirely green: the beat measured **27204
+ms**, the window came out at **54408 ms**, the paused check saw zero heartbeats
+across it and the resumed check saw two. So the adaptive window works on the
+machine it was written for, which is what that change owed.
+
+**What failed instead is group F's
+`a second contact arrives as its own contact and moves only itself`.** It waits
+`PADDLE_SETTLE_MS` — a flat 1500 ms — for both contacts to reach `Ended`, and
+saw `[[2,"Ended"],[3,"Began"],[4,"Began"], [4,"Moved"]]`: the two lifts had not
+arrived. On a machine advancing a simulated second every 27 seconds, one and a
+half seconds is not a batch fold plus a log drain. Same defect as
+`TICK_WINDOW_MS`, one budget along, which is the useful finding: **every
+wall-clock budget in this harness was calibrated on this desktop**, and fixing
+them one at a time buys one red run each.
+
+**So the fix generalises: one measured slowdown, applied to all of them.** The
+beat is already measured, and its nominal value is one simulated second, so
+`slowdown = max(1, beat / 1000)` is the factor this machine is behind by — 1
+here, 27 on that runner. Scale every fixed budget by it rather than deriving
+each one separately. Two properties to keep: never scale _below_ the existing
+constant, so no machine gets a shorter window than today; and note which budgets
+are polls (where a longer deadline is free, since the poll returns on success)
+against which are sleeps watching nothing happen (where a longer window costs
+real time and is strictly stronger). `PADDLE_SETTLE_MS` is both — its own doc
+comment says so.
 
 Also untouched and worth knowing: group F still pauses for the bare
 `TICK_WINDOW_MS` twice, in horde's two-finger checks — those wait for a
