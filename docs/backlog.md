@@ -12223,127 +12223,56 @@ The find now also walks `apps` and `crates` for `.rs`, `.slang` and
 to the artifact, and an exemption reasoned from another code path is how one
 ends up covering the half nobody edits.
 
-## DECISION NEEDED — add the `lumen` and `quarry` browser steps to Pages CI?
+## The browser gate's budgets are measured, not fixed (2026-08-20)
 
-**The blocker this used to be about is gone.** `crcbl-render`'s draw-argument
-pass bound fourteen storage buffers in one compute stage against SwiftShader's
-ceiling of ten, so neither 3D demo could build its pipeline in a GPU-less
-browser. `crates/crcbl-render/src/draw_gen.rs` now binds **eight** — WebGPU's
-guaranteed minimum `maxStorageBuffersPerShaderStage`, so every conforming
-implementation can host it, and the device survey that used to sit here is moot.
+**Both 3D demos now render in a real browser on CI**, which closes the decision
+this entry used to be. What is kept is how it was closed, because the shape
+recurs and the reasoning is not recoverable from the diff.
 
-**Measured 2026-08-20, not assumed.** Chromium 151.0.7922.137 under Xvfb against
-the bundled SwiftShader — this job's own configuration:
+**The decision was never about the demos.** The old blocker — `crcbl-render`'s
+draw-argument pass binding fourteen storage buffers against SwiftShader's
+ceiling of ten — went when that pass was packed down to eight. What was left was
+"nobody has run either on a GitHub runner", and turning the step on twice bought
+two precise defects rather than an opinion:
 
-| demo   | adapter               | result |
-| ------ | --------------------- | ------ |
-| quarry | google swiftshader    | 34/34  |
-| quarry | amd rdna-3 (headless) | 34/34  |
-| lumen  | google swiftshader    | 34/34  |
+1. **32 of 34.** Both failures were group E's HUD heartbeat,
+   `0 HUD line(s) in 4000 ms`. `TICK_WINDOW_MS` was a constant chosen on this
+   desktop; the runner advances quarry's simulated second every 27 seconds.
+   Worse, "a paused demo runs no ticks at all" **passed for free** on that run —
+   no heartbeat could appear in any state — which is the exact failure mode the
+   group's first check exists to catch, and it caught it.
+2. **33 of 34.** Group E green after the window was derived from the measured
+   beat; `PADDLE_SETTLE_MS`'s flat 1500 ms failed instead, one budget along.
 
-**Runner speed was the one remaining unknown**, and it is now measured rather
-than guessed — see below. A software rasteriser on a shared runner is several
-times slower than the desktop above, and these are the two heaviest frames the
-site ships; under SwiftShader locally quarry logged roughly half the heartbeats
-per wall-clock second that it did on hardware.
+**So the fix was not a bigger number, it was a measured one.** The heartbeat's
+nominal value is one simulated second, so `slowdown = max(1, beat / 1000)` is
+how far behind real time a machine is running the demo, and every budget in the
+harness is scaled by it. Clamped at 1, so nothing is ever shorter than the
+constant already gave. The control prints the factor.
 
-**The runner has now been measured, and the answer is not the one the options
-were written for.** quarry's step was enabled on `main`, ran as
-`build the demo site` in Pages run **32363651779**, and scored **32 of 34** in
-3m39s — against 22–41s for each of the five 2D demos. It is not too heavy to
-render: it booted, opened the SwiftShader device, resolved `IndirectPerBatch`
-with `ArrayPages`, drew 64 distinct colours, changed between all 16 sampled
-frames, and got its culling statistics back off the GPU.
+**Measured on the runner, 2026-08-20**, which is what the whole exercise was
+for:
 
-**It failed on the gate's clock, and the failure is the useful part.** Both
-failures are group E's, `0 HUD line(s) in 4000 ms`. The heartbeat is logged
-every sixtieth tick — one second of _simulated_ time — and this runner advanced
-the demo's clock to 22s over roughly 40s of wall clock, so `TICK_WINDOW_MS`'s
-fixed four seconds does not reliably contain one. The step is reverted; the two
-lines are commented in `pages.yml` with this beside them.
+| demo      | beat     | factor | result | step  |
+| --------- | -------- | ------ | ------ | ----- |
+| breakout  | 993 ms   | 1.0x   | 47/47  | —     |
+| flappy    | 1034 ms  | 1.0x   | 43/43  | —     |
+| asteroids | 992 ms   | 1.0x   | 38/38  | —     |
+| horde     | 1023 ms  | 1.0x   | 47/47  | —     |
+| hud       | 1003 ms  | 1.0x   | 37/37  | —     |
+| quarry    | 26243 ms | 26.2x  | 37/37  | 5m54s |
+| lumen     | 19339 ms | 19.3x  | 37/37  | 5m23s |
 
-**Bumping the constant is the wrong fix and is recorded as declined.** It buys
-this runner and loses the next slower one, and it weakens "a paused demo runs no
-ticks at all" for every demo — that check counts zero heartbeats in the same
-window, so a longer window is a longer chance for a paused demo to leak one.
-Note the sharper version of the same problem: on this run the paused check
-**passed for free**, because no heartbeat could appear in any state.
-`TICK_WINDOW_MS`'s own comment says the group's first check exists to stop
-exactly that, and it did — it is what went red.
+The five 2D demos sit at exactly nominal and are untouched by the scaling, which
+is the property that makes it safe; only the two heavy frames are behind, and by
+the factor their own heartbeat reports.
 
-**The window is now derived from the demo's observed heartbeat.** `heartbeatMs`
-in `web/tools/browser-e2e.mjs` waits for two HUD lines against a deadline and
-times the gap; `TICK_WINDOW_MS` became the **floor** and the window is
-`max(floor, beat * TICK_WINDOW_BEATS)`. A fast machine is unchanged — breakout
-measures a 97 ms beat here and still watches for the floor's four seconds — and
-a slow one watches longer. The floor is what stops it going the other way:
-shortening the window on a fast machine would make "a paused demo runs no ticks
-at all" easier to satisfy, which is the one direction this must not move.
-
-It is bounded rather than open-ended: the beat is measured under
-`HEARTBEAT_DEADLINE_MS` (60 s, itself clamped by `--timeout`), so the window
-cannot exceed twice that and the two windows cannot add more than four minutes
-to a step, on a machine where nothing would have passed anyway.
-
-Verified 2026-08-20: breakout 44/44 with the beat reported in the check's
-message — 47/47 after group H landed later the same day, and **every count in
-this file is the total the run it describes had**, so the older figures are
-history rather than drift. Red-checked twice — pointing `hud()` at a string
-nothing logs fails the control with `no second HUD line in 20000 ms`, and
-keeping every fortieth line to stretch the beat to 40 s produced an 80 s window
-on both later checks, with the paused one still reading zero and the resumed one
-two.
-
-**Both steps went back in, the runner answered, and the answer is that group E
-is fixed and the pattern is bigger.** quarry's second run (2026-08-20 12:03,
-5m58s) scored **33 of 34**. Group E is entirely green: the beat measured **27204
-ms**, the window came out at **54408 ms**, the paused check saw zero heartbeats
-across it and the resumed check saw two. So the adaptive window works on the
-machine it was written for, which is what that change owed.
-
-**What failed instead is group F's
-`a second contact arrives as its own contact and moves only itself`.** It waits
-`PADDLE_SETTLE_MS` — a flat 1500 ms — for both contacts to reach `Ended`, and
-saw `[[2,"Ended"],[3,"Began"],[4,"Began"], [4,"Moved"]]`: the two lifts had not
-arrived. On a machine advancing a simulated second every 27 seconds, one and a
-half seconds is not a batch fold plus a log drain. Same defect as
-`TICK_WINDOW_MS`, one budget along, which is the useful finding: **every
-wall-clock budget in this harness was calibrated on this desktop**, and fixing
-them one at a time buys one red run each.
-
-**That is now done: one measured slowdown, applied to all of them.**
-`slowdown = max(1, beat / NOMINAL_BEAT_MS)` is the factor this machine is behind
-by — 1 here, 27 on that runner — and group F takes `settleMs`, `lifeMs`,
-`climbMs` and `walkMs` through `budget()` rather than the bare constants, with
-its two `TICK_WINDOW_MS` pauses taking `windowMs`. The heartbeat control prints
-the factor on every run (`every later budget scaled 27.0x`), so a later check
-failing on a slow machine says in the same log how slow it was.
-
-Verified: breakout 47/47, flappy 43/43, horde 47/47, hud 37/37, quarry 37/37 —
-all at `1.0x`, so nothing on this desktop moved. Red-checked by keeping every
-twentieth HUD line to stretch the beat: the control reported `20.0x` and both of
-group E's windows came out at 40012 ms, which is the factor reaching the budgets
-rather than only the message.
-
-**`TAP_INTERVAL_MS` is deliberately not scaled**, and that is the one untested
-assumption. It is the gap between two synthetic taps — an input cadence, not a
-budget for observing a result — and the loops that tap are bounded by `climbMs`
-and `lifeMs`, so a slow machine already gets more taps rather than fewer. If a
-tap sequence ever fails on a slow runner where the deadline plainly did not
-expire, event coalescing is the first thing to suspect.
-
-**Both steps are back in on the strength of it**, each with
-`timeout-minutes: 10` against quarry's measured 5m58s. That run is the
-measurement that closes this entry, and nothing here can take it in its place:
-the machine that falsifies a wall-clock budget is the slow one.
-
-**What the scaling costs, since it is not free.** The poll deadlines cost
-nothing on success — a poll returns when its condition holds. The sleeps do:
-group E's two windows are `2 * beat` each, so on that runner they are 54s
-apiece, and quarry's step was already 5m58s with them. quarry has no `touch` row
-in `EXPECTATIONS`, so group F's walk and climb sections do not run for it and
-the two `windowMs` pauses there are not in its path; a demo that has one and is
-also that slow would be. The step timeouts are what would catch it.
+**What is still owed.** `TAP_INTERVAL_MS` is deliberately not scaled — an input
+cadence rather than a budget for observing a result, and the loops that tap are
+bounded by scaled deadlines, so a slow machine already gets more taps rather
+than fewer. Untested above 1x: no demo with a `touch` row in `EXPECTATIONS` is
+also slow. If a tap sequence ever fails on a slow runner where the deadline
+plainly did not expire, event coalescing is the first thing to suspect.
 
 **Both stale prose claims are fixed**: `web/pages/index.html`'s excusing clause
 and `web/pages/lumen.html`'s "This one wants a real GPU" note, which said the
