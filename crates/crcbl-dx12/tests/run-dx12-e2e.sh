@@ -145,31 +145,22 @@ export CRCBL_DX12_VALIDATION="${CRCBL_DX12_VALIDATION:-1}"
 echo "crcbl dx12 e2e: CRCBL_DX12_VALIDATION=${CRCBL_DX12_VALIDATION}"
 
 # **Known-red repros, excluded by name and announced on every run.** These are
-# tests that reproduce an open defect on purpose: they are kept because a repro
-# is the most valuable thing an investigation produces, and excluded because a
-# permanently red job is one nobody reads. `#[ignore]` cannot express this — the
-# run below is `--run-ignored only`, so an ignore reason is documentation and
-# nothing more.
+# tests that reproduce an open defect on purpose: kept because a repro is the
+# most valuable thing an investigation produces, excluded because a permanently
+# red job is one nobody reads. `#[ignore]` cannot express this — the run below
+# is `--run-ignored only`, so an ignore reason is documentation and nothing
+# more.
 #
-# Each name is verified to still select a test before the suite runs. A stale
-# entry would otherwise be an exclusion that silently matches nothing, which
-# reads as "excluded" while the test it names has been renamed or deleted.
-KNOWN_RED=(
-    # docs/backlog.md, "DEFERRED -- dx12 mesh shading: WARP claims it and dies".
-    # Both drive a depth-only mesh pipeline, which removes the WARP device; the
-    # second runs the toy stages six colour-target probes pass on, which is what
-    # says the defect is the pipeline shape rather than either shader.
-    #
-    # **These are parked rather than in progress.** dx12 work stopped on
-    # 2026-08-21 (docs/plan/09-backends-metal-dx12.md), so this list is not
-    # expected to shrink on its own. The repros are kept because they are the
-    # investigation's most valuable output and they cost this job nothing while
-    # excluded. They leave the list when the backlog entry's next step is taken,
-    # and that entry going away without them going away means the job has
-    # quietly stopped covering what it claims to.
-    the_cluster_shaders_dag_descent_draws_the_cut_it_chose
-    a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device
-)
+# The names live in `known-red.txt` beside this script because `ci.yml`'s
+# adapter-report step runs this crate's ignored tests too, on an unpinned
+# adapter, and reads the same file. Two copies of this list would drift, and the
+# job that got missed would be red for a reason nobody is working on.
+KNOWN_RED_FILE="$(dirname "${BASH_SOURCE[0]}")/known-red.txt"
+if [[ ! -f "$KNOWN_RED_FILE" ]]; then
+    echo "crcbl dx12 e2e: ${KNOWN_RED_FILE} is missing" >&2
+    exit 1
+fi
+mapfile -t KNOWN_RED < <(grep -v '^[[:space:]]*#' "$KNOWN_RED_FILE" | grep -v '^[[:space:]]*$')
 
 FILTER=()
 if ((${#KNOWN_RED[@]} > 0)); then
@@ -178,14 +169,15 @@ if ((${#KNOWN_RED[@]} > 0)); then
         # `test(name)` is a substring match; `test(=name)` would need the whole
         # `module::path::name` and matches nothing when given a bare one. So the
         # count is the guard: exactly one test, or the entry is stale (zero) or
-        # ambiguous enough to exclude a bystander (more than one).
+        # ambiguous enough to exclude a bystander (more than one). This runs on
+        # every push and is what keeps `known-red.txt` honest for both readers.
         selected="$(cargo nextest list \
             --locked \
             --package crcbl-dx12 \
             --run-ignored only \
             -E "test(${name})" 2>/dev/null | grep -c "${name}")"
         if [[ "$selected" != "1" ]]; then
-            echo "crcbl dx12 e2e: KNOWN_RED names ${name}, which selects ${selected} test(s), not 1" >&2
+            echo "crcbl dx12 e2e: known-red.txt names ${name}, which selects ${selected} test(s), not 1" >&2
             exit 1
         fi
         echo "crcbl dx12 e2e: excluding known-red ${name}"

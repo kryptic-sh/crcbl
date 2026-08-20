@@ -1,0 +1,21 @@
+# Tests that reproduce an open defect on purpose. One test name per line;
+# blank lines and `#` comments are ignored.
+#
+# Two things run this crate's ignored tests -- `tests/run-dx12-e2e.sh`, which
+# pins WARP, and `ci.yml`'s adapter-report step, which deliberately does not --
+# so the list lives here rather than in either of them. A name in one place and
+# not the other is how a job goes red for a reason nobody is working on.
+#
+# `run-dx12-e2e.sh` checks every name here still selects exactly one test and
+# fails if it does not, so a stale entry cannot sit here quietly excluding
+# nothing. That check runs on every push, and covers this file for both readers.
+#
+# These are parked, not in progress: dx12 work stopped on 2026-08-21. See
+# docs/plan/09-backends-metal-dx12.md, and docs/backlog.md's "DEFERRED -- dx12
+# mesh shading" entry for the state and the next step.
+
+# Both drive a depth-only mesh pipeline, which removes the WARP device. The
+# second runs the toy stages six colour-target probes pass on, which is what
+# says the defect is the pipeline shape rather than either shader.
+the_cluster_shaders_dag_descent_draws_the_cut_it_chose
+a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device

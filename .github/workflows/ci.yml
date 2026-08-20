@@ -515,11 +515,30 @@ jobs:
       # because `COMPUTE`, `TIMELINE_SEMAPHORE` and the two indirect features
       # wait on calls no slice has written yet — that is the backend's gap, not
       # the hardware's.
+      #
+      # The known-red exclusion comes from `crates/crcbl-dx12/tests/known-red.txt`,
+      # the same file `run-dx12-e2e.sh` reads. Those are repros of an open defect
+      # that are kept on purpose and would otherwise fail this step too — this
+      # job runs the crate's ignored tests just as that harness does, only
+      # without pinning WARP. That harness checks every name in the file still
+      # selects exactly one test, so a stale entry fails there rather than
+      # silently excluding nothing here.
       - name: The DX12 adapter report, named rather than swept up
         if: runner.os == 'Windows'
-        run: >-
-          cargo nextest run --locked -p crcbl-dx12 --run-ignored all --no-tests
-          fail --success-output immediate
+        shell: bash
+        run: |
+          names=$(grep -v '^[[:space:]]*#' crates/crcbl-dx12/tests/known-red.txt | grep -v '^[[:space:]]*$')
+          filter=()
+          if [[ -n "$names" ]]; then
+            expression=""
+            while read -r name; do
+              echo "ci: excluding known-red ${name}"
+              expression="${expression:+${expression} + }test(${name})"
+            done <<< "$names"
+            filter=(-E "not (${expression})")
+          fi
+          cargo nextest run --locked -p crcbl-dx12 --run-ignored all --no-tests fail \
+            --success-output immediate "${filter[@]}"
 
   # The only job that runs the Wayland backend against a real compositor.
   # `docs/plan/12-testing.md` schedules "scripted resize/mode-switch sequences
