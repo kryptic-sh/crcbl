@@ -13,11 +13,25 @@ because it keys on an optional feature every available adapter reports.
 **The sweep, and it is cheap:**
 
 ```sh
-grep -rn 'features\.contains(' --include='*.rs' crates/*/tests crates/crcbl/tests
+grep -rn 'features\.contains(' --include='*.rs' crates/*/tests crates/*/src
 ```
 
 Then, per hit, ask which branch a local run takes rather than reading the source
 as coverage.
+
+**`crates/*/src` is not optional there**, and this entry said `tests` alone
+until the omission was caught: `crcbl-mtl` and `crcbl-dx12` keep their device
+tests in `#[cfg(test)]` modules inside `src/`, so a sweep of test directories
+sees neither backend. The `src` half is noisier — most hits are the production
+code that computes the capabilities — but the ones inside a `mod tests` are the
+same question.
+
+A second query catches the shape from the other side, since an arm that is
+skipped is an arm that did not run:
+
+```sh
+grep -rniE '(e?println)!\(.*(skip|cannot run|unreachable here)' --include='*.rs' crates
+```
 
 **Fixed by subtracting the feature**, which manufactures the lesser device
 instead of waiting for hardware — the move `mesh.rs` already used to reach
