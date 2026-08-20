@@ -116,9 +116,8 @@
 //! a byte, not a word" and "this backend has not written the code yet" are the
 //! same shape as prose. [`DivergenceKind`] is the field that separates them and
 //! [`parity_blockers`] is the query over it: every row that somebody could still
-//! close, on a backend crcbl is keeping. That set is what shrinks to nothing
-//! when `crcbl-wgpu` can be deleted, and this module's tests snapshot it so it
-//! shrinks deliberately.
+//! close, on a backend crcbl is keeping. Parity is reached when that set is
+//! empty, and this module's tests snapshot it so it shrinks deliberately.
 //!
 //! ```
 //! use crcbl_hal::{BackendKind, Capability, DIVERGENCES, DivergenceKind, divergence, parity_blockers};
@@ -1594,8 +1593,8 @@ mod tests {
     }
 
     /// Every divergence standing between crcbl and its stated end state, as
-    /// reviewed — the whole of what "reach parity, then delete `crcbl-wgpu`"
-    /// still asks for. **Update this deliberately.**
+    /// reviewed — the whole of what full backend parity still asks for.
+    /// **Update this deliberately.**
     ///
     /// A snapshot rather than a rule, and that is the point: a row leaves only
     /// when somebody writes the code, overturns the decline, or shows the API

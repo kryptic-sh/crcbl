@@ -1854,11 +1854,18 @@ pub const MAX_DIMENSION: u32 = 16_384;
 
 /// Row-pitch alignment, in bytes, for the readback staging buffer.
 ///
-/// **Not a performance hint — a portability requirement.** wgpu refuses a
-/// multi-row buffer↔image copy whose row pitch is not a multiple of
-/// `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT` (256), so a tightly packed readback —
-/// which is legal on Vulkan and is what this module used to record — fails on
-/// `crcbl-wgpu` for every width that is not a multiple of 64:
+/// **Not a performance hint — a portability requirement, and it outlived the
+/// backend that exposed it.** WebGPU specifies `bytesPerRow` in *bytes* and
+/// requires a multiple of 256 for any multi-row buffer↔image copy, so a tightly
+/// packed readback — which is legal on Vulkan and is what this module used to
+/// record — is invalid for every width that is not a multiple of 64.
+/// `crcbl-webgpu` enforces it at the seam (see `command.rs`'s copy encoders and
+/// `writer.rs`), so removing this padding breaks the browser backend.
+///
+/// It was found on `crcbl-wgpu`, which is deleted; the transcript is kept
+/// because it is the clearest statement of the failure and no surviving native
+/// backend can reproduce it — `webgpu` refuses to open on native, so there is no
+/// command here that shows it any more:
 ///
 /// ```text
 /// $ CRCBL_GPU=wgpu crcbl screenshot --size 32x32 --output /tmp/x.png

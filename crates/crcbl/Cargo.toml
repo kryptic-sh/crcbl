@@ -148,7 +148,7 @@ workspace = true
 # `tests/render_e2e.rs` — one frame of the cube scene through
 # `ForwardRenderer`, on whichever backend `CRCBL_GPU` names, against a
 # checked-in golden. Feature-gated *and* `#[ignore]`d, the same pair
-# `crcbl-vk`'s `vk-e2e`, `crcbl-wgpu`'s `wgpu-e2e` and `crcbl-mtl`'s `mtl-e2e`
+# `crcbl-vk`'s `vk-e2e` and `crcbl-mtl`'s `mtl-e2e`
 # use: a plain `cargo nextest run --workspace --all-features` on a machine with
 # no GPU must stay green, and `tests/run-render-e2e.sh` is the only thing that
 # turns it on — and it fails when the suite reports zero tests run.
