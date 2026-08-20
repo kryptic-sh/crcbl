@@ -2254,9 +2254,27 @@ fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
             renderer.destroy(headless.device.as_ref());
             pool.destroy(headless.device.as_ref());
         } else {
-            eprintln!(
-                "vk e2e: no TASK_SHADER on this device, so there is no per-cluster cut to \
-                 compare the uniform one against; the uniform arm below still runs"
+            // **This branch has never executed, and until 2026-08-20 it let the
+            // test pass having compared one path against nothing.** Every
+            // adapter this suite has ever opened reports `TASK_SHADER`: radv
+            // here, and lavapipe on both the Linux and the Windows CI arms —
+            // read off run 32105356561's job logs, where the string this used
+            // to print appears zero times and the feature is in every reported
+            // set. A degrade nothing takes is not a kindness to a future
+            // driver, it is a test that would have gone quiet on the day it
+            // mattered.
+            //
+            // Loud rather than skipped, because the alternative is worse in
+            // both directions: skipping leaves "the two geometry paths agree"
+            // asserted over one path, and the uniform arm below cannot stand in
+            // — it is the *other* half of the comparison. A driver without the
+            // feature needs a second device to compare against, which is a
+            // change to make deliberately.
+            panic!(
+                "this adapter reports no TASK_SHADER, so there is no per-cluster cut for the \
+                 uniform arm to be compared against and this test would assert nothing. Every \
+                 adapter this suite has run on reports it — see the comment here before \
+                 loosening this"
             );
         }
         headless.finish();

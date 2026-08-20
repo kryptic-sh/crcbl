@@ -672,13 +672,14 @@ kept because it says what "done" meant, and each line now says where it stands �
 an order of work that still reads as future when it is past is how this file
 rots.
 
-1. ~~Finish migrating the white-box tests to the agnostic suites~~ — the
-   mechanical three landed: `lights`, `shadow` and `depth_probe` are
-   `crates/crcbl/tests/forward_e2e/`, so all four backends run them. **`mesh`
-   and the sprite cluster did not** and are still `crcbl-vk`-only —
-   `crates/crcbl-vk/tests/vk_e2e/mesh.rs` is the largest file in that tree. They
-   need the golden-blessing decision first, which is why they were carved out
-   rather than forgotten.
+1. ~~Finish migrating the white-box tests to the agnostic suites~~ — done, and
+   this line said otherwise until 2026-08-20. `lights`, `shadow` and
+   `depth_probe` are `crates/crcbl/tests/forward_e2e/`; the seam suite,
+   `draw_gen_e2e`, `forward_e2e` and `sprite_e2e` all run on vk, dx12, Metal and
+   WebGPU, and `crcbl-vk`'s own suite came down from 92 tests to 55. `mesh.rs`
+   was split rather than moved — see "`vk_e2e/mesh.rs` is a redesign, not a
+   move" below, which also records the four tests that stayed on Vulkan and why
+   each is not splittable.
 2. ~~Build the capability enum and the exhaustive per-backend answer.~~
 3. ~~Drive the suites from it, both directions, plus the parity report.~~
 4. ~~Close the divergences it surfaces~~ — every one this list named by name has
@@ -3036,14 +3037,20 @@ opposite reason — its agnostic half already exists as `draw_gen_e2e`'s
 `a_bucket_fills_and_empties_as_its_instance_comes_and_goes`, and splitting would
 have duplicated a test that already runs on all four backends.
 
-**One live gap:**
-`the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is` still degrades
-when a device reports no `TASK_SHADER` — it now says so loudly on stderr and
-refuses a _partial_ comparison rather than silently comparing less, but it does
-not fail. Whether lavapipe reports the feature could not be checked from this
-machine, so the choice was to make the degrade visible rather than to harden a
-condition nobody has observed. If CI's lavapipe arm never prints that line, the
-degrade path is dead and the test should simply require the feature.
+**That gap is closed, and the check the entry asked for was taken.** Run
+32105356561's `vk e2e (lavapipe)` and `vk e2e (lavapipe, windows)` job logs
+contain the degrade string **zero times** and report `MESH_SHADER | TASK_SHADER`
+in every feature set they print, so the branch had executed on no device
+anywhere: not radv here, not lavapipe on either CI arm. It now panics with the
+reason rather than printing and continuing — a test claiming "the two geometry
+paths agree" over one path is asserting nothing, and the uniform arm cannot
+stand in for the missing half because it _is_ the other half.
+
+Red-checked by withholding `TASK_SHADER` from that arm's open, which is the
+project's own subtract-the-feature move: `41/48 tests run: 40 passed, 1 failed`,
+naming the adapter. A driver genuinely without the feature needs a second device
+to compare against, which is a change to make deliberately rather than a
+condition to loosen.
 
 ### The Windows probe gate has no adapter; macOS is proven
 
