@@ -1887,6 +1887,25 @@ it, forced by subtracting features from one adapter.
   because quarry places **one** instance of one mesh, so the instance cull has
   one thing to decide about. See the design question below.
 
+**DECIDED 2026-08-20 — the other three, so the gate has one shape.**
+
+- **The skinned prop is deferred, not built.** Skeletal animation is topic 17
+  and a post-wave-1 phase with the player kit; growing it out of a geometry
+  acceptance fixture inverts the plan and lands the engine's first skinning
+  under a sample's exit criteria. quarry's milestone 4 is met by the tiling
+  case, which is done and asserted bit-for-bit; the skinned half is recorded
+  here as waiting on that phase. **The same phase unblocks the `puppet` demo**,
+  so the two move together and neither justifies the subsystem alone.
+- **The Pages demo is a slice after the gate, not part of it.** The rule that
+  every wasm sample is a Pages demo still holds and quarry will get one — but
+  the exit criteria are about goldens and geometry paths, and a browser proves
+  neither. Wiring it costs the four places nothing keeps in step, and that is
+  work the gate does not need to wait behind.
+- **The LOD tint overlay is built now**, because it is milestone 2's last item
+  and needs no decision at all: the six steps are costed, the level fits in
+  `ClusterSelect::flags`' spare bits with no stride change, and the shader
+  toolchain reproduces every committed artifact byte-for-byte on this machine.
+
 **The engine work for what remains is largely already there.** `crcbl-scene`
 carries `meshlet.rs`, `simplify.rs` (QEM), `cluster_dag.rs`, `lod.rs` and
 `lod_resolve.rs`. Milestone 4 is mostly assembling and gating what exists rather
@@ -2291,7 +2310,7 @@ What makes it urgent enough to write down rather than leave in a one-line note:
 until one of the three happens, the seam has a resource that returns "everything
 is hidden" and reports success doing it.
 
-### DECISION NEEDED — should quarry place several faces?
+### DECIDED — quarry keeps one face, and documents the degenerate split
 
 `docs/plan/sample/14-quarry.md`'s exit criteria ask for the reduction to be
 attributed: "how much of the reduction is instance culling and how much is
@@ -2314,7 +2333,15 @@ answered but not exercised.
 
 Not a blocker either way: the numbers are recorded and asserted as they stand.
 
-### DECISION NEEDED — does quarry commit goldens, and per what?
+**DECIDED 2026-08-20 — keep one face, and say so in the sample's docs.** The
+plan asks for "one dense scene" and the split is already recorded and asserted;
+four to nine faces buys a non-degenerate instance cull at four to nine times the
+pool for a criterion that is answered, if not exercised. What the sample owes
+instead is one honest sentence: the instance cull keeps 1 of 1 because the scene
+holds one instance, so this criterion is answered by construction rather than by
+measurement, and a scene with many instances is where it would earn its place.
+
+### DECIDED — quarry commits six goldens, two dolly stops per path
 
 `apps/quarry`'s exit criteria ask for "golden frames per `GeometryPath` from the
 fixed dolly". Everything needed to produce them exists — the dolly, the three
@@ -2376,6 +2403,22 @@ shape, not `render_e2e.rs`'s.
 `wasmtime` `WasmHost` seam), lumen's second half (S4B, blocked on P7C's ray
 tracing) and orbit (S5, behind three physics phases). quarry was the only one
 whose prerequisites were already built.
+
+**DECIDED 2026-08-20 — option (2), six images, and measure the device delta
+first.** One golden per path at each end of the dolly. (1) cannot catch a path
+that breaks partway down, which is where LOD lives and therefore where quarry's
+whole subject is; (3) keeps assertions that are stronger than pixels for
+everything except what the face looks like, which is the one thing they cannot
+cover — and the entry's own measured argument says so: every number quarry
+records is a count, and a face lit from the wrong side covers the same pixels,
+walks the same rungs and draws the same triangles.
+
+**The unmeasured half is a precondition, not a footnote.** These frames come off
+an RX 7900 XTX and CI compares on lavapipe. Before blessing anything, render the
+six on both and read the channel delta; if it exceeds the shared tolerance the
+answer is not a wider tolerance but goldens blessed from the runner that gates
+them. Blessing first and discovering the delta afterwards would produce six
+images nobody can trust and a tolerance widened to fit them.
 
 ### `DivergenceKind::Unclassified` is gone, and can come back
 
