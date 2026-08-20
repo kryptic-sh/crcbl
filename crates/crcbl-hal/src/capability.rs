@@ -638,10 +638,12 @@ impl fmt::Display for Support {
 /// work in this repository could ever close it.
 ///
 /// **This is what makes the parity goal checkable.** Without it, "Metal's blit
-/// fill takes a byte, not a word, and no work changes that" and "this backend
-/// has not written the code yet" are the same shape in the data, and nobody can
-/// answer "what is left?" without re-reading every reason in
-/// [`DIVERGENCES`]. With it, [`parity_blockers`] answers it.
+/// fill takes a byte, not a word, and no work changes that", "this backend has
+/// not written the code yet" and "it is written and no device here has run it"
+/// are the same shape in the data, and nobody can answer "what is left?"
+/// without re-reading every reason in [`DIVERGENCES`]. With it,
+/// [`parity_blockers`] answers it — and the answer distinguishes work that
+/// needs a programmer from work that needs a machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DivergenceKind {
     /// The backend's API cannot express it. **No work here closes it**, so it
@@ -657,8 +659,27 @@ pub enum DivergenceKind {
     /// The API allows it and this crate has not written it.
     ///
     /// The reason says roughly what the work is, and by convention names the
-    /// slice that owes it — `crcbl-dx12` is almost entirely this.
+    /// slice that owes it.
     Unwritten,
+
+    /// The code is written and no device available here has executed it.
+    ///
+    /// **Distinct from [`Unwritten`](Self::Unwritten) because the work owed is
+    /// different in kind.** An `Unwritten` row is closed by somebody writing
+    /// code; one of these is closed by somebody *running* what is already
+    /// there, on hardware this project does not have — a Metal 3 Mac, a device
+    /// reporting a counter set, a D3D12 GPU that is not WARP. Collapsing the two
+    /// makes the remaining distance to parity read as programming when it is
+    /// procurement, which is the opposite of what a reader needs.
+    ///
+    /// It blocks parity exactly as `Unwritten` does. The rule that a row leaves
+    /// [`DIVERGENCES`] only when a device has *run* the path is unchanged, and
+    /// this kind is what lets a row say so instead of claiming work is owed that
+    /// is already done.
+    ///
+    /// The reason must name the calls that exist, so the claim is checkable by
+    /// reading them, and say what device would settle it.
+    Unrun,
 }
 
 impl DivergenceKind {
@@ -674,7 +695,7 @@ impl DivergenceKind {
     pub const fn blocks_parity(self) -> bool {
         match self {
             Self::ApiAbsence => false,
-            Self::Unwritten => true,
+            Self::Unwritten | Self::Unrun => true,
         }
     }
 }
@@ -798,7 +819,7 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::Metal,
-        kind: DivergenceKind::Unwritten,
+        kind: DivergenceKind::Unrun,
         why: "the calls exist — crcbl_mtl::pipeline fills an MTLMeshRenderPipelineDescriptor with \
               the object, mesh and fragment functions and crcbl_mtl::command records \
               drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup: and its \
@@ -832,7 +853,7 @@ pub const DIVERGENCES: &[Divergence] = &[
     Divergence {
         capability: Capability::TaskShaderStage,
         backend: BackendKind::Metal,
-        kind: DivergenceKind::Unwritten,
+        kind: DivergenceKind::Unrun,
         why: "MeshPipelineDesc::task reaches Metal's object stage through the same descriptor the \
               mesh one does — setObjectFunction: beside setMeshFunction: — and it is behind the \
               same unreported flag and the same unrun code; see the MeshShading entry",
@@ -912,7 +933,7 @@ pub const DIVERGENCES: &[Divergence] = &[
         // expresses the feature, so this was never an ApiAbsence. The code was
         // then written, and the row stays Unwritten for the reason the
         // MeshShading entry above stays Unwritten: no device has executed it.
-        kind: DivergenceKind::Unwritten,
+        kind: DivergenceKind::Unrun,
         why: "the calls exist — crcbl_mtl::device's create_query_set builds an \
               MTLCounterSampleBuffer over MTLCommonCounterSetTimestamp, crcbl_mtl::command puts it \
               in a render or compute pass descriptor's sampleBufferAttachments at the two indices \
@@ -952,7 +973,7 @@ pub const DIVERGENCES: &[Divergence] = &[
         // output, and written with it. It stays Unwritten for the same reason —
         // no device has run it — plus one this backend cannot fix on its own:
         // see the second half of the reason.
-        kind: DivergenceKind::Unwritten,
+        kind: DivergenceKind::Unrun,
         why: "the calls exist — crcbl_mtl::device's create_query_set builds an \
               MTLCounterSampleBuffer over MTLCommonCounterSetStatistic and crcbl_mtl::command's \
               resolve_query_set reaches it through the blit encoder's \
@@ -1617,22 +1638,22 @@ mod tests {
         (
             Capability::MeshShading,
             BackendKind::Metal,
-            DivergenceKind::Unwritten,
+            DivergenceKind::Unrun,
         ),
         (
             Capability::TaskShaderStage,
             BackendKind::Metal,
-            DivergenceKind::Unwritten,
+            DivergenceKind::Unrun,
         ),
         (
             Capability::TimestampQuery,
             BackendKind::Metal,
-            DivergenceKind::Unwritten,
+            DivergenceKind::Unrun,
         ),
         (
             Capability::PipelineStatisticsQuery,
             BackendKind::Metal,
-            DivergenceKind::Unwritten,
+            DivergenceKind::Unrun,
         ),
         // `crcbl-webgpu` is not on this list at all, and that is the point:
         // everything WebGPU refuses is WebGPU itself refusing, which is an
@@ -1713,7 +1734,11 @@ mod tests {
     /// describe a real row, or it is vocabulary rather than classification.
     #[test]
     fn every_kind_describes_at_least_one_real_row() {
-        for kind in [DivergenceKind::ApiAbsence, DivergenceKind::Unwritten] {
+        for kind in [
+            DivergenceKind::ApiAbsence,
+            DivergenceKind::Unwritten,
+            DivergenceKind::Unrun,
+        ] {
             assert!(
                 DIVERGENCES.iter().any(|entry| entry.kind == kind),
                 "no divergence is classified {kind:?}, so the variant is a name with nothing \

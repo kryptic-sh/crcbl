@@ -756,10 +756,26 @@ set changes, so `REVIEWED_BLOCKERS` in `crates/crcbl-hal/src/capability.rs` is
 always the current answer. Read it there.
 
 **Every row carries a kind.** `Divergence` has a `DivergenceKind`: `ApiAbsence`
-(the API cannot express it — its reason must carry the evidence), `Unwritten`
-and nothing else. Two more kinds have come and gone — `Unclassified`, for rows
-that could not be settled without hardware nobody here has, and `Declined` —
-each with its own entry below saying what would bring it back.
+(the API cannot express it — its reason must carry the evidence), `Unwritten`,
+and since 2026-08-21 `Unrun`. Two more have come and gone — `Unclassified`, for
+rows that could not be settled without hardware nobody here has, and `Declined`
+— each with its own entry below saying what would bring it back.
+
+**`Unrun` was added because the list had started lying.** `Unwritten` is
+documented as "the API allows it and this crate has not written it", and after
+the Metal mesh and counter-query slices all four Metal rows began "the calls
+exist". The work those rows owe is not programming, it is _running_ what is
+already there on hardware this project does not have — a Metal 3 Mac, a device
+reporting a counter set. Collapsing that into "unwritten" makes the remaining
+distance to parity read as effort when it is procurement.
+
+It blocks parity exactly as `Unwritten` does, and the rule is unchanged: a row
+leaves `DIVERGENCES` when a device has **run** the path, not when the code
+compiles. `Unwritten` still describes dx12's two mesh rows, whose adapter has
+genuinely never asked D3D12 for its mesh tier — and
+`every_kind_describes_at_least_one_real_row` is what keeps both kinds honest.
+Red-checked by moving those two to `Unrun` as well: "no divergence is classified
+Unwritten, so the variant is a name with nothing behind it".
 
 `parity_blockers()` is the query — a row on vk, dx12, Metal or WebGPU whose kind
 is anything but `ApiAbsence` — and `crcbl-wgpu` is excluded **by construction**
@@ -1858,6 +1874,32 @@ nothing has run `crcbl-render`'s mesh path through `crcbl-dx12` on a
 **hardware** D3D12 GPU. WARP failing where hardware succeeds is the likeliest
 reading, but a dx12-specific bug that only a software rasteriser exposes fits
 the evidence just as well.
+
+**A much narrower hypothesis, from reading the two paths rather than from new
+evidence (2026-08-21).** "The renderer's larger use of one" was never narrow
+enough to act on, and the difference turns out to be a single call:
+
+- the probe that **passes** on WARP issues `encoder.draw_mesh_tasks(1, 1, 1)` —
+  a **direct** `DispatchMesh` (`crcbl-dx12/src/device.rs`, in the mesh probe);
+- the renderer that **kills** it issues `encoder.draw_mesh_tasks_indirect(..)` —
+  an **`ExecuteIndirect`** with a `DISPATCH_MESH` command signature whose
+  extents come from a GPU-written buffer (`crcbl-render/src/forward.rs`, the
+  `EmitTail::Mesh` arm);
+- and `draw_mesh_tasks_indirect` appears in `crcbl-dx12`'s own tests exactly
+  once, in a _recording refusal_ check against an unissued handle. **Nothing has
+  ever executed an indirect mesh dispatch on WARP.**
+
+That fits the evidence that otherwise made no sense: zero debug-layer errors and
+zero DRED breadcrumbs are what a fault _inside_ WARP's `ExecuteIndirect`
+implementation would look like, before any command-list work is recorded.
+
+**The experiment**, written the same day: a sibling of the passing probe whose
+only difference is the indirect dispatch, one workgroup, same shader, same
+attachment, asserting the same pixels. It is expected to remove the device, and
+it is deliberately written without a skip or a tolerance that would let it pass
+on a device that removed itself. A failure narrows this entry from "our
+renderer" to one call with a minimal repro; a pass eliminates the suspect and
+says the renderer's larger use really is the subject.
 
 So the decision:
 
