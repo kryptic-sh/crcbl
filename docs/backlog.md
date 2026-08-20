@@ -1285,13 +1285,41 @@ carrying the flag over would fail all seven for a reason already understood.
 `auto` tries hardware, falls back to SwiftShader and takes the first whose
 readback control passes.
 
-**Still owed: `web/run-render-harness-e2e.sh` on macOS and Windows.** It is the
-only gate anywhere that holds a browser's _pixels_ against the committed
-goldens, and it is still Linux-only. It is the harder one for a reason its own
-job records: it neither `needs: build` nor downloads the `site` artifact,
-because `web/build.sh` does not build `apps/render-harness` at all — so unlike
-the demo gates it would bring a Rust toolchain, a wasm build and a native
-comparator to each runner.
+**The golden parity harness went to all three the same day**, as a matrix over
+`ubuntu-latest`, `macos-15` and `windows-latest` with `fail-fast: false`. It
+brings a Rust toolchain, a wasm build and a native comparator to each runner —
+unavoidable, because `web/build.sh` does not build `apps/render-harness` at all,
+so unlike the demo gates there is no `site` artifact to reuse.
+
+**It needed one code change, and the reason is the interesting part.**
+`render-harness-e2e.mjs` **pinned** SwiftShader, deliberately: it compares
+against a golden at a tolerance, so which rasteriser produced the pixels is not
+a detail to leave to the machine. But Chrome's Dawn has no Vulkan backend on
+macOS and therefore no software adapter at all, so a pin is not "deterministic"
+there, it is "cannot run". `CRCBL_WEB_E2E_ADAPTER` now selects `swiftshader`
+(the default, so Linux is unchanged) or `hardware`, there is deliberately **no
+`auto`** — a harness that silently changed rasteriser would change what its
+comparison means — and the driver prints which one it used.
+
+**Measured before any of it was wired, on an RX 7900 XTX:**
+
+| run                                        | result                       |
+| ------------------------------------------ | ---------------------------- |
+| harness, `swiftshader` (unchanged default) | 9/11, `ssr` and `ui` excused |
+| harness, `hardware`                        | **11/11**, no excuse needed  |
+| those readbacks against native vk          | **11/11**                    |
+
+So `ssr` and `ui` are a **software-rasteriser limit, not a browser-backend
+defect** — which is why the macOS leg carries no `--expect-fail` at all and is
+the strongest of the three. If Metal turns out to differ on a scene, the answer
+is a measured excuse on that leg, not a wider tolerance.
+
+**Still owed: the cross-backend step on macOS and Windows.** `--reference mtl`
+and `--reference dx12` would each hold a browser against its own platform's
+native backend on the same machine — no committed reference to drift — which is
+stronger than the golden comparison and is the direct replacement for the
+vk↔wgpu job. The shape is proven (the 11/11 against native vk above used a
+hardware-rendered browser); what is left is the per-OS wiring.
 
 ~~Every WebGPU browser test in the repository runs in one job~~ — **the probe
 now runs on three platforms.** What is still true, and is the live half:,
