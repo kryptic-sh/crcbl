@@ -40,6 +40,31 @@ So the choice is boilerplate against a dependency, with no safety difference —
 which is a smaller question than it looked, and is why it is stated plainly
 rather than argued.
 
+### The sweep for a runner nobody invokes
+
+Every `#[ignore]` in this workspace names the script that reaches it — 398 of
+them across 17 scripts, which is a good convention and was one script short of
+being load-bearing. `run-gltf-e2e.sh` was named by an `#[ignore]` and invoked by
+**no workflow**, so `crates/crcbl/tests/gltf_e2e.rs` executed nowhere but on a
+developer's machine. Fixed 2026-08-20.
+
+**The sweep, and it is two greps:**
+
+```sh
+grep -rhoE '#\[ignore\s*=\s*"[^"]*run ([^ ";]+)' --include='*.rs' . | sort -u
+grep -c '<each script>' .github/workflows/*.yml
+```
+
+Then, per script, a zero is the finding. All 17 named scripts exist in
+`git ls-files`, so the other half of the question — an `#[ignore]` pointing at a
+script that was deleted — is currently clean too.
+
+**Worth re-running whenever a runner is added or a job is reshuffled**, because
+nothing enforces it: an `#[ignore]` reason is prose, and a workflow that drops a
+step leaves the test looking covered. Making it a gate would mean parsing both
+sides, which is a `tools/` script somebody has to maintain against two file
+formats; recorded as declined for now rather than not considered.
+
 ### The sweep for arms that are asserted but never run
 
 A test that branches on what the device reports covers both arms in its source
@@ -1113,9 +1138,14 @@ while adding a thirteenth probe is still cheaper than doing it twice.
 `SceneDesc` and instances, proved by `crates/crcbl/tests/gltf_e2e.rs` drawing
 one and asserting a colour per quadrant. What a real file can still hit:
 
-- **`run-gltf-e2e.sh` is not in CI.** `ci.yml` runs `run-tiling-e2e.sh` on WARP,
-  lavapipe and wgpu; the glTF runner needs the same four steps. Do it with the
-  cross-platform work below, since both edit the same jobs.
+- ~~**`run-gltf-e2e.sh` is not in CI.**~~ Fixed 2026-08-20: it runs beside
+  `run-tiling-e2e.sh` on all four — WARP, lavapipe, wgpu and Metal. It was the
+  **only** runner named by an `#[ignore]` that no workflow invoked, so the suite
+  had executed on no machine but a developer's; found by listing every
+  `#[ignore = "… run <script>"]` in the tree and grepping the workflows for each
+  script named. Measured before adding: it passes on radv, on lavapipe and
+  through wgpu on lavapipe here. The Metal arm has no local measurement behind
+  it and is the one to read first if it goes red.
 - **`data:` URI buffers and images** — Blender's "glTF Embedded" export is
   exactly this, so the most common way an artist hands over a single file is one
   we skip. Probably the highest-value gap for the viewer.
