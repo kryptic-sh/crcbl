@@ -267,8 +267,8 @@ jobs:
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         run: ./web/run-probe-e2e.sh
 
-      # quarry IS RENDERED HERE AND lumen IS NOT — READ THIS BEFORE ADDING OR
-      # DELETING EITHER.
+      # BOTH 3D DEMOS ARE RENDERED HERE, AND THEY WERE NOT FOR A LONG TIME —
+      # READ THIS BEFORE DELETING EITHER.
       #
       # They are the site's two 3D demos, and until 2026-08 neither ran here for
       # one cause: `crcbl-render`'s draw-argument pass bound fourteen storage
@@ -306,17 +306,28 @@ jobs:
       # comment says the group's first check exists to prevent, which is why that
       # first check is what went red.
       #
-      # So the step is out again until the window is derived from the demo's
-      # observed heartbeat rather than fixed. Bumping the constant is not the fix:
-      # it would buy this runner and lose the next slower one, and it makes the
-      # pause check weaker on every demo. `docs/backlog.md` carries it. Adding a
-      # step back is these two lines:
+      # **That is fixed rather than tuned around, which is why both steps are
+      # here now.** `heartbeatMs` in `web/tools/browser-e2e.mjs` waits for two HUD
+      # lines and times the gap, and the watch window is
+      # `max(TICK_WINDOW_MS, beat * TICK_WINDOW_BEATS)` — the constant kept as a
+      # floor, so a fast machine is unchanged and a slow one watches longer.
+      # Raising the constant instead was declined: it buys this runner and loses
+      # the next slower one, and it weakens "a paused demo runs no ticks at all"
+      # on every demo. `docs/backlog.md` carries the reasoning.
       #
-      #     - name: Render quarry in a real browser
-      #       run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
-      #
-      #     - name: Render lumen in a real browser
-      #       run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
+      # The step timeouts are what keep a regression in that machinery readable:
+      # the beat is measured under a 60-second deadline, so a demo whose tick
+      # loop dies costs two of those and fails on the control rather than sitting
+      # here. Ten minutes is roughly three times quarry's measured 3m39s.
+      - name: Render quarry in a real browser
+        timeout-minutes: 10
+        run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
+
+      # lumen last: it is the heaviest frame the site ships, and its local
+      # evidence is the same 34-of-34 SwiftShader run quarry's was.
+      - name: Render lumen in a real browser
+        timeout-minutes: 10
+        run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed

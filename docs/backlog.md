@@ -12257,12 +12257,18 @@ control with `no second HUD line in 20000 ms`, and keeping every fortieth line
 to stretch the beat to 40 s produced an 80 s window on both later checks, with
 the paused one still reading zero and the resumed one two.
 
-**What is still owed: a runner run.** The change is proven on this desktop and
-on a synthetically slowed beat, not on the machine it was written for. Putting
-quarry's step back is the measurement, and lumen's follows it. Also untouched
-and worth knowing: group F still pauses for the bare `TICK_WINDOW_MS` twice, in
-horde's two-finger checks — those wait for a _stopped_ thing to stay stopped, so
-a fixed window is not the same defect, but it is the same constant.
+**Both steps went back in on the strength of it**, each with
+`timeout-minutes: 10` against quarry's measured 3m39s. That run is the real
+measurement — the change is otherwise proven only on this desktop and on a
+synthetically slowed beat, not on the machine it was written for. If a step goes
+red again, read which check failed before touching the window: a heartbeat
+control that fails now means the tick loop produced fewer than two lines in a
+minute, which is a different claim from the four-second one it used to make.
+
+Also untouched and worth knowing: group F still pauses for the bare
+`TICK_WINDOW_MS` twice, in horde's two-finger checks — those wait for a
+_stopped_ thing to stay stopped, so a fixed window is not the same defect, but
+it is the same constant.
 
 **Both stale prose claims are fixed**: `web/pages/index.html`'s excusing clause
 and `web/pages/lumen.html`'s "This one wants a real GPU" note, which said the
