@@ -3052,6 +3052,23 @@ naming the adapter. A driver genuinely without the feature needs a second device
 to compare against, which is a change to make deliberately rather than a
 condition to loosen.
 
+**`the_mesh_dispatch_extent_is_the_culled_instance_count` had the same branch
+and got the same treatment**, found by sweeping the tree for a `println!`
+followed by a `return` inside a test. Its own message already said "radv and
+lavapipe both report `VK_EXT_mesh_shader`", which is the argument for deleting
+the branch rather than for keeping it. It is an `assert_eq!` on the selected
+path now, red-checked the same way.
+
+**The sweep that found it is worth keeping**, because it is cheap and it is a
+different shape from the `features.contains` one already recorded above: a
+capability branch can be written as an early return with no `if features` in
+sight. Both queries are clean as of 2026-08-20 — no feature branch in the tree
+has an `else` that only prints, and the remaining print-and-return sites are
+either a genuinely bimodal exercise whose other arm **asserts a refusal**
+(`vk_e2e/compute.rs`'s `update_bind_group`, `vk_e2e/indirect.rs`'s indirect
+count), a `Null`-backend guard in `apps/quarry`, or a helper binary's usage
+message.
+
 ### The Windows probe gate has no adapter; macOS is proven
 
 **macOS works, first run, exactly as predicted.** `probe-macos` ran headless on

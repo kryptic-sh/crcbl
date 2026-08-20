@@ -1235,17 +1235,22 @@ fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
     )
     .expect("the forward renderer builds");
     place_cube(&mut renderer);
-    if renderer.geometry_path() != crcbl_hal::GeometryPath::MeshShader {
-        eprintln!(
-            "vk e2e: this device does not select the mesh path, so it records no indirect \
-             mesh dispatch. radv and lavapipe both report VK_EXT_mesh_shader, and \
-             `docs/backlog.md` is where a driver that does not belongs"
-        );
-        renderer.destroy(headless.device.as_ref());
-        pool.destroy(headless.device.as_ref());
-        headless.finish();
-        return;
-    }
+    // **Loud rather than skipped, and for the reason the message already
+    // stated.** This asked for `MESH_SHADER | TASK_SHADER` a few lines up and
+    // every adapter this suite opens grants them — radv here, lavapipe on both
+    // the Linux and the Windows CI arms, read off run 32105356561's job logs,
+    // where this string appears zero times. A branch nothing takes is not
+    // tolerance for a future driver; it is the test going quiet on the day it
+    // matters, which is what the rest of this file's degrades were changed for
+    // on 2026-08-20.
+    assert_eq!(
+        renderer.geometry_path(),
+        crcbl_hal::GeometryPath::MeshShader,
+        "this device asked for MESH_SHADER and TASK_SHADER and still selected another \
+         geometry path, so it records no indirect mesh dispatch and this test would assert \
+         nothing. Every adapter this suite has run on selects the mesh path here — see the \
+         comment above before loosening this"
+    );
 
     let at = glam::Mat4::from_translation(OPEN_BOX_AT);
     let camera = two_mesh_camera();
