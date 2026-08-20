@@ -1371,12 +1371,24 @@ running out inside the _native_ comparator's cargo build — a Windows runner
 compiles this workspace twice, once to wasm and once for the host. Its timeout
 is 90 minutes now, per leg rather than for the job.
 
-**Still owed: the cross-backend step on macOS and Windows.** `--reference mtl`
-and `--reference dx12` would each hold a browser against its own platform's
-native backend on the same machine — no committed reference to drift — which is
-stronger than the golden comparison and is the direct replacement for the
-vk↔wgpu job. The shape is proven (the 11/11 against native vk above used a
-hardware-rendered browser); what is left is the per-OS wiring.
+**`--reference mtl` landed on the macOS leg**, and it is the strongest form of
+the comparison anywhere in the tree. On Linux the browser renders on SwiftShader
+and the reference on lavapipe — two software rasterisers, which is why `ssr` and
+`ui` need excusing there. On macOS both halves are **the same Metal device**:
+the harness runs at `adapter hardware` and the reference renders natively
+through `CRCBL_GPU=mtl` on the machine that just drew it. Same GPU, same driver,
+no committed reference between them to drift. It therefore carries **no
+`--expect-fail`**, which is a claim rather than an omission: a mismatch is a
+disagreement between `crcbl-webgpu` and `crcbl-mtl` on one device, and the
+answer would be to read the diff artifact rather than add a name.
+
+**`--reference dx12` on Windows is deliberately not done.** There the browser is
+on SwiftShader and WARP would be the reference — two different software
+rasterisers again, so it would be the weak Linux-shaped comparison rather than
+the strong macOS-shaped one, and it would need its own excuse list to say so.
+The golden comparison already covers that platform. Worth revisiting only if a
+Windows runner with a GPU appears, which would also close the demo-gate gap
+above.
 
 ~~Every WebGPU browser test in the repository runs in one job~~ — **the probe
 now runs on three platforms.** What is still true, and is the live half:,
