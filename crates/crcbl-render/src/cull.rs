@@ -254,9 +254,34 @@ impl Frustum {
     }
 }
 
+/// Which of the per-cluster cull's two tests rejected a cluster, or that neither
+/// did — the outcomes `mesh_cluster.slang`'s `cluster_survives` answers with.
+///
+/// The counters the amplification stage keeps are per outcome, so this is what
+/// [`cluster_cull_verdict`] has to answer for a test to be able to say *which*
+/// test removed a cluster. A survivor count on its own cannot: "27 of 338
+/// survived" is equally consistent with the normal cone doing all of the work
+/// and with it doing none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClusterVerdict {
+    /// Both tests kept it, so it reaches the mesh stage.
+    Kept,
+    /// Its bounding sphere is entirely outside one of the frustum's six planes.
+    RejectedByFrustum,
+    /// Every triangle of it faces away from the camera.
+    ///
+    /// **Reached only by a cluster the frustum kept**, because the two tests are
+    /// asked in that order — so a cluster that is both behind the camera and
+    /// facing away is the frustum's, here and in the shader.
+    RejectedByCone,
+}
+
 /// Whether a cluster of an instance may contribute a pixel — **the reference
 /// implementation of §3.5's per-cluster cull**, and the rule
 /// `mesh_cluster.slang`'s amplification stage runs.
+///
+/// [`cluster_cull_verdict`] is the same rule with the cause of a rejection kept;
+/// this is written in terms of it so the two cannot answer differently.
 ///
 /// `transform` is the instance's model → world matrix and `camera` its
 /// world-space eye position, so this is the cull in **world space**: the same
@@ -296,11 +321,33 @@ pub fn cluster_survives_cull(
     transform: Mat4,
     bounds: &ClusterBounds,
 ) -> bool {
+    cluster_cull_verdict(frustum, camera, transform, bounds) == ClusterVerdict::Kept
+}
+
+/// The same rule as [`cluster_survives_cull`], answering **which test** refused.
+///
+/// Every word of that function's header applies here — it is the one that runs
+/// the rule, and the bool is a reading of this answer. What this adds is the
+/// only thing the counters need and a bool cannot carry: the frame's three
+/// per-cluster numbers are survivors, frustum rejections and cone rejections,
+/// and a test that could only say "something rejected it" would pass just as
+/// well with the two buckets swapped.
+///
+/// The order is the shader's: frustum first against the bounding sphere, then
+/// the cone. A cluster that fails both is [`ClusterVerdict::RejectedByFrustum`]
+/// on both sides.
+#[must_use]
+pub fn cluster_cull_verdict(
+    frustum: &Frustum,
+    camera: Vec3,
+    transform: Mat4,
+    bounds: &ClusterBounds,
+) -> ClusterVerdict {
     let basis = Mat3::from_mat4(transform);
     let center = transform.transform_point3(Vec3::from_array(bounds.center));
     let radius = bounds.radius * max_stretch(basis);
     if !frustum.intersects_sphere(center, radius) {
-        return false;
+        return ClusterVerdict::RejectedByFrustum;
     }
     // A unit axis, so the two sides of the cone inequality below are in the same
     // units: the left is a length along the axis and the right is a length in
@@ -314,7 +361,11 @@ pub fn cluster_survives_cull(
         .sqrt();
     let faces_away =
         bounds.cone_cutoff > 0.0 && axis.dot(to_center) > sine.mul_add(to_center.length(), radius);
-    !faces_away
+    if faces_away {
+        ClusterVerdict::RejectedByCone
+    } else {
+        ClusterVerdict::Kept
+    }
 }
 
 /// The largest factor by which `basis` can grow a vector's length, bounded from
@@ -853,6 +904,78 @@ mod tests {
             !survives(&at([40.0, 0.0, -10.0])),
             "forty units to the right of a 45° frustum ten units deep is outside it"
         );
+    }
+
+    /// **Which test rejected the cluster, not merely that something did.**
+    ///
+    /// The counters the amplification stage keeps are one per cause, so an
+    /// oracle that could only say "rejected" would agree with a shader that had
+    /// the two buckets swapped. Each case here is one the pair of tests above
+    /// already builds, asked for its cause instead of for a bool.
+    ///
+    /// The last case is the one neither of those covers and the one the ordering
+    /// decides: a cluster that is **both** outside the frustum and facing away
+    /// belongs to the frustum, because that test is asked first and the shader
+    /// returns at the first refusal.
+    #[test]
+    fn the_verdict_names_the_test_that_rejected_the_cluster() {
+        let frustum = frustum();
+        let camera = Camera::default().eye;
+        // Facing the camera, so the cone has no opinion about it at all.
+        let facing = |center: [f32; 3]| ClusterBounds {
+            center,
+            radius: 0.5,
+            cone_axis: Vec3::Z.to_array(),
+            cone_cutoff: 1.0,
+        };
+        // The same sphere at the mesh's origin, facing -Z — away from a +Z
+        // camera. `the_instance_transform_moves_the_sphere_and_turns_the_cone`
+        // builds this one and asserts it is rejected; this says by what.
+        let away = ClusterBounds {
+            center: [0.0, 0.0, 0.0],
+            radius: 0.5,
+            cone_axis: [0.0, 0.0, -1.0],
+            cone_cutoff: 1.0,
+        };
+        let ahead = Mat4::from_translation(Vec3::new(0.0, 0.0, -10.0));
+        let aside = Mat4::from_translation(Vec3::new(40.0, 0.0, -10.0));
+
+        for (case, transform, bounds, expected) in [
+            (
+                "straight ahead and facing the camera",
+                Mat4::IDENTITY,
+                facing([0.0, 0.0, -10.0]),
+                ClusterVerdict::Kept,
+            ),
+            (
+                "twenty units behind the eye, facing the camera",
+                Mat4::IDENTITY,
+                facing([0.0, 0.0, 20.0]),
+                ClusterVerdict::RejectedByFrustum,
+            ),
+            (
+                "inside the frustum, facing away",
+                ahead,
+                away,
+                ClusterVerdict::RejectedByCone,
+            ),
+            (
+                "outside the frustum and facing away — the frustum is asked first",
+                aside,
+                away,
+                ClusterVerdict::RejectedByFrustum,
+            ),
+        ] {
+            let verdict = cluster_cull_verdict(&frustum, camera, transform, &bounds);
+            assert_eq!(verdict, expected, "{case}");
+            // And the bool every existing caller reads is this answer and not a
+            // second rule beside it.
+            assert_eq!(
+                cluster_survives_cull(&frustum, camera, transform, &bounds),
+                verdict == ClusterVerdict::Kept,
+                "{case}: the bool and the verdict disagree",
+            );
+        }
     }
 
     /// The cull is in **world space**, so the instance transform is what puts a

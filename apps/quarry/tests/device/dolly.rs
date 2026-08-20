@@ -237,7 +237,7 @@ fn all_of_the_reduction_is_cluster_culling() {
             .clusters
             .expect("the mesh path counts what its amplification stage kept");
         assert!(
-            clusters > 0,
+            clusters.survivors > 0,
             "the amplification stage kept no cluster on frame {}, yet the frame drew",
             stats.frame,
         );
@@ -246,6 +246,135 @@ fn all_of_the_reduction_is_cluster_culling() {
         "quarry dolly: over {} reported frame(s) the instance cull kept 1 of 1 every time, and \
          the cluster cull kept {:?}",
         seen.len(),
-        seen.iter().map(|s| s.clusters).collect::<Vec<_>>(),
+        seen.iter()
+            .map(|s| s.clusters.map(|cull| cull.survivors))
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// Frames rendered at one standing pose before the counters are read.
+///
+/// **The pose does not move, and that is the whole design of the test below.**
+/// `crcbl::render::CullStatsRing` answers a few frames behind, so on a moving
+/// camera the counters and the cut read out of the same `Frame` are about two
+/// different cameras and cannot be added up against each other. Standing still
+/// makes every frame in the run the same measurement, so which one the ring got
+/// round to stops mattering. Six is `SETTLE`'s three for the hysteresis to reach
+/// its fixed point, doubled so the ring has answered well before the last frame.
+const STANDING: usize = 6;
+
+/// **The three per-cluster counts partition the cut: survivors + frustum
+/// rejections + cone rejections is exactly the number of clusters tested.**
+///
+/// `docs/plan/sample/14-quarry.md` asks for the two rejection counts on the
+/// panel, and this is the assertion that says they are the counts they claim to
+/// be. It is the one thing that catches a word landing at the wrong index or a
+/// bucket being missed altogether: each of those leaves three plausible numbers
+/// in three plausible fields, and only the sum notices. A stage that counted a
+/// cluster into two words, or that counted one the DAG descent never selected,
+/// fails here too.
+///
+/// The right-hand side is the **cut**, read out of `cluster_selection` — the
+/// clusters the descent chose, which is exactly the set the amplification stage
+/// puts to a cull. Not the resident pool: the coarse levels' clusters are
+/// resident and were never offered to either test.
+///
+/// # The normal cone is allowed to be zero here
+///
+/// Measured on 2026-08-20 the cone rejects almost nothing on this face — 44
+/// clusters kept against 42 with the cone deliberately fed an inverted eye, in
+/// `freeze.rs`'s header. So this asserts the identity and the frustum's share,
+/// and prints the cone's rather than demanding it. The value of the split is
+/// that the panel can now *say* the cone did nothing, which it could not before.
+#[test]
+fn the_three_cluster_counts_add_up_to_the_cut_they_were_taken_over() {
+    if backend() == crcbl::backend::GpuBackend::Null {
+        eprintln!(
+            "quarry dolly: the Null backend runs no amplification stage, so there are no \
+             per-cluster counts to add up — run with CRCBL_GPU=vk"
+        );
+        return;
+    }
+    // The far end of the dolly, where the camera has travelled *into* the face:
+    // the near half of it is behind the eye, so the frustum has real work to do
+    // and the identity is asserted over a frame where both sides are non-zero.
+    let mut quarry = Quarry::open(Levels::Dag, WALKING_BUDGET);
+    let mut settled: Option<Vec<usize>> = None;
+    let mut last = None;
+    for frame in 1..=STANDING {
+        let seen = quarry.frame(DOLLY_END);
+        let Some(cut) = seen.cut.clone() else {
+            eprintln!(
+                "quarry dolly: this device records no per-cluster cut, so there is no cut for \
+                 the counters to be checked against — see harness::read_the_cut"
+            );
+            quarry.finish();
+            return;
+        };
+        // The first frame of all judges every group with no history and may
+        // reach a different fixed point from the ones after it, so the cut is a
+        // fact about this pose only from the second frame on — which is also the
+        // earliest frame the ring can report, its counter being one-based.
+        if frame > 1 {
+            match &settled {
+                None => settled = Some(cut),
+                Some(before) => assert_eq!(
+                    *before, cut,
+                    "the cut was still moving at a standing camera on frame {frame} of \
+                     {STANDING}, so no single cut describes the frame the counters came from"
+                ),
+            }
+        }
+        last = Some(seen);
+    }
+    let seen = last.expect("STANDING is not zero");
+    let cut = settled.expect("STANDING is more than one");
+    quarry.finish();
+
+    let stats = seen
+        .culled
+        .expect("the ring has come round in six frames, and it is only a few frames deep");
+    let clusters = stats
+        .clusters
+        .expect("the mesh path counts what its amplification stage tested");
+    let tested: usize = cut.iter().sum();
+    eprintln!(
+        "quarry dolly: frame {} tested {} cluster(s) — {} kept, {} rejected by the frustum, {} \
+         by the normal cone; the cut it was taken over is {cut:?}, {tested} cluster(s)",
+        stats.frame,
+        clusters.tested(),
+        clusters.survivors,
+        clusters.frustum_rejects,
+        clusters.cone_rejects,
+    );
+    assert!(
+        stats.frame >= 2,
+        "the counters describe frame {}, which is the first frame of all — the one whose cut is \
+         not yet the settled one this is comparing against",
+        stats.frame,
+    );
+    assert_eq!(
+        stats.instances, 1,
+        "the scene holds one instance and the camera is inside it, so the cluster counts are \
+         over the whole cut or over nothing"
+    );
+    assert_eq!(
+        clusters.tested(),
+        tested as u64,
+        "the amplification stage counted {} cluster(s) into its three words over a cut of \
+         {tested} — the three do not partition what it tested, which is a word at the wrong \
+         index or a cluster counted into none of them",
+        clusters.tested(),
+    );
+    assert!(
+        clusters.survivors > 0,
+        "nothing survived the cull at a pose aimed down the face, so the identity above holds \
+         over a frame that drew nothing"
+    );
+    assert!(
+        clusters.frustum_rejects > 0,
+        "the camera stands inside the face with half of it behind the eye and the frustum \
+         rejected no cluster at all — so the identity above is satisfied by the survivor count \
+         alone and says nothing about the split"
     );
 }

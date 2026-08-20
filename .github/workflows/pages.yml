@@ -288,15 +288,35 @@ jobs:
       # `CRCBL_WEB_E2E_DEMO=lumen` each passed 34 of 34 checks, and quarry passed
       # 34 of 34 against real hardware as well.
       #
-      # What was never measured is a **GitHub runner**, which is a shared machine
-      # several times slower than the desktop those numbers came from, and these
-      # are the two heaviest frames the site ships. quarry goes first because its
-      # own exit criterion names the browser, and it carries a step timeout so
-      # the answer arrives as a number on one step rather than as the 30-minute
-      # job timeout with nothing to read. lumen follows once that number is in.
-      - name: Render quarry in a real browser
-        timeout-minutes: 8
-        run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
+      # **A GitHub runner has now been measured, and it is not the ceiling that
+      # keeps them out — it is `TICK_WINDOW_MS`.** quarry's step ran here on
+      # 2026-08-20 (run 32363651779) and scored **32 of 34**: it booted, opened a
+      # SwiftShader device, resolved `IndirectPerBatch`/`ArrayPages`, drew 64
+      # distinct colours, changed between all 16 sampled frames, and got its
+      # culling statistics back. The two it failed are group E's HUD heartbeat
+      # checks, both `0 HUD line(s) in 4000 ms`, and the step took 3m39s against
+      # 22–41s for the five 2D demos.
+      #
+      # That is a **pace** result, not a rendering one. The HUD line is logged
+      # every sixtieth tick — a second of *simulated* time — and this runner
+      # advanced the demo's clock to 22s over roughly 40s of wall clock, so a
+      # fixed four-second window does not reliably contain one. Worse, the group's
+      # "a paused demo runs no ticks at all" check passes for free on a run where
+      # no heartbeat can appear at all: exactly the shape `TICK_WINDOW_MS`'s own
+      # comment says the group's first check exists to prevent, which is why that
+      # first check is what went red.
+      #
+      # So the step is out again until the window is derived from the demo's
+      # observed heartbeat rather than fixed. Bumping the constant is not the fix:
+      # it would buy this runner and lose the next slower one, and it makes the
+      # pause check weaker on every demo. `docs/backlog.md` carries it. Adding a
+      # step back is these two lines:
+      #
+      #     - name: Render quarry in a real browser
+      #       run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
+      #
+      #     - name: Render lumen in a real browser
+      #       run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed

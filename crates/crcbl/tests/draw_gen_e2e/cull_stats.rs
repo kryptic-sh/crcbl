@@ -195,10 +195,46 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
     // unknown rather than the zero the clearing pass left in it. A device with
     // mesh *and* task shaders has one, and then it is a count.
     if renderer.culls_clusters() {
+        let clusters = stats
+            .clusters
+            .expect("a path with an amplification stage counts what it tested");
         assert!(
-            stats.clusters.is_some_and(|clusters| clusters > 0),
+            clusters.survivors > 0,
             "the amplification stage kept some clusters: {stats:?}",
         );
+        // **Each of the three came off its own word**, checked the same way the
+        // instance count above is: the buffer copied by hand, outside the frame
+        // loop. The scene and the camera do not move, so the words hold the same
+        // numbers this frame that the ring read a few frames ago. Three counters
+        // in one buffer is exactly the arrangement where an off-by-one offset
+        // reports a neighbour's total and reads as entirely plausible — word 2
+        // between them is the light grid's, which is a real number and not a
+        // zero. Whether the three *add up to the cut* needs a cut to compare
+        // against, and that is `apps/quarry`'s device suite.
+        for (word, name, reported) in [
+            (
+                crcbl::shaders::cull::CLUSTER_SURVIVOR_WORD,
+                "survivors",
+                clusters.survivors,
+            ),
+            (
+                crcbl::shaders::cull::CLUSTER_FRUSTUM_REJECT_WORD,
+                "frustum rejections",
+                clusters.frustum_rejects,
+            ),
+            (
+                crcbl::shaders::cull::CLUSTER_CONE_REJECT_WORD,
+                "cone rejections",
+                clusters.cone_rejects,
+            ),
+        ] {
+            assert_eq!(
+                u64::from(read_stats_word(&headless, &renderer, word)),
+                reported,
+                "the ring reported {reported} {name}, and word {word} of the counter buffer \
+                 says otherwise",
+            );
+        }
     } else {
         assert_eq!(
             stats.clusters, None,

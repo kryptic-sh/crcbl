@@ -178,7 +178,7 @@ pub use crcbl_ui::text::FontAtlas;
 /// crate's button API should not have to add a second dependency to call it.
 pub use crcbl_ui::{ButtonState, SkinInsets};
 pub use cull::{Aabb, Frustum, visible_instances};
-pub use cull_stats::{CullStats, CullStatsRing};
+pub use cull_stats::{ClusterCull, CullStats, CullStatsRing};
 pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use effects::{EffectOverride, EffectRequest, RenderEffects};
 pub use fly::{Flyer, LOOK, SPEED, TURN};

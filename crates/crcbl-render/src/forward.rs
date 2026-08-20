@@ -6194,7 +6194,13 @@ impl ForwardRenderer {
             // triangle it never submitted.
             drawn: stats.map(|stats| stats.instances + fullscreen),
             triangles: None,
-            clusters: stats.and_then(|stats| stats.clusters),
+            // The survivors alone: the panel row is "clusters drawn", and the
+            // frustum and cone rejection counts beside them are a different
+            // question — `CullStats::clusters` carries all three for a caller
+            // that wants the split, which `apps/quarry`'s own panel row is.
+            clusters: stats
+                .and_then(|stats| stats.clusters)
+                .map(|cull| cull.survivors),
             cull_frame: stats.map(|stats| stats.frame),
         }
     }

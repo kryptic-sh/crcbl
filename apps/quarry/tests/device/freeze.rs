@@ -213,7 +213,12 @@ fn the_culls_follow_the_live_camera_while_the_cut_is_pinned() {
     let facing = dolly(DOLLY_START);
     quarry.renderer.set_frozen_selection_eye(Some(facing.eye));
 
-    let kept = |frame: &crate::harness::Frame| frame.culled.and_then(|stats| stats.clusters);
+    let kept = |frame: &crate::harness::Frame| {
+        frame
+            .culled
+            .and_then(|stats| stats.clusters)
+            .map(|clusters| clusters.survivors)
+    };
     let mut seen = quarry.frame(DOLLY_START);
     let held = kept(&seen).expect("the ring has come round by now, and this path counts clusters");
     let covered_facing = seen.covered;

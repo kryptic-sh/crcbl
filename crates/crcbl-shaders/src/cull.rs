@@ -28,8 +28,9 @@ pub const PLANE_COUNT: usize = 6;
 ///
 /// **One buffer, and topic 03 §3.6's single permitted readback.**
 /// `cull.slang` adds surviving instances into [`INSTANCE_SURVIVOR_WORD`],
-/// `mesh_cluster.slang`'s amplification stage adds surviving clusters into
-/// [`CLUSTER_SURVIVOR_WORD`], and `light_cluster.slang` adds the light
+/// `mesh_cluster.slang`'s amplification stage adds each cluster it tested into
+/// exactly one of [`CLUSTER_SURVIVOR_WORD`], [`CLUSTER_FRUSTUM_REJECT_WORD`]
+/// and [`CLUSTER_CONE_REJECT_WORD`], and `light_cluster.slang` adds the light
 /// assignments its budget refused into
 /// [`CLUSTER_OVERFLOW_WORD`](crate::light::CLUSTER_OVERFLOW_WORD). A counter of
 /// its own for any of them would be another buffer to zero, to barrier and to
@@ -39,7 +40,7 @@ pub const PLANE_COUNT: usize = 6;
 /// [`crate::clear_counters::Params::stats_words`] — because a clearing pass
 /// that zeroed a prefix would leave one of them carrying the previous frame's
 /// total, which reads as a plausible count rather than as a failure.
-pub const STATS_WORDS: u32 = 3;
+pub const STATS_WORDS: u32 = 5;
 
 /// Which word of the culling statistics counts surviving **instances** — the
 /// one `cull.slang` writes.
@@ -53,12 +54,46 @@ pub const INSTANCE_SURVIVOR_WORD: u32 = 0;
 /// else in the frame culls a cluster.
 pub const CLUSTER_SURVIVOR_WORD: u32 = 1;
 
+/// Which word counts the clusters the **frustum** rejected — the first of
+/// `mesh_cluster.slang`'s two per-cluster tests.
+///
+/// The word that makes [`CLUSTER_SURVIVOR_WORD`] readable. A survivor count on
+/// its own says how much of the cut reached the raster and nothing about which
+/// test removed the rest, so "27 of 338 survived" is equally consistent with the
+/// normal cone doing all of the work and with it doing none.
+///
+/// Counted for a cluster that was **tested**, which is one the DAG descent
+/// selected in a live instance's run. A cluster outside the cut is in none of
+/// the three words — see the amplification stage, where that is the whole reason
+/// its one atomic is guarded.
+///
+/// Zero wherever [`CLUSTER_SURVIVOR_WORD`] is, and for the same reason: no
+/// amplification stage ran, so nothing rejected a cluster either.
+pub const CLUSTER_FRUSTUM_REJECT_WORD: u32 = 3;
+
+/// Which word counts the clusters the **normal cone** rejected — the second of
+/// the two tests, reached only by a cluster the frustum kept.
+///
+/// Ordered, not independent: the two tests are asked in sequence and a cluster
+/// lands in the bucket of the first one that refused it. So this is "faced away
+/// *and* was on screen", which is the number that says what back-face rejection
+/// is worth on this geometry; a cluster that is both behind the camera and
+/// facing away is the frustum's.
+pub const CLUSTER_CONE_REJECT_WORD: u32 = 4;
+
 // Each counter owns one word. A further counter would need `STATS_WORDS` raised
 // with it, and this is what says so at build time. The light grid's own word is
 // asserted the same way beside its declaration in [`crate::light`].
 const _: () = assert!(INSTANCE_SURVIVOR_WORD < STATS_WORDS);
 const _: () = assert!(CLUSTER_SURVIVOR_WORD < STATS_WORDS);
+const _: () = assert!(CLUSTER_FRUSTUM_REJECT_WORD < STATS_WORDS);
+const _: () = assert!(CLUSTER_CONE_REJECT_WORD < STATS_WORDS);
 const _: () = assert!(INSTANCE_SURVIVOR_WORD != CLUSTER_SURVIVOR_WORD);
+const _: () = assert!(INSTANCE_SURVIVOR_WORD != CLUSTER_FRUSTUM_REJECT_WORD);
+const _: () = assert!(INSTANCE_SURVIVOR_WORD != CLUSTER_CONE_REJECT_WORD);
+const _: () = assert!(CLUSTER_SURVIVOR_WORD != CLUSTER_FRUSTUM_REJECT_WORD);
+const _: () = assert!(CLUSTER_SURVIVOR_WORD != CLUSTER_CONE_REJECT_WORD);
+const _: () = assert!(CLUSTER_FRUSTUM_REJECT_WORD != CLUSTER_CONE_REJECT_WORD);
 
 /// Bytes of the uniform block.
 ///
@@ -290,6 +325,23 @@ mod tests {
                 include_str!("../shaders/mesh_cluster.slang"),
                 "CLUSTER_SURVIVOR_WORD",
                 CLUSTER_SURVIVOR_WORD,
+            ),
+            // The two rejection words are the same class of silence one step
+            // further along: the amplification stage picks *one* of three words
+            // per tested cluster, so a rejection landing on the survivor word
+            // would report clusters as kept that the frame never drew, and the
+            // three would still sum to the number tested.
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+                "CLUSTER_FRUSTUM_REJECT_WORD",
+                CLUSTER_FRUSTUM_REJECT_WORD,
+            ),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+                "CLUSTER_CONE_REJECT_WORD",
+                CLUSTER_CONE_REJECT_WORD,
             ),
             // Reads rather than adds, but reads the same shared block: the
             // draw-argument pass clamps its dispatch against the instance

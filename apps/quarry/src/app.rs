@@ -162,13 +162,25 @@ pub struct Summary {
     pub cull: Option<CullStats>,
 }
 
-/// The cut in one line: `12 instance(s), 431 cluster(s), from frame 57`.
+/// The cut in one line:
+/// `12 instance(s), 431 of 900 cluster(s) (312 frustum, 157 cone), from frame 57`.
 ///
 /// `docs/plan/sample/14-quarry.md`'s exit criterion asks for "how much of the
 /// reduction is instance culling and how much is cluster culling, because a
-/// single total hides which one is working" — so the two are printed apart, and
-/// a path with no amplification stage says so rather than printing the zero the
-/// clearing pass left. The frame number is part of the line because
+/// single total hides which one is working" — and then for "per-cluster frustum
+/// and normal-cone rejection counts on the debug panel", which is the same
+/// complaint one level down: `431 of 900` is equally consistent with the normal
+/// cone rejecting all 469 and with it rejecting none, so the two rejection
+/// counts are printed beside it.
+///
+/// The `of` number is [`ClusterCull::tested`] — the clusters the amplification
+/// stage actually put to a test, which is the cut it was handed. **Not the
+/// resident pool**: a cluster the DAG descent left to a coarser relative was
+/// never offered to either cull, and counting it as rejected would report the
+/// descent's work as the cull's.
+///
+/// A path with no amplification stage says so rather than printing three zeroes
+/// the clearing pass left. The frame number is part of the line because
 /// `crcbl::render::CullStatsRing` answers a few frames behind, and a number
 /// printed as this frame's would be a stale one presented as current.
 ///
@@ -180,7 +192,13 @@ pub fn cull_row(cull: Option<CullStats>) -> String {
         None => "cull not read back yet".to_string(),
         Some(stats) => {
             let clusters = match stats.clusters {
-                Some(clusters) => format!("{clusters} cluster(s)"),
+                Some(clusters) => format!(
+                    "{} of {} cluster(s) ({} frustum, {} cone)",
+                    clusters.survivors,
+                    clusters.tested(),
+                    clusters.frustum_rejects,
+                    clusters.cone_rejects,
+                ),
                 None => "no cluster stage".to_string(),
             };
             format!(
@@ -785,6 +803,7 @@ impl crcbl::ui::DebugModule for Quarry {
             None => {
                 section.row_str("instances kept", "pending — the ring is frames behind");
                 section.row_str("clusters kept", "pending — the ring is frames behind");
+                section.row_str("clusters rejected", "pending — the ring is frames behind");
             }
             Some(stats) => {
                 section.row(
@@ -792,11 +811,38 @@ impl crcbl::ui::DebugModule for Quarry {
                     format_args!("{} (frame {})", stats.instances, stats.frame),
                 );
                 match stats.clusters {
-                    Some(clusters) => section.row(
-                        "clusters kept",
-                        format_args!("{clusters} (frame {})", stats.frame),
-                    ),
-                    None => section.row_str("clusters kept", "no amplification stage on this path"),
+                    Some(clusters) => {
+                        // **`of` the clusters *tested*, not the pool.** The
+                        // second number is the cut the DAG descent chose, which
+                        // is the set the amplification stage put to a cull; a
+                        // cluster left to a coarser relative was never offered
+                        // to one, and printing the pool here would blame the
+                        // cull for the descent's work.
+                        section.row(
+                            "clusters kept",
+                            format_args!(
+                                "{} of {} (frame {})",
+                                clusters.survivors,
+                                clusters.tested(),
+                                stats.frame,
+                            ),
+                        );
+                        // The row `docs/plan/sample/14-quarry.md` asks for by
+                        // name. Two numbers rather than their sum: a total
+                        // rejected is the survivor count again with the sign
+                        // flipped, and says nothing about which test earned it.
+                        section.row(
+                            "clusters rejected",
+                            format_args!(
+                                "{} frustum, {} cone",
+                                clusters.frustum_rejects, clusters.cone_rejects,
+                            ),
+                        );
+                    }
+                    None => {
+                        section.row_str("clusters kept", "no amplification stage on this path");
+                        section.row_str("clusters rejected", "no amplification stage on this path");
+                    }
                 }
             }
         }
@@ -862,6 +908,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
 #[cfg(test)]
 mod tests {
     use crcbl::engine::{Flow, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, PAUSE_KEY};
+    use crcbl::render::ClusterCull;
     use crcbl::shell::HeadlessShell;
 
     use super::*;
@@ -907,6 +954,141 @@ mod tests {
             .key_release(window, MENU_ACTIVATE_KEY)
             .expect("the window is live");
         engine.frame().expect("a frame");
+    }
+
+    /// The `quarry` section's rows as `(label, value)`, for a fixture whose
+    /// readback landed with `cull` in it.
+    ///
+    /// The field is written by `HostedGame::draw` off a live renderer, which no
+    /// headless run reaches: the Null backend builds no amplification stage, so
+    /// a loop-driven panel can only ever show the "no stage" wording. Setting it
+    /// here is what lets the numbers themselves be asserted.
+    fn cull_rows(cull: Option<CullStats>) -> Vec<(String, String)> {
+        use crcbl::hal::{BindingModel, GeometryPath, LightingPath};
+
+        let mut quarry = Quarry::new(
+            CameraMode::Dolly,
+            Paths {
+                geometry: GeometryPath::MeshShader,
+                binding: BindingModel::Bindless,
+                lighting: LightingPath::Rasterised,
+                forced: crate::gpu::Forced::default(),
+            },
+            1000,
+            1.0,
+            DebugView::Shaded,
+        );
+        quarry.cull = cull;
+        let mut section = crcbl::ui::DebugSection::default();
+        crcbl::ui::DebugModule::debug_section(&quarry, &mut section);
+        section
+            .rows()
+            .iter()
+            .map(|row| (row.label.clone(), row.value.clone()))
+            .collect()
+    }
+
+    /// **The panel attributes each rejection to the test that made it.**
+    ///
+    /// `docs/plan/sample/14-quarry.md` asks for "per-cluster frustum and
+    /// normal-cone rejection counts on the debug panel", and the row is only
+    /// worth having if the two numbers are told apart: printed the other way
+    /// round it reads as the normal cone doing the work the frustum did, which
+    /// is the exact confusion the split exists to end. So the two are given
+    /// different values and each is required beside the word for its own test.
+    #[test]
+    fn the_panel_attributes_each_rejection_to_the_test_that_made_it() {
+        let rows = cull_rows(Some(CullStats {
+            instances: 12,
+            clusters: Some(ClusterCull {
+                survivors: 431,
+                frustum_rejects: 312,
+                cone_rejects: 157,
+            }),
+            frame: 57,
+        }));
+        let value = |label: &str| {
+            rows.iter()
+                .find(|(row, _)| row == label)
+                .unwrap_or_else(|| panic!("no {label} row on the panel: {rows:?}"))
+                .1
+                .clone()
+        };
+        // 431 + 312 + 157 is 900, so the row reads as a partition of the cut
+        // rather than as three unrelated counts.
+        assert_eq!(value("clusters kept"), "431 of 900 (frame 57)");
+        assert_eq!(value("clusters rejected"), "312 frustum, 157 cone");
+    }
+
+    /// **A path with no amplification stage says so on both rows.**
+    ///
+    /// Zeroes there are a claim — "every cluster was tested and none was
+    /// rejected" — about a frame that has no per-cluster cull in it at all. The
+    /// rejection row is the new half and the one that would be easiest to leave
+    /// printing `0 frustum, 0 cone`.
+    #[test]
+    fn a_path_with_no_amplification_stage_prints_no_rejection_counts() {
+        let rows = cull_rows(Some(CullStats {
+            instances: 12,
+            clusters: None,
+            frame: 57,
+        }));
+        for label in ["clusters kept", "clusters rejected"] {
+            let (_, value) = rows
+                .iter()
+                .find(|(row, _)| row == label)
+                .unwrap_or_else(|| panic!("no {label} row on the panel: {rows:?}"));
+            assert_eq!(value, "no amplification stage on this path");
+        }
+    }
+
+    /// **The row names each rejection count, and names it by its own cause.**
+    ///
+    /// The whole point of the split is that a reader can tell a frustum doing
+    /// all of the work from a normal cone doing all of it, so the two numbers
+    /// are made different and each is looked for beside the word for its test.
+    /// A row that printed them the other way round, or that printed one of them
+    /// twice, satisfies "the numbers appear" and says the opposite thing.
+    #[test]
+    fn the_cull_row_attributes_each_rejection_to_the_test_that_made_it() {
+        let row = cull_row(Some(CullStats {
+            instances: 12,
+            clusters: Some(ClusterCull {
+                survivors: 431,
+                frustum_rejects: 312,
+                cone_rejects: 157,
+            }),
+            frame: 57,
+        }));
+        assert_eq!(
+            row,
+            "12 instance(s), 431 of 900 cluster(s) (312 frustum, 157 cone), from frame 57",
+        );
+        // The `of` number is the three added up, which is what makes the line
+        // readable as a partition rather than as four unrelated counts.
+        assert!(row.contains("of 900"), "431 + 312 + 157 is 900: {row}");
+    }
+
+    /// **A path with no amplification stage says so, and never prints zeroes.**
+    ///
+    /// Three zeroes are a claim — "every cluster was tested and every one of
+    /// them survived nothing" — about a frame that has no per-cluster cull at
+    /// all. `docs/plan/sample/00-samples-overview.md` rule 12 is what this row
+    /// answers, and answering it with a fabricated number is worse than not
+    /// answering it.
+    #[test]
+    fn the_cull_row_says_there_is_no_cluster_stage_rather_than_printing_zeroes() {
+        let row = cull_row(Some(CullStats {
+            instances: 12,
+            clusters: None,
+            frame: 57,
+        }));
+        assert_eq!(row, "12 instance(s), no cluster stage, from frame 57");
+        assert!(
+            !row.contains('0'),
+            "an absent cluster stage must not reach the panel as a count: {row}"
+        );
+        assert_eq!(cull_row(None), "cull not read back yet");
     }
 
     /// Every `Text` command the frame handed to the UI pass.
@@ -1272,7 +1454,13 @@ mod tests {
         }
         // And the rows really reached the draw list, not just the panel.
         let drawn = ui_text(&engine);
-        for row in ["geometry", "lod budget", "clusters kept", "triangles"] {
+        for row in [
+            "geometry",
+            "lod budget",
+            "clusters kept",
+            "clusters rejected",
+            "triangles",
+        ] {
             assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
         }
         engine.finish(ExitReason::FrameBudget).expect("teardown");

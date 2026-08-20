@@ -16,6 +16,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`CullStats::clusters` is `Option<ClusterCull>`, not `Option<u64>`.** The
+  amplification stage counted survivors and nothing else, so a panel could say
+  "30 of 58 clusters survived" and could not say which test rejected the other
+  28 — a number equally consistent with the normal cone doing all the work and
+  with it doing none. `crcbl::render::ClusterCull` carries `survivors`,
+  `frustum_rejects` and `cone_rejects` plus a `tested()` sum. Still one
+  `Option`, and `None` on exactly the conditions the old field had: the two
+  indirect geometry paths, and a device with `Features::MESH_SHADER` and no
+  `Features::TASK_SHADER`. A caller wanting the old number reads
+  `.map(|cull| cull.survivors)`.
+
+  `crcbl_shaders::cull::STATS_WORDS` is 5, with `CLUSTER_FRUSTUM_REJECT_WORD`
+  and `CLUSTER_CONE_REJECT_WORD` at 3 and 4. `mesh_cluster.slang`'s
+  amplification stage still does **one** atomic per invocation: the verdict
+  picks the word, and a cluster the DAG descent never selected lands in no
+  bucket at all — which is what makes the three sum to the size of the cut.
+  `apps/quarry`'s device suite asserts that identity on hardware.
+
 - **`MeshPipelineDesc` gains `mesh_workgroup_size` and `task_workgroup_size`.**
   Metal takes both threadgroup sizes at the **draw** —
   `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`

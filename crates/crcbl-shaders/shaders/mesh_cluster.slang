@@ -573,6 +573,19 @@ struct CullParams
 /// module's `the_shaders_index_the_culling_stats_at_the_words_this_crate_says`.
 static const uint CLUSTER_SURVIVOR_WORD = 1;
 
+/// Which element of `cull_stats` counts the clusters the **frustum** rejected.
+///
+/// Element 2 is `light_cluster.slang`'s dropped light assignments, so the two
+/// rejection words start after it. The same numbers as
+/// `crcbl_shaders::cull::CLUSTER_FRUSTUM_REJECT_WORD` and
+/// `CLUSTER_CONE_REJECT_WORD`, held in step with them by that module's
+/// `the_shaders_index_the_culling_stats_at_the_words_this_crate_says`.
+static const uint CLUSTER_FRUSTUM_REJECT_WORD = 3;
+
+/// Which element of `cull_stats` counts the clusters the **normal cone**
+/// rejected — the ones the frustum kept and that face away.
+static const uint CLUSTER_CONE_REJECT_WORD = 4;
+
 /// What `taskMain` hands `amplifiedMeshMain`: which pair of the dispatch
 /// survived.
 ///
@@ -756,8 +769,9 @@ StructuredBuffer<DrawIndexedArgs> draw_args;
 [[vk::binding(13, 0)]]
 ConstantBuffer<CullParams> cull;
 
-/// The frame's culling statistics, which this stage adds its surviving-cluster
-/// count to at `CLUSTER_SURVIVOR_WORD`.
+/// The frame's culling statistics, which this stage adds each cluster it tested
+/// into: `CLUSTER_SURVIVOR_WORD`, `CLUSTER_FRUSTUM_REJECT_WORD` or
+/// `CLUSTER_CONE_REJECT_WORD`, one of the three and never two.
 ///
 /// The buffer `cull.slang` counts surviving instances into, one element along —
 /// topic 03 §3.6's delayed readback ring is this one buffer, and a second
@@ -984,8 +998,26 @@ float max_stretch(float3x3 basis)
     return sqrt(bound);
 }
 
-/// Whether a cluster of an instance may contribute a pixel: `1` to draw it, `0`
-/// to reject it.
+/// What `cluster_survives` answered: kept, or which of its two tests refused.
+///
+/// Three named values rather than a bool, because the counters downstream are
+/// the whole point — a survivor count on its own cannot tell a frustum doing all
+/// of the work from a normal cone doing all of it. The caller turns one of these
+/// into one word of `cull_stats`.
+///
+/// `CLUSTER_KEPT` is zero so the arithmetic at the call site stays what it was:
+/// the survival flag is `verdict == CLUSTER_KEPT`, and nothing branches in front
+/// of `DispatchMesh`.
+static const uint CLUSTER_KEPT = 0;
+/// The bounding sphere is entirely outside one of the frustum's six planes.
+static const uint CLUSTER_REJECTED_BY_FRUSTUM = 1;
+/// Every triangle of the cluster faces away from the camera. Reached only by a
+/// cluster the frustum kept — the two tests are asked in that order.
+static const uint CLUSTER_REJECTED_BY_CONE = 2;
+
+/// Whether a cluster of an instance may contribute a pixel, and which test said
+/// so: `CLUSTER_KEPT`, `CLUSTER_REJECTED_BY_FRUSTUM` or
+/// `CLUSTER_REJECTED_BY_CONE`.
 ///
 /// **The cull is in world space**, which is where the frustum already is: the
 /// planes are `cull.slang`'s own for this frame, and `frame.camera_position` is
@@ -1040,7 +1072,7 @@ uint cluster_survives(Meshlet cluster, float4x4 transform)
         float4 half_space = cull.planes[plane];
         if (dot(half_space.xyz, center) + half_space.w < -radius * length(half_space.xyz))
         {
-            return 0u;
+            return CLUSTER_REJECTED_BY_FRUSTUM;
         }
     }
 
@@ -1061,10 +1093,10 @@ uint cluster_survives(Meshlet cluster, float4x4 transform)
     if (cluster.cone_cutoff > 0.0
         && dot(axis, to_center) > sine * length(to_center) + radius)
     {
-        return 0u;
+        return CLUSTER_REJECTED_BY_CONE;
     }
 
-    return 1u;
+    return CLUSTER_KEPT;
 }
 
 /// Whether this cluster is in the cut: `1` to draw it, `0` to leave it to a
@@ -1236,9 +1268,11 @@ void meshMain(
 /// count hold whatever the buffer last had — from ever reaching `instances` as
 /// an index.
 ///
-/// The counter is added to with the survival flag itself rather than under an
-/// `if`, so the add of zero is the branch: one instruction, no control flow in
-/// front of the dispatch, and the same statement for every group.
+/// The counters are one atomic per invocation and no more, as they were when
+/// there was a single one: the verdict picks the word, and the `if` around it
+/// replaces the add of zero this used to do for a group outside the cut. It is
+/// in front of nothing the DXIL validator minds — `DispatchMesh` is below it and
+/// reached unbranched.
 [shader("amplification")]
 [numthreads(1, 1, 1)]
 void taskMain(uint3 group: SV_GroupID)
@@ -1250,8 +1284,27 @@ void taskMain(uint3 group: SV_GroupID)
 
     uint index = draw.cluster_base + group.x * active;
     uint selected = cluster_is_selected(cluster_select[index], instance_index);
-    uint keep = active * selected * cluster_survives(cluster, instance.transform);
-    cull_stats[CLUSTER_SURVIVOR_WORD].add(keep);
+    uint verdict = cluster_survives(cluster, instance.transform);
+    uint keep = active * selected * (verdict == CLUSTER_KEPT ? 1u : 0u);
+
+    // **Only a cluster that was actually tested lands in a bucket, and it lands
+    // in exactly one.** `tested` is the same `active * selected` the draw turns
+    // on: a group past the dispatch extents read the bucket's first cluster
+    // rather than its own, and a cluster the DAG descent did not select is a
+    // relative of the one that was — neither was ever put to the frustum or the
+    // cone, so counting either as rejected would report the descent's work as
+    // the cull's. That is what makes the three words sum to the size of the cut
+    // rather than to the whole resident pool, and it is the arithmetic
+    // `apps/quarry`'s device suite asserts.
+    uint tested = active * selected;
+    uint word = verdict == CLUSTER_KEPT
+        ? CLUSTER_SURVIVOR_WORD
+        : (verdict == CLUSTER_REJECTED_BY_FRUSTUM ? CLUSTER_FRUSTUM_REJECT_WORD
+                                                  : CLUSTER_CONE_REJECT_WORD);
+    if (tested == 1u)
+    {
+        cull_stats[word].add(1u);
+    }
 
     // **The cut, not what survived it.** `selected` alone and not `keep`: this
     // records which clusters the DAG descent chose, and a camera that leaves

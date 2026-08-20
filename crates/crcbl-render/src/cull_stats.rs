@@ -128,6 +128,46 @@ const SLOT_BYTES: u64 = cull::STATS_WORDS as u64 * 4;
 /// is far more than the frames the loop keeps in flight.
 const POLL_DEADLINE: u64 = 120;
 
+/// **What the per-cluster cull did, split by which test did it.**
+///
+/// Three numbers rather than one, because a survivor count alone cannot be read:
+/// "27 of 338 survived" is equally consistent with the normal cone rejecting
+/// every one of the other 311 and with it rejecting none of them, and
+/// `docs/plan/sample/14-quarry.md` asks the panel to say which.
+///
+/// **Every cluster the amplification stage *tested* is in exactly one of the
+/// three**, and a cluster it did not test is in none — see
+/// [`tested`](Self::tested), which is the identity that makes them readable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClusterCull {
+    /// Clusters both tests kept, which is what the mesh stage was dispatched
+    /// for.
+    pub survivors: u64,
+    /// Clusters whose bounding sphere was entirely outside the frustum.
+    pub frustum_rejects: u64,
+    /// Clusters the frustum kept and the normal cone refused — every triangle
+    /// facing away from the camera.
+    ///
+    /// **The two tests are ordered**, so this is "faced away *and* was on
+    /// screen". A cluster that is both behind the camera and facing away is
+    /// counted in [`frustum_rejects`](Self::frustum_rejects).
+    pub cone_rejects: u64,
+}
+
+impl ClusterCull {
+    /// Clusters the amplification stage put to either test — the size of the
+    /// cut it was handed, in a frame whose instance survived the camera's cull.
+    ///
+    /// The three counters partition that set, so this is their sum and there is
+    /// no fourth bucket. A cluster the DAG descent did not select, or a group
+    /// past the dispatch extents, was never tested and is in none of them: it
+    /// was not rejected by a cull, it was never offered to one.
+    #[must_use]
+    pub const fn tested(&self) -> u64 {
+        self.survivors + self.frustum_rejects + self.cone_rejects
+    }
+}
+
 /// What one frame's culling actually kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CullStats {
@@ -139,15 +179,20 @@ pub struct CullStats {
     /// number larger than the list is a scene that outgrew it rather than an
     /// error here.
     pub instances: u64,
-    /// Clusters the amplification stage kept, or [`None`] where nothing counted
-    /// them.
+    /// What the per-cluster cull did — survivors and the two rejection counts —
+    /// or [`None`] where nothing counted them.
     ///
     /// [`None`] on the two indirect geometry paths and on a device with
     /// `Features::MESH_SHADER` and no `Features::TASK_SHADER`: there is no
-    /// amplification stage in those frames, so the word keeps the zero the
-    /// clearing pass wrote. Reporting that zero as a count would say "every
+    /// amplification stage in those frames, so the words keep the zeroes the
+    /// clearing pass wrote. Reporting those zeroes as counts would say "every
     /// cluster was rejected" about a frame that drew all of them.
-    pub clusters: Option<u64>,
+    ///
+    /// **One [`Option`] over the three and not three [`Option`]s**, because the
+    /// condition is one condition: the same absent stage is what leaves all
+    /// three words untouched, and three separately-unknown numbers would invite
+    /// a caller to add two of them up.
+    pub clusters: Option<ClusterCull>,
     /// Which frame these came from — a few frames behind the one being
     /// recorded, and how many is the device's to decide rather than this
     /// module's. See the module docs.
@@ -433,9 +478,11 @@ impl CullStatsRing {
         }
         let stats = CullStats {
             instances: u64::from(word(bytes, cull::INSTANCE_SURVIVOR_WORD)),
-            clusters: self
-                .counts_clusters
-                .then(|| u64::from(word(bytes, cull::CLUSTER_SURVIVOR_WORD))),
+            clusters: self.counts_clusters.then(|| ClusterCull {
+                survivors: u64::from(word(bytes, cull::CLUSTER_SURVIVOR_WORD)),
+                frustum_rejects: u64::from(word(bytes, cull::CLUSTER_FRUSTUM_REJECT_WORD)),
+                cone_rejects: u64::from(word(bytes, cull::CLUSTER_CONE_REJECT_WORD)),
+            }),
             frame,
         };
         // At `trace!` and nowhere near `debug!`: this is a line per frame, and
@@ -445,7 +492,7 @@ impl CullStatsRing {
         // a browser cannot read them back at all, and the bug this ring shipped
         // with was precisely that they silently stopped arriving there.
         crcbl_core::log::trace!(
-            "cull stats: frame {frame} kept {} instances, {:?} clusters",
+            "cull stats: frame {frame} kept {} instances, and its cluster cull did {:?}",
             stats.instances,
             stats.clusters,
         );
@@ -712,18 +759,66 @@ mod tests {
         }
     }
 
-    /// **Each counter is read from its own word.** Two counters in one buffer is
-    /// exactly the arrangement where an off-by-one offset reports the other
-    /// one's total and looks entirely plausible, so the two are given different
-    /// values and read back by name.
+    /// **Each counter is read from its own word.** Several counters in one buffer
+    /// is exactly the arrangement where an off-by-one offset reports another
+    /// one's total and looks entirely plausible, so each is given a different
+    /// value and read back by name.
     #[test]
     fn a_counter_is_read_from_its_own_word() {
-        let mut bytes = [0u8; SLOT_BYTES as usize];
-        bytes[0..4].copy_from_slice(&7u32.to_le_bytes());
-        bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
-        bytes[8..12].copy_from_slice(&11u32.to_le_bytes());
+        let bytes = stats_bytes();
         assert_eq!(word(&bytes, cull::INSTANCE_SURVIVOR_WORD), 7);
         assert_eq!(word(&bytes, cull::CLUSTER_SURVIVOR_WORD), 9);
+        assert_eq!(word(&bytes, cull::CLUSTER_FRUSTUM_REJECT_WORD), 13);
+        assert_eq!(word(&bytes, cull::CLUSTER_CONE_REJECT_WORD), 17);
+    }
+
+    /// The statistics buffer with a different number in every word, so a field
+    /// filled from the wrong one is a different number rather than a coincidence.
+    ///
+    /// Word 2 is the light grid's dropped-assignment count — a decoy on purpose:
+    /// it sits *between* the survivor word and the two rejection words, so a
+    /// mapping that walked the buffer in order rather than indexing it by name
+    /// would report it as a cull statistic.
+    fn stats_bytes() -> [u8; SLOT_BYTES as usize] {
+        let mut bytes = [0u8; SLOT_BYTES as usize];
+        for (index, value) in [
+            (cull::INSTANCE_SURVIVOR_WORD, 7u32),
+            (cull::CLUSTER_SURVIVOR_WORD, 9),
+            (crcbl_shaders::light::CLUSTER_OVERFLOW_WORD, 11),
+            (cull::CLUSTER_FRUSTUM_REJECT_WORD, 13),
+            (cull::CLUSTER_CONE_REJECT_WORD, 17),
+        ] {
+            let at = index as usize * 4;
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// **The three cluster counters land in the three fields that name them.**
+    ///
+    /// The word-to-field mapping is the whole of what makes the split real, and
+    /// nothing downstream can catch it being wrong: a frustum count reported as
+    /// survivors is a plausible number in a plausible field, and the three would
+    /// still sum to the size of the cut. So the report is driven directly, with
+    /// a distinct value in every word.
+    #[test]
+    fn each_cluster_counter_reaches_the_field_that_names_it() {
+        let harness = Harness::open();
+        let mut ring = harness.ring(true);
+        ring.report(3, &stats_bytes());
+        assert_eq!(
+            ring.latest(),
+            Some(CullStats {
+                instances: 7,
+                clusters: Some(ClusterCull {
+                    survivors: 9,
+                    frustum_rejects: 13,
+                    cone_rejects: 17,
+                }),
+                frame: 3,
+            }),
+        );
+        harness.finish(ring);
     }
 
     /// **The copy really is in the frame, and it is outside every pass scope.**
@@ -1162,7 +1257,7 @@ mod tests {
     /// four ways this engine draws.
     #[test]
     fn the_cluster_word_is_unknown_where_no_stage_counts_it() {
-        for (counts_clusters, expected) in [(false, None), (true, Some(0))] {
+        for (counts_clusters, expected) in [(false, None), (true, Some(ClusterCull::default()))] {
             let mut harness = Harness::open();
             let mut ring = harness.ring(counts_clusters);
             let stats = run_until_reported(&mut harness, &mut ring, BOUND);

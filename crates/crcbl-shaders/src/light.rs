@@ -92,6 +92,8 @@ pub const CLUSTER_OVERFLOW_WORD: u32 = 2;
 const _: () = assert!(CLUSTER_OVERFLOW_WORD < crate::cull::STATS_WORDS);
 const _: () = assert!(CLUSTER_OVERFLOW_WORD != crate::cull::INSTANCE_SURVIVOR_WORD);
 const _: () = assert!(CLUSTER_OVERFLOW_WORD != crate::cull::CLUSTER_SURVIVOR_WORD);
+const _: () = assert!(CLUSTER_OVERFLOW_WORD != crate::cull::CLUSTER_FRUSTUM_REJECT_WORD);
+const _: () = assert!(CLUSTER_OVERFLOW_WORD != crate::cull::CLUSTER_CONE_REJECT_WORD);
 
 /// The view depth the first slice starts at, in world units.
 ///
