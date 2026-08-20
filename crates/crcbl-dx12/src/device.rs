@@ -6456,6 +6456,961 @@ pub(crate) mod tests {
         device.destroy_buffer(staged);
     }
 
+    /// Clusters the probe below gives its synthetic mesh, and the x extent of
+    /// its dispatch.
+    ///
+    /// **Five, because five is the smallest number that puts every arm of both
+    /// stages' decisions on one frame**: one cluster the descent selects and the
+    /// cull keeps, one it selects and the frustum rejects, one it selects and
+    /// the normal cone rejects, one it drops because the group that produced it
+    /// expanded, and one it drops because the group that contains it did not.
+    /// A smaller mesh would leave at least one of `taskMain`'s branches taken by
+    /// nothing, which is the failure mode a "something was drawn" assertion
+    /// cannot see.
+    const PROBE_CLUSTERS: u32 = 5;
+
+    /// Groups the probe's synthetic DAG holds for one instance, which is
+    /// `ClusterDrawConstants::group_stride`.
+    ///
+    /// Three: group 0 is unexpanded and unused, group 1 is **expanded** — which
+    /// is what drops the cluster naming it as its producer — and group 2 is
+    /// unexpanded, which is what drops the cluster naming it as its container.
+    const PROBE_DAG_GROUPS: u32 = 3;
+
+    /// The clip-space depth every vertex the probe emits carries.
+    ///
+    /// The engine is reversed-Z — [`crcbl_hal::depth::CLEAR`] is `0.0` and
+    /// [`crcbl_hal::DepthStencilState::default`] compares `GREATER` — so any
+    /// value above the clear passes, and one strictly between the clear and the
+    /// near plane is a value neither end of the range could have produced by
+    /// accident. `w` is `1.0` at every vertex, so this is the NDC depth too and
+    /// the assertion below is on the number written here.
+    const PROBE_DEPTH: f32 = 0.5;
+
+    /// **`mesh_cluster.slang`'s own amplification and mesh stages, descending a
+    /// real cluster DAG over synthetic data and rasterising the one cluster the
+    /// cut keeps.**
+    ///
+    /// The five probes above grew a toy shader one feature at a time and every
+    /// one passed, which left this bisect three suspects: the real shader's
+    /// twenty-two bindings against their one or three, the cluster-DAG descent —
+    /// the only real control flow in either stage, and a task-stage container of
+    /// 10,992 bytes against the toy's 2,648 — and the draw-argument pass that
+    /// writes this path's indirect extents. This runs the **committed
+    /// containers** `crcbl-render` builds its mesh pipeline from, with no
+    /// renderer in the test, so a pass leaves only the third.
+    ///
+    /// # The layout is `ForwardRenderer::mesh_layout` minus its three fragment-only rows
+    ///
+    /// `crcbl-dx12` sits below `crcbl-render` and cannot call that function, so
+    /// the entries below are transcribed from it: the same binding numbers, the
+    /// same kinds, the same read-only-ness, in the same ascending order. What is
+    /// **not** transcribed is bindings 15, 16 and 22 — the shadow atlas, its
+    /// comparison sampler and the occlusion channel — and dropping them is
+    /// load-bearing rather than tidy.
+    ///
+    /// **A D3D12 register is not a binding number.** Slang's HLSL output
+    /// annotates each resource with a `register(…)` it numbers per class, from
+    /// zero, in the declaration order of **that source file**; `crate::binding`'s
+    /// `ranges` reproduces that by counting the entries of the *layout*. The two
+    /// agree only when the layout's binding set is exactly the source's. It is
+    /// for `mesh.slang` on the raster path — that layout is bindings 0–8, 15, 16
+    /// and 20–23, which is precisely what that file declares. It is **not** for
+    /// either stage of the mesh path: `mesh_cluster.slang` declares no binding
+    /// 15, 16 or 22, so the layout carrying them numbers its `cluster_select`
+    /// `t11` where its own container says `t10`, and its `tables` `t17` where the
+    /// container says `t15`. Dropping the three rows the geometry stages do not
+    /// declare is what makes every register this probe binds the register the
+    /// containers ask for; see the module-level note this test's report carries.
+    ///
+    /// # There is no fragment stage, and that is the same fact from the other side
+    ///
+    /// `mesh_cluster.slang` has no fragment entry point: the renderer pairs it
+    /// with `mesh.slang`'s `fragmentMain`, which numbers **its** registers from
+    /// **its** declarations and puts the shadow atlas on `t6` — the register
+    /// `mesh_cluster.slang` gives `clusters`. One root signature cannot satisfy
+    /// both, so a probe that bound a fragment stage would be testing the
+    /// disagreement rather than the shader.
+    ///
+    /// What it uses instead is the shape `ForwardRenderer::depth_pipeline`
+    /// already builds for the shadow cascades: the same task and mesh stages,
+    /// `fragment: None`, and no colour target. The observable is the **depth
+    /// attachment**, which is what the mesh stage's `SV_Position` writes, so
+    /// "the device survived and rasterised nothing" still fails here.
+    ///
+    /// # What the data makes the shader do
+    ///
+    /// One instance at the identity transform, one mesh, and [`PROBE_CLUSTERS`]
+    /// clusters that all share one three-vertex, one-triangle run and differ
+    /// only in their bounds and their [`crcbl_shaders::cluster_select::ClusterSelect`]
+    /// record. `view_proj` is the identity too, so a vertex's position is already
+    /// clip space and the triangle covers the centre of the target and neither
+    /// corner.
+    ///
+    /// * **Cluster 0** has no producer and no container, so the descent selects
+    ///   it; its cone is omnidirectional and its sphere is inside the frustum,
+    ///   so the cull keeps it. It is the one cluster that reaches the mesh stage.
+    /// * **Cluster 1** is selected and sits ten units along `+x`, outside the
+    ///   probe's frustum box — `CLUSTER_REJECTED_BY_FRUSTUM`.
+    /// * **Cluster 2** is selected, inside the frustum, and faces directly away
+    ///   from the camera at `(0, 0, 5)` with a `0.9` cone cutoff —
+    ///   `CLUSTER_REJECTED_BY_CONE`.
+    /// * **Cluster 3** names group 1 as its producer, and `group_state[1]` is
+    ///   `1`, so its producer expanded and the descent drops it.
+    /// * **Cluster 4** names group 2 as its container, and `group_state[2]` is
+    ///   `0`, so its container did not expand and the descent drops it.
+    ///
+    /// # What it asserts, and why each assertion can fail
+    ///
+    /// * **The centre texel of the depth attachment holds [`PROBE_DEPTH`] and
+    ///   both corners hold the clear.** A device that survived the dispatch and
+    ///   rasterised nothing leaves the clear in all three, which is the failure
+    ///   the sibling probes' centre-texel assertion catches and the reason there
+    ///   is deliberately no tolerance, skip or catch anywhere below.
+    /// * **`cull_stats` holds exactly one survivor, one frustum rejection and
+    ///   one cone rejection**, and the two words this shader does not own —
+    ///   element 0, which is `cull.slang`'s surviving instances, and element 2,
+    ///   which is `light_cluster.slang`'s dropped assignments — still hold
+    ///   [`PROBE_SENTINEL`]. The three cluster words sum to **three**, which is
+    ///   the size of the cut and not the five clusters dispatched: that is the
+    ///   arithmetic `mesh_cluster.slang`'s own comment states and `apps/quarry`'s
+    ///   device suite asserts a version of, and it is what shows the descent
+    ///   descended rather than every group taking one branch.
+    /// * **`cluster_selection` holds `[1, 1, 1, 0, 0]`**, primed at
+    ///   [`PROBE_SENTINEL`] beforehand, so a stage that wrote nothing and a stage
+    ///   that wrote zeros are different failures.
+    ///
+    /// # What each outcome says
+    ///
+    /// * **It draws and both buffers read back.** The real shader, its real
+    ///   bindings and its DAG descent are not what removes the device, and what
+    ///   is left of this bisect is the draw-argument pass that feeds the mesh
+    ///   path its indirect extents.
+    /// * **The device goes away.** The removal has a repro with no renderer in
+    ///   it and the bisect continues inside one `.slang` file.
+    /// * **It refuses at `create_mesh_pipeline`.** The root signature and the
+    ///   containers disagree about a register after all, which is a layout
+    ///   defect the message names rather than a mesh-shading one.
+    ///
+    /// # What is simplified, stated plainly
+    ///
+    /// The data is synthetic and the DAG is three groups deep in name only —
+    /// nothing here builds a real hierarchy, and the frame is one bucket, one
+    /// instance and one triangle. There is **no fragment stage**, so nothing
+    /// below says anything about `mesh.slang`'s shading, its texture page or the
+    /// registers that stage asks for. And this is not `crcbl-render`'s layout: it
+    /// is that layout minus three rows, for the reason above, so a pass here does
+    /// **not** say the renderer's own mesh pipeline would survive.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn the_cluster_shaders_dag_descent_draws_the_cut_it_chose() {
+        use crcbl_shaders::cluster_select::{CLUSTER_SELECT_STRIDE, ClusterSelect};
+        use crcbl_shaders::cull::{
+            CLUSTER_CONE_REJECT_WORD, CLUSTER_FRUSTUM_REJECT_WORD, CLUSTER_SURVIVOR_WORD,
+            STATS_WORDS,
+        };
+        use crcbl_shaders::draw_gen::DrawIndexedArgs;
+        use crcbl_shaders::level_select::LEVEL_GROUP_STRIDE;
+        use crcbl_shaders::light::LIGHT_STRIDE;
+        use crcbl_shaders::mesh::{
+            FrameUniforms, GpuInstance, GpuMaterial, GpuMesh, SHADOW_CASCADES, SHADOW_LIGHT_TILES,
+            VERTEX_STRIDE,
+        };
+        use crcbl_shaders::meshlet::{ClusterBounds, Meshlet, corner_words};
+        use crcbl_shaders::probe::{PROBE_STRIDE, ProbeVolume};
+
+        let (_instance, device) = open_device();
+
+        // --- the synthetic frame ---
+
+        const IDENTITY: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        /// Where the probe's camera is, which is what the normal-cone test
+        /// measures against.
+        const EYE: [f32; 4] = [0.0, 0.0, 5.0, 1.0];
+
+        let frame = FrameUniforms {
+            view_proj: IDENTITY,
+            camera_position: EYE,
+            // **`w` is zero on purpose.** It is the overlay lane, and both
+            // overlays sit above it — so `emit_cluster` takes neither arm and
+            // `tables`, whose only reader is the heatmap, is bound and not read.
+            ambient: [0.0; 4],
+            shadow_view_proj: [[0.0; 16]; SHADOW_CASCADES],
+            cascade_far: [0.0; 4],
+            shadow_params: [0.0; 4],
+            cluster_grid: [0; 4],
+            light_view_proj: [[0.0; 16]; SHADOW_LIGHT_TILES],
+            probes: ProbeVolume {
+                origin: [0.0; 3],
+                inv_spacing: [0.0; 3],
+                counts: [0; 3],
+            },
+            lod_params: [1.0, 1.0, 1.0, 0.0],
+        };
+
+        // One triangle over the centre of the target and neither corner, in
+        // clip space: `view_proj` and the instance transform are both the
+        // identity, so what is written here is what the rasteriser gets.
+        let pack = |values: &[f32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        let vertex = |x: f32, y: f32| -> Vec<u8> {
+            pack(&[
+                x,
+                y,
+                PROBE_DEPTH,
+                1.0, // position
+                0.0,
+                0.0,
+                1.0,
+                0.0, // normal
+                1.0,
+                1.0,
+                1.0,
+                1.0, // colour
+                0.0,
+                0.0,
+                0.0,
+                0.0, // uv
+            ])
+        };
+        let mut vertex_bytes = Vec::new();
+        for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.0, 0.5)] {
+            vertex_bytes.extend(vertex(x, y));
+        }
+        assert_eq!(
+            vertex_bytes.len(),
+            3 * VERTEX_STRIDE,
+            "the packed vertices are not three of the stride crcbl-shaders publishes"
+        );
+
+        // Every cluster shares the one three-vertex, one-triangle run; what
+        // differs is the bounds each is culled by.
+        let cluster =
+            |center: [f32; 3], radius: f32, cone_axis: [f32; 3], cone_cutoff: f32| Meshlet {
+                vertex_offset: 0,
+                vertex_count: 3,
+                triangle_offset: 0,
+                triangle_count: 1,
+                bounds: ClusterBounds {
+                    center,
+                    radius,
+                    cone_axis,
+                    cone_cutoff,
+                },
+            };
+        let clusters = [
+            // Kept: inside the box below, and a cone that rejects nothing.
+            cluster(
+                [0.0, 0.0, 0.0],
+                1.0,
+                ClusterBounds::OMNIDIRECTIONAL_AXIS,
+                ClusterBounds::OMNIDIRECTIONAL_CUTOFF,
+            ),
+            // Ten units along `+x`, so the `-x` half-space rejects its whole
+            // sphere.
+            cluster(
+                [10.0, 0.0, 0.0],
+                0.5,
+                ClusterBounds::OMNIDIRECTIONAL_AXIS,
+                ClusterBounds::OMNIDIRECTIONAL_CUTOFF,
+            ),
+            // Inside the box and facing straight away from `EYE`: with a cutoff
+            // of `0.9` the test's right-hand side is `0.436 * 5 + 0.1`, which
+            // `dot(axis, to_center) = 5` clears.
+            cluster([0.0, 0.0, 0.0], 0.1, [0.0, 0.0, -1.0], 0.9),
+            // Both of these would survive the cull; the descent is what drops
+            // them, which is why their bounds are cluster 0's.
+            cluster(
+                [0.0, 0.0, 0.0],
+                1.0,
+                ClusterBounds::OMNIDIRECTIONAL_AXIS,
+                ClusterBounds::OMNIDIRECTIONAL_CUTOFF,
+            ),
+            cluster(
+                [0.0, 0.0, 0.0],
+                1.0,
+                ClusterBounds::OMNIDIRECTIONAL_AXIS,
+                ClusterBounds::OMNIDIRECTIONAL_CUTOFF,
+            ),
+        ];
+        assert_eq!(
+            clusters.len(),
+            PROBE_CLUSTERS as usize,
+            "the dispatch extent and the cluster array must be the same number"
+        );
+
+        // The descent's half: two flags and two group indices per cluster.
+        let select = |flags: u32, producer_group: u32, container_group: u32| ClusterSelect {
+            flags,
+            vertex_base: 0,
+            producer_group,
+            container_group,
+        };
+        let selects = [
+            select(0, 0, 0),
+            select(0, 0, 0),
+            select(0, 0, 0),
+            select(ClusterSelect::HAS_PRODUCER, 1, 0),
+            select(ClusterSelect::HAS_CONTAINER, 0, 2),
+        ];
+        // Group 1 expanded, so cluster 3's producer is expanded and it is not in
+        // the cut; group 2 did not, so cluster 4's container never gave it up.
+        let group_state: [u32; PROBE_DAG_GROUPS as usize] = [0, 1, 0];
+
+        // The frustum: an axis-aligned box two units either side of the origin,
+        // as six unnormalized half-spaces `dot(xyz, p) + w >= 0`.
+        let cull_params = crcbl_shaders::cull::Params {
+            planes: [
+                [1.0, 0.0, 0.0, 2.0],
+                [-1.0, 0.0, 0.0, 2.0],
+                [0.0, 1.0, 0.0, 2.0],
+                [0.0, -1.0, 0.0, 2.0],
+                [0.0, 0.0, 1.0, 2.0],
+                [0.0, 0.0, -1.0, 2.0],
+            ],
+            instance_count: 1,
+            capacity: 1,
+        };
+
+        let draw_constants = crcbl_shaders::meshlet::ClusterDrawConstants {
+            base: 0,
+            cluster_base: 0,
+            cluster_count: PROBE_CLUSTERS,
+            bucket: 0,
+            group_stride: PROBE_DAG_GROUPS,
+            level_groups_at: 0,
+        };
+
+        // --- the resources ---
+
+        // A read-only binding is an SRV or a CBV, and D3D12 admits both on the
+        // upload heap — so everything the stages only read is written straight
+        // through `write_buffer`, exactly as `MeshProbe` writes its geometry.
+        let uploaded = |label: &'static str, usage: BufferUsage, bytes: &[u8]| -> BufferHandle {
+            let handle = device
+                .create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size: bytes.len() as u64,
+                    usage,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .unwrap_or_else(|error| panic!("stage=create_buffer({label}): {error:?}"));
+            device
+                .write_buffer(handle, 0, bytes)
+                .unwrap_or_else(|error| panic!("stage=write_buffer({label}): {error:?}"));
+            handle
+        };
+        let read_storage = |label: &'static str, bytes: &[u8]| -> BufferHandle {
+            uploaded(label, BufferUsage::STORAGE, bytes)
+        };
+        let uniform = |label: &'static str, bytes: &[u8]| -> BufferHandle {
+            uploaded(label, BufferUsage::UNIFORM, bytes)
+        };
+
+        let frame_buffer = uniform("mesh_cluster frame", &frame.to_bytes());
+        let vertices = read_storage("mesh_cluster vertices", &vertex_bytes);
+        let instances = read_storage(
+            "mesh_cluster instances",
+            &GpuInstance {
+                transform: IDENTITY,
+                mesh: 0,
+                material: 0,
+                sector: 0,
+                flags: GpuInstance::LIVE,
+            }
+            .to_bytes(),
+        );
+        let draw_buffer = uniform("mesh_cluster draw constants", &draw_constants.to_bytes());
+        let meshes = read_storage(
+            "mesh_cluster meshes",
+            &GpuMesh {
+                base_vertex: 0,
+                base_index: 0,
+                index_count: 3,
+                bounds_min: [-1.0; 3],
+                bounds_max: [1.0; 3],
+            }
+            .to_bytes(),
+        );
+        let visible_instances = read_storage("mesh_cluster visible instances", &0u32.to_le_bytes());
+        let materials = read_storage("mesh_cluster materials", &GpuMaterial::UNTINTED.to_bytes());
+        let cluster_bytes: Vec<u8> = clusters
+            .iter()
+            .flat_map(|cluster| cluster.to_bytes())
+            .collect();
+        let cluster_buffer = read_storage("mesh_cluster clusters", &cluster_bytes);
+        let cluster_vertices =
+            read_storage("mesh_cluster cluster vertices", &pack_words(&[0, 1, 2]));
+        let cluster_corners = read_storage(
+            "mesh_cluster cluster corners",
+            &pack_words(&corner_words(&[0, 1, 2])),
+        );
+        let draw_args = read_storage(
+            "mesh_cluster draw args",
+            &DrawIndexedArgs {
+                index_count: 3,
+                instance_count: 1,
+                first_index: 0,
+                vertex_offset: 0,
+                first_instance: 0,
+            }
+            .to_bytes(),
+        );
+        let cull_buffer = uniform("mesh_cluster cull params", &cull_params.to_bytes());
+        let select_bytes: Vec<u8> = selects
+            .iter()
+            .flat_map(|record| record.to_bytes())
+            .collect();
+        assert_eq!(
+            select_bytes.len(),
+            PROBE_CLUSTERS as usize * CLUSTER_SELECT_STRIDE,
+            "one selection record per cluster"
+        );
+        let cluster_select = read_storage("mesh_cluster cluster select", &select_bytes);
+        let group_state_buffer =
+            read_storage("mesh_cluster group state", &pack_words(&group_state));
+        // Declared by the shader and read by neither stage — see that file's own
+        // comments on why it declares the fragment stage's tables at all. They
+        // are still bound, because a descriptor table with a hole in it is a
+        // descriptor read out of an empty slot.
+        let lights = read_storage("mesh_cluster lights", &[0u8; LIGHT_STRIDE]);
+        let cluster_lights = read_storage("mesh_cluster froxel grid", &pack_words(&[0, 0, 0, 0]));
+        let probes = read_storage("mesh_cluster probes", &[0u8; PROBE_STRIDE]);
+        let tables = read_storage(
+            "mesh_cluster tables",
+            &vec![0u8; PROBE_DAG_GROUPS as usize * LEVEL_GROUP_STRIDE],
+        );
+
+        // The two written bindings. `DeviceLocal` because D3D12 admits an
+        // unordered access view on no other heap — `crate::buffer`'s
+        // `check_unordered_access` refuses the rest by name — so both are primed
+        // by a copy and read back by another.
+        let stats_bytes = u64::from(STATS_WORDS) * size_of::<u32>() as u64;
+        let selection_bytes = u64::from(PROBE_CLUSTERS) * size_of::<u32>() as u64;
+        let mut primer = Vec::new();
+        for word in 0..STATS_WORDS {
+            // The three cluster words start at zero because an atomic add
+            // accumulates; the two this shader does not own start at the
+            // sentinel, so "untouched" is distinguishable from "written zero".
+            let counted = word == CLUSTER_SURVIVOR_WORD
+                || word == CLUSTER_FRUSTUM_REJECT_WORD
+                || word == CLUSTER_CONE_REJECT_WORD;
+            primer.extend((if counted { 0 } else { PROBE_SENTINEL }).to_le_bytes());
+        }
+        primer.extend(
+            core::iter::repeat_n(PROBE_SENTINEL, PROBE_CLUSTERS as usize)
+                .flat_map(u32::to_le_bytes),
+        );
+        let staged = uploaded("mesh_cluster primer", BufferUsage::TRANSFER_SRC, &primer);
+        let written = |label: &'static str, size| {
+            device
+                .create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size,
+                    usage: BufferUsage::STORAGE
+                        | BufferUsage::TRANSFER_DST
+                        | BufferUsage::TRANSFER_SRC,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .unwrap_or_else(|error| panic!("stage=create_buffer({label}): {error:?}"))
+        };
+        let cull_stats = written("mesh_cluster cull stats", stats_bytes);
+        let cluster_selection = written("mesh_cluster cluster selection", selection_bytes);
+        let stats_staging = readback_buffer(&device, stats_bytes as usize);
+        let selection_staging = readback_buffer(&device, selection_bytes as usize);
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[
+                    buffer_barrier(
+                        cull_stats,
+                        ResourceState::Undefined,
+                        ResourceState::TransferDst,
+                    ),
+                    buffer_barrier(
+                        cluster_selection,
+                        ResourceState::Undefined,
+                        ResourceState::TransferDst,
+                    ),
+                ],
+                ..Barriers::default()
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: staged,
+                src_offset: 0,
+                dst: cull_stats,
+                dst_offset: 0,
+                size: stats_bytes,
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: staged,
+                src_offset: stats_bytes,
+                dst: cluster_selection,
+                dst_offset: 0,
+                size: selection_bytes,
+            });
+            // `ShaderReadWrite`, not `ShaderWrite`: a barrier names the access
+            // the *descriptor* permits rather than the one the source performs,
+            // and an unordered-access view is both.
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[
+                    buffer_barrier(
+                        cull_stats,
+                        ResourceState::TransferDst,
+                        ResourceState::ShaderReadWrite,
+                    ),
+                    buffer_barrier(
+                        cluster_selection,
+                        ResourceState::TransferDst,
+                        ResourceState::ShaderReadWrite,
+                    ),
+                ],
+                ..Barriers::default()
+            });
+        });
+
+        // The base-colour page and its sampler: declared by the shader, sampled
+        // by neither stage, and bound for the reason the buffers above are.
+        let page = device
+            .create_image(&image(
+                Format::Rgba8Unorm,
+                ImageUsage::SAMPLED,
+                Extent3d::d2(4, 4),
+            ))
+            .expect("a base-colour page");
+        let page_view = device
+            .create_image_view(&ImageViewDesc {
+                label: Some("mesh_cluster base colour page"),
+                image: page,
+                // `D2Array`, which is what the layout entry claims and what
+                // `Texture2DArray<float4>` in the source is.
+                view_type: ImageViewType::D2Array,
+                format: Format::Rgba8Unorm,
+                range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+            })
+            .expect("an array view of the page");
+        let sampler = device
+            .create_sampler(&SamplerDesc {
+                label: Some("mesh_cluster base colour sampler"),
+                ..SamplerDesc::default()
+            })
+            .expect("a sampler");
+
+        // --- the layout ---
+
+        // Transcribed from `crcbl_render::ForwardRenderer::mesh_layout` — see
+        // the doc comment on which rows are absent and why. `ShaderStages::ALL`
+        // rather than `MESH | TASK` for [`MeshProbe`]'s reason: this backend
+        // reports no `Features::MESH_SHADER`, so the seam refuses a layout
+        // naming those bits, and `ALL` is `D3D12_SHADER_VISIBILITY_ALL`, which
+        // does reach both stages.
+        let read_only = BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        };
+        let writable = BindingKind::StorageBuffer {
+            read_only: false,
+            dynamic: false,
+        };
+        let entry = |binding: u32, kind: BindingKind| BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::ALL,
+            kind,
+            count: 1,
+            flags: BindingFlags::empty(),
+        };
+        let layout_entries = vec![
+            entry(0, BindingKind::UniformBuffer { dynamic: false }),
+            entry(1, read_only),
+            entry(2, read_only),
+            // **Dynamic, and that is the renderer's mechanism**: one block per
+            // bucket reached through an offset. It becomes a root descriptor
+            // here rather than a table entry, and it still takes a `b` register
+            // in declaration order — which is what puts `cull` on `b2`.
+            entry(3, BindingKind::UniformBuffer { dynamic: true }),
+            entry(4, read_only),
+            entry(5, read_only),
+            entry(6, read_only),
+            BindGroupLayoutEntry {
+                binding: 7,
+                visibility: ShaderStages::ALL,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2Array,
+                    sample_type: crcbl_hal::SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 8,
+                visibility: ShaderStages::ALL,
+                kind: BindingKind::Sampler { comparison: false },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            entry(9, read_only),
+            entry(10, read_only),
+            entry(11, read_only),
+            entry(12, read_only),
+            entry(13, BindingKind::UniformBuffer { dynamic: false }),
+            entry(14, writable),
+            entry(17, read_only),
+            entry(18, writable),
+            entry(19, read_only),
+            entry(20, read_only),
+            entry(21, read_only),
+            entry(23, read_only),
+            entry(24, read_only),
+        ];
+        let set_layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("mesh_cluster"),
+                entries: &layout_entries,
+            })
+            .expect("the cluster layout's twenty-two bindings");
+        let pipeline_layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("mesh_cluster"),
+                bind_group_layouts: &[set_layout],
+                push_constants: None,
+            })
+            .expect("a root signature with one table, one sampler table and one root descriptor");
+
+        let buffers = [
+            (0u32, frame_buffer),
+            (1, vertices),
+            (2, instances),
+            (3, draw_buffer),
+            (4, meshes),
+            (5, visible_instances),
+            (6, materials),
+            (9, cluster_buffer),
+            (10, cluster_vertices),
+            (11, cluster_corners),
+            (12, draw_args),
+            (13, cull_buffer),
+            (14, cull_stats),
+            (17, cluster_select),
+            (18, cluster_selection),
+            (19, group_state_buffer),
+            (20, lights),
+            (21, cluster_lights),
+            (23, probes),
+            (24, tables),
+        ];
+        let mut bound: Vec<BindGroupEntry> = buffers
+            .iter()
+            .map(|(binding, buffer)| BindGroupEntry {
+                binding: *binding,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(*buffer),
+            })
+            .collect();
+        bound.push(BindGroupEntry {
+            binding: 7,
+            array_index: 0,
+            resource: BindingResource::ImageView(page_view),
+        });
+        bound.push(BindGroupEntry {
+            binding: 8,
+            array_index: 0,
+            resource: BindingResource::Sampler(sampler),
+        });
+        assert_eq!(
+            bound.len(),
+            layout_entries.len(),
+            "every binding of the layout must be filled; a hole is a descriptor read out of an \
+             empty slot"
+        );
+        let group = device
+            .create_bind_group(&BindGroupDesc {
+                label: Some("mesh_cluster"),
+                layout: set_layout,
+                entries: &bound,
+                variable_count: None,
+            })
+            .expect("a bind group over the cluster set");
+
+        // --- the pipeline ---
+
+        let module = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("mesh_cluster.slang"),
+                dxil: &crcbl_shaders::MESH_CLUSTER.dxil_containers(),
+                ..ShaderModuleDesc::default()
+            })
+            .unwrap_or_else(|error| panic!("stage=create_shader_module: {error:?}"));
+        let pipeline = device
+            .create_mesh_pipeline(&crcbl_hal::MeshPipelineDesc {
+                label: Some("mesh_cluster depth"),
+                layout: pipeline_layout,
+                task: Some(ShaderEntry {
+                    module,
+                    entry_point: "taskMain",
+                }),
+                // `mesh_cluster.slang`'s own numbers. D3D12 reads them out of
+                // the DXIL and ignores these; they are here because Metal
+                // cannot.
+                task_workgroup_size: [1, 1, 1],
+                mesh: ShaderEntry {
+                    module,
+                    entry_point: "amplifiedMeshMain",
+                },
+                mesh_workgroup_size: [crcbl_shaders::meshlet::MAX_CLUSTER_VERTICES as u32, 1, 1],
+                fragment: None,
+                primitive: PrimitiveState::default(),
+                depth_stencil: Some(crcbl_hal::DepthStencilState::default()),
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            })
+            .unwrap_or_else(|error| panic!("stage=create_mesh_pipeline: {error:?}"));
+
+        let target = device
+            .create_image(&image(
+                Format::D32Float,
+                ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                SQUARE,
+            ))
+            .expect("a depth target");
+        let view = device
+            .create_image_view(&whole(target, Format::D32Float))
+            .expect("a depth stencil view");
+        let readback = readback_buffer(&device, SQUARE_BYTES);
+
+        let extents: Vec<u8> = pack_words(&[PROBE_CLUSTERS, 1, 1]);
+        let args = indirect_buffer(&device, "mesh_cluster dispatch extents", &extents);
+
+        let depth = crcbl_hal::DepthStencilAttachment {
+            view,
+            read_only: false,
+            depth_load: LoadOp::Clear,
+            depth_store: StoreOp::Store,
+            stencil_load: LoadOp::DontCare,
+            stencil_store: StoreOp::Discard,
+            clear: ClearValue::default(),
+        };
+        let pass = RenderPassDesc {
+            label: Some("mesh_cluster depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(depth),
+            render_area: Rect2d::from_size(SQUARE.width, SQUARE.height),
+            timestamp_writes: None,
+        };
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                images: &[
+                    ImageBarrier::new(
+                        target,
+                        ImageSubresourceRange::all(Format::D32Float),
+                        ResourceState::Undefined,
+                        ResourceState::DepthStencilWrite,
+                    ),
+                    ImageBarrier::new(
+                        page,
+                        ImageSubresourceRange::all(Format::Rgba8Unorm),
+                        ResourceState::Undefined,
+                        ResourceState::ShaderRead,
+                    ),
+                ],
+                ..Barriers::default()
+            });
+            encoder.begin_render_pass(&pass);
+            // Pipeline before group: setting a root signature resets every root
+            // argument, so the reverse order would bind a table the next call
+            // discards.
+            encoder.bind_graphics_pipeline(pipeline);
+            // One dynamic offset, for binding 3: this frame draws the bucket at
+            // the start of the block.
+            encoder.bind_group(0, group, &[0], pipeline_layout);
+            encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 1,
+                stride: 0,
+            });
+            encoder.end_render_pass();
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[
+                    buffer_barrier(
+                        cull_stats,
+                        ResourceState::ShaderReadWrite,
+                        ResourceState::TransferSrc,
+                    ),
+                    buffer_barrier(
+                        cluster_selection,
+                        ResourceState::ShaderReadWrite,
+                        ResourceState::TransferSrc,
+                    ),
+                ],
+                images: &[ImageBarrier::new(
+                    target,
+                    ImageSubresourceRange::all(Format::D32Float),
+                    ResourceState::DepthStencilWrite,
+                    ResourceState::TransferSrc,
+                )],
+                ..Barriers::default()
+            });
+            encoder.copy_image_to_buffer(&BufferImageCopy {
+                buffer: readback,
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image: target,
+                image_subresource: ImageSubresourceLayers {
+                    aspect: ImageAspect::DEPTH,
+                    mip: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: Offset3d::default(),
+                image_extent: SQUARE,
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: cull_stats,
+                src_offset: 0,
+                dst: stats_staging,
+                dst_offset: 0,
+                size: stats_bytes,
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: cluster_selection,
+                src_offset: 0,
+                dst: selection_staging,
+                dst_offset: 0,
+                size: selection_bytes,
+            });
+        });
+
+        // Between the submit and the `Map`, because `DXGI_ERROR_DEVICE_REMOVED`
+        // is reported at the *next* call — see [`MeshProbe::frame`], which does
+        // the same for the same reason.
+        still_alive(&device, "mesh_cluster depth");
+
+        let read = |buffer, bytes: u64| -> Vec<u8> {
+            let request = device
+                .request_readback(&ReadbackDesc {
+                    label: Some("mesh_cluster readback"),
+                    buffer,
+                    offset: 0,
+                    size: bytes,
+                    after: None,
+                })
+                .expect("a readback of a HostReadback buffer");
+            let out = drain(&device, request, bytes as usize);
+            device.destroy_readback(request);
+            out
+        };
+        let words = |buffer, bytes: u64| -> Vec<u32> {
+            read(buffer, bytes)
+                .chunks_exact(size_of::<u32>())
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                .collect()
+        };
+
+        // --- what the frame must have produced ---
+
+        let drawn = read(readback, SQUARE_BYTES as u64);
+        let depth_at = |x: usize, y: usize| -> f32 {
+            let at = (y * SQUARE.width as usize + x) * size_of::<f32>();
+            f32::from_le_bytes(
+                drawn[at..at + size_of::<f32>()]
+                    .try_into()
+                    .expect("four bytes"),
+            )
+        };
+        assert_eq!(
+            depth_at(0, 0),
+            crcbl_hal::depth::CLEAR,
+            "top-left corner: the one cluster in the cut does not cover it"
+        );
+        assert_eq!(
+            depth_at(SQUARE.width as usize - 1, SQUARE.height as usize - 1),
+            crcbl_hal::depth::CLEAR,
+            "bottom-right corner"
+        );
+        assert_eq!(
+            depth_at(32, 32),
+            PROBE_DEPTH,
+            "the cluster the descent selected and the cull kept rasterised nothing over the centre"
+        );
+
+        let stats = words(stats_staging, stats_bytes);
+        assert_eq!(
+            stats.len(),
+            STATS_WORDS as usize,
+            "the readback is not the whole statistics buffer"
+        );
+        let mut expected_stats = vec![PROBE_SENTINEL; STATS_WORDS as usize];
+        expected_stats[CLUSTER_SURVIVOR_WORD as usize] = 1;
+        expected_stats[CLUSTER_FRUSTUM_REJECT_WORD as usize] = 1;
+        expected_stats[CLUSTER_CONE_REJECT_WORD as usize] = 1;
+        assert_eq!(
+            stats, expected_stats,
+            "the amplification stage's three counters are not one survivor, one frustum rejection \
+             and one cone rejection, with the two words it does not own untouched"
+        );
+        // Stated separately because it is the arithmetic `mesh_cluster.slang`'s
+        // own comment makes: the three words sum to the size of the **cut**, not
+        // to the clusters dispatched, because a cluster the descent did not
+        // select was never put to either test.
+        assert_eq!(
+            stats[CLUSTER_SURVIVOR_WORD as usize]
+                + stats[CLUSTER_FRUSTUM_REJECT_WORD as usize]
+                + stats[CLUSTER_CONE_REJECT_WORD as usize],
+            3,
+            "the tested clusters must sum to the cut and not to the {PROBE_CLUSTERS} dispatched"
+        );
+
+        assert_eq!(
+            words(selection_staging, selection_bytes),
+            vec![1, 1, 1, 0, 0],
+            "the cut the descent recorded is not the one two flags and three group words say"
+        );
+
+        // --- teardown ---
+
+        device.destroy_buffer(args);
+        device.destroy_buffer(readback);
+        device.destroy_image_view(view);
+        device.destroy_image(target);
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_shader_module(module);
+        device.destroy_bind_group(group);
+        device.destroy_pipeline_layout(pipeline_layout);
+        device.destroy_bind_group_layout(set_layout);
+        device.destroy_sampler(sampler);
+        device.destroy_image_view(page_view);
+        device.destroy_image(page);
+        device.destroy_buffer(selection_staging);
+        device.destroy_buffer(stats_staging);
+        device.destroy_buffer(staged);
+        // `cull_stats` and `cluster_selection` are in this list too, which is
+        // why neither is released above.
+        for (_, buffer) in buffers {
+            device.destroy_buffer(buffer);
+        }
+    }
+
+    /// `words` as the little-endian bytes a `StructuredBuffer<uint>` holds.
+    fn pack_words(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
     /// Amplification groups [`many_indirect_amplification_groups_do_not_remove_the_device`]
     /// and [`a_zero_group_dispatch_mesh_does_not_remove_the_device`] each ask one
     /// `ExecuteIndirect` for.
