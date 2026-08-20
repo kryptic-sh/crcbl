@@ -55,7 +55,7 @@ proptest = "1.9"
 # minimally: `rand_core` keeps `os_rng` OFF so nothing drags `getrandom` onto
 # wasm32, which is the whole point of the seam.
 rand_chacha = { version = "0.9", default-features = false }
-rand_core = { version = "0.9", default-features = false }
+rand_core = { version = "0.10", default-features = false }
 thiserror = "2.0"
 # Storage and persistence: serde for settings/save schemas, toml for settings
 # files, dirs for platform-standard config/data paths.
