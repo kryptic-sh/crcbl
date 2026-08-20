@@ -5790,104 +5790,66 @@ using namespace metal;\n\
         device.destroy_buffer(destination);
     }
 
-    /// Every slice that has not arrived still refuses, by name — so none of
-    /// them can be half-implemented without this saying so.
+    /// **Every Metal slice has now arrived, and this is what replaced the last
+    /// two refusals.**
     ///
-    /// **The binding, dispatch, indirect-count and mesh slices emptied this
-    /// list down to two.** What is left is the two **counter-sampled** query
-    /// kinds, whose obstacle is a device that advertises no counter set rather
-    /// than a slice nobody has written — which is why they are the two Metal
-    /// rows still on `crcbl_hal::parity_blockers`. The mesh draws left it when
-    /// `crcbl_mtl::pipeline` gained `MTLMeshRenderPipelineDescriptor`, and
-    /// their real errors are asserted in
-    /// `the_mesh_slice_replaced_refusals_with_real_errors` below. The occlusion
-    /// kind is not among them any more —
-    /// `Device::create_query_set` builds it, and
-    /// `crates/crcbl/tests/hal_seam_e2e.rs`'s `exercise_query_set_creation` is
-    /// what drives it — and neither are the indirect-count draws, which
-    /// `crcbl_mtl::indirect_count` answers now. The calls that stopped refusing
-    /// are asserted in `the_binding_slice_replaced_refusals_with_real_errors`,
-    /// in `crcbl_mtl::instance`'s
-    /// `the_default_device_desc_opens_and_the_rest_degrades` for the flag the
-    /// count-limited draw earned, and in that same suite's
-    /// `a_compute_dispatch_writes_the_values_it_was_asked_for` — rather than
-    /// merely dropped from here.
+    /// This test was
+    /// `the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves`
+    /// and its list emptied one slice at a time: the binding and dispatch calls
+    /// left for `the_binding_slice_replaced_refusals_with_real_errors`, the mesh
+    /// draws for `the_mesh_slice_replaced_refusals_with_real_errors`, the
+    /// occlusion kind when `create_query_set` built it, and the count-limited
+    /// draws when `crcbl_mtl::indirect_count` answered them. The last two
+    /// members were the counter-sampled query kinds, and they went when
+    /// `create_query_set` learned `MTLCounterSampleBuffer`.
+    ///
+    /// **A refusal here is now the device's, never the backend's**, and that is
+    /// the whole claim. `QueryKind::Timestamp` and `QueryKind::PipelineStatistics`
+    /// depend on what `MTLDevice::counterSets` carries, so the two arms are
+    /// asserted against what this device actually reports rather than one of
+    /// them being assumed — a machine with the counter set must build the object,
+    /// and a machine without it must refuse naming the set it lacks. CI's
+    /// `Apple Paravirtual device` reports `counterSets=0` and takes the second
+    /// arm; a Metal 3 Mac takes the first, and neither is a skip.
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
+    fn the_query_slice_refuses_for_the_device_or_builds_the_object() {
         let (_instance, device) = open_device();
+        let features = device.caps().features;
 
-        let refusals: Vec<(&str, HalError)> = vec![
+        for (what, kind, flag) in [
+            ("timestamp", QueryKind::Timestamp, Features::TIMESTAMP_QUERY),
             (
-                "timestamp query sets",
-                device
-                    .create_query_set(&QuerySetDesc {
-                        label: None,
-                        kind: QueryKind::Timestamp,
-                        count: 1,
-                    })
-                    .expect_err("no counter sample buffer yet"),
+                "pipeline-statistics",
+                QueryKind::PipelineStatistics,
+                Features::PIPELINE_STATISTICS_QUERY,
             ),
-            (
-                "pipeline-statistics query sets",
-                device
-                    .create_query_set(&QuerySetDesc {
-                        label: None,
-                        kind: QueryKind::PipelineStatistics,
-                        count: 1,
-                    })
-                    .expect_err("no counter sample buffer yet"),
-            ),
-        ];
-        assert!(!refusals.is_empty(), "nothing to check");
-        for (what, error) in &refusals {
-            assert!(
-                matches!(error, HalError::Unsupported { backend, .. } if *backend == BackendKind::Metal),
-                "{what}: {error:?}"
-            );
-            let text = error.to_string();
-            assert!(text.contains("metal"), "{what}: {text}");
-            assert!(
-                text.contains("Metal") && text.contains("slice"),
-                "{what}: {text}"
-            );
+        ] {
+            let made = device.create_query_set(&QuerySetDesc {
+                label: None,
+                kind,
+                count: 1,
+            });
+            if features.contains(flag) {
+                let set = made.unwrap_or_else(|error| {
+                    panic!("{what}: this device reports {flag:?} and refused the set: {error:?}")
+                });
+                device.destroy_query_set(set);
+            } else {
+                let error = made.err().unwrap_or_else(|| {
+                    panic!("{what}: this device reports no {flag:?} and built the set anyway")
+                });
+                assert!(
+                    matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Metal),
+                    "{what}: {error:?}"
+                );
+                let text = error.to_string();
+                assert!(
+                    text.contains("counterSets"),
+                    "{what}: a device refusal must name what the device lacks: {text}"
+                );
+            }
         }
-
-        // The mesh draws used to be refused here; they are real errors now and
-        // `the_mesh_slice_replaced_refusals_with_real_errors` asserts them.
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .expect("the graphics queue exists");
-
-        // An empty submission is legal now and does nothing, which is the only
-        // honest answer: there is no work to run and nothing to signal.
-        device
-            .submit(queue, &SubmitInfo::new(&[]))
-            .expect("an empty submission is a no-op, not a refusal");
-
-        // A queue handle really belonging to another device is foreign; a
-        // hand-made one carries no device tag at all and was never issued.
-        let (_other_instance, other) = open_device();
-        let other_queue = other
-            .queue(QueueKind::Graphics)
-            .expect("the other device has a queue too");
-        assert_ne!(queue, other_queue);
-        let error = device
-            .submit(other_queue, &SubmitInfo::new(&[]))
-            .expect_err("that queue belongs to the other device");
-        assert!(
-            matches!(error, HalError::ForeignObject { kind, .. } if kind == "queue"),
-            "{error:?}"
-        );
-
-        let untagged = Handle::from_bits(1 << 32).expect("generation 1");
-        let error = device
-            .submit(untagged, &SubmitInfo::new(&[]))
-            .expect_err("no device ever issued that handle");
-        assert!(
-            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "queue"),
-            "{error:?}"
-        );
     }
 
     /// The calls the binding slice took off the refusal list now fail for the

@@ -8482,12 +8482,27 @@ Proven on hardware:
 Not proven on any device: dynamic offsets, offscreen surfaces, and a recorded
 frame.
 
-**A rot to expect.** `c4e8655` reddened WARP on
-`the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves`, which
-asserts the unimplemented calls still answer `Unsupported`. Three of them had
-just started working. That test's own comment calls it "the half that rots" —
-every DX12 slice from here has to prune it, and the failure is legible when it
-happens.
+**A rot to expect, and it has now happened three times.** `c4e8655` reddened
+WARP on
+`the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves` — a
+test asserting the unimplemented calls still answer `Unsupported` — because
+three of them had just started working. The Metal mesh slice reddened it again
+on 2026-08-20, and the counter-query slice emptied it entirely on 2026-08-21:
+its last two members were `QueryKind::Timestamp` and
+`QueryKind::PipelineStatistics`, and with those implemented the list had nothing
+in it.
+
+It is now `the_query_slice_refuses_for_the_device_or_builds_the_object`, which
+asserts **both** arms against what the device reports rather than asserting an
+absence: a machine carrying the counter set must build the object, one without
+it must refuse naming `counterSets`. That shape cannot rot the same way, because
+implementing something does not falsify it.
+
+**The general lesson, which cost three red runs to learn:** a test whose subject
+is "this is not implemented yet" is a test that fails on success, and it runs
+only on the platform that can implement it — so the failure always arrives from
+CI, never locally. Prefer asserting what a call _does_ on each side of a
+capability to asserting that it does nothing.
 
 Also: `crcbl-dx12`'s crate docs still say bind groups and pipelines refuse,
 which the code contradicts.
