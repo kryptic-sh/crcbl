@@ -7,7 +7,7 @@
 
 use crcbl::args::{Common, Consumed};
 use crcbl::hal::{BindingModel, GeometryPath};
-use crcbl::render::ForwardRenderer;
+use crcbl::render::{DebugView, ForwardRenderer};
 
 use crate::gpu::Forced;
 use crate::menu::CameraMode;
@@ -38,6 +38,12 @@ pub struct Options {
     /// Whether the run starts with each cluster tinted by its DAG level rather
     /// than shaded — `docs/plan/25-lod.md`'s overlay.
     pub lod_view: bool,
+    /// Whether the run starts with each cluster shaded by the projected error
+    /// the LOD selection judged it on — that plan's *other* overlay.
+    ///
+    /// **Wins over [`lod_view`](Self::lod_view) when both were asked for**; see
+    /// [`Options::debug_view`], which is where the two are resolved.
+    pub heatmap: bool,
     /// Print the device-free report and exit, opening no shell and no adapter.
     ///
     /// Not a run: `src/main.rs` answers this before the front end starts, which
@@ -53,6 +59,7 @@ impl Default for Options {
             forced: Forced::default(),
             lod_budget: ForwardRenderer::LOD_ERROR_BUDGET,
             lod_view: false,
+            heatmap: false,
             report: false,
         }
     }
@@ -123,6 +130,13 @@ OPTIONS:
                          menu's LOD VIEW row toggles it. The two indirect paths
                          select one level per instance and draw one flat tint,
                          which is the comparison rather than a shortfall.
+    --heatmap            Start with each cluster shaded by the screen-space
+                         error the LOD selection judged it on: a ramp that
+                         climbs in brightness towards the budget, with a hue
+                         break at the hold budget and white at or over the
+                         expand budget. ENTER on the pause menu's HEATMAP row
+                         toggles it. Mesh path only, on --lod-view's terms, and
+                         it wins over --lod-view when both are given.
     --report             Print the face's counts, the meshlet total and the
                          per-level DAG breakdown, then exit. Opens no window and
                          no adapter, so it runs on a machine with no driver.
@@ -184,12 +198,40 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 None => return Invocation::BadUsage("--lod-budget needs a value".into()),
             },
             "--lod-view" => options.lod_view = true,
+            "--heatmap" => options.heatmap = true,
             "--report" => options.report = true,
             _ => return Invocation::BadUsage(format!("unknown argument: {arg}")),
         }
     }
 
     Invocation::Run(options)
+}
+
+impl Options {
+    /// Which overlay the run starts on.
+    ///
+    /// **The precedence, stated once**: the heatmap wins over the tint, which
+    /// wins over the shaded picture — the same order
+    /// [`ForwardRenderer::debug_view`] resolves, and deliberately so. A run
+    /// asking for both flags has one defined answer whichever order they were
+    /// typed in, and it is the answer the renderer would have reached anyway;
+    /// two different orders would be a `--help` that describes one rule and a
+    /// picture that follows another.
+    ///
+    /// Refusing the pair instead was the alternative and it buys nothing here:
+    /// both flags name an overlay of the same kind, so "the outer one" is a
+    /// meaning rather than a guess — and a fixture that exits on a combination
+    /// a reviewer typed while exploring is a fixture that stops them exploring.
+    #[must_use]
+    pub const fn debug_view(&self) -> DebugView {
+        if self.heatmap {
+            DebugView::Heatmap
+        } else if self.lod_view {
+            DebugView::LodTint
+        } else {
+            DebugView::Shaded
+        }
+    }
 }
 
 /// A screen-space error budget by the value `--lod-budget` takes.
@@ -267,6 +309,12 @@ mod tests {
             "a bare run selects under the renderer's own budget, not a copy of it",
         );
         assert!(!options.lod_view, "the tint is an overlay, not the picture");
+        assert!(!options.heatmap, "and so is the heatmap");
+        assert_eq!(
+            options.debug_view(),
+            DebugView::Shaded,
+            "a bare run draws the picture, not an overlay"
+        );
         assert!(!options.report);
     }
 
@@ -283,6 +331,7 @@ mod tests {
             "--lod-budget",
             "16",
             "--lod-view",
+            "--heatmap",
             "--headless",
             "--frames",
             "4",
@@ -299,10 +348,50 @@ mod tests {
         );
         assert_eq!(options.lod_budget, 16.0);
         assert!(options.lod_view);
+        assert!(options.heatmap);
         // And the shared half still landed, which is what a parser that
         // consumed its own flags first would break.
         assert!(options.common.headless);
         assert_eq!(options.common.frames, Some(4));
+    }
+
+    /// **The two overlays resolve to one, whichever order they were typed.**
+    ///
+    /// The four combinations, and the two that matter are the ones where a rule
+    /// has to be applied rather than read off. Written as both orders of the
+    /// pair rather than one, because a parser that let the *last* flag win would
+    /// pass a test that only tried one of them — and would then disagree with
+    /// [`ForwardRenderer::debug_view`], which sees two booleans and no order at
+    /// all.
+    #[test]
+    fn the_heatmap_wins_over_the_tint_whichever_order_they_are_asked_for() {
+        let view = |argv: &[&str]| {
+            let Invocation::Run(options) = run(argv) else {
+                panic!("{argv:?} is a run");
+            };
+            options.debug_view()
+        };
+        assert_eq!(view(&[]), DebugView::Shaded);
+        assert_eq!(view(&["--lod-view"]), DebugView::LodTint);
+        assert_eq!(view(&["--heatmap"]), DebugView::Heatmap);
+        assert_eq!(
+            view(&["--lod-view", "--heatmap"]),
+            DebugView::Heatmap,
+            "the heatmap wins when it is asked for second"
+        );
+        assert_eq!(
+            view(&["--heatmap", "--lod-view"]),
+            DebugView::Heatmap,
+            "and when it is asked for first — the order must not decide it"
+        );
+
+        // And the flags themselves both landed, so the resolution above is a
+        // rule over two recorded settings rather than one flag quietly
+        // overwriting the other's field.
+        let Invocation::Run(options) = run(&["--heatmap", "--lod-view"]) else {
+            panic!("that is a run");
+        };
+        assert!(options.lod_view && options.heatmap);
     }
 
     /// **Every camera the pause row can reach can be asked for on the command

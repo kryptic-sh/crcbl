@@ -1826,7 +1826,7 @@ What would make it worth doing: a fourth copy. Two fixtures with different
 requirements are a resemblance; a third caller needing the same extras is
 duplicated knowledge.
 
-### quarry (S4C): what is left is two overlays and the skinned case
+### quarry (S4C): what is left is one overlay and the skinned case
 
 The phase table's S4C row asks for "meshlet clusters, QEM cluster LOD, and all
 three `GeometryPath` values on one dense scene", gated by "golden frames per
@@ -1915,38 +1915,55 @@ it, forced by subtracting features from one adapter.
   budget" is a judgement no tolerance makes. The images are
   `apps/quarry/tests/golden/`.
 
-- **The LOD tint is built; the heatmap is not.** `ForwardRenderer::set_lod_view`
-  tints each cluster by the DAG level it was decimated to, and
-  `the_lod_view_tints_the_mesh_path_by_level_and_the_indirect_paths_flat`
-  measures it: three colours on the mesh path at `MIXING_BUDGET` — background
-  plus levels 1 and 2 — against exactly two on the per-batch path, which has no
-  per-cluster level to tint by.
+- **The LOD tint and the screen-error heatmap are both built.**
+  `ForwardRenderer::set_lod_view` tints each cluster by the DAG level it was
+  decimated to; `set_heatmap` shades it by the projected error the selection
+  judged it on. Both are mesh-path only and both assert the indirect paths draw
+  flat, which is not a seam gap — per-cluster error exists only where selection
+  is per cluster.
 
-  **The screen-error heatmap is the half still owed, and it is smaller than this
-  entry used to claim.** The claim was that a heatmap "needs the error the
-  selection judged, which is per group rather than per cluster and is not in
-  `ClusterSelect` at all". The second half is true and the conclusion does not
-  follow, re-derived by reading the shaders on 2026-08-20:
-  - `mesh_cluster.slang`'s `group_state` binding already reads
-    `group_state[base + select.producer_group]`, so the mesh stage has both the
-    group index and the table base.
-  - `draw_gen.slang`'s `LevelGroup` carries `error`, `center_x`/`y`/`z` and
-    `radius` — every input `GroupCost::projected_error` takes.
-  - `mesh_cluster.slang`'s `FrameUniforms` already carries `camera_position`.
+  **The heatmap cost more than this entry predicted.** It said "one binding and
+  one scalar". It was one binding and _four_ scalars, plus an unread mirror:
+  - Binding 22 is `AMBIENT_OCCLUSION_BINDING` and 23 is `PROBE_TABLE_BINDING`,
+    both declared by `mesh.slang`'s `fragmentMain` — which **is** the mesh
+    pipeline's fragment stage, so both are in that layout. `tables` went to 24.
+  - `crcbl-mtl` numbers a Metal buffer by counting the layout's entries below
+    it, so `mesh_cluster.slang` also needed an unread mirror of `probes` at 23
+    or `tables` would land one index low. The evidence is the artifact rather
+    than the argument: `msl/mesh_cluster.metal` takes `tables [[buffer(19)]]`.
+  - `pixels_per_unit` and both budgets went into `FrameUniforms` as a trailing
+    `lod_params`; `level_groups_at` went into `ClusterDrawConstants`.
 
-  What is genuinely missing is **one binding and one scalar**: `tables` is
-  declared in `draw_gen.slang` and not in `mesh_cluster.slang`, whose bindings
-  stop at `cluster_lights`, and `pixels_per_unit` lives in `draw_gen.slang`'s
-  own uniform block as `lod_params.x` rather than in the shared frame block.
-  Bind the first and carry the second and the fragment stage can project the
-  error itself, on the same path `lod_tint` already took.
+  **The WebGPU ceiling question that entry left open is closed.**
+  `crcbl_hal::check_portable_storage_buffers` sums only `VERTEX`/`FRAGMENT`/
+  `COMPUTE`, and the new row is gated on `emit.is_mesh()`, so the raster layout
+  — which the code says sits _at_ the ceiling with no headroom — is untouched.
 
-  **Not yet costed against the other backends.** The seam rule applies — a
-  binding added to the mesh pipeline is a binding on vk, dx12, Metal and WebGPU
-  — and nothing here has checked what that does to Metal's argument table or to
-  WebGPU's per-stage storage-buffer ceiling, which is the limit that already
-  keeps lumen's browser gate off CI. That check is the first step, not the
-  shader work.
+  **Coverage gap: the heatmap has been looked at on one device only.** The three
+  budget frames were rendered and reviewed by eye on an RX 7900 XTX — flat
+  indigo at 1px, a teal/yellow contour at `MIXING_BUDGET`, flat blue at
+  `COARSE_BUDGET`, cold at both ends by different routes. The device test's bars
+  (`HEATMAP_MESH_COLOURS`, `HEATMAP_FLOOR_COLOURS`, `HEATMAP_LUMA_GAP`) are set
+  well inside those measurements so a driver quantising the ramp differently
+  still passes, but **the lavapipe numbers are a prediction, not a
+  measurement**, and the browser has never been looked at — WebGPU never takes
+  the mesh path, so the page draws the same flat grey the tint does there.
+  Argued, not seen.
+
+- **`ForwardRenderer::set_lod_error_budget` validates nothing.** `--lod-budget`
+  refuses a non-positive or non-finite value; the setter takes any `f32`, and
+  `heat_tint`'s `RAMP_FLOOR` is the only thing stopping a zero or negative
+  budget reaching a colour as an infinity or a NaN. Not fixed: tightening the
+  setter is an API decision, and an orthographic camera legitimately writes
+  negative infinity through the same field.
+
+- **The mesh-without-task-shader path's Metal indices are already wrong**, and
+  the heatmap neither caused nor fixed it. `crcbl-mtl` counts layout entries,
+  and a `MESH_SHADER`-without-`TASK_SHADER` layout omits bindings 13, 14, 18 and
+  19 — so `cluster_select` would land at `buffer(11)` while the MSL says
+  `buffer(13)`. Unreachable today because that backend refuses mesh pipelines
+  outright (`crcbl_mtl::device::create_mesh_pipeline`). Noticed while checking
+  the new binding; not verified on hardware.
 
 - **Milestone 4: the tiling case and the Pages demo are done, the skinned one is
   blocked.** `crcbl_quarry::tile` is the modular wall piece, and two tiles
@@ -2001,10 +2018,10 @@ it, forced by subtracting features from one adapter.
   costed against the other backends, and the seam rule applies.
 
 - **The freeze-selection-from-here camera is still owed.** Topic 25's third
-  overlay, beside the LOD tint (built) and the screen-error heatmap (above).
-  Nothing in `apps/quarry` or `crcbl-render` holds a cut across a camera move
-  today, and it is what makes "the selection is per cluster" checkable by
-  walking away from a frozen cut rather than by reading a count.
+  overlay, beside the LOD tint and the screen-error heatmap, both built. Nothing
+  in `apps/quarry` or `crcbl-render` holds a cut across a camera move today, and
+  it is what makes "the selection is per cluster" checkable by walking away from
+  a frozen cut rather than by reading a count.
 
 **DECIDED 2026-08-20 — the other three, so the gate has one shape.**
 

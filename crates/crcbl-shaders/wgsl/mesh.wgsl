@@ -78,6 +78,7 @@ struct FrameUniforms_std140_0
     @align(16) probe_origin_0 : vec4<f32>,
     @align(16) probe_inv_spacing_0 : vec4<f32>,
     @align(16) probe_counts_0 : vec4<u32>,
+    @align(16) lod_params_0 : vec4<f32>,
 };
 
 @binding(0) @group(0) var<uniform> frame_0 : FrameUniforms_std140_0;

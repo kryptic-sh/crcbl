@@ -19,6 +19,7 @@
 //! engine's menu is a finding about the menu.
 
 use crcbl::engine::FIRST_GAME_ID;
+use crcbl::render::DebugView;
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
 /// Which camera the frame is drawn from.
@@ -91,6 +92,35 @@ pub enum QuarryAction {
     /// Flip [`ForwardRenderer::set_lod_view`](crcbl::render::ForwardRenderer::set_lod_view):
     /// each cluster tinted by the DAG level it came from, instead of shaded.
     ToggleLodView,
+    /// Flip [`ForwardRenderer::set_heatmap`](crcbl::render::ForwardRenderer::set_heatmap):
+    /// each cluster shaded by the projected error the selection judged it on.
+    ///
+    /// **Switching one overlay on switches the other off** — see
+    /// [`toggled_to`], which is where the fixture's exclusivity lives. Two rows
+    /// that could both read `ON` while one picture is drawn would be a panel
+    /// that lies about the frame under it.
+    ToggleHeatmap,
+}
+
+/// The view a row leaves in force: `on` if it was not already showing, and the
+/// shaded picture if it was.
+///
+/// **The whole of this fixture's exclusivity.** The renderer resolves a
+/// precedence over three independent switches — a debug view has to survive a
+/// caller setting two of them — but a *panel* has rows, and a row that says
+/// `LOD VIEW: ON` while the heatmap is drawn is a row nobody can act on. So the
+/// fixture holds one view rather than a flag per overlay, and pressing a row is
+/// this function.
+#[must_use]
+pub const fn toggled_to(view: DebugView, on: DebugView) -> DebugView {
+    if matches!(
+        (view, on),
+        (DebugView::LodTint, DebugView::LodTint) | (DebugView::Heatmap, DebugView::Heatmap)
+    ) {
+        DebugView::Shaded
+    } else {
+        on
+    }
 }
 
 /// The id carrying [`QuarryAction::ToggleCamera`]. The first id a game may use,
@@ -100,6 +130,9 @@ pub const CAMERA_ID: crcbl::ui::WidgetId = FIRST_GAME_ID;
 /// The id carrying [`QuarryAction::ToggleLodView`].
 pub const LOD_VIEW_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 1;
 
+/// The id carrying [`QuarryAction::ToggleHeatmap`].
+pub const HEATMAP_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 2;
+
 /// The action a widget id names, or `None` for an id this sample's menus do not
 /// use.
 #[must_use]
@@ -108,16 +141,22 @@ pub const fn action_for(id: crcbl::ui::WidgetId) -> Option<QuarryAction> {
         Some(QuarryAction::ToggleCamera)
     } else if id == LOD_VIEW_ID {
         Some(QuarryAction::ToggleLodView)
+    } else if id == HEATMAP_ID {
+        Some(QuarryAction::ToggleHeatmap)
     } else {
         None
     }
 }
 
-/// The pause panel: the loop's own three rows, then the camera in force and
-/// whether the LOD tint is on.
+/// The pause panel: the loop's own three rows, then the camera in force and one
+/// row per overlay.
+///
+/// Each overlay row says whether *it* is the view being drawn, so at most one of
+/// them reads `ON` — see [`toggled_to`].
 #[must_use]
-pub fn pause_menu(camera: CameraMode, lod_view: bool) -> Menu {
+pub fn pause_menu(camera: CameraMode, view: DebugView) -> Menu {
     use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
+    let state = |row: DebugView| if view == row { "ON" } else { "OFF" };
     Menu::new(
         "PAUSED",
         vec![
@@ -127,7 +166,12 @@ pub fn pause_menu(camera: CameraMode, lod_view: bool) -> Menu {
             MenuItem::new(CAMERA_ID, format!("CAMERA: {}", camera.label()), "ENTER"),
             MenuItem::new(
                 LOD_VIEW_ID,
-                format!("LOD VIEW: {}", if lod_view { "ON" } else { "OFF" }),
+                format!("LOD VIEW: {}", state(DebugView::LodTint)),
+                "ENTER",
+            ),
+            MenuItem::new(
+                HEATMAP_ID,
+                format!("HEATMAP: {}", state(DebugView::Heatmap)),
                 "ENTER",
             ),
         ],
@@ -149,7 +193,10 @@ pub type Menus = MenuSet<bool>;
 pub fn menus() -> Menus {
     MenuSet::new(
         false,
-        vec![(true, pause_menu(CameraMode::default(), false))],
+        vec![(
+            true,
+            pause_menu(CameraMode::default(), DebugView::default()),
+        )],
     )
 }
 
@@ -206,6 +253,7 @@ mod tests {
         for expected in [
             MenuAction::Game(QuarryAction::ToggleCamera),
             MenuAction::Game(QuarryAction::ToggleLodView),
+            MenuAction::Game(QuarryAction::ToggleHeatmap),
         ] {
             assert!(actions.contains(&expected), "no row fires {expected:?}");
         }
@@ -223,10 +271,59 @@ mod tests {
             (CameraMode::Dolly, "CAMERA: DOLLY"),
             (CameraMode::Free, "CAMERA: FREE"),
         ] {
-            for (lod_view, lod_row) in [(false, "LOD VIEW: OFF"), (true, "LOD VIEW: ON")] {
-                let rows = labels(&pause_menu(camera, lod_view));
+            for (view, lod_row, heat_row) in [
+                (DebugView::Shaded, "LOD VIEW: OFF", "HEATMAP: OFF"),
+                (DebugView::LodTint, "LOD VIEW: ON", "HEATMAP: OFF"),
+                (DebugView::Heatmap, "LOD VIEW: OFF", "HEATMAP: ON"),
+            ] {
+                let rows = labels(&pause_menu(camera, view));
                 assert!(rows.contains(&camera_row.to_string()), "{rows:?}");
                 assert!(rows.contains(&lod_row.to_string()), "{rows:?}");
+                assert!(rows.contains(&heat_row.to_string()), "{rows:?}");
+            }
+        }
+    }
+
+    /// **The two overlay rows are mutually exclusive**, and each one is its own
+    /// off switch.
+    ///
+    /// Every start × every row, so the case a naive toggle gets wrong is
+    /// covered: pressing HEATMAP while the tint is showing must *replace* it
+    /// rather than leave both set, and pressing a row that is already on must
+    /// return the shaded picture rather than doing nothing.
+    #[test]
+    fn each_overlay_row_replaces_the_other_and_switches_itself_off() {
+        for start in [DebugView::Shaded, DebugView::LodTint, DebugView::Heatmap] {
+            assert_eq!(
+                toggled_to(start, DebugView::LodTint),
+                if start == DebugView::LodTint {
+                    DebugView::Shaded
+                } else {
+                    DebugView::LodTint
+                },
+                "LOD VIEW pressed from {start:?}"
+            );
+            assert_eq!(
+                toggled_to(start, DebugView::Heatmap),
+                if start == DebugView::Heatmap {
+                    DebugView::Shaded
+                } else {
+                    DebugView::Heatmap
+                },
+                "HEATMAP pressed from {start:?}"
+            );
+            // And pressing one row twice comes back to where it started, which
+            // is what a reviewer flicking a row expects.
+            for row in [DebugView::LodTint, DebugView::Heatmap] {
+                assert_eq!(
+                    toggled_to(toggled_to(start, row), row),
+                    if start == row {
+                        start
+                    } else {
+                        DebugView::Shaded
+                    },
+                    "{row:?} pressed twice from {start:?}"
+                );
             }
         }
     }

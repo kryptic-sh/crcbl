@@ -354,8 +354,8 @@ impl Meshlet {
 
 /// Bytes in one bucket's cluster-draw constant block.
 ///
-/// Five `uint`s and the three `std140` rounds the block up by — a structure's
-/// size is a multiple of 16 whatever its members are, exactly as
+/// Six `uint`s and the two `std140` rounds the block up by — a structure's size
+/// is a multiple of 16 whatever its members are, exactly as
 /// [`DrawConstants`](crate::mesh::DrawConstants) beside it records.
 pub const CLUSTER_DRAW_CONSTANTS_SIZE: usize = 32;
 
@@ -363,9 +363,9 @@ pub const CLUSTER_DRAW_CONSTANTS_SIZE: usize = 32;
 /// `struct ClusterDrawConstants` in `shaders/mesh_cluster.slang`.
 ///
 /// A block of its own rather than [`DrawConstants`](crate::mesh::DrawConstants),
-/// because four of its five fields mean nothing to the raster path and a
-/// record carrying them there would be four unread words in every frame that
-/// does not use them.
+/// because five of its six fields mean nothing to the raster path and a record
+/// carrying them there would be five unread words in every frame that does not
+/// use them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClusterDrawConstants {
     /// This bucket's first slot in the list `draw_gen.slang` scatters
@@ -393,6 +393,22 @@ pub struct ClusterDrawConstants {
     /// [`crcbl_shaders::cluster_select`](crate::cluster_select), which is where
     /// the state and the two budgets over it are described.
     pub group_stride: u32,
+    /// Where the [`LevelGroup`](crate::level_select::LevelGroup) records start
+    /// in the shared table buffer, in **words** — the same offset
+    /// [`draw_gen::Params::level_groups_at`](crate::draw_gen::Params::level_groups_at)
+    /// carries into the draw-argument pass.
+    ///
+    /// **The screen-error heatmap is what reads it**, and only that: the mesh
+    /// stage projects a cluster's producing group's error itself so the overlay
+    /// can shade by the number the selection judged, and the record it projects
+    /// lives in that region. Nothing about the *cut* needs it — that arrives
+    /// through the hysteresis state.
+    ///
+    /// A frame-wide number in a per-bucket block for
+    /// [`group_stride`](Self::group_stride)'s reason, and fixed for the life of
+    /// the renderer besides: the host packs the table regions when a mesh
+    /// becomes resident, never per frame.
+    pub level_groups_at: u32,
 }
 
 impl ClusterDrawConstants {
@@ -412,6 +428,7 @@ impl ClusterDrawConstants {
             self.cluster_count,
             self.bucket,
             self.group_stride,
+            self.level_groups_at,
         ] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
@@ -920,14 +937,14 @@ mod tests {
     }
 
     /// The offsets `slangc` emitted for `ClusterDrawConstants`, read out of the
-    /// disassembly. Five `uint`s in a row permute silently — a bucket index
-    /// read as a cluster base draws another mesh's clusters — so each is
-    /// pinned to its byte.
+    /// disassembly. Six `uint`s in a row permute silently — a bucket index read
+    /// as a cluster base draws another mesh's clusters — so each is pinned to
+    /// its byte.
     #[test]
     fn the_cluster_constants_match_the_offsets_slangc_emits() {
         // `OpMemberDecorate %ClusterDrawConstants_std140 n Offset …`: 0, 4, 8,
-        // 12, 16, and a block size of 32 because `std140` rounds a structure up
-        // to a multiple of 16.
+        // 12, 16, 20, and a block size of 32 because `std140` rounds a
+        // structure up to a multiple of 16.
         assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE, 32);
         assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE % 16, 0);
 
@@ -937,6 +954,7 @@ mod tests {
             cluster_count: 3,
             bucket: 4,
             group_stride: 5,
+            level_groups_at: 6,
         }
         .to_bytes();
         let uint_at =
@@ -946,8 +964,9 @@ mod tests {
         assert_eq!(uint_at(8), 3, "cluster_count at offset 8");
         assert_eq!(uint_at(12), 4, "bucket at offset 12");
         assert_eq!(uint_at(16), 5, "group_stride at offset 16");
+        assert_eq!(uint_at(20), 6, "level_groups_at at offset 20");
         assert!(
-            bytes[20..].iter().all(|&byte| byte == 0),
+            bytes[24..].iter().all(|&byte| byte == 0),
             "the padding has to be written, not left to whatever the buffer held"
         );
     }

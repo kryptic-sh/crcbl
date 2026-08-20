@@ -912,6 +912,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`ForwardRenderer::set_heatmap`/`heatmap()`, and `DebugView`.** Topic 25's
+  second debug overlay: each cluster shaded by the projected screen-space error
+  the LOD selection judged it on — the number `draw_gen.slang`'s
+  `group_is_expanded` compares against the budget — on a ramp that climbs in
+  Rec. 709 luminance from a cold floor to white, with a hue break at the hold
+  budget and another at the expand budget. Each budget therefore draws itself as
+  a contour across the surface instead of hiding in a gradient, which is the
+  whole question a viewer has. A rainbow was rejected: it has no readable
+  ordering, and a luminance-monotone ramp survives a greyscale screenshot.
+
+  Mesh path only, exactly as the LOD tint is — a per-cluster error exists only
+  where selection is per cluster, and both indirect paths draw the same flat
+  grey. `ForwardRenderer::debug_view()` is the one place the three overlays'
+  precedence is decided (heatmap over LOD tint over normals), so a caller
+  setting two switches gets a defined answer rather than whichever shader branch
+  ran first.
+
+- **`quarry` gains `--heatmap`**, a `HEATMAP` pause-menu row, and a `view` row
+  on the debug panel naming the overlay in force. The two overlay rows are
+  mutually exclusive, and `--heatmap` wins over `--lod-view` in either order.
+
 - **`quarry` has a browser demo**, at `/demos/quarry/`. The geometry acceptance
   fixture compiled to `wasm32`, drawing its cluster DAG through WebGPU. A
   browser exposes neither a mesh stage nor a GPU-side draw count, so the page
@@ -970,6 +991,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and `TURN` from the engine rather than defining them.
 
 ### Changed
+
+- **`crcbl_shaders::mesh::FrameUniforms` gained a trailing
+  `lod_params: [f32; 4]`** — the frame's pixels-per-unit and both LOD budgets,
+  carried into the geometry stage so the heatmap shades by the metric the cut
+  was actually chosen with rather than a second derivation of it. Appended, so
+  no existing member's offset moves and every golden blessed before it still
+  matches. Out-of-tree code building the struct with a literal must add the
+  field.
+
+- **`crcbl_shaders::meshlet::ClusterDrawConstants` gained `level_groups_at`**,
+  where the frame's `LevelGroup` records start. The block is still 32 bytes.
 
 - **quarry's `[HUD]` heartbeat gained `eye z:`**, the camera's position down the
   face. Anything parsing that line needs updating. It is what the browser gate

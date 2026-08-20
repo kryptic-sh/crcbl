@@ -440,18 +440,40 @@ mod tests {
     /// this red instead of being blessed by it.
     #[test]
     fn the_shader_reads_the_selection_records_at_the_words_this_module_encodes() {
-        let source = include_str!("../shaders/draw_gen.slang");
+        let draw_gen = include_str!("../shaders/draw_gen.slang");
+        // **The group records are read by two shaders now.** The draw-argument
+        // pass judges the cut from them and `mesh_cluster.slang`'s mesh stage
+        // projects the same records for the screen-error heatmap, so a word
+        // constant that drifted in one file and not the other would be an
+        // overlay shading by a radius while the cut was chosen by an error. The
+        // `MeshLevels` half stays the draw-argument pass's alone — the mesh path
+        // takes no uniform cut, so that stage has no reason to read it.
+        let group_sources = [
+            ("draw_gen.slang", draw_gen),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+            ),
+        ];
         let declares = |declaration: &str| {
             assert!(
-                source.contains(declaration),
+                draw_gen.contains(declaration),
                 "draw_gen.slang does not declare `{declaration}`"
             );
+        };
+        let both_declare = |declaration: &str| {
+            for (name, source) in group_sources {
+                assert!(
+                    source.contains(declaration),
+                    "{name} does not declare `{declaration}`"
+                );
+            }
         };
         declares(&format!(
             "static const uint MESH_LEVELS_WORDS = {};",
             MESH_LEVELS_STRIDE / 4
         ));
-        declares(&format!(
+        both_declare(&format!(
             "static const uint LEVEL_GROUP_WORDS = {};",
             LEVEL_GROUP_STRIDE / 4
         ));
@@ -534,7 +556,12 @@ mod tests {
             let index = (0..stride / 4)
                 .find(|slot| word(bytes, *slot) == encoded)
                 .unwrap_or_else(|| panic!("{name}'s sentinel is in no word of the encoding"));
-            declares(&format!("static const uint {name} = {index};"));
+            let declaration = format!("static const uint {name} = {index};");
+            if name.starts_with("LEVEL_GROUP_") {
+                both_declare(&declaration);
+            } else {
+                declares(&declaration);
+            }
             pinned += 1;
         }
         assert_eq!(

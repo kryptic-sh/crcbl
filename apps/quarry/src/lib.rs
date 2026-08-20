@@ -52,9 +52,13 @@
 //! [`crcbl::hal::GeometryPath::IndirectPerBatch`] can be looked at without
 //! forcing it.
 //!
-//! Still owed, from that document's milestones: the screen-error heatmap and the
-//! freeze-selection camera, both of milestone 2. The skinned prop is behind an
-//! engine feature that does not exist — nothing here does skinning.
+//! Still owed, from that document's milestones: the freeze-selection camera, of
+//! milestone 2. Its two siblings are built — `--lod-view` tints each cluster by
+//! the DAG level it was decimated to, `--heatmap` shades it by the projected
+//! error the selection judged it on — and both are mesh-path only, because a
+//! per-cluster number exists only where selection is per cluster. The skinned
+//! prop is behind an engine feature that does not exist — nothing here does
+//! skinning.
 //!
 //! # Rule 11 does not apply
 //!
@@ -92,5 +96,6 @@ pub use args::{
 };
 pub use gpu::{CELLS, Forced, Gpu, GpuError, Paths};
 pub use menu::{
-    CAMERA_ID, CameraMode, LOD_VIEW_ID, Menus, QuarryAction, action_for, menus, pause_menu,
+    CAMERA_ID, CameraMode, HEATMAP_ID, LOD_VIEW_ID, Menus, QuarryAction, action_for, menus,
+    pause_menu, toggled_to,
 };

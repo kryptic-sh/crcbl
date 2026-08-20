@@ -113,7 +113,7 @@ fn level_group_at_0( group_0 : u32) -> LevelGroup_0
     return record_0;
 }
 
-fn group_is_expanded_0( error_1 : f32,  center_0 : vec3<f32>,  radius_1 : f32,  eye_0 : vec3<f32>,  was_0 : u32) -> u32
+fn projected_error_0( error_1 : f32,  center_0 : vec3<f32>,  radius_1 : f32,  eye_0 : vec3<f32>,  pixels_per_unit_0 : f32) -> f32
 {
     var delta_0 : vec3<f32> = eye_0 - center_0;
     var _S1 : f32 = delta_0.x;
@@ -122,9 +122,14 @@ fn group_is_expanded_0( error_1 : f32,  center_0 : vec3<f32>,  radius_1 : f32,  
     var distance_0 : f32 = sqrt(_S1 * _S1 + _S2 * _S2 + _S3 * _S3) - radius_1;
     if(distance_0 <= 0.0f)
     {
-        return u32(1);
+        return 3.4028234663852886e+38f;
     }
-    var projected_0 : f32 = error_1 * gen_0.lod_params_0.x / distance_0;
+    return error_1 * pixels_per_unit_0 / distance_0;
+}
+
+fn group_is_expanded_0( error_2 : f32,  center_1 : vec3<f32>,  radius_2 : f32,  eye_1 : vec3<f32>,  was_0 : u32) -> u32
+{
+    var projected_0 : f32 = projected_error_0(error_2, center_1, radius_2, eye_1, gen_0.lod_params_0.x);
     var expanded_0 : bool;
     if(projected_0 > (gen_0.lod_params_0.y))
     {

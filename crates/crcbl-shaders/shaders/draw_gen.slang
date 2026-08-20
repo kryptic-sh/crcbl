@@ -628,29 +628,62 @@ uint mesh_arg_word(uint bucket, uint slot)
     return gen.bucket_count + bucket * MESH_ARGS_WORDS + slot;
 }
 
-/// Whether a group is **expanded** — its children drawn rather than its parents
-/// — from the eye this frame selects at, given whether it was last frame.
+/// What `projected_error` answers for an eye inside the group's own sphere.
 ///
-/// `docs/plan/25-lod.md`'s metric and its hysteresis, and
-/// `crcbl_shaders::cluster_select::group_is_expanded` in Slang: the projection
-/// against `gen.lod_params.y` to *start* expanding, against `gen.lod_params.z`
-/// to *keep* expanding, and the previous answer deciding between them. Equal
-/// budgets are one threshold and `was` stops mattering, which is what a test
-/// sets to show the band is doing the work.
+/// The largest finite `float`, standing in for the infinity
+/// `crcbl_shaders::cluster_select::GroupCost::projected_error` returns there:
+/// an infinity has no literal every target of this file spells the same way,
+/// and every comparison the projection takes part in is against a budget a
+/// caller set — a finite number, which this is above. So the two answer the
+/// same decisions from the same inputs.
+static const float INSIDE_THE_SPHERE = 3.4028235e38;
+
+/// One group's simplification cost in **pixels**, from an eye at `eye`.
 ///
-/// **An eye inside the sphere expands**, because there is no distance to divide
-/// by and "as close as possible, so descend" is both the conservative answer and
-/// the monotone one — and monotone is what keeps the band from tearing a cut.
-uint group_is_expanded(float error, float3 center, float radius, float3 eye, uint was)
+/// `docs/plan/25-lod.md`'s metric and the whole of it. The error is a length in
+/// the mesh's own units, `pixels_per_unit` is how many pixels one such unit
+/// subtends one unit from the eye, and the distance is measured to the *near
+/// side* of the group's sphere rather than to its centre — so what comes out
+/// bounds the cost anywhere in the group rather than naming it at one point.
+///
+/// **An eye inside the sphere has no distance to divide by** and answers
+/// [`INSIDE_THE_SPHERE`]: as close as possible, which is both the conservative
+/// reading and the monotone one, and monotone is what keeps the hysteresis band
+/// from tearing a cut. The branch is taken before `error` is read at all, so a
+/// group whose simplification costs nothing still answers it.
+///
+/// `crcbl_shaders::cluster_select::GroupCost::projected_error` is this function
+/// in Rust — the same three operations over the same `f32`s. **The body below
+/// also appears verbatim in `shaders/mesh_cluster.slang`**, whose mesh stage
+/// shades a cluster by exactly this number for the screen-error heatmap: a
+/// second spelling of one metric is a picture nobody can hold against the cut
+/// it claims to describe. `crcbl_shaders::cluster_select`'s
+/// `the_two_shaders_project_the_error_with_one_function` is what holds the two
+/// texts equal.
+float projected_error(float error, float3 center, float radius, float3 eye, float pixels_per_unit)
 {
     float3 delta = eye - center;
     float separation = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
     float distance = separation - radius;
     if (distance <= 0.0)
     {
-        return 1u;
+        return INSIDE_THE_SPHERE;
     }
-    float projected = error * gen.lod_params.x / distance;
+    return error * pixels_per_unit / distance;
+}
+
+/// Whether a group is **expanded** — its children drawn rather than its parents
+/// — from the eye this frame selects at, given whether it was last frame.
+///
+/// `docs/plan/25-lod.md`'s hysteresis, and
+/// `crcbl_shaders::cluster_select::group_is_expanded` in Slang: [`projected_error`]
+/// against `gen.lod_params.y` to *start* expanding, against `gen.lod_params.z`
+/// to *keep* expanding, and the previous answer deciding between them. Equal
+/// budgets are one threshold and `was` stops mattering, which is what a test
+/// sets to show the band is doing the work.
+uint group_is_expanded(float error, float3 center, float radius, float3 eye, uint was)
+{
+    float projected = projected_error(error, center, radius, eye, gen.lod_params.x);
     bool expanded = projected > gen.lod_params.y
         || (was != 0u && projected > gen.lod_params.z);
     return expanded ? 1u : 0u;

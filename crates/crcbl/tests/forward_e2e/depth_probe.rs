@@ -1114,6 +1114,11 @@ fn render_probe(
         // add exactly nothing to `PROBE_AMBIENT` — see
         // `crcbl::shaders::probe`.
         probes: crcbl::shaders::probe::ProbeVolume::default(),
+        // No LOD selection either: this probe draws through its own pipeline
+        // with `mesh.slang`'s fragment stage, which reads none of these — the
+        // screen-error heatmap is the mesh path's, and it is a debug view this
+        // frame never switches on.
+        lod_params: [0.0; 4],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

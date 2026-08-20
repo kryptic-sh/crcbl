@@ -42,8 +42,8 @@ use crcbl::hal::{
 };
 use crcbl::prelude::*;
 use crcbl::render::{
-    CullStats, DirectionalLight, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers,
-    RenderGraph, TransientPool, UiRenderer,
+    CullStats, DebugView, DirectionalLight, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer,
+    PassTimers, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -269,6 +269,21 @@ fn desc(gpu: GpuOptions, forced: Forced) -> GpuContextDesc<'static> {
     }
 }
 
+/// Asks the renderer for `view`, and for no other overlay.
+///
+/// **Every switch is written, not only the one being turned on**, which is what
+/// makes this fixture's rows exclusive: the renderer holds three independent
+/// booleans and resolves a precedence over them, so leaving a stale `true`
+/// behind would draw an overlay nobody asked for the moment the outer one was
+/// switched off. `DebugView::Normals` is not one of the rows this sample has,
+/// and it is written here for the same reason — a run that never asks for it
+/// must not inherit it either.
+const fn set_debug_view(renderer: &mut ForwardRenderer, view: DebugView) {
+    renderer.set_heatmap(matches!(view, DebugView::Heatmap));
+    renderer.set_lod_view(matches!(view, DebugView::LodTint));
+    renderer.set_normals_view(matches!(view, DebugView::Normals));
+}
+
 /// A [`Gpu`] being opened one poll at a time.
 ///
 /// It carries the three settings the device request outlives: all of them are
@@ -279,7 +294,7 @@ pub struct PendingGpu {
     pending: PendingGpuContext,
     forced: Forced,
     lod_budget: f32,
-    lod_view: bool,
+    view: DebugView,
 }
 
 impl PendingGpu {
@@ -291,9 +306,7 @@ impl PendingGpu {
     /// device it produced.
     pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
         match self.pending.poll()? {
-            Some(ctx) => {
-                Gpu::from_context(ctx, self.forced, self.lod_budget, self.lod_view).map(Some)
-            }
+            Some(ctx) => Gpu::from_context(ctx, self.forced, self.lod_budget, self.view).map(Some),
             None => Ok(None),
         }
     }
@@ -319,13 +332,13 @@ impl Gpu {
         gpu: GpuOptions,
         forced: Forced,
         lod_budget: f32,
-        lod_view: bool,
+        view: DebugView,
     ) -> Result<Self, GpuError> {
         Self::from_context(
             GpuContext::open(shell, window, extent, &desc(gpu, forced))?,
             forced,
             lod_budget,
-            lod_view,
+            view,
         )
     }
 
@@ -343,13 +356,13 @@ impl Gpu {
         gpu: GpuOptions,
         forced: Forced,
         lod_budget: f32,
-        lod_view: bool,
+        view: DebugView,
     ) -> Result<PendingGpu, GpuError> {
         Ok(PendingGpu {
             pending: GpuContext::request_open(shell, window, extent, &desc(gpu, forced))?,
             forced,
             lod_budget,
-            lod_view,
+            view,
         })
     }
 
@@ -364,7 +377,7 @@ impl Gpu {
         ctx: GpuContext,
         forced: Forced,
         lod_budget: f32,
-        lod_view: bool,
+        view: DebugView,
     ) -> Result<Self, GpuError> {
         let optional_features = forced.optional_features();
         let caps = ctx.device().caps();
@@ -403,7 +416,7 @@ impl Gpu {
             )));
         }
         renderer.set_lod_error_budget(lod_budget);
-        renderer.set_lod_view(lod_view);
+        set_debug_view(&mut renderer, view);
 
         let paths = Paths::of(&caps, forced);
         crcbl::log::info!(
@@ -494,15 +507,15 @@ impl Gpu {
         self.renderer.lod_params()[1]
     }
 
-    /// Whether the colour pass tints each cluster by its DAG level.
+    /// Which overlay the colour pass is drawing, if any.
     #[must_use]
-    pub const fn lod_view(&self) -> bool {
-        self.renderer.lod_view()
+    pub const fn debug_view(&self) -> DebugView {
+        self.renderer.debug_view()
     }
 
-    /// Turns the LOD tint on or off, from the pause menu's row.
-    pub const fn set_lod_view(&mut self, on: bool) {
-        self.renderer.set_lod_view(on);
+    /// Draws `view` instead, from the pause menu's rows.
+    pub const fn set_debug_view(&mut self, view: DebugView) {
+        set_debug_view(&mut self.renderer, view);
     }
 
     /// What the last completed frame's culling kept.
@@ -714,7 +727,7 @@ impl crcbl::engine::PolledGpu for Gpu {
             gpu,
             defaults.forced,
             defaults.lod_budget,
-            defaults.lod_view,
+            defaults.debug_view(),
         )
     }
 

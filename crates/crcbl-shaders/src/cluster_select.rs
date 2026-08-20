@@ -522,6 +522,115 @@ mod tests {
         );
     }
 
+    /// **The two shaders project the error with one function**, character for
+    /// character.
+    ///
+    /// There are three spellings of `docs/plan/25-lod.md`'s metric now, and this
+    /// is the one that closes the ring:
+    ///
+    /// * [`ClusterGroup::projected_error`](crate::cluster_dag::ClusterGroup::projected_error)
+    ///   and [`GroupCost::projected_error`] are held equal by
+    ///   `the_two_projections_are_one_metric_over_the_whole_dag` above, over
+    ///   every group of the committed DAG.
+    /// * `draw_gen.slang`'s `group_is_expanded` is held to `GroupCost` by
+    ///   `crcbl-vk`'s `the_gpu_descends_the_dag_to_the_cut_the_host_rule_says`,
+    ///   which compares the *decision* over every group on a real device.
+    /// * `mesh_cluster.slang`'s copy — the screen-error heatmap's, which shades
+    ///   a cluster by the number rather than by the decision — has no device
+    ///   test of its own and could not usefully get one: a colour is not a cut,
+    ///   so nothing on the far side would notice a drifted copy. What can be
+    ///   checked cheaply and exactly is that it *is* a copy.
+    ///
+    /// So this asserts the function text, not the behaviour, and it is the
+    /// stronger assertion of the two available here: equal text cannot differ
+    /// under any input. **It goes red on a one-character edit to either file**,
+    /// which is the point — an overlay drawn from a slightly different metric is
+    /// a picture that disagrees with the cut it is drawn over while looking
+    /// entirely plausible.
+    ///
+    /// The doc comments above the two are deliberately *not* compared: each
+    /// says why its own file has the copy, and holding those equal would be
+    /// holding two explanations to one wording.
+    #[test]
+    fn the_two_shaders_project_the_error_with_one_function() {
+        const SIGNATURE: &str = "float projected_error(float error, float3 center, float radius, \
+                                 float3 eye, float pixels_per_unit)";
+        const INSIDE: &str = "static const float INSIDE_THE_SPHERE = 3.4028235e38;";
+        let body = format!(
+            "{SIGNATURE}\n\
+             {{\n    \
+             float3 delta = eye - center;\n    \
+             float separation = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);\n    \
+             float distance = separation - radius;\n    \
+             if (distance <= 0.0)\n    \
+             {{\n        \
+             return INSIDE_THE_SPHERE;\n    \
+             }}\n    \
+             return error * pixels_per_unit / distance;\n\
+             }}\n"
+        );
+        for (name, source) in [
+            ("draw_gen.slang", include_str!("../shaders/draw_gen.slang")),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+            ),
+        ] {
+            assert!(
+                source.contains(INSIDE),
+                "{name} must declare `{INSIDE}`, or the two files disagree about what an eye \
+                 inside a group's sphere costs"
+            );
+            assert!(
+                source.contains(&body),
+                "{name} does not carry this exact function, so the metric now has two shader \
+                 spellings:\n{body}"
+            );
+        }
+
+        // And the sentinel really is the largest finite `f32`, which is what
+        // makes it stand in for the infinity the Rust returns: every comparison
+        // either takes part in is against a finite budget, and both are above
+        // every one of those.
+        let literal: f32 = INSIDE
+            .rsplit_once("= ")
+            .expect("the declaration has a value")
+            .1
+            .trim_end_matches(';')
+            .parse()
+            .expect("the sentinel is a float");
+        assert_eq!(
+            literal.to_bits(),
+            f32::MAX.to_bits(),
+            "the shaders' sentinel is {literal}, which is not f32::MAX"
+        );
+        let inside = GroupCost {
+            error: 0.0,
+            bounds: crate::cluster_dag::GroupBounds {
+                center: [0.0; 3],
+                radius: 1.0,
+            },
+        };
+        let ours = inside.projected_error([0.0; 3], PIXELS_PER_UNIT);
+        assert!(
+            ours.is_infinite() && ours > 0.0,
+            "the Rust answers {ours} from inside the sphere, so the sentinel above is standing \
+             in for something else — and note it answered that with a zero error, which is the \
+             branch being taken before `error` is read"
+        );
+        // The two agree on every budget **strictly below the sentinel**, which
+        // is every budget a caller can set: `set_lod_error_budget` takes a pixel
+        // count and the shadow bias scales it by a constant, so the range in
+        // play is the one swept here.
+        for budget in [f32::MIN_POSITIVE, 1.0, 16.0, 4096.0, 1.0e30] {
+            assert_eq!(
+                literal > budget,
+                ours > budget,
+                "the sentinel and the infinity disagree about the budget {budget}"
+            );
+        }
+    }
+
     /// **The band is where the previous answer decides**, and only there.
     ///
     /// Three regions, over a real group of the committed DAG: above the expand

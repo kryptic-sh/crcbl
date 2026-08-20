@@ -128,7 +128,7 @@ const _: () = assert!(
 /// against the `Offset` decorations `slangc` emits by this module's
 /// `the_uniform_block_matches_the_offsets_slangc_emits`.
 pub const FRAME_UNIFORMS_SIZE: usize =
-    96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE;
+    96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE + 16;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -298,6 +298,28 @@ pub struct FrameUniforms {
     ///
     /// [`ProbeVolume::default`]: crate::probe::ProbeVolume::default
     pub probes: ProbeVolume,
+    /// `docs/plan/25-lod.md`'s selection numbers, the same four lanes
+    /// [`crate::draw_gen::Params::lod_params`] carries: `x` is how many pixels
+    /// one unit of length subtends one unit from the eye, `y` is the budget an
+    /// unexpanded group's projected error must exceed to expand, `z` is the
+    /// budget an expanded one is held down to before it collapses again, and `w`
+    /// is unread padding.
+    ///
+    /// **Written for the screen-error heatmap and read by that alone.**
+    /// `mesh_cluster.slang`'s mesh stage projects a cluster's producing group's
+    /// error itself under [`HEATMAP_VIEW_ON`](Self::HEATMAP_VIEW_ON) and anchors
+    /// the ramp on the two budgets; `mesh.slang` declares the row and never
+    /// reads it, because the two files are one buffer.
+    ///
+    /// This is the *same* pair `draw_gen.slang` judged the cut against, not a
+    /// second derivation: `crcbl_render::ForwardRenderer` computes them once a
+    /// frame and writes them into both blocks. An overlay drawn against numbers
+    /// the selection did not use is one nobody can hold against the picture.
+    ///
+    /// **Last in the block**, for [`probes`](Self::probes)' reason exactly: no
+    /// existing member's offset moves, so every golden blessed before this
+    /// member existed still matches.
+    pub lod_params: [f32; 4],
 }
 
 impl FrameUniforms {
@@ -349,6 +371,26 @@ impl FrameUniforms {
     /// `crcbl_render::ForwardRenderer::set_lod_view` is what writes it.
     pub const LOD_VIEW_ON: f32 = 2.0;
 
+    /// [`ambient`](Self::ambient)`.w` for the **screen-error heatmap**, the LOD
+    /// tint's sibling: `mesh_cluster.slang`'s mesh stage replaces each cluster's
+    /// vertex colour with a ramp position taken from the projected error the LOD
+    /// selection judged that cluster's producing group on, and `mesh.slang`'s
+    /// fragment stage passes it through unshaded exactly as it does the tint.
+    ///
+    /// **Three sentinels in one lane now**, and the shader tests them outermost
+    /// first — a `3.0` clears all three thresholds, so the heatmap's has to win.
+    /// `the_heatmap_view_threshold_lies_above_the_lod_view` is what holds the
+    /// interleaving.
+    ///
+    /// The tint says which level a patch came from; this says how close that
+    /// patch is to the budget that would change it. Both are mesh-path only, for
+    /// the same reason: the two indirect paths select one level per *instance*
+    /// and have no per-cluster number of either kind — `mesh.slang`'s vertex
+    /// stage writes one flat grey and the difference is the comparison.
+    ///
+    /// `crcbl_render::ForwardRenderer::set_heatmap` is what writes it.
+    pub const HEATMAP_VIEW_ON: f32 = 3.0;
+
     /// The bytes a uniform buffer holds, in `std140` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; FRAME_UNIFORMS_SIZE] {
@@ -390,6 +432,7 @@ impl FrameUniforms {
         // them, and a second spelling of that is a second place for it to drift.
         bytes[at..at + PROBE_VOLUME_SIZE].copy_from_slice(&self.probes.to_bytes());
         at += PROBE_VOLUME_SIZE;
+        put(&mut bytes, &mut at, &self.lod_params);
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
@@ -1455,6 +1498,149 @@ mod tests {
         }
     }
 
+    /// A `static const float` (or `float3`) declared in a shader source, by
+    /// name.
+    ///
+    /// Reads the *shader's* number rather than restating it here, which is the
+    /// whole point of every threshold check below: a constant written twice is
+    /// one that can drift, and the copy in a test is the one nobody looks at.
+    fn shader_float(source: &str, name: &str) -> f32 {
+        let literal = source
+            .split_once(&format!("static const float {name} = "))
+            .unwrap_or_else(|| panic!("the source declares `{name}`"))
+            .1
+            .split_once(';')
+            .expect("a declaration ends in a semicolon")
+            .0;
+        literal
+            .parse()
+            .unwrap_or_else(|_| panic!("`{literal}` is not a float"))
+    }
+
+    /// **The heatmap's threshold lies above the LOD view's**, so one lane can
+    /// carry four states.
+    ///
+    /// The lane now holds off, normals, tint and heatmap, and the sentinels
+    /// ascend — so a `3.0` clears all three thresholds and only the *order* of
+    /// the tests keeps it out of the two lower branches. The order in
+    /// `mesh_cluster.slang` is asserted here rather than left to a reader,
+    /// exactly as `the_lod_view_threshold_lies_above_the_normals_view` asserts
+    /// the pair below it.
+    ///
+    /// `mesh.slang` deliberately has **no** `HEATMAP_VIEW`: its fragment stage
+    /// treats every overlay the same way — pass the colour through unshaded —
+    /// so it needs one threshold for the set, and that is what its `LOD_VIEW`
+    /// doc says. The absence is asserted, because a `HEATMAP_VIEW` appearing
+    /// there later would be a second place the interleaving has to hold.
+    #[test]
+    fn the_heatmap_view_threshold_lies_above_the_lod_view() {
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        let heatmap = shader_float(cluster, "HEATMAP_VIEW");
+        let tint = shader_float(cluster, "LOD_VIEW");
+        assert!(
+            FrameUniforms::LOD_VIEW_ON < heatmap && heatmap < FrameUniforms::HEATMAP_VIEW_ON,
+            "mesh_cluster.slang switches at {heatmap}, which does not separate the LOD view's \
+             {} from the heatmap's {}",
+            FrameUniforms::LOD_VIEW_ON,
+            FrameUniforms::HEATMAP_VIEW_ON,
+        );
+        assert!(
+            tint < heatmap,
+            "the tint's threshold ({tint}) must lie below the heatmap's ({heatmap}), or the \
+             heatmap's sentinel never reaches a branch of its own"
+        );
+
+        let heat_at = cluster
+            .find("if (frame.ambient.w >= HEATMAP_VIEW)")
+            .expect("mesh_cluster.slang's mesh stage tests the heatmap");
+        let tint_at = cluster
+            .find("else if (frame.ambient.w >= LOD_VIEW)")
+            .expect("mesh_cluster.slang's mesh stage tests the tint after it");
+        assert!(
+            heat_at < tint_at,
+            "the heatmap must be tested first, or its sentinel is caught by the tint's threshold \
+             and the overlay is a mosaic of levels wearing the heatmap's name"
+        );
+        assert!(
+            !include_str!("../shaders/mesh.slang").contains("static const float HEATMAP_VIEW"),
+            "mesh.slang has grown a heatmap threshold of its own; the interleaving above now has \
+             a second place to hold and this test only checks one of them"
+        );
+    }
+
+    /// **The heatmap ramp climbs in luminance**, stop by stop, including across
+    /// the two deliberate hue breaks.
+    ///
+    /// That climb is the whole legibility argument for the ramp: the overlay
+    /// answers "how close to the budget is this", so it has to be readable as an
+    /// ordering, and a rainbow — the usual choice — has none. A reader who
+    /// cannot separate teal from amber still reads amber as hotter, and so does
+    /// a greyscale screenshot.
+    ///
+    /// The stops are read out of the shader rather than restated, and the
+    /// weights are Rec. 709's, which is the luma the sRGB primaries are defined
+    /// against. **The two hue breaks are where this can fail quietly**: the ramp
+    /// jumps teal → amber at the hold budget and yellow → white at the expand
+    /// budget, so a stop chosen for its hue alone can easily land *below* the
+    /// one before it and leave two bands the eye orders backwards.
+    #[test]
+    fn the_heatmap_ramp_climbs_in_luminance() {
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        let stop = |name: &str| -> [f32; 3] {
+            let literal = cluster
+                .split_once(&format!("static const float3 {name} = float3("))
+                .unwrap_or_else(|| panic!("mesh_cluster.slang declares `{name}`"))
+                .1
+                .split_once(')')
+                .expect("a float3 literal closes its parenthesis")
+                .0;
+            let channels: Vec<f32> = literal
+                .split(',')
+                .map(|channel| {
+                    channel
+                        .trim()
+                        .parse()
+                        .unwrap_or_else(|_| panic!("`{channel}` of {name} is not a float"))
+                })
+                .collect();
+            channels
+                .try_into()
+                .unwrap_or_else(|_| panic!("{name} is not three channels"))
+        };
+        // Rec. 709, the luma weights of the primaries sRGB is defined against.
+        let luma = |rgb: [f32; 3]| 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        let names = [
+            "HEAT_UNDER_LOW",
+            "HEAT_UNDER_HIGH",
+            "HEAT_BAND_LOW",
+            "HEAT_BAND_HIGH",
+            "HEAT_OVER",
+        ];
+        let mut previous = f32::NEG_INFINITY;
+        for name in names {
+            let rgb = stop(name);
+            for channel in rgb {
+                assert!(
+                    (0.0..=1.0).contains(&channel),
+                    "{name} has a channel outside [0, 1]: {rgb:?}"
+                );
+            }
+            let here = luma(rgb);
+            assert!(
+                here > previous,
+                "{name} is at luminance {here}, which does not climb past the stop before it \
+                 ({previous}) — the ramp is no longer readable as an ordering"
+            );
+            previous = here;
+        }
+        assert_eq!(
+            stop("HEAT_OVER"),
+            [1.0, 1.0, 1.0],
+            "the over-budget stop is white, which is what makes the expand budget the brightest \
+             thing in the frame"
+        );
+    }
+
     /// **The LOD view's threshold lies above the normals view's**, and both
     /// shaders that declare it agree.
     ///
@@ -1546,13 +1732,13 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 704,
+            FRAME_UNIFORMS_SIZE, 720,
             "at two cascades and six light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
-        // 224, 240, 256, 272, 656, 672, 688 — and
-        // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`. The last three
-        // are the grid header's rows, which this side writes as one group.
+        // 224, 240, 256, 272, 656, 672, 688, 704 — and
+        // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`. Three of the last
+        // four are the grid header's rows, which this side writes as one group.
         let cascades = 64 * SHADOW_CASCADES;
         let lights = 64 * SHADOW_LIGHT_TILES;
         let offsets = [
@@ -1565,6 +1751,7 @@ mod tests {
             128 + cascades,
             144 + cascades,
             144 + cascades + lights,
+            144 + cascades + lights + PROBE_VOLUME_SIZE,
         ];
         let sizes = [
             64usize,
@@ -1576,6 +1763,7 @@ mod tests {
             16,
             lights,
             PROBE_VOLUME_SIZE,
+            16,
         ];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
@@ -1617,6 +1805,7 @@ mod tests {
                 inv_spacing: [63.0, 64.0, 65.0],
                 counts: [2, 3, 4],
             },
+            lod_params: [70.0, 71.0, 72.0, 73.0],
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -1680,6 +1869,16 @@ mod tests {
             ],
             [2, 3, 4, 24],
             "the probe grid's counts and their product"
+        );
+        // And the selection numbers past the header, which is where the block
+        // now ends. Every lane, because all four are `float`s of one width and
+        // a permutation between the two budgets is an overlay whose ramp is
+        // anchored on the wrong one — a picture, not an error.
+        let lod = probes + PROBE_VOLUME_SIZE;
+        assert_eq!(
+            [at(lod), at(lod + 4), at(lod + 8), at(lod + 12)],
+            [70.0, 71.0, 72.0, 73.0],
+            "the selection numbers"
         );
     }
 

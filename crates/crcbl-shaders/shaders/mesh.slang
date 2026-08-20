@@ -356,6 +356,22 @@ struct FrameUniforms
     /// All zero for a scene with no probes, and `probe_irradiance` then returns
     /// exactly zero with no branch anywhere — see it.
     uint4 probe_counts;
+    /// `docs/plan/25-lod.md`'s selection numbers, as `draw_gen.slang`'s
+    /// `DrawGenParams::lod_params` carries them: `x` pixels per unit of length
+    /// one unit from the eye, `y` the budget a group's projected error must
+    /// exceed to expand, `z` the budget an expanded one is held down to, `w`
+    /// unread padding.
+    ///
+    /// **Read by nothing in this file.** It is declared because this block and
+    /// `mesh_cluster.slang`'s are one buffer, and *that* file's mesh stage reads
+    /// all three for the screen-error heatmap — it projects a group's error
+    /// itself and anchors the ramp on the two budgets. A block short of this row
+    /// here would be one whose size the two stages disagree about.
+    ///
+    /// **Last in the block**, on `probe_origin`'s terms exactly: no existing
+    /// member's offset moves, so every golden blessed before this member existed
+    /// still matches.
+    float4 lod_params;
 };
 
 /// What `FrameUniforms::ambient`'s `w` must reach for `fragmentMain` to draw the
@@ -382,6 +398,15 @@ static const float NORMALS_VIEW = 0.5;
 /// — selection is per instance — so `vertexMain` writes one flat colour, and
 /// that difference is the thing worth seeing: the mesh path is a mosaic and the
 /// indirect paths are not.
+///
+/// **This threshold is the whole set of overlays, not only the tint.**
+/// `mesh_cluster.slang` carries a third sentinel above it —
+/// `crcbl_shaders::mesh::FrameUniforms::HEATMAP_VIEW_ON`, the screen-error
+/// heatmap — and a `3.0` clears this comparison too. That is deliberate rather
+/// than incidental: what this file does for every overlay is the same thing,
+/// pass the colour the geometry stage chose through unshaded, so it needs a
+/// threshold per *kind of treatment* and not one per overlay. The stage that
+/// picks between the overlays is the one that knows the cluster.
 static const float LOD_VIEW = 1.5;
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
@@ -921,9 +946,10 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // instance that nothing needs until non-uniform scale exists.
     output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
     // **No cluster here, and that is the honest picture.** These two paths
-    // select one level per *instance*, so there is no per-cluster level to tint
-    // by; a flat grey says so, and standing it beside the mesh path's mosaic is
-    // the comparison the LOD view exists to make.
+    // select one level per *instance*, so there is neither a per-cluster level
+    // to tint by nor a per-cluster projected error to shade by; a flat grey says
+    // so for both overlays, and standing it beside the mesh path's mosaic is the
+    // comparison they exist to make.
     output.color = frame.ambient.w >= LOD_VIEW
         ? float4(0.45, 0.45, 0.48, 1.0)
         : vertex.color;

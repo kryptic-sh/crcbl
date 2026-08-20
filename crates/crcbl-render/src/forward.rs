@@ -221,6 +221,48 @@ const _: () = assert!(
 /// a format, which is why any is passed.
 const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).format;
 
+/// Which picture the colour pass draws instead of the shaded one.
+///
+/// The engine's debug views, as one value rather than as three independent
+/// booleans, because they are not independent: all three ride in a single lane
+/// of the frame's uniform block and the shaders test the thresholds outermost
+/// first, so a renderer with two of them set draws exactly one.
+/// [`ForwardRenderer::debug_view`] is where that order lives, and this is what it
+/// answers with — so a menu row, a debug panel and the picture cannot disagree
+/// about which view is on.
+///
+/// The variants are in **precedence order**, outermost first, which is also the
+/// order of the sentinels in
+/// [`FrameUniforms`](crcbl_shaders::mesh::FrameUniforms) — see its
+/// `HEATMAP_VIEW_ON`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DebugView {
+    /// The lit picture. What every frame draws unless a caller asked otherwise.
+    #[default]
+    Shaded,
+    /// Each cluster shaded by the projected screen-space error the LOD
+    /// selection judged it on — [`ForwardRenderer::set_heatmap`].
+    Heatmap,
+    /// Each cluster tinted by the DAG level it was decimated to —
+    /// [`ForwardRenderer::set_lod_view`].
+    LodTint,
+    /// World-space surface normals — [`ForwardRenderer::set_normals_view`].
+    Normals,
+}
+
+impl DebugView {
+    /// What a panel row or a summary line calls it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Shaded => "shaded",
+            Self::Heatmap => "heatmap",
+            Self::LodTint => "lod tint",
+            Self::Normals => "normals",
+        }
+    }
+}
+
 /// The bind-group slot the sun's shadow atlas is read through.
 ///
 /// **15, not 9**, and the gap is `mesh_cluster.slang`'s: bindings 9 to 14 belong
@@ -268,12 +310,36 @@ const AMBIENT_OCCLUSION_BINDING: u32 = 22;
 /// `msl/mesh.metal` still takes `lights [[buffer(7)]]` and
 /// `cluster_lights [[buffer(8)]]`, and this one lands on `buffer(9)`.
 ///
-/// 23 is past everything `mesh_cluster.slang` declares, which reaches 21, so
-/// that file needs no mirror of this *binding*. It does mirror the frame block's
-/// new members, which is a different thing: the two files read one uniform
-/// buffer and their `FrameUniforms` declarations are held identical by
-/// `crcbl_shaders::cull`'s own lint.
+/// **`mesh_cluster.slang` mirrors this one**, declared and read by nothing, and
+/// it did not have to until [`LEVEL_GROUP_TABLE_BINDING`] existed. That file's
+/// own bindings used to stop at 21, so every number here was past everything it
+/// declared and nothing of its could move; now it declares 24, and a source that
+/// skipped this row would put *that* buffer one Metal index below where
+/// `crcbl-mtl` binds it. It also mirrors the frame block's members, which is a
+/// different obligation: the two files read one uniform buffer.
 const PROBE_TABLE_BINDING: u32 = 23;
+
+/// The bind-group slot the mesh path reads `docs/plan/25-lod.md`'s group records
+/// through — `DrawGen`'s packed table buffer, the same one the draw-argument
+/// pass judges the cut from.
+///
+/// **Appended past [`PROBE_TABLE_BINDING`], never inserted**, for that
+/// constant's reason exactly, and the committed artifact is the evidence rather
+/// than the argument: `msl/mesh_cluster.metal` takes `tables [[buffer(19)]]`,
+/// which is the number this backend computes for binding 24 by counting the
+/// buffer entries of the mesh path's layout.
+///
+/// Bound on [`GeometryPath::MeshShader`] and nowhere else, exactly as bindings 9
+/// to 12 and 17 are: the raster path's vertex stage never reads it, and that
+/// layout is already at the WebGPU storage-buffer ceiling with no headroom — see
+/// the check at the end of the layout below.
+///
+/// **What it is for is the screen-error heatmap**, and only that. The *cut* is
+/// still the draw-argument pass's decision and still arrives through the
+/// hysteresis state; what this adds is the number that decision was made on, so
+/// an overlay can shade a cluster by how close its producing group is to the
+/// budget.
+const LEVEL_GROUP_TABLE_BINDING: u32 = 24;
 
 /// The radius `ssao.slang` gathers occlusion within, in **world units**.
 ///
@@ -773,6 +839,20 @@ pub struct ForwardRenderer {
     /// order true.
     lod_view: bool,
 
+    /// Whether the colour pass shades each cluster by the projected error the
+    /// LOD selection judged it on, instead of shading it or tinting it — see
+    /// [`set_heatmap`](ForwardRenderer::set_heatmap).
+    ///
+    /// **Wins over both [`lod_view`](Self::lod_view) and
+    /// [`normals_view`](Self::normals_view)**, on the same terms and for the same
+    /// reason: one uniform lane carries all three switches and the shaders test
+    /// the outermost threshold first. `crcbl_shaders`'
+    /// `the_heatmap_view_threshold_lies_above_the_lod_view` is what keeps that
+    /// order true, and
+    /// `the_three_debug_views_resolve_in_one_order_however_they_are_set` is what
+    /// holds this side to it.
+    heatmap: bool,
+
     /// Topic 18's shadow atlas: one `D32Float` image holding
     /// [`shadow::TILES`] square tiles in a fixed grid — the sun's cascades
     /// first, then one per shadowed light.
@@ -1193,6 +1273,14 @@ struct SharedBindings<'a> {
     /// by view. A cascade reads it too and never looks — the depth-only pipeline
     /// has no fragment stage of its own.
     probes: BufferHandle,
+    /// Binding [`LEVEL_GROUP_TABLE_BINDING`], `DrawGen`'s packed table buffer.
+    ///
+    /// Shared rather than per-group for the probe grid's reason exactly: the
+    /// regions are written when a mesh becomes resident and never per frame, so
+    /// a cascade and the colour pass read the same words. What varies between
+    /// them is the *budget* the mesh stage projects against, and that rides in
+    /// each pass's own frame block.
+    tables: BufferHandle,
 }
 
 /// The half of a mesh-layout bind group that differs between the colour pass and
@@ -1426,13 +1514,23 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::ImageView(self.ambient_occlusion),
         });
-        // And the irradiance grid past it, which is where the list now ends —
-        // see [`PROBE_TABLE_BINDING`].
+        // And the irradiance grid past it — see [`PROBE_TABLE_BINDING`].
         entries.push(BindGroupEntry {
             binding: PROBE_TABLE_BINDING,
             array_index: 0,
             resource: BindingResource::whole_buffer(shared.probes),
         });
+        // The group records at the top of the list, on the mesh path alone,
+        // where the layout has the row — see [`LEVEL_GROUP_TABLE_BINDING`].
+        // Keyed on the cluster pool for binding 17's reason: it is what the
+        // layout keys the same rows on.
+        if shared.clusters.is_some() {
+            entries.push(BindGroupEntry {
+                binding: LEVEL_GROUP_TABLE_BINDING,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(shared.tables),
+            });
+        }
         entries
     }
 }
@@ -2618,7 +2716,7 @@ impl ForwardRenderer {
             });
         }
 
-        // Topic 18's light list and froxel grid, last of all because
+        // Topic 18's light list and froxel grid, next because
         // `mesh_cluster.slang` reaches 19 and both files declare these two above
         // it. Bound on **every** path and in every group, unlike the four
         // conditional ranges above: `mesh.slang`'s fragment stage reads them
@@ -2692,6 +2790,36 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        if emit.is_mesh() {
+            // `docs/plan/25-lod.md`'s group records, and the top of the list —
+            // see [`LEVEL_GROUP_TABLE_BINDING`], which is where "the list only
+            // ever grows at its top" is argued.
+            //
+            // **Conditional like bindings 9 to 12 and 17**, and not for tidiness:
+            // the raster path's layout is at the WebGPU storage-buffer ceiling
+            // already, so a row bound unconditionally would be a renderer that
+            // cannot be built in a browser. The mesh path's own reads sit outside
+            // that count because `ShaderStages::MESH` is not one of the three
+            // stages it sums.
+            mesh_entries.push(BindGroupLayoutEntry {
+                binding: LEVEL_GROUP_TABLE_BINDING,
+                // **Not the fragment stage**, on bindings 9 to 12's terms: the
+                // heatmap's colour is chosen where the cluster is known, and
+                // `mesh.slang`'s fragment stage — which is this pipeline's —
+                // names nothing above 23.
+                visibility: geometry,
+                kind: BindingKind::StorageBuffer {
+                    // Read-only and read by **both** mesh entry points, like
+                    // binding 17: an un-amplified stage draws through the same
+                    // `emit_cluster`, so a row present for one and absent for the
+                    // other is a descriptor read out of an empty slot.
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            });
+        }
 
         let mesh_desc = BindGroupLayoutDesc {
             label: Some("mesh frame"),
@@ -2764,6 +2892,13 @@ impl ForwardRenderer {
                     // differently is a cluster reading another instance's
                     // decision.
                     group_stride: draws.group_stride(),
+                    // Where the group records are in the table buffer, from the
+                    // object that packed it — the screen-error heatmap's one
+                    // input that is not already in the frame block. Taken from
+                    // `DrawGen` rather than recomputed here for `group_stride`'s
+                    // reason: two spellings of one offset is an overlay reading
+                    // another region's words as a group.
+                    level_groups_at: draws.table_offsets().level_groups_at,
                 }
                 .to_bytes()
                 .to_vec()
@@ -2988,6 +3123,7 @@ impl ForwardRenderer {
                 lights: lights.lights(frame),
                 light_grid: lights.grid(frame),
                 probes: probe_buffer,
+                tables: draws.tables(),
             };
             let buffer = device.create_buffer(&BufferDesc {
                 label: Some("mesh frame uniforms"),
@@ -3395,6 +3531,7 @@ impl ForwardRenderer {
             // second field here.
             normals_view: false,
             lod_view: false,
+            heatmap: false,
             shadow_atlas,
             shadow_atlas_view,
             shadow_placeholder,
@@ -3880,16 +4017,7 @@ impl ForwardRenderer {
             // `set_normals_view` and the constants it names. A renderer nobody
             // has called that on writes the `0.0` this line has always written,
             // which is what makes every golden image untouched by the feature.
-            ambient: light
-                .ambient
-                .extend(if self.lod_view {
-                    mesh::FrameUniforms::LOD_VIEW_ON
-                } else if self.normals_view {
-                    mesh::FrameUniforms::NORMALS_VIEW_ON
-                } else {
-                    mesh::FrameUniforms::NORMALS_VIEW_OFF
-                })
-                .to_array(),
+            ambient: light.ambient.extend(self.debug_view_lane()).to_array(),
             shadow_view_proj,
             cascade_far: cascades.far,
             shadow_params: Cascades::params(),
@@ -3900,6 +4028,17 @@ impl ForwardRenderer {
             // description with no probes leaves the default, which evaluates to
             // exactly zero in the shader.
             probes: self.probe_volume,
+            // The very numbers the draw-argument pass selected under, carried
+            // into the geometry stage so the screen-error heatmap shades by the
+            // metric the cut was chosen with rather than by a second derivation
+            // of it. `w` is padding — the block's rows are sixteen bytes wide
+            // whatever is in them.
+            lod_params: [
+                self.lod_params[0],
+                self.lod_params[1],
+                self.lod_params[2],
+                0.0,
+            ],
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
@@ -4029,6 +4168,19 @@ impl ForwardRenderer {
             let block = mesh::FrameUniforms {
                 view_proj: view_proj.to_cols_array(),
                 camera_position: from.extend(1.0).to_array(),
+                // **This view's budgets, not the camera's**, which is the pair
+                // its own draw generator selected under —
+                // [`shadow_lod_params`](Self::shadow_lod_params). Nothing reads
+                // the colour these stages produce, because `depth_pipeline`
+                // names no fragment stage; carrying the camera's numbers here
+                // would still be a block that says a cascade selected under a
+                // budget it did not.
+                lod_params: [
+                    self.shadow_lod_params[0],
+                    self.shadow_lod_params[1],
+                    self.shadow_lod_params[2],
+                    0.0,
+                ],
                 ..uniforms
             };
             device.write_buffer(self.shadow_uniforms[self.frame][view], 0, &block.to_bytes())
@@ -5549,9 +5701,108 @@ impl ForwardRenderer {
     }
 
     /// Whether the colour pass tints clusters by their DAG level.
+    ///
+    /// **What was asked for, not what is drawn.** The three debug views share
+    /// one lane and resolve in one order, so a renderer with this and
+    /// [`set_heatmap`](Self::set_heatmap) both on draws the heatmap and still
+    /// answers `true` here — the caller's setting is what a caller's toggle has
+    /// to read back, and [`debug_view`](Self::debug_view) is what says which one
+    /// the frame actually took.
     #[must_use]
     pub const fn lod_view(&self) -> bool {
         self.lod_view
+    }
+
+    /// Shades each cluster by the **projected screen-space error** the LOD
+    /// selection judged it on, instead of shading it.
+    ///
+    /// The LOD tint's sibling, and the other half of `docs/plan/25-lod.md`'s
+    /// pair: [`set_lod_view`](Self::set_lod_view) answers "which level am I
+    /// looking at", and this answers "how close to the budget is this, and where
+    /// is the selection about to switch". The number is the one
+    /// `draw_gen.slang`'s `group_is_expanded` compared against the budget — a
+    /// cluster's *producing* group's error, projected from this frame's eye at
+    /// this frame's pixels per unit.
+    ///
+    /// # What the colours mean
+    ///
+    /// A ramp that climbs in luminance from a cold floor to white, with a hue
+    /// break at each of the two budgets: the hold budget where the hysteresis
+    /// band starts, and the expand budget at the top, which is white. So the two
+    /// budgets draw themselves as contour lines across the surface, and
+    /// "brighter is closer to switching" reads even in a greyscale screenshot.
+    /// `mesh_cluster.slang`'s `HEAT_UNDER_LOW` carries the ramp in full, and
+    /// `crcbl_shaders`' `the_heatmap_ramp_climbs_in_luminance` is what holds it
+    /// to being readable as an ordering.
+    ///
+    /// A cluster nothing simplified — the original surface, at the bottom of the
+    /// DAG — costs exactly zero and takes the ramp's floor.
+    ///
+    /// # Mesh path only, and that is the capability rather than a shortfall
+    ///
+    /// A per-cluster error exists only where selection is per cluster.
+    /// [`GeometryPath::IndirectCount`] and [`GeometryPath::IndirectPerBatch`]
+    /// choose one level per *instance*, so there is no per-cluster number for
+    /// them to shade by and `mesh.slang`'s vertex stage writes the same flat grey
+    /// the LOD tint gets. Standing the two beside each other is the comparison.
+    ///
+    /// # It builds nothing and adds no pass
+    ///
+    /// One lane of the frame's uniform block, on
+    /// [`set_normals_view`](Self::set_normals_view)'s terms exactly — plus one
+    /// storage-buffer read in the mesh stage, which the mesh path's layout
+    /// already carries. Nothing to build, nothing to refuse, nothing to release.
+    ///
+    /// **Wins over both the LOD tint and the normals view when several are on**;
+    /// see [`debug_view`](Self::debug_view), which is that order stated once.
+    ///
+    /// [`GeometryPath::IndirectCount`]: crcbl_hal::GeometryPath::IndirectCount
+    /// [`GeometryPath::IndirectPerBatch`]: crcbl_hal::GeometryPath::IndirectPerBatch
+    pub const fn set_heatmap(&mut self, on: bool) {
+        self.heatmap = on;
+    }
+
+    /// Whether the colour pass shades clusters by their projected error.
+    ///
+    /// **What was asked for, not what is drawn**, on
+    /// [`lod_view`](Self::lod_view)'s terms.
+    #[must_use]
+    pub const fn heatmap(&self) -> bool {
+        self.heatmap
+    }
+
+    /// Which of the debug views the next frame will actually draw.
+    ///
+    /// **The one place the precedence is decided**, and every other statement of
+    /// it in this crate reads it back from here. The three switches ride in one
+    /// float lane of the frame block — see
+    /// [`FrameUniforms::HEATMAP_VIEW_ON`](crcbl_shaders::mesh::FrameUniforms::HEATMAP_VIEW_ON)
+    /// — and the shaders test the outermost threshold first, so a sentinel for
+    /// an outer view clears every threshold below it. Resolving here rather than
+    /// letting each caller guess is what stops "which view is on" being answered
+    /// differently by a menu row, a debug panel and the picture.
+    #[must_use]
+    pub const fn debug_view(&self) -> DebugView {
+        if self.heatmap {
+            DebugView::Heatmap
+        } else if self.lod_view {
+            DebugView::LodTint
+        } else if self.normals_view {
+            DebugView::Normals
+        } else {
+            DebugView::Shaded
+        }
+    }
+
+    /// [`debug_view`](Self::debug_view) as the value the frame block's lane
+    /// carries.
+    const fn debug_view_lane(&self) -> f32 {
+        match self.debug_view() {
+            DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
+            DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
+            DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
+            DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
+        }
     }
 
     /// Whether the colour pass draws world-space normals instead of shading.
@@ -6444,6 +6695,153 @@ mod tests {
                 renderer.exposure(),
             );
         }
+
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **The three debug views resolve in one order, however they are set.**
+    ///
+    /// All three ride in one float lane and the shaders test the outermost
+    /// threshold first, so a renderer with two switches on draws exactly one
+    /// picture — and which one has to be a rule rather than whichever branch a
+    /// caller's setter happened to run last. Every one of the eight combinations
+    /// is walked, because a precedence written as an `if` chain is right for
+    /// most of them by accident: a chain in the wrong order agrees with this one
+    /// on the five combinations where at most one switch is set.
+    ///
+    /// [`ForwardRenderer::debug_view`] is asserted beside the lane, so the value
+    /// a panel reads back and the value the shader branches on cannot drift —
+    /// they are the same function.
+    #[test]
+    fn the_three_debug_views_resolve_in_one_order_however_they_are_set() {
+        // `w` of the second `float4` of the block — the lane
+        // `the_normals_view_moves_the_ambients_last_lane_and_no_other_byte`
+        // spells out, and for its reason.
+        const AMBIENT_W: usize = 64 + 16 + 12;
+
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        let camera = Camera::default();
+        let light = DirectionalLight::default();
+
+        for heatmap in [false, true] {
+            for lod in [false, true] {
+                for normals in [false, true] {
+                    renderer.set_heatmap(heatmap);
+                    renderer.set_lod_view(lod);
+                    renderer.set_normals_view(normals);
+                    // Each switch reads back what it was set to, whatever the
+                    // others are: a caller's toggle is about the caller's
+                    // setting, and only `debug_view` is about the picture.
+                    assert_eq!(renderer.heatmap(), heatmap);
+                    assert_eq!(renderer.lod_view(), lod);
+                    assert_eq!(renderer.normals_view(), normals);
+
+                    let expected = if heatmap {
+                        DebugView::Heatmap
+                    } else if lod {
+                        DebugView::LodTint
+                    } else if normals {
+                        DebugView::Normals
+                    } else {
+                        DebugView::Shaded
+                    };
+                    assert_eq!(
+                        renderer.debug_view(),
+                        expected,
+                        "heatmap={heatmap} lod={lod} normals={normals}"
+                    );
+
+                    renderer
+                        .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                        .expect("write");
+                    let block = recorder
+                        .buffer_bytes(renderer.uniforms[renderer.frame])
+                        .expect("begin_frame wrote the block");
+                    let sentinel = match expected {
+                        DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
+                        DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
+                        DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
+                        DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
+                    };
+                    assert_eq!(
+                        &block[AMBIENT_W..AMBIENT_W + 4],
+                        &sentinel.to_le_bytes(),
+                        "heatmap={heatmap} lod={lod} normals={normals} resolved to {expected:?}, \
+                         and the lane says otherwise"
+                    );
+                }
+            }
+        }
+
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **The heatmap moves the ambient's last lane and no other byte**, and
+    /// switching it off puts the block back.
+    ///
+    /// The normals view's assertion below, for the outermost of the three: the
+    /// overlay costs one lane, so every golden image ever blessed is untouched
+    /// by the feature existing. The `lod_params` row the heatmap reads is
+    /// written every frame whether it is on or not — it is the numbers the
+    /// selection used — so this compares two frames of the *same* camera and
+    /// budget, where that row is equal on both sides and any byte outside the
+    /// lane is a real difference.
+    #[test]
+    fn the_heatmap_moves_the_ambients_last_lane_and_no_other_byte() {
+        const AMBIENT_W: usize = 64 + 16 + 12;
+
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        let camera = Camera::default();
+        let light = DirectionalLight::default();
+        let block = |renderer: &mut ForwardRenderer| -> Vec<u8> {
+            renderer
+                .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                .expect("write");
+            recorder
+                .buffer_bytes(renderer.uniforms[renderer.frame])
+                .expect("begin_frame wrote the block")
+        };
+
+        assert!(
+            !renderer.heatmap(),
+            "the heatmap has to be off in a renderer nobody has asked",
+        );
+        let shaded = block(&mut renderer);
+        assert_eq!(
+            &shaded[AMBIENT_W..AMBIENT_W + 4],
+            &mesh::FrameUniforms::NORMALS_VIEW_OFF.to_le_bytes(),
+            "an untouched renderer must write the value every golden image was blessed with",
+        );
+
+        renderer.set_heatmap(true);
+        let heatmap = block(&mut renderer);
+        assert_eq!(
+            &heatmap[AMBIENT_W..AMBIENT_W + 4],
+            &mesh::FrameUniforms::HEATMAP_VIEW_ON.to_le_bytes(),
+            "the switch has to reach the lane the mesh stage branches on",
+        );
+        let outside: Vec<usize> = shaded
+            .iter()
+            .zip(heatmap.iter())
+            .enumerate()
+            .filter(|(at, (was, now))| was != now && !(AMBIENT_W..AMBIENT_W + 4).contains(at))
+            .map(|(at, _)| at)
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "the frame block changed at {outside:?}, which is outside the heatmap's own lane",
+        );
+
+        renderer.set_heatmap(false);
+        assert_eq!(
+            block(&mut renderer),
+            shaded,
+            "switching the view off has to put the block back, not just stop reporting it",
+        );
 
         renderer.destroy(device.as_ref());
     }

@@ -41,7 +41,7 @@ use crcbl::engine::{
     wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::render::{CullStats, Flyer};
+use crcbl::render::{CullStats, DebugView, Flyer};
 use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowDesc, WindowId};
 use crcbl::ui::draw_list::DrawList;
 
@@ -231,17 +231,20 @@ pub struct Quarry {
     /// is reported as the renderer's own default rather than as the number that
     /// was asked for.
     lod_budget: f32,
-    /// Whether the LOD tint is on. **Owned here rather than read off the
-    /// renderer**, because the pause menu's row is applied in
+    /// Which overlay is being drawn, if any. **Owned here rather than read off
+    /// the renderer**, because the pause menu's rows are applied in
     /// [`HostedGame::apply`], which is handed no GPU; [`HostedGame::draw`] is
     /// where it reaches one.
-    lod_view: bool,
+    ///
+    /// One value rather than a flag per overlay, which is what makes the panel's
+    /// rows exclusive — see [`menu::toggled_to`].
+    view: DebugView,
     /// What the last frame whose readback landed kept — re-read every
     /// [`HostedGame::draw`], because the ring answers a few frames behind.
     cull: Option<CullStats>,
     /// The values the pause panel was last built for — `None` until the first
     /// pause, so the panel is always rebuilt once with the real ones.
-    shown: Option<(CameraMode, bool)>,
+    shown: Option<(CameraMode, DebugView)>,
     /// Whether the loop has the simulation stopped, recorded in
     /// [`HostedGame::menu_kind`].
     ///
@@ -263,7 +266,7 @@ impl Quarry {
         paths: Paths,
         triangles: usize,
         lod_budget: f32,
-        lod_view: bool,
+        view: DebugView,
     ) -> Self {
         Self {
             camera,
@@ -272,7 +275,7 @@ impl Quarry {
             paths,
             triangles,
             lod_budget,
-            lod_view,
+            view,
             cull: None,
             shown: None,
             paused: false,
@@ -301,14 +304,14 @@ impl Quarry {
         }
         crcbl::log::info!(
             "[HUD] tick: {}  geometry: {:?}  binding: {:?}  camera: {}  eye z: {:.2}  \
-             budget: {}px  lod view: {}  cull: {}",
+             budget: {}px  view: {}  cull: {}",
             self.ticks,
             self.paths.geometry,
             self.paths.binding,
             self.camera.label(),
             self.camera().eye.z,
             self.lod_budget,
-            self.lod_view,
+            self.view.label(),
             cull_row(self.cull),
         );
     }
@@ -319,10 +322,10 @@ impl Quarry {
         self.camera
     }
 
-    /// Whether the frame is tinted by DAG level rather than shaded.
+    /// Which overlay the frame is drawn with, if any.
     #[must_use]
-    pub const fn lod_view(&self) -> bool {
-        self.lod_view
+    pub const fn debug_view(&self) -> DebugView {
+        self.view
     }
 
     /// The free camera, whether or not it is the one in use.
@@ -397,7 +400,7 @@ pub fn with_shell<S: Shell + ?Sized>(
         options.common.gpu(),
         options.forced,
         options.lod_budget,
-        options.lod_view,
+        options.debug_view(),
     )?;
 
     Ok(assemble(
@@ -446,11 +449,11 @@ fn assemble<S: Shell + ?Sized>(booted: Booted<S, Gpu>, options: &Options) -> Loo
     let paths = booted.gpu.paths();
     let triangles = booted.gpu.triangles();
     let lod_budget = booted.gpu.lod_budget();
-    let lod_view = booted.gpu.lod_view();
+    let view = booted.gpu.debug_view();
 
     Loop::new(
         booted,
-        Quarry::new(options.camera, paths, triangles, lod_budget, lod_view),
+        Quarry::new(options.camera, paths, triangles, lod_budget, view),
         options.common.loop_config(),
     )
 }
@@ -549,7 +552,12 @@ impl HostedGame for Quarry {
             }
             // Recorded here and handed to the renderer in `draw`, which is the
             // method with a GPU in it.
-            QuarryAction::ToggleLodView => self.lod_view = !self.lod_view,
+            QuarryAction::ToggleLodView => {
+                self.view = menu::toggled_to(self.view, DebugView::LodTint);
+            }
+            QuarryAction::ToggleHeatmap => {
+                self.view = menu::toggled_to(self.view, DebugView::Heatmap);
+            }
         }
     }
 
@@ -559,7 +567,7 @@ impl HostedGame for Quarry {
         // frame, or the cursor comes back one frame into a menu the reviewer is
         // already trying to click.
         self.paused = paused;
-        if paused && self.shown != Some((self.camera, self.lod_view)) {
+        if paused && self.shown != Some((self.camera, self.view)) {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a press
             // on a row does not throw the reviewer back to the top.
@@ -567,14 +575,14 @@ impl HostedGame for Quarry {
                 .current()
                 .and_then(crcbl::ui::menu::Menu::selected_item)
                 .map(|item| item.id);
-            menus.replace(true, menu::pause_menu(self.camera, self.lod_view));
+            menus.replace(true, menu::pause_menu(self.camera, self.view));
             if let Some(id) = selected {
                 menus
                     .current_mut()
                     .expect("the pause menu is in the set")
                     .select_id(id);
             }
-            self.shown = Some((self.camera, self.lod_view));
+            self.shown = Some((self.camera, self.view));
         }
         paused
     }
@@ -588,7 +596,7 @@ impl HostedGame for Quarry {
         // Here rather than in `tick`, which does not run while paused: the row
         // that was just pressed is on a panel over a frame that has to change
         // behind it.
-        gpu.set_lod_view(self.lod_view);
+        gpu.set_debug_view(self.view);
         self.paths = gpu.paths();
         // The budget a frame was really selected under, not the one the flag
         // asked for — see the field. Zero is what the renderer holds before its
@@ -690,7 +698,10 @@ impl crcbl::ui::DebugModule for Quarry {
         }
         section.row("triangles", format_args!("{} at level 0", self.triangles));
         section.row("lod budget", format_args!("{} px", self.lod_budget));
-        section.row_str("lod view", if self.lod_view { "on" } else { "off" });
+        // **Which view, not two on/off rows.** The three overlays share one
+        // lane and resolve to one picture, so a panel with a row per switch
+        // could say `on` twice about a frame that drew one of them.
+        section.row_str("view", self.view.label());
         match self.cull {
             None => {
                 section.row_str("instances kept", "pending — the ring is frames behind");
@@ -941,7 +952,11 @@ mod tests {
         let mut engine = scripted(&options);
         let window = engine.window();
         engine.frame().expect("a frame");
-        assert!(engine.gpu().lod_view(), "the flag never reached the frame");
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::LodTint,
+            "the flag never reached the frame"
+        );
 
         engine
             .shell_mut()
@@ -952,8 +967,9 @@ mod tests {
 
         // Four rows down from RESUME is LOD VIEW: the loop's three, then CAMERA.
         press_row(&mut engine, window, 4);
-        assert!(
-            !engine.gpu().lod_view(),
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::Shaded,
             "the row did not reach the renderer",
         );
         assert!(
@@ -963,12 +979,80 @@ mod tests {
         );
 
         press_row(&mut engine, window, 0);
-        assert!(engine.gpu().lod_view(), "the row did not put it back");
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::LodTint,
+            "the row did not put it back"
+        );
         assert!(
             ui_text(&engine).iter().any(|text| text == "LOD VIEW: ON"),
             "{:?}",
             ui_text(&engine),
         );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **`--heatmap` reaches the renderer, and its row replaces the tint rather
+    /// than joining it.**
+    ///
+    /// The exclusivity is checked *through the renderer* rather than on
+    /// [`menu::toggled_to`] alone — that function has its own unit test — because
+    /// what a reviewer sees is the frame, and the two settings are separate
+    /// booleans on the far side of this crate. A press that left the tint set
+    /// would still draw the heatmap, by the renderer's precedence, and would
+    /// then draw the tint the moment the heatmap row was pressed again.
+    #[test]
+    fn the_heatmap_flag_and_its_row_replace_the_tint_at_the_renderer() {
+        let mut options = headless(400);
+        options.heatmap = true;
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::Heatmap,
+            "the flag never reached the frame"
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "HEATMAP: ON")
+                && ui_text(&engine).iter().any(|text| text == "LOD VIEW: OFF"),
+            "one overlay is drawn, so exactly one row says ON: {:?}",
+            ui_text(&engine),
+        );
+
+        // Four rows down from RESUME is LOD VIEW, five is HEATMAP. Pressing the
+        // tint's row from here must *swap* the overlay.
+        press_row(&mut engine, window, 4);
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::LodTint,
+            "the tint's row did not replace the heatmap",
+        );
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "HEATMAP: OFF")
+                && ui_text(&engine).iter().any(|text| text == "LOD VIEW: ON"),
+            "{:?}",
+            ui_text(&engine),
+        );
+
+        // And back the other way, off the heatmap's own row.
+        press_row(&mut engine, window, 1);
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::Heatmap,
+            "the heatmap's row did not replace the tint",
+        );
+        // Pressing it again is the way back to the shaded picture, which is what
+        // makes each row its own off switch.
+        press_row(&mut engine, window, 0);
+        assert_eq!(engine.gpu().debug_view(), DebugView::Shaded);
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

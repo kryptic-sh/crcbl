@@ -172,6 +172,23 @@ struct FrameUniforms
     float4 probe_origin;
     float4 probe_inv_spacing;
     uint4 probe_counts;
+    /// `docs/plan/25-lod.md`'s selection numbers, as `draw_gen.slang`'s
+    /// `DrawGenParams::lod_params` carries them: `x` is how many pixels one unit
+    /// of length subtends one unit from the eye, `y` is the budget an unexpanded
+    /// group's projected error must exceed to expand, `z` is the budget an
+    /// expanded one is held down to, and `w` is unread padding.
+    ///
+    /// **Read here and by nothing in `mesh.slang`**, which declares the member
+    /// all the same because the two blocks are one buffer. The screen-error
+    /// heatmap is what reads it: this stage projects a cluster's producing
+    /// group's error itself, and the two budgets are what the ramp is anchored
+    /// on. That is the same pair `draw_gen.slang` judged the cut against — the
+    /// renderer writes one set of numbers into both blocks.
+    ///
+    /// **Last in the block**, on `probe_origin`'s terms exactly: no existing
+    /// member's offset moves, so every golden blessed before this member existed
+    /// still matches.
+    float4 lod_params;
 };
 
 /// Matching `struct GpuLight` in `mesh.slang`.
@@ -191,6 +208,20 @@ struct GpuLight
     float cos_inner;
     uint shadow_tile;
     uint pad1;
+};
+
+/// Matching `struct GpuProbe` in `mesh.slang`.
+///
+/// Declared here and read by nothing, on `GpuLight`'s terms exactly: the
+/// binding below it is one this file *does* read, and Slang's Metal target
+/// numbers a stage's buffers by declaration order — so a source that skipped the
+/// probe table would put its own table one index below where the backend binds
+/// it.
+struct GpuProbe
+{
+    float4 sh_r;
+    float4 sh_g;
+    float4 sh_b;
 };
 
 /// Matching `struct GpuInstance` in `mesh.slang`.
@@ -289,6 +320,149 @@ static const uint LEVEL_SHIFT = 2;
 /// and `the_lod_view_threshold_lies_above_the_normals_view` holds the two files
 /// in step.
 static const float LOD_VIEW = 1.5;
+
+/// What `FrameUniforms::ambient`'s `w` must reach for the **screen-error
+/// heatmap**, the LOD tint's sibling overlay.
+///
+/// The same lane again, one sentinel further out:
+/// `crcbl_shaders::mesh::FrameUniforms::HEATMAP_VIEW_ON` is the `3.0` the host
+/// writes, and this threshold sits between it and `LOD_VIEW_ON`'s `2.0`. Tested
+/// **before** `LOD_VIEW`, or a `3.0` would be caught by the tint's threshold on
+/// its way past — the same ordering `LOD_VIEW` has against the normals view, and
+/// `crcbl_shaders::mesh`'s `the_heatmap_view_threshold_lies_above_the_lod_view`
+/// is what holds the three sentinels and the three thresholds interleaved.
+///
+/// `mesh.slang` needs no mirror of *this* constant and does mirror the sentinel:
+/// its `fragmentMain` tests `>= LOD_VIEW` and passes the colour it was handed
+/// through unshaded, which is what both overlays want, and its `vertexMain`
+/// writes the same flat grey for both — the two indirect paths select a level
+/// per instance, so they have neither a per-cluster level nor a per-cluster
+/// error to draw.
+static const float HEATMAP_VIEW = 2.5;
+
+/// The heatmap ramp's coldest stop: a cluster whose producing group's error
+/// projects to nothing this frame.
+///
+/// # Why these five stops, and why not a rainbow
+///
+/// The question a viewer brings to this overlay is "how close to the budget is
+/// this, and where is the selection about to switch". A rainbow answers neither:
+/// its hues have no order anyone can read off, so "hotter" becomes a legend
+/// lookup per pixel. These five are **strictly increasing in luminance** —
+/// `crcbl_shaders::mesh`'s `the_heatmap_ramp_climbs_in_luminance` reads them out
+/// of this file and checks it — so the picture reads as a height field over the
+/// error even in a screenshot, and even to a reader who cannot separate the
+/// hues.
+///
+/// # Both budgets are landmarks on it, and that is what the breaks are for
+///
+/// `t` is the projected error over the **expand** budget, so `t = 1` is that
+/// budget exactly — and it is the ceiling of the data on the amplified path,
+/// because a cluster the descent kept is one whose producer did not expand,
+/// which is `projected <= expand`. The ramp is anchored there rather than on the
+/// hold budget for that reason: hold is where an *already* expanded group gives
+/// up, and no cluster in the cut sits above it.
+///
+/// The ramp is discontinuous at both budgets on purpose. `t = hold/expand`
+/// jumps from teal to amber and `t = 1` jumps from yellow to white, so each
+/// budget draws itself as a contour line across the surface rather than being
+/// somewhere in a gradient a viewer has to estimate. Luminance still climbs
+/// across both jumps, so the discontinuities cost the ordering nothing.
+///
+/// Between the two is `docs/plan/25-lod.md`'s hysteresis band: a cluster shaded
+/// amber-to-yellow is one whose producer would already have expanded had it
+/// been expanded last frame, which is exactly "about to switch".
+static const float3 HEAT_UNDER_LOW = float3(0.08, 0.10, 0.35);
+
+/// The cool ramp's top, reached as the projected error approaches the hold
+/// budget.
+static const float3 HEAT_UNDER_HIGH = float3(0.10, 0.55, 0.60);
+
+/// The hysteresis band's bottom — the **hold** budget, and the first of the two
+/// contour lines.
+static const float3 HEAT_BAND_LOW = float3(0.85, 0.45, 0.10);
+
+/// The band's top, reached as the projected error approaches the expand budget.
+static const float3 HEAT_BAND_HIGH = float3(0.97, 0.85, 0.20);
+
+/// At or over the **expand** budget: the ramp's brightest stop, and the second
+/// contour line.
+///
+/// Reachable in the cut only where the eye is inside a group's own sphere, which
+/// is where `projected_error` answers [`INSIDE_THE_SPHERE`] — a cluster the
+/// descent kept is one whose producer did not expand, and that is exactly
+/// `projected <= expand`. It is the ordinary colour of the *coarse* half of a
+/// frame drawn by `meshMain`, which culls nothing and selects nothing, so the
+/// clusters whose producing groups are over the budget are drawn anyway.
+static const float3 HEAT_OVER = float3(1.00, 1.00, 1.00);
+
+/// The smallest divisor `heat_tint` will normalise by.
+///
+/// `crcbl_render::ForwardRenderer::set_lod_error_budget` takes any `float` — the
+/// *flag* in front of it refuses a non-positive one, the setter does not — and an
+/// orthographic camera's budget is negative infinity by design. So this is the
+/// one line that keeps the division from producing an infinity or a NaN in a
+/// colour, whatever a caller reaches it with.
+static const float RAMP_FLOOR = 1.0e-6;
+
+/// Where `projected` sits between the two budgets, as a colour.
+///
+/// See [`HEAT_UNDER_LOW`] for the ramp and for why it is this one. **Comparisons
+/// and `lerp`, never an index into a table**: `lod_tint` below carries the
+/// measurement that made that rule, and this function's input varies per cluster
+/// inside one wave exactly as that one's does.
+float3 heat_tint(float projected, float expand, float hold)
+{
+    float budget = max(expand, RAMP_FLOOR);
+    float t = projected / budget;
+    if (t >= 1.0)
+    {
+        return HEAT_OVER;
+    }
+    // Equal budgets put the break at the ramp's own top, so the band is empty
+    // and the cool half covers the whole range — which is what a caller who
+    // switched hysteresis off asked for.
+    float band = clamp(hold / budget, 0.0, 1.0);
+    if (t >= band)
+    {
+        return lerp(HEAT_BAND_LOW, HEAT_BAND_HIGH,
+                    saturate((t - band) / max(1.0 - band, RAMP_FLOOR)));
+    }
+    return lerp(HEAT_UNDER_LOW, HEAT_UNDER_HIGH, saturate(t / max(band, RAMP_FLOOR)));
+}
+
+/// What `projected_error` answers for an eye inside the group's own sphere.
+///
+/// The largest finite `float`, standing in for the infinity
+/// `crcbl_shaders::cluster_select::GroupCost::projected_error` returns there:
+/// an infinity has no literal every target of this file spells the same way,
+/// and every comparison the projection takes part in is against a budget a
+/// caller set — a finite number, which this is above. So the two answer the
+/// same decisions from the same inputs.
+static const float INSIDE_THE_SPHERE = 3.4028235e38;
+
+/// One group's simplification cost in **pixels**, from an eye at `eye`.
+///
+/// **`shaders/draw_gen.slang` declares this function verbatim**, and that file
+/// is where the metric is documented in full. It is copied rather than shared
+/// because Slang has no header this build uses, and it is copied *exactly* for
+/// the reason two spellings of one metric are dangerous here: that pass judges
+/// the cut with it and this one shades a cluster by it, so a drifted copy is an
+/// overlay that disagrees with the picture it is drawn over while looking
+/// entirely plausible. `crcbl_shaders::cluster_select`'s
+/// `the_two_shaders_project_the_error_with_one_function` holds the two texts
+/// equal.
+float projected_error(float error, float3 center, float radius, float3 eye, float pixels_per_unit)
+{
+    float3 delta = eye - center;
+    float separation = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    float distance = separation - radius;
+    if (distance <= 0.0)
+    {
+        return INSIDE_THE_SPHERE;
+    }
+    return error * pixels_per_unit / distance;
+}
 
 /// A distinct colour per DAG level, for the LOD view.
 ///
@@ -446,7 +620,67 @@ struct ClusterDrawConstants
     /// reads, and `draw_gen.slang` — which writes the state — carries the same
     /// number in its own params block.
     uint group_stride;
+    /// Where the `LevelGroup` records start in `tables`, in words — the same
+    /// offset `draw_gen.slang`'s `DrawGenParams::level_groups_at` carries,
+    /// because `level_group_at` below reads the region that pass wrote its
+    /// decisions from.
+    ///
+    /// A frame-wide number in a per-bucket block for `group_stride`'s reason
+    /// exactly, and fixed for the life of the renderer besides: the host packs
+    /// the regions when a mesh becomes resident, not per frame.
+    uint level_groups_at;
 };
+
+/// One group of a mesh's cluster DAG, matching `struct LevelGroup` in
+/// `draw_gen.slang` and `crcbl_shaders::level_select::LevelGroup`.
+///
+/// Six scalars and not a `float3` in sight, for `struct Meshlet`'s reason above:
+/// under `std430` a `float3` is 16-byte aligned and would put four bytes of
+/// padding in front of itself.
+///
+/// **Read here for the screen-error heatmap alone.** The *cut* is
+/// `draw_gen.slang`'s decision and this stage reads its answer out of
+/// `group_state`; what the overlay wants is the number that decision was made
+/// on, which is this record projected from the eye.
+struct LevelGroup
+{
+    /// The level whose clusters this group grouped. Read by nothing here — the
+    /// level a cluster was decimated to reaches the LOD tint through
+    /// `ClusterSelect::flags` instead — and declared because the record is six
+    /// words and a reader that skipped one would read every field after it at
+    /// the wrong offset.
+    uint level;
+    /// How far this group's simplification may have moved the surface, in the
+    /// mesh's own units of length.
+    float error;
+    /// Centre of the sphere the error is projected from, in the mesh's own
+    /// space.
+    float center_x;
+    float center_y;
+    float center_z;
+    /// Distance from that centre to the furthest point the sphere contains.
+    float radius;
+};
+
+/// Words one `LevelGroup` occupies in `tables`, matching `draw_gen.slang`'s
+/// constant of the same name and
+/// `crcbl_shaders::level_select::LEVEL_GROUP_STRIDE` divided by four.
+static const uint LEVEL_GROUP_WORDS = 6;
+
+/// Which word of a group's record holds which field.
+///
+/// Named rather than written as literals in `level_group_at` below, for
+/// `CLUSTER_SURVIVOR_WORD`'s reason: six scalars in a row permute silently — a
+/// radius read as an error shades a cluster the wrong colour rather than
+/// crashing — and `crcbl_shaders::level_select`'s
+/// `the_shader_reads_the_selection_records_at_the_words_this_module_encodes` is
+/// what holds these against the bytes the host writes.
+static const uint LEVEL_GROUP_LEVEL = 0;
+static const uint LEVEL_GROUP_ERROR = 1;
+static const uint LEVEL_GROUP_CENTER_X = 2;
+static const uint LEVEL_GROUP_CENTER_Y = 3;
+static const uint LEVEL_GROUP_CENTER_Z = 4;
+static const uint LEVEL_GROUP_RADIUS = 5;
 
 [[vk::binding(0, 0)]]
 ConstantBuffer<FrameUniforms> frame;
@@ -587,6 +821,32 @@ StructuredBuffer<GpuLight> lights;
 [[vk::binding(21, 0)]]
 StructuredBuffer<uint> cluster_lights;
 
+/// The irradiance grid's rows, for the same reason and one more of its own.
+///
+/// **Binding 22 is `mesh.slang`'s occlusion channel and 23 is its probe table**,
+/// both declared by the fragment stage of this very pipeline. 22 is a *texture*
+/// and this file declares one texture whatever happens after it, so it needs no
+/// mirror; 23 is a buffer, and the buffer below it is this file's. Skipping it
+/// would put `tables` one index below where `crcbl-mtl` binds it — that backend
+/// counts the same-table entries of the layout, which carries 23 on every path.
+[[vk::binding(23, 0)]]
+StructuredBuffer<GpuProbe> probes;
+
+/// Every host-written table `draw_gen.slang` reads, as one flat array of words —
+/// the same buffer and the same regions, described there in full.
+///
+/// **Read here for one region only**: the `LevelGroup` records at
+/// `draw.level_groups_at`, through `level_group_at` below. The screen-error
+/// heatmap is the only reader, and what it wants is the group cost the cut was
+/// judged on rather than the cut itself, which arrives through `group_state`.
+///
+/// **Bound wherever `clusters` is**, so both mesh entry points can read it: a
+/// device with no amplification stage still draws through `emit_cluster`, and a
+/// binding present for one entry point and absent for the other is a descriptor
+/// read out of an empty slot.
+[[vk::binding(24, 0)]]
+StructuredBuffer<uint> tables;
+
 /// What the mesh stage emits and `mesh.slang`'s `fragmentMain` consumes.
 ///
 /// **Member order is the interface**, not just the layout: locations are
@@ -610,6 +870,64 @@ uint corner_at(uint corner)
 {
     uint word = cluster_corners[corner >> 2];
     return (word >> ((corner & 3) * 8)) & 0xffu;
+}
+
+/// Group `group` of the concatenated DAG groups, its five floats read back
+/// through `asfloat`.
+///
+/// `draw_gen.slang`'s accessor of the same name, over the same region of the
+/// same buffer — the only difference is where the region's offset is carried,
+/// which is that pass's params block there and this pass's per-bucket block
+/// here. The bit pattern the host wrote is the bit pattern a float load would
+/// have produced, so this is a reinterpretation and not a conversion.
+LevelGroup level_group_at(uint group)
+{
+    uint at = draw.level_groups_at + group * LEVEL_GROUP_WORDS;
+    LevelGroup record;
+    record.level = tables[at + LEVEL_GROUP_LEVEL];
+    record.error = asfloat(tables[at + LEVEL_GROUP_ERROR]);
+    record.center_x = asfloat(tables[at + LEVEL_GROUP_CENTER_X]);
+    record.center_y = asfloat(tables[at + LEVEL_GROUP_CENTER_Y]);
+    record.center_z = asfloat(tables[at + LEVEL_GROUP_CENTER_Z]);
+    record.radius = asfloat(tables[at + LEVEL_GROUP_RADIUS]);
+    return record;
+}
+
+/// The screen-error heatmap's colour for one cluster of an instance at
+/// `transform`.
+///
+/// **The producing group's projected error, not the containing group's**, and
+/// that is the choice the overlay is about. A cluster is in the cut while
+/// `!E(producer) && E(container)`, so the producer is the group that would
+/// *refine* this patch next — the one whose error the selection is holding just
+/// under the budget, and the one whose crossing replaces this cluster with finer
+/// ones. The container's error is already over the budget by construction and
+/// says how far past the switch the coarser half is, which is a different
+/// question and one the tint answers better.
+///
+/// **A cluster with no producer costs exactly zero**, and that is a fact rather
+/// than a fallback: nothing simplified it, so it is the original surface and its
+/// simplification cannot have moved anything. The ramp's floor is the honest
+/// colour for it. The group is not read at all in that case — an absent
+/// producer's index is zero, which is in range for a mesh that has a hierarchy
+/// and is not for one that has none.
+///
+/// **In world space, exactly as `draw_gen.slang`'s `select_level` is**: the
+/// sphere's centre goes through the instance's transform, its radius does not,
+/// and the eye stays where it is.
+float3 cluster_heat(uint cluster_index, float4x4 transform)
+{
+    ClusterSelect select = cluster_select[cluster_index];
+    float projected = 0.0;
+    if ((select.flags & HAS_PRODUCER) != 0)
+    {
+        LevelGroup group = level_group_at(select.producer_group);
+        float3 center = mul(transform,
+                            float4(group.center_x, group.center_y, group.center_z, 1.0)).xyz;
+        projected = projected_error(
+            group.error, center, group.radius, frame.camera_position.xyz, frame.lod_params.x);
+    }
+    return heat_tint(projected, frame.lod_params.y, frame.lod_params.z);
 }
 
 /// How many workgroups a group of the dispatch is worth: `1` while both its
@@ -824,6 +1142,24 @@ void emit_cluster(
     GpuInstance instance = instances[visible_instances[draw.base + instance_slot]];
     GpuMesh mesh = meshes[instance.mesh];
 
+    // The overlay colour, chosen once for the whole cluster rather than per
+    // vertex: both overlays are per-cluster facts and the heatmap's is a buffer
+    // read and a square root.
+    //
+    // **A uniform branch**: every lane of every cluster of every instance reads
+    // the same `frame.ambient.w`, so a frame drawing the shaded picture reaches
+    // neither arm and pays for neither. The heatmap is tested first because its
+    // sentinel clears both thresholds — see `HEATMAP_VIEW`.
+    float4 overlay = float4(0.0, 0.0, 0.0, 1.0);
+    if (frame.ambient.w >= HEATMAP_VIEW)
+    {
+        overlay = float4(cluster_heat(cluster_index, instance.transform), 1.0);
+    }
+    else if (frame.ambient.w >= LOD_VIEW)
+    {
+        overlay = float4(lod_tint(cluster_select[cluster_index].flags >> LEVEL_SHIFT), 1.0);
+    }
+
     // **The level's base, not only the mesh's.** A DAG's levels are decimated
     // separately, so a coarser level's vertices are its own array and belong to
     // no vertex of the level below — where the instance names one mesh and so
@@ -844,13 +1180,12 @@ void emit_cluster(
         // — the obligation `GpuInstance::transform` carries, and the same line
         // `mesh.slang`'s vertex stage writes.
         output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
-        // Under the LOD view the cluster's own level replaces the vertex
-        // colour, which is what makes a cut spanning several levels of one mesh
-        // visible. A uniform branch: every lane of every cluster reads the same
-        // `frame.ambient.w`, so the two sides cost nothing at runtime.
-        output.color = frame.ambient.w >= LOD_VIEW
-            ? float4(lod_tint(cluster_select[cluster_index].flags >> LEVEL_SHIFT), 1.0)
-            : vertex.color;
+        // Under either overlay the cluster's colour replaces the vertex's,
+        // which is what makes a per-cluster fact — the level a cut spans, or
+        // how close to the budget each patch is — visible at all. `LOD_VIEW` is
+        // the lower of the two thresholds, so this one comparison covers both;
+        // which colour it is was decided above.
+        output.color = frame.ambient.w >= LOD_VIEW ? overlay : vertex.color;
         output.material = instance.material;
         output.uv = vertex.uv.xy;
         verts[v] = output;
