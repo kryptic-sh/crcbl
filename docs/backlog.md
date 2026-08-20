@@ -27,16 +27,18 @@ name. So this is a dependency question rather than a refactor.
 - **(c) Leave the names literal.** Ten lines a sample of pure boilerplate, and
   no new anything.
 
-**What makes (c) less safe than it looks, and it is worth knowing before
-choosing.** `web/tools/check-exports.mjs` guards the shared `__crcbl_web_*`
-surface but does **not** check these per-sample names. A name that drifts from
-the JS calling it is therefore caught by the browser gate failing to boot the
-demo, not by a static check — later and more expensively than a compile error,
-and only for demos the gate runs.
+**(c) is safer than it first looks, and this entry said the opposite until it
+was checked.** `web/tools/check-exports.mjs` compares every symbol the shim
+calls against the artifact's actual exports, and `web/build.sh` runs it **per
+demo on every build**. A name that drifts from the JS calling it therefore fails
+the build, not the browser: the mistyped export lands in the artifact, the shim
+asks for the right one, and the check reports it missing. That holds whether or
+not the names are macro-generated, because the comparison is against the built
+artifact rather than against the Rust source.
 
-**What would make (c) fine:** teaching `check-exports.mjs` the ten names it can
-derive from each sample's slug. That is a smaller change than either macro route
-and needs no decision, so it is the fallback if (a) and (b) are both declined.
+So the choice is boilerplate against a dependency, with no safety difference —
+which is a smaller question than it looked, and is why it is stated plainly
+rather than argued.
 
 ### The sweep for arms that are asserted but never run
 
