@@ -649,6 +649,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The browser gate reads a demo's clear colour while the demo is playing.**
+  Group G sampled whatever frame group F left on screen, so flappy's death
+  screen — which dims the whole sky — was read as the sRGB encode having failed,
+  and a Pages run went red on a docs-only commit. It now presses the demo's own
+  start key until the demo's own started line appears, and checks that it got
+  there, so the sample is never taken in an unknown state. A broken encode still
+  fails: a live frame without one shows the linear colour.
+
 - **The browser gate proves its own reporting channels are open.** Three of its
   checks assert a silence — no uncaught page exception, no missing asset, no
   WebGPU device error — and each passed just as happily against a listener that

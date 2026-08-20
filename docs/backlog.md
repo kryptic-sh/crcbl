@@ -77,6 +77,49 @@ attempted, and worth weighing against what it buys: the mesh path exists on one
 backend today, so three of the four arms would be running the indirect half
 twice.
 
+### The sRGB gate was reading whichever menu the run ended on
+
+**A red Pages run on a docs-only commit, 2026-08-20**, and the interesting part
+is how nearly it was misread. Group G reported
+`expected rgb(107,173,229) … the dominant colour is rgb(63,105,141) at 32.5%`
+under the name "the clear reaches the canvas sRGB-encoded" — the message for the
+bug that shipped to users once already.
+
+**The numbers said it was not that.** The observed colour is a **uniform 0.61
+multiply** of the expected one (ratios 0.589, 0.607, 0.616); a transfer-function
+error is a power curve, and `rgb(107,173,229)` sRGB-decoded is
+`rgb(37,107,200)`, nothing like what arrived. A uniform multiply is an overlay.
+Confirmed by printing the demo's own HUD line beside each sample: six
+consecutive samples read `[HUD] Dead score: 0` — flappy's death screen dims the
+whole sky, and by group G the bird had died.
+
+**Why it passed here every time and failed there.** Nothing about the runner:
+the state at group G depends on how group F's taps went, so it is a race, and
+this desktop happened to land on the winning side five runs out of five. That is
+what a race looks like from the machine that never loses it.
+
+**Fixed by establishing the state, not by moving or widening anything.** Group G
+now presses the demo's own start key until its own `started` line appears — the
+same state group C establishes — and checks that it got there, so the sample is
+never taken in an unknown state. It cannot hide a broken encode: a live frame
+with no encode shows the linear colour, which is what the row's `unencoded` is
+compared against. Red-checked by making flappy's `started` predicate match
+nothing: the new check fails with "the demo never reported its started state in
+3 presses", and the sRGB check fails _beside_ it, so the misdiagnosis cannot
+repeat.
+
+**Two things tried first and rejected, recorded so they are not retried.**
+Rebooting the page before sampling is worse — `crcbl.status()` reaches RUNNING
+before the first frame is presented, so flappy sampled an all-black canvas, and
+breakout's clear is only uncovered once its start menu has been dismissed.
+Moving the group before E and F is not enough either: the bird is already dead
+by then, which is how the `Dead` line was found.
+
+**One thing worth keeping from the detour:** the eight backdrop samples were
+taken back to back, spanning a few milliseconds, so they were eight looks at one
+frame rather than eight frames. They are spaced now, and the spacing is scaled
+by the measured slowdown like every other budget.
+
 ### The sweep for a runner nobody invokes
 
 Every `#[ignore]` in this workspace names the script that reaches it — 398 of

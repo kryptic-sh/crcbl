@@ -450,6 +450,29 @@ const BACKDROP_TOLERANCE = 2;
 const BACKDROP_SAMPLES = 8;
 
 /**
+ * How long the backdrop check waits between two of those samples.
+ *
+ * Without it the eight `toDataURL` calls span a few milliseconds and are eight
+ * looks at **one** frame, which is no better than a single sample. Scaled by the
+ * measured slowdown at the call site, like every other budget here.
+ */
+const BACKDROP_INTERVAL_MS = 120;
+
+/**
+ * How long the backdrop check gives the demo to be *playing* before it reads the
+ * clear, and how many times it presses the demo's own start key to get there.
+ *
+ * A game decides for itself what covers its clear colour, and by this point in
+ * the run the demo has been played: flappy's bird is usually dead, and its death
+ * screen dims the whole sky. That is not a hypothetical —
+ * `[HUD] Dead score: 0` was printed beside `rgb(63,105,141)` on every one of six
+ * consecutive samples here, and the Pages run of 2026-08-20 went red on exactly
+ * that frame while nothing was wrong with the encode.
+ */
+const BACKDROP_PLAY_MS = 4_000;
+const BACKDROP_PLAY_ATTEMPTS = 3;
+
+/**
  * The culling-statistics line `crcbl_render::cull_stats` logs when a readback
  * answers.
  *
@@ -1721,6 +1744,26 @@ try {
   // Everything from here to the `moving` check is about the start key, so a
   // demo that has none skips it rather than dispatching a key that means
   // nothing and asserting it did something. `EXPECTATIONS` says which.
+  // The key the demo's own instructions name. `code` is what the engine binds
+  // to; `key` and the virtual key codes are what a real keyboard sends — and
+  // they are spelled for Space, which is what every keyed row asks for. A row
+  // naming a different key has to bring its own three values with it.
+  //
+  // A named helper rather than an inline loop because group G presses it too, to
+  // put the demo back in play before reading its clear colour.
+  const pressStartKey = async () => {
+    for (const type of ['keyDown', 'keyUp']) {
+      await page.send('Input.dispatchKeyEvent', {
+        type,
+        code: EXPECTED.key,
+        key: ' ',
+        windowsVirtualKeyCode: 32,
+        nativeVirtualKeyCode: 32,
+        ...(type === 'keyDown' ? { text: ' ' } : {}),
+      });
+    }
+  };
+
   if (EXPECTED.key) {
     // **The focusing click must not also press a button**, which is the check
     // whose absence let the centred click above survive. Without it, a click
@@ -1737,20 +1780,7 @@ try {
       afterFocusClick.trim() || 'no HUD line after the click'
     );
 
-    // The key the demo's own instructions name. `code` is what the engine binds
-    // to; `key` and the virtual key codes are what a real keyboard sends — and
-    // they are spelled for Space, which is what every keyed row asks for. A row
-    // naming a different key has to bring its own three values with it.
-    for (const type of ['keyDown', 'keyUp']) {
-      await page.send('Input.dispatchKeyEvent', {
-        type,
-        code: EXPECTED.key,
-        key: ' ',
-        windowsVirtualKeyCode: 32,
-        nativeVirtualKeyCode: 32,
-        ...(type === 'keyDown' ? { text: ' ' } : {}),
-      });
-    }
+    await pressStartKey();
 
     const launched = await until(async () =>
       hud()
@@ -2937,6 +2967,53 @@ try {
   if (EXPECTED.backdrop) {
     group('G — the frame is sRGB-encoded');
 
+    // **THE DEMO IS PUT IN PLAY FIRST, AND THAT IS NOT LENIENCY.** A game decides
+    // for itself what covers its clear colour, and by this point in the run it
+    // has been played: flappy's bird is usually dead and its death screen dims
+    // the whole sky. Read in that state the check went red on the Pages run of
+    // 2026-08-20 with `rgb(63,105,141)` against the expected `rgb(107,173,229)`,
+    // and the numbers say what that was — a **uniform 0.61 multiply**, an
+    // overlay. A transfer-function error is a power curve, and the expected
+    // colour decoded is `rgb(37,107,200)`, nothing like what arrived. Six
+    // consecutive samples here printed `[HUD] Dead score: 0` beside that colour.
+    //
+    // Pressing the demo's own start key until its own `started` line appears is
+    // the same state group C establishes, and it makes this the *only* check
+    // here that does not race the simulation. It cannot hide a broken encode: a
+    // run with no encode shows the linear colour on a live frame too, which is
+    // what `unencoded` in the row below is compared against.
+    //
+    // Rebooting the page instead was tried and is worse — `crcbl.status()`
+    // reaches RUNNING before the first frame is presented, so the sample is an
+    // all-black canvas, and breakout's clear is only uncovered once its start
+    // menu has been dismissed.
+    if (EXPECTED.started) {
+      let playing = false;
+      for (
+        let attempt = 0;
+        attempt < BACKDROP_PLAY_ATTEMPTS && !playing;
+        attempt += 1
+      ) {
+        if (!EXPECTED.started(hud().at(-1) ?? '')) await pressStartKey();
+        playing = Boolean(
+          await until(
+            async () => EXPECTED.started(hud().at(-1) ?? '') || null,
+            budget(BACKDROP_PLAY_MS)
+          )
+        );
+      }
+      check(
+        'G',
+        'the demo is in play when its clear colour is read',
+        playing,
+        playing
+          ? (hud().at(-1) ?? '').trim().slice(-72)
+          : `the demo never reported its started state in ` +
+              `${BACKDROP_PLAY_ATTEMPTS} presses, so whatever the sample below ` +
+              `reads is whichever menu it was left on`
+      );
+    }
+
     const { source, encoded, unencoded, share } = EXPECTED.backdrop;
     let best = null;
     for (let i = 0; i < BACKDROP_SAMPLES; i += 1) {
@@ -2946,6 +3023,10 @@ try {
       );
       if (sample && (!best || sample.encoded > best.encoded)) best = sample;
       if (best && best.encoded >= share) break;
+      // Spaced so consecutive samples are different *frames*: eight
+      // `toDataURL` calls back to back span a few milliseconds and are eight
+      // looks at one of them.
+      await pause(budget(BACKDROP_INTERVAL_MS));
     }
 
     const want = `rgb(${encoded.join(',')})`;
