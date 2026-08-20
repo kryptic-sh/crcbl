@@ -6956,7 +6956,7 @@ pub(crate) mod tests {
     /// All of it. This crate compiles on Windows alone and the development box
     /// is Linux.
     #[test]
-    #[ignore = "known-red: a depth-only mesh pipeline removes the WARP device (docs/backlog.md)"]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device() {
         // What the rasteriser must leave at the centre, taken from the toy
         // shader's own vertices rather than written here. The guards that make

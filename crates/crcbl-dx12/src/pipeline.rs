@@ -871,9 +871,23 @@ pub(crate) fn mesh(
         add(&mut stream, TaskShader(dxil.bytecode()));
     }
     add(&mut stream, MeshShader(mesh_dxil.bytecode()));
-    if let Some(dxil) = fragment_dxil {
-        add(&mut stream, PixelShader(dxil.bytecode()));
-    }
+    // **Always present, empty when there is no fragment stage**, which is what
+    // the raster path above does with `unwrap_or_default()` and is not
+    // symmetry for its own sake. Omitting the subobject leaves the pixel stage
+    // to the stream's default, and on WARP a mesh pipeline built that way
+    // removes the device: `ID3D12Resource::Map` fails with
+    // `DXGI_ERROR_DEVICE_REMOVED` and DRED reports no breadcrumbs at all, with
+    // nothing from the debug layer. Measured by
+    // `a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device`, which
+    // runs stages six colour-target probes pass on, against
+    // `a_mesh_pipeline_with_a_fragment_stage_and_a_depth_attachment_draws_both`
+    // and `a_depth_only_raster_pipeline_draws_the_triangle_into_depth`, which
+    // both draw — so it is this subobject's absence rather than depth, the
+    // shader or the mesh stage.
+    add(
+        &mut stream,
+        PixelShader(fragment_dxil.map(Dxil::bytecode).unwrap_or_default()),
+    );
     add(
         &mut stream,
         blend_state(desc.color_targets, &desc.multisample),
