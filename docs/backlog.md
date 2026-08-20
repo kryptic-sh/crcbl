@@ -860,14 +860,35 @@ rots.
 5. **Then delete `crcbl-wgpu` entirely** — crate, `wgpu-e2e` suite, CI job,
    registry entry, `CRCBL_GPU=wgpu`, and `wgpu` from the dependency graph.
 
-   **Inventory, so the deletion is mechanical rather than exploratory:** only
-   `crates/crcbl/Cargo.toml` actually depends on it — the `crcbl-mtl` and
-   `crcbl-shaders` manifests merely _mention_ it in comments, as do
-   `crcbl-golden`, `crcbl-core`'s `surface.rs` and three files in
-   `crcbl-webgpu`. Its own runner is `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`,
-   and all three workflows (`ci.yml`, `pages.yml`, `cron.yml`) name it. The
-   workspace root's `Cargo.toml` holds the `path` entry the member manifest
-   resolves through, so that is a second manifest edit and not just a comment.
+   **Inventory, counted against the tree on 2026-08-20 rather than described.**
+   The deletion is smaller than this entry used to imply, and the numbers are
+   the reason to believe that:
+   - **Four non-comment Rust references outside the crate, and three of them are
+     message strings.** `crcbl-dx12/src/instance.rs`,
+     `crcbl-mtl/src/swapchain.rs` and `crcbl-vk/src/instance.rs` each refuse a
+     canvas surface with a sentence naming `crcbl-wgpu` as whose target it is;
+     those want rewording to `crcbl-webgpu`, not deleting. The **one** real call
+     is `crcbl_wgpu::WgpuInstance::new_async()` in `crcbl/src/backend.rs`'s
+     registry.
+   - **111 comment-only mentions across 53 files.** Prose, and none of it
+     compiles.
+   - **35 `GpuBackend::Wgpu` / `BackendKind::Wgpu` sites, in five files**:
+     `crcbl-hal/src/capability.rs` (18 — the `DIVERGENCES` rows and the
+     by-construction exclusion), `crcbl/src/backend.rs` (13 — the variant, the
+     registry, `as_str`, `from_name`, `ALL`), `crcbl-hal/src/caps.rs` (2),
+     `crcbl-hal/src/error.rs` (1) and `crcbl/src/args.rs` (1).
+   - **Two manifests**: the workspace root's `path` entry and
+     `crates/crcbl/Cargo.toml`'s dependency. The `crcbl-mtl` and `crcbl-shaders`
+     manifests only mention it in comments.
+   - **Two CI jobs**: `wgpu e2e (lavapipe, Xvfb)` (nine suites) and
+     `cross-backend image compare (vk vs wgpu)`, plus
+     `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh` and the `CRCBL_GPU=wgpu` lines in
+     roughly ten harness scripts' usage text.
+
+   **Removing the enum variant is the anti-rot mechanism proving itself.**
+   `BackendKind::Wgpu` is matched exhaustively, so the compiler names every site
+   that has to change — including `GpuBackend::position`, whose whole purpose is
+   to fail when a variant moves. Nothing here needs finding by grep.
 
    **A second CI job goes with it, and the inventory above did not name it:**
    `cross-backend image compare (vk vs wgpu)`, which runs
