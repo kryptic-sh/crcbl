@@ -10488,10 +10488,26 @@ on `windows-latest`: the dx12 job runs three of these harnesses that way, and
 `crcbl_pin_vk_icd` already converts the manifest through `cygpath` under MSYS,
 which `crates/crcbl-vk/tests/vulkan-icd.sh` records as a fight already had.
 
+**It went green on its first run**, `32384457918`, 13 of 13 in 40 seconds on
+`llvmpipe (LLVM 22.1.8) type=Cpu`. The channel really is open, checked the way
+this file keeps telling people to check: the test's own name appears **twice**
+in that job's log, where it appeared zero times before. One green run is not a
+verdict on the flake — five occurrences in one evening against one clean run —
+but it is the difference between a test that can fail and a test that is not
+there.
+
 **`draw_gen_e2e`, `hal_seam_e2e`, `gltf_e2e` and the tiling suite are
-golden-free on the same measurement** and could follow the same way.
-Deliberately left out of that change so a failure names one thing; worth adding
-once this step has been green for a while.
+golden-free on the same measurement** and could follow the same way. Measured on
+Linux lavapipe on 2026-08-20 so the follow-up needs no new investigation: 12/12,
+19/19, 1/1 and 1/1 respectively. That would take this job from **2 suites to
+6**; for scale, Linux vk runs 11, dx12/WARP 9, wgpu 9 and Metal 8, and this job
+being the thinnest by far is what let the `depth_probe` coverage loss go
+unnoticed for six days.
+
+The remaining three — `render_e2e`, `sprite_e2e`, `mesh_e2e` — **do** call
+`crcbl_golden::compare`, and this job's header warns its Mesa build differs from
+the one the references were blessed on. Those need the re-blessing question
+answered first and are a different decision.
 
 **What is still not known is why the burst happened.** Nothing about the cause
 was learned — this only restores the configuration that can report it. If it
