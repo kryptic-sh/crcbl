@@ -103,6 +103,11 @@ OPTIONS:
                          scaled by the renderer's 1x1 white instead.
     --no-reflections     Draw with no screen-space reflections. The frame is the
                          forward pass's own scene colour, bit for bit.
+                         Each of the three has a pause-menu row — SHADOWS, AO
+                         and REFLECTIONS — and ENTER toggles it, so a flag is
+                         the starting state rather than the only way in. A row
+                         reading 'unavailable' is an effect this device clamped
+                         off, and pressing it does nothing on purpose.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
@@ -343,6 +348,25 @@ mod tests {
             assert!(
                 USAGE.contains(&kebab),
                 "the usage text does not offer {kebab}"
+            );
+        }
+    }
+
+    /// **The help names the pause-menu rows, and it names the ones that exist.**
+    ///
+    /// The three effect flags used to describe themselves and stop there, so a
+    /// reader who found `--no-ao` had no way to learn that AO is also a row
+    /// ENTER toggles — `--camera`'s entry has said so all along. Prose is
+    /// decoration unless something checks it, and what makes this checkable is
+    /// that the row labels are `crate::menu::EFFECT_ROWS`' own third column:
+    /// renaming a row fails here rather than leaving the help describing a row
+    /// nobody can find.
+    #[test]
+    fn the_help_names_every_effect_row_the_pause_menu_has() {
+        for (_, _, label) in crate::menu::EFFECT_ROWS {
+            assert!(
+                USAGE.contains(label),
+                "the pause menu has a {label} row and the usage text never mentions it",
             );
         }
     }

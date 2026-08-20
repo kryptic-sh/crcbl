@@ -110,7 +110,7 @@ pub const REFLECTIONS_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 3;
 ///
 /// The names are the command line's: `--no-ao` and the `AO` row are visibly the
 /// same switch.
-const EFFECT_ROWS: [(crcbl::ui::WidgetId, RenderEffects, &str); 3] = [
+pub(crate) const EFFECT_ROWS: [(crcbl::ui::WidgetId, RenderEffects, &str); 3] = [
     (SHADOWS_ID, RenderEffects::SHADOWS, "SHADOWS"),
     (AO_ID, RenderEffects::AMBIENT_OCCLUSION, "AO"),
     (REFLECTIONS_ID, RenderEffects::REFLECTIONS, "REFLECTIONS"),

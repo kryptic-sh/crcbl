@@ -11663,8 +11663,11 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
 - **The rest of milestone 4's matrix.** The three effect rows are on the pause
   menu now, doing read-modify-write on the programmatic layer. What the charter
   asks for beyond them — the side-by-side and A/B-flip comparison modes — needs
-  the monitor camera above, and the toggles' `--help` text still describes only
-  the flags, with no line pointing at the rows the way `--camera`'s does.
+  the monitor camera above. The `--help` half is closed: the three flags now
+  point at the SHADOWS, AO and REFLECTIONS rows and say what an `unavailable`
+  row means, and `the_help_names_every_effect_row_the_pause_menu_has` holds the
+  prose to `menu::EFFECT_ROWS`' own labels so a renamed row fails a test rather
+  than leaving the help describing a row nobody can find.
 - **`UNAVAILABLE` has never run on hardware.** The effect rows report a
   device-clamped effect as unavailable rather than off, and a press on such a
   row is a deliberate no-op. Both are covered by a constructed device set only,
