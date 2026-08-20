@@ -1798,9 +1798,25 @@ green test pinning this defect would be worse than none.
 
 **What is measured and what is inferred.** The registers above are read from the
 generated HLSL and confirmed against the containers' PSV0 tables; the counting
-rule is read from `root::assign_registers`. That the mismatch is what removes
-the device is the inference — strong, and consistent with every observation, but
-the probe that would confirm it needs the fix first.
+rule is read from `root::assign_registers`. The collision is therefore a fact,
+and it makes the renderer's D3D12 mesh pipeline incorrect whatever else is true.
+
+**But it is _not_ what removes the device, and that was tested rather than
+assumed.** The probe of 2026-08-21 ran `mesh_cluster.slang`'s own containers
+under a layout trimmed to exactly that file's 22 declarations. Recomputing the
+assignment by hand over that declaration list gives `frame` `b0`, `instances`
+`t1`, `visible_instances` `t3`, `clusters` `t6`, `draw_args` `t9`,
+`cluster_select` `t10`, `group_state` `t11`, `cull_stats` `u0` and
+`cluster_selection` `u1` — every one matching the generated HLSL, so no register
+disagreed with anything the shader asked for. **WARP removed the device
+anyway**, with the renderer's exact signature: `DXGI_ERROR_DEVICE_REMOVED` out
+of `ID3D12Resource::Map`, DRED reporting `0 command list(s) with recorded work`,
+on run 32416192662.
+
+So there are **two** defects and this entry is only one of them. Fixing the
+registers is still required — as it stands the renderer's mesh pipeline reads a
+texture descriptor as a structured buffer — but it will not by itself make the
+mesh path work.
 
 ## DECISION NEEDED — dx12 mesh shading: WARP claims it and dies, hardware works
 
@@ -1981,11 +1997,25 @@ whole of `render_e2e`'s non-mesh path, with the same materials, textures,
 culling compute pass and several draws per frame. So "the rest of the renderer's
 frame" is only a suspect where it is _mesh-specific_.
 
-**The next step is therefore to stop growing the toy and drive
-`mesh_cluster.slang` itself** through the probe harness against synthetic data.
-It collapses the three remaining suspects into one experiment: if the device
-goes, the shader is it and the bisect continues inside one file; if it survives,
-what remains is the draw-gen pass that feeds it.
+**Driving `mesh_cluster.slang` itself reproduced the removal.** The probe ran
+its own containers, 22 bindings, a texture, a sampler and a real DAG descent
+through an `ExecuteIndirect`, and WARP removed the device with the renderer's
+exact signature — so **there is now a repro with no renderer in it**, on
+run 32416192662. It was reverted from `main` rather than left red (`cd1f653`);
+the patch is recoverable from `76939d0`.
+
+**What it does not yet separate**, and the next slice is exactly this: the probe
+has no fragment stage, because `mesh_cluster.slang` has none and `mesh.slang`'s
+cannot share a root signature with it. It takes `depth_pipeline`'s shape —
+`fragment: None`, no colour targets, the depth attachment as the observable —
+and `crcbl-dx12` has never built a depth-only mesh pipeline or copied a
+`D32Float` image back before. So the removal is the cluster shader **or** that
+untried machinery. Driving the same depth-only shape with `mesh_shader.slang`'s
+toy stages answers it in one run: if the toy dies too, the pipeline shape is the
+defect and the cluster shader is still unjudged; if it draws, the cluster shader
+is it. It collapses the three remaining suspects into one experiment: if the
+device goes, the shader is it and the bisect continues inside one file; if it
+survives, what remains is the draw-gen pass that feeds it.
 
 **What is no longer in question**: WARP's `ExecuteIndirect` of `DISPATCH_MESH`,
 its amplification stage, both together at a thousand groups, a dispatch count of
