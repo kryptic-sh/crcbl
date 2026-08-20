@@ -43,39 +43,41 @@ rather than argued.
 ### Which suite runs on which backend, measured
 
 Read out of `ci.yml` by mapping every `run: …run-*.sh` step to the `CRCBL_GPU`
-in its own `env` block, 2026-08-20. Recorded because "the agnostic suites run
-everywhere" is a claim this project rests a lot on, and it had never been read
-off the workflow rather than believed:
+in its own `env` block, and re-derived the same way on 2026-08-21 after
+`crcbl-wgpu` went. Recorded because "the agnostic suites run everywhere" is a
+claim this project rests a lot on, and it had never been read off the workflow
+rather than believed:
 
-| runner                | backends            |
-| --------------------- | ------------------- |
-| `run-hal-seam-e2e.sh` | dx12, mtl, vk, wgpu |
-| `run-render-e2e.sh`   | dx12, mtl, vk, wgpu |
-| `run-forward-e2e.sh`  | dx12, mtl, vk, wgpu |
-| `run-draw-gen-e2e.sh` | dx12, mtl, vk, wgpu |
-| `run-sprite-e2e.sh`   | dx12, mtl, vk, wgpu |
-| `run-mesh-e2e.sh`     | dx12, mtl, vk, wgpu |
-| `run-tiling-e2e.sh`   | dx12, mtl, vk, wgpu |
-| `run-gltf-e2e.sh`     | dx12, mtl, vk, wgpu |
-| `run-lumen-golden.sh` | vk                  |
-| `run-quarry-e2e.sh`   | vk                  |
+| runner                | backends      |
+| --------------------- | ------------- |
+| `run-hal-seam-e2e.sh` | dx12, mtl, vk |
+| `run-render-e2e.sh`   | dx12, mtl, vk |
+| `run-forward-e2e.sh`  | dx12, mtl, vk |
+| `run-draw-gen-e2e.sh` | dx12, mtl, vk |
+| `run-sprite-e2e.sh`   | dx12, mtl, vk |
+| `run-mesh-e2e.sh`     | dx12, mtl, vk |
+| `run-tiling-e2e.sh`   | dx12, mtl, vk |
+| `run-gltf-e2e.sh`     | dx12, mtl, vk |
+| `run-lumen-golden.sh` | vk            |
+| `run-quarry-e2e.sh`   | vk            |
 
-**Every agnostic suite really does run on all four.** The two exceptions are the
-sample golden suites, and quarry's is vk-only for a reason that was measured
-rather than assumed: `CRCBL_GPU=wgpu` fails 12 of its 23 tests, and the first
-failure is the harness's own
-`"{path:?} was asked for by withholding features and {selected:?} opened"` — the
-fixture forces all three `GeometryPath` values by subtracting features, and a
-backend with no mesh path lands one rung lower than asked. That assertion is the
-fixture working, not a defect: a green run comparing `IndirectPerBatch` against
-itself under the name `MeshShader` is exactly what it exists to stop.
+**Every agnostic suite really does run on every native backend.** The two
+exceptions are the sample golden suites, and quarry's is vk-only for a reason
+that was measured rather than assumed: the fixture forces all three
+`GeometryPath` values by subtracting features, and a backend with no mesh path
+lands one rung lower than asked, so the harness's own
+`"{path:?} was asked for by withholding features and {selected:?} opened"` is
+the first failure. That assertion is the fixture working, not a defect: a green
+run comparing `IndirectPerBatch` against itself under the name `MeshShader` is
+exactly what it exists to stop. **Measured on `CRCBL_GPU=wgpu`, which failed 12
+of quarry's 23 tests** before that crate was deleted on 2026-08-21 — dx12 and
+Metal have no mesh path either, so the same thing awaits them.
 
 **So making quarry travel is a redesign, not a job edit** — the same shape
 `vk_e2e/mesh.rs` needed: split each test's backend-agnostic claim (which levels
 the descent chose, how many clusters survived) from its mesh-path claim. Not
 attempted, and worth weighing against what it buys: the mesh path exists on one
-backend today, so three of the four arms would be running the indirect half
-twice.
+backend today, so the other arms would be running the indirect half twice.
 
 ### The sRGB gate was reading whichever menu the run ended on
 
@@ -230,11 +232,6 @@ drives; and the "timestamps degrade rather than break" claim, which
 `crcbl-render`'s null-backend unit test covers for `PassTimers::new` declining
 and every mesh test covers for the frame, since `render_mesh` executes with
 `None` timers on real hardware.
-
-**Not reachable this way:** `crcbl-wgpu`'s push-constant overflow test needs
-`PUSH_CONSTANTS` _enabled_, and that backend never enables wgpu's `IMMEDIATES`,
-so it skips with the reason printed. Subtraction cannot add a feature. It leaves
-with the crate.
 
 ### Declined: extending the citation gate from paths to symbols
 
@@ -391,10 +388,10 @@ Every module's docs name its own omission; this is the list in one place.
   is what a grid is for — `3.7` gives the same line density and says nothing.
 
   **Verified on Vulkan only.** The wiring's pixel evidence is one RADV run; no
-  golden anywhere turns the grid on, so `run-render-e2e.sh`'s Metal, DX12 and
-  wgpu arms say nothing about it. The shader itself was checked on hardware in
-  the previous slice, but `SV_Depth` on Metal and WebGPU is still compiled-and-
-  read rather than executed.
+  golden anywhere turns the grid on, so `run-render-e2e.sh`'s Metal and DX12
+  arms say nothing about it. The shader itself was checked on hardware in the
+  previous slice, but `SV_Depth` on Metal and WebGPU is still compiled-and- read
+  rather than executed.
 
   `Grid` bakes `target_format` into its pipeline at first use, so a caller
   drawing into a different format needs a second one. That matches the tonemap
@@ -421,8 +418,8 @@ Every module's docs name its own omission; this is the list in one place.
   CI's lavapipe takes the indirect path, which is the arm nobody has measured —
   which is why its overlap bar is a simple majority rather than "nearly all".
   The **wireframe pipeline is never released until `destroy`**, so a session
-  that pressed `W` once carries a pipeline it may never use again. And
-  **wgpu/web is untested end to end**: the designed behaviour is
+  that pressed `W` once carries a pipeline it may never use again. And **The
+  browser is untested end to end**: the designed behaviour is
   `supports_wireframe` false, one line at start-up, and a warning per press,
   whose renderer half is tested but which no browser run confirms. `crate::gpu`
   has a `UiRenderer` pass now, so the blocker is no longer the pass: it is that
@@ -431,8 +428,8 @@ Every module's docs name its own omission; this is the list in one place.
   The normals view leaves two of its own. Its **pixel proof
   (`gpu::tests::the_normals_view_paints_each_face_the_encoding_of_its_world_normal`)
   also needs a pinned backend** and was measured here on RADV only; CI's
-  lavapipe runs it, but Metal, DX12 and wgpu have executed the branch nowhere —
-  the generated MSL and WGSL were read, not run. And
+  lavapipe runs it, but Metal, DX12 and WebGPU have executed the branch nowhere
+  — the generated MSL and WGSL were read, not run. And
   **`RenderEffects::REFLECTIONS` contaminates it at the silhouette**: the
   fragment stage writes a zero `F0` in this view so `ssr.slang` marches nothing,
   but Schlick's grazing tail is `(1 - F0) * (1 - N·V)^5`, which is not zero, so
@@ -731,15 +728,15 @@ so agreement with `crcbl-vk` proves less than it looks.
 ### TOP PRIORITY — backend feature parity, enforced so it cannot rot
 
 **The goal: every render feature works on every backend — vk, dx12, Metal,
-WebGPU — with divergence made impossible to introduce silently. `crcbl-wgpu` is
-dropped once that holds.** It is kept until then, but not as a conformance
-oracle: on Linux it runs Vulkan underneath, so it is a second abstraction over
-the same driver rather than an independent implementation, and agreement between
-them proves less than it appears. What it caught (`fill_buffer` non-zero) came
-from its own refusal policy, not from a different GPU stack — and **Metal
-refuses the same call for a different reason**, since `fillBuffer:range:value:`
-takes a byte, not a word. Two of four backends cannot honour a contract the seam
-documents.
+WebGPU — with divergence made impossible to introduce silently.** `crcbl-wgpu`
+was the bridge backend this goal was defined against, and it was deleted on
+2026-08-21. It was never a conformance oracle: on Linux it ran Vulkan
+underneath, so it was a second abstraction over the same driver rather than an
+independent implementation. What it caught (`fill_buffer` non-zero) came from
+its own refusal policy, not from a different GPU stack — and **Metal refused the
+same call for a different reason**, since `fillBuffer:range:value:` takes a
+byte, not a word. Two backends could not honour a contract the seam documented,
+which is the shape this entry exists to make impossible.
 
 **The structural problem.** Nothing connects "what the seam promises" to "what a
 backend does". A feature added to `crcbl-vk` alone breaks nothing: the other
@@ -777,15 +774,14 @@ genuinely never asked D3D12 for its mesh tier — and
 Red-checked by moving those two to `Unrun` as well: "no divergence is classified
 Unwritten, so the variant is a name with nothing behind it".
 
-`parity_blockers()` is the query — a row on vk, dx12, Metal or WebGPU whose kind
-is anything but `ApiAbsence` — and `crcbl-wgpu` is excluded **by construction**
-rather than by a reader remembering. A snapshot test fails when that set
-changes, including when a kind is widened to `ApiAbsence` to make a row vanish,
-which its failure message names.
+`parity_blockers()` is the query — a row on any GPU backend whose kind is
+anything but `ApiAbsence`. A snapshot test fails when that set changes,
+including when a kind is widened to `ApiAbsence` to make a row vanish, which its
+failure message names.
 
 **The blockers are `REVIEWED_BLOCKERS`, and this entry no longer restates
-them.** That list is what stands between here and the deletion, and reading it
-is the only way to get it right. This entry said nine, then eight; the code says
+them.** That list is what stands between here and parity, and reading it is the
+only way to get it right. This entry said nine, then eight; the code says
 neither. `DrawIndirectCount` on Metal closed when `crcbl_mtl::indirect_count`
 landed and nothing here noticed, and the `Declined` rows left the same way — so
 the count has now been wrong twice for the same reason the entry itself names.
@@ -868,10 +864,10 @@ mechanism exists to prevent, and the mechanism had one in it.**
 
 **Order of work:**
 
-**Steps 1 to 4 are done except where noted; only step 5 is open.** The list is
-kept because it says what "done" meant, and each line now says where it stands —
-an order of work that still reads as future when it is past is how this file
-rots.
+**Every step is done except the rows that need hardware nobody here has.** The
+list is kept because it says what "done" meant, and each line now says where it
+stands — an order of work that still reads as future when it is past is how this
+file rots.
 
 1. ~~Finish migrating the white-box tests to the agnostic suites~~ — done, and
    this line said otherwise until 2026-08-20. `lights`, `shadow` and
@@ -888,132 +884,36 @@ rots.
    with no value at all, and the timeline-signal, double-acquire and refused
    WebGPU rows are gone from `REVIEWED_BLOCKERS`. What is left there is only
    rows that need hardware nobody here has; read the list rather than this line.
-5. **Then delete `crcbl-wgpu` entirely** — crate, `wgpu-e2e` suite, CI job,
-   registry entry, `CRCBL_GPU=wgpu`, and `wgpu` from the dependency graph.
+5. ~~Then delete `crcbl-wgpu` entirely~~ — **done on 2026-08-21**: the crate,
+   the `wgpu-e2e` suite, both CI jobs, the registry entry, `CRCBL_GPU=wgpu` and
+   the whole `wgpu` family out of the lockfile. What it left behind is below.
 
-   **Inventory, counted against the tree on 2026-08-20 rather than described.**
-   The deletion is smaller than this entry used to imply, and the numbers are
-   the reason to believe that:
-   - **Four non-comment Rust references outside the crate, and three of them are
-     message strings.** `crcbl-dx12/src/instance.rs`,
-     `crcbl-mtl/src/swapchain.rs` and `crcbl-vk/src/instance.rs` each refuse a
-     canvas surface with a sentence naming `crcbl-wgpu` as whose target it is;
-     those want rewording to `crcbl-webgpu`, not deleting. The **one** real call
-     is `crcbl_wgpu::WgpuInstance::new_async()` in `crcbl/src/backend.rs`'s
-     registry.
-   - **111 comment-only mentions across 53 files.** Prose, and none of it
-     compiles.
-   - **35 `GpuBackend::Wgpu` / `BackendKind::Wgpu` sites, in five files**:
-     `crcbl-hal/src/capability.rs` (18 — the `DIVERGENCES` rows and the
-     by-construction exclusion), `crcbl/src/backend.rs` (13 — the variant, the
-     registry, `as_str`, `from_name`, `ALL`), `crcbl-hal/src/caps.rs` (2),
-     `crcbl-hal/src/error.rs` (1) and `crcbl/src/args.rs` (1).
-   - **Two manifests**: the workspace root's `path` entry and
-     `crates/crcbl/Cargo.toml`'s dependency. The `crcbl-mtl` and `crcbl-shaders`
-     manifests only mention it in comments.
-   - **Two CI jobs**: `wgpu e2e (lavapipe, Xvfb)` (nine suites) and
-     `cross-backend image compare (vk vs wgpu)`, plus the `wgpu-e2e` suite
-     (deleted 2026-08-21) and the `CRCBL_GPU=wgpu` lines in roughly ten harness
-     scripts' usage text.
+**What the deletion left behind, measured on 2026-08-21.** The code went in one
+commit; the prose did not. `git grep -lI 'crcbl-wgpu\|crcbl_wgpu'` finds the
+name in **92 files** outside this backlog — plan documents, crate docs, test
+comments, `CHANGELOG.md`, `docs/code-review.md`. Most of that is history and
+correct as history. Three are justifications that are now false and will mislead
+whoever reads them next:
 
-   **Removing the enum variant is the anti-rot mechanism proving itself.**
-   `BackendKind::Wgpu` is matched exhaustively, so the compiler names every site
-   that has to change — including `GpuBackend::position`, whose whole purpose is
-   to fail when a variant moves. Nothing here needs finding by grep.
+- **`crates/crcbl-mtl/Cargo.toml`** justifies `objc2-quartz-core` and
+  `objc2-core-foundation` as "already in this workspace's lockfile — `wgpu-hal`
+  resolves them for `crcbl-wgpu`". Both halves expired: `wgpu-hal` is gone, and
+  so is `raw-window-metal`, the other dependent the argument fell back on, so
+  `crcbl-mtl` is the only thing resolving either now (read out of `Cargo.lock`,
+  2026-08-21). The dependency is fine; the reason written beside it is not.
+- **`crates/crcbl/Cargo.toml`** still describes `crcbl-wgpu` as "a
+  `cfg(not(wasm32))` dependency above", which no longer exists.
+- **`crates/crcbl-hal/src/capability.rs`**'s `parity_blockers` doc still
+  explains its filter as excluding "`crcbl-wgpu`, which is deleted once
+  `crcbl-webgpu` replaces it".
 
-   **A second CI job goes with it, and the inventory above did not name it:**
-   `cross-backend image compare (vk vs wgpu)`, which runs
-   `web/run-cross-backend-e2e.sh`. Its own header calls it
-   `docs/plan/12-testing.md`'s "the tier system's regression net" and the P5
-   gate, P5 being "when a _second_ backend implements the seam". After the
-   deletion **no two backends share a runner** — vk on Linux, dx12 on Windows,
-   Metal on macOS, WebGPU in a browser — so there is no pair left to compare on
-   one machine.
+Nothing enforces this: `tools/check-doc-citations.sh` resolves the paths a doc
+cites, not the names in its prose, so it is a read-and-fix sweep rather than
+something a gate will surface.
 
-   **The loss is smaller than that framing suggests, and the difference is
-   measured rather than argued.** Goldens are shared, not backend-keyed: the 27
-   images under `crates/crcbl/tests/golden/` carry no backend in their names
-   (the four matching "mesh" are geometry scenes), so every backend already
-   compares against the same references on its own runner and cross-backend
-   agreement survives transitively. What actually goes is the **direct** pixel
-   comparison, whose bound is tighter than golden tolerance — the runner's own
-   worked example is two backends differing in 84.23% of pixels at a max channel
-   delta of 1, none over tolerance — together with its refusal to pass two blank
-   frames, which is the check that both backends rendered at all.
-
-   So the options are: drop the job with the crate and rely on shared goldens;
-   or re-point it across runners, comparing vk's Linux frames against dx12's
-   Windows frames through uploaded artifacts, which is a bigger job than the one
-   being deleted and buys a comparison across two software rasterisers that
-   already disagree in the last bit. Worth deciding deliberately rather than
-   discovering when the job's name stops resolving.
-
-   **The lockfile was checked and is not a hazard, which is worth recording
-   because the manifests imply it might be.** `crcbl-mtl`'s comment justifies
-   `objc2-quartz-core` and `objc2-core-foundation` as "already in this
-   workspace's lockfile — `wgpu-hal` resolves them for `crcbl-wgpu`", which
-   stops being the reason once `wgpu-hal` goes. Both are single-version
-   (`0.3.2`) with three dependents — `crcbl-mtl`, `raw-window-metal` and
-   `wgpu-hal` — so `raw-window-metal` keeps them resolved and no version
-   unification changes. What the deletion actually owes here is a reworded
-   comment, the same debt as `crcbl-shaders`' `naga` pin below, not a dependency
-   fix. Note `cargo deny` runs `--all-features` in CI, so any duplicate a
-   narrower local check would miss shows up there.
-
-   **The deletion was going to cost four GPU exercises that exist nowhere else**
-   — not a `DIVERGENCES` row, so nothing else would have flagged it. **Two are
-   now closed.** The seam suite's raster fixture drives a padded indirect stride
-   positively (the first in the tree; every other site uses the tight stride),
-   and an MSAA resolve now runs on vk, wgpu, Metal and dx12 there plus on WebGPU
-   through browser probe group AD — where `crcbl-wgpu`'s suite had been the only
-   thing in the workspace attaching a resolve view to a real device.
-
-   **Three are now closed.** The push-constant range came with the seam suite's
-   `exercise_push_constants`, which builds a layout with a real
-   `PushConstantRange` and drives it on every backend — the same piece of work
-   that unblocked dx12's and Metal's rows, which is why it was worth doing
-   properly rather than three times.
-
-   **The fourth is closed, and it took a shader.**
-   `crates/crcbl-shaders/shaders/bindless_probe.slang` is the first committed
-   artifact in the tree to declare an array of descriptors — an unbounded
-   `StructuredBuffer<uint> sources[]` at the last and highest-numbered binding —
-   and `exercise_bindless_descriptor_array` in
-   `crates/crcbl/tests/hal_seam_e2e.rs` binds four distinct buffers into it,
-   dispatches one workgroup per descriptor and asserts each descriptor's own
-   words came back in that descriptor's own block.
-   `Capability:: BindlessDescriptorArray` is driven on every backend the suite
-   runs, so the per-backend refusal checks that remain — `crcbl-vk`'s
-   `a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier` and
-   `crcbl-wgpu`'s pair — are a duplicate of a contract the agnostic suite now
-   drives, not the only thing holding it.
-
-   **`crcbl-wgpu`'s dishonest `Support::No` is fixed, by refusing rather than by
-   implementing.** Its reason used to say wgpu "offer[s] no partial binding"
-   while `hal_features_for` in `crcbl-wgpu/src/instance.rs` _requires_
-   `PARTIALLY_BOUND_BINDING_ARRAY` before granting `DESCRIPTOR_INDEXING` — and
-   `create_bind_group_layout` then built a real fixed-size array from a
-   `VARIABLE_COUNT` entry, which would have scored `Worked` against a declared
-   `No`. It now refuses a `VARIABLE_COUNT` layout with `HalError::Unsupported`
-   and refuses `BindGroupDesc::variable_count` at `create_bind_group` with the
-   same variant, which is the shape `crcbl-mtl` already used for the pair. The
-   reason and the `DIVERGENCES` row say what is actually missing: a wgpu binding
-   array's length is the layout's count and the length of the slice a group is
-   created with, and there is no `update_bind_group` to fill a slot later. This
-   was deliberately not an implementation — the crate is scheduled for deletion.
-   Fallout, all of it followed through: `BindGroupLayoutSlot::variable_binding`
-   is gone, `crcbl_wgpu::binding::check_variable_count` collapsed to the
-   refusal, and
-   `a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped` is now
-   `a_wgpu_variable_count_is_refused_not_dropped`.
-
-   **`naga` does NOT leave with it, and notes here said otherwise twice.**
-   `crcbl-shaders` takes `naga` as its own **dev-dependency** (`version = "30"`,
-   `wgsl-in`) to validate the generated WGSL — "a module naga rejects is a
-   pipeline that fails to create". That validation matters _more_ once WebGPU is
-   the only browser backend, since the WGSL it checks is what actually ships. It
-   stays, and its manifest comment needs rewording: it justifies the pin as "the
-   version `wgpu` already resolves", which stops being true.
+**`naga` did not leave with it**, and notes here said otherwise twice. See "The
+`crcbl-wgpu` deletion bar was already answered" above for the owner's decision
+of 2026-08-21 and what it costs the lockfile.
 
 **The coverage model afterwards:** the agnostic e2e suites own every behaviour
 all backends owe, and bespoke per-backend tests keep only what cannot be
@@ -1207,12 +1107,12 @@ work has to touch browser discovery and the Xvfb branch in every driver anyway,
 and doing both at once means changing the plumbing in one place instead of
 three, and then again three more times per platform.
 
-### DECISION NEEDED — the browser's WebGL2 fallback dies with `crcbl-wgpu`
+### DECIDED — the browser has no WebGL2 fallback, and the deletion closed the alternative
 
-Un-linking `crcbl-wgpu` from the wasm dropped a capability nobody has decided
-about: **a browser without WebGPU now has no fallback at all.** The WebGL2 path
-came from `wgpu`, which is no longer linkable there, so on such a browser the
-engine has no backend to open rather than a slower one.
+Un-linking `crcbl-wgpu` from the wasm dropped a capability: **a browser without
+WebGPU has no fallback at all.** The WebGL2 path came from `wgpu`, which stopped
+being linkable there and was deleted outright on 2026-08-21, so on such a
+browser the engine has no backend to open rather than a slower one.
 
 **Detect-and-message shipped**, which was the recommendation. `demo.js`'s `main`
 answers a missing `navigator.gpu` with "This browser has no WebGPU" and the
@@ -1220,29 +1120,23 @@ browsers that have it, and — the case that actually happens — answers a
 `requestAdapter()` that resolves to `null` with a sentence aimed at a person,
 before the megabytes of wasm load. A blank canvas is now an explanation.
 
-**What remains undecided is only the fallback itself**, and it is a real choice
-rather than an oversight:
+**The fallback itself was the open half, and the deletion settled it by
+foreclosure.** Both options are kept so neither is re-argued:
 
 - **Accept it.** WebGPU shipped in Chrome, Edge and Firefox; Safari has it
   from 26. The floor rises on its own, and the engine now refuses gracefully.
+  This is what happened.
 - **A second artifact.** Build a wgpu/WebGL2 wasm alongside and pick at load
-  time — keeps the fallback and the small default, at the cost of two builds,
-  two toolchains (that build needs `wasm-bindgen` back) and a loader that
-  chooses. Note this option **dies with `crcbl-wgpu`**: once that crate is
-  deleted there is no WebGL2 path left to build, so choosing it later means
-  reviving a deleted backend, not re-enabling a flag.
+  time — the fallback and the small default both, at the cost of two builds, two
+  toolchains (that build needs `wasm-bindgen` back) and a loader that chooses.
+  **This one is gone**: with `crcbl-wgpu` deleted there is no WebGL2 path left
+  to build, so choosing it now means reviving a deleted backend rather than
+  re-enabling a flag.
 
-**This is why it is titled as a decision rather than left as a note.** It was
-recorded as an observation, which made it invisible to anyone looking for what
-still needs a call — and it is the one open question the `crcbl-wgpu` deletion
-_forecloses_ rather than merely postpones. Every other blocker on that deletion
-can be revisited afterwards; this one cannot. It should be answered before the
-crate goes, not discovered after.
-
-**Recommendation stands: accept it, and revisit only if someone reports a
-browser that needs it.** Nothing in the samples requires WebGL2, and no
-telemetry says anyone is on such a browser. Worth deciding before the deletion
-rather than after, since the deletion forecloses the alternative.
+**Revisit only if someone reports a browser that needs it.** Nothing in the
+samples requires WebGL2 and no telemetry says anyone is on such a browser — and
+reopening it is now a revival rather than a flag, which is the thing to know
+before promising anyone a fallback.
 
 ### The browser probes cannot say why a readback failed
 
@@ -1280,9 +1174,9 @@ while adding a thirteenth probe is still cheaper than doing it twice.
 one and asserting a colour per quadrant. What a real file can still hit:
 
 - ~~**`run-gltf-e2e.sh` is not in CI.**~~ Fixed 2026-08-20: it runs beside
-  `run-tiling-e2e.sh` on all four — WARP, lavapipe, wgpu and Metal. It was the
-  **only** runner named by an `#[ignore]` that no workflow invoked, so the suite
-  had executed on no machine but a developer's; found by listing every
+  `run-tiling-e2e.sh` on WARP, lavapipe and Metal. It was the **only** runner
+  named by an `#[ignore]` that no workflow invoked, so the suite had executed on
+  no machine but a developer's; found by listing every
   `#[ignore = "… run <script>"]` in the tree and grepping the workflows for each
   script named. Measured before adding: it passes on radv, on lavapipe and
   through wgpu on lavapipe here. The Metal arm has no local measurement behind
@@ -1458,21 +1352,21 @@ If a platform turns out not to support it in CI, run it locally on that machine
 and say so plainly here rather than leaving the impression it is covered — a
 gate that exists on one OS is coverage for one OS.
 
-### The office PC's `VK_ERROR_OUT_OF_DEVICE_MEMORY` — wgpu only, so not worth fixing
+### The office PC's `VK_ERROR_OUT_OF_DEVICE_MEMORY` — seen on `crcbl-wgpu`, never fixed
 
 On a dual-GPU laptop the web samples flood the console with
 `vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY`, and in `breakout`
 **every** allocation the frame makes fails, cascading into invalid buffers,
 textures, bind groups and command buffers until nothing renders.
 
-**It is the `wgpu` backend, not `crcbl-webgpu`.** The log says
+**It was the `wgpu` backend, not `crcbl-webgpu`.** The log says
 `opened the wgpu GPU backend` / `crcbl_wgpu::errors`, and at the time it was
 captured the deployed site was still the default `wgpu` build. **The site now
-deploys `crcbl-webgpu`**, so the live question is whether that machine fares any
-better on it — worth asking the reporter to retry. Since `crcbl-wgpu` is being
-deleted at the end of the migration, the wgpu failure itself **is not being
-fixed.** It is recorded only because of what it says about the machine and about
-our own robustness.
+deploys `crcbl-webgpu`**, and `crcbl-wgpu` was deleted on 2026-08-21, so the
+wgpu failure itself was never fixed and now cannot be. The live question is
+whether that machine fares any better on the backend that is deployed — worth
+asking the reporter to retry. It is recorded only because of what it says about
+the machine and about our own robustness.
 
 **It is not an allocation-size problem, and the earlier guess that it was
 `ArrayPages` allocating a large fixed texture array was wrong.** The failing
@@ -1483,24 +1377,23 @@ not the one with the free memory: the plausible causes are the dGPU (an MX550 on
 a PCIe 1.0 x4 link, parked in P8) being unable to serve allocations in that
 state, or Dawn selecting a device or memory type that has nothing available.
 Chromium holds GPU processes on **both** the MX550 and the Intel UHD, so which
-one Dawn opened is still unknown — the engine logs the adapter name as empty
-(`wgpu adapter ""`, type `Other`), which is a real gap in its own right: a bug
-report from a user cannot say which GPU produced it.
+one Dawn opened is still unknown — the engine logged the adapter name as empty
+(`wgpu adapter ""`, type `Other`), a real gap in its own right: a bug report
+from a user cannot say which GPU produced it. That was observed on `crcbl-wgpu`;
+whether `crcbl-webgpu` names the adapter it opened is unchecked.
 
 **What this is worth acting on:**
 
 - **Find out whether `crcbl-webgpu` survives the same machine.** That is the
   backend we are keeping, and it is the only version of this question that
-  matters. Nothing deployed uses it today, so there is nothing for the user to
-  try — publishing a `webgpu`-backed variant of the site alongside the default
-  one would make the new backend testable on real problem hardware instead of
-  only on CI's SwiftShader and one developer's RDNA-3.
-- **We degrade badly rather than failing loudly.** `crcbl-wgpu` does surface
-  these through `crcbl_wgpu::errors` and `crcbl::web`'s `gpu error`, which is
-  better than silence — but the engine keeps running for minutes with invalid
-  textures and empty bind groups, rendering nothing. An unrecoverable device
-  error at start-up should stop and say so. `crcbl-webgpu` no longer shares the
-  gap: `WebGpuDevice::take_error` drains a real queue fed by the browser's
+  matters. The site deploys it now, so the reporter can simply retry — nobody
+  has asked them to.
+- **The failure mode is recorded, and the surviving backend does not share it.**
+  `crcbl-wgpu` surfaced these through `crcbl_wgpu::errors` and `crcbl::web`'s
+  `gpu error`, which was better than silence — but the engine kept running for
+  minutes with invalid textures and empty bind groups, rendering nothing. An
+  unrecoverable device error at start-up should stop and say so. `crcbl-webgpu`
+  does: `WebGpuDevice::take_error` drains a real queue fed by the browser's
   `uncapturederror`, and `Gpu::acquire` calls it each frame and stops recording
   once it answers.
 
@@ -1624,9 +1517,14 @@ object — `Ok` plus a poisoned layout. Fixed.
 **Still open, and it is a seam-shape call rather than a fix:** a caller cannot
 ask "will this layout fit" without building it, so a renderer wanting a fallback
 must construct both. A `Device::can_create_pipeline_layout` verb or a cost model
-would answer it; neither was built. Also note the new wgpu guard has no standing
-test of its own — the seam test only exercises its non-refusing side, and its
-reachability was shown by a temporary edit rather than by a check that stays.
+would answer it; neither was built. **And the refusal arm of
+`a_pipeline_layout_at_every_reported_ceiling_is_served_or_refused_by_name` runs
+on nothing:** on a capable device every layout at the reported ceiling is
+served, so the assertion only ever exercises its accepting side. That was
+noticed because `crcbl-wgpu`'s new `max_bind_groups` guard had no standing test
+of its own — its reachability was shown by a temporary edit rather than by a
+check that stays — and the crate went on 2026-08-21 while the gap in the seam
+test did not.
 
 Original finding: `Limits` documents each field as "a hard ceiling the backend
 guarantees". That is Vulkan's model. D3D12 leaves `max_bind_groups` at the floor
@@ -1943,33 +1841,47 @@ conforming device must serve rather than a limit being probed.
 through one `ExecuteIndirect`, no removal. **So shape and scale are both
 eliminated**, on three negative results and no hardware.
 
-**DECISION NEEDED — which of the two remaining paths is worth the budget.** What
-still differs between the four frames WARP survives and the frame it does not is
-no longer a call or a count. It is the content:
+**DECIDED (2026-08-21) — (a), grow the probe shader toward the real one.** The
+owner chose the bisect over shipping the capability and letting the renderer's
+frame fail, so every step is a shader plus a test and each answer stays clean.
+(b) is not refused, only deferred: it re-keys every D3D12 golden before any
+diagnosis starts, and that cost does not shrink by waiting.
 
-- `mesh_cluster.slang` against `mesh_shader.slang` — groupshared memory, an
-  amplification **payload**, the cluster-DAG descent, and a far larger DXIL;
-- the **bindless descriptor heap**, which the toy shader does not touch at all;
-- the rest of the renderer's frame — the culling compute pass that writes the
-  indirect args, and several draws per frame rather than one.
+**One suspect on that list was wrong, and the probes already say so.**
+`mesh_shader.slang`'s `taskMain` builds an `Amplification` payload and passes it
+to `DispatchMesh`, and `amplifiedMeshMain` reads it back through `in payload` —
+so an amplification payload rides through both passing amplified probes. It is
+not a difference between the frames WARP survives and the one it does not, and
+the list below no longer names it.
 
-Neither next step is small:
+**Fourth negative result: a zero-group `DispatchMesh`.** `mesh_cluster.slang`'s
+`taskMain` ends `DispatchMesh(keep, 1, 1, payload)` where `keep` is `0` on a
+culled cluster, so the renderer asks D3D12 to dispatch **nothing** on every
+frame that culls anything — and no probe had ever asked for that.
+`a_zero_group_dispatch_mesh_does_not_remove_the_device` drives
+`zero_dispatch_probe.slang`'s `culledTaskMain`, which dispatches one mesh group
+for odd `SV_GroupID` and none for even, so both arms run inside one
+`ExecuteIndirect`. **It passed** — `PASS [0.095s] (37/82)` on run 32410198419,
+confirmed by name in the job log. So a zero dispatch count is not it either.
 
-- **(a) Grow the probe shader toward the real one.** Add a payload, then
-  groupshared, then the heap, one at a time, each a separate CI round trip.
-  Keeps every result a clean bisect and needs no golden changes, but it is
-  several slices and each one is a shader plus a test.
-- **(b) Report `Features::MESH_SHADER` from `crcbl_dx12::adapter` and let the
-  renderer's own frame fail.** This is the change we actually want to ship, and
-  the failure it produces is the real one rather than a proxy. The cost is the
-  one this entry has always named: every D3D12 adapter moves onto
-  `GeometryPath::MeshShader` and **every golden image re-keys**, which is its
-  own slice before any diagnosis starts.
+**What is still on the list**, in the order it is being taken:
 
-**What is no longer in question either way**: WARP's `ExecuteIndirect` of
-`DISPATCH_MESH`, its amplification stage, and both together at a thousand groups
-all work. Anything that begins "WARP cannot do mesh shading" is contradicted by
-`crates/crcbl-dx12/src/device.rs`'s four probes.
+- **UAV traffic from the amplification stage.** `mesh_cluster.slang`'s
+  `taskMain` does an atomic `cull_stats[word].add(1u)` and a plain
+  `cluster_selection[index] = selected`, both under branches, before it
+  dispatches. Every probe so far writes **nothing** from that stage, and an
+  atomic from an amplification shader is a far less travelled path than the
+  dispatch itself.
+- **Groupshared memory**, which no probe uses.
+- **The bindless descriptor heap**, which the toy shaders do not touch at all.
+- **The cluster-DAG descent and the much larger DXIL** behind it.
+- **The rest of the renderer's frame** — the culling compute pass that writes
+  the indirect args, and several draws per frame rather than one.
+
+**What is no longer in question**: WARP's `ExecuteIndirect` of `DISPATCH_MESH`,
+its amplification stage, both together at a thousand groups, and a dispatch
+count of zero all work. Anything that begins "WARP cannot do mesh shading" is
+contradicted by the probes in `crates/crcbl-dx12/src/device.rs`.
 
 **Worth stating because it is the shape of the whole exercise:** every one of
 these is a _negative_ result, and each is still progress. The entry started at
@@ -2263,9 +2175,7 @@ accommodate one, and is worth naming only to reject.
 closed the coverage gap this entry used to record: it draws twice in one render
 pass with different `push_constant_raster.slang` blocks and asserts each draw
 saw its own, with the vertex stage taking its rectangle from the block and the
-fragment stage its colour. Verified on vk against real hardware (RADV Navi31),
-and `Refused` on wgpu, which is that backend's answer at layout creation because
-it never enables wgpu's `IMMEDIATES`.
+fragment stage its colour. Verified on vk against real hardware (RADV Navi31).
 
 **The Metal and dx12 arms have since run green.** They were type-checked only
 when this was written — `--target aarch64-apple-darwin` and
@@ -2608,11 +2518,10 @@ Re-derived from the tree on 2026-08-19, so the deletion is a reviewed change
 rather than a grep. Two halves: what actually references the crate, and what its
 removal does to `parity_blockers`.
 
-**One question the deletion forecloses, and it is not on the bar.** See
-"DECISION NEEDED — the browser's WebGL2 fallback dies with `crcbl-wgpu`". Every
-other item gating this deletion can be revisited afterwards; that one cannot,
-because deleting the crate deletes the only WebGL2 path there is to build. It
-should be answered before the crate goes rather than discovered after.
+**One question the deletion foreclosed, and it was not on the bar.** See
+"DECIDED — the browser has no WebGL2 fallback" above. Every other item gating
+this deletion could be revisited afterwards; that one could not, because
+deleting the crate deleted the only WebGL2 path there was to build.
 
 **The code surface is five files and two manifests.** Everything else that names
 `wgpu` names it in prose. Counting only lines that are not comments:
@@ -2685,11 +2594,12 @@ _suite's_ machinery rather than any real divergence. But after the deletion the
 Linux seam job tests one direction of the parity contract and the other lives
 only on Windows and macOS runners.
 
-So the deletion's parity half is: drop `is_parity_target` and its call in
+So the deletion's parity half was: drop `is_parity_target` and its call in
 `parity_blockers`, or keep it for `Null` alone and rewrite that test to say so.
-The first is honest and the second is machinery for a case that cannot arise —
-`Null` declares no divergence because it records rather than draws. Worth
-deciding when the deletion is made rather than discovering it as a red test.
+**The first was taken.** `parity_blockers` now filters on `BackendKind::is_gpu`,
+`is_parity_target` is gone, and `every_gpu_backend_is_inside_the_goal` in
+`crates/crcbl-hal/src/capability.rs` is the test that replaced
+`crcbl_wgpu_is_outside_the_goal_by_construction`.
 
 ### MEASURED — vk↔WebGPU replaces vk↔wgpu as the cross-backend oracle
 
@@ -2731,8 +2641,8 @@ which is what says the gate measures the browser backend rather than the
 reference's rasteriser.
 
 **What it does not do.** It compares eleven scenes at one size, where the job it
-replaces compares three at two. Nothing has been deleted yet: the vk↔wgpu job
-stays until `crcbl-wgpu` goes, and this runs beside it.
+replaces compared three at two. That job is gone — it went with `crcbl-wgpu` on
+2026-08-21, and this is what stands in its place rather than beside it.
 
 The remaining half of the deletion bar is the parity blockers, all of them rows
 of hardware nobody here has. The count is deliberately not written here — it has
@@ -2849,15 +2759,6 @@ contract's two directions:
 Whether either could be made to hold under both asks is unexamined. The CI step
 runs `-E 'test(every_declared_capability_behaves_the_way_it_was_declared)'`.
 
-**`crcbl-wgpu` fails the narrow pass and was deliberately not fixed.**
-`Capability::PolygonModeLine` is declared supported unconditionally, and on a
-device opened without `POLYGON_MODE_LINE` the pipeline creation comes back as a
-raw wgpu validation error — "Features … are required but not enabled on the
-device" — rather than `HalError::Unsupported`. The suite's own message says why
-that matters: "a caller branching on that variant to pick a fallback would miss
-this refusal entirely". Left alone because that crate is slated for deletion; if
-the deletion is ever abandoned, this is a real defect in it.
-
 **`crcbl-dx12` and `crcbl-mtl` had vk's exact inconsistency and it is fixed.**
 Both declared `Capability::TimelineWaitBeforeSignal => Support::Yes`
 unconditionally while the arm beside it gated the timeline group on
@@ -2922,11 +2823,10 @@ test can ever cover them** and a browser probe group is the only possible route,
 not merely the convenient one. Three earlier versions of this paragraph gave a
 setup-cost reason instead, and each was wrong about which rows it applied to.
 
-So of the five backends the pattern was checked on: three had it (`crcbl-vk`,
-`crcbl-dx12`, `crcbl-mtl`, all fixed), `crcbl-webgpu` did not, and `crcbl-wgpu`
-has a different defect in the same family — `PolygonModeLine` refusing through a
-raw validation error rather than `HalError::Unsupported`, left alone for the
-deletion.
+So of the backends the pattern was checked on: three had it (`crcbl-vk`,
+`crcbl-dx12`, `crcbl-mtl`, all fixed) and `crcbl-webgpu` did not. `crcbl-wgpu`
+had a different defect in the same family and was deleted before it was fixed —
+see "A capability refusal must be `Unsupported`" below.
 
 ### DECISION NEEDED — occlusion queries: finish them, refuse them, or delete them
 
@@ -2948,11 +2848,9 @@ this seam would cull the entire scene and every return value would say success.
 
 **Which backends this reaches, measured rather than assumed.** `crcbl-vk`
 answers `Support::Yes` (gated, and radv has the feature) and is where the
-`[0, 0]` came from. `crcbl-wgpu` **refuses** — it builds no query sets at all —
-so there is no trap there. `crcbl-webgpu` answers `Support::Yes`
-unconditionally, and `crcbl-dx12` and `crcbl-mtl` gate on a device feature, so
-on any device that has it the same read is available. The `Null` backend records
-and answers `Yes`.
+`[0, 0]` came from. `crcbl-webgpu` answers `Support::Yes` unconditionally, and
+`crcbl-dx12` and `crcbl-mtl` gate on a device feature, so on any device that has
+it the same read is available. The `Null` backend records and answers `Yes`.
 
 `Capability::OcclusionQuery` is honest about this — its doc is "a
 `QueryKind::Occlusion` query set", nothing more, unlike `TimestampQuery` whose
@@ -3423,8 +3321,8 @@ written here and both had rotted by a third; ask the file. At least seven of its
 tests open the device demanding `Features::MESH_SHADER | Features::TASK_SHADER`
 and then assert that `GeometryPath::MeshShader` was the path selected — one
 failure message even says "radv and lavapipe both report VK_EXT_mesh_shader".
-That path does not exist on wgpu, WARP or Metal, so those tests assert a Vulkan
-fact, not a seam fact.
+That path does not exist on WARP or Metal, so those tests assert a Vulkan fact,
+not a seam fact.
 
 **Decision, taken rather than deferred: split each affected test in two.** The
 claim about what the cluster DAG selected — which levels, which clusters, how
@@ -3638,7 +3536,7 @@ need it.
 5. ~~Push constants~~ — **landed.** The artifact it was waiting on is
    `push_constant_probe.slang` and its committed `dxil`, and dx12 now carries no
    `PushConstants` row in `DIVERGENCES` at all. WGSL cannot carry the block, so
-   the artifact's target list excludes wgsl and both wgpu backends stay refused.
+   the artifact's target list excludes wgsl and `crcbl-webgpu` stays refused.
 6. **Mesh, and only after a measurement.** Largest, riskiest, and the only one
    whose provability is unknown: `crcbl-dx12` never calls `CheckFeatureSupport`
    for `OPTIONS7`, so it reports no mesh support **by construction rather than
@@ -3753,16 +3651,16 @@ Written 2026-08-18, when `PassTimestampWrites` replaced
   batch to after its close, and the module doc argued that was the more useful
   number. It is no longer available: a pass boundary is a pass boundary. What a
   profiler now cannot see is a pass whose transitions cost more than its draws.
-- **`crcbl-mtl` and `crcbl-wgpu` refuse a pass carrying timestamps rather than
-  accepting and dropping it.** Neither can create a timestamp set, so any set
-  such a pass could name is dead or of another kind, and the seam's
-  degrade-rather-than-break rule is discharged one level up: `PassTimers::new`
-  gates on `Features::TIMESTAMP_QUERY` and builds nothing on either backend, so
-  the refusal is unreachable from the engine. If a caller ever hand-rolls a
-  timed pass without checking the flag, it will get a loud `HalError` rather
-  than silent zeros — which is the intended direction, but it is a behaviour
-  change from "accepted and dropped" and is written down here rather than only
-  in the code.
+- **`crcbl-mtl` refuses a pass carrying timestamps rather than accepting and
+  dropping it.** It cannot create a timestamp set, so any set such a pass could
+  name is dead or of another kind, and the seam's degrade-rather-than-break rule
+  is discharged one level up: `PassTimers::new` gates on
+  `Features::TIMESTAMP_QUERY` and builds nothing there, so the refusal is
+  unreachable from the engine. If a caller ever hand-rolls a timed pass without
+  checking the flag, it will get a loud `HalError` rather than silent zeros —
+  which is the intended direction, but it is a behaviour change from "accepted
+  and dropped" and is written down here rather than only in the code.
+  `crcbl-wgpu` refused the same way, and was deleted 2026-08-21.
 - **The browser gate asserts `end >= start` and not `end > start`.** Chromium
   quantises timestamp-query results (100 µs at the time of writing) unless
   started with `--disable-dawn-features=timestamp_quantization`, so probe group
@@ -3804,13 +3702,13 @@ which is `timestampWrites`' own shape, so the replayer passes it straight
 through and there is no free-standing call left to place wrongly. The feature
 leak the same section named is closed the way it asked — by implementing.
 
-**What has no browser-side evidence at all**, and matters because after
-`crcbl-wgpu` is deleted these are claims resting on nothing: `DepthClamp` —
-every probe pipeline sets it false; `BinarySemaphore` — unprovable by
-construction and honestly declared so; and `SamplerAnisotropy`, whose `Yes` arm
-is **unreachable** because the limit is pinned to 1.
+**What has no browser-side evidence at all**, and matters because with
+`crcbl-wgpu` deleted these are claims resting on nothing: `DepthClamp` — every
+probe pipeline sets it false; `BinarySemaphore` — unprovable by construction and
+honestly declared so; and `SamplerAnisotropy`, whose `Yes` arm is
+**unreachable** because the limit is pinned to 1.
 
-### DECISION NEEDED — the seam's two attachment usages, which three of five backends fold
+### DECISION NEEDED — the seam's two attachment usages, which half the backends fold
 
 Found on 2026-08-20 by the impossible case in
 `a_created_image_is_one_the_device_can_serve`: ask for `Format::Rgba8Unorm` with
@@ -3818,33 +3716,35 @@ Found on 2026-08-20 by the impossible case in
 
 - **`crcbl-vk` refuses it** — `vkGetPhysicalDeviceImageFormatProperties2`
   answers `VK_ERROR_FORMAT_NOT_SUPPORTED`, on radv and on lavapipe alike;
-- **`crcbl-wgpu` serves it**, with no pending error.
+- **`crcbl-wgpu` served it**, with no pending error. That crate was deleted on
+  2026-08-21 and `crcbl-webgpu` folds the two usages the same way, which is why
+  this entry outlives it.
 
 **Neither backend is wrong on its own terms**, which is what makes this a seam
-problem rather than a bug report. `crcbl_wgpu::conv::map_image_usage` folds
+problem rather than a bug report. `crcbl_wgpu::conv::map_image_usage` folded
 `COLOR_ATTACHMENT` and `DEPTH_STENCIL_ATTACHMENT` into the single
 `wgpu::TextureUsages::RENDER_ATTACHMENT`, because that is what WebGPU has:
 whether a texture can be a depth attachment is decided by its **format**, not by
 a usage bit. So the caller's distinction is lost in the mapping, and what comes
 back is a perfectly good colour render target that cannot be a depth attachment.
 
-**Measured on all five backends, and the split is 3–2 the other way from the
-first reading.** `Format::Rgba8Unorm` asked for as an
+**Measured on every backend then in the tree, and the split is 3–2 the other way
+from the first reading.** `Format::Rgba8Unorm` asked for as an
 `ImageUsage::DEPTH_STENCIL_ATTACHMENT`:
 
-| backend                     | answer                                                              |
-| --------------------------- | ------------------------------------------------------------------- |
-| `crcbl-vk` (radv, lavapipe) | **refused** — `VK_ERROR_FORMAT_NOT_SUPPORTED` from the format query |
-| `crcbl-dx12` (WARP)         | **refused** — `CreateCommittedResource` returns `0x80070057`        |
-| `crcbl-mtl` (CI Mac)        | served                                                              |
-| `crcbl-wgpu` (lavapipe)     | served                                                              |
+| backend                                     | answer                                                              |
+| ------------------------------------------- | ------------------------------------------------------------------- |
+| `crcbl-vk` (radv, lavapipe)                 | **refused** — `VK_ERROR_FORMAT_NOT_SUPPORTED` from the format query |
+| `crcbl-dx12` (WARP)                         | **refused** — `CreateCommittedResource` returns `0x80070057`        |
+| `crcbl-mtl` (CI Mac)                        | served                                                              |
+| `crcbl-wgpu` (lavapipe, deleted 2026-08-21) | served                                                              |
 
 **This corrects an earlier reading here that called the fold "inherent to
 WebGPU".** It is not a browser property. `crcbl_mtl::conv::texture_usage` folds
-the same two flags into the single `MTLTextureUsage::RenderTarget`, so **three
-of the five APIs have one render-target usage** — Metal, wgpu and WebGPU — and
-only Vulkan and D3D12 carry two. The seam's two flags are the minority position,
-not the norm one backend family fails to meet.
+the same two flags into the single `MTLTextureUsage::RenderTarget`, so **half
+the APIs the seam targets have one render-target usage** — Metal and WebGPU —
+and only Vulkan and D3D12 carry two. The seam's two flags are the minority
+position, not the norm one backend family fails to meet.
 
 **And it closes the dx12 question this entry opened.** `crcbl-dx12`'s refusal
 path was unexercised when the contract test only asked about depth formats,
@@ -3852,12 +3752,12 @@ since WARP serves both; the impossible case reaches it, and D3D12 refuses on its
 own without any per-format query. dx12 is proven to refuse rather than merely
 untested.
 
-**It survives the `crcbl-wgpu` deletion either way.** `gpu-replay.js` folds the
-same two flags for the same reason and says so at length: "`COLOR_ATTACHMENT`
-and `DEPTH_STENCIL_ATTACHMENT` are both `RENDER_ATTACHMENT`: WebGPU has one
-attachment usage and reads _which kind_ off the format". So `crcbl-webgpu` — the
-backend that outlives `crcbl-wgpu` — behaves the same way, and this divergence
-is permanent unless the seam closes it.
+**It survived the `crcbl-wgpu` deletion.** `gpu-replay.js` folds the same two
+flags for the same reason and says so at length: "`COLOR_ATTACHMENT` and
+`DEPTH_STENCIL_ATTACHMENT` are both `RENDER_ATTACHMENT`: WebGPU has one
+attachment usage and reads _which kind_ off the format". So `crcbl-webgpu`
+behaves the same way, and this divergence is permanent unless the seam closes
+it.
 
 **That comment argues the fold is lossless, and it is right about the texture
 and incomplete about the descriptor.** Its claim — "the seam's two flags carry
@@ -3873,7 +3773,7 @@ disagree with.
 **Which sharpens the fix rather than changing it.** Only the seam can catch this
 one, on any browser backend, ever — so if it is worth catching, it is worth
 catching there. That is a stronger argument for a seam-level check than the
-original measurement gave, and it applies after `crcbl-wgpu` is gone.
+original measurement gave, and it still applies with `crcbl-wgpu` gone.
 
 **The parity mechanism cannot see this**, and that is the interesting part. It
 is not a capability — no `Capability` names it, both backends would answer the
@@ -3886,8 +3786,8 @@ that is fine but is not what was asked for.
 permits a colour format as a depth-stencil attachment, so the _seam_ can refuse
 it before any backend sees it. `Format` already knows whether it is a depth
 format, so a shared helper in `crcbl-hal` called at the top of each
-`create_image` would make all five refuse identically, and the impossible case
-above would then be refused everywhere rather than on some backends.
+`create_image` would make every backend refuse identically, and the impossible
+case above would then be refused everywhere rather than on some backends.
 
 **The option the seam rule actually points at, and my first write-up missed it:
 delete the distinction.** The standing rule is "refactor anything that cannot
@@ -3900,9 +3800,9 @@ Applied here that means one `ImageUsage::RENDER_ATTACHMENT` in place of
 `COLOR_ATTACHMENT` and `DEPTH_STENCIL_ATTACHMENT`, with each backend deriving
 the API bit it needs from the format — which `crcbl-vk` can do, since the format
 determines which of `VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT` and
-`VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` is correct, and which **three of
-the five backends already do**: Metal, wgpu and WebGPU all fold the pair onto
-one render-target bit today, so the merge adopts the majority shape rather than
+`VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` is correct, and which **half the
+backends already do**: Metal and WebGPU both fold the pair onto one
+render-target bit today, so the merge adopts the majority shape rather than
 inventing one. It makes the contradictory descriptor _unwritable_ rather than
 merely refused, which is the difference between a lock and a convention.
 
@@ -3927,7 +3827,7 @@ expensive. Worth deciding rather than reaching for the first shape.
 ### DECISION NEEDED — how a caller asks whether a format is usable
 
 Found while building the seam suite's raster fixture, which needed a
-depth-stencil attachment and hit both:
+depth-stencil attachment and hit it:
 
 - **`crcbl-vk::create_image` does not check format support.** Asking for
   `D24UnormS8Uint` as a `DEPTH_STENCIL_ATTACHMENT` on radv returns `Ok`, while
@@ -3935,10 +3835,6 @@ depth-stencil attachment and hit both:
   `vkGetPhysicalDeviceImageFormatProperties2` and then two more VUIDs at view
   and pipeline creation. The first draft of that fixture **passed on undefined
   behaviour** before the layer output was read.
-- **`crcbl-wgpu::create_image` is not wrapped in `checked()`**, unlike
-  `create_graphics_pipeline` next to it — a format the device did not enable
-  arrives through the uncaptured-error handler and a live-looking handle comes
-  back anyway.
 
 **The root cause is a seam gap, not two backend bugs.** `DeviceCaps` carries
 features and numeric limits and **no format table**, so a caller has no portable
@@ -3961,20 +3857,14 @@ with `HalError::Unsupported`. Measured both ways by forcing the raster fixture
 to try `D24UnormS8Uint` first — it returned `Ok` before and is refused now — and
 it refuses nothing in use across every suite on radv.
 
-**`crcbl-wgpu`'s half is fixed too.** `create_texture` is wrapped in `checked()`
-now, like `create_graphics_pipeline` beside it. It was left for the deletion
-until a new agnostic test — `a_created_image_is_one_the_device_can_serve` in the
-seam suite — found it on the first run, refusing `D32FloatS8Uint` on a device
-without `depth32float-stencil8`. Fixing it was cheaper than excusing it, and
-leaving it would have meant a red seam job on that backend.
-
 **The contract now has a test, which is what makes this stop recurring.** It
 asserts a successful `create_image` yields a usable image, reads both error
-channels — `crcbl-mtl` refuses through the return value and `crcbl-wgpu` through
-`Device::take_error` — and requires at least one format to be served, so a run
+channels — a backend may refuse through the return value, as `crcbl-mtl` does,
+or leave the refusal on `Device::take_error`, which is how `crcbl-wgpu` did it
+before it was deleted — and requires at least one format to be served, so a run
 where everything was refused cannot pass as coverage of the accepting path.
-Measured: radv serves `D32FloatS8Uint` and refuses `D24UnormS8Uint`, wgpu the
-exact reverse, lavapipe both.
+Measured: radv serves `D32FloatS8Uint` and refuses `D24UnormS8Uint`, lavapipe
+both.
 
 **Answered on 2026-08-20 by the new contract test, and the two answers differ.**
 `a_created_image_is_one_the_device_can_serve` ran on both platforms in CI:
@@ -4003,16 +3893,29 @@ seam suite's raster fixture negotiates — it tries `D32FloatS8Uint`, then
 `Device::take_error`. That workaround is the shape every caller would otherwise
 have to reinvent, which is the argument for the query.
 
-### A wgpu pipeline refusal is `Backend`, not `Unsupported`
+### A capability refusal must be `Unsupported`, and an error channel is not one
 
-`crcbl-wgpu::create_graphics_pipeline` refuses through `checked()`, which
-produces `HalError::Backend`. On a wgpu device lacking `POLYGON_MODE_LINE` or
-`DEPTH_CLIP_CONTROL`, `Support::NotOnThisDevice` would meet a `Backend` error
-and the seam suite's "a capability refusal is `Unsupported` and nothing else"
-assertion would fire. Not reproducible on this machine — the adapter here has
-both features — but the raster exercises made it **reachable where it was not
-before**, so it is a live hazard on a poorer device rather than a theoretical
-one.
+The seam suite asserts that a capability declared unsupported is refused with
+`HalError::Unsupported` **and nothing else**, because a caller branching on that
+variant to pick a fallback would miss any other shape. There are two ways a
+backend defeats it, both found on `crcbl-wgpu` (deleted 2026-08-21) and neither
+specific to that crate:
+
+- **Refusing through a driver-level error channel.** Its
+  `create_graphics_pipeline` refused through `checked()`, which produces
+  `HalError::Backend`, so on a device lacking `POLYGON_MODE_LINE` or
+  `DEPTH_CLIP_CONTROL` a `Support::NotOnThisDevice` row met a `Backend` error
+  and the assertion would have fired.
+- **Declaring a capability unconditionally.** `Capability::PolygonModeLine` was
+  `Support::Yes` whatever the device reported, so on a poorer device the refusal
+  arrived as a raw validation error rather than through the seam at all.
+
+**Neither was reproducible here** — the adapters on this machine have the
+features — which is why the shape is worth recording rather than the instance.
+`crcbl-webgpu` answers `Capability::OcclusionQuery` `Support::Yes`
+unconditionally (measured in the occlusion-query entry above), which is the same
+second half; whether any surviving backend's refusals arrive as something other
+than `Unsupported` on a device that lacks a feature has not been checked.
 
 ### MEASURED — CI's Metal device can serve neither query, and no mesh
 
@@ -4145,23 +4048,21 @@ target contributes nothing to it, and one that declares it again is caught.
 
 **What this unblocked:** dx12's `PushConstants` row is closed; Metal's still
 stands, and its slice is smaller than planned because the block lands behind the
-bound buffer rather than ahead of it. Plus the re-homing of `crcbl-wgpu`'s
-push-constant-range exercise, which is one of the two coverage losses still
-standing between here and that crate's deletion.
+bound buffer rather than ahead of it.
 
 ### No GPU job in CI runs on real hardware, and one defect has already proved it matters
 
-Enumerated from the workflows on 2026-08-18, every adapter every GPU job opens:
+Enumerated from the workflows on 2026-08-18, every adapter every GPU job opens.
+The `wgpu-e2e` and `cross-backend-e2e` rows went with `crcbl-wgpu` on 2026-08-21
+and are struck rather than left naming jobs that no longer exist:
 
-| job                          | backend    | adapter                               |
-| ---------------------------- | ---------- | ------------------------------------- |
-| `vk-e2e`                     | vk         | **lavapipe** (`CRCBL_VK_ICD` pins it) |
-| `wgpu-e2e`                   | wgpu       | **lavapipe**                          |
-| `cross-backend-e2e`          | vk vs wgpu | **lavapipe** both sides               |
-| `dx12-e2e`                   | dx12       | **WARP** (`CRCBL_ADAPTER=cpu`)        |
-| `mtl-e2e`                    | mtl        | **Apple Paravirtual device**          |
-| Pages probe (Linux, Windows) | webgpu     | **SwiftShader**                       |
-| Pages probe (macOS)          | webgpu     | Apple Paravirtual, through Metal      |
+| job                          | backend | adapter                               |
+| ---------------------------- | ------- | ------------------------------------- |
+| `vk-e2e`                     | vk      | **lavapipe** (`CRCBL_VK_ICD` pins it) |
+| `dx12-e2e`                   | dx12    | **WARP** (`CRCBL_ADAPTER=cpu`)        |
+| `mtl-e2e`                    | mtl     | **Apple Paravirtual device**          |
+| Pages probe (Linux, Windows) | webgpu  | **SwiftShader**                       |
+| Pages probe (macOS)          | webgpu  | Apple Paravirtual, through Metal      |
 
 **There is no real GPU anywhere in it.** Every golden, every seam exercise and
 every capability claim is verified against a software rasteriser or a
@@ -4820,10 +4721,12 @@ confirmed; the rest of this file assumes them.
   was leaving three of four committed shader artifacts validated by nothing —
   the gap that let `wgsl/ui.wgsl` ship for months with a `var<uniform>` carrying
   no binding decoration, which `crcbl-wgpu` could never have loaded. naga is the
-  tool that would have caught it, is already in `Cargo.lock` through wgpu at the
-  same version, and is dev-only so it does not ship. `git diff Cargo.lock` is a
-  three-line dependency edge and **no new package entered the graph**;
-  `cargo deny` is clean. **To override:** drop the dev-dependency and the WGSL
+  tool that would have caught it, and is dev-only so it does not ship. **The
+  lockfile half of the original argument expired on 2026-08-21**: it was
+  "already in `Cargo.lock` through wgpu at the same version", so no new package
+  entered the graph; with `crcbl-wgpu` deleted naga is a pin of its own. The
+  owner confirmed it stays anyway — see "The `crcbl-wgpu` deletion bar was
+  already answered" above. **To override:** drop the dev-dependency and the WGSL
   artifacts go back to being unchecked, or find a validator that is not naga.
 
 - **The shader manifest's section order was locale-dependent, and that broke
@@ -4884,11 +4787,6 @@ confirmed; the rest of this file assumes them.
   `DrawParameters`). Recorded as reopenable in `docs/plan/02-vulkan-backend.md`
   with a named trigger. **To override:** adopt SPIRV-Cross and spirv-to-dxil for
   the native targets.
-- **`crcbl-wgpu` should report capabilities honestly rather than pinning to a
-  low tier.** wgpu on native exposes bindless, multi-draw-indirect-count, ray
-  query and mesh shaders; the reduced set belongs to the browser, not the crate.
-  **To override:** keep it deliberately limited as a pure triage backend, and
-  say so in its crate docs so the pinning is not read as a bug.
 - **The editor is native-only.** `10-wasm-webgpu.md` called editor-in-browser a
   stretch that "should mostly work by construction"; the asset browser, OS
   drag-drop and the file watcher are all native-shaped and nobody examined it.
@@ -7527,12 +7425,13 @@ MoltenVK option this entry originally listed alongside them.
 
 Reasons, so this is not re-argued:
 
-- **GL is already reachable and nobody needs a crate for it.** `crcbl-wgpu`
-  enumerates `wgpu::Backends::all()` and wgpu's default feature set includes
-  `gles`, so a GL device is enumerable through the existing backend today. It is
-  present and unproven rather than supported — nothing in CI exercises it — but
-  the cheap experiment would be pointing the existing wgpu e2e suite at a GL
-  device, not writing a backend.
+- **GL was already reachable and nobody needed a crate for it.** `crcbl-wgpu`
+  enumerated `wgpu::Backends::all()` and wgpu's default feature set includes
+  `gles`, so a GL device was enumerable through the existing backend — present
+  and unproven rather than supported, since nothing in CI exercised it. **This
+  reason expired on 2026-08-21**: that crate is deleted, so nothing in the tree
+  enumerates a GL device any more. The decision stands on the two reasons below,
+  which are the load-bearing ones.
 - **The blocker is above the seam, not at it.** `RendererTier` declares exactly
   two tiers, and Tier B is not a low bar: per-batch indirect draws, indexed SSBO
   lookups, and culling still running in compute. GLES 3.0 has no compute, no
@@ -7652,10 +7551,10 @@ coverage win available and needs no new HAL backend at all.
 
 **Does WARP clear Tier A?** Specifically SM6.6 dynamic resources, which this
 backend is specced around. If it does, the Windows CI argument is real and DX12
-buys golden-image coverage on a second OS. If WARP is Tier B only, `crcbl-wgpu`
-already covers that on Windows and the CI half of the justification collapses,
-leaving Xbox and tooling. Cheap to check, and it changes how much of the above
-is true — so check it before committing the phase, not during it.
+buys golden-image coverage on a second OS. If WARP is Tier B only, the CI half
+of the justification collapses, leaving Xbox and tooling. Cheap to check, and it
+changes how much of the above is true — so check it before committing the phase,
+not during it. is true — so check it before committing the phase, not during it.
 
 ## Considered and deferred: console backends
 
@@ -8318,14 +8217,13 @@ the transport seam over a third transport shape.
 
 ### Owed by the shader guardrails
 
-- **The differential render gate is still vk↔wgpu only.** Rule 5 asks for every
-  backend; the gate now covers three scenes (cube, sprite, ui) across two, which
-  closes the shaders with a history of divergence and leaves **Metal and D3D12
-  entirely outside it**. A `sprite.slang` or `ui.slang` that means something
-  different on MSL or DXIL would not be caught by anything. Both are blocked on
-  the same prerequisites as everything else on those backends: `crcbl-mtl`'s
-  draw tests are quarantined on a GPU hang, and `crcbl-dx12` refuses offscreen
-  surfaces so it cannot read a frame back at all.
+- **The differential render gate does not reach D3D12.** Rule 5 asks for every
+  backend. The vk↔wgpu comparison this bullet used to name went with
+  `crcbl-wgpu` on 2026-08-21; its heir is `web/run-cross-backend-e2e.sh`, which
+  holds the browser against vk on Linux and against Metal on macOS, so Metal is
+  inside the gate now and D3D12 is what is left outside it. A `sprite.slang` or
+  `ui.slang` that means something different on DXIL is caught by the shared
+  goldens and by nothing that compares two implementations directly.
 
 - **The cross-backend CI job's timeout was left at 30 minutes while its work
   tripled** (4 renders to 12). The renders are seconds on lavapipe and the
@@ -8361,9 +8259,9 @@ run.
 **A wrong workgroup size is caught on Vulkan and nowhere else.**
 `crcbl_vk::spirv::require_workgroup_size` reads `OpExecutionMode … LocalSize`
 and refuses a descriptor that disagrees with the shader. Metal cannot (MSL
-declares no thread count, which is why the field exists) and wgpu keeps no
-module source after `create_shader_module`. Safe only while every compute shader
-is also run under Vulkan, which is true today and will not always be.
+declares no thread count, which is why the field exists). Safe only while every
+compute shader is also run under Vulkan, which is true today and will not always
+be.
 
 ### Settled: `setDepthStencilState(nil)` hung every Metal draw
 
@@ -8607,7 +8505,7 @@ is bit-identical through it. What is not settled:
   outside a pass and the graph has no fill step.** A graph-level fill, or a tiny
   clear dispatch, would let them be device-local.
 - **The browser will take `IndirectPerBatch`** — WebGPU has neither indirect
-  feature — and that has not been tested there. Native wgpu selects
+  feature — and that has not been tested there. The native backends select
   `IndirectCount`, so the browser's arm is not the one CI exercises.
 - **A golden is not sufficient for this stage.** Breaking `first_index` to zero
   left the cube golden **bit-identical** and was caught only by the argument
@@ -8712,6 +8610,37 @@ green run over content that does not use the feature.
   has any global shader parameter is invalid on Metal. Nothing checks this — the
   `xcrun metal` CI step catches it after the fact, which is how it was found.
 
+- **Slang's Metal backend miscompiles any module with two amplification entry
+  points, and the damage lands on the one you did not touch.** Found on
+  2026-08-21 while adding a second task stage to `mesh_shader.slang` for the
+  D3D12 WARP bisect; it constrains every future mesh shader here, which is why
+  it is written down rather than worked around silently.
+
+  Slang 2026.14 emits **every** `[[object]]` function in such a module with its
+  payload and `mesh_grid_properties` parameters listed twice — a redefined
+  parameter, which `xcrun metal` will not take:
+
+  ```
+  [[object]] void taskMain(Amplification_0 object_data* _slang_mesh_payload
+    [[payload]], mesh_grid_properties _slang_mgp, Amplification_0 object_data*
+    _slang_mesh_payload [[payload]], mesh_grid_properties _slang_mgp, …)
+  ```
+
+  Reduced to a standalone file to confirm it is the second amplification entry
+  point rather than `SV_GroupID`: two payload-less-parameter task entry points
+  reproduce it exactly. Giving the second one its own payload struct removes the
+  duplication and produces a **different** defect instead — both `[[object]]`
+  functions declare the first payload type, and the second then assigns a value
+  of the other type through it.
+
+  **The rule that falls out:** one amplification entry point per `.slang`
+  module. A new task stage goes in a new file, as
+  `shaders/zero_dispatch_probe.slang` does. That costs nothing on D3D12, which
+  resolves each stage's DXIL container separately, so a pipeline can still pair
+  a task stage from one module with mesh and fragment stages from another.
+  Nothing checks this either; the `xcrun metal` CI step is what catches it, and
+  the breakage appears in an entry point the change never mentions.
+
 - **Not reproduced: a lavapipe SIGSEGV in CI that does not occur locally.**
   `retire::two_submissions_referencing_one_destroyed_buffer_keep_it_alive`
   segfaulted on CI's lavapipe during the same run, in a test unrelated to mesh
@@ -8810,11 +8739,11 @@ green run over content that does not use the feature.
 - **"Tier" vocabulary survives in inline comments across the backends.** The
   type is gone and the doc comments are cleaned, but narrative comments,
   `.expect()` strings and test names still say Tier A/B in `crcbl-render`,
-  `crcbl-wgpu`, `crcbl-mtl`, `crcbl-vk` and `crcbl-dx12`. Two caveats before
-  anyone sweeps it: `crcbl-render`'s references were about the
-  `ui.slang`/`ui_tier_b.slang` **shader permutation**, which no longer exists —
-  that fork is deleted, so those are now simply dead words; and much of
-  `crcbl-dx12`'s is real D3D12 `ResourceBindingTier` vocabulary that must stay.
+  `crcbl-mtl`, `crcbl-vk` and `crcbl-dx12`. Two caveats before anyone sweeps it:
+  `crcbl-render`'s references were about the `ui.slang`/`ui_tier_b.slang`
+  **shader permutation**, which no longer exists — that fork is deleted, so
+  those are now simply dead words; and much of `crcbl-dx12`'s is real D3D12
+  `ResourceBindingTier` vocabulary that must stay.
 
 - **Every path selector value must be executed by something.** A `GeometryPath`,
   `BindingModel` or `LightingPath` value no device in CI selects is compiled and
@@ -9061,12 +8990,15 @@ The slice brief asked for `--run-ignored all` on both
 **That was not done, on `docs/plan/12-testing.md`'s authority**, which reserves
 that run as the one that deliberately does not execute the ignored set so it
 stays green on a machine with no compositor and no GPU. Measured rather than
-argued: `cargo nextest list --workspace --all-features --run-ignored only` on
-Linux selects 159 tests — `crcbl-vk::vk_e2e` 73, `crcbl-shell::wayland_e2e` 37,
-`crcbl-shell::x11_e2e` 32, `crcbl-wgpu::wgpu_e2e` 15, and one each from
-`crcbl::render_e2e` and `crcbl-cli::cli_e2e`. `--all-features` compiles the
-Vulkan, wgpu and render suites on the macOS and Windows runners too, so the flag
-would have those jobs open a Vulkan device on a runner with no loader.
+argued, and re-derived on 2026-08-21 after `crcbl-wgpu` went:
+`cargo nextest list --workspace --all-features --run-ignored only` on Linux
+selects 215 tests, across `crcbl-vk::vk_e2e`, `crcbl-shell`'s `wayland_e2e` and
+`x11_e2e`, the agnostic `crcbl::*_e2e` suites, `lumen::golden` and
+`crcbl-cli::cli_e2e`. The per-suite counts are deliberately not written out —
+the list this replaced had rotted by more than the deleted suite alone.
+`--all-features` compiles the Vulkan and render suites on the macOS and Windows
+runners too, so the flag would have those jobs open a Vulkan device on a runner
+with no loader.
 
 What that leaves is a **pairing nothing enforces**: `crcbl-mtl`'s device
 coverage now exists only in the `mtl e2e` job and `crcbl-dx12`'s only in the
@@ -9106,11 +9038,6 @@ the rest of that entry's list still stands.
   hashes, which is order-insensitive — no longer holds, because the test feeds
   one hasher in block order and asserts that the reversed event order hashes
   differently.
-- **`crcbl-wgpu/src/conv.rs`'s `format_mapping_round_trips` remains**, a
-  three-word name naming the function under test rather than a claim. `crcbl-vk`
-  and `crcbl-mtl` state the same contract as
-  `no_two_formats_share_a_metal_format` and its siblings, so the wgpu name
-  should follow that shape. It was outside this slice's paths.
 - **The four `the_workgroup_size_matches_the_numthreads_the_shader_declares`
   copies and the three `the_params_block_matches_the_offsets_slangc_emits`
   copies in `crcbl-shaders` now name their shader** — read end to end first, and
@@ -9198,12 +9125,12 @@ it.
   not the deferral half. `crcbl-mtl` has neither:
   `crates/crcbl-mtl/src/swapchain.rs` argues the obligation is discharged more
   simply because Metal has no separate surface object, which is plausible and is
-  a claim rather than a test. `crcbl-wgpu` has neither.
+  a claim rather than a test.
 
 - **Clamp-and-report** (a swapchain clamps the shell's requested extent into the
   platform range and reports the result on `AcquiredFrame::extent`) is tested on
-  Vulkan and Metal and on neither D3D12 nor wgpu. On D3D12 the platform does pin
-  the range on a real `HWND`, so this is a real gap; the fixture
+  Vulkan and Metal and not on D3D12. On D3D12 the platform does pin the range on
+  a real `HWND`, so this is a real gap; the fixture
   `a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd` already
   builds the window a test would need.
 
@@ -9240,7 +9167,7 @@ extent is a _failure_, so it does not belong in the fault-injection shape those
 two took, and it wants its own decision about whether the recorder holds a clamp
 rule or a one-shot override.
 
-### The dedicated cross-backend job still compares two backends of two
+### No runner has two native backends, so nothing compares them directly
 
 **Half of this closed on `41b6e61`**, differently from how it was framed. The
 entry used to say MSL and DXIL were compared against nothing, because
@@ -9250,13 +9177,16 @@ else. That is no longer the gap: `crates/crcbl/tests/render_e2e.rs` now draws
 D3D12 compare all three against the same lavapipe-blessed references the other
 two do. Both matched on their first run, at max channel delta 1.
 
-What is left is narrower and worth stating precisely. The vk-versus-wgpu job
-compares two backends' output **to each other**, which catches a divergence
-neither has a golden for; the golden path compares each backend to a
-_reference_, which catches a backend drifting from what was blessed. Those are
-different checks, and only the first is still two-backends-wide. Extending it
-would mean running two backends in one process on one machine — which is what
-that job does — and no runner has both Metal and D3D12.
+What is left is narrower and worth stating precisely. A job that compares two
+backends' output **to each other** catches a divergence neither has a golden
+for; the golden path compares each backend to a _reference_, which catches a
+backend drifting from what was blessed. Those are different checks. The
+vk-versus-wgpu job this entry was written about went with `crcbl-wgpu` on
+2026-08-21; `web/run-cross-backend-e2e.sh` is its heir and holds the browser
+against vk on Linux and against Metal on macOS, so the direct comparison still
+exists and is now browser-versus-native. Extending it to two _native_ backends
+would mean running both in one process on one machine, and no runner has both
+Metal and D3D12.
 
 So the remaining gap is structural rather than owed: a Metal-versus-D3D12
 comparison has nowhere to run. The golden path is the substitute and is already
@@ -9279,27 +9209,6 @@ in place.
 Each of these was a question the coverage audit raised and left open. They are
 answered here rather than carried, with the reasoning, so a later session can
 disagree with the argument rather than rediscover the question.
-
-### Decided: `crcbl-wgpu` gets owner tagging, and the wasm build pays for it
-
-The question was whether the browser target should carry the side table the
-seam's third obligation requires. **It does.** The cost is one `u64` compare per
-handle resolve, against a hash lookup that already happens; that is not a cost
-the wasm build needs protecting from, and a seam obligation honoured by three of
-four backends is not honoured. Cross-device handle misuse being undefined on
-exactly the backend a browser runs is the worst place to have it, not the most
-defensible.
-
-Follow whichever existing backend's shape is closest rather than inventing a
-fourth spelling.
-
-**Noted while deciding, not acted on:** owner tagging will then exist in four
-crates as four hand-written copies of one idea. That is duplicated knowledge and
-it will drift. Extracting it into `crcbl-hal` is the obvious move and is
-deliberately _not_ being done now — three of the copies work, and rewriting
-working backends to host a fourth is scope the task does not need. Revisit if a
-fifth backend ever appears, which is the point at which the duplication stops
-being tolerable.
 
 ### Decided: device loss surfaces, it does not self-heal
 
@@ -9328,14 +9237,14 @@ those are exactly the two policies this entry chose between.
 The audit's framing was a cross-platform image compare — bless a shared
 reference and have the macOS and Windows jobs compare against it. **That already
 exists**: `crates/crcbl/tests/render_e2e.rs` compares against a checked-in
-golden blessed on lavapipe, and CI runs it on all four backends. What it does
+golden blessed on lavapipe, and CI runs it on vk, dx12 and Metal. What it does
 not do is cover more than one scene.
 
 So the gap is one line of scope, not a new job: `Scene` has `Cube`, `Sprite` and
 `Ui`, `render_e2e` draws only `Cube`, and `sprite.slang` and `ui.slang` are the
 two shaders that have _actually_ diverged per target in this repo's history. The
 fix is to draw all three scenes there and bless two more goldens, which gives
-Metal and D3D12 the coverage `run-cross-backend-e2e.sh` gives Vulkan and wgpu.
+Metal and D3D12 the coverage `run-cross-backend-e2e.sh` gives Vulkan.
 
 Cheaper than a new job, reuses the anti-vacuity colour floor and the tolerance
 that are already calibrated, and it puts the coverage in the file whose whole
@@ -9402,12 +9311,12 @@ The backends disagree, and both answers are defensible:
   seam's documented set**.
 - `crcbl-mtl` treats the same case as an ordinary unsatisfied wait.
 
-**Decided: the seam grows the third outcome rather than wgpu losing it.**
-Failing fast with a reason beats blocking for the full timeout to report a
-timeout that was never going to be anything else — a frame-pacing poll wants to
-know it asked for something impossible, not to pay the deadline first. So
-`wait_semaphores`' docs should name `Unsupported` for an unsatisfiable wait, and
-the other backends should adopt it when next touched.
+**Decided: the seam grows the third outcome.** Failing fast with a reason beats
+blocking for the full timeout to report a timeout that was never going to be
+anything else — a frame-pacing poll wants to know it asked for something
+impossible, not to pay the deadline first. So `wait_semaphores`' docs should
+name `Unsupported` for an unsatisfiable wait, and the other backends should
+adopt it when next touched.
 
 Not done in the slice that found it: changing a seam contract means changing
 every implementation of it plus the tests that assert the current behaviour, and
@@ -9417,45 +9326,40 @@ exactly which ones move.
 
 ### `crcbl-dx12` has no timeline-semaphore test because it has no timeline semaphore
 
-Recorded so it is not mistaken for a coverage gap. `crcbl-vk`, `crcbl-mtl` and
-now `crcbl-wgpu` each have
+Recorded so it is not mistaken for a coverage gap. `crcbl-vk` and `crcbl-mtl`
+each have
 `a_<backend>_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it`;
 D3D12 has none because the feature is unimplemented there, not because the test
 was forgotten.
 
-## `crcbl-wgpu` owner tagging: what the tests do not reach
+## The owner tag cannot separate two owners whose tags collide
 
-Obligation 3 is now implemented in `crcbl-wgpu` — `crcbl-wgpu`'s handle module
-(deleted 2026-08-21) holds the tag/id pair, and every pool entry is an
-`Owned<T>` — so the "Decided: `crcbl-wgpu` gets owner tagging" entry above is
-answered. Two things about that work are worth carrying rather than
-rediscovering.
+Found while implementing the seam's third obligation in `crcbl-wgpu`, deleted
+2026-08-21. The finding is about every backend that carries the side table
+rather than about that crate, which is why it outlives it.
 
-**The slot's `u64` cannot separate owners whose tags collide.** Not a defect in
-this backend, and true of `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` for the same
-reason: every pool holds exactly one owner's rows, so a foreign handle that gets
-past the tag lands on a row the _looking-up_ owner filled, the id agrees, and
-the lookup succeeds. The id half is what catches a shared pool and what stops
-`handle::remove` from taking a row this owner does not own — that much is
-asserted by
-`a_wgpu_slot_belongs_to_the_owner_that_filled_it_even_when_two_tags_collide` —
-but it is not a second line of defence against a colliding tag, and this session
-briefly wrote a test claiming it was before the test failed and said otherwise.
-The hole opens only after `OWNER_TAG_COUNT` owners in one process.
+**The slot's `u64` cannot separate owners whose tags collide.** True of
+`crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` for the same reason: every pool holds
+exactly one owner's rows, so a foreign handle that gets past the tag lands on a
+row the _looking-up_ owner filled, the id agrees, and the lookup succeeds. The
+id half is what catches a shared pool and what stops `handle::remove` from
+taking a row this owner does not own — it is not a second line of defence
+against a colliding tag, and a test written to claim it was failed and said
+otherwise. The hole opens only after `OWNER_TAG_COUNT` owners in one process.
 
-**The windowed swapchain path's owner checks are untested.**
-`WgpuDevice::swapchain` and `WgpuDevice::surface` funnel through
-`dead_or_foreign`, which keeps a dead handle reporting `SurfaceError::Lost`
-(what callers retry on) and reports a foreign one as
-`SurfaceError::Hal(ForeignObject)`. **Nothing asserts that split.**
-`crcbl-wgpu`'s own suite (deleted 2026-08-21) is offscreen-only by construction
-and the harness's Xvfb half runs `apps/sandbox` and `apps/breakout` rather than
-checking errors, so no test hands `acquire_next_frame`, `present` or
-`reconfigure_swapchain` a swapchain from another device or a surface from
-another instance. The three new e2e tests cover buffers, the queue handle and
-surfaces at `Instance` level only. Closing it needs either a windowed test
-target or an offscreen swapchain crossed between two devices — the latter is
-cheap and was simply not in this task's scope.
+**Nothing asserts the id half any more.** The test that pinned it,
+`a_wgpu_slot_belongs_to_the_owner_that_filled_it_even_when_two_tags_collide`,
+was in `crcbl-wgpu`'s suite and went with it; grepping the tree on 2026-08-21
+finds no equivalent in `crcbl-vk`, `crcbl-mtl` or `crcbl-dx12`, and only
+`crcbl-vk` spells `OWNER_TAG_COUNT` at all. Re-homing one of these into the
+agnostic seam suite is the obvious close.
+
+**Owner tagging is a hand-written copy per backend, and extracting it was
+declined.** Each backend spells the same idea itself, which is duplicated
+knowledge that will drift. Pulling it into `crcbl-hal` is the obvious move and
+was deliberately not taken while the existing copies work; revisit when a
+backend has to grow a fresh one, which is the point at which the duplication
+stops being tolerable.
 
 ## What the three-scene `render_e2e` does and does not prove
 
@@ -9548,7 +9452,8 @@ sizes cannot share a page. The extent is the caller's now — `PageDesc::extent`
 whatever `PageDesc::opaque_white` was given, asserted against the recorded
 copies by `forward`'s `an_app_page_and_table_reach_the_device_whole` — but it is
 still _one_ extent for every layer. Real content does not look like that. See
-the wgpu entry below for what stands between here and the bindless form.
+"The base-colour page is still `ArrayPages`" below for what stands between here
+and the bindless form.
 
 **No mip chain, and the sampler is nearest because of it.** §3.2 makes mip
 generation a compute pass of its own and it is not written, so
@@ -9696,29 +9601,12 @@ them hud's:
   does, since the runner has no GPU at all — but a developer who passes
   `--hardware` under Xvfb gets a confusing failure. Not investigated.
 
-- **A browser that hands out no adapter is guarded twice, and there is a race
-  between the guards.** `WgpuInstance::new_async` probes with wgpu's
-  `is_browser_webgpu_supported` before enumerating, and `web/engine/demo.js`
-  probes before downloading the wasm. If `requestAdapter()` succeeds for a probe
-  and returns null for wgpu's own enumeration a moment later, `new_async` still
-  traps — proven reachable with a call-counting double that lets the first _n_
-  requests through. Closing it properly needs an upstream fix: `wgpu::Adapter`
-  exposes no accessor for its inner `GPUAdapter` (`api/adapter.rs` has only
-  `as_custom`), and every other reader — `features()`, `limits()` — is the same
-  structural getter with the same uncatchable failure.
-
-- **Worth filing upstream against wgpu**: the vendored
-  `Gpu::request_adapter{,_with_options}` bindings type a nullable WebIDL return
-  (`Promise<GPUAdapter?>`) as `js_sys::JsOption`, which is undefined-only by
-  documented design — `wasm-bindgen`'s own `sys.rs` says "JavaScript `null` is a
-  distinct present value". Either the binding needs a null-aware wrapper or
-  `future_request_adapter` should test `is_null_or_undefined`.
-
-- **No standing regression guard for the null adapter.** The double that
-  reproduces it lives in a scratchpad, not the repo. Making it permanent means a
-  group-A sub-check that patches `requestAdapter` and asserts the named message,
+- **No standing regression guard for the null adapter.** Nothing patches
+  `requestAdapter` to resolve `null` and asserts the message a visitor would
+  see. Making it permanent means a group-A sub-check that does exactly that,
   which is a real change to a harness with a documented one-demo-per-run shape —
-  left out rather than decided unilaterally.
+  left out rather than decided unilaterally. The double that reproduced the old
+  `crcbl-wgpu` double-guard race lived in a scratchpad and went with that crate.
 
 - **Neither WebGPU-refusal branch in `web/engine/demo.js` calls `settle()`**, so
   the Stop button stays enabled and does nothing. Pre-existing on the sibling
@@ -10184,30 +10072,6 @@ the stage boundary and the other two — `SV_InstanceID`, `SV_VertexID` — both
 lowered differently per target and were both caught by rendering rather than by
 reading the emitted code.
 
-**One edit this needs is outside the slice's paths and was not made.** The
-material table's `BindGroupLayoutEntry` is `ShaderStages::VERTEX`, which is now
-the one stage that does not read it:
-
-- `ForwardRenderer::mesh_layout`'s binding 6 in
-  `crates/crcbl-render/src/forward.rs`.
-- The same binding in the layout `crcbl-vk`'s `vk_e2e/depth_probe.rs` builds for
-  itself.
-
-Both must become `ShaderStages::VERTEX.union(ShaderStages::FRAGMENT)`. **The
-union, not `FRAGMENT` alone**, and that is a Metal constraint rather than
-symmetry: Slang's Metal backend materialises every global in every entry point
-(see "Slang's Metal backend materialises every global shader parameter…"), so
-`vertexMain` in `msl/mesh.metal` still takes `materials [[buffer(6)]]` whether
-it reads it or not. Verified with the change applied in a scratch worktree —
-`vk` and `wgpu` are green and bit-identical with the union.
-
-**Until it lands, `wgpu` cannot draw the cube at all.** Not a validation
-warning: `Device::create_render_pipeline, label = 'forward mesh'` fails with
-"Shader global ResourceBinding { group: 0, binding: 6 } is not available in the
-pipeline layout / Visibility flags don't include the shader stage", and
-`crates/crcbl/tests/run-render-e2e.sh` on `CRCBL_GPU=wgpu` reports
-`3 tests run: 2 passed, 1 failed`.
-
 **Vulkan is looser, and where it is loose depends on who is listening.** The
 pipeline is created and draws the correct frame either way, but the layer emits
 `VUID-VkGraphicsPipelineCreateInfo-layout-07988` — which `run-render-e2e.sh`
@@ -10305,7 +10169,7 @@ construction. Evidence: in run 31454155654, message 597 — the gate's own
 deliberate violation — appears exactly once, inside the expected panic of the
 test that raises it, and that test passed.
 
-## The base-colour page is still `ArrayPages`; the wgpu blocker under it is gone
+## The base-colour page is still `ArrayPages`; the backend blocker under it is gone
 
 `docs/plan/03-gpu-driven-rendering.md` §3.2's texture half is implemented as one
 `Texture2DArray` page — `crcbl_render::forward`'s `base_color_page`, bound at
@@ -10321,7 +10185,7 @@ would have selected the bindless path on wgpu (it reports `DESCRIPTOR_INDEXING`)
 and then failed to build the group. `crcbl-wgpu`'s binding module (deleted
 2026-08-21) now does the bucketing, and
 `a_wgpu_shader_reads_the_array_element_the_bind_group_put_in_each_slot` reads
-both elements out of a two-texture array on lavapipe. All four backends honour
+both elements out of a two-texture array on lavapipe. Every backend honours
 `array_index`.
 
 **What is left is above the seam, and it is a real slice.** Nothing selects
@@ -10329,36 +10193,17 @@ both elements out of a two-texture array on lavapipe. All four backends honour
 unconditionally. Going bindless means a descriptor array whose length is a
 runtime bound, a per-material index into it that is a descriptor slot rather
 than a layer, `BindingFlags::VARIABLE_COUNT` and `BindGroupDesc::variable_count`
-actually being used (see the wgpu entry below — that backend ignores the second
-one), and a `mesh.slang` that declares the array. The two paths then have to
-render the same frame, which is the observable.
+actually being used (WebGPU bind groups are immutable, so there is no
+update-after-bind path and the seam's streaming bindless write is create-only in
+the browser — a page of descriptors that grows as content loads has to be
+rebuilt rather than written into), and a `mesh.slang` that declares the array.
+The two paths then have to render the same frame, which is the observable.
 
 **What bindless buys**, so the case stays on the record: a page is one image, so
 its layers share an extent, a format and a mip count. A descriptor array lifts
 all three, which is what real imported content needs. Until then the engine has
 one page of one size, which is enough for the observable and not enough for a
 game.
-
-## What `crcbl-wgpu`'s binding work still leaves, after the refusals landed
-
-The three silent drops found while writing `crcbl-wgpu`'s binding module
-(deleted 2026-08-21) are fixed — `BindingFlags` and the `VARIABLE_COUNT`
-ordering rule are checked at layout creation, `variable_count` is checked
-against the layout's variable binding and the entries supplied, `count: 0` is
-refused, and `create_bind_group_layout` is error-scoped. What is left:
-
-- **`update_bind_group` is still `Unsupported` on wgpu** — WebGPU bind groups
-  are immutable and there is no update-after-bind path, so the seam's streaming
-  bindless write is create-only here. It is the other half of what `array_index`
-  exists for: a page of descriptors that grows as content loads has to be
-  rebuilt rather than written into.
-
-**Not verified: the browser.** Binding arrays are a native-only wgpu feature and
-`DESCRIPTOR_INDEXING` will be absent under WebGPU, so the array-shaped tests
-take their skip branch there. No browser run was made, and the skip branch means
-a wasm regression in this code would not be observed by anything. The refusals
-that do not need an array layout — the flags gate, `count: 0`, the in-band
-layout error — run on every adapter, so that half is not skip-shaped.
 
 ## What the shadow LOD bias left, and two stale docs
 
@@ -10700,8 +10545,8 @@ thing.
 **Correction 2, and it is why the silence since is worth nothing.** `ba0c49f`
 moved `depth_probe` into the agnostic `crates/crcbl/tests/forward_e2e/` on
 2026-08-18, and **`run-forward-e2e.sh` has no Vulkan-on-Windows arm**: it runs
-on `windows-latest` under **dx12/WARP**, on `ubuntu-latest` under vk and wgpu,
-and on `macos-latest` under Metal. The `vk e2e (lavapipe, windows)` job runs
+on `windows-latest` under **dx12/WARP**, on `ubuntu-latest` under vk, and on
+`macos-latest` under Metal. The `vk e2e (lavapipe, windows)` job runs
 `run-vk-e2e.sh` and nothing else, so the test name appears **zero** times in its
 log. The burst had already stopped four days before the move, so the move did
 not cause the quiet — but from 2026-08-18 onward this configuration cannot
@@ -10739,9 +10584,9 @@ there.
 golden-free on the same measurement** and could follow the same way. Measured on
 Linux lavapipe on 2026-08-20 so the follow-up needs no new investigation: 12/12,
 19/19, 1/1 and 1/1 respectively. That would take this job from **2 suites to
-6**; for scale, Linux vk runs 11, dx12/WARP 9, wgpu 9 and Metal 8, and this job
-being the thinnest by far is what let the `depth_probe` coverage loss go
-unnoticed for six days.
+6**; for scale, Linux vk runs 11, dx12/WARP 9 and Metal 8, and this job being
+the thinnest by far is what let the `depth_probe` coverage loss go unnoticed for
+six days.
 
 The remaining three — `render_e2e`, `sprite_e2e`, `mesh_e2e` — **do** call
 `crcbl_golden::compare`, and this job's header warns its Mesa build differs from
@@ -10849,15 +10694,15 @@ it is emitted rather than only as a count at teardown.
 
 Still open, and not touched here:
 
-- **Closed for `crcbl-dx12` and `crcbl-mtl`; `crcbl-wgpu` is left to the
-  deletion.** Both now call `crcbl_core::log::init_logging()` in their
-  `instance::tests::open`, which is the single funnel every device test in each
-  crate opens through — the one line `crcbl-vk`'s `harness::instance` carries.
-  **The check named here was the wrong one and found nothing for that reason:**
-  neither crate has an e2e tree under `tests/` at all (only a `run-*-e2e.sh`),
-  because their device tests live in `#[cfg(test)] mod tests` inside `src/`.
-  Grep a crate for `log::error!` to find whether it has a channel, then for
-  `init_logging` to find whether anything is listening.
+- **Closed for `crcbl-dx12` and `crcbl-mtl`.** Both now call
+  `crcbl_core::log::init_logging()` in their `instance::tests::open`, which is
+  the single funnel every device test in each crate opens through — the one line
+  `crcbl-vk`'s `harness::instance` carries. **The check named here was the wrong
+  one and found nothing for that reason:** neither crate has an e2e tree under
+  `tests/` at all (only a `run-*-e2e.sh`), because their device tests live in
+  `#[cfg(test)] mod tests` inside `src/`. Grep a crate for `log::error!` to find
+  whether it has a channel, then for `init_logging` to find whether anything is
+  listening.
 
   **Unverified, and it cannot be verified here:** both funnels are on
   platform-gated code, so the evidence is a cross-target
@@ -10868,8 +10713,7 @@ Still open, and not touched here:
   read one of those runs to close it.
 
   `crcbl-webgpu` is **not** in this hole: it emits no `log::error!` or
-  `log::warn!` anywhere, so there is no channel to leave closed. `crcbl-wgpu`
-  does emit them and is deliberately untouched — it goes with the crate.
+  `log::warn!` anywhere, so there is no channel to leave closed.
 
 - **The messenger asks the layer for `ERROR` and `WARNING` only**
   (`debug::messenger_create_info`), so `INFO`/`VERBOSE` never arrive whatever
@@ -10900,15 +10744,11 @@ read out of the two jobs' logs. Inside that:
   `--success-output immediate` instead. Measured locally on this workstation,
   from the suite's own summary line: lavapipe 9.786s -> 1.439s, radv 7.753s ->
   1.193s.
-- **`crcbl-wgpu/tests/run-wgpu-e2e.sh` still carries the same dead pair** —
-  `--test-threads 1` immediately followed by `--no-capture`, so nextest warns
-  and serialises that suite too. Left alone deliberately: it is a different
-  suite on a different job, and turning its parallelism on wants its own
-  several-runs-per-driver check, which is exactly what turned up the
-  use-after-free in `crcbl-vk`'s deletion queue. `run-cli-e2e.sh`,
-  `run-wayland-e2e.sh`, `run-x11-e2e.sh` and `run-win32-e2e.ps1` pass
-  `--test-threads 1` _without_ `--no-capture`, so theirs is effective and
-  deliberate — `run-win32-e2e.ps1`'s header says why.
+- **The other harnesses' `--test-threads 1` is effective and deliberate.**
+  `run-cli-e2e.sh`, `run-wayland-e2e.sh`, `run-x11-e2e.sh` and
+  `run-win32-e2e.ps1` pass it _without_ `--no-capture`, so nextest honours it —
+  `run-win32-e2e.ps1`'s header says why. The one harness that carried the same
+  dead pair was `crcbl-wgpu`'s, and it went with that crate on 2026-08-21.
 
 ### The suspicion that is still unmeasured: synchronisation validation
 
@@ -11400,24 +11240,9 @@ What is left:
   four ways the engine draws.
 - **`Scene::Cube` culls nothing**, so the cross-backend readback test can only
   assert `drawn == submitted`; the actually-culled claim is vk-only. A scene
-  with something off-screen would let wgpu, Metal and D3D12 assert it too.
-- **`crcbl-wgpu`'s e2e suite has no `crcbl-render` dev-dependency**, so wgpu's
-  coverage of the ring lives in `crcbl`'s `render_e2e` instead. Adding the
-  dev-dep, as `crcbl-vk` has, was not taken.
+  with something off-screen would let the other backends assert it too.
 - **Metal and D3D12 have never run the readback.** Cross-target type-checks
   only, as ever.
-- **`crcbl-wgpu` enumerates `Backends::all()`, which includes OpenGL — a
-  platform the matrix declined.** The right expression is
-  `wgpu::Backends::PRIMARY`, which is `VULKAN | METAL | DX12 | BROWSER_WEBGPU`
-  on every target with no `cfg`, and `SECONDARY` is GL alone; the browser would
-  lose only the WebGL2 fallback, also declined. **Not taken, because the trade
-  is real**: measured with `VK_LOADER_DRIVERS_DISABLE='*'`, a Vulkan-less Linux
-  box currently gets the GL adapter and passes all 28 wgpu e2e tests, honestly
-  declining `DESCRIPTOR_INDEXING` and `DRAW_INDIRECT_COUNT` rather than claiming
-  them. Narrowing to `PRIMARY` turns that into no adapter at all.
-  `create_native`'s own doc already claims Vulkan/Metal/DX12 while the code says
-  otherwise, so whichever way this goes, one of the two is wrong today.
-  **Decision wanted.**
 - **The whole counters section lags the frame by one, uniformly.** The panel is
   gathered in `draw_debug_overlay`, which runs before `GameGpu::frame` records
   anything. Stated in the module docs and asserted by
@@ -11653,16 +11478,16 @@ re-argued:
   was proven — but it would not notice the message becoming useless.
 
 **Coverage, stated as a gap rather than implied.** The validator is proven
-_called_ on three backends by a real run: the seam and null backend on the host,
-`crcbl-vk` on an RX 7900 XTX, `crcbl-wgpu` on lavapipe — neutering
-`check_entries` to return `Ok(())` reddens ten seam tests plus one test in each
-of those two device suites. **`crcbl-dx12` and `crcbl-mtl` are type-checked only
-here.** `crcbl-dx12` is entirely `#[cfg(target_os = "windows")]`, so a Linux
-`cargo test -p crcbl-dx12` never compiles `binding::tests` at all, and
-`--target x86_64-pc-windows-msvc` has no linker on this box; the `--target`
-clippy runs are a type-check and nothing more. Those two backends' new tests
-first _execute_ on CI's Windows and macOS runners, which is where their evidence
-comes from.
+_called_ by a real run on the seam and null backend on the host and on
+`crcbl-vk` on an RX 7900 XTX — neutering `check_entries` to return `Ok(())`
+reddens ten seam tests plus one test in that device suite. The same red-check
+covered `crcbl-wgpu` on lavapipe, which was deleted 2026-08-21. **`crcbl-dx12`
+and `crcbl-mtl` are type-checked only here.** `crcbl-dx12` is entirely
+`#[cfg(target_os = "windows")]`, so a Linux `cargo test -p crcbl-dx12` never
+compiles `binding::tests` at all, and `--target x86_64-pc-windows-msvc` has no
+linker on this box; the `--target` clippy runs are a type-check and nothing
+more. Those two backends' new tests first _execute_ on CI's Windows and macOS
+runners, which is where their evidence comes from.
 
 ## `BindingKind::StorageImage` has no way to say "reads _and_ writes"
 
@@ -11693,14 +11518,6 @@ Nothing in `crcbl-render` or the committed shaders declares a storage image at
 all, so neither option has a caller to prove itself against yet. Revisit when a
 compute pass first wants one — a mip-generation pass is the likely first,
 `docs/plan/03-gpu-driven-rendering.md` §3.2.
-
-**`crcbl-wgpu` deliberately did not grow the arm.** It could:
-`wgpu::BindingType::StorageTexture` takes exactly the three values the seam now
-carries. It is scheduled for deletion once the other four backends reach parity,
-so `map_binding_kind` still answers `HalError::Unsupported` and
-`crcbl_hal::DIVERGENCES` classifies the row `Unwritten` — off the parity
-blockers because `BackendKind::is_parity_target` answers `false` for it. Writing
-the arm is maybe fifteen lines if anybody ever wants it before the crate goes.
 
 ## What the sun shadow pass owes
 
@@ -11742,15 +11559,19 @@ What is left, and what it taught:
 
 ## What a sampled binding still cannot say
 
-`map_binding_kind` assumes every sampled image is float-filterable and
-single-sampled: `wgpu::TextureSampleType::Float { filterable: true }` and
-`multisampled: false`, both constants. That is what every sampled binding in the
-engine is. A shadow-comparison sampler (`TextureSampleType::Depth`), an integer
-texture (`Uint`/`Sint`) or an MSAA source would each need another field on
-`BindingKind::SampledImage`, and each would fail on wgpu the way the array did —
-at pipeline creation, loudly. The other three backends would not notice, so
-**the wgpu suite is the only local gate on it**:
-`CRCBL_GPU=wgpu crates/crcbl/tests/run-render-e2e.sh`.
+`BindingKind::SampledImage` carries `view_type` and `sample_type`, so a
+shadow-comparison sampler is expressible. Two shapes still are not, and
+`crates/crcbl-hal/src/pipeline.rs` says so at the type — "two variants and not
+four": an integer texture (`Uint`/`Sint`) and an MSAA source would each need
+another field.
+
+**The local gate that used to catch this is gone.** The mistake surfaced loudly
+at pipeline creation on `crcbl-wgpu`, whose `map_binding_kind` pinned
+`filterable: true` and `multisampled: false` as constants; that crate was
+deleted 2026-08-21. The native backends take the dimension off the bound view
+and would not notice, so what is left is `web/engine/gpu-replay.js`, which
+builds a real `GPUTextureBindingLayout` from the wire and refuses a `sampleType`
+it cannot map — a browser run, not a `cargo test`.
 
 ## Settled: the `D2Array` page samples on Metal and D3D12
 
@@ -11882,9 +11703,9 @@ left:
 - **Lavapipe reports `VK_EXT_mesh_shader`** (Mesa 23.2 and later), so CI's Linux
   and Windows vk jobs take the mesh path too — verified locally with
   `VK_DRIVER_FILES=…/lvp_icd.json vulkaninfo` and by a full local run on
-  lavapipe at zero differing pixels. wgpu, WARP and Metal do not: each reports
-  no `MESH_SHADER`, so those jobs keep drawing through an indirect tail and are
-  the coverage that the fallback still works.
+  lavapipe at zero differing pixels. WARP and Metal do not: each reports no
+  `MESH_SHADER`, so those jobs keep drawing through an indirect tail and are the
+  coverage that the fallback still works.
 - **Settled: the cone cull rule needed a radius term, and it now has one.** The
   documented form was the point-sized one — it treats every triangle as sharing
   the centre's view direction, so a cluster with a real radius close to the
@@ -13650,15 +13471,15 @@ wiring.
   `HalError`. The set that exists is deliberately representative, not complete,
   and the crate docs say so.
 
-## `webgpu` is a name and a refusal, not yet a backend
+## `webgpu` is a refusal on native, and the browser's only backend
 
 `crcbl::backend::REGISTRY`'s `GpuBackend::WebGpu` entry returns
-`WEBGPU_NOT_IMPLEMENTED` unconditionally. Replacing it means giving
-`crcbl-webgpu` an `Instance`, adapter enumeration and a device, then deciding
-whether it displaces `GpuBackend::Wgpu`'s automatic selection on wasm32 — wgpu
-is still the browser's only automatic backend, and
+`WEBGPU_NOT_IMPLEMENTED` on native. On `wasm32` it does not: its `open` starts a
+real `crcbl_webgpu::WebGpuInstanceOpen`, and with `crcbl-wgpu` deleted on
+2026-08-21 there is no second candidate a build flag could reach, so it is the
+browser's only automatic backend.
 `exactly_one_backend_is_auto_selectable_and_it_depends_on_the_target` is what
-pins that, so the swap is a deliberate edit rather than something that can
+pins that, so a change there is a deliberate edit rather than something that can
 drift.
 
 It is registered rather than left out on purpose: an unregistered name yields
@@ -13804,9 +13625,10 @@ there is no device — but it means `TIMESTAMP_QUERY` is reported on a browser
 that has it, while `crcbl-webgpu` has no `create_query_set` command and could
 not serve a query set at all.
 
-**When `impl Instance` lands it must intersect the mapped set with what the
-stream can actually encode**, which is what `crcbl-wgpu`'s own feature mapping
-already does for query sets. Noted in `gpu-replay.js` and in
+**The mapped set must be intersected with what the stream can actually encode.**
+`crcbl-wgpu`'s own feature mapping did exactly that for query sets and is where
+the shape was taken from; that crate was deleted 2026-08-21, so the only copy of
+it left to write is this one. Noted in `gpu-replay.js` and in
 `crcbl-webgpu/src/instance.rs`; it is the sort of thing that reads as correct
 right up until a caller believes it.
 
@@ -13817,9 +13639,9 @@ right up until a caller believes it.
   one, and the mapping would put a guess where the honest answer is "declined to
   say".
 - **Reporting `max_sampler_anisotropy: 16` and granting `SAMPLER_ANISOTROPY`**,
-  the way `crcbl-wgpu` does. WebGPU accepts `maxAnisotropy` above 1 but reports
-  no queryable ceiling, and `Limits` is what the backend _guarantees_ — 16 would
-  be a number nothing told us.
+  the way `crcbl-wgpu` did before it was deleted. WebGPU accepts `maxAnisotropy`
+  above 1 but reports no queryable ceiling, and `Limits` is what the backend
+  _guarantees_ — 16 would be a number nothing told us.
 
 ### Coverage gap in what the browser corroborates
 
@@ -13833,7 +13655,8 @@ corroborated at all, because a browser has nothing to disagree with.
 
 Whether `Features::DEBUG_MARKERS` genuinely reaches a capture tool in every
 browser. It is granted unconditionally on the grounds that `pushDebugGroup` is
-core WebGPU, matching what `crcbl-wgpu` does, but nothing was measured.
+core WebGPU, matching what `crcbl-wgpu` did before it was deleted, but nothing
+was measured.
 
 ## The device request round-trips; `PendingDevice` is still not implemented
 
@@ -13927,14 +13750,17 @@ Found while fixing dx12's missing acquire tracking; neither is a dx12 bug, and
 neither should be fixed on one backend alone.
 
 - **Acquiring twice without presenting is accepted** by dx12, vk and mtl — each
-  simply overwrites the outstanding acquire. Only wgpu refuses it
-  (`"acquire_next_frame with a frame already acquired; present it first"`).
-  Making the other three refuse it would turn dx12's own e2e job red today: the
+  simply overwrites the outstanding acquire — and by `crcbl-webgpu`, whose
+  `acquire_next_frame` in `hal/device.rs` allocates a fresh image and view and
+  returns `Ok` with no outstanding-acquire state at all. **The one backend that
+  refused it was `crcbl-wgpu`**
+  (`"acquire_next_frame with a frame already acquired; present it first"`),
+  deleted 2026-08-21 — so the divergence that raised this question is gone and
+  every surviving backend now accepts the call. The question it raised is still
+  open, and making them refuse would turn dx12's own e2e job red today: the
   windowed loop in `crcbl-dx12/src/swapchain.rs` acquires and then calls
-  `draw_and_present`, which acquires again before presenting. So the question is
-  which behaviour the seam means — if wgpu is right, three backends and a caller
-  need fixing; if it is wrong, wgpu's refusal should go. Decide before adding it
-  to `hal_seam_e2e.rs`.
+  `draw_and_present`, which acquires again before presenting. Decide what the
+  seam means before adding it to `hal_seam_e2e.rs`.
 - **`reconfigure_swapchain` does not clear the outstanding acquire** on dx12, vk
   or mtl, so `acquire` → `reconfigure` → `present` is accepted even though the
   reconfigure already destroyed that image and its view. Exotic — the engine
@@ -13942,6 +13768,6 @@ neither should be fixed on one backend alone.
   present — but it is a real hole, identical on three backends, and cheap to
   close once someone decides the first question.
 
-The suite that would hold all four to an answer already exists
-(`crates/crcbl/tests/hal_seam_e2e.rs`, run by CI on WARP, lavapipe, Metal and
-wgpu), so these are decisions rather than infrastructure.
+The suite that would hold every native backend to an answer already exists
+(`crates/crcbl/tests/hal_seam_e2e.rs`, run by CI on WARP, lavapipe and Metal),
+so these are decisions rather than infrastructure.
