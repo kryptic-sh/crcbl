@@ -1864,24 +1864,51 @@ for odd `SV_GroupID` and none for even, so both arms run inside one
 `ExecuteIndirect`. **It passed** — `PASS [0.095s] (37/82)` on run 32410198419,
 confirmed by name in the job log. So a zero dispatch count is not it either.
 
-**What is still on the list**, in the order it is being taken:
+**Fifth negative result: storage writes from the amplification stage.**
+`task_write_probe.slang`'s `writingTaskMain` does an atomic `count[0].add(1u)`
+on odd groups and a plain `slots[group.x] = group.x + 1u` on even ones, the two
+write kinds `mesh_cluster.slang`'s `taskMain` performs before it dispatches.
+`storage_writes_from_the_amplification_stage_do_not_remove_the_device` asserts
+the buffers rather than survival — the counter holds half the groups, and the
+untouched odd slots still hold the priming sentinel, which is what shows the
+branch branched. **It passed** — `PASS [0.122s] (56/83)` on run 32412768533.
 
-- **UAV traffic from the amplification stage.** `mesh_cluster.slang`'s
-  `taskMain` does an atomic `cull_stats[word].add(1u)` and a plain
-  `cluster_selection[index] = selected`, both under branches, before it
-  dispatches. Every probe so far writes **nothing** from that stage, and an
-  atomic from an amplification shader is a far less travelled path than the
-  dispatch itself.
-- **Groupshared memory**, which no probe uses.
-- **The bindless descriptor heap**, which the toy shaders do not touch at all.
-- **The cluster-DAG descent and the much larger DXIL** behind it.
-- **The rest of the renderer's frame** — the culling compute pass that writes
-  the indirect args, and several draws per frame rather than one.
+**Two more suspects died on reading `mesh_cluster.slang` rather than on a
+probe**, and both were this entry's own guesses:
+
+- **There is no `groupshared` in it.** Not in the amplification stage, not in
+  the mesh stage, nowhere in the file. It was never a difference.
+- **It is not bindless.** No unbounded array is declared anywhere in it; the
+  texture binding is a `Texture2DArray<float4>` with a `SamplerState` beside it.
+  "The bindless descriptor heap the toy shader does not touch" described
+  something the real shader does not touch either.
+
+**What actually still differs**, measured:
+
+- **23 `[[vk::binding]]` declarations against the probe's one or three**, and
+  with them a much larger root signature, plus a **texture and a sampler** — the
+  probes bind storage buffers alone.
+- **The cluster-DAG descent**, which is the only real control flow in either
+  stage, and a task-stage DXIL of 10,992 bytes against the probe's 2,648.
+- **The mesh-specific part of the frame** — the draw-gen pass that writes the
+  indirect args for this path.
+
+**And one thing is exonerated by a run nobody set up for it:** WARP renders the
+whole of `render_e2e`'s non-mesh path, with the same materials, textures,
+culling compute pass and several draws per frame. So "the rest of the renderer's
+frame" is only a suspect where it is _mesh-specific_.
+
+**The next step is therefore to stop growing the toy and drive
+`mesh_cluster.slang` itself** through the probe harness against synthetic data.
+It collapses the three remaining suspects into one experiment: if the device
+goes, the shader is it and the bisect continues inside one file; if it survives,
+what remains is the draw-gen pass that feeds it.
 
 **What is no longer in question**: WARP's `ExecuteIndirect` of `DISPATCH_MESH`,
-its amplification stage, both together at a thousand groups, and a dispatch
-count of zero all work. Anything that begins "WARP cannot do mesh shading" is
-contradicted by the probes in `crates/crcbl-dx12/src/device.rs`.
+its amplification stage, both together at a thousand groups, a dispatch count of
+zero, and an atomic plus a plain store from that stage all work. Anything that
+begins "WARP cannot do mesh shading" is contradicted by the probes in
+`crates/crcbl-dx12/src/device.rs`.
 
 **Worth stating because it is the shape of the whole exercise:** every one of
 these is a _negative_ result, and each is still progress. The entry started at
