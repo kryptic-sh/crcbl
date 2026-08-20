@@ -144,6 +144,45 @@ echo "crcbl dx12 e2e: CRCBL_DX12_ADAPTER=${CRCBL_DX12_ADAPTER}"
 export CRCBL_DX12_VALIDATION="${CRCBL_DX12_VALIDATION:-1}"
 echo "crcbl dx12 e2e: CRCBL_DX12_VALIDATION=${CRCBL_DX12_VALIDATION}"
 
+# **Known-red repros, excluded by name and announced on every run.** These are
+# tests that reproduce an open defect on purpose: they are kept because a repro
+# is the most valuable thing an investigation produces, and excluded because a
+# permanently red job is one nobody reads. `#[ignore]` cannot express this — the
+# run below is `--run-ignored only`, so an ignore reason is documentation and
+# nothing more.
+#
+# Each name is verified to still select a test before the suite runs. A stale
+# entry would otherwise be an exclusion that silently matches nothing, which
+# reads as "excluded" while the test it names has been renamed or deleted.
+KNOWN_RED=(
+    # docs/backlog.md, "dx12 mesh shading: WARP claims it and dies": drives
+    # mesh_cluster.slang's own containers and removes the device.
+    the_cluster_shaders_dag_descent_draws_the_cut_it_chose
+)
+
+FILTER=()
+if ((${#KNOWN_RED[@]} > 0)); then
+    expression=""
+    for name in "${KNOWN_RED[@]}"; do
+        # `test(name)` is a substring match; `test(=name)` would need the whole
+        # `module::path::name` and matches nothing when given a bare one. So the
+        # count is the guard: exactly one test, or the entry is stale (zero) or
+        # ambiguous enough to exclude a bystander (more than one).
+        selected="$(cargo nextest list \
+            --locked \
+            --package crcbl-dx12 \
+            --run-ignored only \
+            -E "test(${name})" 2>/dev/null | grep -c "${name}")"
+        if [[ "$selected" != "1" ]]; then
+            echo "crcbl dx12 e2e: KNOWN_RED names ${name}, which selects ${selected} test(s), not 1" >&2
+            exit 1
+        fi
+        echo "crcbl dx12 e2e: excluding known-red ${name}"
+        expression="${expression:+${expression} + }test(${name})"
+    done
+    FILTER=(-E "not (${expression})")
+fi
+
 LOG="$(mktemp -t crcbl-dx12-e2e.XXXXXX.log)"
 cleanup() {
     local status=$?
@@ -166,6 +205,7 @@ cargo nextest run \
     --no-fail-fast \
     --no-tests fail \
     --success-output immediate \
+    "${FILTER[@]}" \
     "$@" 2>&1 | tee "$LOG"
 STATUS=${PIPESTATUS[0]}
 set -e

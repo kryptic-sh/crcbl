@@ -94,6 +94,7 @@ use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_INFO_QUEUE_FILTER, D3D12_INFO_QUEUE_FILTER_DESC, D3D12_MESSAGE,
+    D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
     D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
     D3D12_MESSAGE_ID_CREATE_SAMPLER_COMPARISON_FUNC_IGNORED, D3D12_MESSAGE_SEVERITY,
     D3D12_MESSAGE_SEVERITY_CORRUPTION, D3D12_MESSAGE_SEVERITY_ERROR, D3D12_MESSAGE_SEVERITY_INFO,
@@ -216,6 +217,10 @@ impl Severity {
 /// `x86_64-pc-windows-msvc` build.
 const CLEAR_VALUE_NOT_GIVEN: i32 = 820;
 
+/// `D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE`, the depth
+/// twin of [`CLEAR_VALUE_NOT_GIVEN`]. See that constant for why it is a number.
+const DEPTH_CLEAR_VALUE_NOT_GIVEN: i32 = 821;
+
 /// `D3D12_MESSAGE_ID_CREATE_SAMPLER_COMPARISON_FUNC_IGNORED`. See
 /// [`CLEAR_VALUE_NOT_GIVEN`] for why it is a number.
 const SAMPLER_COMPARISON_FUNC_IGNORED: i32 = 1361;
@@ -226,6 +231,8 @@ const SAMPLER_COMPARISON_FUNC_IGNORED: i32 = 1361;
 #[cfg(target_os = "windows")]
 const _: () = assert!(
     CLEAR_VALUE_NOT_GIVEN == D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE.0
+        && DEPTH_CLEAR_VALUE_NOT_GIVEN
+            == D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE.0
         && SAMPLER_COMPARISON_FUNC_IGNORED
             == D3D12_MESSAGE_ID_CREATE_SAMPLER_COMPARISON_FUNC_IGNORED.0,
     "a debug-layer message id in ALLOWED is not the D3D12 constant it names"
@@ -262,6 +269,18 @@ const ALLOWED: &[AllowedMessage] = &[
                  ColorAttachment::clear, which is after the image exists. Device::create_image is \
                  the one place that passes None; a backend that started passing a value would \
                  have to revisit this entry, because the mismatch form is a real defect.",
+    },
+    AllowedMessage {
+        id: DEPTH_CLEAR_VALUE_NOT_GIVEN,
+        reason: "ClearDepthStencilView on an image created with no pOptimizedClearValue. Every \
+                 word of the entry above applies unchanged — same advisory, same grading by the \
+                 layer, same Device::create_image passing None, and the same reason passing a \
+                 value would trade an advisory for a real MISMATCHINGCLEARVALUE the moment a pass \
+                 cleared to anything else. It is a second id because D3D12 files the depth and \
+                 colour forms under different numbers and this table is per id by design; the two \
+                 entries move together. `crcbl-render`'s D3D12 frame is where it was first \
+                 measured, and crate::device's depth-only mesh probes are the tests here that \
+                 clear a depth attachment at all.",
     },
     AllowedMessage {
         id: SAMPLER_COMPARISON_FUNC_IGNORED,
