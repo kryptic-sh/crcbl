@@ -12016,6 +12016,30 @@ fixed, and not obviously ours to fix** — if it recurs, the question to answer 
 whether the gate should demand a software GL/Vulkan fallback explicitly rather
 than taking whatever the image offers.
 
+## The browser gate's staleness guard did not cover Rust (fixed 2026-08-20)
+
+Kept because the _shape_ recurs, not because the fix is pending.
+`web/run-browser-e2e.sh` warns when `target/site` is older than its sources, and
+that warning is the only thing standing between a reused site and a green run
+about code that is not under test — the block says so in capitals.
+
+It scanned `web/engine` and `web/tools` for `.js`/`.mjs` and nothing else. Its
+comment excused the gap with "the wasm has `build.sh`'s own staleness handling",
+which is true of `build.sh` and irrelevant in the branch where the warning
+lives: that branch is precisely the one `build.sh` does not run in, so no
+`cargo` invocation ever compares a `.rs` against the artifact.
+
+**It cost a false red-check the day it was found.** A deliberately frozen camera
+was re-run through the gate without `--build`; the gate reported
+`the dolly keeps running down the face under its own steam — it took 2 values`
+and passed 34/34, against a wasm built before the sabotage. With `--build` the
+same tree failed 32/34. The guard printed nothing either way.
+
+The find now also walks `apps` and `crates` for `.rs`, `.slang` and
+`Cargo.toml`. **The general lesson:** a staleness guard has to cover every input
+to the artifact, and an exemption reasoned from another code path is how one
+ends up covering the half nobody edits.
+
 ## DECISION NEEDED — add the `lumen` and `quarry` browser steps to Pages CI?
 
 **The blocker this used to be about is gone.** `crcbl-render`'s draw-argument

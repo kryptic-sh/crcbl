@@ -199,15 +199,23 @@ if [ "$BUILD" = "1" ] || [ ! -d "$SITE" ]; then
 else
     # **A REUSED SITE IS THE ONE WAY THIS HARNESS LIES.** Without `--build` the
     # run drives whatever `target/site` already holds, so an edit to
-    # `web/engine/*.js` is tested in its previous form and the gate passes on
-    # code that is not the code under test. That is not theoretical: it produced
-    # three green runs in a row for edits deliberately made to fail.
+    # `web/engine/*.js` — or to the Rust the wasm is built from — is tested in
+    # its previous form and the gate passes on code that is not the code under
+    # test. That is not theoretical: it produced three green runs in a row for
+    # edits deliberately made to fail, and on 2026-08-20 it did it again for a
+    # Rust edit, reporting a frozen camera as "it took 2 values".
     #
     # A warning rather than a rebuild, because CI already runs `web/build.sh`
     # itself before calling this and would then pay for the build twice on every
-    # demo. `find -newer` against the copied entry point is the whole check: the
-    # engine modules and the driver tools are what a person iterates on, and the
-    # wasm has `build.sh`'s own staleness handling.
+    # demo.
+    #
+    # **The Rust half is checked here rather than left to cargo.** This comment
+    # used to say "the wasm has `build.sh`'s own staleness handling", which is
+    # true of `build.sh` and irrelevant in this branch: `build.sh` is exactly
+    # what does not run here, so no `cargo` invocation ever compares a source
+    # against the artifact. A `.rs` or `.slang` edit therefore produced no
+    # warning at all — the silent half of the failure this block exists to make
+    # loud.
     STAMP="$SITE/engine/demo.js"
     if [ -f "$STAMP" ]; then
         # `-newer` rather than a shell loop comparing timestamps: under `set -e`
@@ -215,8 +223,15 @@ else
         # whole run with it, silently, which is how this guard first shipped.
         # The parentheses are load-bearing — without them `-newer` binds to the
         # second `-name` alone and every `.js` file matches.
+        #
+        # `apps` and `crates` rather than the whole repository: `$REPO/target`
+        # holds build output newer than the site by construction, and every
+        # source the demos are built from is under one of those two.
         NEWER="$(find "$REPO/web/engine" "$REPO/web/tools" \
-            \( -name '*.js' -o -name '*.mjs' \) -newer "$STAMP")"
+            \( -name '*.js' -o -name '*.mjs' \) -newer "$STAMP"
+            find "$REPO/apps" "$REPO/crates" \
+            \( -name '*.rs' -o -name '*.slang' -o -name 'Cargo.toml' \) \
+            -newer "$STAMP")"
         if [ -n "$NEWER" ]; then
             echo "crcbl web e2e: WARNING — $SITE is older than these sources, so this run does not test them:" >&2
             # Indented with a read loop rather than `sed 's|^|  |'`, which is
