@@ -5850,6 +5850,79 @@ pub(crate) mod tests {
         probe.destroy(&device);
     }
 
+    /// **The combination the renderer actually uses: an indirect dispatch
+    /// *through the amplification stage*.**
+    ///
+    /// The sibling above eliminated one suspect and this narrows what is left.
+    /// The four combinations of {direct, indirect} x {mesh only, amplified} are
+    /// now all driven here, and until this test three of them were:
+    /// `the_mesh_shader_pipeline_draws_through_both_entry_points` covers direct
+    /// with and without `taskMain`, the sibling above covers indirect without
+    /// it, and `crcbl-render`'s frame is the only thing that has ever run
+    /// indirect **with** it — which is the frame that removes the device.
+    ///
+    /// So this is the smallest step from a frame WARP survives to the frame it
+    /// does not. A failure here puts the fault in
+    /// `ExecuteIndirect(DISPATCH_MESH)` reaching an amplification stage, which
+    /// is one call and one stage rather than a renderer; a pass eliminates the
+    /// pipeline shape entirely and leaves scale, the cluster shader's own size,
+    /// and the bindless heap as what differs.
+    ///
+    /// One workgroup and the same three texels as every mesh frame here, for the
+    /// reason its sibling gives: surviving is not the claim.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it — this crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn an_indirect_dispatch_through_the_amplification_stage_draws_the_same_triangle() {
+        let (_instance, device) = open_device();
+        let probe = MeshProbe::new(&device);
+
+        // The same one `D3D12_DISPATCH_MESH_ARGUMENTS` the sibling writes.
+        // `taskMain` is `[numthreads(1, 1, 1)]` and dispatches one mesh group,
+        // so `1, 1, 1` is one amplification group exactly as it is one mesh
+        // group there.
+        let extents: Vec<u8> = [1u32, 1, 1].iter().flat_map(|n| n.to_le_bytes()).collect();
+        let args = indirect_buffer(&device, "amplified mesh dispatch extents", &extents);
+
+        let drawn = probe.frame(
+            &device,
+            "mesh_shader amplified indirect",
+            Some("taskMain"),
+            "amplifiedMeshMain",
+            |encoder| {
+                encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                    args,
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 0,
+                });
+            },
+        );
+
+        assert_eq!(texel(&drawn, 0, 0), CLEAR_TEXEL, "top-left corner");
+        assert_eq!(
+            texel(
+                &drawn,
+                SQUARE.width as usize - 1,
+                SQUARE.height as usize - 1
+            ),
+            CLEAR_TEXEL,
+            "bottom-right corner"
+        );
+        assert_ne!(
+            texel(&drawn, 32, 32),
+            CLEAR_TEXEL,
+            "the amplified indirect dispatch emitted nothing over the centre of the target"
+        );
+
+        device.destroy_buffer(args);
+        probe.destroy(&device);
+    }
+
     /// The index pool every indexed draw below reads, and the decoy in front of
     /// it.
     ///

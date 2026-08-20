@@ -1912,11 +1912,27 @@ so a removal surfaces as `GetDeviceRemovedReason` plus DRED breadcrumbs against
 the frame's label rather than as `ID3D12Resource::Map failed` — `DEVICE_REMOVED`
 is reported at the next call, and the `Map` was that call.
 
-**A failure narrows this entry from "our renderer" to one call with a minimal
-repro; a pass eliminates the suspect** and says the renderer's larger use really
-is the subject. Nothing here has executed: the test is Windows-gated and
-`#[ignore]`d, so the only local evidence is that it type-checks under
-`x86_64-pc-windows-msvc`.
+**It passed. `ExecuteIndirect(DISPATCH_MESH)` works on WARP**, run 32405… —
+`PASS [0.109s] (41/79)`, confirmed by name in the job log rather than inferred
+from a green job. So the hypothesis is dead and one suspect is gone. That job
+also prints what WARP claims: `MeshShaderTier = 10 (TIER_1)` and
+`highest shader model by descending probe = 6.8`.
+
+**What that leaves, and the next step is already in the tree.** The passing test
+used `task: None` — a mesh stage with **no amplification**. The renderer uses an
+amplification stage _and_ an indirect dispatch, and that combination had still
+never run.
+`an_indirect_dispatch_through_the_amplification_stage_draws_the_same_triangle`
+drives it, so all four combinations of {direct, indirect} × {mesh only,
+amplified} are now covered here and the last one is the smallest step from a
+frame WARP survives to the frame it does not.
+
+If that fails, the fault is `ExecuteIndirect(DISPATCH_MESH)` reaching an
+amplification stage — one call and one stage rather than a renderer. If it
+passes, the pipeline _shape_ is eliminated entirely and what remains is scale
+(the renderer dispatches many groups, these dispatch one),
+`mesh_cluster.slang`'s own size and groupshared use, and the bindless descriptor
+heap.
 
 So the decision:
 
