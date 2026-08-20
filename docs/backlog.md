@@ -3,6 +3,41 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### DECISION NEEDED — the ten export names, and whether a proc macro earns a dependency
+
+The other half of `web_exports!`'s residue. `crcbl::impl_web_pending!` took the
+forwarding impl; what is left is ten literal symbol names per sample, six
+samples, and they cannot become constants: each is an `extern "C"`
+`#[unsafe(no_mangle)]` export and the names must stay per-sample so two demos on
+one page cannot collide.
+
+Collapsing them to one token — `web_exports!(hud)` building `__crcbl_hud_boot`
+and the rest — needs a macro that can **construct** identifiers.
+`concat_idents!` is unstable, and `macro_rules!` cannot paste tokens into a
+name. So this is a dependency question rather than a refactor.
+
+- **(a) Take a small external helper** such as `paste`. One dependency, widely
+  used, and the change is contained. The workspace has no `paste`, `syn`,
+  `quote` or `proc-macro2` today, so this is genuinely new surface rather than
+  one more use of something already vendored in.
+- **(b) Write a workspace proc-macro crate.** No external dependency, and it
+  could grow other jobs later. The costs are real: a new crate, and a proc-macro
+  crate builds for the **host** even when the samples build for `wasm32`, so
+  every sample's build gains that step.
+- **(c) Leave the names literal.** Ten lines a sample of pure boilerplate, and
+  no new anything.
+
+**What makes (c) less safe than it looks, and it is worth knowing before
+choosing.** `web/tools/check-exports.mjs` guards the shared `__crcbl_web_*`
+surface but does **not** check these per-sample names. A name that drifts from
+the JS calling it is therefore caught by the browser gate failing to boot the
+demo, not by a static check — later and more expensively than a compile error,
+and only for demos the gate runs.
+
+**What would make (c) fine:** teaching `check-exports.mjs` the ten names it can
+derive from each sample's slug. That is a smaller change than either macro route
+and needs no decision, so it is the fallback if (a) and (b) are both declined.
+
 ### The sweep for arms that are asserted but never run
 
 A test that branches on what the device reports covers both arms in its source
