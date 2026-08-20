@@ -1938,7 +1938,8 @@ jobs:
       - uses: actions/checkout@v7
       # **The MSL half of `docs/plan/02-vulkan-backend.md`'s fourth shader
       # portability rule** — "validate all four artifacts, not one".
-      # `tools/compile-shaders.sh` runs `spirv-val` over the SPIR-V and
+      # `crates/crcbl-shaders/tools/compile-shaders.sh` runs `spirv-val` over the
+      # SPIR-V and
       # `crates/crcbl-shaders/tests/wgsl_validation.rs` runs naga over the WGSL,
       # both on Linux. The MSL can be checked **nowhere else**: `xcrun metal` is
       # macOS-only, `newLibraryWithSource:` needs a device, and no open-source
@@ -2277,7 +2278,8 @@ jobs:
     timeout-minutes: 20
     env:
       SLANG_VERSION: '2026.14'
-      # Pinned in `tools/compile-shaders.sh` and repeated here, exactly as the
+      # Pinned in `crates/crcbl-shaders/tools/compile-shaders.sh` and repeated
+      # here, exactly as the
       # Slang version is. The script checks what the binary *reports* rather
       # than this tag — a `dxc` does not know which release it came from — so a
       # mismatched download fails the check step rather than silently producing

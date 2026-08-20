@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Every repository path a doc or a doc comment cites in backticks must exist.
 #
-#   tools/check-doc-citations.sh [file…]   # default: tracked *.md (not the
-#                                          # changelog) and tracked *.rs
+#   tools/check-doc-citations.sh [file…]   # default: every tracked file that
+#                                          # carries prose, bar the changelog
 #
 # `docs/backlog.md` is the working record, and its worth is that an entry can be
 # acted on months later. A citation that no longer resolves defeats that
@@ -62,7 +62,10 @@ crate_root_of() {
 
 files=("$@")
 if [ ${#files[@]} -eq 0 ]; then
-  mapfile -t files < <(git ls-files '*.md' '*.rs' | grep -v '^CHANGELOG.md$')
+  mapfile -t files < <(
+    git ls-files '*.md' '*.rs' '*.mjs' '*.js' '*.yml' '*.sh' '*.slang' |
+      grep -v '^CHANGELOG.md$'
+  )
 fi
 
 status=0
@@ -72,9 +75,9 @@ for file in "${files[@]}"; do
     [ -n "$path" ] || continue
     checked=$((checked + 1))
     # Three ordinary ways to write a citation, so all three resolve: from the
-    # repository root, from the doc's own directory (`web/README.md` says
-    # `tools/serve.mjs`), and from the owning crate's root — which is how
-    # `crcbl-shaders`' sources say `tools/compile-shaders.sh` for a script
+    # repository root, from the doc's own directory (`web/README.md` says a
+    # bare tools/serve.mjs), and from the owning crate's root — which is how
+    # `crcbl-shaders`' sources say a bare tools/compile-shaders.sh for a script
     # beside their `Cargo.toml`.
     if [ -e "$path" ] ||
       [ -e "$(dirname "$file")/$path" ] ||
