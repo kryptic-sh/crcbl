@@ -882,7 +882,7 @@ there. What it does not do, and why:
 - **No sensitivity, damping or inertia.** It takes raw deltas and applies them
   immediately. Smoothing is a frame-rate-dependent filter over the same deltas
   and belongs to whatever owns the frame clock, not to the arithmetic;
-  `apps/lumen`'s `Flyer` keeps its own `TURN` constant for the same reason.
+  `crcbl-render`'s own `Flyer` keeps its `TURN` constant for the same reason.
   Considered and declined at this slice.
 - **Pan is in fractions of the viewport height, not metres or pixels.** Chosen
   so a drag tracks the pointer at any zoom and on any window size — the

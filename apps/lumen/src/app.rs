@@ -38,12 +38,11 @@ use crcbl::engine::{
     wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::render::{EffectRequest, RenderEffects};
+use crcbl::render::{EffectRequest, Flyer, RenderEffects};
 use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowDesc, WindowId};
 use crcbl::ui::draw_list::DrawList;
 
 use crate::args::Options;
-use crate::camera::Flyer;
 use crate::gpu::{Gpu, Paths, Unbuilt};
 use crate::menu::{self, CameraMode, LumenAction, Menus};
 use crate::room;

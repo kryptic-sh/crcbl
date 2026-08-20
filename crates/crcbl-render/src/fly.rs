@@ -1,17 +1,26 @@
-//! The free-fly camera, and the one thing that makes it a *fixture's* camera.
+//! The free-fly camera: keys and mouse deltas in, a [`Camera`] out.
+//!
+//! ```text
+//! key(code, pressed) ─┐
+//! advance(dt) ────────┼─▶ Flyer { eye, yaw, pitch, speed } ─▶ Camera
+//! look(motion) ───────┘
+//! ```
 //!
 //! `docs/plan/sample/13-lumen.md`'s Scope asks for "a free-fly camera, a fixed
 //! camera set for goldens". The two are the same [`Camera`] type and the same
 //! projection — what differs is whether anything moves it — so this module is
-//! the moving half and [`crate::room::fixed_camera`] is the pose both start at.
+//! the moving half, and the pose it starts at is the app's to choose. It is here
+//! beside [`OrbitCamera`](crate::OrbitCamera) rather than in a sample for the
+//! same reason that one is: it is arithmetic, it needs no device, and every one
+//! of its claims is a unit test.
 //!
 //! # Why it is stepped on the fixed timestep
 //!
-//! [`Flyer::advance`] is called from `tick`, not from `draw`. A camera
-//! integrated on the frame rate flies at a speed proportional to how fast the
-//! machine is, which makes "walk to the corner and look at the contact shadow"
-//! a different journey on every machine — and it makes a headless run's camera a
-//! function of the frame budget rather than of the clock.
+//! [`Flyer::advance`] is meant to be called from `tick`, not from `draw`. A
+//! camera integrated on the frame rate flies at a speed proportional to how fast
+//! the machine is, which makes "walk to the corner and look at the contact
+//! shadow" a different journey on every machine — and it makes a headless run's
+//! camera a function of the frame budget rather than of the clock.
 //!
 //! # The mouse and the arrow keys both turn it
 //!
@@ -19,24 +28,29 @@
 //! delta — and never by differencing positions: an absolute position is clamped
 //! at the edge of the display and has pointer acceleration already applied, so a
 //! look built from one stops turning exactly when the cursor runs out of screen.
-//! The pointer is captured for it, which `crate::app`'s
-//! `HostedGame::pointer_mode` is what asks for; a look that turned while a
-//! *visible* cursor walked out of the window would click on whatever is behind
-//! it, so [`Flyer::look`] is called only on the frames that capture produces.
+//! The pointer is captured for it, which the app's `HostedGame::pointer_mode` is
+//! what asks for; a look that turned while a *visible* cursor walked out of the
+//! window would click on whatever is behind it, so [`Flyer::look`] should be
+//! called only on the frames that capture produces.
 //!
 //! The arrow keys stay, and are not a fallback: they are what a reviewer with no
 //! mouse hand free uses to nudge the framing a few degrees, and they are the
 //! only turn a shell without pointer lock has.
 
-use crcbl::core::input::KeyCode;
-use crcbl::math::{Vec2, Vec3};
-use crcbl::render::Camera;
+use core::f32::consts::{FRAC_PI_2, PI};
 
-/// How fast the camera walks, in metres a second.
+use crcbl_core::input::KeyCode;
+use glam::{Vec2, Vec3};
+
+use crate::camera::{Camera, Projection};
+
+/// How fast the camera walks by default, in metres a second.
 ///
-/// A brisk walk rather than a fly-through speed: the room is six metres across,
-/// and a camera that crossed it in a second would be one a reviewer overshoots
-/// every time they try to stand in the corner.
+/// A brisk walk rather than a fly-through speed, because the scene a fly camera
+/// is pointed at is usually a room-sized one: a camera that crossed a
+/// six-metre room in a second is one a reviewer overshoots every time they try
+/// to stand in the corner. A scene measured in hundreds of metres wants more,
+/// and [`Flyer::with_speed`] is how it says so.
 pub const SPEED: f32 = 2.4;
 
 /// How fast the arrow keys turn it, in radians a second.
@@ -54,14 +68,14 @@ pub const TURN: f32 = 1.6;
 /// ships as its default, and a lighting fixture wants the slow end. A reviewer's
 /// job here is to hold a highlight in frame and walk around it, not to flick
 /// onto a target.
-pub const LOOK: f32 = 0.1 * (std::f32::consts::PI / 180.0);
+pub const LOOK: f32 = 0.1 * (PI / 180.0);
 
 /// How far the pitch may go from level, in radians.
 ///
 /// Just short of straight up and straight down: at exactly vertical the
 /// forward vector is parallel to `up` and the view matrix is degenerate, which
 /// arrives as a frame of nothing.
-const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
+const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.05;
 
 /// Which of the movement keys are down.
 ///
@@ -94,20 +108,22 @@ pub struct Flyer {
     yaw: f32,
     /// Rotation away from the horizon, positive up.
     pitch: f32,
+    /// How fast a held movement key walks, in metres a second.
+    speed: f32,
     held: Held,
-    /// Whether any key has moved it since it was built — what the debug panel
+    /// Whether any key has moved it since it was built — what a debug panel
     /// reports, so "free-fly, and nobody has flown it" is distinguishable from
     /// "this is the golden pose".
     moved: bool,
 }
 
 impl Flyer {
-    /// A flyer standing where `camera` stands and looking where it looks.
+    /// A flyer standing where `camera` stands and looking where it looks, at
+    /// [`SPEED`].
     ///
-    /// Starting at the golden pose is what makes `--camera free` and
-    /// `--camera fixed` the same first frame: a reviewer comparing a windowed
-    /// run against a golden is comparing the same picture until they press a
-    /// key.
+    /// Starting at the golden pose is what makes a sample's free camera and its
+    /// fixed camera the same first frame: a reviewer comparing a windowed run
+    /// against a golden is comparing the same picture until they press a key.
     #[must_use]
     pub fn at(camera: &Camera) -> Self {
         let forward = (camera.target - camera.eye).normalize_or_zero();
@@ -117,9 +133,28 @@ impl Flyer {
             // which is the direction a zero yaw looks.
             yaw: forward.x.atan2(-forward.z),
             pitch: forward.y.clamp(-1.0, 1.0).asin(),
+            speed: SPEED,
             held: Held::default(),
             moved: false,
         }
+    }
+
+    /// The same flyer walking at `speed` metres a second instead of [`SPEED`].
+    ///
+    /// The default is sized for a room, and a scene that is not room-sized needs
+    /// its own number: a camera that takes a minute and a half to cross the
+    /// subject is as unusable as one that overshoots it. The turn rates are not
+    /// configurable beside it, because an angle is an angle at every scale.
+    #[must_use]
+    pub const fn with_speed(mut self, speed: f32) -> Self {
+        self.speed = speed;
+        self
+    }
+
+    /// How fast a held movement key walks it, in metres a second.
+    #[must_use]
+    pub const fn speed(&self) -> f32 {
+        self.speed
     }
 
     /// Whether a key has ever moved this camera.
@@ -211,15 +246,15 @@ impl Flyer {
 
         // **Walking is on the level plane, and rising is on the world's `+Y`.**
         // Folding the pitch into the walk would make `W` fly downhill whenever
-        // the reviewer was looking at the floor, which in a room whose whole
-        // subject is the floor is most of the time.
+        // the reviewer was looking at the floor, which in an indoor scene is
+        // most of the time.
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let ahead = Vec3::new(sin_yaw, 0.0, -cos_yaw);
         let aside = Vec3::new(cos_yaw, 0.0, sin_yaw);
         let step = ahead * axis(self.held.forward, self.held.back)
             + aside * axis(self.held.right, self.held.left)
             + Vec3::Y * axis(self.held.up, self.held.down);
-        let step = step.normalize_or_zero() * SPEED * dt;
+        let step = step.normalize_or_zero() * self.speed * dt;
 
         if step != Vec3::ZERO || turn != 0.0 || tilt != 0.0 {
             self.moved = true;
@@ -233,7 +268,7 @@ impl Flyer {
     /// the *lens*, and the whole point of the pair is that the free camera and
     /// the golden camera see through the same one.
     #[must_use]
-    pub fn camera(&self, projection: crcbl::render::Projection) -> Camera {
+    pub fn camera(&self, projection: Projection) -> Camera {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         let forward = Vec3::new(sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch);
@@ -249,17 +284,35 @@ impl Flyer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::room;
+
+    /// The pose every test here starts from.
+    ///
+    /// **Deliberately skew**: the forward vector `(-2.2, -0.7, -6.0)` has a
+    /// non-zero component on all three axes and no two of them equal, so it is
+    /// neither axis-aligned nor 45°-symmetric. That is what
+    /// [`the_turn_arrows_swing_the_view_toward_the_side_they_name`] and
+    /// [`the_mouse_swings_the_view_the_way_it_moved`] need to keep their teeth:
+    /// against a level camera looking straight down `-Z`, a swapped `atan2`
+    /// argument or a flipped sign lands on a pose that is still symmetric and
+    /// still passes.
+    fn fixture() -> Camera {
+        Camera {
+            eye: Vec3::new(1.5, 1.6, 4.0),
+            target: Vec3::new(-0.7, 0.9, -2.0),
+            up: Vec3::Y,
+            projection: Projection::default(),
+        }
+    }
 
     /// **A flyer built from a camera reproduces that camera**, which is what
-    /// makes `--camera free`'s first frame the golden's frame.
+    /// makes a sample's free-camera first frame the golden's frame.
     ///
     /// Round-tripping through two angles is where a sign or a swapped argument
     /// hides: every candidate mistake produces a camera pointing somewhere
     /// plausible in a room with walls on all sides.
     #[test]
     fn a_flyer_starts_looking_exactly_where_the_fixed_camera_looks() {
-        let fixed = room::fixed_camera();
+        let fixed = fixture();
         let flyer = Flyer::at(&fixed);
         let rebuilt = flyer.camera(fixed.projection);
         assert_eq!(rebuilt.eye, fixed.eye);
@@ -279,7 +332,7 @@ mod tests {
     /// camera that never went anywhere.
     #[test]
     fn holding_forward_walks_and_releasing_it_stops() {
-        let fixed = room::fixed_camera();
+        let fixed = fixture();
         let mut flyer = Flyer::at(&fixed);
         assert!(flyer.key(KeyCode::KeyW, true), "W is the camera's");
         flyer.advance(0.5);
@@ -302,11 +355,43 @@ mod tests {
         );
     }
 
+    /// **[`SPEED`] is the default and [`Flyer::with_speed`] is how a scene that
+    /// is not room-sized replaces it**, both measured in metres walked.
+    ///
+    /// The observable is the distance a second of held `W` covers, not the
+    /// field: an `advance` that read the constant instead of the field would
+    /// report the new speed from [`Flyer::speed`] and still walk the old one.
+    #[test]
+    fn a_second_of_forward_walks_the_flyers_own_speed() {
+        let mut standard = Flyer::at(&fixture());
+        assert_eq!(standard.speed(), SPEED, "the default is the constant");
+        standard.key(KeyCode::KeyW, true);
+        standard.advance(1.0);
+        let walked = standard.eye().distance(fixture().eye);
+        assert!(
+            (walked - SPEED).abs() < 1e-4,
+            "a second of forward walked {walked} m at the default speed of {SPEED} m/s"
+        );
+
+        // Far enough from the default that no rounding could confuse the two,
+        // and the scale a hundred-metre subject actually wants.
+        let quick = 20.0;
+        let mut fast = Flyer::at(&fixture()).with_speed(quick);
+        assert_eq!(fast.speed(), quick, "with_speed did not take");
+        fast.key(KeyCode::KeyW, true);
+        fast.advance(1.0);
+        let flown = fast.eye().distance(fixture().eye);
+        assert!(
+            (flown - quick).abs() < 1e-3,
+            "a second of forward walked {flown} m at {quick} m/s"
+        );
+    }
+
     /// Walking is level: looking at the floor and pressing forward walks
     /// forward rather than down.
     #[test]
     fn walking_forward_does_not_follow_the_pitch_into_the_floor() {
-        let fixed = room::fixed_camera();
+        let fixed = fixture();
         let mut flyer = Flyer::at(&fixed);
         flyer.key(KeyCode::ArrowDown, true);
         flyer.advance(1.0);
@@ -333,14 +418,14 @@ mod tests {
     #[test]
     fn the_pitch_stops_short_of_straight_up_and_straight_down() {
         for (key, sign) in [(KeyCode::ArrowUp, 1.0f32), (KeyCode::ArrowDown, -1.0)] {
-            let mut flyer = Flyer::at(&room::fixed_camera());
+            let mut flyer = Flyer::at(&fixture());
             flyer.key(key, true);
             // Far more turning than the limit is away, so a missing clamp runs
             // past vertical and comes back the other side.
             for _ in 0..200 {
                 flyer.advance(0.1);
             }
-            let camera = flyer.camera(room::fixed_camera().projection);
+            let camera = flyer.camera(fixture().projection);
             let forward = (camera.target - camera.eye).normalize();
             assert!(
                 forward.y * sign > 0.9 && forward.y.abs() < 1.0,
@@ -362,15 +447,15 @@ mod tests {
     ///
     /// The claim is made against the camera's **own** starting basis rather than
     /// against a world axis, so it holds at every yaw and needs no arithmetic
-    /// about where `room::fixed_camera` happens to look: after turning right the
-    /// new forward leans toward the old *right* vector, and after turning left,
-    /// away from it. A test comparing `yaw` would pass on a camera that stored
-    /// the angle correctly and built its basis backwards.
+    /// about where [`fixture`] happens to look: after turning right the new
+    /// forward leans toward the old *right* vector, and after turning left, away
+    /// from it. A test comparing `yaw` would pass on a camera that stored the
+    /// angle correctly and built its basis backwards.
     #[test]
     fn the_turn_arrows_swing_the_view_toward_the_side_they_name() {
         for (key, sign) in [(KeyCode::ArrowRight, 1.0f32), (KeyCode::ArrowLeft, -1.0)] {
-            let mut flyer = Flyer::at(&room::fixed_camera());
-            let before = flyer.camera(room::fixed_camera().projection);
+            let mut flyer = Flyer::at(&fixture());
+            let before = flyer.camera(fixture().projection);
             let start = (before.target - before.eye).normalize();
             // `cross(forward, up)` is the right-hand side in this engine's
             // right-handed, `+Y` up, `-Z` forward world — the same vector
@@ -383,7 +468,7 @@ mod tests {
             // the perpendicular and make a wrong sign read as a right one.
             flyer.advance(0.05);
 
-            let after = flyer.camera(room::fixed_camera().projection);
+            let after = flyer.camera(fixture().projection);
             let turned = (after.target - after.eye).normalize();
             let leaned = turned.dot(right);
             assert!(
@@ -403,7 +488,7 @@ mod tests {
     /// claim [`the_turn_arrows_swing_the_view_toward_the_side_they_name`] makes
     /// for the arrow keys and the same way of making it: against the camera's
     /// own starting basis, so it holds at every yaw and says nothing about where
-    /// `room::fixed_camera` happens to point.
+    /// [`fixture`] happens to point.
     ///
     /// Both axes, because a look with one sign right and the other inverted is
     /// the ordinary shape of this bug — `motion` is **Y down** while the pitch
@@ -423,15 +508,15 @@ mod tests {
             (Vec2::new(0.0, -sweep), 0.0, 1.0),
             (Vec2::new(0.0, sweep), 0.0, -1.0),
         ] {
-            let mut flyer = Flyer::at(&room::fixed_camera());
-            let before = flyer.camera(room::fixed_camera().projection);
+            let mut flyer = Flyer::at(&fixture());
+            let before = flyer.camera(fixture().projection);
             let start = (before.target - before.eye).normalize();
             let right = start.cross(Vec3::Y).normalize();
             let up = right.cross(start).normalize();
 
             flyer.look(motion);
 
-            let after = flyer.camera(room::fixed_camera().projection);
+            let after = flyer.camera(fixture().projection);
             let turned = (after.target - after.eye).normalize();
             assert!(
                 turned.dot(right) * toward_right > 0.01 || toward_right == 0.0,
@@ -452,7 +537,7 @@ mod tests {
         }
 
         // And a frame that reported no movement is not one.
-        let mut still = Flyer::at(&room::fixed_camera());
+        let mut still = Flyer::at(&fixture());
         still.look(Vec2::ZERO);
         assert!(!still.has_moved());
     }
@@ -466,7 +551,7 @@ mod tests {
     #[test]
     fn the_mouse_pitch_stops_short_of_vertical_too() {
         for sign in [1.0f32, -1.0] {
-            let mut flyer = Flyer::at(&room::fixed_camera());
+            let mut flyer = Flyer::at(&fixture());
             // Far more than the limit is away, in one shove and then in many
             // small ones, because a clamp applied to the delta rather than to
             // the accumulated angle survives the first and not the second.
@@ -474,7 +559,7 @@ mod tests {
             for _ in 0..200 {
                 flyer.look(Vec2::new(0.0, -sign * 50.0));
             }
-            let camera = flyer.camera(room::fixed_camera().projection);
+            let camera = flyer.camera(fixture().projection);
             let forward = (camera.target - camera.eye).normalize();
             assert!(
                 forward.y * sign > 0.9 && forward.y.abs() < 1.0,
@@ -488,11 +573,11 @@ mod tests {
         }
     }
 
-    /// A key this camera does not bind is reported as somebody else's, so the
-    /// sample can grow one later without the camera having swallowed it.
+    /// A key this camera does not bind is reported as somebody else's, so an app
+    /// can grow one later without the camera having swallowed it.
     #[test]
     fn an_unbound_key_is_not_claimed() {
-        let mut flyer = Flyer::at(&room::fixed_camera());
+        let mut flyer = Flyer::at(&fixture());
         assert!(!flyer.key(KeyCode::KeyQ, true));
         flyer.advance(1.0);
         assert!(!flyer.has_moved());

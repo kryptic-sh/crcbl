@@ -40,7 +40,7 @@ pub enum CameraMode {
     /// reference without anybody having to stand in the right place first.
     #[default]
     Fixed,
-    /// [`crate::camera::Flyer`], starting at that same pose.
+    /// [`crcbl::render::Flyer`], starting at that same pose.
     Free,
 }
 

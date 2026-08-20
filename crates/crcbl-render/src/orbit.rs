@@ -26,7 +26,7 @@
 //!
 //! * **A positive yaw delta swings the eye toward the camera's own right**, and
 //!   the view therefore turns left. That is the same rotation sense as
-//!   `apps/lumen`'s `Flyer` — a rising yaw is a rotation about `+Y` that carries
+//!   [`crate::fly::Flyer`] — a rising yaw is a rotation about `+Y` that carries
 //!   `+Z` toward `+X` — so the two cameras in this engine agree about which way
 //!   an angle goes, and an app that wants the object to follow the pointer
 //!   negates the delta on its way in.
@@ -61,11 +61,11 @@ use crate::cull::Aabb;
 /// How far the eye may rise or fall from the pivot's horizontal plane, in
 /// radians.
 ///
-/// Just short of straight up and straight down, and `apps/lumen`'s `PITCH_LIMIT`
-/// is the precedent. At *exactly* vertical the direction from pivot to eye is
-/// parallel to `Vec3::Y` and [`Camera::view`] panics rather than hand back a
-/// matrix of `NaN`s — so an unclamped turntable does not wobble, it takes the
-/// process down.
+/// Just short of straight up and straight down, and [`crate::fly::Flyer`]'s own
+/// pitch limit is the precedent. At *exactly* vertical the direction from pivot
+/// to eye is parallel to `Vec3::Y` and [`Camera::view`] panics rather than hand
+/// back a matrix of `NaN`s — so an unclamped turntable does not wobble, it takes
+/// the process down.
 pub const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.05;
 
 /// The closest the eye may come to the pivot, in metres.
@@ -94,7 +94,7 @@ pub const FRAME_MARGIN: f32 = 1.1;
 /// A camera that turns about a pivot: orbit, pan, zoom, frame.
 ///
 /// Holds a pivot, a distance and two angles rather than a [`Camera`], for the
-/// same reason `apps/lumen`'s `Flyer` holds angles: an eye and a target
+/// same reason [`crate::fly::Flyer`] holds angles: an eye and a target
 /// integrated directly drift apart, and "orbit" would depend on how far away the
 /// target happened to be.
 ///

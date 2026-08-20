@@ -884,6 +884,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::render::Flyer` is the engine's free-fly camera**, moved out of
+  `apps/lumen` so a second sample can fly the same one. It is the same
+  controller — WASD and Space/Shift on a fixed timestep, arrow keys and
+  `PointerUpdate::motion` for the turn, a pitch clamped short of vertical — and
+  it now sits beside `OrbitCamera` where it needs no device and every claim it
+  makes is a unit test. `SPEED`, `TURN` and `LOOK` come with it.
+
+  **The walk speed is per-camera.** `SPEED` is now a _default_ sized for a room,
+  and `Flyer::with_speed` replaces it for a scene that is not room-sized;
+  `Flyer::speed` reads it back. `Flyer::at` still starts at `SPEED`, so nothing
+  that already flew one moves differently. The turn rates stay constants: an
+  angle is an angle at every scale.
+
+  `crcbl_lumen`'s public surface is unchanged — it re-exports `Flyer`, `SPEED`
+  and `TURN` from the engine rather than defining them.
+
 - **`crcbl-webgpu`'s refusals are checked too, without a browser.** It is the
   one backend the native seam suite cannot open — `crcbl::backend::open` answers
   "it reaches a device only on wasm32" — so the driver that holds every other

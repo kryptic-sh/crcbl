@@ -63,7 +63,6 @@
 mod app;
 mod args;
 pub mod bounce;
-mod camera;
 mod gpu;
 mod menu;
 pub mod room;
@@ -75,7 +74,10 @@ pub use app::{Loop, Lumen, LumenError, PendingLoop, Summary, run, start, with_sh
 pub use args::{
     DEFAULT_TICK_HZ, Invocation, Options, USAGE, binding_from_name, geometry_from_name, parse,
 };
-pub use camera::{Flyer, SPEED, TURN};
+/// Re-exported rather than defined here: the free-fly camera moved into
+/// `crcbl-render` so a second sample could fly the same one, and this keeps
+/// `crcbl_lumen::Flyer` resolving for anything that already named it.
+pub use crcbl::render::{Flyer, SPEED, TURN};
 pub use gpu::{Forced, Gpu, GpuError, Paths, Unbuilt};
 pub use menu::{
     AO_ID, CAMERA_ID, CameraMode, LumenAction, Menus, REFLECTIONS_ID, SHADOWS_ID, action_for,
