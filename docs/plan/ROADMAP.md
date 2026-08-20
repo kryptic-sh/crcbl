@@ -1778,13 +1778,21 @@ be present in some of them.** Two surveys of `apps/*` produced the slices below.
    which is more machinery than the handful of genuinely shared lines buys — and
    those lines are now in the engine anyway.
 
-6. **`web_exports!`'s residue** — 899 lines still across six samples, but only
-   two real items each: a pure-forwarding `WebPending` impl, and ten literal
-   symbol names. The impl looks collapsible as-is. The ten names need a proc
-   macro that can build identifiers, because `concat_idents!` is unstable and
-   the names must stay per-sample so two demos in one browser cannot collide —
-   **that means a new dependency, which is the repo owner's call** (see
-   Decisions).
+6. **`web_exports!`'s residue** — the impl half is **shipped** as
+   `crcbl::impl_web_pending!`; the ten symbol names are still the owner's call.
+   The six `WebPending` impls were byte-identical once the sample's name was
+   normalised away, and are now one macro invocation each. It carries the same
+   `const _` coercion guard `impl_game_gpu!` documents, because both forwards
+   are `Self::method(..)` and rustc suppresses `unconditional_recursion` inside
+   a macro expansion — so a sample that loses its inherent `poll` would compile
+   into an infinite loop rather than an error. The guard only works while
+   `WebPending` is **not** imported in the sample, which is why the six lost
+   that import and each says so.
+
+   What is left is the ten literal names, which need a proc macro that can build
+   identifiers: `concat_idents!` is unstable and the names must stay per-sample
+   so two demos in one browser cannot collide — **that means a new dependency,
+   which is the repo owner's call** (see Decisions).
 
 7. **`crcbl_audio::CueDeck`** — the plumbing only: the stream-open-with-null-
    fallback, the unknown-id guard, the cue→`VoiceMix` conversion and the `plays`

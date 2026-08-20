@@ -77,9 +77,7 @@
 
 use std::rc::Rc;
 
-use crcbl::engine::Clock;
 use crcbl::store::web::FetchSource;
-use crcbl::web::WebPending;
 
 use crate::app::{Loop, PendingLoop};
 use crate::args::Options;
@@ -96,25 +94,16 @@ pub use crcbl::web::{
 // This game's half of the lifecycle
 // ---------------------------------------------------------------------------
 
-/// **There is no `WebLoop` impl here.** `crcbl::web` blanket-implements it for
-/// every `crcbl::engine::Loop`, and the two halves that were ever this game's —
-/// its name and the log line a finished run is worth — are `HostedGame::NAME`
-/// and `HostedGame::log_summary` in `app.rs`. What is left below is start-up,
-/// which stays here because the options it opens with are flappy's.
-impl WebPending for PendingLoop<dyn crcbl::shell::Shell> {
-    type Loop = Loop<dyn crcbl::shell::Shell>;
-
-    fn request(
-        shell: Box<dyn crcbl::shell::Shell>,
-        clock: Clock,
-    ) -> Result<Self, crate::app::FlappyError> {
-        Self::request(shell, &Options::default(), clock)
-    }
-
-    fn poll(&mut self) -> Result<Option<Self::Loop>, crate::app::FlappyError> {
-        Self::poll(self)
-    }
-}
+// **There is no `WebLoop` impl here.** `crcbl::web` blanket-implements it for
+// every `crcbl::engine::Loop`, and the two halves that were ever this game's —
+// its name and the log line a finished run is worth — are `HostedGame::NAME`
+// and `HostedGame::log_summary` in `app.rs`. What is left below is start-up,
+// which stays here because the options it opens with are flappy's.
+// **`WebPending` is deliberately not imported.** The macro's guard against a
+// missing inherent method resolves `PendingLoop::poll` by path, and an import
+// would let that resolve to the trait method instead — which is the infinite
+// recursion the guard exists to catch. See `crcbl::impl_web_pending`.
+crcbl::impl_web_pending!(PendingLoop, Loop, Options, crate::app::FlappyError);
 
 // ---------------------------------------------------------------------------
 // Exports

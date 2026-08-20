@@ -81,9 +81,6 @@
 //! canvas has no size until the document gives it one, and a swapchain needs
 //! one; a shim that never calls `resize` leaves the status at `BOOTING` forever.
 
-use crcbl::engine::Clock;
-use crcbl::web::WebPending;
-
 use crate::app::{Loop, PendingLoop};
 use crate::args::Options;
 
@@ -99,25 +96,18 @@ pub use crcbl::web::{
 // This sample's half of the lifecycle
 // ---------------------------------------------------------------------------
 
-/// **There is no `WebLoop` impl here.** `crcbl::web` blanket-implements it for
-/// every `crcbl::engine::Loop`, and the two halves that were ever this sample's
-/// — its name and the log line a finished run is worth — are `HostedGame::NAME`
-/// and `HostedGame::log_summary` in `app.rs`. What is left below is start-up,
-/// which stays here because the options it opens with are hud's.
-impl WebPending for PendingLoop<dyn crcbl::shell::Shell> {
-    type Loop = Loop<dyn crcbl::shell::Shell>;
-
-    fn request(
-        shell: Box<dyn crcbl::shell::Shell>,
-        clock: Clock,
-    ) -> Result<Self, crate::app::HudError> {
-        Self::request(shell, &Options::default(), clock)
-    }
-
-    fn poll(&mut self) -> Result<Option<Self::Loop>, crate::app::HudError> {
-        Self::poll(self)
-    }
-}
+// **There is no `WebLoop` impl here.** `crcbl::web` blanket-implements it for
+// every `crcbl::engine::Loop`, and the two halves that were ever this sample's
+// — its name and the log line a finished run is worth — are `HostedGame::NAME`
+// and `HostedGame::log_summary` in `app.rs`. What is left is start-up, and the
+// macro below writes it: the impl was identical in all six samples once the
+// sample's name was normalised away.
+//
+// **`WebPending` is deliberately not imported.** The macro's guard against a
+// missing inherent method resolves `PendingLoop::poll` by path, and an import
+// would let that resolve to the trait method instead — which is the infinite
+// recursion the guard exists to catch. See `crcbl::impl_web_pending`.
+crcbl::impl_web_pending!(PendingLoop, Loop, Options, crate::app::HudError);
 
 // ---------------------------------------------------------------------------
 // Exports

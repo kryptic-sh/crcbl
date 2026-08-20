@@ -357,6 +357,75 @@ impl<S: crate::shell::Shell + ?Sized, G: crate::engine::HostedGame> WebLoop
 }
 
 /// A game's start-up, as the browser lifecycle needs to see it.
+/// Writes a sample's [`WebPending`] impl, which is pure forwarding.
+///
+/// Six samples carried the same block, identical once the sample's name is
+/// normalised away: `request` fills in the game's own `Options::default()` and
+/// `poll` delegates, because the browser entry point has neither to hand.
+///
+/// # The recursion this had to be made safe against first
+///
+/// Both forwards are `Self::method(..)`, and if the type has no inherent method
+/// of that name the call resolves to the **trait** method — so it calls itself
+/// for ever rather than failing to compile. Written out by hand that is caught
+/// by rustc's `unconditional_recursion`, which this workspace denies; but
+/// **rustc suppresses its lints inside an external macro's expansion**, so
+/// collapsing the block into a macro removes the only thing catching it. This is
+/// the same trap [`impl_game_gpu`](crate::impl_game_gpu) documents, and it is
+/// the reason this macro opens with a `const _` block coercing both inherent
+/// methods to function pointers: path syntax only considers a trait's methods
+/// when the trait is in scope, and `WebPending` is not imported inside the
+/// expansion, so each coercion can only resolve to the inherent method. A type
+/// missing one gets `E0599` naming it.
+///
+/// # Examples
+///
+/// ```ignore
+/// crcbl::impl_web_pending!(PendingLoop, Loop, Options, crate::app::HudError);
+/// ```
+///
+/// The example is `ignore` because it needs the sample's own `PendingLoop`,
+/// `Loop` and `Options`. Every sample under `apps/` exercises the expansion.
+#[macro_export]
+macro_rules! impl_web_pending {
+    ($pending:ident, $running:ident, $options:ty, $error:ty) => {
+        // Load-bearing, not decoration: see the macro's docs. Without it a
+        // sample that loses its inherent `request` or `poll` compiles into an
+        // infinite recursion instead of an error.
+        const _: () = {
+            let _: fn(
+                ::std::boxed::Box<dyn $crate::shell::Shell>,
+                &$options,
+                $crate::engine::Clock,
+            ) -> ::core::result::Result<$pending<dyn $crate::shell::Shell>, $error> =
+                <$pending<dyn $crate::shell::Shell>>::request;
+            let _: fn(
+                &mut $pending<dyn $crate::shell::Shell>,
+            ) -> ::core::result::Result<
+                ::core::option::Option<$running<dyn $crate::shell::Shell>>,
+                $error,
+            > = <$pending<dyn $crate::shell::Shell>>::poll;
+        };
+
+        impl $crate::web::WebPending for $pending<dyn $crate::shell::Shell> {
+            type Loop = $running<dyn $crate::shell::Shell>;
+
+            fn request(
+                shell: ::std::boxed::Box<dyn $crate::shell::Shell>,
+                clock: $crate::engine::Clock,
+            ) -> ::core::result::Result<Self, $error> {
+                Self::request(shell, &<$options>::default(), clock)
+            }
+
+            fn poll(
+                &mut self,
+            ) -> ::core::result::Result<::core::option::Option<Self::Loop>, $error> {
+                Self::poll(self)
+            }
+        }
+    };
+}
+
 pub trait WebPending: Sized {
     /// The loop this becomes.
     type Loop: WebLoop;
