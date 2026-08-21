@@ -193,17 +193,25 @@ pub fn with_shell<S: Shell + ?Sized>(
 ///
 /// [`BreakoutError`] if the game could not be built.
 fn assemble<S: Shell + ?Sized>(
-    mut booted: Booted<S, Gpu>,
+    booted: Booted<S, Gpu>,
     options: &Options,
 ) -> Result<Loop<S>, BreakoutError> {
     // `--screenshot`, armed before the first frame because the frame it names
     // is counted from this point. The flag forces `--headless` on, so the
     // context behind this is always an offscreen ring — see
     // [`crcbl::args::Common::screenshot`].
+    //
+    // The mutable binding lives inside the `cfg` rather than on the parameter:
+    // a browser build arms nothing, so a `mut` in the signature would be one
+    // the wasm32 target correctly reports as unused.
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(request) = options.common.screenshot_request() {
-        booted.gpu.context_mut().set_screenshot(request);
-    }
+    let booted = {
+        let mut booted = booted;
+        if let Some(request) = options.common.screenshot_request() {
+            booted.gpu.context_mut().set_screenshot(request);
+        }
+        booted
+    };
     let game =
         Game::new(options.common.headless, options.common.tick_hz).map_err(BreakoutError::Game)?;
     Ok(Loop::new(

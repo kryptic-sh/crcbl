@@ -1499,7 +1499,12 @@ impl GpuContext {
         // one batch: submission order is what puts the copy's barrier after the
         // frame's last pass, and a second `submit` would be a second batch with
         // nothing ordering it against the first.
+        #[cfg(not(target_arch = "wasm32"))]
         let mut batch = [command_buffer; 2];
+        // No second slot is ever written in a browser, so the binding is not
+        // `mut` there — the same split the `recorded` below already makes.
+        #[cfg(target_arch = "wasm32")]
+        let batch = [command_buffer; 2];
         #[cfg(not(target_arch = "wasm32"))]
         let recorded = match &capture {
             Some(capture) => {
@@ -1595,9 +1600,9 @@ impl GpuContext {
     /// problems — a present there simply returns the image — so
     /// `--screenshot` turns `--headless` on rather than trusting the caller to
     /// pass it, and that is the whole of the enforcement. Nothing here branches
-    /// on which backend is behind the seam; the copy is
-    /// [`crate::screenshot::record_image_readback`], which every backend
-    /// implements.
+    /// on which backend is behind the seam; the copy goes through
+    /// `crate::screenshot`'s image readback, which is written once against
+    /// `crcbl_hal` and which every backend therefore implements.
     ///
     /// Arming twice replaces the first request: there is one file and one
     /// frame, and a second arm is the caller changing its mind rather than
