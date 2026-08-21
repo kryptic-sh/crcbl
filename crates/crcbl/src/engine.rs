@@ -192,6 +192,14 @@ pub enum GpuError {
     Surface(SurfaceError),
     /// The render graph refused the frame.
     Graph(crcbl_render::GraphError),
+    /// A `--screenshot` frame could not be read back or written.
+    ///
+    /// Its own variant rather than a `Hal`, because most of what can go wrong
+    /// here is not the device's: a directory that does not exist, a readback
+    /// that never landed, an extent whose bytes do not fit a `usize`. A run
+    /// asked for a file and did not get one, and that has to stop the run —
+    /// see [`GpuContext::set_screenshot`].
+    Screenshot(String),
 }
 
 impl std::fmt::Display for GpuError {
@@ -207,6 +215,7 @@ impl std::fmt::Display for GpuError {
             Self::Hal(error) => write!(f, "{error}"),
             Self::Surface(error) => write!(f, "{error}"),
             Self::Graph(error) => write!(f, "render graph: {error}"),
+            Self::Screenshot(what) => write!(f, "screenshot: {what}"),
         }
     }
 }
@@ -546,6 +555,41 @@ pub struct GpuOptions {
     pub pacing: Pacing,
 }
 
+/// A frame the run has been asked to write out as a PNG — `--screenshot`'s
+/// half inside the GPU.
+///
+/// Armed with [`GpuContext::set_screenshot`] and spent exactly once: the frame
+/// whose present is the [`frame`](Self::frame)-th is copied out of the
+/// swapchain image it was just drawn into, and the request is cleared.
+///
+/// **Native only, because it writes a file.** A browser build has no argv to
+/// carry the flag and no path to write to, and `crcbl-golden` — the PNG encoder
+/// behind it — is not linked there at all.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenshotRequest {
+    /// Where the PNG goes. Its directory has to exist; nothing here creates one.
+    pub path: std::path::PathBuf,
+    /// Which presented frame to write, counted from 1.
+    ///
+    /// The *last* frame of a bounded run is what
+    /// [`Common::screenshot_request`](crate::args::Common::screenshot_request)
+    /// asks for, which is why this is a frame number rather than a "capture the
+    /// next one" flag: a run has to reach the state the picture is of before
+    /// the picture means anything.
+    pub frame: u64,
+}
+
+/// One `--screenshot` copy recorded and submitted, waiting for its bytes.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct PendingScreenshot {
+    commands: CommandBufferHandle,
+    staging: crcbl_hal::BufferHandle,
+    layout: crate::screenshot::ReadbackLayout,
+    extent: (u32, u32),
+}
+
 /// What [`GpuContext::open`] should ask the device for.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuContextDesc<'a> {
@@ -685,6 +729,20 @@ pub struct GpuContext {
     /// [`set_pacing`](Self::set_pacing) to [`Pacing::Auto`] can settle against
     /// the sample already taken instead of taking a second one.
     observed_timing: Option<DisplayTiming>,
+    /// Presents that actually happened, which is what a `--screenshot` frame
+    /// number counts against.
+    ///
+    /// Not `submitted`: that one counts *submissions*, and a frame whose
+    /// present reported the swapchain out of date was submitted and reached
+    /// nothing. The two differ only on a surface that reconfigures, which is a
+    /// surface `--screenshot` refuses to finish on — but counting the right
+    /// thing is cheaper than the comment explaining why the wrong one happens
+    /// to work.
+    #[cfg(not(target_arch = "wasm32"))]
+    presented: u64,
+    /// The frame this run was asked to write out, until it has been written.
+    #[cfg(not(target_arch = "wasm32"))]
+    screenshot: Option<ScreenshotRequest>,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -1133,6 +1191,10 @@ impl GpuContext {
             // Not asked yet, and the query is only meaningful after a present —
             // see `settle_pacing`.
             observed_timing: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            presented: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            screenshot: None,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
         })
@@ -1406,6 +1468,11 @@ impl GpuContext {
         acquired: &AcquiredFrame,
         command_buffer: CommandBufferHandle,
     ) -> Result<FrameOutcome, GpuError> {
+        // Before the submit, because the copy has to ride in the *same* batch
+        // as the frame that drew it — see `begin_screenshot`.
+        #[cfg(not(target_arch = "wasm32"))]
+        let capture = self.begin_screenshot(acquired)?;
+
         self.submitted += 1;
         let value = self.submitted;
 
@@ -1428,10 +1495,26 @@ impl GpuContext {
                 .map(|semaphore| SemaphoreSignal { semaphore, value }),
         );
 
+        // Two command buffers on a `--screenshot` frame and one otherwise, in
+        // one batch: submission order is what puts the copy's barrier after the
+        // frame's last pass, and a second `submit` would be a second batch with
+        // nothing ordering it against the first.
+        let mut batch = [command_buffer; 2];
+        #[cfg(not(target_arch = "wasm32"))]
+        let recorded = match &capture {
+            Some(capture) => {
+                batch[1] = capture.commands;
+                2
+            }
+            None => 1,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let recorded = 1;
+
         self.device.submit(
             self.queue,
             &SubmitInfo {
-                command_buffers: &[command_buffer],
+                command_buffers: &batch[..recorded],
                 waits: &self.waits,
                 signals: &self.signals,
             },
@@ -1454,6 +1537,20 @@ impl GpuContext {
             Ok(()) => {}
             // **Present is the usual place a resize is noticed**, not acquire.
             Err(SurfaceError::OutOfDate) => {
+                // A `--screenshot` frame that never reached anything is a file
+                // the caller asked for and will not get, so it stops the run
+                // rather than being retried on the next frame: the retry would
+                // silently move the picture to a later frame than the one that
+                // was asked for. Unreachable through the flag itself — it
+                // implies `--headless`, and an offscreen ring has no compositor
+                // to go out of date against — which is exactly why it is an
+                // error and not a code path with its own recovery.
+                #[cfg(not(target_arch = "wasm32"))]
+                if capture.is_some() {
+                    return Err(GpuError::Screenshot(
+                        "the swapchain went out of date on the frame that was to be written".into(),
+                    ));
+                }
                 self.reconfigure()?;
                 return Ok(FrameOutcome::Reconfigured);
             }
@@ -1465,11 +1562,190 @@ impl GpuContext {
         // the display did with a frame it has been given.
         self.settle_pacing()?;
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.presented += 1;
+            if let Some(capture) = capture {
+                self.finish_screenshot(capture)?;
+            }
+        }
+
         if acquired.suboptimal {
             log::debug!("hal: swapchain suboptimal; reconfiguring after present");
             self.reconfigure()?;
         }
         Ok(FrameOutcome::Presented)
+    }
+
+    /// Asks for the `request.frame`-th presented frame to be written to
+    /// `request.path` as a PNG.
+    ///
+    /// **The frame is read back off the image it was presented from**, which is
+    /// why this is a method on the context rather than a second render of the
+    /// scene: a screenshot of a game is the frame the game drew, including
+    /// whatever menu, HUD and overlay were on it, and re-rendering it from the
+    /// outside would be a different picture that happens to look similar.
+    ///
+    /// # It only works with no window, and the flag is what enforces that
+    ///
+    /// Reading a *presented* swapchain image back is not something a window
+    /// system owes anybody: a compositor may have taken the image, the surface
+    /// may not have been created with the transfer usage, and the format is
+    /// whatever the display asked for. An offscreen ring has none of those
+    /// problems — a present there simply returns the image — so
+    /// `--screenshot` turns `--headless` on rather than trusting the caller to
+    /// pass it, and that is the whole of the enforcement. Nothing here branches
+    /// on which backend is behind the seam; the copy is
+    /// [`crate::screenshot::record_image_readback`], which every backend
+    /// implements.
+    ///
+    /// Arming twice replaces the first request: there is one file and one
+    /// frame, and a second arm is the caller changing its mind rather than
+    /// asking for two pictures.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_screenshot(&mut self, request: ScreenshotRequest) {
+        log::info!(
+            "screenshot: frame {} will be written to {}",
+            request.frame,
+            request.path.display()
+        );
+        self.screenshot = Some(request);
+    }
+
+    /// Records the copy for a `--screenshot` frame, if this is the one.
+    ///
+    /// Returns the recorded command buffer and its staging buffer for
+    /// `submit_and_present` to put in the frame's own batch — one submission,
+    /// so the copy's `Present → TransferSrc` barrier is ordered after the
+    /// passes that drew the image.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn begin_screenshot(
+        &mut self,
+        acquired: &AcquiredFrame,
+    ) -> Result<Option<PendingScreenshot>, GpuError> {
+        let Some(request) = &self.screenshot else {
+            return Ok(None);
+        };
+        if self.presented + 1 != request.frame {
+            return Ok(None);
+        }
+
+        let extent = acquired.extent;
+        let layout = crate::screenshot::ReadbackLayout::for_extent(extent).ok_or_else(|| {
+            GpuError::Screenshot(format!(
+                "a {}x{} frame does not fit in host memory",
+                extent.0, extent.1
+            ))
+        })?;
+
+        let device = self.device.as_ref();
+        let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+            label: Some("crcbl screenshot"),
+            queue: self.queue,
+        });
+        let staging = crate::screenshot::record_image_readback(
+            device,
+            encoder.as_mut(),
+            acquired.image,
+            self.config.format,
+            extent,
+            &layout,
+            "crcbl screenshot readback",
+        )?;
+        let commands = encoder.finish()?;
+
+        Ok(Some(PendingScreenshot {
+            commands,
+            staging,
+            layout,
+            extent,
+        }))
+    }
+
+    /// Waits for a submitted `--screenshot` copy to land and writes the PNG.
+    ///
+    /// Blocking, and deliberately: this happens once in a run, on a headless
+    /// run with no display to keep up with, and the alternative is a state
+    /// machine spread across the caller's frames for a file nobody reads until
+    /// the process has exited.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::Screenshot`] if the copy never landed, if the pixels do not
+    /// describe the frame's extent, or if the file could not be written;
+    /// [`GpuError::Hal`] if the readback itself failed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_screenshot(&mut self, capture: PendingScreenshot) -> Result<(), GpuError> {
+        let request = self
+            .screenshot
+            .take()
+            .ok_or_else(|| GpuError::Screenshot("the request went away mid-frame".into()))?;
+
+        let device = self.device.as_ref();
+        let readback = device.request_readback(&crcbl_hal::ReadbackDesc {
+            label: Some("crcbl screenshot readback"),
+            buffer: capture.staging,
+            offset: 0,
+            size: capture.layout.byte_count,
+            after: None,
+        })?;
+
+        let mut staged = vec![0u8; capture.layout.staged_capacity];
+        let started = MonotonicTime::new();
+        loop {
+            if matches!(
+                device.poll_readback(readback, &mut staged)?,
+                crcbl_hal::ReadbackState::Ready
+            ) {
+                break;
+            }
+            if started.elapsed() > crate::screenshot::READBACK_DEADLINE {
+                // The in-flight resources are left alone deliberately, exactly
+                // as `OffscreenSetup::draw_and_readback` leaves its own: the
+                // GPU may still be reading them, and `destroy` waits the device
+                // idle before it frees anything.
+                return Err(GpuError::Screenshot(format!(
+                    "the copy had not landed after {:?}",
+                    crate::screenshot::READBACK_DEADLINE
+                )));
+            }
+            std::thread::yield_now();
+        }
+
+        device.destroy_command_buffer(capture.commands);
+        device.destroy_buffer(capture.staging);
+        device.destroy_readback(readback);
+
+        let pixels = crate::screenshot::compact_rows(
+            &staged,
+            capture.layout.staged_pitch,
+            capture.layout.packed_pitch,
+            capture.layout.host_capacity,
+        );
+        let (width, height) = capture.extent;
+        // `from_readback`, never `from_rgba8`: an ordinary desktop surface is
+        // BGRA and the swizzle is what stops a red/blue-swapped PNG that no
+        // structural comparison would notice.
+        let image = crcbl_golden::Image::from_readback(
+            width,
+            height,
+            &pixels,
+            crate::screenshot::channel_order(self.config.format),
+        )
+        .map_err(|error| GpuError::Screenshot(format!("{width}x{height}: {error}")))?;
+        image.save_png(&request.path).map_err(|error| {
+            GpuError::Screenshot(format!(
+                "could not write {}: {error}",
+                request.path.display()
+            ))
+        })?;
+
+        log::info!(
+            "screenshot: wrote {} ({width}x{height}) from frame {}",
+            request.path.display(),
+            request.frame
+        );
+        Ok(())
     }
 
     /// Reads what the display is doing with the frame just presented, settles

@@ -1309,6 +1309,24 @@ jobs:
         run: >-
           cargo run --locked --quiet --package breakout -- --headless --frames
           60 --backend vk
+      # The same binary again, and this time somebody looks at the frame.
+      #
+      # The step above proves breakout runs on a real driver without a
+      # validation error; it cannot tell a correct board from a black one, and
+      # neither can `apps/breakout/tests/headless.rs`, which compares tick counts
+      # and a summary line. `docs/plan/12-testing.md` asks each sample for a
+      # determinism check *and* a golden frame, and this is the second half:
+      # `--screenshot` writes the frame the run presented and the suite compares
+      # it, after asserting the frame holds a board at all.
+      #
+      # Driving the compiled binary rather than a scene the test rebuilt is the
+      # point — the flag is `crcbl::args::Common`'s, so what lands in the PNG is
+      # what a player would have seen.
+      - name: Draw breakout's board on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: apps/breakout/tests/run-breakout-golden.sh
       # The library seam, against a real driver. `apps/bare` writes its own
       # loop against the public API instead of plugging into the engine's, and
       # it exists so that "crcbl is usable as a plain library" stays a property

@@ -66,6 +66,20 @@ pub const COMMON_OPTIONS_HELP: &str = "\
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.";
 
+/// The `--screenshot` line, for the samples that have wired it up.
+///
+/// **Separate from [`COMMON_OPTIONS_HELP`] because the flag is separate**: it
+/// only exists for a sample whose [`Common`] said
+/// [`with_screenshot`](Common::with_screenshot), and a help text listing a flag
+/// that same binary answers with exit 2 would be worse than not listing it.
+/// Spliced in where a game's own flags go — between the two shared blocks — so
+/// the ordering is the one every other flag already has.
+pub const SCREENSHOT_HELP: &str = "\
+    --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
+                         Turns --headless on: the frame is read back off the
+                         offscreen ring, which is the only surface every backend
+                         can copy a presented image out of.";
+
 /// The tail of the shared block: the debug overlay pair and `--help`.
 ///
 /// Separate from [`COMMON_OPTIONS_HELP`] so a game can list its own flags
@@ -229,6 +243,35 @@ pub struct Common {
     /// [`Common::new`] parameter because, unlike the tick rate, most games have
     /// no opinion at all.
     pub limit: FrameLimit,
+    /// Whether this sample arms `--screenshot` on its GPU context.
+    ///
+    /// **`false` makes the flag absent, not ignored.** [`consume`](Self::consume)
+    /// hands `--screenshot` back as [`Consumed::No`] here, which every sample's
+    /// parser turns into "unknown argument" and exit 2 — so a sample that has
+    /// not wired the arming up refuses the flag rather than accepting it and
+    /// writing nothing. That is the whole reason this is not simply always on:
+    /// the shared half of the flag is the parse, and the half that cannot be
+    /// shared is a bundle handing its [`GpuContext`](crate::engine::GpuContext)
+    /// over.
+    ///
+    /// Set with [`with_screenshot`](Self::with_screenshot). `apps/breakout` is
+    /// the sample that does.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub can_screenshot: bool,
+    /// Where to write the run's last presented frame as a PNG, if anywhere.
+    ///
+    /// **Setting this forces [`headless`](Self::headless) on**, and that is the
+    /// enforcement rather than a note: a presented *window* swapchain image is
+    /// not something every backend and surface will copy back, so a windowed
+    /// `--screenshot` would be a flag that produced nothing. Headless renders
+    /// into an offscreen ring, where a present returns the image and the copy
+    /// is the same on every backend — see
+    /// [`GpuContext::set_screenshot`](crate::engine::GpuContext::set_screenshot).
+    ///
+    /// Native only, like the request it builds: there is no argv in a browser
+    /// and no file to write.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub screenshot: Option<std::path::PathBuf>,
     /// The window size the sample opens at, or `None` for the sample's default.
     ///
     /// Pixels, as a `WxH` value. The window *request* is
@@ -255,8 +298,42 @@ impl Common {
             debug_overlay: None,
             pacing: Pacing::Auto,
             limit: FrameLimit::fps(FrameLimit::DEFAULT_FPS),
+            #[cfg(not(target_arch = "wasm32"))]
+            can_screenshot: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            screenshot: None,
             size: None,
         }
+    }
+
+    /// Declares that this sample hands its context to
+    /// [`GpuContext::set_screenshot`](crate::engine::GpuContext::set_screenshot),
+    /// and so may be given `--screenshot`.
+    ///
+    /// Written into the game's `Options::default` —
+    /// `Common::new(TICK_HZ).with_screenshot()` — beside the tick rate, which
+    /// is the other fact about a sample that this struct cannot guess.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub const fn with_screenshot(mut self) -> Self {
+        self.can_screenshot = true;
+        self
+    }
+
+    /// What `--screenshot` asked the GPU for, or `None` if it was not passed.
+    ///
+    /// The frame is [`frame_budget`](Self::frame_budget)'s — the **last** one
+    /// the run will present. Every sample's opening frames are its start-up:
+    /// the first tick has not run, the atlas may not have uploaded, and a
+    /// picture of that is a picture of nothing anyone plays. The budget is
+    /// always `Some` here because `--screenshot` forced `headless` on, and
+    /// [`frame_budget`](Self::frame_budget) always answers for a headless run.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn screenshot_request(&self) -> Option<crate::engine::ScreenshotRequest> {
+        let path = self.screenshot.clone()?;
+        let frame = self.frame_budget()?;
+        Some(crate::engine::ScreenshotRequest { path, frame })
     }
 
     /// What the command line contributes to opening a GPU.
@@ -408,6 +485,20 @@ impl Common {
                 Ok(size) => self.size = Some(size),
                 Err(message) => return Consumed::Bad(message),
             },
+            // `headless` is set here rather than checked after the parse,
+            // because a check would have to run somewhere every game
+            // remembered to put it and this cannot be forgotten. The two orders
+            // `--screenshot x --headless` and `--headless --screenshot x` reach
+            // the same `Common`, and there is no third state where a file was
+            // asked for and no offscreen ring exists to read it off.
+            #[cfg(not(target_arch = "wasm32"))]
+            "--screenshot" if self.can_screenshot => {
+                let Some(path) = rest.next() else {
+                    return Consumed::Bad("--screenshot needs a path".into());
+                };
+                self.screenshot = Some(path.into());
+                self.headless = true;
+            }
             _ => return Consumed::No,
         }
         Consumed::Yes
@@ -499,7 +590,13 @@ mod tests {
     /// Runs a whole argv through `consume`, the way a game's loop does, and
     /// reports the first thing that was not `Yes`.
     fn run(argv: &[&str]) -> (Common, Consumed) {
-        let mut common = Common::new(60);
+        run_from(Common::new(60), argv)
+    }
+
+    /// The same, starting from a `Common` the caller has already shaped — the
+    /// only thing a sample does to it before parsing is declare what it
+    /// supports.
+    fn run_from(mut common: Common, argv: &[&str]) -> (Common, Consumed) {
         let mut rest = argv.iter().map(|s| (*s).to_string());
         while let Some(arg) = rest.next() {
             match common.consume(&arg, &mut rest) {
@@ -522,6 +619,87 @@ mod tests {
             (_, Consumed::Bad(message)) => message,
             (_, other) => panic!("expected a rejection, got {other:?}"),
         }
+    }
+
+    /// `--screenshot` is a flag a sample *has*, not one every sample accepts
+    /// and half of them ignore. A `Common` that never said
+    /// `with_screenshot` hands it straight back, which is what every sample's
+    /// parser turns into "unknown argument" and exit 2.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_sample_that_did_not_wire_the_capture_refuses_the_flag() {
+        let (common, consumed) = run(&["--screenshot", "/tmp/frame.png"]);
+        assert_eq!(consumed, Consumed::No);
+        assert_eq!(common.screenshot, None);
+        assert!(
+            !common.headless,
+            "and it did not quietly go headless either"
+        );
+    }
+
+    /// The half that makes the flag mean something: it names the file *and* it
+    /// turns the window off, in either order, because reading a presented
+    /// image back off a real surface is not something every backend can do.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_screenshot_flag_names_a_file_and_forces_the_offscreen_path() {
+        for argv in [
+            ["--screenshot", "/tmp/frame.png"].as_slice(),
+            ["--screenshot", "/tmp/frame.png", "--frames", "8"].as_slice(),
+        ] {
+            let (common, consumed) = run_from(Common::new(60).with_screenshot(), argv);
+            assert_eq!(consumed, Consumed::Yes);
+            assert_eq!(
+                common.screenshot.as_deref(),
+                Some(std::path::Path::new("/tmp/frame.png"))
+            );
+            assert!(common.headless, "--screenshot has to imply --headless");
+        }
+    }
+
+    /// The frame the request names is the run's **last**, so a picture is of a
+    /// sample that has finished starting up — and a bare `--screenshot` still
+    /// gets one, because forcing headless on is what gives the run a budget.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_request_names_the_runs_last_frame() {
+        let common = run_from(
+            Common::new(60).with_screenshot(),
+            &["--screenshot", "/tmp/frame.png", "--frames", "8"],
+        )
+        .0;
+        let request = common.screenshot_request().expect("a request");
+        assert_eq!(request.frame, 8);
+        assert_eq!(request.path, std::path::Path::new("/tmp/frame.png"));
+
+        let default = run_from(
+            Common::new(60).with_screenshot(),
+            &["--screenshot", "/tmp/frame.png"],
+        )
+        .0;
+        assert_eq!(
+            default.screenshot_request().expect("a request").frame,
+            HEADLESS_FRAME_BUDGET
+        );
+    }
+
+    /// A path is not optional, and a run without one must not start.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_screenshot_with_no_path_is_refused() {
+        let (_, consumed) = run_from(Common::new(60).with_screenshot(), &["--screenshot"]);
+        assert_eq!(
+            consumed,
+            Consumed::Bad("--screenshot needs a path".to_string())
+        );
+    }
+
+    /// Nothing was asked for, so nothing is requested — the flag is the only
+    /// thing that arms a capture.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_run_that_asked_for_no_screenshot_requests_none() {
+        assert!(parsed(&["--headless"]).screenshot_request().is_none());
     }
 
     #[test]
@@ -870,6 +1048,23 @@ mod tests {
                 "{flag} is documented and not implemented"
             );
         }
+    }
+
+    /// The same claim for the block that is not in every sample's help: the
+    /// flag `SCREENSHOT_HELP` documents has to be one a `Common` that declared
+    /// the capability actually takes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_screenshot_block_documents_a_flag_the_parser_takes() {
+        assert!(SCREENSHOT_HELP.contains("--screenshot"));
+        let mut rest = ["/tmp/frame.png".to_string()].into_iter();
+        assert_ne!(
+            Common::new(60)
+                .with_screenshot()
+                .consume("--screenshot", &mut rest),
+            Consumed::No,
+            "--screenshot is documented and not implemented"
+        );
     }
 
     /// The front end's contract is "argv in, exit code out", and the four

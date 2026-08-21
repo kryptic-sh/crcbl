@@ -1030,6 +1030,52 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`--screenshot <PATH>` writes the frame a sample presented, as a PNG.** A
+  field on `crcbl::args::Common` and an arm in `Common::consume`, so it is the
+  engine's flag rather than one game's: the run's _last_ presented frame is
+  copied straight off the swapchain image the game drew into — menu, HUD and
+  every pass included — and written where the flag says.
+
+  **It turns `--headless` on rather than trusting the caller to pass it.**
+  Reading a presented image back off a real window surface is not something
+  every backend and window system will do; an offscreen ring is, so that is the
+  only surface the flag ever runs against, and there is no invocation in which
+  it produces nothing.
+
+  `docs/plan/12-testing.md` asks every sample for a determinism check **and** a
+  golden frame, and only the determinism half existed. Nothing the samples
+  compared — simulation tuples, `horde`'s `state_hash`,
+  `crcbl_server::sim_hash::hash_world` — contains a pixel, which is how every
+  browser demo shipped a transfer function that was too dark for several commits
+  with every gate green.
+
+  A sample declares it can serve the flag with `Common::with_screenshot`, and
+  `apps/breakout` is the first that does. **A sample that has not wired the
+  arming refuses `--screenshot` with exit 2** rather than accepting it and
+  writing nothing, and its `--help` does not list it — the flag's help text is
+  `crcbl::args::SCREENSHOT_HELP`, spliced in by the samples that have it.
+
+  `crcbl-golden` is therefore a normal dependency of `crcbl` on native targets,
+  because something in the binary has to encode the PNG. It stays out of
+  `wasm32` builds, where there is no argv to carry the flag and no file to
+  write, so no browser demo links a PNG encoder.
+
+- **`apps/breakout` has a golden frame**, `apps/breakout/tests/golden.rs` and
+  `apps/breakout/tests/golden/board.png`, driven by
+  `apps/breakout/tests/run-breakout-golden.sh` and run on lavapipe in CI. It
+  runs the **compiled binary** with `--screenshot` and compares the file that
+  binary left behind — the first golden in the tree that does, and the reason
+  the capture is an engine flag instead of per-sample test code.
+
+  Three claims stand in front of the comparison, in
+  `crates/crcbl/tests/render_e2e.rs`'s shape: a distinct-colour floor, the menu
+  panel against the field behind it, and the top-left brick's red against its
+  blue — the last being the one a channel-order mistake fails and a luma-based
+  structural comparison does not. A fourth,
+  `a_uniformly_darkened_frame_is_refused_by_the_tolerance_the_golden_uses`,
+  needs no GPU and pins that `Tolerance::RASTERISER` refuses the uniform
+  multiply the reported defect amounted to.
+
 - **`crcbl-mtl` builds mesh pipelines and records the mesh draws.** A real
   `MTLMeshRenderPipelineDescriptor` — object, mesh and fragment functions,
   colour attachments, depth and stencil, sample count — sharing the raster

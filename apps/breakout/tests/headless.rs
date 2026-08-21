@@ -140,6 +140,55 @@ fn the_tick_rate_changes_ticks_and_not_frames() {
     assert!(summary.contains("30 ticks"), "{summary}");
 }
 
+/// `--screenshot` names a file and the run leaves one there — checked on the
+/// null backend, so it runs on every platform in the plain suite.
+///
+/// What this is *not* is a check on the picture: the null backend records
+/// commands and draws nothing, so the PNG is uniform and
+/// `tests/golden.rs` is what looks at pixels. What it pins is the wiring —
+/// the flag reaches `crcbl::engine::GpuContext::set_screenshot`, the readback
+/// lands, and the file is written — on a runner with no GPU at all, which is
+/// every runner the golden suite skips.
+///
+/// The stale file is removed first and its absence is the whole assertion: a
+/// `--screenshot` that quietly did nothing would otherwise pass on the previous
+/// run's file forever.
+#[test]
+fn a_screenshot_run_leaves_a_file_behind() {
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("headless-shot.png");
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("could not clear {}: {error}", path.display()),
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_breakout"))
+        .args(["--backend", "null", "--frames", "4", "--screenshot"])
+        .arg(&path)
+        .output()
+        .expect("the breakout binary runs");
+    assert_eq!(
+        code(&output),
+        0,
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        path.exists(),
+        "breakout exited 0 and wrote no {}",
+        path.display()
+    );
+
+    // **`--headless` was never passed.** The flag turns it on, and the summary
+    // saying so is what proves the offscreen path was taken rather than a
+    // window having been opened on the developer's display.
+    assert!(
+        stdout(&output).contains("headless shell"),
+        "{}",
+        stdout(&output)
+    );
+}
+
 /// A long enough headless run actually plays: the ball launches only on input,
 /// so a run with none stays in `WaitingForLaunch` at score zero — and that is
 /// the state the summary must report rather than a fabricated one.

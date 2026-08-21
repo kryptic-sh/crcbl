@@ -21,7 +21,9 @@ use crcbl::args::{Common, Consumed};
 ///
 /// Cannot drift from [`crcbl::args::COMMON_OPTIONS_HELP`] silently:
 /// `the_shared_half_of_the_usage_text_is_the_engines_verbatim` asserts
-/// this string contains both shared blocks byte for byte.
+/// this string contains both shared blocks byte for byte — and
+/// [`crcbl::args::SCREENSHOT_HELP`], which is spliced between them because
+/// breakout is the sample that has wired `--screenshot` up.
 pub const USAGE: &str = "\
 breakout — the first playable Crucible sample
 
@@ -49,6 +51,10 @@ OPTIONS:
     --size <WxH>         Window size in pixels, WxH (default 960x720). The
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.
+    --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
+                         Turns --headless on: the frame is read back off the
+                         offscreen ring, which is the only surface every backend
+                         can copy a presented image out of.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
@@ -63,6 +69,13 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            // `with_screenshot` is what makes `--screenshot` a flag this binary
+            // has rather than an unknown argument: `crate::app::assemble` arms
+            // the request on the context, and a sample that had not done that
+            // must refuse the flag instead of writing nothing.
+            #[cfg(not(target_arch = "wasm32"))]
+            common: Common::new(crate::game::DEFAULT_TICK_HZ).with_screenshot(),
+            #[cfg(target_arch = "wasm32")]
             common: Common::new(crate::game::DEFAULT_TICK_HZ),
         }
     }
@@ -168,6 +181,10 @@ mod tests {
         assert!(
             USAGE.contains(crcbl::args::COMMON_TAIL_HELP),
             "the shared tail has drifted from crcbl::args"
+        );
+        assert!(
+            USAGE.contains(crcbl::args::SCREENSHOT_HELP),
+            "the --screenshot block has drifted from crcbl::args"
         );
         assert!(USAGE.contains("breakout — the first playable Crucible sample"));
     }

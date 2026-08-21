@@ -2635,30 +2635,13 @@ impl OffscreenSetup {
 
         let extent = acquired.extent;
         // The extent comes back from the swapchain rather than from `open`, so
-        // it is checked here too: `u32 * u32 * 4` overflows a `u32` and the
-        // product has to survive narrowing to a `usize` before it can size a
-        // staging buffer or a `Vec`.
-        let too_large = || OffscreenError::TooLarge {
+        // it is checked here too — see `ReadbackLayout::for_extent`, which is
+        // where the arithmetic lives now that the engine's `--screenshot`
+        // capture reads a swapchain image back through the same steps.
+        let layout = ReadbackLayout::for_extent(extent).ok_or(OffscreenError::TooLarge {
             width: extent.0,
             height: extent.1,
-        };
-        // The *staged* row pitch, padded to `READBACK_ROW_ALIGNMENT`; the
-        // tightly packed pitch is what the caller gets back.
-        let packed_pitch = u64::from(extent.0).checked_mul(4).ok_or_else(too_large)?;
-        let staged_pitch = packed_pitch
-            .checked_next_multiple_of(u64::from(READBACK_ROW_ALIGNMENT))
-            .ok_or_else(too_large)?;
-        let byte_count = staged_pitch
-            .checked_mul(u64::from(extent.1))
-            .ok_or_else(too_large)?;
-        let packed_bytes = packed_pitch
-            .checked_mul(u64::from(extent.1))
-            .ok_or_else(too_large)?;
-        let staged_capacity = usize::try_from(byte_count).map_err(|_| too_large())?;
-        let host_capacity = usize::try_from(packed_bytes).map_err(|_| too_large())?;
-        // `buffer_row_length` is in *texels*, and the padded pitch is a multiple
-        // of 4 for every 4-byte format, so this division is exact.
-        let staged_row_texels = u32::try_from(staged_pitch / 4).map_err(|_| too_large())?;
+        })?;
 
         // ---- render the frame through the graph ----
 
@@ -2719,68 +2702,19 @@ impl OffscreenSetup {
 
         // ---- readback: barrier to TransferSrc, copy, barrier back, submit ----
         //
-        // **Both ends of this pair are `ResourceState::Present`, not
-        // `ColorAttachment`.** The graph does not hand the image back in the
-        // state its last pass left it in: `ForwardRenderer::present_target`
-        // declares `final_state: Present`, and `CompiledGraph::execute` emits a
-        // trailing barrier to reach it. So `Present` is what the image is in
-        // when the copy starts, and declaring anything else is a lie the API
-        // checks — lavapipe's validation layer reported this one as
-        // `VUID-VkImageMemoryBarrier2-oldLayout-01197`, "cannot transition …
-        // from VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL when the previous known
-        // layout is VK_IMAGE_LAYOUT_PRESENT_SRC_KHR".
-        //
-        // And the second barrier is why there is a pair at all. `present` takes
-        // the image back into the ring, and the next trip round declares
-        // `Undefined` — legal from any layout on Vulkan, but on D3D12
-        // `Undefined` and `Present` are both `COMMON` and the declared
-        // before-state is validated, so an image left in `COPY_SOURCE` makes
-        // that next declaration false. `crcbl-dx12`'s own offscreen-ring suite
-        // ends every frame with this same transition for that reason.
+        // The copy is recorded into **this** encoder, after the graph, so the
+        // frame and its readback are one submission. `record_image_readback`
+        // owns the barrier pair and says why both ends of it are `Present`.
 
-        let staging = device.create_buffer(&BufferDesc {
-            label: Some("screenshot readback"),
-            size: byte_count,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::HostReadback,
-        })?;
-
-        let range = ImageSubresourceRange::all(self.format);
-        encoder.pipeline_barrier(&Barriers {
-            images: &[ImageBarrier::new(
-                acquired.image,
-                range,
-                ResourceState::Present,
-                ResourceState::TransferSrc,
-            )],
-            ..Barriers::default()
-        });
-
-        encoder.copy_image_to_buffer(&BufferImageCopy {
-            buffer: staging,
-            buffer_offset: 0,
-            buffer_row_length: staged_row_texels,
-            buffer_image_height: 0,
-            image: acquired.image,
-            image_subresource: ImageSubresourceLayers {
-                aspect: ImageAspect::COLOR,
-                mip: 0,
-                base_layer: 0,
-                layer_count: 1,
-            },
-            image_offset: Offset3d::default(),
-            image_extent: Extent3d::d2(extent.0, extent.1),
-        });
-
-        encoder.pipeline_barrier(&Barriers {
-            images: &[ImageBarrier::new(
-                acquired.image,
-                range,
-                ResourceState::TransferSrc,
-                ResourceState::Present,
-            )],
-            ..Barriers::default()
-        });
+        let staging = record_image_readback(
+            device,
+            encoder.as_mut(),
+            acquired.image,
+            self.format,
+            extent,
+            &layout,
+            "screenshot readback",
+        )?;
 
         let commands = encoder.finish()?;
         device.submit(self.queue, &SubmitInfo::new(&[commands]))?;
@@ -2797,11 +2731,11 @@ impl OffscreenSetup {
             label: Some("screenshot readback"),
             buffer: staging,
             offset: 0,
-            size: byte_count,
+            size: layout.byte_count,
             after: None,
         })?;
 
-        let staged = vec![0u8; staged_capacity];
+        let staged = vec![0u8; layout.staged_capacity];
 
         Ok(PendingReadback {
             setup: self,
@@ -2810,9 +2744,7 @@ impl OffscreenSetup {
             readback,
             staged,
             extent,
-            staged_pitch,
-            packed_pitch,
-            host_capacity,
+            layout,
         })
     }
 
@@ -2863,9 +2795,7 @@ pub struct PendingReadback<'a> {
     /// The padded readback bytes, filled by [`Device::poll_readback`] once ready.
     staged: Vec<u8>,
     extent: (u32, u32),
-    staged_pitch: u64,
-    packed_pitch: u64,
-    host_capacity: usize,
+    layout: ReadbackLayout,
 }
 
 impl PendingReadback<'_> {
@@ -2895,13 +2825,182 @@ impl PendingReadback<'_> {
                 // describe usefully.
                 let pixels = compact_rows(
                     &self.staged,
-                    self.staged_pitch,
-                    self.packed_pitch,
-                    self.host_capacity,
+                    self.layout.staged_pitch,
+                    self.layout.packed_pitch,
+                    self.layout.host_capacity,
                 );
                 Ok(Some((self.extent, pixels)))
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Readback, shared with the engine
+// ---------------------------------------------------------------------------
+
+/// The staging geometry of a readback of one four-bytes-per-texel image.
+///
+/// Two callers, which is why it is a type rather than six locals:
+/// [`OffscreenSetup::begin_readback`] here, and
+/// [`GpuContext::submit_and_present`](crate::engine::GpuContext::submit_and_present)
+/// for `--screenshot`. Both have to pad to [`READBACK_ROW_ALIGNMENT`] and both
+/// have to drop the padding again, and a second copy of that arithmetic is a
+/// second chance to shear the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReadbackLayout {
+    /// The padded row pitch the copy writes, in bytes.
+    pub(crate) staged_pitch: u64,
+    /// The tight row pitch the caller gets back, in bytes.
+    pub(crate) packed_pitch: u64,
+    /// The whole staging buffer, in bytes.
+    pub(crate) byte_count: u64,
+    /// `byte_count` as a host length.
+    pub(crate) staged_capacity: usize,
+    /// The compacted image's length, in bytes.
+    pub(crate) host_capacity: usize,
+    /// `staged_pitch` in *texels*, which is the unit `BufferImageCopy` names it
+    /// in.
+    pub(crate) staged_row_texels: u32,
+}
+
+impl ReadbackLayout {
+    /// The layout for an `extent`-sized frame, or `None` if it does not fit.
+    ///
+    /// `None` rather than an error because the two callers report the failure
+    /// in their own vocabularies — `OffscreenError::TooLarge` here and a
+    /// screenshot failure in the engine — and neither of them wants the
+    /// other's type.
+    ///
+    /// Every step is checked: `u32 * u32 * 4` overflows a `u32`, and the
+    /// product has to survive narrowing to a `usize` before it can size a
+    /// staging buffer or a `Vec`.
+    pub(crate) fn for_extent(extent: (u32, u32)) -> Option<Self> {
+        let packed_pitch = u64::from(extent.0).checked_mul(4)?;
+        let staged_pitch =
+            packed_pitch.checked_next_multiple_of(u64::from(READBACK_ROW_ALIGNMENT))?;
+        let byte_count = staged_pitch.checked_mul(u64::from(extent.1))?;
+        let packed_bytes = packed_pitch.checked_mul(u64::from(extent.1))?;
+        Some(Self {
+            staged_pitch,
+            packed_pitch,
+            byte_count,
+            staged_capacity: usize::try_from(byte_count).ok()?,
+            host_capacity: usize::try_from(packed_bytes).ok()?,
+            // `buffer_row_length` is in texels, and the padded pitch is a
+            // multiple of 4 for every 4-byte format, so this division is exact.
+            staged_row_texels: u32::try_from(staged_pitch / 4).ok()?,
+        })
+    }
+}
+
+/// Records the barrier → copy → barrier that reads a **presented** swapchain
+/// image into a fresh host-visible buffer, and returns that buffer.
+///
+/// The caller owns the buffer from here: submit `encoder`, request a readback
+/// over it, and destroy it once the copy has landed.
+///
+/// # Both ends of the barrier pair are `ResourceState::Present`
+///
+/// Not `ColorAttachment`. A render graph does not hand the image back in the
+/// state its last pass left it in: `ForwardRenderer::present_target` declares
+/// `final_state: Present`, and `CompiledGraph::execute` emits a trailing
+/// barrier to reach it. So `Present` is what the image is in when the copy
+/// starts, and declaring anything else is a lie the API checks — lavapipe's
+/// validation layer reported this one as
+/// `VUID-VkImageMemoryBarrier2-oldLayout-01197`, "cannot transition … from
+/// VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL when the previous known layout is
+/// VK_IMAGE_LAYOUT_PRESENT_SRC_KHR".
+///
+/// And the second barrier is why there is a pair at all. `present` takes the
+/// image back into the ring, and the next trip round declares `Undefined` —
+/// legal from any layout on Vulkan, but on D3D12 `Undefined` and `Present` are
+/// both `COMMON` and the declared before-state is validated, so an image left
+/// in `COPY_SOURCE` makes that next declaration false. `crcbl-dx12`'s own
+/// offscreen-ring suite ends every frame with this same transition for that
+/// reason.
+///
+/// # Errors
+///
+/// [`HalError`](crate::hal::HalError) if the staging buffer could not be
+/// allocated.
+pub(crate) fn record_image_readback(
+    device: &dyn Device,
+    encoder: &mut dyn crate::hal::CommandEncoder,
+    image: crate::hal::ImageHandle,
+    format: Format,
+    extent: (u32, u32),
+    layout: &ReadbackLayout,
+    label: &str,
+) -> Result<BufferHandle, crate::hal::HalError> {
+    let staging = device.create_buffer(&BufferDesc {
+        label: Some(label),
+        size: layout.byte_count,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    })?;
+
+    let range = ImageSubresourceRange::all(format);
+    encoder.pipeline_barrier(&Barriers {
+        images: &[ImageBarrier::new(
+            image,
+            range,
+            ResourceState::Present,
+            ResourceState::TransferSrc,
+        )],
+        ..Barriers::default()
+    });
+
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: staging,
+        buffer_offset: 0,
+        buffer_row_length: layout.staged_row_texels,
+        buffer_image_height: 0,
+        image,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d::default(),
+        image_extent: Extent3d::d2(extent.0, extent.1),
+    });
+
+    encoder.pipeline_barrier(&Barriers {
+        images: &[ImageBarrier::new(
+            image,
+            range,
+            ResourceState::TransferSrc,
+            ResourceState::Present,
+        )],
+        ..Barriers::default()
+    });
+
+    Ok(staging)
+}
+
+/// The channel order a readback in `format` arrives in.
+///
+/// Named after the memory order, like the HAL format itself, so the mapping is
+/// a rename rather than a judgement.
+///
+/// **The bug it exists to stop:** an ordinary desktop surface prefers
+/// `Bgra8UnormSrgb`, and a readback of one handed to
+/// [`Image::from_rgba8`](crcbl_golden::Image::from_rgba8) writes a PNG with red
+/// and blue swapped — swapped in a way a structural comparison cannot see,
+/// because SSIM is computed on luma and a channel swap barely moves it.
+/// [`Image::from_readback`](crcbl_golden::Image::from_readback) does the
+/// swizzle, and this is what tells it which one.
+///
+/// Native-only because [`crcbl_golden`] is: it is what puts a PNG encoder in a
+/// binary, and a browser build has no file to write one to.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn channel_order(format: Format) -> crcbl_golden::ChannelOrder {
+    match format {
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
+        _ => crcbl_golden::ChannelOrder::Rgba,
     }
 }
 
@@ -2915,7 +3014,12 @@ impl PendingReadback<'_> {
 /// A short final row is copied as far as it goes rather than dropped: a backend
 /// that wrote less than it promised should produce a visibly truncated image,
 /// not a panic in the middle of a screenshot.
-fn compact_rows(staged: &[u8], staged_pitch: u64, packed_pitch: u64, packed_len: usize) -> Vec<u8> {
+pub(crate) fn compact_rows(
+    staged: &[u8],
+    staged_pitch: u64,
+    packed_pitch: u64,
+    packed_len: usize,
+) -> Vec<u8> {
     if staged_pitch == packed_pitch {
         let end = packed_len.min(staged.len());
         return staged[..end].to_vec();

@@ -11,11 +11,15 @@
 //! writes a PNG with red and blue swapped — and swapped in a way a structural
 //! comparison cannot see, because SSIM is computed on luma and a red/green or
 //! red/blue swap barely moves it. So the format is read off the setup and
-//! turned into a [`ChannelOrder`], and `Image::from_readback` does the swizzle
+//! turned into a `ChannelOrder`, and `Image::from_readback` does the swizzle
 //! that `crcbl-golden` has had for exactly this since it was written.
+//!
+//! The mapping itself is [`crcbl::screenshot::channel_order`]: the engine grew
+//! a second caller when `crcbl::args::Common`'s `--screenshot` started writing
+//! a sample's own frame, and a second copy of it is a second chance to get the
+//! one thing it exists to prevent wrong.
 
-use crcbl::hal::Format;
-use crcbl_golden::ChannelOrder;
+use crcbl::screenshot::channel_order;
 
 use crate::args::ScreenshotArgs;
 use crate::json::Json;
@@ -63,33 +67,14 @@ pub fn run(args: &ScreenshotArgs) -> Result<Outcome, Failure> {
     })
 }
 
-/// The channel order a readback in `format` arrives in.
-///
-/// Named after the memory order, like the HAL format itself, so the mapping is
-/// a rename rather than a judgement.
-fn channel_order(format: Format) -> ChannelOrder {
-    match format {
-        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => ChannelOrder::Bgra,
-        _ => ChannelOrder::Rgba,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The bug this mapping exists to stop: every BGRA surface used to produce
-    /// a red/blue-swapped PNG.
-    #[test]
-    fn bgra_surfaces_are_swizzled_and_rgba_ones_are_not() {
-        assert_eq!(channel_order(Format::Bgra8UnormSrgb), ChannelOrder::Bgra);
-        assert_eq!(channel_order(Format::Bgra8Unorm), ChannelOrder::Bgra);
-        assert_eq!(channel_order(Format::Rgba8UnormSrgb), ChannelOrder::Rgba);
-        assert_eq!(channel_order(Format::Rgba8Unorm), ChannelOrder::Rgba);
-    }
-
-    /// End to end on the byte level: a BGRA readback of a known colour has to
-    /// come out of the image the way it went into the framebuffer.
+    /// The subcommand's own end-to-end claim about the swizzle: a BGRA readback
+    /// of a known colour comes out of the image the way it went into the
+    /// framebuffer. The mapping `channel_order` makes is pinned in
+    /// `crcbl::screenshot`, where it lives.
     #[test]
     fn a_bgra_readback_round_trips_to_the_right_colour() {
         // Blue, as a BGRA surface stores it.
@@ -98,7 +83,7 @@ mod tests {
             1,
             1,
             &readback,
-            channel_order(Format::Bgra8UnormSrgb),
+            channel_order(crcbl::hal::Format::Bgra8UnormSrgb),
         )
         .expect("one pixel");
         assert_eq!(image.pixel(0, 0), Some([0, 0, 255, 255]), "red and blue");

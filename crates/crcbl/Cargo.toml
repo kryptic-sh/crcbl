@@ -92,6 +92,17 @@ crcbl-webgpu = { workspace = true }
 # browser's table contains only backends that exist.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crcbl-vk = { workspace = true }
+# The PNG encoder behind `crcbl::args::Common::screenshot` — `--screenshot
+# <PATH>`, which reads the frame a sample just presented back off the offscreen
+# ring and writes it. Something in the *binary* has to encode it, so this is the
+# one place `crcbl-golden` stops being test-only.
+#
+# Per-target rather than unconditional, on `crcbl-vk`'s argument above: a
+# browser build has no argv to carry the flag and no file to write, so linking
+# `png` into every demo's `.wasm` would buy nothing. That is also the whole of
+# what the manifest note below used to be protecting — `crcbl-golden` reaching a
+# *shipped* binary — and a browser demo is the shipped binary here.
+crcbl-golden = { workspace = true }
 
 # Metal, and only where Metal exists. `crcbl-mtl` is `#[cfg(target_os =
 # "macos")]` from its crate root down and its `objc2-*` dependencies are pinned
@@ -121,11 +132,12 @@ crcbl-mtl = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 crcbl-dx12 = { workspace = true }
 
-# `crcbl-golden` is a **dev**-dependency: the only reference to it from this
-# crate is an intra-doc link in `screenshot.rs`, and rustdoc resolves those from
-# dev-dependencies. As a normal dependency it linked `png` into every binary
-# that names `crcbl` — and falsified `crcbl-golden`'s own manifest, which says
-# "it reaches no shipped binary".
+# `crcbl-golden` is **also** a dev-dependency, and the duplicate is load-bearing
+# rather than sloppy: the normal dependency above is `cfg(not(wasm32))`, and the
+# wasm32 job runs `cargo doc -D warnings` over this crate — where
+# `screenshot.rs`'s intra-doc links to `crcbl_golden` would otherwise resolve to
+# nothing. Dev-dependencies are visible to rustdoc on every target, so this line
+# is what keeps those links alive on the one target the crate is not linked for.
 [dev-dependencies]
 crcbl-golden = { workspace = true }
 # For `tests/tiling_e2e.rs`, which draws greybox floor quads under the physical
@@ -259,8 +271,8 @@ scene = ["dep:crcbl-scene", "crcbl-scene/render"]
 #
 # It existed to pick which of two browser backends `src/backend.rs`
 # auto-selected on `wasm32`, while `crcbl-webgpu` was taking over from
-# `crcbl-wgpu`. Now that `crcbl-wgpu` is a `cfg(not(wasm32))` dependency above,
-# a browser build has exactly one GPU backend and there is nothing left to pick:
+# `crcbl-wgpu`. That crate was deleted on 2026-08-21, so a browser build has
+# exactly one GPU backend and there is nothing left to pick:
 # a feature whose every arm makes the same choice is a switch that reads as
 # configuration and configures nothing. `crcbl-webgpu` is the wasm32 backend
 # because the target says so, the same way `crcbl-vk` is the native one.

@@ -193,9 +193,17 @@ pub fn with_shell<S: Shell + ?Sized>(
 ///
 /// [`BreakoutError`] if the game could not be built.
 fn assemble<S: Shell + ?Sized>(
-    booted: Booted<S, Gpu>,
+    mut booted: Booted<S, Gpu>,
     options: &Options,
 ) -> Result<Loop<S>, BreakoutError> {
+    // `--screenshot`, armed before the first frame because the frame it names
+    // is counted from this point. The flag forces `--headless` on, so the
+    // context behind this is always an offscreen ring — see
+    // [`crcbl::args::Common::screenshot`].
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(request) = options.common.screenshot_request() {
+        booted.gpu.context_mut().set_screenshot(request);
+    }
     let game =
         Game::new(options.common.headless, options.common.tick_hz).map_err(BreakoutError::Game)?;
     Ok(Loop::new(
