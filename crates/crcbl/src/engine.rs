@@ -198,7 +198,9 @@ pub enum GpuError {
     /// here is not the device's: a directory that does not exist, a readback
     /// that never landed, an extent whose bytes do not fit a `usize`. A run
     /// asked for a file and did not get one, and that has to stop the run —
-    /// see [`GpuContext::set_screenshot`].
+    /// see `GpuContext::set_screenshot`, named rather than linked because it is
+    /// `cfg(not(target_arch = "wasm32"))` and does not exist in a browser
+    /// build.
     Screenshot(String),
 }
 

@@ -69,8 +69,9 @@ pub const COMMON_OPTIONS_HELP: &str = "\
 /// The `--screenshot` line, for the samples that have wired it up.
 ///
 /// **Separate from [`COMMON_OPTIONS_HELP`] because the flag is separate**: it
-/// only exists for a sample whose [`Common`] said
-/// [`with_screenshot`](Common::with_screenshot), and a help text listing a flag
+/// only exists for a sample whose [`Common`] said `with_screenshot` — named
+/// rather than linked because it is `cfg(not(target_arch = "wasm32"))` and a
+/// browser build documents no such item — and a help text listing a flag
 /// that same binary answers with exit 2 would be worse than not listing it.
 /// Spliced in where a game's own flags go — between the two shared blocks — so
 /// the ordering is the one every other flag already has.
