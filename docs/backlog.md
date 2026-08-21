@@ -9432,24 +9432,6 @@ the recorder, because a rebuild that failed records no event — so an engine th
 never tried and one that tried and was refused look identical in the stream, and
 those are exactly the two policies this entry chose between.
 
-### Decided: the four-backend compare is more scenes in `render_e2e`, not a new job
-
-The audit's framing was a cross-platform image compare — bless a shared
-reference and have the macOS and Windows jobs compare against it. **That already
-exists**: `crates/crcbl/tests/render_e2e.rs` compares against a checked-in
-golden blessed on lavapipe, and CI runs it on vk, dx12 and Metal. What it does
-not do is cover more than one scene.
-
-So the gap is one line of scope, not a new job: `Scene` has `Cube`, `Sprite` and
-`Ui`, `render_e2e` draws only `Cube`, and `sprite.slang` and `ui.slang` are the
-two shaders that have _actually_ diverged per target in this repo's history. The
-fix is to draw all three scenes there and bless two more goldens, which gives
-Metal and D3D12 the coverage `run-cross-backend-e2e.sh` gives Vulkan.
-
-Cheaper than a new job, reuses the anti-vacuity colour floor and the tolerance
-that are already calibrated, and it puts the coverage in the file whose whole
-purpose is being backend-agnostic.
-
 ### Declined: minimum-count floors on the e2e harnesses
 
 Both backend harnesses now select `--run-ignored only`, so the number they guard
