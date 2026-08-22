@@ -21,8 +21,8 @@
 
 use crcbl_hal::null::{Command, NullInstance, ObjectKind, Recorder};
 use crcbl_hal::{
-    CommandEncoderDesc, Device, DeviceDesc, Format, ImageAspect, ImageSubresourceRange, ImageUsage,
-    Instance, QueueHandle, QueueKind, ResourceState,
+    BufferHandle, CommandEncoderDesc, Device, DeviceDesc, Format, ImageAspect,
+    ImageSubresourceRange, ImageUsage, Instance, QueueHandle, QueueKind, ResourceState,
 };
 use crcbl_render::graph::{
     GraphBarriers, GraphError, ImageId, ImportedBuffer, ImportedImage, InitialClaim, RenderGraph,
@@ -121,6 +121,19 @@ impl Harness {
             final_state: ResourceState::ShaderRead,
             ..self.target(format)
         }
+    }
+
+    /// A buffer the *importer* owns across frames, which is what every buffer
+    /// import is: a light grid or a cull counter with no renderer attached.
+    fn owned_buffer(&self) -> BufferHandle {
+        self.device
+            .create_buffer(&crcbl_hal::BufferDesc {
+                label: Some("light grid"),
+                size: 4096,
+                usage: crcbl_hal::BufferUsage::STORAGE,
+                memory: crcbl_hal::MemoryLocation::DeviceLocal,
+            })
+            .expect("a buffer")
     }
 
     fn record(&self, run: impl FnOnce(&mut dyn crcbl_hal::CommandEncoder)) {
@@ -684,6 +697,167 @@ fn the_import_ledger_records_what_the_frame_actually_left() {
         atlas.final_state,
         ResourceState::ColorAttachment,
         "or this assertion could not tell the two apart"
+    );
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// **A buffer import that contradicts the last frame is refused too**, and a
+/// buffer is the case nothing else in the stack would ever notice.
+///
+/// [`ImportedBuffer::initial`] is the image declaration about a resource with no
+/// layout, so everything that would have caught the image version is blind to
+/// this one: no layout to look wrong in a capture, no discard to see, nothing
+/// but a barrier quietly carrying `srcStageMask = NONE` while the previous
+/// frame's dispatch is still writing the same buffer. The cull counters, the
+/// light grid and the readback slots are all imports of exactly this shape, and
+/// none of them has an acquire semaphore to be exempt behind — which is why
+/// there is no `InitialClaim` here to opt one out.
+///
+/// The three halves the image test asserts, restated: the honest first frame is
+/// accepted, the repeat `Undefined` is rejected by name and by message, and the
+/// corrected declaration is accepted *and produces the barrier that orders the
+/// two frames*. Without that last one this would pass just as well against a
+/// `compile` that refused every buffer import.
+#[test]
+fn a_buffer_import_that_contradicts_the_last_frame_is_refused() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let grid = harness.owned_buffer();
+
+    // The pass read-modify-writes it and the frame after only reads it, so
+    // `final_state` is neither the declaration nor the access the pass asked
+    // for — the ledger cannot agree with it by echoing either one.
+    let declaring = |pool: &TransientPool, initial| {
+        let mut graph = harness.graph();
+        let froxels = graph.import_buffer(
+            "light-grid",
+            ImportedBuffer {
+                buffer: grid,
+                initial,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+        graph
+            .add_compute_pass("light-cluster")
+            .use_buffer(froxels, ResourceState::ShaderReadWrite)
+            .execute(|ctx| {
+                ctx.encoder().dispatch(1, 1, 1);
+            });
+        graph.compile(pool)
+    };
+
+    let first = declaring(&pool, ResourceState::Undefined)
+        .expect("nothing has been left for the first frame to contradict");
+    assert_eq!(
+        first.passes()[0].barriers().buffers[0].from,
+        ResourceState::Undefined,
+        "a buffer nothing has written yet has no source scope to name, which is the one \
+         time `Undefined` is the truth"
+    );
+    harness.record(|encoder| {
+        first
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+
+    // The scope every line below sits inside: a guard reading an empty ledger
+    // accepts everything, and would pass the rest of this test unchanged.
+    assert_eq!(
+        pool.imported_buffer_use(grid),
+        Some(ResourceState::ShaderRead),
+        "the frame's trailing barrier reached `final_state`, so that is what it left"
+    );
+
+    let error = declaring(&pool, ResourceState::Undefined)
+        .expect_err("a second `Undefined` is a barrier with no source scope");
+    assert!(
+        matches!(
+            error,
+            GraphError::BufferImportStateMismatch {
+                declared: ResourceState::Undefined,
+                left: ResourceState::ShaderRead,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let text = error.to_string();
+    for part in ["light-grid", "Undefined", "ShaderRead"] {
+        assert!(text.contains(part), "{part:?} missing from {text:?}");
+    }
+
+    let second =
+        declaring(&pool, ResourceState::ShaderRead).expect("declaring what was left is accepted");
+    assert_eq!(
+        second.passes()[0].barriers().buffers[0].from,
+        ResourceState::ShaderRead,
+        "and the barrier it produces is the one that orders the two frames"
+    );
+    harness.record(|encoder| {
+        second
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// The buffer ledger is written by [`CompiledGraph::execute`], not by `compile`,
+/// and holds [`ImportedBuffer::final_state`].
+///
+/// The claims a wrong implementation could still satisfy while the test above
+/// passed, stated on their own: that a *compiled and dropped* graph leaves
+/// nothing behind — it recorded no commands, so a following frame ordered
+/// against it would be ordered against writes the GPU never performed — that
+/// what is recorded is the state the trailing barrier reached rather than the
+/// one the pass happened to want, and that a buffer no graph has run with is
+/// absent rather than defaulted.
+///
+/// [`CompiledGraph::execute`]: crcbl_render::graph::CompiledGraph::execute
+#[test]
+fn the_buffer_import_ledger_records_what_the_frame_actually_left() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let grid = harness.owned_buffer();
+    assert_eq!(
+        pool.imported_buffer_use(grid),
+        None,
+        "no graph has run with this buffer"
+    );
+
+    let mut graph = harness.graph();
+    let froxels = graph.import_buffer(
+        "light-grid",
+        ImportedBuffer {
+            buffer: grid,
+            initial: ResourceState::Undefined,
+            final_state: ResourceState::ShaderRead,
+        },
+    );
+    graph
+        .add_compute_pass("light-cluster")
+        .use_buffer(froxels, ResourceState::ShaderReadWrite)
+        .execute(|ctx| {
+            ctx.encoder().dispatch(1, 1, 1);
+        });
+    let compiled = graph.compile(&pool).expect("a legal frame");
+    assert_eq!(
+        pool.imported_buffer_use(grid),
+        None,
+        "compiling records nothing: a graph that is dropped rather than executed ran no commands"
+    );
+
+    harness.record(|encoder| {
+        compiled
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    assert_eq!(
+        pool.imported_buffer_use(grid),
+        Some(ResourceState::ShaderRead),
+        "the trailing barrier leaves it in `final_state`, not in the `ShaderReadWrite` the pass \
+         asked for"
     );
     harness.recorder.assert_valid();
     pool.destroy(harness.device.as_ref());

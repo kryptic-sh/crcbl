@@ -43,14 +43,16 @@
 //! resource and a resize cannot leave one resource wearing another's history.
 //!
 //! The pool keeps one more thing for the same reason, about resources it does
-//! not own: what the last graph left each *imported* image in. An import's
-//! starting state is a declaration rather than a lookup, and
-//! [`TransientPool::imported_image_use`] is what lets the next
+//! not own: what the last graph left each *imported* image and buffer in. An
+//! import's starting state is a declaration rather than a lookup, and
+//! [`TransientPool::imported_image_use`] and
+//! [`TransientPool::imported_buffer_use`] are what let the next
 //! [`RenderGraph::compile`](crate::graph::RenderGraph::compile) reject one that
 //! contradicts the frame before it — see
-//! [`InitialClaim`](crate::graph::InitialClaim). The pool holds it because it
-//! is the one thing that outlives a graph and is already handed to both
-//! `compile` and `execute`.
+//! [`InitialClaim`](crate::graph::InitialClaim) for the image half, which is
+//! the only one of the two with an exemption. The pool holds both because it is
+//! the one thing that outlives a graph and is already handed to `compile` and
+//! `execute` alike.
 
 use std::collections::HashMap;
 
@@ -186,6 +188,18 @@ pub struct TransientPool {
     /// and a handle carries a generation, so an entry left by a destroyed image
     /// can never be read by whatever takes its slot.
     imported_images: HashMap<ImageHandle, ResourceState>,
+    /// What the last graph left each **imported** buffer in, and the ledger
+    /// [`ImportedBuffer::initial`](crate::graph::ImportedBuffer::initial) is
+    /// checked against.
+    ///
+    /// The image ledger above, one resource kind over, and held for the same
+    /// reasons — it is not pooling, and a handle is the only key an import
+    /// offers. What differs is that every buffer import lands here rather than
+    /// the tracked subset: no buffer in this engine arrives behind an acquire
+    /// semaphore, so there is no buffer the graph has to take a declaration
+    /// from on trust. See [`ImportedBuffer`](crate::graph::ImportedBuffer) for
+    /// why that asymmetry is the resources' and not the check's.
+    imported_buffers: HashMap<BufferHandle, ResourceState>,
     /// Frames begun. Reported by [`TransientPool::frame_count`]; retirement
     /// counts idle frames per entry rather than reading this.
     frames: u64,
@@ -360,6 +374,28 @@ impl TransientPool {
         self.imported_images.insert(image, state);
     }
 
+    /// What the last graph left the imported buffer `buffer` in, if one has.
+    ///
+    /// [`TransientPool::imported_image_use`]'s answer for a buffer, and [`None`]
+    /// means the same thing: no graph has executed against this pool with
+    /// `buffer` imported, so there is no claim to contradict. A buffer a
+    /// `write_buffer` filled before any frame ran is the ordinary way to arrive
+    /// here.
+    #[must_use]
+    pub fn imported_buffer_use(&self, buffer: BufferHandle) -> Option<ResourceState> {
+        self.imported_buffers.get(&buffer).copied()
+    }
+
+    /// Records what this frame left the imported buffer `buffer` in.
+    ///
+    /// Not public, for [`TransientPool::set_imported_image_use`]'s reason: the
+    /// caller that knows this is the one that has just recorded the trailing
+    /// barrier reaching the state, and any other would be teaching the check a
+    /// wrong answer rather than moving a barrier.
+    pub(crate) fn set_imported_buffer_use(&mut self, buffer: BufferHandle, state: ResourceState) {
+        self.imported_buffers.insert(buffer, state);
+    }
+
     /// Records what this frame left the `ordinal`-th pooled image in.
     ///
     /// Deliberately not public: the only caller that can know this is
@@ -483,6 +519,7 @@ impl TransientPool {
         // pool is finished, and a ledger outliving it would answer questions
         // about frames it can no longer be the pool for.
         self.imported_images.clear();
+        self.imported_buffers.clear();
     }
 }
 

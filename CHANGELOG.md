@@ -1053,6 +1053,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`RenderGraph::compile` now checks an imported buffer's declared state, as it
+  already does an imported image's.** `ImportedBuffer::initial` was a
+  declaration nothing verified, and one that lies produces a barrier with the
+  wrong source scope — the same hazard class that has been wrong twice on the
+  image side. `TransientPool` records what each executed graph left every
+  imported buffer in (`TransientPool::imported_buffer_use` reads it), and
+  `GraphError::BufferImportStateMismatch` is what a disagreeing declaration
+  gets. **Unlike an image, a buffer import has no `InitialClaim` and no
+  exemption**: nothing hands this engine a buffer from behind an acquire
+  semaphore, so a claim field would have exactly one legal value on the very
+  struct whose check exists because escape hatches are how a guard gets lost.
+  `ImportedBuffer` gained no field, so every construction site compiles
+  unchanged; what changes is that a graph importing a buffer in a state the
+  previous frame did not leave it in now fails to compile rather than emitting
+  the wrong barrier.
+
 - **`--screenshot <PATH>` writes the frame a sample presented, as a PNG.** A
   field on `crcbl::args::Common` and an arm in `Common::consume`, so it is the
   engine's flag rather than one game's: the run's _last_ presented frame is

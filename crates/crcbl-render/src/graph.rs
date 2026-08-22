@@ -100,6 +100,16 @@
 //! exempt because a semaphore, not a barrier, is what orders it; the variant's
 //! docs say why that is a real exemption rather than an escape hatch.
 //!
+//! **A buffer import is audited the same way and has no exemption at all.**
+//! [`ImportedBuffer::initial`] is the identical declaration about a resource
+//! with no layout, which is what makes getting it wrong worse rather than
+//! milder: a capture of a mislabelled image at least shows the wrong layout,
+//! and a buffer whose barrier lost its source scope looks like nothing until the
+//! numbers it carries are wrong. So every buffer import is checked against the
+//! ledger — [`GraphError::BufferImportStateMismatch`] — and [`ImportedBuffer`]
+//! carries no claim, because nothing hands this engine a buffer from behind a
+//! semaphore the way a swapchain hands it an image.
+//!
 //! # Compilation is pure, and that is what makes it testable
 //!
 //! [`RenderGraph::compile`] takes no device and touches no GPU. It reads the
@@ -165,6 +175,17 @@ impl BufferId {
 /// wrong source scope, and `Undefined` carries none at all. So the importer has
 /// to say *how it knows*, and that answer decides whether the graph can check
 /// the claim or has to take it.
+///
+/// **Images only, and that is a fact about the resources rather than about the
+/// check.** [`ImportedBuffer::initial`] is the same declaration and is audited
+/// on the same ledger, but it has no counterpart to this enum: [`Acquired`] is
+/// the only reason an import escapes the audit, an acquire is what a swapchain
+/// does, and a swapchain hands out images. Giving a buffer a claim field with
+/// one legal value would be an escape hatch with no case behind it — and the
+/// [`Acquired`] docs below are about how such a hatch is how the check gets
+/// lost.
+///
+/// [`Acquired`]: InitialClaim::Acquired
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitialClaim {
     /// The importer owns this image across frames, so `initial` is checkable.
@@ -259,13 +280,48 @@ pub struct ImportedImage {
 }
 
 /// A buffer the graph did not create, and does not own.
+///
+/// The importer-owned per-frame ring is the canonical one: a cull counter, a
+/// light grid, a readback slot. Each belongs to something that keeps it across
+/// frames and hands the same handle back every time its turn comes round, so
+/// what orders this frame's first access is a barrier out of the state the last
+/// frame on that handle left it in — and [`ImportedBuffer::initial`] is where
+/// that state is named.
+///
+/// Unlike [`ImportedImage`] there is no [`InitialClaim`] here, because there is
+/// nothing for one to say. A buffer never arrives from a presentation engine,
+/// so no buffer import in this engine has an acquire semaphore standing between
+/// the last use and this frame; every one of them is a resource whose whole
+/// history is frames of this graph, and every one is therefore checked. See
+/// [`GraphError::BufferImportStateMismatch`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImportedBuffer {
     /// The buffer itself.
     pub buffer: BufferHandle,
     /// The state it is in when the graph starts.
+    ///
+    /// A **declaration the owner makes**, exactly as
+    /// [`ImportedImage::initial`] is and for the same reason: the graph did not
+    /// create this buffer and has no description of it to look up. The right
+    /// answer is what the last thing to touch it left it in —
+    /// [`final_state`](Self::final_state) on a buffer this graph has run with
+    /// before, and whatever the upload or copy outside the graph did on one it
+    /// has not.
+    ///
+    /// [`ResourceState::Undefined`] is the answer only when nothing has written
+    /// the buffer *at all*: it names no source scope, so a barrier out of it
+    /// orders this frame against nothing, and using it on a buffer another
+    /// frame's dispatch or copy wrote is precisely the write-after-write the
+    /// module docs describe. The graph rejects that rather than believing it,
+    /// on the ledger the previous frame left — see
+    /// [`GraphError::BufferImportStateMismatch`].
     pub initial: ResourceState,
     /// The state the graph must leave it in.
+    ///
+    /// The graph emits a trailing barrier if the last pass left it somewhere
+    /// else and emits nothing if it did not, so this is what the buffer is in
+    /// once the frame has run either way — which is why it is what the ledger
+    /// records, and so what the next frame's `initial` has to say.
     pub final_state: ResourceState,
 }
 
@@ -950,6 +1006,9 @@ pub struct CompiledGraph<'a> {
     /// reaches it. Handed to the pool by [`CompiledGraph::execute`], where the
     /// next frame's [`RenderGraph::compile`] checks a declaration against it.
     imported_image_end: Vec<(ImageHandle, ResourceState)>,
+    /// The same for every imported buffer, which is all of them: a buffer
+    /// import has no [`InitialClaim::Acquired`] counterpart to leave out.
+    imported_buffer_end: Vec<(BufferHandle, ResourceState)>,
 }
 
 impl fmt::Debug for CompiledGraph<'_> {
@@ -1201,6 +1260,7 @@ impl<'a> CompiledGraph<'a> {
             transient_image_end,
             transient_buffer_end,
             imported_image_end,
+            imported_buffer_end,
             ..
         } = self;
 
@@ -1296,6 +1356,9 @@ impl<'a> CompiledGraph<'a> {
         // disagrees rather than to barrier against them.
         for (image, state) in imported_image_end {
             pool.set_imported_image_use(image, state);
+        }
+        for (buffer, state) in imported_buffer_end {
+            pool.set_imported_buffer_use(buffer, state);
         }
         Ok(())
     }
@@ -1666,6 +1729,28 @@ pub enum GraphError {
         /// What the last graph to execute against this pool left it in.
         left: ResourceState,
     },
+    /// A buffer import declared a state the last graph did not leave it in.
+    ///
+    /// [`GraphError::ImportStateMismatch`] for a resource with no layout, and
+    /// its own variant rather than the same one because the two answers a reader
+    /// needs differ. An image has a way out — say [`InitialClaim::Acquired`] and
+    /// mean it — and telling a buffer's importer to reach for a field
+    /// [`ImportedBuffer`] does not have would send them looking for an escape
+    /// that is not there and should not be. What is left when that clause goes
+    /// is the whole of the advice: declare what the last frame left.
+    #[error(
+        "`{resource}` is imported as {declared:?}, but the last graph left it in {left:?}; a \
+         barrier out of a state the buffer is not in carries the wrong source scope, and \
+         `Undefined` carries none at all — declare what was left"
+    )]
+    BufferImportStateMismatch {
+        /// Resource label.
+        resource: String,
+        /// What the import declared as [`ImportedBuffer::initial`].
+        declared: ResourceState,
+        /// What the last graph to execute against this pool left it in.
+        left: ResourceState,
+    },
     /// The seam refused something at execution time.
     #[error(transparent)]
     Hal(#[from] HalError),
@@ -1994,7 +2079,7 @@ fn compile<'a>(
     } = graph;
 
     validate(&images, &buffers, &passes)?;
-    validate_imports(&images, pool)?;
+    validate_imports(&images, &buffers, pool)?;
 
     let image_lifetimes = lifetimes(passes.len(), passes.iter().map(|pass| &pass.images), |a| {
         a.image.0
@@ -2231,6 +2316,16 @@ fn compile<'a>(
             _ => None,
         })
         .collect();
+    // And every imported buffer, for the same reason off the same loop, with no
+    // subset to select: there is no buffer whose declaration the graph takes on
+    // trust, so there is none whose ending state it has no business recording.
+    let imported_buffer_end = buffers
+        .iter()
+        .filter_map(|node| match node.source {
+            BufferSource::Imported(imported) => Some((imported.buffer, imported.final_state)),
+            BufferSource::Transient(_) => None,
+        })
+        .collect();
 
     Ok(CompiledGraph {
         images,
@@ -2244,6 +2339,7 @@ fn compile<'a>(
         transient_image_end,
         transient_buffer_end,
         imported_image_end,
+        imported_buffer_end,
     })
 }
 
@@ -2375,18 +2471,26 @@ fn assign<N, D: Copy + PartialEq>(
     Ok(slots)
 }
 
-/// Checks every tracked import against what the last graph left it in.
+/// Checks every checkable import against what the last graph left it in.
 ///
 /// The half of validation that needs the pool, which is why it is not inside
 /// [`validate`]: everything there is a property of the declarations alone, and
 /// this is a property of the declarations *and* the frames before them.
 ///
-/// Silence for an image the ledger has never heard of is deliberate and is not
-/// a hole. The ledger records what a graph left, so an absent entry means no
-/// graph has left this image in anything — an image an upload put into
+/// Every buffer import is checkable and only a [`InitialClaim::Tracked`] image
+/// is — see [`ImportedBuffer`] for why the asymmetry belongs to the resources
+/// rather than to this function.
+///
+/// Silence for a resource the ledger has never heard of is deliberate and is
+/// not a hole. The ledger records what a graph left, so an absent entry means no
+/// graph has left this one in anything — an image an upload put into
 /// [`ResourceState::ShaderRead`] before any frame ran is the ordinary case, and
 /// there is no previous frame for the declaration to be wrong about.
-fn validate_imports(images: &[ImageNode], pool: &TransientPool) -> Result<(), GraphError> {
+fn validate_imports(
+    images: &[ImageNode],
+    buffers: &[BufferNode],
+    pool: &TransientPool,
+) -> Result<(), GraphError> {
     for node in images {
         let ImageSource::Imported(imported) = node.source else {
             continue;
@@ -2399,6 +2503,21 @@ fn validate_imports(images: &[ImageNode], pool: &TransientPool) -> Result<(), Gr
         };
         if left != imported.initial {
             return Err(GraphError::ImportStateMismatch {
+                resource: node.label.clone(),
+                declared: imported.initial,
+                left,
+            });
+        }
+    }
+    for node in buffers {
+        let BufferSource::Imported(imported) = node.source else {
+            continue;
+        };
+        let Some(left) = pool.imported_buffer_use(imported.buffer) else {
+            continue;
+        };
+        if left != imported.initial {
+            return Err(GraphError::BufferImportStateMismatch {
                 resource: node.label.clone(),
                 declared: imported.initial,
                 left,
