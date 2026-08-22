@@ -5094,14 +5094,15 @@ fn exercise_push_constants(headless: &Headless) -> Exercise {
 /// and then rejected the artifact is a fixture that needs looking at, not a
 /// capability answer.
 ///
-/// # The shader indexes its block with a divergent index, and that does not work
-/// on RADV
+/// # Why the shader selects components with a switch rather than indexing
 ///
-/// **This is a known failure of the fixture, not of any backend, and it is why a
-/// `CRCBL_GPU=vk` run can go red on an AMD card while passing on a software
-/// one.** `push_constant_probe.slang` reads `constants.values[index]` with
-/// `index` taken from `SV_DispatchThreadID`, which Slang emits as an
-/// `OpAccessChain` into the push-constant vector with a per-invocation index.
+/// **Fixed, and recorded because the measurement is the reason the shader is
+/// written the way it is.** It was once a real failure of the fixture rather
+/// than of any backend, and it made a `CRCBL_GPU=vk` run go red on an AMD card
+/// while passing on a software one. `push_constant_probe.slang` used to read
+/// `constants.values[index]` with `index` taken from `SV_DispatchThreadID`,
+/// which Slang emits as an `OpAccessChain` into the push-constant vector with a
+/// per-invocation index.
 /// NIR defines the offset of a `load_push_constant` as dynamically uniform, so
 /// ACO is entitled to scalarise it — and does. Measured here on Mesa 26.1.7:
 /// `RADV_DEBUG=shaders` shows `v_readfirstlane_b32 s3, v0` ahead of the
@@ -5110,13 +5111,15 @@ fn exercise_push_constants(headless: &Headless) -> Exercise {
 /// machine — a discrete Navi31 and an integrated Raphael — answer that way;
 /// llvmpipe, which addresses per lane, returns the four words correctly.
 ///
-/// Nothing this file can do fixes that: the exercise, the range and the write
-/// are all correct, and the shader is what has to change — the block wants
-/// reading at constant component indices (`values.x`/`.y`/`.z`/`.w` selected by
-/// a switch) rather than through a pointer, which keeps the one-`uint4` layout
-/// the source argues for and takes the divergent index out of the load. Until
-/// then this exercise is honest about a real defect and reports it where it
-/// happens rather than passing quietly on the one device that hides it.
+/// Nothing this file could do fixed it: the exercise, the range and the write were
+/// all correct, and the shader was what had to change. It now selects constant
+/// components (`values.x`/`.y`/`.z`/`.w` through a `switch`) rather than
+/// indexing through a pointer, which keeps the one-`uint4` layout the source
+/// argues for and takes the divergent index out of the load. The exercise
+/// passes on both RADV adapters here as well as on llvmpipe.
+///
+/// **Do not put the index back.** It reads more naturally and it is the form
+/// that was measured wrong.
 fn exercise_push_constants_on_compute(headless: &Headless) -> Exercise {
     use crcbl::shaders::push_constant_probe::{CONSTANTS_SIZE, WORD_COUNT, WORKGROUP_SIZE};
 
@@ -5417,9 +5420,11 @@ fn push_constant_dispatch(
              block and landed in the wrong place — the right constants written somewhere else, \
              which is a wrong picture with a clean log. Three things produce it, and the readback \
              above says which: the range reached the shader at the wrong offset, only part of the \
-             block was delivered, or every element holds one and the same pushed word — see \
-             `exercise_push_constants_on_compute` on that last one, which is the driver reading \
-             the block with a divergent index and is not this backend's doing.",
+             block was delivered, or every element holds one and the same pushed word. That \
+             last shape had a known cause once — a driver scalarising a divergent index into the \
+             block — and the shader was changed to a component `switch` so it cannot arise that \
+             way any more; see `exercise_push_constants_on_compute`. Seeing it now is a new \
+             defect rather than that one.",
             words[index], PUSHED.values[index], PUSHED.values,
         )
     }
