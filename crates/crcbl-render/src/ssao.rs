@@ -34,7 +34,7 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ClearValue, ColorTargetState, Device, Format, GraphicsPipelineHandle, HalError,
     ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
-    PipelineLayoutHandle, SampleType, ShaderStages, StoreOp,
+    PipelineLayoutHandle, SampleType, ShaderStages, StoreOp, check_portable_storage_buffers,
 };
 use crcbl_shaders::{SSAO, SSAO_BLUR, ssao};
 
@@ -131,10 +131,12 @@ impl Ssao {
                 flags: BindingFlags::empty(),
             },
         ];
-        let layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let desc = BindGroupLayoutDesc {
             label: Some("ssao depth"),
             entries: &entries,
-        })?;
+        };
+        check_portable_storage_buffers(Some("ssao"), &[&desc])?;
+        let layout = device.create_bind_group_layout(&desc)?;
         let set_layouts = [layout];
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("ssao"),
@@ -181,10 +183,12 @@ impl Ssao {
                 flags: BindingFlags::empty(),
             },
         ];
-        let blur_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let blur_desc = BindGroupLayoutDesc {
             label: Some("ssao blur"),
             entries: &blur_entries,
-        })?;
+        };
+        check_portable_storage_buffers(Some("ssao blur"), &[&blur_desc])?;
+        let blur_layout = device.create_bind_group_layout(&blur_desc)?;
         let blur_set_layouts = [blur_layout];
         let blur_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("ssao blur"),

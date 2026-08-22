@@ -14518,11 +14518,6 @@ not fix:
   gates all eleven, which is what says these are a rasteriser limit rather than
   a backend defect. The reasoning is in `.github/workflows/pages.yml` above the
   `render-harness:` job, which is where someone re-opening it will be standing.
-- **The new seam check covers 4 of the 12 `create_pipeline_layout` sites** in
-  `crcbl-render` — draw_gen's three and `forward.rs`'s `mesh frame`. Unchecked:
-  `light_grid`, `sprite_pass`, `ssao` (x2), `ssr` (x2), `ui_pass`, and
-  `forward`'s `tonemap`. None is near the limit today, so this is prevention
-  rather than a live defect, and extending it is mechanical.
 - **`crcbl-dx12`'s register case list claims "every shader is listed" and omits
   `clear_counters`.** Found while updating `draw_gen`'s row; pre-existing. The
   table transcribes each shader's binding classes so the register assignment can

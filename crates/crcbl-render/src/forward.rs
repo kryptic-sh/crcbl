@@ -2925,7 +2925,11 @@ impl ForwardRenderer {
         // at somebody else's `createPipelineLayout` — see
         // [`crcbl_hal::check_portable_storage_buffers`], which also says why the
         // mesh path's extra reads are outside the count.
-        check_portable_storage_buffers(mesh_desc.label, &[&mesh_desc])?;
+        // `Some("mesh")`, which is the *pipeline* layout's label, not
+        // `mesh_desc.label` — the error text reads "pipeline layout {label}
+        // binds …", so naming the bind group layout there sends the reader to
+        // the wrong object.
+        check_portable_storage_buffers(Some("mesh"), &[&mesh_desc])?;
         let mesh_layout = device.create_bind_group_layout(&mesh_desc)?;
         rollback.bind_group_layouts.push(mesh_layout);
 
@@ -3435,10 +3439,12 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             },
         ];
-        let tonemap_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let tonemap_desc = BindGroupLayoutDesc {
             label: Some("tonemap scene"),
             entries: &tonemap_entries,
-        })?;
+        };
+        check_portable_storage_buffers(Some("tonemap"), &[&tonemap_desc])?;
+        let tonemap_layout = device.create_bind_group_layout(&tonemap_desc)?;
         rollback.bind_group_layouts.push(tonemap_layout);
         let tonemap_set_layouts = [tonemap_layout];
         let tonemap_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {

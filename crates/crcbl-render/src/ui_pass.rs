@@ -59,7 +59,7 @@ use crcbl_hal::{
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle, ImageViewType,
     IndexFormat, LoadOp, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
     QueueHandle, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
-    ShaderModuleDesc, ShaderStages, StoreOp,
+    ShaderModuleDesc, ShaderStages, StoreOp, check_portable_storage_buffers,
 };
 
 use crcbl_shaders::{Stage, UI};
@@ -264,10 +264,12 @@ impl UiRenderer {
                 flags: BindingFlags::empty(),
             },
         ];
-        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let layout_desc = BindGroupLayoutDesc {
             label: Some("ui pass"),
             entries: &layout_entries,
-        })?;
+        };
+        check_portable_storage_buffers(Some("ui"), &[&layout_desc])?;
+        let bind_group_layout = device.create_bind_group_layout(&layout_desc)?;
         rollback.bind_group_layouts.push(bind_group_layout);
 
         // Per-frame bind groups (atlas/sampler are static, the rest rotate)

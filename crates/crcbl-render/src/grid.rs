@@ -60,6 +60,7 @@ use crcbl_hal::{
     DepthStencilState, Device, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError,
     LoadOp, MemoryLocation, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle,
     PrimitiveState, ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp,
+    check_portable_storage_buffers,
 };
 use crcbl_shaders::{GRID, Stage};
 use glam::{Mat4, Vec2, Vec3};
@@ -408,10 +409,12 @@ impl Grid {
             count: 1,
             flags: BindingFlags::empty(),
         }];
-        let layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let desc = BindGroupLayoutDesc {
             label: Some("grid"),
             entries: &entries,
-        })?;
+        };
+        check_portable_storage_buffers(Some("grid"), &[&desc])?;
+        let layout = device.create_bind_group_layout(&desc)?;
         rollback.bind_group_layouts.push(layout);
 
         let set_layouts = [layout];

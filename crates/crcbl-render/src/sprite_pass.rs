@@ -78,7 +78,7 @@ use crcbl_hal::{
     FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewType,
     LoadOp, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle,
     SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StoreOp,
+    ShaderStages, StoreOp, check_portable_storage_buffers,
 };
 use crcbl_shaders::{SPRITE, Stage};
 use crcbl_sprite::SampleMode;
@@ -588,59 +588,69 @@ impl SpriteRenderer {
         })?;
         rollback.samplers.push(sampler);
 
-        let frame_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let frame_layout_entries = [
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::VERTEX,
+                // `dynamic: true`, unlike `ui_pass`'s equivalent binding.
+                // This is the one thing that lets a batch say where its
+                // instances start without the draw's `firstInstance` — which
+                // `add_pass` explains cannot be used, because the two
+                // shading languages disagree about what it does to
+                // `SV_InstanceID`. One buffer, one block per batch, one
+                // offset at bind time.
+                kind: BindingKind::UniformBuffer { dynamic: true },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::VERTEX,
+                kind: BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+        ];
+        let frame_desc = BindGroupLayoutDesc {
             label: Some("sprite frame"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX,
-                    // `dynamic: true`, unlike `ui_pass`'s equivalent binding.
-                    // This is the one thing that lets a batch say where its
-                    // instances start without the draw's `firstInstance` — which
-                    // `add_pass` explains cannot be used, because the two
-                    // shading languages disagree about what it does to
-                    // `SV_InstanceID`. One buffer, one block per batch, one
-                    // offset at bind time.
-                    kind: BindingKind::UniformBuffer { dynamic: true },
-                    count: 1,
-                    flags: BindingFlags::empty(),
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::VERTEX,
-                    kind: BindingKind::StorageBuffer {
-                        read_only: true,
-                        dynamic: false,
-                    },
-                    count: 1,
-                    flags: BindingFlags::empty(),
-                },
-            ],
-        })?;
-        rollback.bind_group_layouts.push(frame_layout);
+            entries: &frame_layout_entries,
+        };
 
-        let sheet_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        let sheet_layout_entries = [
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::Sampler { comparison: false },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+        ];
+        let sheet_desc = BindGroupLayoutDesc {
             label: Some("sprite sheet"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
-                    kind: BindingKind::SampledImage {
-                        view_type: ImageViewType::D2,
-                        sample_type: SampleType::Float,
-                    },
-                    count: 1,
-                    flags: BindingFlags::empty(),
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
-                    kind: BindingKind::Sampler { comparison: false },
-                    count: 1,
-                    flags: BindingFlags::empty(),
-                },
-            ],
-        })?;
+            entries: &sheet_layout_entries,
+        };
+
+        // **Both sets in one call, in the order the pipeline layout below names
+        // them.** The guaranteed limit is a sum over a whole pipeline layout
+        // rather than a per-set budget, so checking either set on its own would
+        // under-count — see [`crcbl_hal::check_portable_storage_buffers`].
+        check_portable_storage_buffers(Some("sprite"), &[&frame_desc, &sheet_desc])?;
+        let frame_layout = device.create_bind_group_layout(&frame_desc)?;
+        rollback.bind_group_layouts.push(frame_layout);
+        let sheet_layout = device.create_bind_group_layout(&sheet_desc)?;
         rollback.bind_group_layouts.push(sheet_layout);
 
         // A dynamic offset must be a multiple of the device's alignment, and the

@@ -45,7 +45,7 @@
 use crcbl_hal::{
     BindGroupDesc, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc,
     BufferHandle, BufferUsage, ComputePipelineHandle, Device, HalError, MemoryLocation,
-    PipelineLayoutDesc, PipelineLayoutHandle, ResourceState,
+    PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, check_portable_storage_buffers,
 };
 use crcbl_shaders::light::{
     self, CLUSTER_DEPTH_SLICES, CLUSTER_PARAMS_SIZE, CLUSTER_STRIDE, CLUSTER_TILE_PIXELS,
@@ -227,17 +227,20 @@ impl LightGrid {
         label: &str,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
-        let layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+        // `light_cluster.slang`'s declaration order, which is the only order
+        // Metal and D3D12 agree about — see `crcbl_shaders::declaration_order`.
+        let entries = [
+            uniform(0),
+            storage(1, true),
+            storage(2, false),
+            storage(3, false),
+        ];
+        let layout_desc = BindGroupLayoutDesc {
             label: Some(label),
-            // `light_cluster.slang`'s declaration order, which is the only order
-            // Metal and D3D12 agree about — see `crcbl_shaders::declaration_order`.
-            entries: &[
-                uniform(0),
-                storage(1, true),
-                storage(2, false),
-                storage(3, false),
-            ],
-        })?;
+            entries: &entries,
+        };
+        check_portable_storage_buffers(Some(label), &[&layout_desc])?;
+        let layout = device.create_bind_group_layout(&layout_desc)?;
         rollback.layouts.push(layout);
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some(label),
