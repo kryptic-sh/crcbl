@@ -805,17 +805,23 @@ fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
 ///
 /// # What this does and does not reach
 ///
-/// A **[`SurfaceTarget::Offscreen`] surface**, because that is the only surface
-/// any GPU suite in this workspace creates — there is no compositor in the test
-/// environment and no windowed GPU e2e to put this in. So on `vk`, `dx12` and
-/// `mtl` it pins each backend's own offscreen table (`crcbl-vk`'s
-/// `offscreen_surface_caps`, `crcbl-dx12`'s `OFFSCREEN_FORMATS`, `crcbl-mtl`'s
-/// offscreen arm) and not what a real window system answered. That is a weaker
-/// claim than it looks and it is stated rather than glossed: the windowed path
-/// is covered only by each backend's own unit tests over a fabricated
-/// `SurfaceCaps`, and `crcbl-webgpu`'s canvas — the one that actually
-/// regressed — by `crcbl-webgpu`'s `hal/tests.rs` and by group I of the
-/// standalone probe, neither of which this binary can run.
+/// A **[`SurfaceTarget::Offscreen`] surface**, because this suite runs on
+/// whichever backend `CRCBL_GPU` names and offscreen is the one surface every
+/// backend can create anywhere. So on `vk`, `dx12` and `mtl` it pins each
+/// backend's own offscreen table (`crcbl-vk`'s `offscreen_surface_caps`,
+/// `crcbl-dx12`'s `OFFSCREEN_FORMATS`, `crcbl-mtl`'s offscreen arm) and not what
+/// a real window system answered. That is a weaker claim than it looks and it is
+/// stated rather than glossed.
+///
+/// What covers the other half is no longer nothing: `tests/windowed_e2e.rs`,
+/// behind the `windowed-e2e` feature, puts a real `crcbl-vk` swapchain on a real
+/// X11 window and holds it to what the server actually reports — the extent
+/// clamp in particular, which no fabricated `SurfaceCaps` can make a claim
+/// about. That suite is Vulkan-and-X11 only, so `dx12` and `mtl` are still
+/// covered on the windowed path by their own unit tests over a fabricated
+/// `SurfaceCaps` and by nothing else. `crcbl-webgpu`'s canvas — the one that
+/// actually regressed — is covered by `crcbl-webgpu`'s `hal/tests.rs` and by
+/// group I of the standalone probe, neither of which this binary can run.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
 fn a_surface_offers_an_srgb_format_and_preferred_format_picks_it() {
