@@ -57,12 +57,30 @@
 //! stream, [`crate::probe`] builds both an occlusion set and a timestamp set
 //! through it, and the browser gate reads a timed pass's two ticks back.
 //!
-//! That is the right split while there is no device — the wire's job is to
-//! carry the browser's answer intact — but it stops being right the moment an
-//! `impl Instance` exists, because a capability on the HAL seam is a promise
-//! about what a caller may *ask for*. The impl must intersect this set with what
-//! the stream can encode, the way `crcbl-wgpu`'s `hal_features_for` withholds
-//! the query features its backend refuses.
+//! That split is the wire's job — carry the browser's answer intact — and it is
+//! not the whole story now that [`WebGpuInstance`](crate::hal::WebGpuInstance)
+//! implements [`Instance`](crcbl_hal::Instance). A capability on the HAL seam is
+//! a promise about what a caller may *ask for*, so the set has to be intersected
+//! somewhere with what the stream can encode. Where that happens today, and
+//! where it does not:
+//!
+//! * **The mapping is gated, at build time.**
+//!   `web/tools/gpu-replay.mjs`'s "every mapped feature has a command that can
+//!   serve it" section reads the keys of `gpu-replay.js`'s `FEATURE_MAP` out of
+//!   the table itself and drives, for each one, the command that serves it
+//!   against a stub device that opened with it. A `GPUFeatureName` mapped to a
+//!   [`Features`](crcbl_hal::Features) bit before its commands exist has nothing
+//!   to drive and fails that suite. So the mistake this section describes — a
+//!   bit promised that no frame could encode — cannot be made silently by adding
+//!   a row.
+//! * **The reply is not filtered, at run time.**
+//!   [`Instance::adapters`](crcbl_hal::Instance::adapters) hands back the
+//!   [`AdapterInfo`]s the replies carried, unchanged; no bit is withheld there
+//!   for a command the stream cannot encode. That is sound only while every
+//!   mapped feature is served, which is what the gate above keeps true. It is a
+//!   check on the table, not a filter on the answer, and the two are not
+//!   substitutes: a browser is free to report a feature this crate never mapped,
+//!   and the table drops that by construction.
 //!
 //! # Worked exchange
 //!

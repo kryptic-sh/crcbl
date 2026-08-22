@@ -116,7 +116,7 @@
 import { readFile } from 'node:fs/promises';
 import { deepStrictEqual } from 'node:assert/strict';
 
-import { DEVICE_TYPE, ReplyWriter } from '../engine/gpu-reply.js';
+import { DEVICE_TYPE, FORMAT, ReplyWriter } from '../engine/gpu-reply.js';
 import {
   HandleTable,
   ReplayError,
@@ -10033,6 +10033,227 @@ async function main() {
       thrown instanceof TypeError &&
         thrown.message.includes('maxStorageBufferBindingSize'),
       `an adapter with no limits names the member it was missing (${String(thrown)})`
+    );
+  }
+
+  // ---- every mapped feature has a command that can serve it ---------------
+  //
+  // **THE MAPPING IS NOT ALLOWED TO OUTRUN THE STREAM.** `FEATURE_MAP` is what
+  // turns a `GPUFeatureName` the browser reported into a `crcbl_hal::Features`
+  // bit the adapter reply carries, and a bit on the seam is a promise about what
+  // a caller may *ask for*. A row added for a feature whose commands do not
+  // exist yet therefore makes the reply advertise a capability no frame could
+  // encode — the split `crates/crcbl-webgpu/src/instance.rs` describes, and one
+  // nothing used to catch. Every row today is served, so the defect would arrive
+  // with the *next* row rather than showing up in any of these.
+  //
+  // EXHAUSTIVE OVER THE TABLE, WHICH IS THE ONLY PART THAT MAKES IT A GATE. The
+  // names are not written out here: they are read out of `FEATURE_MAP` itself,
+  // by handing {@link halFeaturesFor} a `features` set whose `has` records every
+  // name it is asked about and answers `false`. That call walks the table row by
+  // row, so what comes back is exactly its keys, in its own order — and a fifth
+  // row arrives here on the run that adds it, with nothing in `SERVED_BY` to
+  // answer for it. That is the property `crcbl_hal::Capability` buys on the Rust
+  // side from a `match` with no wildcard arm, bought here with a loop instead.
+  //
+  // AND THE EVIDENCE IS DRIVEN, NOT DECLARED. Each entry below replays the
+  // command the feature governs against a stub device that opened with it and
+  // reads what reached WebGPU back off the stub. A table saying "served, trust
+  // me" beside each name would pass whatever the replayer did, which is the one
+  // thing this must not do.
+  {
+    /**
+     * Every key of `FEATURE_MAP`, in its order, taken from the table itself.
+     *
+     * A `Set` whose `has` is replaced rather than a plain object, so this is
+     * still the `ReadonlySet<string>` {@link halFeaturesFor} documents taking.
+     * The returned word is discarded: what is wanted is the walk, not the bits.
+     */
+    const mapped = [];
+    const recording = new Set();
+    recording.has = (name) => {
+      mapped.push(name);
+      return false;
+    };
+    halFeaturesFor({ features: recording });
+    // A loop over an empty list passes every check inside it, so the list being
+    // non-empty is its own check: `halFeaturesFor` walking nothing would leave
+    // every row below unexamined and this section silently green.
+    check(
+      mapped.length > 0,
+      `FEATURE_MAP has rows to hold to the stream (${mapped.length}: ${mapped.join(', ')})`
+    );
+
+    /**
+     * What proves each mapped feature is one this replayer can actually serve.
+     *
+     * Keyed by `GPUFeatureName` and called with that name, so nothing inside an
+     * entry restates the key it is filed under. Each answers `served` — the
+     * thing the check turns on — and `how`, the phrase it prints, which names
+     * the path that was driven rather than the feature that has one.
+     *
+     * @type {Record<string, (name: string) => Promise<{ served: boolean, how: string }>>}
+     */
+    const SERVED_BY = {
+      'depth-clip-control': async (name) => {
+        // `primitive.unclippedDepth` is the only place WebGPU spells depth
+        // clamping and `CreateGraphicsPipeline` is the only command that sets
+        // it, so the descriptor the device was handed is the whole evidence.
+        // The device opens with `depth32float-stencil8` as well, because the
+        // corpus pipeline's depth format is gated behind it and a refusal there
+        // would look exactly like a feature nothing serves.
+        const { replayer, device } = await readyWithDevice({
+          device: stubDevice(['depth32float-stencil8', name]),
+        });
+        rasterFrame(replayer);
+        replayer.replay(
+          frameOf(
+            {
+              ...graphicsPipeline,
+              primitive: { ...graphicsPipeline.primitive, depthClamp: true },
+            },
+            900n
+          )
+        );
+        const built = device.createdRenderPipelines[0];
+        return {
+          served: built?.primitive?.unclippedDepth === true,
+          how:
+            'a CreateGraphicsPipeline carrying depth_clamp reaches' +
+            ` createRenderPipeline as primitive.unclippedDepth (${JSON.stringify(built?.primitive)})`,
+        };
+      },
+      'texture-compression-bc': async (name) => {
+        // Read off the format table rather than driven through one command: a
+        // compressed format is served by every command that names a format, and
+        // the single decision behind all of them is
+        // {@link webgpuTextureFormatFor}. The formats it is asked about come
+        // from `gpu-reply.js`'s wire table — a different module from the one
+        // under question, and the one the decoder agrees with — so this is the
+        // whole of `crcbl_hal::Format` and not a list kept in step by hand.
+        const gated = Object.keys(FORMAT).filter((format) => {
+          const bare = webgpuTextureFormatFor(format, new Set());
+          const enabled = webgpuTextureFormatFor(format, new Set([name]));
+          return (
+            bare.name === null &&
+            String(bare.reason).includes(name) &&
+            enabled.name !== null
+          );
+        });
+        return {
+          served: gated.length > 0,
+          how:
+            `${gated.length} of crcbl_hal::Format's variants lower to a` +
+            ` GPUTextureFormat only on a device that enabled it (${gated.join(', ')})`,
+        };
+      },
+      'timestamp-query': async (name) => {
+        // `CreateQuerySet` of the `Timestamp` kind is the command this gates,
+        // and both halves are read: the set is created as `type: 'timestamp'`
+        // on a device that has the feature, and refused *by name* on one that
+        // does not. A replayer that created the set unconditionally would look
+        // just as served from the first half alone.
+        const opened = await readyWithDevice({ device: stubDevice([name]) });
+        opened.replayer.replay(
+          frameOf({ ...querySetCommand, kind: 'Timestamp' }, 900n)
+        );
+        const bare = await readyWithDevice();
+        bare.replayer.replay(
+          frameOf({ ...querySetCommand, kind: 'Timestamp' }, 900n)
+        );
+        const refusal = bare.replayer.takeError();
+        return {
+          served:
+            opened.device.createdQuerySets.length === 1 &&
+            opened.device.createdQuerySets[0].type === 'timestamp' &&
+            bare.device.createdQuerySets.length === 0 &&
+            String(refusal).includes(name),
+          how:
+            'a CreateQuerySet of the Timestamp kind reaches createQuerySet' +
+            ` with it and is refused naming it without it (${JSON.stringify(opened.device.createdQuerySets)},` +
+            ` ${JSON.stringify(refusal)})`,
+        };
+      },
+      'indirect-first-instance': async () => {
+        // **THE ONE ROW WITH NO DESCRIPTOR FIELD BEHIND IT, and it is said
+        // rather than papered over.** This feature lifts core WebGPU's rule
+        // that an indirect draw's `firstInstance` must be zero, and that value
+        // lives in the buffer the GPU reads — so no call this replayer makes
+        // mentions it and there is nothing on a descriptor to compare against.
+        // What *can* be driven is the thing that would be missing had the row
+        // been mapped before its commands existed: that the two commands the
+        // feature governs are replayed at all, reaching WebGPU's own
+        // `drawIndirect` and `drawIndexedIndirect`. A row mapped early has no
+        // such calls to find, which is the case this is here to catch; it is
+        // weaker than the three above, and knowingly so.
+        const { replayer, device } = await readyWithDevice();
+        const bufH = handle(94, 1);
+        replayer.replay(frameOf(storageBufferAt(bufH), 900n));
+        const buffer = replayer.buffers.get(bufH);
+        const pass = openedPass(replayer, device);
+        replayer.replay(
+          frameOf(
+            {
+              name: 'DrawIndirect',
+              buffer: bufH,
+              offset: 0n,
+              drawCount: 1,
+              stride: 16,
+            },
+            902n
+          )
+        );
+        replayer.replay(
+          frameOf(
+            {
+              name: 'DrawIndexedIndirect',
+              buffer: bufH,
+              offset: 0n,
+              drawCount: 1,
+              stride: 20,
+            },
+            903n
+          )
+        );
+        return {
+          served:
+            buffer !== undefined &&
+            pass.indirectDraws.length === 1 &&
+            pass.indexedIndirectDraws.length === 1 &&
+            replayer.pendingErrors === 0,
+          how:
+            'the indirect draws it governs are replayed as drawIndirect and' +
+            ` drawIndexedIndirect (${pass.indirectDraws.length} and ${pass.indexedIndirectDraws.length},` +
+            ` ${replayer.pendingErrors} errors)`,
+        };
+      },
+    };
+
+    for (const name of mapped) {
+      const evidence = SERVED_BY[name];
+      if (evidence === undefined) {
+        check(
+          false,
+          `${name} is mapped to a crcbl_hal::Features bit and nothing in SERVED_BY drives a command that serves it` +
+            ' — add the drive, or drop the row until the commands exist'
+        );
+        continue;
+      }
+      const { served, how } = await evidence(name);
+      check(served, `${name} is served by the stream: ${how}`);
+    }
+
+    // …and the table cannot rot the other way either. An entry for a name
+    // `FEATURE_MAP` no longer maps is a drive nothing runs, which is how a
+    // suite ends up carrying a check for a row that was deleted years ago.
+    const orphaned = Object.keys(SERVED_BY).filter(
+      (name) => !mapped.includes(name)
+    );
+    check(
+      orphaned.length === 0,
+      orphaned.length === 0
+        ? 'and every SERVED_BY entry answers for a row FEATURE_MAP still has'
+        : `SERVED_BY still answers for ${orphaned.join(', ')}, which FEATURE_MAP no longer maps`
     );
   }
 

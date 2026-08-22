@@ -171,13 +171,29 @@ import {
 //
 // IT REPORTS WHAT THE BROWSER SAID, NOT WHAT `crcbl-webgpu` CAN EXECUTE. The
 // channel's job is to carry the browser's answer intact; a capability on the
-// seam is a promise about what a caller may *ask for*, so an `impl Instance`
-// must intersect this set with what the stream can encode.
+// seam is a promise about what a caller may *ask for*, so that set has to be
+// intersected somewhere with what the stream can encode.
 // `crates/crcbl-webgpu/src/instance.rs` says so too. `TIMESTAMP_QUERY` used to
 // be the standing example of a bit the stream could not serve, and is no longer
 // one: `CreateQuerySet` takes the timestamp kind and both pass commands carry
 // `timestampWrites`, so a browser that reports `timestamp-query` gets a bit that
 // means something.
+//
+// WHAT IS ENFORCED, AND WHAT IS NOT — two halves of that intersection, and only
+// one of them has anything holding it. `web/tools/gpu-replay.mjs`'s "every
+// mapped feature has a command that can serve it" section reads the keys of
+// `FEATURE_MAP` out of the table itself and drives, for each one, the command
+// that serves it against a stub device that opened with it. A row added here
+// for a feature whose commands do not exist yet has no such command to drive
+// and fails that suite by construction, so the **mapping** can no longer
+// outrun the stream unnoticed. Every row today passes it.
+//
+// THE RUNTIME INTERSECTION IS THE HALF THAT STILL DOES NOT HAPPEN.
+// `crcbl_webgpu::hal::WebGpuInstance` implements `Instance`, and its `adapters`
+// hands back the `AdapterInfo`s this file filled, unchanged: no bit is withheld
+// there for a command the stream cannot encode. That is sound only while the
+// table above is honest, which is precisely what the gate keeps it — a check on
+// this table, not a filter on the reply.
 
 /**
  * `crcbl_hal::Features` bits that core WebGPU grants unconditionally.
