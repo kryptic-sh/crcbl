@@ -90,7 +90,6 @@ use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::jobs::{Inline, Pool, Spawn, default_spawner};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
-use crcbl::phys::query::ShapeHit;
 use crcbl::phys::{ColliderComponent, PhysicsSystem, QueryScratch, RigidBody, Segment, Transform};
 use crcbl::session::Loopback;
 
@@ -2058,8 +2057,8 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
     let target = with_physics(world, |phys| {
         phys.overlap_sphere(origin, range)
             .into_iter()
-            .filter(|(entity, _hit)| by_entity.contains_key(entity))
-            .filter_map(|(entity, _hit)| {
+            .filter(|entity| by_entity.contains_key(entity))
+            .filter_map(|entity| {
                 let position = phys.transform(entity)?.position;
                 Some((entity, position))
             })
@@ -2148,7 +2147,7 @@ fn contact_damage(logic: &mut GameLogic, world: &mut World, dt: f64) {
     let dps = with_physics(world, |phys| {
         phys.overlap_sphere(centre, PLAYER_RADIUS)
             .into_iter()
-            .filter_map(|(entity, _hit)| by_entity.get(&entity).copied())
+            .filter_map(|entity| by_entity.get(&entity).copied())
             .filter_map(|index| enemies.get(index))
             .map(|enemy| enemy.kind.contact_dps())
             .sum::<f64>()
@@ -2382,7 +2381,7 @@ fn collect_pickups(logic: &mut GameLogic, world: &mut World) {
     let mut taken = std::mem::take(&mut logic.scratch_entities);
     taken.clear();
     with_physics(world, |phys| {
-        for (entity, _hit) in phys.overlap_sphere(centre, radius) {
+        for entity in phys.overlap_sphere(centre, radius) {
             if pickup_by_entity.contains_key(&entity) {
                 taken.push(entity);
             }
@@ -2641,7 +2640,7 @@ fn steer_enemies(logic: &mut GameLogic, world: &mut World, pool: &mut Pool) {
                             scratch,
                             neighbours,
                         );
-                        for &(other, _hit) in neighbours.iter() {
+                        for &other in neighbours.iter() {
                             if other == me.entity {
                                 continue;
                             }
@@ -2701,7 +2700,7 @@ thread_local! {
     /// It cannot affect an answer: both halves are cleared by the query before
     /// it writes them, so what a chunk finds in here is whatever the last chunk
     /// on this thread left, and nothing reads it.
-    static STEER_SCRATCH: RefCell<(QueryScratch, Vec<(Entity, ShapeHit)>)> =
+    static STEER_SCRATCH: RefCell<(QueryScratch, Vec<Entity>)> =
         RefCell::new((QueryScratch::new(), Vec::new()));
 }
 
@@ -3846,9 +3845,6 @@ impl Game {
         };
         let mut found = with_physics(self.session.server_mut().world_mut(), |phys| {
             phys.overlap_sphere(position, separation_query_radius(kind))
-                .into_iter()
-                .map(|(entity, _hit)| entity)
-                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
         found.sort_unstable_by_key(|entity| entity.to_bits());

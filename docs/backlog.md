@@ -6978,13 +6978,6 @@ it costs is **tree quality**, not answers.
   and what breakout and flappy both work around by removing the sweeper's own
   collider and putting it back.
 
-- **`PhysicsSystem::overlap_sphere` still fabricates its `ShapeHit`.** `t: 0.0`,
-  `normal: DVec3::Y`, `started_inside: true` for every result. Asteroids only
-  asks _whether_ anything is there, so it discards the hit outright — which
-  means the type is promising a contact that no caller in the workspace can use.
-  Either compute a real deepest-point normal or change the return type to entity
-  ids. `PhysicsWorld::overlap_sphere` underneath is honest.
-
 - **Rotational dynamics are absent.** `Transform` carries a `DQuat` and
   `ThrustForce` reads it, but there is no angular velocity, no torque and no
   quaternion integration: `RigidBody` has `velocity` and `force_accum` and

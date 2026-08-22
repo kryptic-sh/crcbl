@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`PhysicsSystem::overlap_sphere` and `overlap_sphere_into` answer `Entity`
+  rather than `(Entity, ShapeHit)`.** The hit was fabricated: every result
+  carried `t: 0.0`, `point: centre`, `normal: DVec3::Y` and
+  `started_inside: true`, the same answer whatever the geometry, so a caller
+  that read the normal got "up" for every body it found. None did — all six call
+  sites in this workspace named it `_hit` — and the fields are not a gap to fill
+  in later, because an overlap has no impact time, no impact point and no single
+  normal. `cast_ray` and `sweep_sphere` are the queries that genuinely have a
+  hit, and they still return one. A caller that was destructuring the pair drops
+  the second half.
+
 - **`RenderGraph::import_image` and `import_buffer` now deduplicate on the
   handle, and a repeat import that contradicts the first is a compile error.**
   Each call used to push a node, so one `ImageHandle` imported twice in a frame
