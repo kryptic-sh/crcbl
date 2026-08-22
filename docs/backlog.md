@@ -9381,16 +9381,27 @@ name of three words or fewer outside the backend crates. Measured with a
 test-name collisions still open between non-backend crates" above are resolved;
 the rest of that entry's list still stands.
 
-- **`orbit_integration_deterministic` (`crcbl-audio`, `tests/spatial_chain.rs`)
-  was deliberately not renamed.** It is cited by name in `docs/code-review.md`,
-  which was outside this slice's paths, so renaming it would strand that
-  citation. The citation is already stale in two other ways and is worth fixing
-  together with the rename: it gives the path as
-  `crates/crcbl-audio/tests/orbit.rs:191` (the file is now
-  `tests/spatial_chain.rs`), and its finding — that the test XORs per-block
-  hashes, which is order-insensitive — no longer holds, because the test feeds
-  one hasher in block order and asserts that the reversed event order hashes
-  differently.
+- **`orbit_integration_deterministic` was renamed after all, and the citation it
+  was being held back to protect is now stranded.** This entry used to say the
+  name was deliberately left alone because `docs/code-review.md` cites it. The
+  test in `crates/crcbl-audio/tests/spatial_chain.rs` is now
+  `an_orbit_hashes_the_same_twice_and_differently_in_reverse`, and no
+  `orbit_integration_deterministic` exists anywhere in the tree.
+
+  `docs/code-review.md:1775` is therefore wrong in **three** ways at once: the
+  path (`crates/crcbl-audio/tests/orbit.rs:191` — that file is
+  `tests/spatial_chain.rs`), the test name, and the finding itself. It says the
+  test XORs per-block hashes and is order-insensitive; the test feeds one hasher
+  in block order and asserts the reversed event order hashes _differently_,
+  which is the property the old name could not express and the new one does.
+
+  **Not fixed here on purpose.** Whether `docs/code-review.md` is a living
+  findings list to be pruned or a dated snapshot to be preserved is an open
+  question recorded under _Owed_, and it governs the whole document rather than
+  this one line. Fix them together. Found by sweeping every backticked symbol in
+  this file against the tree — a check the doc-citation gate does not make,
+  since it resolves paths and not names.
+
 - **The four `the_workgroup_size_matches_the_numthreads_the_shader_declares`
   copies and the three `the_params_block_matches_the_offsets_slangc_emits`
   copies in `crcbl-shaders` now name their shader** — read end to end first, and
