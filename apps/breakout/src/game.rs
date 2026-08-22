@@ -423,25 +423,14 @@ fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_
         };
         let pos = transform.position;
         let vel = body.velocity;
-        // Physics already integrated `vel * dt`; sweeping backwards over
-        // exactly that covers the path the ball took during this tick — which
-        // is only true because this runs once per physics tick, with the same
-        // `dt` the schedule used.
-        let segment = crcbl::phys::Segment {
-            start: pos - vel * dt,
-            end: pos,
-        };
+        // `sweep_body` builds the segment from the ball's own motion — back
+        // over `vel * dt` and forward to where it is — which is the path it
+        // took during this tick only because this runs once per physics tick,
+        // with the same `dt` the schedule used. It leaves the ball's own
+        // collider out of the answer, so the ball can stay in the broadphase
+        // while it is swept.
+        let hit = phys.sweep_body(ball, dt, BALL_RADIUS);
 
-        // `PhysicsSystem::sweep_sphere` has no exclusion list, and the ball's
-        // own collider sits at the far end of the segment — so a sweep run with
-        // it still in the world reports the ball hitting *itself* at t = 0,
-        // every tick, and the ball never leaves the launch position. Lift it
-        // out for the duration of the query and put it back afterwards, at
-        // whatever transform the resolution settled on.
-        phys.remove_collider(ball);
-        let hit = phys.sweep_sphere(&segment, BALL_RADIUS);
-
-        let mut resolved = transform;
         if let Some((hit_entity, hit)) = hit {
             let is_brick = logic.bricks.contains(&hit_entity);
             let approaching = vel.dot(hit.normal) < 0.0;
@@ -472,6 +461,7 @@ fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_
                 };
                 new_body.velocity = bounce(vel, hit.normal, english, speed);
                 phys.set_body(ball, new_body);
+                let mut resolved = transform;
                 resolved.position = hit.point + hit.normal * BALL_RADIUS * 1.01;
                 phys.set_transform(ball, resolved);
             }
@@ -482,8 +472,6 @@ fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_
                 phys.remove_entity(entity);
             }
         }
-
-        phys.set_collider(ball, &BALL_COLLIDER, &resolved);
     });
 
     if let Some(entity) = broken {

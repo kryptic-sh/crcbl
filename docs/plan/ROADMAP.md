@@ -582,11 +582,11 @@ pass and its `batch_count`, `PhysicsWorld::broadphase_stats`, the
 `#[non_exhaustive]`, and the wasm32 rustdoc gate.
 
 **What is still open** lives in `docs/backlog.md` and nowhere else: music
-streaming and ducking, the voice limit and stealing, `sweep_body`'s missing
-exclusion list, `overlap_sphere`'s fabricated `ShapeHit`, angular velocity, the
-BVH-traversal-order neighbour sum, horde's arena-size decision, the unrun
-windowed native path, and the fact that every performance number in this project
-was taken on an offscreen image ring rather than a real swapchain.
+streaming and ducking, the voice limit and stealing, the absent entity-shaped
+overlap query, angular velocity, the BVH-traversal-order neighbour sum, horde's
+arena-size decision, the unrun windowed native path, and the fact that every
+performance number in this project was taken on an offscreen image ring rather
+than a real swapchain.
 
 **The one claim the lists made that this document still makes:** the seams
 themselves survived four unrelated games — the action map, the render graph, the

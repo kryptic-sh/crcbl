@@ -6970,15 +6970,16 @@ it costs is **tree quality**, not answers.
   the velocity exactly on zero. Measured: that version goes red.
 
 - **There is no "what does entity E overlap" query.**
-  `PhysicsSystem::overlap_sphere` takes a free centre and radius. An entity that
-  is only ever the _subject_ of overlap tests therefore has no reason to be in
-  the broadphase at all — asteroids' ship carries no collider, because a leaf no
+  `PhysicsSystem::overlap_sphere` takes a free centre and radius, so an entity
+  that is only ever the _subject_ of overlap tests has no reason to be in the
+  broadphase at all — asteroids' ship carries no collider, because a leaf no
   query is allowed to return would have needed filtering back out of every
   result by entity id. That is fine here and will not be for a game where two
   things test against each other. What is wanted is an entity-shaped overlap
-  with an exclusion list; the same exclusion list is what `sweep_sphere` needs
-  and what breakout and flappy both work around by removing the sweeper's own
-  collider and putting it back.
+  that excludes the subject, the way `sweep_body` now does: the exclusion has to
+  reach `PhysicsWorld`, because filtering above it would drop the hit rather
+  than fall through to the next one. `sweep_sphere_excluding` is the shape to
+  copy.
 
 - **Rotational dynamics are absent.** `Transform` carries a `DQuat` and
   `ThrustForce` reads it, but there is no angular velocity, no torque and no

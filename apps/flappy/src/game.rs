@@ -445,22 +445,10 @@ fn fatal(logic: &GameLogic, world: &mut World, dt: f64) -> Option<Death> {
     }
 
     let hit = with_physics(world, |phys| {
-        let (body, transform) = phys
-            .body(bird)
-            .copied()
-            .zip(phys.transform(bird).copied())?;
-        let segment = crcbl::phys::Segment {
-            start: transform.position - body.velocity * dt,
-            end: transform.position,
-        };
-        // The bird's own collider sits at the far end of the segment, and the
-        // sweep has no exclusion list — left in the world it reports the bird
-        // hitting itself at t = 0 and every run ends on its first tick. Breakout
-        // pays the same price for the same reason.
-        phys.remove_collider(bird);
-        let hit = phys.sweep_sphere(&segment, BIRD_RADIUS);
-        phys.set_collider(bird, &BIRD_COLLIDER, &transform);
-        hit.map(|_| Death::Pipe)
+        // `sweep_body` reconstructs the bird's path over the tick from its own
+        // velocity, and leaves the bird's own collider out of the answer — so
+        // the bird stays in the broadphase while it is swept.
+        phys.sweep_body(bird, dt, BIRD_RADIUS).map(|_| Death::Pipe)
     });
     hit.flatten()
 }

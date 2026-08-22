@@ -508,6 +508,40 @@ impl PhysicsWorld {
         segment: &Segment,
         radius: f64,
     ) -> Option<(ColliderId, ShapeHit)> {
+        self.sweep_sphere_excluding(segment, radius, None)
+    }
+
+    /// [`sweep_sphere`](Self::sweep_sphere) with one collider left out of the
+    /// answer.
+    ///
+    /// This is the query a *body* sweeping its own path needs: the segment ends
+    /// where the body is, so the body's own shape is sitting on the far end of
+    /// it and is reported as the closest hit at `t = 0`. Excluding it here — and
+    /// not by discarding the result afterwards — is what keeps the *next*
+    /// closest hit: the narrow phase picks a single winner, so a caller that
+    /// throws away a self-hit throws away the wall behind it too.
+    ///
+    /// A stale or invalid `exclude` excludes nothing, which is the same answer
+    /// as `None`.
+    ///
+    /// # One id, not a filter object
+    ///
+    /// The field's general form is a filter the query calls back into — PhysX's
+    /// `PxQueryFilterData`/`PxQueryFilterCallback`, Jolt's `BodyFilter`,
+    /// Bullet's `ClosestRayResultCallback` and its mask. Every one of them also
+    /// ships the degenerate case as its own thing, because it is the case that
+    /// actually comes up: Jolt has `IgnoreSingleBodyFilter`, and Bullet's
+    /// character controller carries a `ClosestNotMeConvexResultCallback`. That
+    /// degenerate case is the whole of what this crate's consumers ask for, so
+    /// it is the whole of what this takes.
+    #[must_use]
+    pub fn sweep_sphere_excluding(
+        &mut self,
+        segment: &Segment,
+        radius: f64,
+        exclude: Option<ColliderId>,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        let skip = exclude.and_then(|id| self.slot_of(id));
         self.ensure_bvh();
         let bvh = self.bvh.as_ref().unwrap();
         let bounds = Aabb::new(
@@ -516,7 +550,7 @@ impl PhysicsWorld {
         )
         .inflated(radius);
         let candidates = bvh.traverse_aabb(&bounds);
-        self.closest_swept(segment, radius, &candidates)
+        self.closest_swept(segment, radius, &candidates, skip)
     }
 
     /// Get the AABB of a collider by id.
@@ -660,16 +694,21 @@ impl PhysicsWorld {
     }
 
     /// Given broadphase candidates, find the closest exact swept-sphere hit.
-    /// Triggers are non-solid and are skipped.
+    /// Triggers are non-solid and are skipped, and so is `skip` — the storage
+    /// slot of the collider the caller excluded, if any.
     fn closest_swept(
         &self,
         segment: &Segment,
         radius: f64,
         candidates: &[u32],
+        skip: Option<usize>,
     ) -> Option<(ColliderId, ShapeHit)> {
         let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
         for &element in candidates {
             let idx = element as usize;
+            if Some(idx) == skip {
+                continue;
+            }
             let Some(Some(slot)) = self.colliders.get(idx) else {
                 continue;
             };
@@ -1003,6 +1042,65 @@ mod tests {
         let (id, hit) = world.cast_ray(&ray).unwrap();
         assert_eq!(id, close);
         assert!((hit.t - 4.0).abs() < 0.001);
+    }
+
+    /// **The excluded collider is dropped before the winner is picked, so the
+    /// next-closest hit survives.**
+    ///
+    /// `near` sits where the swept sphere reaches it first and `far` behind it,
+    /// so an implementation that ran the ordinary sweep and threw the answer
+    /// away when it named `near` would report nothing at all. Excluding `near`
+    /// has to return `far`, and excluding an id the world never issued has to
+    /// return `near` again.
+    #[test]
+    fn sweep_sphere_excluding_keeps_the_next_closest_hit() {
+        let mut world = PhysicsWorld::new();
+        let near = world.add_sphere(Sphere::new(DVec3::new(0.0, 0.0, 0.0), 1.0));
+        let far = world.add_sphere(Sphere::new(DVec3::new(3.0, 0.0, 0.0), 1.0));
+        let seg = Segment::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0));
+
+        let (id, _) = world.sweep_sphere(&seg, 0.5).expect("the sweep hits both");
+        assert_eq!(id, near, "the unfiltered sweep answers the closest");
+
+        let (id, hit) = world
+            .sweep_sphere_excluding(&seg, 0.5, Some(near))
+            .expect("the one behind it is still there");
+        assert_eq!(id, far, "excluding the closest must not lose the rest");
+        assert!(
+            (hit.t - 0.65).abs() < 0.001,
+            "expected ~0.65, got {}",
+            hit.t
+        );
+
+        let (id, _) = world
+            .sweep_sphere_excluding(&seg, 0.5, Some(ColliderId::new(999, 0)))
+            .expect("an id the world never issued excludes nothing");
+        assert_eq!(id, near);
+
+        // **The dangerous stale id is the one whose slot is still live.** An id
+        // the world never issued names no slot at all, so ignoring it is easy;
+        // an id whose index was reused names a slot that *is* occupied, by
+        // something else. Excluding on the index alone would take the new
+        // occupant out of the sweep, which is a hit silently lost rather than a
+        // filter that did nothing.
+        assert!(world.remove(near), "the collider was live");
+        let reused = world.add_sphere(Sphere::new(DVec3::new(0.0, 0.0, 0.0), 1.0));
+        assert_eq!(
+            reused.index, near.index,
+            "this test only says anything while the slot is actually reused"
+        );
+        assert_ne!(
+            reused.generation, near.generation,
+            "and the id has moved on"
+        );
+        let (id, _) = world
+            .sweep_sphere_excluding(&seg, 0.5, Some(near))
+            .expect("the stale id must not hide the collider that took its slot");
+        assert_eq!(
+            id, reused,
+            "a generation that has moved on excludes nothing, so the sweep still \
+             answers the shape occupying that slot"
+        );
     }
 
     #[test]

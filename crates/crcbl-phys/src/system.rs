@@ -307,25 +307,19 @@ impl PhysicsSystem {
     /// Cast a ray, returning the closest hit entity and details.
     #[must_use]
     pub fn cast_ray(&mut self, ray: &Ray) -> Option<(Entity, ShapeHit)> {
-        self.world.cast_ray(ray).and_then(|(id, hit)| {
-            let slot = id.index() as usize;
-            self.collider_to_entity
-                .get(slot)
-                .and_then(|e| e.map(|entity| (entity, hit)))
-        })
+        let (id, hit) = self.world.cast_ray(ray)?;
+        Some((self.entity_for(id)?, hit))
     }
 
     /// Sweep a sphere, returning the closest hit entity and details.
+    ///
+    /// Every collider in the world is a candidate. A caller sweeping a body
+    /// along its own path wants [`sweep_body`](Self::sweep_body) instead, which
+    /// builds the same segment and leaves that body out of the answer.
     #[must_use]
     pub fn sweep_sphere(&mut self, segment: &Segment, radius: f64) -> Option<(Entity, ShapeHit)> {
-        self.world
-            .sweep_sphere(segment, radius)
-            .and_then(|(id, hit)| {
-                let slot = id.index() as usize;
-                self.collider_to_entity
-                    .get(slot)
-                    .and_then(|e| e.map(|entity| (entity, hit)))
-            })
+        let (id, hit) = self.world.sweep_sphere(segment, radius)?;
+        Some((self.entity_for(id)?, hit))
     }
 
     /// Sweep the body at `entity` along the segment it covers in `dt`: from where
@@ -336,14 +330,15 @@ impl PhysicsSystem {
     /// than its own radius in one tick would tunnel through anything it crossed
     /// between steps, and the swept volume is what catches it.
     ///
-    /// # The swept entity must have no collider
+    /// # The swept entity is left out of its own answer
     ///
-    /// The segment starts inside the body's own shape at `t = 0`, so an entity
-    /// that is also in the broadphase reports hitting itself — the caller whose
-    /// bodies carry colliders has to work around that, which is the separate
-    /// exclusion question `overlap_sphere`'s entry in `docs/backlog.md` records.
-    /// The consumer this was written for (asteroids' bullets) is a query, not a
-    /// body in the broadphase, and this method is exactly its shape.
+    /// The segment ends where the body is, so the body's own collider sits on
+    /// the end of it: swept against itself it is a hit at `t = 0`, closer than
+    /// anything it was actually heading for. This excludes it — see
+    /// [`PhysicsWorld::sweep_sphere_excluding`], which drops it in the narrow
+    /// phase so the next-closest hit survives. An entity with a collider is
+    /// therefore swept exactly like one without, and neither the caller nor
+    /// this method has to lift a collider out of the world to ask.
     #[must_use]
     pub fn sweep_body(
         &mut self,
@@ -357,7 +352,9 @@ impl PhysicsSystem {
             start: transform.position - body.velocity * dt,
             end: transform.position,
         };
-        self.sweep_sphere(&segment, radius)
+        let own = self.entity_to_collider.get(&entity).copied();
+        let (id, hit) = self.world.sweep_sphere_excluding(&segment, radius, own)?;
+        Some((self.entity_for(id)?, hit))
     }
 
     /// Overlap query: return all entities whose collider overlaps the sphere.
@@ -447,10 +444,7 @@ impl PhysicsSystem {
         self.world
             .overlap_aabb(aabb)
             .into_iter()
-            .filter_map(|id| {
-                let slot = id.index() as usize;
-                self.collider_to_entity.get(slot).and_then(|e| *e)
-            })
+            .filter_map(|id| self.entity_for(id))
             .collect()
     }
 
@@ -466,6 +460,14 @@ impl PhysicsSystem {
     }
 
     // ── Internals ──────────────────────────────────────────────────────
+
+    /// The entity a collider id belongs to, or `None` if nothing is mapped to
+    /// its slot.
+    fn entity_for(&self, id: ColliderId) -> Option<Entity> {
+        self.collider_to_entity
+            .get(id.index() as usize)
+            .and_then(|e| *e)
+    }
 
     fn add_collider_to_world(
         &mut self,
@@ -1080,6 +1082,88 @@ mod tests {
         );
 
         assert_eq!(phys.sweep_body(bullet, 1.0, 0.5), None);
+    }
+
+    /// **The swept body stays registered exactly as it was.**
+    ///
+    /// The workaround this replaced lifted the collider out of the world for
+    /// the duration of the query and put it back: a BVH removal and a BVH
+    /// insertion every tick, a recycled storage slot, a bumped generation —
+    /// and a window in which the body was not in the world at all, so an early
+    /// return between the two calls lost its collider. The id surviving the
+    /// sweep unchanged is what says none of that happens any more.
+    #[test]
+    fn sweep_body_leaves_the_swept_colliders_registration_alone() {
+        let mut phys = PhysicsSystem::new();
+        let mover = test_entity(0);
+        let mut body = RigidBody::new_kinematic();
+        body.velocity = DVec3::new(10.0, 0.0, 0.0);
+        phys.set_body(mover, body);
+        phys.set_collider(
+            mover,
+            &ColliderComponent::Sphere {
+                offset: DVec3::ZERO,
+                radius: 1.0,
+                is_trigger: false,
+            },
+            &Transform::from_position(DVec3::ZERO),
+        );
+
+        let before = phys.entity_to_collider[&mover];
+        for _ in 0..8 {
+            let _ = phys.sweep_body(mover, 1.0, 0.5);
+        }
+        assert_eq!(
+            phys.entity_to_collider[&mover], before,
+            "the sweep re-registered the collider it swept"
+        );
+        assert_eq!(phys.collider_count(), 1);
+    }
+
+    /// **A body with a collider never sweeps into itself.**
+    ///
+    /// The segment ends where the body is, so the body's own sphere is a hit
+    /// near the end of it — at `t = 0.85` for the geometry below. Both halves
+    /// break without the exclusion, and they break differently: alone in the
+    /// world the mover reports hitting *itself*, and with `wall` just past its
+    /// end position the self-hit is the nearer of the two and masks it. The
+    /// second is why the exclusion has to happen inside the query rather than
+    /// by discarding a self-naming result: the narrow phase keeps one winner,
+    /// so throwing that one away throws the wall away with it.
+    #[test]
+    fn sweep_body_never_hits_the_body_it_sweeps() {
+        let sphere = ColliderComponent::Sphere {
+            offset: DVec3::ZERO,
+            radius: 1.0,
+            is_trigger: false,
+        };
+        let mut phys = PhysicsSystem::new();
+        let mover = test_entity(0);
+        let wall = test_entity(1);
+
+        let mut body = RigidBody::new_kinematic();
+        body.velocity = DVec3::new(10.0, 0.0, 0.0);
+        phys.set_body(mover, body);
+        phys.set_collider(mover, &sphere, &Transform::from_position(DVec3::ZERO));
+
+        assert_eq!(
+            phys.sweep_body(mover, 1.0, 0.5),
+            None,
+            "the only collider in the world is the mover's own"
+        );
+
+        // Just past where the mover ended up: reached at t = 0.90, behind the
+        // mover's own shape at t = 0.85.
+        phys.set_collider(
+            wall,
+            &sphere,
+            &Transform::from_position(DVec3::new(0.5, 0.0, 0.0)),
+        );
+        let (hit_entity, hit) = phys
+            .sweep_body(mover, 1.0, 0.5)
+            .expect("the wall is on the segment");
+        assert_eq!(hit_entity, wall, "the mover masked the wall with itself");
+        assert!((hit.t - 0.90).abs() < 1e-9, "expected ~0.90, got {}", hit.t);
     }
 
     /// The `_into` form answers exactly what the owned one does, and reuses

@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`PhysicsSystem::sweep_body` no longer reports the swept entity's own
+  collider.** A body sweeping forward hit itself at `t: 0.0` — the collider
+  sitting on the segment's origin is the nearest thing on it — so a caller that
+  wanted the wall ahead had to remove the sweeper's collider before the query
+  and put it back after, which flappy and breakout both did. The exclusion could
+  not live above the query: `PhysicsWorld` keeps one winner, so filtering a
+  self-hit out of the answer discards the sweep instead of falling through to
+  the shape behind it. A caller that was compensating for the self-hit — by
+  discarding a zero-`t` result, or by unhooking its own collider — should stop.
+
 - **`PhysicsSystem::overlap_sphere` and `overlap_sphere_into` answer `Entity`
   rather than `(Entity, ShapeHit)`.** The hit was fabricated: every result
   carried `t: 0.0`, `point: centre`, `normal: DVec3::Y` and
@@ -46,6 +56,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `GraphError` variants, so an exhaustive `match` on it must add arms.
 
 ### Added
+
+- **`PhysicsWorld::sweep_sphere_excluding(&Segment, radius, Option<ColliderId>)`**
+  is the sweep with one collider held out of the candidate set, and
+  `sweep_sphere` is now its `None` case. The exclusion is by `ColliderId`, so it
+  is generation-checked: an id whose slot has since been reused excludes
+  nothing, and the sweep answers the collider now occupying that slot rather
+  than silently hiding it.
 
 - **`ForwardRenderer` declares the base-colour page it samples**, through the
   new `ForwardRenderer::base_color_page_import()` and the public
