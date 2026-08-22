@@ -6166,15 +6166,26 @@ none goes backwards. Both are already the shape that catches a reordering, both
 are bounded so a wedged primitive fails red instead of hanging, and both run on
 aarch64 every CI run. There is no test-writing slice here.
 
-**What is actually unproven is that they _can_ fail for this reason on that
-machine.** A weak-memory bug is probabilistic, and the red-check behind these
-orderings has only ever been run under Miri — where the model reports the race —
-never on aarch64, where x86's total-store-order argument does not apply and the
-hardware would have to be caught in the act. So the rule this project applies to
-every other guard has not been applied to these two on the target that matters:
-weaken a `Release` to `Relaxed`, push it to a branch, and see whether
-`build + test (macos-latest)` actually goes red. If it does not, the aarch64 leg
-is reassurance rather than evidence, and knowing which it is costs one CI run.
+**Measured 2026-08-23: they do not fail for this reason on that machine, so the
+aarch64 leg is reassurance and not evidence.** The red-check behind these
+orderings had only ever been run under Miri, where the model reports the race;
+on aarch64 the hardware has to be caught in the act. So it was run there. A
+throwaway branch weakened both orderings at once — `ring.rs`'s `tail` store from
+`Release` to `Relaxed`, `mailbox.rs`'s handoff swap from `AcqRel` to `Relaxed` —
+and CI was dispatched against it. **The entire run went green**, and the two
+tests demonstrably executed rather than being skipped:
+`build + test (macos-latest)` logs `PASS` for both, at 0.011 s and 0.231 s.
+
+Read it for exactly what it is. One run of 20 000 iterations on Apple silicon
+produced no violation, which says these two tests are not sensitive enough to
+catch a reordering, not that a reordering could never surface. It also weakens
+the ordering for the compiler as well as the hardware, so a green run does not
+even isolate which of the two would have had to misbehave. The practical
+consequence: **Miri remains the only check that actually holds these
+orderings**, and an aarch64 job should not be cited as covering them. If that
+coverage is wanted for real, the instrument is a targeted stress harness — many
+short runs with interleaving pressure and a failure counter — not the existing
+tests and not another runner.
 
 **The pool's own gaps**, none of which is a defect:
 
