@@ -607,8 +607,8 @@ pub const BRASS_METALLIC: f32 = 1.0;
 pub(crate) const PLASTER_COLOR: [f32; 4] = [0.82, 0.80, 0.78, 1.0];
 
 /// [`FLOOR`]'s base colour, on [`PLASTER_COLOR`]'s terms and darker still: this
-/// row is multiplied by [`FLOOR_TEXELS`] as well, which is what a floor with a
-/// pattern on it reflects.
+/// row is multiplied by [`floor_texels`]'s check as well, which is what a
+/// floor with a pattern on it reflects.
 pub(crate) const FLOOR_COLOR: [f32; 4] = [0.62, 0.60, 0.57, 1.0];
 
 /// [`BOUNCE`]'s base colour: a strong warm red, at a factor a diffuse surface

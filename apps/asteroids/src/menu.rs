@@ -16,9 +16,9 @@
 //! **The container is no longer written here.** `Menus` was a hand-rolled copy
 //! of the same struct in every sample; it is now
 //! [`crcbl::ui::menu::MenuSet`], keyed by this game's [`MenuKind`]. What stays
-//! per-game is what was always genuinely per-game: the [`MenuAction`] enum and
-//! its `WidgetId` discriminants, the [`MenuKind::of`] precedence rule, the
-//! titles and the labels.
+//! per-game is what was always genuinely per-game: the [`Fire`] enum and its
+//! `WidgetId` discriminants, the [`MenuKind::of`] precedence rule, the titles
+//! and the labels.
 //!
 //! # There is no win menu, and that is not an omission
 //!

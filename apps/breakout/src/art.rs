@@ -263,7 +263,7 @@ impl Scene {
 /// walls run down to `-WORLD_TOP`. The nine-slice's insets divided by its
 /// texels-per-unit scale are that same thickness, so the *inner* faces of the
 /// drawn walls land exactly on the lines the ball bounces off — which is what
-/// [`tests::the_court_is_drawn_where_the_walls_actually_are`] measures.
+/// `tests::the_court_is_drawn_where_the_walls_actually_are` measures.
 ///
 /// There is no bottom wall and the art has no bottom inset, so the court is open
 /// at `-WORLD_TOP` and the ball falls out of it into [`SURROUND`].

@@ -721,10 +721,11 @@ const HUD_TEXT_X: f32 = 10.0;
 /// The stat line's font size, and the reason the panel is as wide as it is.
 ///
 /// **The width is measured, not guessed** — `the_hud_fits_the_panel_it_is_drawn_on`
-/// puts a stated worst-case run through the real [`FontAtlas`] and requires it
-/// inside [`HUD_PANEL_RIGHT`]. The placeholder renderer's 430 became 560 became
-/// 690 by eye, and the browser gate's capture caught the last of those with the
-/// text running off the end of its own backdrop.
+/// puts a stated worst-case run through the real
+/// [`crcbl::ui::text::FontAtlas`] and requires it inside [`HUD_PANEL_RIGHT`].
+/// The placeholder renderer's 430 became 560 became 690 by eye, and the browser
+/// gate's capture caught the last of those with the text running off the end of
+/// its own backdrop.
 ///
 /// What is bounded is a five-minute run at the shipped enemy cap. `--max-enemies
 /// 10000` with a twenty-minute soak behind it can still outgrow this; that is

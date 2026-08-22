@@ -161,7 +161,7 @@ impl Face {
 /// The slab test: the nearest positive crossing of the three pairs of planes,
 /// and which one it was. `None` only for a direction that crosses none of them,
 /// which a unit direction from inside the box cannot be —
-/// [`every_direction_of_the_quadrature_leaves_the_room`] is what says so rather
+/// `every_direction_of_the_quadrature_leaves_the_room` is what says so rather
 /// than a comment.
 fn exit(from: Vec3, direction: Vec3) -> Option<(Vec3, Face)> {
     let mut nearest = f32::INFINITY;

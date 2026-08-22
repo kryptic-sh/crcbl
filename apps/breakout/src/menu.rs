@@ -42,7 +42,7 @@
 //!
 //! [`MenuKind::of`] is a total function of `(paused, RenderState)` and returns
 //! one variant. That is what
-//! [`tests::a_paused_game_shows_the_pause_menu_and_nothing_else`] pins: a paused
+//! `tests::a_paused_game_shows_the_pause_menu_and_nothing_else` pins: a paused
 //! frame that also drew the start menu would be two panels stacked on the same
 //! centre.
 
@@ -60,8 +60,9 @@ use crate::game::{BRICK_COUNT, GameState, RenderState, STARTING_LIVES};
 /// re-entering its own input path.
 ///
 /// Serving is nonetheless delivered to the simulation *as* a key, in
-/// [`crate::app::Breakout::apply`]: launching the ball is the simulation's
-/// business and the simulation is driven by its action map.
+/// [`crate::app::Breakout`]'s [`crcbl::engine::HostedGame::apply`]: launching
+/// the ball is the simulation's business and the simulation is driven by its
+/// action map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Launch {
     /// Serve the ball, or start the next game — `game.rs`'s launch action.

@@ -62,8 +62,9 @@ use crate::game::{GameState, RenderState};
 /// re-entering its own input path.
 ///
 /// Flapping is nonetheless delivered to the simulation *as* a key, in
-/// [`crate::app::Flappy::apply`]: starting and restarting a run is the
-/// simulation's business and the simulation is driven by its action map.
+/// [`crate::app::Flappy`]'s [`crcbl::engine::HostedGame::apply`]: starting and
+/// restarting a run is the simulation's business and the simulation is driven
+/// by its action map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flap {
     /// Beat a wing — which starts a waiting run and restarts a finished one.

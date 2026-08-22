@@ -19,8 +19,8 @@
 //! `apps/flappy/src/menu.rs`, `apps/sandbox/src/menu.rs` and
 //! `apps/asteroids/src/menu.rs`; it is now
 //! [`crcbl::ui::menu::MenuSet`], keyed by this game's [`MenuKind`]. What stays
-//! per-game is what was always genuinely per-game: the [`MenuAction`] enum and
-//! its `WidgetId` discriminants, the [`MenuKind::of`] precedence rule, the
+//! per-game is what was always genuinely per-game: the [`HordeAction`] enum
+//! and its `WidgetId` discriminants, the [`MenuKind::of`] precedence rule, the
 //! titles and the labels.
 //!
 //! # There is a start menu, and it was argued against before it was built

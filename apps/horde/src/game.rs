@@ -2559,10 +2559,9 @@ fn thaw_field(logic: &mut GameLogic, world: &mut World) {
 ///
 /// # And that is why it is the pass that runs on the job pool
 ///
-/// Order-independence is exactly the precondition
-/// [`crcbl_jobs::Pool::par_for`] asks for, so this is the sample's adoption of
-/// the job system. The shape is three steps, and the middle one is the only
-/// parallel one:
+/// Order-independence is exactly the precondition [`Pool::par_for`] asks for,
+/// so this is the sample's adoption of the job system. The shape is three
+/// steps, and the middle one is the only parallel one:
 ///
 /// 1. **Cache the positions**, serially, because it reads the transform map.
 /// 2. **Decide every velocity**, in chunks of [`STEER_CHUNK`], through
@@ -2664,9 +2663,9 @@ fn steer_enemies(logic: &mut GameLogic, world: &mut World, pool: &mut Pool) {
 ///
 /// **A constant, not a function of the worker count**, which is what keeps the
 /// closure calls identical between a pool with workers and one without — see
-/// [`crcbl_jobs::Pool::par_for`], whose docs are explicit that the boundaries
-/// are the caller's. Sizing it to the pool would make the split a function of
-/// the machine, and the `--workers` determinism gate compares runs on the same
+/// [`Pool::par_for`], whose docs are explicit that the boundaries are the
+/// caller's. Sizing it to the pool would make the split a function of the
+/// machine, and the `--workers` determinism gate compares runs on the same
 /// machine at different worker counts.
 ///
 /// Sixty-four enemies is a few microseconds of BVH descents, which is far more

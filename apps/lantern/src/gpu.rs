@@ -845,10 +845,11 @@ impl Gpu {
 /// [`ForwardRenderer::add_passes`] now imports the page and declares a read of
 /// it on every pass that binds it, so the graph has the edge and works the
 /// barrier out from the declarations wherever this pass sits. This function
-/// imports the same handle and therefore gets the same [`ImageId`] and the same
-/// state tracker — see [`ForwardRenderer::base_color_page_import`], which is
-/// where the declaration the two share comes from, and which is why nothing here
-/// restates the page's format or extent.
+/// imports the same handle and therefore gets the same
+/// [`crcbl::render::ImageId`] and the same state tracker — see
+/// [`ForwardRenderer::base_color_page_import`], which is where the declaration
+/// the two share comes from, and which is why nothing here restates the page's
+/// format or extent.
 fn feed_monitor<'a>(
     graph: &mut RenderGraph<'a>,
     pool: &TransientPool,
