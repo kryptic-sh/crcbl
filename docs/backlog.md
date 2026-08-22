@@ -5478,92 +5478,39 @@ recorded anywhere else.
   `hal/channel` superseded the requirement, the plan's version should not be
   resurrected from git by the next reader.
 
-## The Windows browser-golden leg cannot finish, and that is self-perpetuating (2026-08-22)
+## `pages.yml` cancels the verification jobs it is not deploying (2026-08-22)
 
-**Measured on run 32557088937, which had a clear field — no push landed on top
-of it.** The three legs of `pages.yml`'s `render-harness` job ran the identical
-`Compare every golden scene rendered in a browser` step on the same commit:
-Linux **43s**, macOS **31s**, Windows **5358s and then killed** by its
-`timeout-minutes: 90`. Whole jobs: 97s, 69s, 5412s.
+**The three-hour Windows leg is fixed and the cold-cache theory it spawned is
+dead — do not resurrect either.** For the record, because both were written down
+here as established and both were wrong: the leg was never slow. Its work took
+54 seconds (30 of them the wasm build) and then `node render-harness-e2e.mjs`
+sat in teardown until the job's timeout killed it, three hours later. The cache
+being skipped was a _consequence_ of the cancellation, not its cause, and
+raising the timeout — tried twice, at 90 and at 180 minutes — could never have
+worked. Reordering the teardown so the browser dies before the server is
+awaited, plus `closeAllConnections()` in `serve.mjs`, ended it: on run
+**32585681819** the Windows leg finished in **2m04s** and the watchdog line
+never printed, so the process exited on its own rather than being rescued.
 
-That is a 100× gap on a commit that changed only markdown, so it is not platform
-slowness — Linux and macOS restored a warm Rust cache and rebuilt nothing.
-**Windows has never had a warm cache, and cannot get one.**
-`Swatinem/rust-cache` saves in a post step, and a post step does not run when a
-job is cancelled. On that run Windows' `Post Run Swatinem/rust-cache@v2` is
-**`skipped`** while Linux's is `success`. So: cold run → over 90 minutes →
-timeout → save skipped → next run cold. The nine consecutive
-`cancel-in-progress` kills before it did the same thing for the same reason.
-
-**Tried, and it failed: 180 minutes is not enough either.** The `timeout` was
-raised to 180 to let one cold run complete and seed the cache. Run
-**32561651591** got the clear field it needed — no push landed on it for three
-hours — and still died: job started `08:12:35Z`, ended `11:12:47Z`, conclusion
-`cancelled`, with the single step
-`Compare every golden scene rendered in a browser` consuming the whole budget.
-
-**And then the log was read, which changes the diagnosis entirely
-(2026-08-23).** That step is not slow. Its own timestamps:
-
-| what                                                       | when                    |
-| ---------------------------------------------------------- | ----------------------- |
-| step starts                                                | `08:13:30`              |
-| `cargo build --lib -p render-harness --target wasm32` done | `08:14:00`              |
-| all eleven scenes rendered, driver prints its last line    | `08:14:24`              |
-| _nothing whatsoever_                                       | `08:14:24` → `11:12:43` |
-| cancelled by the timeout                                   | `11:12:43`              |
-
-**The work takes 54 seconds and then the process hangs for three hours.** The
-wasm build — the thing the cold-cache story was about — is 30 seconds of it. The
-next line the shell script would print,
-`==> comparing each readback against crates/crcbl/tests/golden`, never appears,
-so `node render-harness-e2e.mjs` had finished its work and never exited.
-
-So **every earlier conclusion here about cold caches was measuring the wrong
-thing.** The cache _is_ skipped on a cancelled job and that _is_ true, but it is
-a consequence of the hang, not its cause; a warm cache would save 30 seconds of
-a three-hour failure. "The step's actual cold duration is unknown and unbounded"
-is also wrong — it is 54 seconds.
-
-**What was done about it, and what is still not known.** The exact handle
-holding node's event loop open is _not_ established, and nothing here should be
-read as saying it is. `stopBrowser` already does the right Windows thing
-(`taskkill /pid … /T /F`); the teardown order in `render-harness-e2e.mjs` was
-the reverse of `error-scope-bench.mjs`'s — it awaited `server.close()` before
-`browser.stop()`, so a server that did not close would strand the kill — and
-`serve.mjs`'s `close()` did not call `closeAllConnections()`. Both are now fixed
-and both are **hardening rather than a demonstrated fix**: an attempt to
-reproduce the hang locally, by holding a keep-alive socket open across
-`close()`, did **not** reproduce it, because Node ≥ 19's `close()` already drops
-idle connections.
-
-What _is_ guaranteed is that it can no longer cost three hours. `main()` now
-arms an `unref`'d watchdog: it cannot itself keep the process alive, so on the
-healthy path it never fires, and it fires only when something else is holding
-the loop open — printing that fact and exiting with the code the run had earned.
-Red-checked both ways locally. The next Windows run therefore either passes or
-says _"teardown finished but something is still holding the event loop open"_,
-and either way it takes minutes.
-
-**DECISION NEEDED — and the trade-off has changed shape.** The four options
-already recorded below were written when "raise the timeout" was still live. It
-is not. Whichever is chosen has to make the Windows leg's _first_ run cheap
-rather than merely permitted, or take the leg off the critical path. The
-`cancel-in-progress` question is now the smaller half of this, not the whole of
-it.
+**What is still not known** is which handle held node's event loop open. It was
+never identified, and no local reproduction ever succeeded — holding a
+keep-alive socket across `close()` does not do it, because Node ≥ 19 already
+drops idle connections. That is a gap, not a task: the watchdog in `main()`
+bounds any recurrence to `EXIT_DEADLINE_MS` and names itself in the log, so if
+it comes back it says so cheaply. Nothing further is worth doing until it does.
 
 **Still open, and it is the user's call**, because it is about runner minutes
-rather than correctness:
+rather than correctness. `pages.yml` sets `cancel-in-progress: true` at the
+workflow level, with the comment "a superseded deploy is worth cancelling; two
+of them racing to publish is not". That argument is right about the **deploy**
+and is applied to the whole run, including three verification jobs that are not
+deploys. Job-level `concurrency:` cannot rescue them — workflow-level
+cancellation kills the run outright, whatever a job declares. The deploy is not
+gated on the harness, so the site ships either way and what a cancellation costs
+is only the signal. Now that the leg is minutes rather than hours the stake is
+smaller, but a burst of pushes still lands with none of the three legs having
+answered:
 
-- `pages.yml` sets `cancel-in-progress: true` at the workflow level, with the
-  comment "a superseded deploy is worth cancelling; two of them racing to
-  publish is not". That argument is right about the **deploy** and is applied to
-  the whole run, including three verification jobs that are not deploys.
-  Job-level `concurrency:` cannot rescue them — workflow-level cancellation
-  kills the run outright, whatever a job declares. The deploy is not gated on
-  the harness: on this run `deploy to GitHub Pages` succeeded while the Windows
-  leg was still going, so the site ships either way and what is lost is only the
-  signal.
 - _Leave it._ Cheapest, and the gate does answer on a quiet branch — but least
   often exactly when the tree is moving fastest.
 - _`cancel-in-progress: false`._ Every push queues a full three-OS run and each
@@ -5576,11 +5523,37 @@ rather than correctness:
   per-push gate into a nightly one — a regression is then found by a scheduled
   run rather than by the push that caused it.
 
-**Considered and not taken:** `Swatinem/rust-cache`'s `cache-on-failure` input.
-It would seed the cache from a _failed_ job, but a timeout is recorded as
-`cancelled`, not `failed`, so it does not address this loop. Worth adding for
-its own sake, once someone has confirmed the input exists on the pinned version
-rather than recalling it.
+## A `ConfigureRequest` went missing under openbox, and nothing explains why (2026-08-23)
+
+**What happened.** On run **32585681821** the `windowed swapchain e2e (Xvfb)`
+job's second pass — the one with `CRCBL_E2E_X11_WM=openbox` — failed
+`a_resize_from_outside_forces_a_reconfigure_at_the_new_extent` on its 20-second
+deadline. The no-manager pass on the same commit ran all four tests green in
+4.2s, openbox was alive at the end (the runner checks `kill -0` on it before
+reporting), its log holds nothing but the missing-menu-file message, and the two
+commits on that push touched `web/tools/` and this file — neither is an input to
+that job. The seven runs before it were green.
+
+**What was changed.** The test asked once and waited; it now re-asks on every
+pump turn until the shell reports the size, and its timeout names the extent the
+shell last reported. That removes the whole class — a request that goes nowhere
+is indistinguishable from one not yet answered, and only the client can tell the
+difference by asking again — and the new message separates "never answered" from
+"answered with a different size", which the old one could not.
+
+**What is not established.** Whether openbox dropped the request, or granted it
+at a size nobody recorded, is unknown; the failure predicted only
+`Some(RESIZED)` and printed nothing when it did not arrive. It did not reproduce
+locally: twelve runs pinned to one core with `taskset -c 0`, against openbox
+3.6.1, all passed. The evidence for "dropped" rather than "altered" is indirect
+— `crcbl-shell`'s `a_resize_from_outside_is_reported_exactly_once` asserts the
+same 800×600 lands under the same manager on the same runner and has stayed
+green — so it is a reading of the odds, not a measurement. If the wait ever
+expires again, the extent in the message is the thing to read first.
+
+**Deliberately not changed:** the sandbox suite's own resize test still asks
+exactly once. It counts the `Resized` events carrying the new size and asserts
+there is one, so a repeated request would break the assertion it exists for.
 
 ## Findings the roadmap carried that nothing else did (2026-08-22)
 
