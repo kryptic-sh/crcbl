@@ -7524,9 +7524,32 @@ not:
 
   Still open, and not fixable by any golden: **nobody has listened to it.** No
   test can tell a good explosion from a bad one, and these only say it has not
-  changed. Emitting a WAV a human opens from a CI artifact is the way, the way
-  `crcbl-golden` argues for PNG — the encoder is a header and a byte copy, and
-  no decoder is needed.
+  changed. Emitting a WAV a human opens is the way, the way `crcbl-golden`
+  argues for PNG.
+
+  **Both halves are cheaper than this entry assumed, measured 2026-08-22:
+  `crcbl-audio/src/wav.rs` already exists and already decodes IEEE-float WAV**
+  (`format = 3`), held by
+  `format_tag_three_is_read_as_float_samples_rather_than_integers` and
+  `float32_non_finite_becomes_silence`. What the crate has no half of is an
+  _encoder_. So the two items collapse into one slice producing one artifact:
+  - Add a float32 WAV encoder to `wav.rs` — the header and the byte copy
+    described above — round-tripped against the decoder already sitting next to
+    it.
+  - Commit the burst as a reference WAV under `crates/crcbl-audio/tests/`, the
+    way each sample commits its golden PNG. **Mono**, not stereo: the generator
+    is mono-in-stereo and the test already asserts the two channels agree, so
+    storing one channel halves the fixture without dropping a claim. About 61
+    KB.
+  - `a_burst_is_the_waveform_that_shipped` then decodes the fixture and compares
+    _every_ frame at `PROBE_TOLERANCE` — the per-sample coverage the probes gave
+    up — and asserts channel equality over the whole buffer rather than at eight
+    indices.
+
+  The same file is the one a human opens, so "nobody has listened to it" stops
+  needing a CI artifact: anyone with the repo can play it. Regenerating it is a
+  wholesale change to a binary blob, which is the real cost and is the one every
+  golden PNG here already carries.
 
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
