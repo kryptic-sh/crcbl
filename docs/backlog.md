@@ -7442,21 +7442,26 @@ annotated.
 S2 is done — simulation, art, audio, persistence and the browser demo. What is
 not:
 
-- **No golden buffer for the cues, and the job is smaller than it sounds.** Two
-  of the three are analytic: `SOUND_SHOT` is `synth::sine(900.0, 0.05)` and the
-  engine is `synth::looped_sine(ENGINE_HZ, ENGINE_CYCLES)`, so the right check
-  is each sample against the closed form, which needs no golden file at all and
-  nobody has written it. Only the explosion needs pinning —
-  `synth::noise_burst(0.32, EXPLOSION_DECAY, EXPLOSION_SEED)` runs splitmix64,
-  so it is byte-reproducible and nothing pins the bytes.
-  `the_explosion_is_a_decaying_burst_of_noise` asserts it decays and is not a
-  tone, which a different noise generator would also satisfy. If a digest is
-  used it must be taken over `f32::to_bits`, or over the i16 quantisation that
-  actually reaches a device — never over the samples' memory, which folds in
-  signed zero and NaN payloads. Nobody has listened to the result on a real
-  device and no test can tell a good explosion from a bad one; that half is not
-  fixable by a golden, only by emitting a WAV a human opens, the way
-  `crcbl-golden` argues for PNG.
+- **The cues are pinned now; what is left is a listener.** `crcbl-audio`'s
+  `synth` tests gained the two checks this entry asked for.
+  `a_one_shot_is_a_sinusoid_and_not_just_the_right_shape` and
+  `a_looped_tone_is_a_sinusoid_at_the_frequency_it_steps` hold `sine` and
+  `looped_sine` to `x[n+1] = 2cos(w)x[n] - x[n-1]`, which every sinusoid and no
+  other shape satisfies — a triangle wave at the same amplitude and fade passed
+  every previous assertion and violates this one by 2.0e-2 against thresholds of
+  1e-5 and 2e-4. `a_burst_is_pinned_to_the_bytes_it_ships` folds
+  `crcbl_core::rand::hash_u64` over `f32::to_bits` and pins the digest; nudging
+  the low-pass coefficient by 0.006% moves it while **every other test in the
+  workspace stays green**, which is what the old
+  `a_burst_is_reproducible_from_its_seed_and_varies_with_it` could never catch,
+  comparing as it does two calls inside one build.
+
+  Still open, and not fixable by a golden: **nobody has listened to it.** No
+  test can tell a good explosion from a bad one, and the digest only says the
+  bad one has not changed. What would help is emitting a WAV a human opens from
+  a CI artifact, the way `crcbl-golden` argues for PNG — the encoder is a header
+  and a byte copy, and no decoder is needed.
+
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
   simulated play), 337 rocks spawned, 1,221 bullets fired, six waves cleared,

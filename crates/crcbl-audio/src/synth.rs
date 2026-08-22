@@ -311,6 +311,130 @@ mod tests {
         assert_ne!(a, c, "the seed reaches nothing");
     }
 
+    /// The largest `|x[n+1] - 2cos(w)x[n] + x[n-1]|` a correct generator leaves
+    /// behind, over the buffers the tests below build.
+    ///
+    /// Two constants because the two generators step phase differently and the
+    /// error follows: [`looped_sine`] steps `2pi*cycles*i/frames`, which stays
+    /// small, while [`sine`] evaluates `2pi*f*t` outright and reaches hundreds
+    /// of radians by the end of a fifth of a second, where an `f32` sine has
+    /// fewer bits left. Measured at 2.3e-6 and 3.6e-5; these leave headroom and
+    /// are still two orders below the ~1e-3 a change of waveform produces.
+    const LOOP_RESIDUAL: f32 = 1e-5;
+    const SINE_RESIDUAL: f32 = 2e-4;
+
+    /// Every sinusoid, and nothing else, satisfies
+    /// `x[n+1] = 2cos(w)x[n] - x[n-1]`.
+    ///
+    /// Returns the largest violation over `range`, reading the left channel.
+    /// The caller supplies `w` because the two generators reach it differently.
+    fn worst_recurrence(data: &[AudioSample], w: f32, range: std::ops::Range<usize>) -> f32 {
+        let k = 2.0 * w.cos();
+        range.fold(0.0f32, |worst, i| {
+            let residual = (data[(i + 1) * CHANNELS] - k * data[i * CHANNELS]
+                + data[(i - 1) * CHANNELS])
+                .abs();
+            worst.max(residual)
+        })
+    }
+
+    /// **The one-shot is a sine, not merely a thing of the right size.**
+    ///
+    /// Every other assertion about [`sine`] here is a property a triangle wave
+    /// at the same amplitude and fade satisfies too: it starts at silence, it
+    /// ends inside a fade step, it is loud in between, and it is the length it
+    /// asked for. The recurrence is what separates a sinusoid from every other
+    /// shape, and it is checked rather than the closed form recomputed, so this
+    /// is a statement about the waveform and not a restatement of the code that
+    /// produced it.
+    ///
+    /// Read over the held region only. Inside a fade the samples are a sinusoid
+    /// times a ramp, which is a different signal and does not satisfy this.
+    #[test]
+    fn a_one_shot_is_a_sinusoid_and_not_just_the_right_shape() {
+        let data = sine(440.0, 0.2, RATE);
+        let frames = data.len() / CHANNELS;
+        let held = FADE_FRAMES + 1..frames - FADE_FRAMES - 1;
+        assert!(
+            held.end > held.start + RATE as usize / 100,
+            "the held region is {held:?}, too short for this to be saying anything"
+        );
+
+        let w = 2.0 * std::f32::consts::PI * 440.0 / RATE as f32;
+        let worst = worst_recurrence(&data, w, held);
+        assert!(
+            worst <= SINE_RESIDUAL,
+            "the held region violates the sinusoid recurrence by {worst:e}, past \
+             {SINE_RESIDUAL:e} - this is some other waveform"
+        );
+    }
+
+    /// **The loop is a sinusoid, at the frequency its own phase step implies.**
+    ///
+    /// [`looped_sine`] does not step `2pi*f*t`; it steps `2pi*cycles*i/frames`
+    /// so the buffer lands back on phase zero however `frames` rounded, which
+    /// moves the effective frequency by a fraction of a hertz. That is the
+    /// frequency asserted here, so this fails both if the shape stops being a
+    /// sinusoid and if the phase step stops being the one the doc claims.
+    ///
+    /// No fade to skip: a loop must not have one, which
+    /// `a_looped_tone_is_not_faded` covers, so the whole buffer is fair game.
+    #[test]
+    fn a_looped_tone_is_a_sinusoid_at_the_frequency_it_steps() {
+        let cycles = 10;
+        let data = looped_sine(440.0, cycles, RATE);
+        let frames = data.len() / CHANNELS;
+
+        let w = 2.0 * std::f32::consts::PI * cycles as f32 / frames as f32;
+        let worst = worst_recurrence(&data, w, 1..frames - 1);
+        assert!(
+            worst <= LOOP_RESIDUAL,
+            "the loop violates the sinusoid recurrence by {worst:e}, past {LOOP_RESIDUAL:e}"
+        );
+    }
+
+    /// **The burst is pinned to the samples it ships, not merely to itself.**
+    ///
+    /// `a_burst_is_reproducible_from_its_seed_and_varies_with_it` compares two
+    /// calls inside one build, which any deterministic generator satisfies
+    /// whatever it generates. It says nothing about whether today's burst is the
+    /// one that shipped, so a change to the mixing, the low-pass or the decay
+    /// would go through it green and every build would ship a different
+    /// explosion.
+    ///
+    /// The digest folds [`crcbl_core::rand::hash_u64`] over `f32::to_bits`, in
+    /// order. Over the bits rather than over the samples' memory, because a
+    /// sample's identity is its value: raw bytes would fold in signed zero and,
+    /// were one ever to appear, NaN payloads. The parameters are asteroids'
+    /// explosion, which is the longest burst any sample plays.
+    #[test]
+    fn a_burst_is_pinned_to_the_bytes_it_ships() {
+        /// Asteroids' explosion.
+        const SEED: u64 = 0x4173_7465_726F_6964;
+        /// The digest that burst has always produced.
+        const DIGEST: u64 = 0x0B90_BA33_2FFB_B038;
+        /// Its length. `0.32 * 48_000` lands a frame short of 15_360 because
+        /// `0.32` is not exact in `f32` and the product is floored.
+        const SAMPLES: usize = 30_718;
+
+        let data = noise_burst(0.32, 9.0, SEED, RATE);
+        assert_eq!(
+            data.len(),
+            SAMPLES,
+            "the burst changed length, so the digest below cannot be compared"
+        );
+
+        let digest = data.iter().fold(0u64, |acc, s| {
+            crcbl_core::rand::hash_u64(acc, u64::from(s.to_bits()))
+        });
+        assert_eq!(
+            digest, DIGEST,
+            "the explosion is not the sound that shipped. If the generator changed on \
+             purpose, listen to the result and then update DIGEST; if it did not, \
+             something moved underneath it"
+        );
+    }
+
     /// The decay is what makes it a burst rather than a wash, and it is an
     /// argument rather than a constant so that a kill and a death can differ.
     #[test]

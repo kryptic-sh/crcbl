@@ -57,6 +57,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-audio`'s generators are held to their waveform.** `synth`'s tests now
+  check `sine` and `looped_sine` against `x[n+1] = 2cos(w)x[n] - x[n-1]`, which
+  every sinusoid and no other shape satisfies, and pin `noise_burst` to a digest
+  of `f32::to_bits`. Nothing user-facing changed; a game whose cue sounded right
+  yesterday sounds identical today, and now something says so.
+
 - **A `windowed-e2e` feature on `crcbl`**, and `tests/run-windowed-e2e.sh`
   behind it: the first suite in this workspace to create a surface that is not
   `SurfaceTarget::Offscreen`. On `crcbl-vk` a null `VkSurfaceKHR` is the
