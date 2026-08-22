@@ -157,7 +157,9 @@ use crate::cull::Frustum;
 use crate::cull_stats::CullStatsRing;
 use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 use crate::effects::{EffectRequest, RenderEffects};
-use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, PassBuilder, RenderGraph};
+use crate::graph::{
+    BufferId, ImageId, ImportedBuffer, ImportedImage, InitialClaim, PassBuilder, RenderGraph,
+};
 // Renamed on the way in, because [`crate::light_grid::Grid`] already holds the
 // bare name here and means the froxel grid — the collision [`crate::grid`]'s
 // header predicted.
@@ -4789,6 +4791,7 @@ impl ForwardRenderer {
                 format: Format::R8Unorm,
                 extent: (1, 1),
                 initial: ResourceState::ShaderRead,
+                claim: InitialClaim::Tracked,
                 final_state: ResourceState::ShaderRead,
             },
         );
@@ -5309,6 +5312,10 @@ impl ForwardRenderer {
                 // What the previous frame left it in — `Undefined` on the first,
                 // which is what makes the graph give it a layout at all.
                 initial: imported,
+                // The renderer keeps this image, so the pool's ledger has the
+                // answer and a stale `shadow_imported` is refused rather than
+                // barriered against.
+                claim: InitialClaim::Tracked,
                 final_state: ResourceState::ShaderRead,
             },
         );
@@ -5320,6 +5327,7 @@ impl ForwardRenderer {
                 format: Format::D32Float,
                 extent: (1, 1),
                 initial: imported,
+                claim: InitialClaim::Tracked,
                 final_state: ResourceState::ShaderRead,
             },
         );
@@ -6236,6 +6244,10 @@ impl ForwardRenderer {
             format,
             extent,
             initial: ResourceState::Undefined,
+            // The acquire's semaphore, not a barrier, is what orders this frame
+            // after the last use of the image — which is what makes `Undefined`
+            // honest here and what makes it uncheckable. See `InitialClaim`.
+            claim: InitialClaim::Acquired,
             final_state: ResourceState::Present,
         }
     }
@@ -9422,12 +9434,18 @@ mod tests {
     ///
     /// # Why this cannot be read off one frame
     ///
-    /// The atlas is neither a transient nor a swapchain image. The graph cannot
-    /// look its state up in the [`TransientPool`], and no acquire semaphore sits
+    /// The atlas is neither a transient nor a swapchain image. The pool has no
+    /// description of it to hand back a state for, and no acquire semaphore sits
     /// between one frame's use of it and the next — so
     /// [`ForwardRenderer::add_passes`] *declares* it, out of
-    /// [`ForwardRenderer::shadow_imported`], and the declaration is the only
-    /// thing making the transition true.
+    /// [`ForwardRenderer::shadow_imported`], and the declaration is what makes
+    /// the transition true.
+    ///
+    /// [`InitialClaim::Tracked`] is that declaration submitting itself for
+    /// audit, and it catches a `shadow_imported` that has drifted from what the
+    /// last graph *executed*. It cannot catch a first frame — there is nothing
+    /// recorded to contradict — and it says nothing about the barriers on either
+    /// side of the declaration, which is what the stream below is for.
     ///
     /// Declaring [`ResourceState::Undefined`] on a frame after the first is the
     /// failure this catches. It expands to `srcStageMask = NONE,

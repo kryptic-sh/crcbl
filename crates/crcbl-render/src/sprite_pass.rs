@@ -1363,7 +1363,7 @@ mod tests {
         Limits, QueueKind, ResourceState,
     };
 
-    use crate::graph::ImportedImage;
+    use crate::graph::{ImportedImage, InitialClaim};
     use crate::transient::TransientPool;
 
     const TARGET: Format = Format::Bgra8UnormSrgb;
@@ -1438,6 +1438,11 @@ mod tests {
             // `Load`, so the sprite pass composites onto something rather than
             // being the first writer.
             initial: ResourceState::ColorAttachment,
+            // No swapchain and no semaphore: this is an image the test made and
+            // hands to one frame, so it is the checked kind. The ledger has
+            // nothing on a freshly created handle, which is what makes the
+            // declaration above legal rather than exempt.
+            claim: InitialClaim::Tracked,
             final_state: ResourceState::Present,
         }
     }

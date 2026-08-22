@@ -42,7 +42,7 @@ use crcbl::engine::{
 };
 use crcbl::hal::{CommandEncoderDesc, ResourceState};
 use crcbl::prelude::*;
-use crcbl::render::{ImportedImage, RenderGraph, TransientPool};
+use crcbl::render::{ImportedImage, InitialClaim, RenderGraph, TransientPool};
 use crcbl::shell::{
     DisplayMode, HeadlessShell, PhysicalSize, Shell, ShellBackend, WindowDesc, WindowId,
     open_backend,
@@ -150,6 +150,7 @@ fn a_consumer_can_drive_a_whole_frame_by_hand() {
                 format: gpu.format(),
                 extent: acquired.extent,
                 initial: ResourceState::Undefined,
+                claim: InitialClaim::Acquired,
                 final_state: ResourceState::Present,
             },
         );

@@ -320,6 +320,7 @@ fn generate_with(
                 format: headless.format,
                 extent: MESH_EXTENT,
                 initial: ResourceState::Undefined,
+                claim: crcbl::render::InitialClaim::Acquired,
                 final_state: ResourceState::Present,
             },
         );

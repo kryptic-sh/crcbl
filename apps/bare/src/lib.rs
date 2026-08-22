@@ -41,7 +41,7 @@ use crcbl::engine::{
 };
 use crcbl::hal::{CommandEncoderDesc, Format, ResourceState};
 use crcbl::prelude::*;
-use crcbl::render::{ImportedImage, RenderGraph, TransientPool};
+use crcbl::render::{ImportedImage, InitialClaim, RenderGraph, TransientPool};
 use crcbl::shell::{
     DisplayMode, LogicalSize, Shell, ShellBackend, WindowDesc, WindowId, open, open_backend,
 };
@@ -262,6 +262,10 @@ impl<S: Shell + ?Sized> Bare<S> {
                 format: self.gpu.format(),
                 extent: acquired.extent,
                 initial: ResourceState::Undefined,
+                // The acquire's semaphore is what orders this frame after the
+                // last one that presented this image, so there is nothing here
+                // for the graph to check against — see `InitialClaim`.
+                claim: InitialClaim::Acquired,
                 final_state: ResourceState::Present,
             },
         );

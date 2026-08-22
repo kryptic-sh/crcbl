@@ -1165,6 +1165,7 @@ fn render_probe(
                 format: headless.format,
                 extent: MESH_EXTENT,
                 initial: ResourceState::Undefined,
+                claim: crcbl::render::InitialClaim::Acquired,
                 final_state: ResourceState::TransferSrc,
             },
         );
@@ -1190,6 +1191,11 @@ fn render_probe(
                 format: Format::D32Float,
                 extent: (1, 1),
                 initial: std::mem::replace(&mut probe.shadow_imported, ResourceState::ShaderRead),
+                // The probe owns this image across calls and no semaphore sits
+                // between them, so the declaration above is one the graph can
+                // and does check — this is the site whose second `Undefined`
+                // was the hazard.
+                claim: crcbl::render::InitialClaim::Tracked,
                 final_state: ResourceState::ShaderRead,
             },
         );

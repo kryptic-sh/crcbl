@@ -207,6 +207,7 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
                 format: headless.format,
                 extent: MESH_EXTENT,
                 initial: ResourceState::Undefined,
+                claim: crcbl::render::InitialClaim::Acquired,
                 final_state: ResourceState::TransferSrc,
             },
         );

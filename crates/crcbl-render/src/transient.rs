@@ -41,6 +41,16 @@
 //!
 //! The state lives **on the pooled entry**, so retirement takes it with the
 //! resource and a resize cannot leave one resource wearing another's history.
+//!
+//! The pool keeps one more thing for the same reason, about resources it does
+//! not own: what the last graph left each *imported* image in. An import's
+//! starting state is a declaration rather than a lookup, and
+//! [`TransientPool::imported_image_use`] is what lets the next
+//! [`RenderGraph::compile`](crate::graph::RenderGraph::compile) reject one that
+//! contradicts the frame before it — see
+//! [`InitialClaim`](crate::graph::InitialClaim). The pool holds it because it
+//! is the one thing that outlives a graph and is already handed to both
+//! `compile` and `execute`.
 
 use std::collections::HashMap;
 
@@ -159,6 +169,23 @@ struct PooledBuffer {
 pub struct TransientPool {
     images: HashMap<TransientImageDesc, Vec<PooledImage>>,
     buffers: HashMap<TransientBufferDesc, Vec<PooledBuffer>>,
+    /// What the last graph left each **imported** image in — the ledger behind
+    /// [`InitialClaim::Tracked`](crate::graph::InitialClaim::Tracked).
+    ///
+    /// The pool does not own these images and never hands one out, so this is
+    /// not pooling: it is the only place that outlives a graph and is already
+    /// threaded through both halves of one, which is what a cross-frame check
+    /// on an import needs. Keyed on the handle rather than on a description
+    /// because an import has no description here — the graph did not create it.
+    ///
+    /// Only tracked imports land here. An
+    /// [`Acquired`](crate::graph::InitialClaim::Acquired) one is never read
+    /// back, and its handles are precisely the ones a resize throws away, so
+    /// recording them would grow a table nothing consults. What remains is an
+    /// entry per long-lived importer-owned image — an atlas, a placeholder —
+    /// and a handle carries a generation, so an entry left by a destroyed image
+    /// can never be read by whatever takes its slot.
+    imported_images: HashMap<ImageHandle, ResourceState>,
     /// Frames begun. Reported by [`TransientPool::frame_count`]; retirement
     /// counts idle frames per entry rather than reading this.
     frames: u64,
@@ -304,6 +331,35 @@ impl TransientPool {
             .map_or_else(TransientUse::default, |pooled| pooled.last)
     }
 
+    /// What the last graph left the imported image `image` in, if one has.
+    ///
+    /// [`None`] means no graph has executed against this pool with `image`
+    /// declared as
+    /// [`InitialClaim::Tracked`](crate::graph::InitialClaim::Tracked) — so
+    /// there is no claim to contradict, and an importer whose image was put
+    /// into its state by an upload outside the graph is the ordinary way to
+    /// arrive here. [`RenderGraph::compile`](crate::graph::RenderGraph::compile)
+    /// reads it; a test asserts on it to show the ledger is not silently empty,
+    /// which is the difference between this guard checking something and
+    /// checking nothing.
+    #[must_use]
+    pub fn imported_image_use(&self, image: ImageHandle) -> Option<ResourceState> {
+        self.imported_images.get(&image).copied()
+    }
+
+    /// Records what this frame left the imported image `image` in.
+    ///
+    /// Deliberately not public, for the reason
+    /// [`TransientPool::set_image_use`] is not: the only caller that can know
+    /// this is [`CompiledGraph::execute`](crate::graph::CompiledGraph::execute),
+    /// which has just recorded the trailing barrier that reaches the state. A
+    /// caller writing a different one here would not move a barrier — it would
+    /// teach the *check* the wrong answer, and every following frame's honest
+    /// declaration would be rejected.
+    pub(crate) fn set_imported_image_use(&mut self, image: ImageHandle, state: ResourceState) {
+        self.imported_images.insert(image, state);
+    }
+
     /// Records what this frame left the `ordinal`-th pooled image in.
     ///
     /// Deliberately not public: the only caller that can know this is
@@ -423,6 +479,10 @@ impl TransientPool {
         }
         self.images.clear();
         self.buffers.clear();
+        // Not resources to destroy — imports belong to their owners — but the
+        // pool is finished, and a ledger outliving it would answer questions
+        // about frames it can no longer be the pool for.
+        self.imported_images.clear();
     }
 }
 

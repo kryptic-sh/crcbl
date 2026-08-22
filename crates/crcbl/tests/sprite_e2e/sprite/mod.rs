@@ -450,6 +450,7 @@ pub(crate) fn render_sprites(
                 format: headless.format,
                 extent: SPRITE_EXTENT,
                 initial: ResourceState::Undefined,
+                claim: crcbl::render::InitialClaim::Acquired,
                 // Read back rather than shown, so the graph is asked to leave it
                 // as a copy source and the copy below needs no hand-written
                 // barrier — the same trick the mesh path uses.

@@ -185,8 +185,8 @@ pub use fly::{Flyer, LOOK, SPEED, TURN};
 pub use forward::{DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardRenderer, SHADOW_LOD_BIAS};
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
-    GraphError, GraphImageBarrier, ImageId, ImportedBuffer, ImportedImage, PassBuilder,
-    PassContext, PassKind, RenderGraph,
+    GraphError, GraphImageBarrier, ImageId, ImportedBuffer, ImportedImage, InitialClaim,
+    PassBuilder, PassContext, PassKind, RenderGraph,
 };
 pub use instance_pool::{
     Instance, InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError,

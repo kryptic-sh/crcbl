@@ -37,7 +37,7 @@ use crcbl::hal::{
     ImageSubresourceLayers, MemoryLocation, ReadbackDesc, ReadbackState, ResourceState,
 };
 use crcbl::render::scene::InstanceDesc;
-use crcbl::render::{ForwardRenderer, ImportedImage, RenderGraph, TransientPool};
+use crcbl::render::{ForwardRenderer, ImportedImage, InitialClaim, RenderGraph, TransientPool};
 use crcbl_quarry::{dag, face, scene};
 
 /// Quads per side. Smaller than the binary's 256: these assert that the scene
@@ -394,6 +394,9 @@ fn frame_body(
                 format: quarry.ctx.format(),
                 extent: EXTENT,
                 initial: ResourceState::Undefined,
+                // Acquired from the ring, so the acquire's semaphore is what
+                // orders this frame against the last one that used the image.
+                claim: InitialClaim::Acquired,
                 // **Not `Present`**: this frame is read back rather than shown,
                 // so the graph is asked to leave it a copy source and the copy
                 // below needs no barrier of its own.

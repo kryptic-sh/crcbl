@@ -87,6 +87,19 @@
 //! [`ImportedImage::initial`] is a declaration and the owner is the one who has
 //! to be right. See its docs for what makes `Undefined` correct there.
 //!
+//! It is a declaration the graph *audits*, though, wherever auditing is
+//! possible. An import that says [`InitialClaim::Tracked`] is one its owner
+//! keeps across frames, so the pool remembers what the last graph left it in —
+//! [`ImportedImage::final_state`], which the trailing barrier reaches — and the
+//! next [`RenderGraph::compile`] rejects an `initial` that disagrees. That is
+//! [`GraphError::ImportStateMismatch`], and it is the compile-time form of two
+//! bugs this engine has actually shipped: a readback path and a 1×1 shadow
+//! placeholder, each declaring a state the image was not in on every frame
+//! after the first, and each found only by a validation layer on CI. An
+//! [`InitialClaim::Acquired`] import is
+//! exempt because a semaphore, not a barrier, is what orders it; the variant's
+//! docs say why that is a real exemption rather than an escape hatch.
+//!
 //! # Compilation is pure, and that is what makes it testable
 //!
 //! [`RenderGraph::compile`] takes no device and touches no GPU. It reads the
@@ -144,6 +157,58 @@ impl BufferId {
     }
 }
 
+/// What backs an importer's claim about [`ImportedImage::initial`].
+///
+/// `initial` is the one thing in a graph the graph cannot derive, and getting
+/// it wrong is silent: a barrier out of a state the image is not in still
+/// records, still renders, and still passes every golden — it just carries the
+/// wrong source scope, and `Undefined` carries none at all. So the importer has
+/// to say *how it knows*, and that answer decides whether the graph can check
+/// the claim or has to take it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitialClaim {
+    /// The importer owns this image across frames, so `initial` is checkable.
+    ///
+    /// [`RenderGraph::compile`] looks the image up in the pool's ledger of what
+    /// the last graph *left* each tracked import in, and rejects a declaration
+    /// that disagrees with it — see [`GraphError::ImportStateMismatch`]. A
+    /// handle the ledger has never heard of is accepted: the graph has left it
+    /// in nothing, so there is nothing for the claim to contradict, and an
+    /// image put into `ShaderRead` by an upload outside the graph is the
+    /// ordinary case of that.
+    ///
+    /// The right answer for anything the importer keeps and re-imports — a
+    /// shadow atlas, a 1×1 placeholder, an offscreen target it renders into
+    /// twice. Both of the bugs this check exists to stop were images of exactly
+    /// that kind: one declared [`ResourceState::Undefined`] on a placeholder the
+    /// frame before had left in [`ResourceState::ShaderRead`], which is a
+    /// write-after-read with no source scope; the other named
+    /// [`ResourceState::ColorAttachment`] on an image the graph had already
+    /// returned to [`ResourceState::Present`], which is an illegal old layout.
+    Tracked,
+    /// An acquire semaphore stands between the last use and this frame, so
+    /// there is nothing left for `initial` to order against.
+    ///
+    /// The freshly acquired swapchain image, and only that shape. Its
+    /// [`ResourceState::Undefined`] is not a lie the graph should catch: the
+    /// semaphore the acquire signalled is waited on by the submission that runs
+    /// this graph, so the frame is *already* ordered after everything the
+    /// presentation engine and the previous frame did with the image, and the
+    /// first barrier has no ordering left to carry — only a layout to reach.
+    ///
+    /// Which is also why the graph cannot check one. The image goes back into
+    /// the presentation ring at [`ResourceState::Present`] and the window system
+    /// does what it likes with it; a ledger entry saying what this frame left
+    /// would be a claim about an image the engine no longer controls. So the
+    /// ledger does not record these at all, and nothing reads them.
+    ///
+    /// **Reaching for this to quiet a rejection is how the check gets lost.** A
+    /// tracked image marked `Acquired` opts out of the whole guard and reads as
+    /// verified; if a declaration is refused and there is no acquire in the
+    /// chain, the declaration is what is wrong.
+    Acquired,
+}
+
 /// An image the graph did not create, and does not own.
 ///
 /// The swapchain image is the canonical one: it belongs to the swapchain, it
@@ -167,21 +232,29 @@ pub struct ImportedImage {
     /// correct source for one.
     ///
     /// Unlike a transient, this is a **declaration the owner makes**, not
-    /// something the graph can look up: the graph never saw this image before
-    /// today and has no way to know what was done to it. `Undefined` is right
-    /// for an acquired swapchain image because the acquire's semaphore — waited
-    /// on by the submission that runs this graph — already orders the frame
-    /// after everything the presentation engine and the previous frame did with
-    /// it, so the barrier has no ordering left to carry and only has to reach
-    /// the layout. An importer with no such semaphore in the chain owes the
-    /// graph the truth here instead, or it is asking for the same
-    /// write-after-write the module docs describe.
+    /// something the graph can derive: the graph never created this image and
+    /// has no description of it to look up. `Undefined` is right for an
+    /// acquired swapchain image because the acquire's semaphore — waited on by
+    /// the submission that runs this graph — already orders the frame after
+    /// everything the presentation engine and the previous frame did with it,
+    /// so the barrier has no ordering left to carry and only has to reach the
+    /// layout. An importer with no such semaphore in the chain owes the graph
+    /// the truth here instead, or it is asking for the same write-after-write
+    /// the module docs describe.
+    ///
+    /// [`claim`](Self::claim) says which of those two an importer is, and a
+    /// [`InitialClaim::Tracked`] one is checked rather than taken on trust.
     pub initial: ResourceState,
+    /// How the importer knows [`initial`](Self::initial), and so whether the
+    /// graph checks it. See [`InitialClaim`].
+    pub claim: InitialClaim,
     /// The state the graph must leave it in.
     ///
     /// [`ResourceState::Present`] for a swapchain image. The graph emits a
     /// trailing barrier if the last pass left it somewhere else, and emits
-    /// nothing if it did not.
+    /// nothing if it did not — so this is what the image is in once the frame
+    /// has run either way, which is exactly why it is what the ledger behind
+    /// [`InitialClaim::Tracked`] records.
     pub final_state: ResourceState,
 }
 
@@ -872,6 +945,11 @@ pub struct CompiledGraph<'a> {
     transient_image_end: Vec<TransientUse>,
     /// The same for buffers.
     transient_buffer_end: Vec<TransientUse>,
+    /// What this frame leaves each [`InitialClaim::Tracked`] import in, which
+    /// is [`ImportedImage::final_state`] because the trailing barrier is what
+    /// reaches it. Handed to the pool by [`CompiledGraph::execute`], where the
+    /// next frame's [`RenderGraph::compile`] checks a declaration against it.
+    imported_image_end: Vec<(ImageHandle, ResourceState)>,
 }
 
 impl fmt::Debug for CompiledGraph<'_> {
@@ -1122,6 +1200,7 @@ impl<'a> CompiledGraph<'a> {
             transient_buffers,
             transient_image_end,
             transient_buffer_end,
+            imported_image_end,
             ..
         } = self;
 
@@ -1210,6 +1289,13 @@ impl<'a> CompiledGraph<'a> {
                 ordinal(&transient_buffers, slot),
                 transient_buffer_end[slot],
             );
+        }
+        // The same handover for the imports the owner says it tracks, and for
+        // the same reason one turn further out: the next graph's `compile` is
+        // what reads these, and it reads them to *refuse* a declaration that
+        // disagrees rather than to barrier against them.
+        for (image, state) in imported_image_end {
+            pool.set_imported_image_use(image, state);
         }
         Ok(())
     }
@@ -1557,6 +1643,29 @@ pub enum GraphError {
         /// Resource label.
         resource: String,
     },
+    /// An [`InitialClaim::Tracked`] import declared a state the last graph did
+    /// not leave the image in.
+    ///
+    /// The whole point of the claim: the owner said it tracks this image across
+    /// frames, and the pool remembers what the previous graph's trailing
+    /// barrier actually reached. When those disagree the first barrier of this
+    /// frame names a source scope the GPU never visits — and if the declaration
+    /// is [`ResourceState::Undefined`] it names no source scope at all, so the
+    /// transition orders against nothing while the previous frame is still
+    /// reading the same image.
+    #[error(
+        "`{resource}` is imported as {declared:?}, but the last graph left it in {left:?}; a \
+         barrier out of a state the image is not in carries the wrong source scope — declare \
+         what was left, or say `InitialClaim::Acquired` if a semaphore already orders this frame"
+    )]
+    ImportStateMismatch {
+        /// Resource label.
+        resource: String,
+        /// What the import declared as [`ImportedImage::initial`].
+        declared: ResourceState,
+        /// What the last graph to execute against this pool left it in.
+        left: ResourceState,
+    },
     /// The seam refused something at execution time.
     #[error(transparent)]
     Hal(#[from] HalError),
@@ -1885,6 +1994,7 @@ fn compile<'a>(
     } = graph;
 
     validate(&images, &buffers, &passes)?;
+    validate_imports(&images, pool)?;
 
     let image_lifetimes = lifetimes(passes.len(), passes.iter().map(|pass| &pass.images), |a| {
         a.image.0
@@ -2108,6 +2218,19 @@ fn compile<'a>(
         .map(ImageTracker::end)
         .collect();
     let transient_buffer_end = transient_buffer_state.iter().map(|t| t.end()).collect();
+    // Read off the declaration rather than off the tracker, because the loop
+    // above has just made them the same thing: every segment of an imported
+    // image that is not already at `final_state` gets a trailing barrier into
+    // it, so `final_state` is where the image is once this frame has run.
+    let imported_image_end = images
+        .iter()
+        .filter_map(|node| match node.source {
+            ImageSource::Imported(imported) if imported.claim == InitialClaim::Tracked => {
+                Some((imported.image, imported.final_state))
+            }
+            _ => None,
+        })
+        .collect();
 
     Ok(CompiledGraph {
         images,
@@ -2120,6 +2243,7 @@ fn compile<'a>(
         transient_buffers,
         transient_image_end,
         transient_buffer_end,
+        imported_image_end,
     })
 }
 
@@ -2249,6 +2373,39 @@ fn assign<N, D: Copy + PartialEq>(
         slots[index] = Slot::Transient(slot);
     }
     Ok(slots)
+}
+
+/// Checks every tracked import against what the last graph left it in.
+///
+/// The half of validation that needs the pool, which is why it is not inside
+/// [`validate`]: everything there is a property of the declarations alone, and
+/// this is a property of the declarations *and* the frames before them.
+///
+/// Silence for an image the ledger has never heard of is deliberate and is not
+/// a hole. The ledger records what a graph left, so an absent entry means no
+/// graph has left this image in anything — an image an upload put into
+/// [`ResourceState::ShaderRead`] before any frame ran is the ordinary case, and
+/// there is no previous frame for the declaration to be wrong about.
+fn validate_imports(images: &[ImageNode], pool: &TransientPool) -> Result<(), GraphError> {
+    for node in images {
+        let ImageSource::Imported(imported) = node.source else {
+            continue;
+        };
+        if imported.claim != InitialClaim::Tracked {
+            continue;
+        }
+        let Some(left) = pool.imported_image_use(imported.image) else {
+            continue;
+        };
+        if left != imported.initial {
+            return Err(GraphError::ImportStateMismatch {
+                resource: node.label.clone(),
+                declared: imported.initial,
+                left,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate(

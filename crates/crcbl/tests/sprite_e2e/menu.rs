@@ -104,6 +104,7 @@ fn render_menu(
                 format: headless.format,
                 extent,
                 initial: ResourceState::Undefined,
+                claim: crcbl::render::InitialClaim::Acquired,
                 final_state: ResourceState::TransferSrc,
             },
         );

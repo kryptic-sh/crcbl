@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`ImportedImage` gained a required `claim: InitialClaim` field, and a
+  contradicting `initial` is now a compile error rather than a silent hazard.**
+  `initial` was a declaration the graph could not check, and a declaration that
+  lies produces a barrier with no source scope — `Undefined` maps to
+  `(stage NONE, access NONE, layout UNDEFINED)`, so nothing waits for the
+  previous frame's reads. `TransientPool` now records what each executed graph
+  left every tracked import in, and `RenderGraph::compile` answers
+  `GraphError::ImportStateMismatch` when the next frame's `initial` disagrees.
+  `InitialClaim::Acquired` is the exemption a swapchain image needs: its acquire
+  semaphore already orders the frame, so there is no ordering left for `initial`
+  to carry. Every struct literal must add the field, and choosing `Acquired`
+  where an image is genuinely owned opts that import out of the check.
+
 - **`crcbl-wgpu` is deleted.** The crate, its `wgpu-e2e` suite, both of its CI
   jobs, the native vk↔wgpu image compare, the `GpuBackend::Wgpu` and
   `BackendKind::Wgpu` variants and `CRCBL_GPU=wgpu` are all gone. It was the

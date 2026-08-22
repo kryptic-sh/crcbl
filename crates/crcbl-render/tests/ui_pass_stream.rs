@@ -22,7 +22,7 @@ use crcbl_hal::{
     QueueKind, ResourceState,
 };
 use crcbl_render::UiRenderer;
-use crcbl_render::graph::{ImportedImage, RenderGraph};
+use crcbl_render::graph::{ImportedImage, InitialClaim, RenderGraph};
 use crcbl_render::transient::TransientPool;
 use crcbl_ui::draw_list::DrawList;
 use crcbl_ui::text::FontAtlas;
@@ -104,6 +104,10 @@ impl Harness {
             format: TARGET_FORMAT,
             extent: EXTENT,
             initial: ResourceState::ColorAttachment,
+            // A hand-made image with no acquire in front of it, so it is the
+            // checked kind; every `target()` is a fresh handle the ledger has
+            // never seen, so nothing contradicts the `Load` state above.
+            claim: InitialClaim::Tracked,
             final_state: ResourceState::Present,
         }
     }

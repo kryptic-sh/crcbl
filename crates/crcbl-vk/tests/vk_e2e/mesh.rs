@@ -248,6 +248,7 @@ pub(crate) fn render_mesh(
                 format: headless.format,
                 extent: MESH_EXTENT,
                 initial: ResourceState::Undefined,
+                claim: crcbl_render::InitialClaim::Acquired,
                 // **Not `Present`**: this frame is read back rather than shown,
                 // so the graph is asked to leave it as a copy source and the
                 // copy below needs no barrier of its own. Saying so in the

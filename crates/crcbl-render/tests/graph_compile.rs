@@ -25,7 +25,7 @@ use crcbl_hal::{
     Instance, QueueHandle, QueueKind, ResourceState,
 };
 use crcbl_render::graph::{
-    GraphBarriers, GraphError, ImageId, ImportedBuffer, ImportedImage, RenderGraph,
+    GraphBarriers, GraphError, ImageId, ImportedBuffer, ImportedImage, InitialClaim, RenderGraph,
 };
 use crcbl_render::transient::{TransientBufferDesc, TransientImageDesc, TransientPool};
 
@@ -97,7 +97,29 @@ impl Harness {
             format,
             extent: EXTENT,
             initial: ResourceState::Undefined,
+            // `Acquired`, because that is what it stands in for: the cross-frame
+            // tests below hand the same handle to frame after frame exactly as a
+            // swapchain ring does, and each one declares `Undefined` because the
+            // acquire's semaphore — not a barrier — is what orders it after the
+            // present that came before. `import_state_mismatch` below covers the
+            // other kind, with an image nothing acquires.
+            claim: InitialClaim::Acquired,
             final_state: ResourceState::Present,
+        }
+    }
+
+    /// An image the *importer* owns across frames: made by hand like
+    /// [`Harness::target`], but declared [`InitialClaim::Tracked`] because
+    /// nothing acquires it. The shadow atlas and its 1×1 placeholder are the
+    /// real ones; this is their shape with no renderer attached.
+    fn tracked_target(&self, format: Format) -> ImportedImage {
+        ImportedImage {
+            initial: ResourceState::Undefined,
+            claim: InitialClaim::Tracked,
+            // Sampled by the frame after, which is what makes a second
+            // `Undefined` a write-after-read rather than a harmless relabel.
+            final_state: ResourceState::ShaderRead,
+            ..self.target(format)
         }
     }
 
@@ -474,6 +496,195 @@ fn a_resize_starts_the_new_targets_from_undefined_again() {
             .execute(harness.device.as_ref(), &mut pool, encoder, None)
             .expect("executed");
     });
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// **A tracked import that contradicts the last frame is refused at compile
+/// time**, which is the only place it can be caught before a validation layer
+/// on CI catches it.
+///
+/// [`ImportedImage::initial`] is the one thing in a graph nothing derives, and
+/// a wrong one is silent all the way down: the frame records, the picture is
+/// right, and the barrier that was supposed to order this frame after the last
+/// one carries `srcStageMask = NONE, srcAccessMask = NONE` instead. Two images
+/// have shipped that bug — a readback path and a 1×1 shadow placeholder — and
+/// both looked exactly like the second frame below.
+///
+/// So the pool remembers what the previous graph *left* the image in, and this
+/// checks all three halves of that: the honest first frame is accepted, the
+/// repeat `Undefined` is rejected by name and by message, and the corrected
+/// declaration is accepted again. Without the last one the test would pass just
+/// as well against a `compile` that refused every tracked import.
+#[test]
+fn a_tracked_import_that_contradicts_the_last_frame_is_refused() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let atlas = harness.tracked_target(Format::Bgra8UnormSrgb);
+
+    let write_into = |pool: &TransientPool, imported: ImportedImage| {
+        let mut graph = harness.graph();
+        let target = graph.import_image("shadow-atlas", imported);
+        graph
+            .add_render_pass("atlas")
+            .clear_color(target, [0.0; 4])
+            .execute(|_| {});
+        graph.compile(pool)
+    };
+
+    let first =
+        write_into(&pool, atlas).expect("nothing has been left for the first frame to contradict");
+    harness.record(|encoder| {
+        first
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+
+    // The scope the rest of this test asserts inside: a guard that reads an
+    // empty ledger accepts everything, and would pass every line below.
+    assert_eq!(
+        pool.imported_image_use(atlas.image),
+        Some(ResourceState::ShaderRead),
+        "the frame's trailing barrier reached `final_state`, so that is what it left"
+    );
+
+    let error = write_into(&pool, atlas)
+        .expect_err("a second `Undefined` is a barrier with no source scope");
+    assert!(
+        matches!(
+            error,
+            GraphError::ImportStateMismatch {
+                declared: ResourceState::Undefined,
+                left: ResourceState::ShaderRead,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let text = error.to_string();
+    for part in ["shadow-atlas", "Undefined", "ShaderRead"] {
+        assert!(text.contains(part), "{part:?} missing from {text:?}");
+    }
+
+    let honest = ImportedImage {
+        initial: ResourceState::ShaderRead,
+        ..atlas
+    };
+    let second = write_into(&pool, honest).expect("declaring what was left is accepted");
+    assert_eq!(
+        second.passes()[0].barriers().images[0].from,
+        ResourceState::ShaderRead,
+        "and the barrier it produces is the one that orders the two frames"
+    );
+    harness.record(|encoder| {
+        second
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// **A swapchain image may declare `Undefined` on every frame, forever**, and
+/// that is the case the check must not break.
+///
+/// It is not the same declaration as the one above even though it reads
+/// identically. An acquired image arrives behind a semaphore that the
+/// submission running this graph waits on, so the frame is already ordered
+/// after everything the presentation engine and the previous frame did with it
+/// — the first barrier has no ordering left to carry and only has to reach the
+/// layout. [`InitialClaim::Acquired`] is the importer saying so, and the ledger
+/// deliberately holds nothing about one: this frame hands the image back to a
+/// ring the engine does not control, so there is nothing true to write down.
+#[test]
+fn an_acquired_import_may_declare_undefined_every_frame() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let target = harness.target(Format::Bgra8UnormSrgb);
+    assert_eq!(target.claim, InitialClaim::Acquired);
+
+    // More laps than the frames the engine keeps in flight, so at least one of
+    // them follows a frame that both wrote the image and handed it back.
+    for lap in 0..4 {
+        let mut graph = harness.graph();
+        let swap = graph.import_image("swapchain", target);
+        graph
+            .add_render_pass("clear")
+            .clear_color(swap, [0.0; 4])
+            .execute(|_| {});
+        let compiled = graph
+            .compile(&pool)
+            .unwrap_or_else(|error| panic!("lap {lap} of an acquired image: {error}"));
+        assert_eq!(
+            compiled.passes()[0].barriers().images[0].from,
+            ResourceState::Undefined,
+            "an acquired image's contents are undefined on every lap, not just the first"
+        );
+        harness.record(|encoder| {
+            compiled
+                .execute(harness.device.as_ref(), &mut pool, encoder, None)
+                .expect("executed");
+        });
+        assert_eq!(
+            pool.imported_image_use(target.image),
+            None,
+            "an acquired import is never checked, so nothing records one"
+        );
+    }
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// The ledger is written by [`CompiledGraph::execute`], not by `compile`, and
+/// holds [`ImportedImage::final_state`].
+///
+/// The three claims a wrong implementation could still satisfy while the test
+/// above passed, stated on their own: that a *compiled and dropped* graph
+/// leaves nothing behind — it recorded no commands, so a following frame
+/// ordered against it would be ordered against writes the GPU never performed —
+/// that what is recorded is the state the trailing barrier reached rather than
+/// the one the last pass happened to want, and that an image no graph has run
+/// with is absent rather than defaulted.
+#[test]
+fn the_import_ledger_records_what_the_frame_actually_left() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let atlas = harness.tracked_target(Format::Bgra8UnormSrgb);
+    assert_eq!(
+        pool.imported_image_use(atlas.image),
+        None,
+        "no graph has run with this image"
+    );
+
+    let mut graph = harness.graph();
+    let target = graph.import_image("shadow-atlas", atlas);
+    graph
+        .add_render_pass("atlas")
+        .clear_color(target, [0.0; 4])
+        .execute(|_| {});
+    let compiled = graph.compile(&pool).expect("a legal frame");
+    assert_eq!(
+        pool.imported_image_use(atlas.image),
+        None,
+        "compiling records nothing: a graph that is dropped rather than executed ran no commands"
+    );
+
+    harness.record(|encoder| {
+        compiled
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    assert_eq!(
+        pool.imported_image_use(atlas.image),
+        Some(atlas.final_state),
+        "the trailing barrier leaves it in `final_state`, not in the `ColorAttachment` the pass \
+         asked for"
+    );
+    assert_ne!(
+        atlas.final_state,
+        ResourceState::ColorAttachment,
+        "or this assertion could not tell the two apart"
+    );
     harness.recorder.assert_valid();
     pool.destroy(harness.device.as_ref());
 }
