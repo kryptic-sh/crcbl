@@ -33,10 +33,13 @@
 //! [`report_device_error`](Recorder::report_device_error) queues an out-of-band
 //! failure, [`fail_next_reconfigures`](Recorder::fail_next_reconfigures) refuses
 //! a swapchain rebuild, [`report_swapchain_out_of_date`](Recorder::report_swapchain_out_of_date)
-//! resizes the window out from under the frame loop, and
-//! [`lose_device`](Recorder::lose_device) kills the device for good. The last
-//! two exist because the conditions they model — a resize and a TDR — are
-//! otherwise reachable only on a real driver at a moment nobody can schedule.
+//! resizes the window out from under the frame loop,
+//! [`report_suboptimal_acquires`](Recorder::report_suboptimal_acquires) hands
+//! out a frame the surface has outgrown but will still take, and
+//! [`lose_device`](Recorder::lose_device) kills the device for good. The
+//! swapchain ones and the loss exist because the conditions they model — a
+//! resize, a stale extent and a TDR — are otherwise reachable only on a real
+//! driver at a moment nobody can schedule.
 //!
 //! # Always compiled
 //!
@@ -1759,6 +1762,12 @@ impl Device for NullDevice {
         swapchain: SwapchainHandle,
     ) -> Result<AcquiredFrame, SurfaceError> {
         self.check_current(swapchain)?;
+        // Before the lock, like the `check` helpers above it and for the same
+        // reason — the recorder's mutex is not reentrant, and the borrow of the
+        // swapchain object below holds it until the frame is built. Reading it
+        // here also spends the injection only on an acquire that got this far,
+        // which is what leaves a refused one recording and consuming nothing.
+        let suboptimal = self.recorder.take_suboptimal_acquire();
         let mut state = self.recorder.lock();
         let Some(object) = state.get_mut(ObjectKind::Swapchain, swapchain.to_bits()) else {
             return Err(SurfaceError::Hal(HalError::invalid_handle(
@@ -1793,7 +1802,7 @@ impl Device for NullDevice {
             index,
             acquire_semaphore: acquire_semaphores[slot],
             present_semaphore: present_semaphores[slot],
-            suboptimal: false,
+            suboptimal,
         };
         state.events.push(Event::Acquired { swapchain, index });
         Ok(frame)

@@ -670,6 +670,10 @@ pub(super) struct State {
     /// until a reconfigure clears it. See
     /// [`Recorder::report_swapchain_out_of_date`].
     pub(super) swapchain_out_of_date: bool,
+    /// How many `acquire_next_frame` calls hand back a frame marked
+    /// [`suboptimal`](crate::AcquiredFrame::suboptimal). See
+    /// [`Recorder::report_suboptimal_acquires`].
+    pub(super) suboptimal_acquires: u32,
     /// Why the device is lost, once it is — and never cleared, which is what
     /// separates it from `device_errors`. See [`Recorder::lose_device`].
     pub(super) lost_device: Option<String>,
@@ -688,6 +692,7 @@ impl State {
             device_errors: std::collections::VecDeque::new(),
             reconfigure_failures: 0,
             swapchain_out_of_date: false,
+            suboptimal_acquires: 0,
             lost_device: None,
         }
     }
@@ -1058,6 +1063,50 @@ impl Recorder {
     /// them that an assertion could see.
     pub fn report_swapchain_out_of_date(&self) {
         self.lock().swapchain_out_of_date = true;
+    }
+
+    /// Makes the next `acquire_next_frame` call(s) hand back a frame marked
+    /// [`suboptimal`](crate::AcquiredFrame::suboptimal), as if the surface had
+    /// moved under a swapchain that still presents.
+    ///
+    /// The gentler sibling of
+    /// [`report_swapchain_out_of_date`](Self::report_swapchain_out_of_date):
+    /// out of date means the three presentation calls *refuse*, suboptimal
+    /// means they all still work and the frame merely no longer matches the
+    /// surface it is going to. `crcbl-vk` reads it off `VK_SUBOPTIMAL_KHR` and
+    /// `crcbl-mtl` off a drawable whose size moved; this backend has no window
+    /// system to disagree with, so the field was a hardcoded `false` here and
+    /// the engine's reconfigure-*after*-present policy — the arm in
+    /// `crcbl/src/engine.rs`'s `submit_and_present` that keeps a stale-extent
+    /// frame from being presented forever — was reachable from no test in the
+    /// workspace.
+    ///
+    /// **Counted rather than latched, and that is the opposite of its sibling
+    /// on purpose.** An out-of-date swapchain refuses everything, so a caller
+    /// that ignores it makes no progress and a latch is what a driver does. A
+    /// suboptimal one presents fine, and the engine answers it by
+    /// reconfiguring — so a latch here would rebuild the swapchain on every
+    /// frame for as long as the loop ran, and a test that drove such a loop
+    /// would hang rather than fail. A count cannot: it runs out.
+    ///
+    /// Consumed one per acquire, and only by an acquire that actually handed a
+    /// frame out — one refused by the out-of-date latch or a dead handle
+    /// spends nothing. After `times` frames the backend reports optimal ones
+    /// again. Default `0`.
+    pub fn report_suboptimal_acquires(&self, times: u32) {
+        self.lock().suboptimal_acquires = times;
+    }
+
+    /// Consumes one suboptimal acquire, if any are owed. The backend's half of
+    /// [`report_suboptimal_acquires`](Self::report_suboptimal_acquires).
+    pub(super) fn take_suboptimal_acquire(&self) -> bool {
+        let mut state = self.lock();
+        if state.suboptimal_acquires > 0 {
+            state.suboptimal_acquires -= 1;
+            true
+        } else {
+            false
+        }
     }
 
     /// Loses the device, permanently: every later call that resolves a handle —

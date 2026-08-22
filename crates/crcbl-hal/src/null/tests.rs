@@ -1414,6 +1414,103 @@ fn an_out_of_date_swapchain_fails_every_presentation_call_until_a_reconfigure_cl
     instance.destroy_surface(surface);
 }
 
+/// The suboptimal injection, from the seam's side: it reaches
+/// [`AcquiredFrame::suboptimal`], every presentation call keeps working while it
+/// is owed, and **it runs out**.
+///
+/// Running out is the half that had to be decided rather than copied. Its
+/// sibling [`Recorder::report_swapchain_out_of_date`] latches, because a
+/// driver's out-of-date swapchain stays out of date until something rebuilds it
+/// and a caller that ignores it has to keep being told. A latch here would
+/// behave the other way round: the engine answers a suboptimal frame by
+/// reconfiguring, so a latch would have a driven loop rebuild on every frame it
+/// ever ran, and a test of that loop would hang instead of failing. A count
+/// cannot do that.
+#[test]
+fn a_suboptimal_acquire_is_counted_out_and_presents_all_the_same() {
+    let instance = NullInstance::gpu_driven();
+    let recorder = instance.recorder();
+    let device = open(&instance);
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("every device has a graphics queue");
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let desc = SwapchainDesc {
+        label: None,
+        surface,
+        format: Format::Bgra8UnormSrgb,
+        extent: (8, 8),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device.create_swapchain(&desc).expect("swapchain");
+
+    // The control: nothing has moved under this swapchain.
+    assert!(
+        !device
+            .acquire_next_frame(swapchain)
+            .expect("acquire")
+            .suboptimal,
+        "a swapchain nobody has disturbed still matches its surface"
+    );
+
+    const OWED: u32 = 2;
+    recorder.report_suboptimal_acquires(OWED);
+    for spent in 0..OWED {
+        let frame = device
+            .acquire_next_frame(swapchain)
+            .expect("a suboptimal swapchain hands out frames; it does not refuse them");
+        assert!(frame.suboptimal, "acquire {spent} of the {OWED} injected");
+        let present_id = u64::from(spent) + 1;
+        device
+            .present(
+                queue,
+                &PresentInfo {
+                    swapchain,
+                    waits: frame.present_semaphore.as_slice(),
+                    present_id: Some(present_id),
+                },
+            )
+            .expect("and presents them, which is the whole difference from out of date");
+        device
+            .wait_until_presented(swapchain, present_id, Duration::from_secs(30))
+            .expect("a frame that reached the swapchain can be waited for");
+    }
+
+    assert!(
+        !device
+            .acquire_next_frame(swapchain)
+            .expect("acquire")
+            .suboptimal,
+        "the injection is spent; a report that did not run out would reconfigure forever"
+    );
+
+    // A refused acquire spends none of it: the out-of-date latch answers before
+    // the count is read, so what a caller is owed outlives the resize it is
+    // about to handle rather than being eaten by it.
+    recorder.report_suboptimal_acquires(1);
+    recorder.report_swapchain_out_of_date();
+    let refused = device
+        .acquire_next_frame(swapchain)
+        .expect_err("the surface moved under the swapchain");
+    assert!(matches!(refused, SurfaceError::OutOfDate), "{refused}");
+    device
+        .reconfigure_swapchain(swapchain, &desc)
+        .expect("reconfigure");
+    assert!(
+        device
+            .acquire_next_frame(swapchain)
+            .expect("acquire")
+            .suboptimal,
+        "the refused acquire consumed nothing"
+    );
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+}
+
 /// The device-loss injection, from the seam's side: it reaches every call that
 /// can report it, it does not wear off, and it is not the out-of-band error
 /// channel wearing a different hat.

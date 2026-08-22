@@ -8679,6 +8679,24 @@ mod tests {
             .count()
     }
 
+    /// The presents and the rebuilds the recorder saw, in the order it saw
+    /// them.
+    ///
+    /// What [`presents`] and [`reconfigures`] cannot answer: whether the rebuild
+    /// happened *after* the frame reached the display or instead of it. Both
+    /// orders leave the same two counts behind.
+    fn presentation_sequence(recorder: &crcbl_hal::null::Recorder) -> Vec<&'static str> {
+        recorder
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                crcbl_hal::null::Event::Presented { .. } => Some("present"),
+                crcbl_hal::null::Event::Reconfigured { .. } => Some("reconfigure"),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// **An acquire that reports the swapchain out of date is expected traffic,
     /// not a failed frame**: it rebuilds and hands the frame back as skipped.
     ///
@@ -9016,6 +9034,105 @@ mod tests {
             reconfigures(&recorder),
             0,
             "and rebuilt nothing on the way out"
+        );
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// **A suboptimal frame is presented and *then* the swapchain is rebuilt**,
+    /// and that order is the whole of what separates this arm from every other
+    /// reconfigure the engine does.
+    ///
+    /// The observable is the recorder's event *sequence*, not its counts,
+    /// because the counts cannot tell the candidate engines apart. One that
+    /// ignores [`AcquiredFrame::suboptimal`] records the present and no rebuild.
+    /// One that treated it the way it treats
+    /// [`SurfaceError::OutOfDate`] would rebuild *instead* of presenting — a
+    /// rebuild with nothing on the display ahead of it, and a
+    /// [`FrameOutcome::Reconfigured`] for a frame that in fact went out. Only a
+    /// `present` followed by a `reconfigure`, on the one frame, is
+    /// [`GpuContext::submit_and_present`] doing what it says.
+    ///
+    /// The driven half is the other obligation. `report_suboptimal_acquires` is
+    /// *counted* rather than latched, so a loop handed a few suboptimal frames
+    /// rebuilds exactly that many times and then runs out its budget. A latch
+    /// would make this run reconfigure on every frame until
+    /// [`MAX_CONSECUTIVE_RECONFIGURES`] — a test that hangs where it meant to
+    /// fail — which is why the recorder counts.
+    #[test]
+    fn a_suboptimal_frame_is_presented_and_then_the_swapchain_is_rebuilt() {
+        let (mut shell, window, recorder, mut gpu) =
+            null_context("suboptimal frame test", Pacing::Vsync);
+
+        // The control: an undisturbed frame presents and rebuilds nothing, so
+        // the sequence below is this one plus what the flag added.
+        recorder.clear();
+        assert_eq!(
+            null_frame(&mut gpu).expect("a healthy frame"),
+            FrameOutcome::Presented
+        );
+        assert_eq!(
+            presentation_sequence(&recorder),
+            ["present"],
+            "nothing rebuilds a swapchain the surface still fits"
+        );
+
+        recorder.report_suboptimal_acquires(1);
+        recorder.clear();
+        assert_eq!(
+            null_frame(&mut gpu).expect("a suboptimal frame is not a failed one"),
+            FrameOutcome::Presented,
+            "the frame reached the display, so the loop counts it as presented"
+        );
+        assert_eq!(
+            presentation_sequence(&recorder),
+            ["present", "reconfigure"],
+            "the rebuild has to come after the present, not instead of it: {:?}",
+            recorder.events()
+        );
+
+        // And it stops, because the report was spent by the acquire that read
+        // it.
+        recorder.clear();
+        assert_eq!(
+            null_frame(&mut gpu).expect("a healthy frame"),
+            FrameOutcome::Presented
+        );
+        assert_eq!(
+            presentation_sequence(&recorder),
+            ["present"],
+            "the rebuilt swapchain is not suboptimal again"
+        );
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+
+        // Driven, so the arm runs where it actually lives: inside a loop that
+        // has a budget to spend and can therefore be seen failing to spend it.
+        const BUDGET: u64 = 4;
+        const SUBOPTIMAL: u32 = 2;
+
+        let (mut shell, window, recorder, gpu) = null_context("driven suboptimal", Pacing::Vsync);
+        recorder.report_suboptimal_acquires(SUBOPTIMAL);
+        let frames = std::rc::Rc::new(std::cell::Cell::new(0));
+        let ran = drive(DeviceOnlyLoop {
+            gpu,
+            frames: std::rc::Rc::clone(&frames),
+            stop_after: BUDGET,
+        })
+        .expect("a swapchain the surface outgrew is not a run that failed");
+        assert_eq!(
+            ran, BUDGET,
+            "the loop spent its whole budget rather than reconfiguring its way out of it"
+        );
+        assert_eq!(
+            presents(&recorder),
+            usize::try_from(BUDGET).expect("the budget fits a usize"),
+            "and every frame reached the display, suboptimal or not"
+        );
+        assert_eq!(
+            reconfigures(&recorder),
+            usize::try_from(SUBOPTIMAL).expect("the injected count fits a usize"),
+            "one rebuild per suboptimal frame, and none once the report ran out"
         );
         shell.destroy_window(window).expect("the window goes away");
     }
