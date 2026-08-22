@@ -1138,34 +1138,68 @@ samples requires WebGL2 and no telemetry says anyone is on such a browser — an
 reopening it is now a revival rather than a flag, which is the thing to know
 before promising anyone a fallback.
 
-### The browser probes cannot say why a readback failed
+### DECISION NEEDED — five copies of the golden harness helper
 
-`Reply::ReadbackFailed` now carries a reason and `poll_readback` reports it, but
-the eight readback state machines in `crates/crcbl-webgpu/src/probe.rs`
-(`ReadbackProbe`, `DrawProbe` and their siblings) each end their `match` with
-`_ => Self::Pending`. So a `ReadbackFailed` naming a probe's sequence still
-reads as "not yet", and the probe re-polls until the gate's deadline instead of
-reporting the browser's words.
+`screenshot_from_a_real_run`, `adapter_line`, `brightness`, `channel`,
+`channel_mean` and `required_backend` now exist five times over, in
+`apps/{breakout,flappy,hud,asteroids,horde}/tests/golden.rs`. This is duplicated
+**knowledge**, not duplicated shape: a fix to the adapter-line parse or to the
+stale-file removal has to land in five places, and the copy that gets missed
+stays green while testing something slightly different.
 
-Unchanged behaviour and the probe gate is green — nothing is failing today. But
-it means the one harness whose job is diagnosing the seam is the one place a
-failure diagnoses as a timeout.
+It was left duplicated deliberately while the mechanism was being proved, and
+the obvious home does not work: `crcbl-golden` would have to depend on `crcbl`
+to spawn a sample binary and read `BACKEND_ENV_VAR`, which inverts the
+dependency the whole crate exists to avoid.
 
-**Measured on 2026-08-20 rather than estimated, and it is wider than "eight".**
-Twelve state machines carry the swallowing arm — `ReadbackProbe`, `DrawProbe`,
-`ComputeProbe`, `CopyChainProbe`, `FillProbe`, `PresentProbe`, `ReconfigProbe`,
-`IndirectProbe`, `DepthProbe`, `StencilProbe`, `MsaaProbe`, `OcclusionProbe` —
-each a separate enum with its own `absorb`, its own `__crcbl_web_*` reader, and
-a state code that `web/engine/gpu-probe.js` mirrors in one of its twenty frozen
-tables. So a `Failed { reason }` variant is not twelve edits but twelve times
-four, and it moves the wasm ABI the JS side is written against.
+- **(a) A small support crate under `apps/`** that the sample test targets
+  depend on. Clean, and it is where the knowledge belongs; costs a workspace
+  member that exists only for tests.
+- **(b) `#[path]`-include one file** from each suite. No new crate and no
+  manifest churn, but the included file is compiled once per suite and each gets
+  its own copy of every `const` — fine here, surprising later.
+- **(c) Leave it.** Five copies of about a hundred lines, and the next sample
+  makes six.
 
-**Mechanical but wide, and testable without a browser**, which is the one thing
-that makes it cheaper than it looks: `absorb` is a pure function over
-`&[(u64, Reply)]`, so feeding it a `Reply::ReadbackFailed` is an ordinary unit
-test in this crate — the same route
-`a_capability_declared_unsupported_is_refused_by_its_own_call` takes. Doing it
-while adding a thirteenth probe is still cheaper than doing it twice.
+### horde's golden spends its whole tolerance budget
+
+Measured 2026-08-22 on lavapipe: `max channel delta 2` against a
+`max_channel_delta` of **2**, so nothing over tolerance and **no headroom at
+all**. The other three sit at 1. A lavapipe rebuild that moves one channel by
+one more turns `apps/horde`'s golden red for a reason that is not a regression.
+
+The arena's noisy grass is why — it is also why the PNG is 436 KB against 6–30
+KB for every other golden in the tree. Worth deciding before it fires: raise
+horde's tolerance alone, re-bless on the CI adapter rather than on hardware, or
+accept the re-bless when it happens.
+
+### flappy's and asteroids' goldens cannot see the simulation stop
+
+**flappy's title screen is completely static** — frames 24, 60 and 61 are
+byte-identical. asteroids' rocks move sub-pixel per tick. So both goldens are
+insensitive to the exact frame index, which is robustness, and both would go on
+passing if the simulation halted entirely.
+
+Their content claims still catch a lost pass or a channel swap; what is
+uncovered is motion. Closing it needs a scripted-input path into gameplay, which
+neither sample has — `horde`'s `--prefill` is the only fixture of that kind in
+the tree, and it is what lets horde's golden picture a playing frame.
+
+### Nothing guards the Rust to JS state-code mirror
+
+`web/engine/gpu-probe.js` restates `crates/crcbl-webgpu/src/probe.rs`'s
+`pub const … : u32` state codes in twenty frozen tables, by hand. No test, gate
+or script compares them, so a code added on one side and forgotten on the other
+is silent — the browser reads a state it has no name for, or names one the
+engine never sends.
+
+All 111 codes were checked by hand on 2026-08-22, when twelve of those tables
+moved at once for the readback-failure work. The next person will not do that.
+
+The fix is cheap and worth taking: a `#[test]` in `probe.rs` that pulls
+`gpu-probe.js` in with `include_str!`, parses the tables, and asserts each `X_Y`
+constant equals table `X`'s `Y`. It fails on the side that forgot, names the
+constant, and needs no browser.
 
 ### glTF reaches the renderer — what it still cannot open
 
@@ -9377,9 +9411,10 @@ in place.
 
 ### Coverage the testing plan asks for and nothing provides
 
-- **No sample owns a golden frame** — declined rather than owed, and the
-  reasoning is under "Declined for now: a golden frame per sample" below rather
-  than repeated here.
+- **One sample owns no golden frame.** `breakout`, `flappy`, `hud`, `asteroids`
+  and `horde` each compare a real frame now, and `lumen` has one by its own
+  route; `quarry` and `viewer` do not. Both are tools rather than demos, so the
+  question is whether the plan's rule reaches them at all.
 - **The ECS churn soak with a leak assert does not exist.** The plan asks for it
   by name. Nothing in `crcbl-ecs` spawns and despawns over many ticks and then
   asserts nothing leaked. One seeded loop, no GPU.
@@ -9429,31 +9464,6 @@ are printed by both harnesses and visible in the run log, and the classification
 that produces them is now documented in `docs/plan/12-testing.md`. Revisit if a
 collapse ever actually happens — at that point the floor has evidence behind it
 instead of a guess.
-
-### Declined for now: a golden frame per sample
-
-`docs/plan/12-testing.md` asks every sample for a determinism check _and_ a
-golden frame. The determinism half is met everywhere.
-
-**The argument that used to close this entry was wrong, and a shipped bug is the
-proof.** It said the samples "are already pinned by replay hashes, which catch
-the same regressions a golden would catch". They do not catch _rendering_
-regressions: there is no `replay_hash` in the tree, and what exists — tuple
-comparison of simulation state, horde's `state_hash` over kills/HP/positions,
-and `crcbl-server::sim_hash::hash_world` over tick id, system names and
-component bytes — contains **no pixel at all**. All of them pass unchanged if
-the frame is black, the tonemap is wrong or a shader is swapped. Every browser
-demo rendered a transfer function too dark for several commits and every gate
-stayed green; a user reported it.
-
-**And the cost is lower than this entry assumed, because the pattern already
-ships.** `apps/lumen/tests/golden.rs` with `golden/room.png` and
-`run-lumen-golden.sh` renders lumen's own scene through
-`OffscreenSetup::open_forward_with` and diffs it with `crcbl-golden`, wired into
-CI. Replicating that per demo needs each sample to expose its scene construction
-— no engine feature. The `--screenshot` route is the alternative: one field on
-`Common` in `crates/crcbl/src/args.rs` plus one arm in `Common::consume`,
-reaching all seven apps. Either would have caught this bug at zero tolerance.
 
 ### The seam does not describe what `wait_semaphores` does with an impossible wait
 
