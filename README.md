@@ -151,7 +151,7 @@ built it.
 | `asteroids`      | churn: entities spawn and die every tick                               | ✓              |
 | `horde`          | scale: thousands of agents, one broadphase, a job pool                 | ✓              |
 | `hud`            | the UI system's living fixture — draw-list primitives and nothing else | ✓              |
-| `lantern`          | the lighting acceptance fixture: one room, every effect                | ✓              |
+| `lantern`        | the lighting acceptance fixture: one room, every effect                | ✓              |
 | `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          |                |
 | `bare`           | the engine as a plain library, with a hand-written loop                |                |
 | `crcbl-sim`      | the determinism harness: headless server simulation                    |                |

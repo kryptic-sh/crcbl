@@ -197,14 +197,14 @@ kept because the sixth's own table is read against it. All at a slope
 coefficient of 2:
 
 | Constant, in texels | lantern's strip | dunes' valley floor |
-| ------------------- | ------------- | ------------------- |
-| 0.5                 | 0.140 m       | heavy cross-hatch   |
-| 1                   | 0.160 m       | cross-hatch         |
-| 2                   | 0.203 m       | cross-hatch         |
-| 3                   | 0.244 m       | faint cross-hatch   |
-| 4                   | 0.289 m       | a trace             |
-| 5                   | 0.330 m       | clean               |
-| 6 (shipped then)    | 0.375 m       | clean               |
+| ------------------- | --------------- | ------------------- |
+| 0.5                 | 0.140 m         | heavy cross-hatch   |
+| 1                   | 0.160 m         | cross-hatch         |
+| 2                   | 0.203 m         | cross-hatch         |
+| 3                   | 0.244 m         | faint cross-hatch   |
+| 4                   | 0.289 m         | a trace             |
+| 5                   | 0.330 m         | clean               |
+| 6 (shipped then)    | 0.375 m         | clean               |
 
 Five is where the trace stops being visible in the dunes frame; six is that with
 margin, and the margin costs four and a half centimetres of lantern's strip.
@@ -251,27 +251,27 @@ is still what covers it; it is simply a much smaller one. The re-measured trade,
 slope coefficient still 2, on radv:
 
 | Constant, in texels | lantern's strip | dunes, shading normal | dunes, facet normal |
-| ------------------- | ------------- | --------------------- | ------------------- |
-| 0                   | 0.128 m       | heavy cross-hatch     | seam on most edges  |
-| 0.5                 | 0.149 m       | —                     | seam on many edges  |
-| 1                   | 0.170 m       | —                     | seam on some edges  |
-| 2                   | 0.213 m       | faint cross-hatch     | a few isolated dots |
-| 3 (shipped)         | 0.256 m       | —                     | clean               |
-| 6 (shipped before)  | 0.382 m       | clean                 | clean               |
+| ------------------- | --------------- | --------------------- | ------------------- |
+| 0                   | 0.128 m         | heavy cross-hatch     | seam on most edges  |
+| 0.5                 | 0.149 m         | —                     | seam on many edges  |
+| 1                   | 0.170 m         | —                     | seam on some edges  |
+| 2                   | 0.213 m         | faint cross-hatch     | a few isolated dots |
+| 3 (shipped)         | 0.256 m         | —                     | clean               |
+| 6 (shipped before)  | 0.382 m         | clean                 | clean               |
 
 Graded from the 1280×960 frame and from the golden's own 256×192, which is where
-the aliasing is worst. The lantern column does not depend on which normal is read:
-that room is built of flat slabs, so its frames at 6.0 are **byte-identical**
-either way, which is also the cleanest evidence that the change does nothing
-except where the two normals disagree.
+the aliasing is worst. The lantern column does not depend on which normal is
+read: that room is built of flat slabs, so its frames at 6.0 are
+**byte-identical** either way, which is also the cleanest evidence that the
+change does nothing except where the two normals disagree.
 
 **Three is shipped with no margin above it**, deliberately unlike the six it
 replaces. Six was one over the first clean value because what it covered was an
 unexplained shortfall; three covers a bounded, understood quantity, so margin in
 it is lantern's strip bought back for nothing.
 
-Re-measured through `apps/lantern`'s 1280×960 review frames, on the same fixtures
-as the fifth decision's table:
+Re-measured through `apps/lantern`'s 1280×960 review frames, on the same
+fixtures as the fifth decision's table:
 
 | Artefact                            | Texels off `N` | Texels off `Ng` |
 | ----------------------------------- | -------------- | --------------- |

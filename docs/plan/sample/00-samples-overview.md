@@ -42,7 +42,7 @@ GitHub Pages site.
 | 09  | [puppet](09-puppet.md)       | post-MVP wave 1              | Skeletal animation acceptance test; shadows + device-swap input showcase                                           |
 | 10  | [sparks](10-sparks.md)       | post-MVP wave 1              | VFX gallery + live workbench; GPU particle pipeline fixture                                                        |
 | 11  | [breach](11-breach.md)       | FPS-era                      | **FPS flagship**: web slice first, then native 5v5 comp — prediction/lagcomp, ballistics, FP rendering, integrity  |
-| 13  | [lantern](13-lantern.md)         | S4B (P7B–P7C)                | Lighting acceptance: the same scene under `RayTraced` and `Rasterised`, every effect, both paths side by side      |
+| 13  | [lantern](13-lantern.md)     | S4B (P7B–P7C)                | Lighting acceptance: the same scene under `RayTraced` and `Rasterised`, every effect, both paths side by side      |
 | 14  | [quarry](14-quarry.md)       | S4C (P7)                     | Geometry acceptance: meshlet clusters, QEM cluster LOD, and all three `GeometryPath` values on one scene           |
 | 15  | [shard](15-shard.md)         | S6B → wave 2                 | **MMO flagship**: web slice first, then a native persistent world — sector streaming, interest management at scale |
 | 16  | [bracket](16-bracket.md)     | P13                          | Matchmaking + rating + ranked auth as a service, with no game attached; the only genuinely networked web client    |
@@ -54,8 +54,8 @@ is the **FPS-era flagship** — the biggest sample by far, consuming topics 26�
 as one game; it starts only after arena has proven prediction/lag comp.
 
 13 and 14 are **acceptance fixtures** rather than games, in the shape hud
-already established: lantern owns lighting and quarry owns geometry, each proving
-that every path renders correctly before a game depends on it. 15 is the
+already established: lantern owns lighting and quarry owns geometry, each
+proving that every path renders correctly before a game depends on it. 15 is the
 **second flagship** and the one the demo site leads with, since breach's
 competitive game never ships to a browser. 16 is a **tech demo with no game in
 it at all** — matchmaking, rating and ranked auth in isolation, which is the
