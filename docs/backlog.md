@@ -14558,28 +14558,50 @@ The round trip on hardware Chromium, on Firefox, or on a browser whose
 The name check compares against the same browser, so it holds wherever it runs —
 but nowhere else has run it.
 
-## The adapter reply reports features the stream cannot serve
+## The adapter reply is not filtered, though the mapping is now gated
 
 `web/engine/gpu-replay.js` maps a browser's `adapter.features` onto
-`crcbl_hal::Features` and reports what the browser said. That is right while
-there is no device — but nothing intersects the result with what the stream can
-actually encode, so a feature the browser has and this backend cannot serve is
-reported as available.
+`crcbl_hal::Features` and reports what the browser said. Two different things
+could go wrong with that, and as of 2026-08-22 they have different answers.
 
-**The standing example is gone and no replacement has been found.**
-`TIMESTAMP_QUERY` used to be it, and it is not one any more:
-`crcbl-webgpu/src/command.rs` defines `Command::CreateQuerySet`, `probe.rs`
-calls `stream.create_query_set`, and `gpu-replay.js` has `createQuerySet`. So
-the mechanism is still missing while no feature is currently known to be
-misreported through it — which makes this prevention, and makes it cheap to get
-wrong again the next time a feature is mapped before its commands exist.
+**Half closed: the mapping can no longer outrun the stream.**
+`web/tools/gpu-replay.mjs` gained a section that reads `FEATURE_MAP`'s keys out
+of the table itself — `halFeaturesFor` is handed a `Set` whose `has` records
+what it is asked and answers `false`, so the walk yields the table's keys in its
+own order — and for each key replays the command that feature governs against a
+stub device that opened with it, reading back what reached WebGPU. A row added
+for a feature whose commands do not exist yet has nothing to drive and fails.
+Red-checked both ways: a bogus `shader-f16` row fails naming it, and making
+`webgpuPrimitiveFor` drop `unclippedDepth` fails `depth-clip-control` and prints
+the descriptor that was recorded. `pages.yml` runs the suite, so it is a CI gate
+and not a local one.
 
-**The mapped set must be intersected with what the stream can actually encode.**
-`crcbl-wgpu`'s own feature mapping did exactly that for query sets and is where
-the shape was taken from; that crate was deleted 2026-08-21, so the only copy of
-it left to write is this one. Noted in `gpu-replay.js` and in
-`crcbl-webgpu/src/instance.rs`; it is the sort of thing that reads as correct
-right up until a caller believes it.
+`indirect-first-instance` is the weak row and the code says so: WebGPU exposes
+no field for it — the feature lifts core's `firstInstance == 0` rule and the
+value lives in the indirect buffer — so the evidence is only that the indirect
+draws it governs are replayed at all.
+
+**Still open: `Instance::adapters` withholds nothing.** This entry used to say
+the intersection was owed "the moment an `impl Instance` exists". It exists —
+`crcbl_webgpu::hal::WebGpuInstance` at `crates/crcbl-webgpu/src/hal/instance.rs`
+— and its `adapters` is `self.adapters.clone()`, the replies unchanged. So the
+runtime half genuinely does not happen. Both `gpu-replay.js`'s header and
+`crcbl-webgpu/src/instance.rs` said an impl was still to come; both are
+corrected.
+
+**That is sound only while the table is honest, which is exactly what the new
+gate keeps true** — so this is not urgent, and it is not fixed either. The two
+are not substitutes: a check on the table cannot answer for a bit that is mapped
+and served today and stops being served tomorrow, and only a filter on the reply
+can. What a filter would need is a list, on the Rust side, of the capabilities
+this crate's command set can encode — which is what `Device::supports` already
+answers for a device, and what nothing answers for an adapter.
+
+**Every mapped feature is served today**, so nothing is currently misreported
+through either half. `TIMESTAMP_QUERY` used to be the standing example and is
+not one any more: `crcbl-webgpu/src/command.rs` defines
+`Command::CreateQuerySet`, `probe.rs` calls `stream.create_query_set`, and
+`gpu-replay.js` has `createQuerySet`.
 
 ### Considered and declined
 
