@@ -5533,7 +5533,7 @@ it comes back it says so cheaply. Nothing further is worth doing until it does.
 **Measured 2026-08-23, and it sharpens the choice.** The two seam-probe jobs
 (`probe the seam on Windows`, `probe the seam on macOS`) `needs: build`, and
 `build the demo site` took **12m25s** on run 32585681819 and **15m09s** on run
-32588129594 — the two most recent Pages runs that finished. The three
+32587146042 — the two most recent Pages runs that finished. The three
 browser-golden legs, which do not wait on it, were done inside three minutes of
 their own start on both. So the probe gate reports something like fifteen to
 twenty minutes after a push, and **any push cadence faster than that cancels it
