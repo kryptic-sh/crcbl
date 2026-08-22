@@ -61,6 +61,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`Device::wait_semaphores` refuses a binary semaphore**, and the null backend
+  now does so too. A host wait has no value to compare against on a semaphore
+  that carries none, which is why `signal_semaphore` already refused the mirror
+  case; `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` all answered
+  `HalError::Unsupported` for it already, and `crcbl-hal`'s `NullDevice`
+  answered `Ok(true)` — telling a caller that a wait no real device accepts had
+  been satisfied. The seam's `# Errors` now names it. A caller that waited on a
+  binary semaphore against the null device and read the `bool` gets an `Err`
+  instead; one that was waiting on a real device was already getting it.
+
 - **`PhysicsSystem::sweep_body` no longer reports the swept entity's own
   collider.** A body sweeping forward hit itself at `t: 0.0` — the collider
   sitting on the segment's origin is the nearest thing on it — so a caller that
