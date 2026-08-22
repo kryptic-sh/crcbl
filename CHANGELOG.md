@@ -73,9 +73,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **`crcbl-audio`'s generators are held to their waveform.** `synth`'s tests now
   check `sine` and `looped_sine` against `x[n+1] = 2cos(w)x[n] - x[n-1]`, which
-  every sinusoid and no other shape satisfies, and pin `noise_burst` to a digest
-  of `f32::to_bits`. Nothing user-facing changed; a game whose cue sounded right
-  yesterday sounds identical today, and now something says so.
+  every sinusoid and no other shape satisfies, and hold `noise_burst` to probe
+  samples and total energy within a tolerance. No behaviour changed. One
+  documented claim did: `noise_burst`'s docs said its output is the same on
+  every build, and it is not — the decay goes through libm's `exp`, which glibc,
+  Apple's and the MSVC runtime round differently, so a byte-exact golden of it
+  is not possible anywhere but the platform that recorded it.
 
 - **A `windowed-e2e` feature on `crcbl`**, and `tests/run-windowed-e2e.sh`
   behind it: the first suite in this workspace to create a surface that is not

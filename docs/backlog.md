@@ -7464,25 +7464,41 @@ annotated.
 S2 is done — simulation, art, audio, persistence and the browser demo. What is
 not:
 
-- **The cues are pinned now; what is left is a listener.** `crcbl-audio`'s
-  `synth` tests gained the two checks this entry asked for.
-  `a_one_shot_is_a_sinusoid_and_not_just_the_right_shape` and
+- **The cues are pinned now, but not to their bytes — and that is a fact about
+  the generator.** `a_one_shot_is_a_sinusoid_and_not_just_the_right_shape` and
   `a_looped_tone_is_a_sinusoid_at_the_frequency_it_steps` hold `sine` and
   `looped_sine` to `x[n+1] = 2cos(w)x[n] - x[n-1]`, which every sinusoid and no
-  other shape satisfies — a triangle wave at the same amplitude and fade passed
+  other shape satisfies; a triangle wave at the same amplitude and fade passed
   every previous assertion and violates this one by 2.0e-2 against thresholds of
-  1e-5 and 2e-4. `a_burst_is_pinned_to_the_bytes_it_ships` folds
-  `crcbl_core::rand::hash_u64` over `f32::to_bits` and pins the digest; nudging
-  the low-pass coefficient by 0.006% moves it while **every other test in the
-  workspace stays green**, which is what the old
-  `a_burst_is_reproducible_from_its_seed_and_varies_with_it` could never catch,
-  comparing as it does two calls inside one build.
+  1e-5 and 2e-4.
 
-  Still open, and not fixable by a golden: **nobody has listened to it.** No
-  test can tell a good explosion from a bad one, and the digest only says the
-  bad one has not changed. What would help is emitting a WAV a human opens from
-  a CI artifact, the way `crcbl-golden` argues for PNG — the encoder is a header
-  and a byte copy, and no decoder is needed.
+  The burst took two attempts. A digest of every sample's `f32::to_bits` passed
+  locally and **failed on macOS and on Windows the first time CI ran it** (run
+  32569734803). That is the generator's fault, not the runner's: `noise_burst`'s
+  splitmix64 source is integer and `white` divides by a power of two, so that
+  half is exact everywhere, but the samples then go through a one-pole filter
+  and `(-decay * t).exp()`, and `exp` is libm's. glibc, Apple's and the MSVC
+  runtime differ in the last bit and the recursion carries it forward. **Windows
+  failing is what rules out an architecture cause** — it is `x86_64` like the
+  Linux runner, so it is the maths library, not the instruction set. `synth`'s
+  module doc claimed byte-identical output across builds; that claim is now
+  corrected rather than repeated.
+
+  `a_burst_is_the_waveform_that_shipped` replaces it: eight probe samples at a
+  1e-5 absolute tolerance plus total energy at 1e-6 relative. Both halves are
+  live and they catch different things — shifting the noise sequence by one
+  index moves a probe by 0.040, and nudging the low-pass coefficient by 0.006%
+  leaves every probe inside tolerance and moves the energy. What it gives up
+  against a digest is per-sample coverage of the 30,718 samples between the
+  probes; **a full reference buffer with a tolerance would restore that**, which
+  is what `crcbl-golden` does for images, and it would want the same thing the
+  next item asks for — a file a human can open.
+
+  Still open, and not fixable by any golden: **nobody has listened to it.** No
+  test can tell a good explosion from a bad one, and these only say it has not
+  changed. Emitting a WAV a human opens from a CI artifact is the way, the way
+  `crcbl-golden` argues for PNG — the encoder is a header and a byte copy, and
+  no decoder is needed.
 
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of

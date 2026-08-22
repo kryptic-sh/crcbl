@@ -166,10 +166,17 @@ pub fn looped_sine(freq_hz: f32, cycles: u32, sample_rate: u32) -> Vec<AudioSamp
 /// by a fifth of a second — so a kill wants a fast one and a death wants a slow
 /// one.
 ///
-/// **Deterministic**, from `seed` through [`crcbl_core::rand`]'s splitmix64
-/// mix, so the sound a build ships is the sound every build ships and a golden
-/// buffer is possible. A different `seed` is a different-sounding burst, not a
-/// wrong one.
+/// **Deterministic from `seed`** through [`crcbl_core::rand`]'s splitmix64 mix:
+/// the same seed gives the same burst, and a different one is a
+/// different-sounding burst rather than a wrong one.
+///
+/// **Deterministic is not bit-identical across platforms**, and this used to
+/// claim it was. The noise source is integer and `white` divides by a power of
+/// two, so that half is exact everywhere — but `(-decay * t).exp()` is libm's,
+/// and glibc, Apple's and the MSVC runtime disagree in the last bit, which the
+/// filter's recursion then carries forward. A byte-exact golden is therefore
+/// not possible; a tolerance one is, and
+/// `a_burst_is_the_waveform_that_shipped` is it.
 #[must_use]
 pub fn noise_burst(seconds: f32, decay: f32, seed: u64, sample_rate: u32) -> Vec<AudioSample> {
     // f64 so the product cannot overflow f32; floored to whole frames; capped
@@ -393,48 +400,90 @@ mod tests {
         );
     }
 
-    /// **The burst is pinned to the samples it ships, not merely to itself.**
+    /// **The burst is the sound that shipped, to the precision a float buffer
+    /// can promise across platforms.**
     ///
-    /// `a_burst_is_reproducible_from_its_seed_and_varies_with_it` compares two
-    /// calls inside one build, which any deterministic generator satisfies
-    /// whatever it generates. It says nothing about whether today's burst is the
-    /// one that shipped, so a change to the mixing, the low-pass or the decay
-    /// would go through it green and every build would ship a different
-    /// explosion.
+    /// This started life pinning a digest of every sample's `f32::to_bits`, and
+    /// CI failed it on macOS and on Windows the first time it ran. That was the
+    /// test being wrong, not the generator: the splitmix64 source is integer
+    /// and identical everywhere, and `white` is exact because it divides by a
+    /// power of two — but the samples then pass through a one-pole filter and
+    /// `(-decay * t).exp()`, and `exp` is libm's. glibc, Apple's and the MSVC
+    /// runtime do not agree to the last bit, so the bytes differ by around an
+    /// ULP and the recursion carries that forward. **It failed on Windows as
+    /// well as macOS, which is what rules out an architecture cause**: Windows
+    /// is `x86_64` like the Linux runner, so the difference is the maths
+    /// library and not the instruction set.
     ///
-    /// The digest folds [`crcbl_core::rand::hash_u64`] over `f32::to_bits`, in
-    /// order. Over the bits rather than over the samples' memory, because a
-    /// sample's identity is its value: raw bytes would fold in signed zero and,
-    /// were one ever to appear, NaN payloads. The parameters are asteroids'
-    /// explosion, which is the longest burst any sample plays.
+    /// So the bytes are not pinnable and this checks the waveform instead:
+    /// eight samples spread across the burst, and its total energy. A tolerance
+    /// of [`PROBE_TOLERANCE`] is roughly fifty times the drift an `exp` an ULP
+    /// out can produce through a filter whose pole contracts error rather than
+    /// growing it, and still some three orders tighter than any real change —
+    /// a different seed, decay, amplitude or filter moves these samples by
+    /// their own magnitude, not by their last digit.
+    ///
+    /// What this gives up against the digest is coverage of every sample; what
+    /// it buys is a test that is true. `docs/backlog.md` carries what a full
+    /// reference buffer would take.
     #[test]
-    fn a_burst_is_pinned_to_the_bytes_it_ships() {
-        /// Asteroids' explosion.
+    fn a_burst_is_the_waveform_that_shipped() {
+        /// Asteroids' explosion, the longest burst any sample plays.
         const SEED: u64 = 0x4173_7465_726F_6964;
-        /// The digest that burst has always produced.
-        const DIGEST: u64 = 0x0B90_BA33_2FFB_B038;
-        /// Its length. `0.32 * 48_000` lands a frame short of 15_360 because
-        /// `0.32` is not exact in `f32` and the product is floored.
-        const SAMPLES: usize = 30_718;
+        /// `0.32 * 48_000` lands a frame short of 15_360 because `0.32` is not
+        /// exact in `f32` and the product is floored.
+        const FRAMES: usize = 15_359;
+        /// Left-channel samples at `k * FRAMES / 8`, measured on the Linux
+        /// runner's build.
+        const PROBE: [f32; 8] = [
+            // Silent: `fade_gain` is zero at the first frame.
+            0.0,
+            -0.000_696_863,
+            -0.014_059_698,
+            0.005_607_709,
+            0.043_979_72,
+            -0.008_442_327,
+            -0.014_862_902,
+            -0.001_449_375,
+        ];
+        /// Sum of squares over both channels, which no single probe sample
+        /// would catch a change in the parts of the burst between them.
+        const ENERGY: f64 = 32.695_741_201;
+        /// Absolute, on samples whose magnitudes run to about 0.044.
+        const PROBE_TOLERANCE: f32 = 1e-5;
+        /// Relative, on a sum of 30_718 squares.
+        const ENERGY_TOLERANCE: f64 = 1e-6;
 
         let data = noise_burst(0.32, 9.0, SEED, RATE);
+        let frames = data.len() / CHANNELS;
         assert_eq!(
-            data.len(),
-            SAMPLES,
-            "the burst changed length, so the digest below cannot be compared"
+            frames, FRAMES,
+            "the burst changed length, so the probes below index into a different sound"
         );
 
-        let digest = data.iter().fold(0u64, |acc, s| {
-            crcbl_core::rand::hash_u64(acc, u64::from(s.to_bits()))
-        });
-        assert_eq!(
-            digest, DIGEST,
-            "the explosion is not the sound that shipped. If the generator changed on \
-             purpose, listen to the result and then update DIGEST; if it did not, \
-             something moved underneath it"
+        for (k, &want) in PROBE.iter().enumerate() {
+            let i = k * FRAMES / 8;
+            let got = data[i * CHANNELS];
+            assert!(
+                (got - want).abs() <= PROBE_TOLERANCE,
+                "frame {i} is {got}, not {want} — off by {} against a tolerance of \
+                 {PROBE_TOLERANCE:e}, which is far more than a differing libm can explain",
+                (got - want).abs()
+            );
+            assert_eq!(
+                got,
+                data[i * CHANNELS + 1],
+                "frame {i}'s two channels differ, and this generator is mono in stereo"
+            );
+        }
+
+        let energy: f64 = data.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+        assert!(
+            (energy - ENERGY).abs() <= ENERGY * ENERGY_TOLERANCE,
+            "the burst carries {energy} of energy, not {ENERGY} — the samples between \
+             the probes changed"
         );
     }
-
     /// The decay is what makes it a burst rather than a wash, and it is an
     /// argument rather than a constant so that a kill and a death can differ.
     #[test]
