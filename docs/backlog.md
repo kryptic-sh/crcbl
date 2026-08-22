@@ -6148,11 +6148,24 @@ written into the crate docs where somebody editing the atomics will see it — a
 red on 2026-08-03 for want of a `libasound2-dev` install and was found only
 because it was briefly on the per-PR path.
 
-Also still open: **nothing runs the primitives on a weakly-ordered machine.**
-Miri models the memory ordering, which is a stronger check than any test on x86,
-but it is a model — an aarch64 runner exercising the same stress tests natively
-would be independent evidence, and GitHub offers one. Not attempted, and the
-cost is a second `test` leg rather than anything subtle.
+**The primitives DO run on a weakly-ordered machine, and this entry said they
+did not.** Corrected 2026-08-23: the entry asked for an aarch64 runner as
+independent evidence beside Miri's model, called it unattempted and priced it at
+a second `test` leg. That leg exists — `build + test (macos-latest)` in `ci.yml`
+runs the workspace under nextest on **`aarch64-apple-darwin`**, and all forty of
+`crcbl-jobs`' tests pass there on every run (counted off `14c89de`'s CI log).
+Nobody needs to build it.
+
+What is genuinely still open is narrower and worth keeping. A weak-memory bug is
+**probabilistic**, so forty passing tests on aarch64 are weaker evidence than
+Miri's model rather than stronger — and only two of them are concurrent at all
+(`a_concurrent_producer_and_consumer_move_every_item_in_order` in `ring.rs`,
+`a_concurrent_reader_never_sees_half_of_a_state` in `mailbox.rs`). The rest are
+single-threaded and would pass under any ordering. So the honest statement is:
+the code executes on aarch64 continuously, and **two** tests there could in
+principle catch a reordering, neither of which was written to be adversarial
+about it. Making them so — iteration counts, interleaving pressure — is the
+slice, not adding a runner.
 
 **The pool's own gaps**, none of which is a defect:
 
