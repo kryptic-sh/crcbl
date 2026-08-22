@@ -5257,15 +5257,21 @@ nothing.
   (`crates/crcbl-shell/src/x11/input.rs`) — ~2.3e-10 relative error,
   unobservable, and the new test asserts to `1e-6` so it does not pin the
   exactness either.
-- Assorted DRY/YAGNI survivors: the Wayland `data_device_mut` chain and
-  `destroy_offer(&data::Offer)` taking a throwaway; `crcbl-vk`'s three
-  independent teardown sweeps (`destroy_trash`, `Drop`, `build_swapchain`'s
-  `unwind`) — note the _bug_ under that bullet is fixed by `take_owned`;
-  `crcbl-hal`'s hand-written handle marker/alias pairs and `ObjectKind`'s three
-  parallel lists; `ConditionSimulator::send_reliable`/`send_unreliable`;
+- Assorted DRY/YAGNI survivors: `destroy_offer(&data::Offer)` taking a
+  throwaway; `crcbl-vk`'s three independent teardown sweeps (`destroy_trash`,
+  `Drop`, `build_swapchain`'s `unwind`) — note the _bug_ under that bullet is
+  fixed by `take_owned`; `crcbl-hal`'s hand-written handle marker/alias pairs
+  and `ObjectKind`'s three parallel lists;
+  `ConditionSimulator::send_reliable`/`send_unreliable`;
   `RenderGraph::physical_buffer_count` (now zero callers, not even tests);
-  `AudioEvent::range`; the inert `Schedule::debug_draw` path; `_start_tick` in
-  `ReplayReader`; `ClipboardContent::into_bytes`.
+  `AudioEvent::range`; the inert `Schedule::debug_draw` path; the discarded
+  `_start_tick` in `FileTransport::open` (`crcbl-store/src/replay.rs`);
+  `ClipboardContent::into_bytes`. **Two names this bullet used to carry did not
+  resolve** and were dropped 2026-08-23: a Wayland `data_device_mut` chain,
+  which has never appeared in a `.rs` file in this repository's history, and
+  `ReplayReader`, which does not exist — `replay.rs` defines `ReplayWriter` and
+  `FileTransport`. A citation that sends a reader to nothing is worse than no
+  citation, because it reads as verified.
 - **Five wall-clock `thread::sleep` timing assertions**
   (`crates/crcbl-net/src/condition.rs`) will flake on a loaded runner.
 
@@ -9033,10 +9039,12 @@ The device-and-resources slice. Everything below is in `crates/crcbl-dx12`.
 - **The concurrent-`wait_idle` ordering is not provable by test.**
   `concurrent_waits_each_signal_once_and_all_return` pins that every call
   signals exactly once, which is deterministic. It does not pin that the signals
-  reach the queue in increasing order — that is what the lock on
-  `DeviceInner::idle_value` exists for, and its failure mode is a hang caught by
-  `slow-timeout`, not a red assertion. A passing run is not evidence the race
-  cannot happen.
+  reach the queue in increasing order — that is what the lock ordering the
+  signals exists for, and its failure mode is a hang caught by `slow-timeout`,
+  not a red assertion. The value they are driven towards is
+  `DeviceState::next_fence_value`; this entry named it
+  `DeviceInner::idle_value`, which no longer resolves, and `DeviceInner`'s own
+  doc records the move. A passing run is not evidence the race cannot happen.
 
 ## What DX3 left open
 
@@ -9893,13 +9901,6 @@ that the HKLM writes are in the workflow and not in either harness. What was
 not: whether `run-vk-e2e.sh` under Git Bash would pass on that runner today,
 which only a CI run can answer.
 
-Related, and also not acted on: `tools/nextest-summary-test.sh` exercises the
-shared guard against every summary shape and **nothing runs it**. `ci.yml` has
-no shell-lint or script job to hang it on —
-`grep -n shellcheck .github/workflows/` matches nothing — and adding one was
-outside the paths that slice owned. Until it is wired in, the guard's own test
-is a file somebody has to remember to run.
-
 ## Test-file names: what the rename slice left, and one rename declined
 
 The naming slice took `docs/plan/12-testing.md`'s "filenames name the subject,
@@ -9922,24 +9923,14 @@ now argues this under "Why it is not called `appkit_e2e`", so the question does
 not get re-opened from the filename alone. If the suffix ever stops implying a
 gate, the rename becomes correct and the header is where to look.
 
-**Stale path references left behind, all in files that slice did not own.** Each
-is prose in a code span, not an intra-doc link, so nothing fails to build and
-`cargo doc` stays green — they are simply wrong and will send a reader to a file
-that is not there:
+**The stale path references this entry listed are all fixed** — verified
+2026-08-23: `broadphase.rs` and `docs/plan/12-testing.md` name
+`crates/crcbl-phys/tests/broadphase_churn.rs`, `forces.rs` names
+`crates/crcbl-phys/tests/dynamics.rs`, and `crcbl/src/engine.rs` names
+`crates/crcbl/tests/seam_from_outside.rs`. Each was prose in a code span rather
+than an intra-doc link, which is why `cargo doc` stayed green throughout and
+nothing but a reader was ever misled.
 
-- `crates/crcbl-phys/src/broadphase.rs` names `tests/churn.rs` twice (module
-  header and the depth-bound doc comment); it is now
-  `tests/broadphase_churn.rs`.
-- `crates/crcbl-phys/src/forces.rs` names `tests/property.rs`; it is now
-  `tests/dynamics.rs`.
-- `crates/crcbl/src/engine.rs` names `tests/library_seam.rs` in the doc comment
-  about the hand-driven loop; it is now `tests/seam_from_outside.rs`.
-- `docs/plan/12-testing.md` names `tests/churn.rs` and `tests/property.rs` in
-  its seeded-generator paragraph. Its taxonomy-tier example is **fixed**: it
-  cited `crcbl-server`'s old `integration.rs`, which the doc-citation gate had
-  been masking behind an `allowed()` entry added for an unrelated reason. The
-  paragraph now names `client_server_session.rs` and no longer claims a
-  counter-example that does not exist.
 - The review cited `crates/crcbl-server/tests/integration.rs:15` and
   `crates/crcbl-audio/tests/orbit.rs:191`; both files are gone (the first
   replaced by `client_server_session.rs`, the second by `spatial_chain.rs`).
@@ -9957,12 +9948,13 @@ after. Renaming the functions is a separate task and stays unclaimed.
 ### Exact test-name collisions still open between non-backend crates
 
 Measured over every crate under `crates/` with the same detector used for the
-backend rename — a name defined under `#[test]` in more than one crate. Eight
-remain, all outside the four backend crates and so outside that task's paths:
+backend rename — a name defined under `#[test]` in more than one crate. What
+remains is below, all outside the four backend crates and so outside that task's
+paths. The `debug_format` bullet this list used to open with is **resolved** —
+the name is defined nowhere in the tree now, as
+`### What the non-backend test-name rename left behind` already recorded, and
+this entry went on claiming five copies for months after.
 
-- `debug_format` in `crcbl-client`, `crcbl-ecs`, `crcbl-phys`, `crcbl-server`
-  and `crcbl-ui` — five copies, and the only name in the workspace that is not a
-  prose sentence at all.
 - `automatic_selection_reports_what_it_tried` (`crcbl`, `crcbl-shell`),
   `messages_name_the_specific_problem` (`crcbl-hal`, `crcbl-shell`),
   `the_seam_is_also_usable_generically` (`crcbl-hal`, `crcbl-shell`),
@@ -9972,13 +9964,20 @@ remain, all outside the four backend crates and so outside that task's paths:
   `crcbl-store`), `the_frames_corners_do_not_grow_with_the_menu`
   (`crcbl-render`, `crcbl-ui`).
 
-`a_device_outlives_the_instance_that_made_it` in
-`crates/crcbl-hal/tests/seam_from_outside.rs` is deliberately **not** in that
-list any more and should stay unqualified: it is the seam's own obligation
-checked on `NullBackend` from outside the crate, which `docs/plan/12-testing.md`
-calls the backend-agnostic shape. It was a fifth copy of that name until the
-three backend copies took their prefixes; the bare name now belongs to the one
-test that is genuinely about no backend.
+`a_device_outlives_the_instance_that_made_it` **collides again, and this entry's
+own criterion is what says so.** It reads here as deliberately unqualified — the
+seam's obligation checked on `NullBackend` from outside the crate, which
+`docs/plan/12-testing.md` calls the backend-agnostic shape — on the grounds that
+the bare name belonged to the one test genuinely about no backend. It no longer
+does: `crates/crcbl/tests/hal_seam_e2e.rs`, the cross-backend seam suite written
+after this entry, defines the same name under `#[test]`, so there are two
+(checked 2026-08-23; the `crcbl` copy also carries `#[ignore]` for a real GPU).
+
+Whether that is worth renaming is a judgement this entry should not pre-empt:
+the two are the _same obligation_ asked of the null backend and of every real
+one, so the shared name arguably reads correctly and the collision is cosmetic.
+What is not defensible is the paragraph above claiming the collision does not
+exist.
 
 ### The first-triangle milestone is four different claims, not one written four ways
 
@@ -14217,12 +14216,16 @@ roughness, same absence of direct light, differing only in whether the ray finds
 anything. It reads about 22/255 against exactly 0 at 256×192 and 18 against 0 at
 1280×960.
 
-**`METAL_DARKNESS` was replaced by that gradient rather than deleted**, and the
-constant itself was kept: it is read at `MIRROR_MISSES` now, which is above
-everything that reflects, so the claim it makes about a conductor's absent
-ambient is still exactly true and its number has not moved. `MIRROR_GRADIENT` is
-the new central claim beside it, and `reflecting > LIT_FLOOR` is the floor that
-stops a ratio against zero from being a check that cannot fail.
+**`METAL_DARKNESS` is gone, not kept** — this entry said it survived at
+`MIRROR_MISSES` with its number unmoved, and that was wrong on every count;
+`71ef3e2 feat(render): fill SSR misses from probes` deleted it, and it resolves
+nowhere in the tree (checked 2026-08-23). What stands at that control point is
+`MIRROR_FRACTION_OF_PLASTER` in `apps/lantern/tests/golden.rs`, which asserts
+the opposite sense — a floor on the brightness a miss retains, rather than a
+ratio by which it must be darker, because a miss is filled from the probes now
+instead of going black. `MIRROR_GRADIENT` is the central claim beside it, and
+`reflecting > LIT_FLOOR` is the floor that stops a ratio against zero from being
+a check that cannot fail.
 
 **Considered, and for the sample's owner rather than the SSR slice:** if lantern
 wants a mirror showing the room, the panel wants angling or moving to a side
