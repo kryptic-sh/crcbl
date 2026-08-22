@@ -4091,7 +4091,7 @@ pub const PROBE_STENCIL_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTargetState
 /// nothing back whatever happens.
 ///
 /// Front and back are identical because the triangles are not culled and their
-/// winding is not the subject; keeping every op [`StencilOp::Keep`] beside
+/// winding is not the subject; keeping every op [`StencilOp::Keep`](crcbl_hal::StencilOp::Keep) beside
 /// `write_mask: 0` is what makes the second draw see the same plane the first
 /// one did.
 const PROBE_STENCIL_FACE: crcbl_hal::StencilFaceState = crcbl_hal::StencilFaceState {
@@ -6322,7 +6322,7 @@ impl TimestampProbe {
 ///
 /// **The browser counterpart of `the_parity_report_matches_the_reviewed_divergence_list`**
 /// in `crates/crcbl/tests/hal_seam_e2e.rs`. That test is a native binary and
-/// this backend runs in a browser, so every [`Support`] answer
+/// this backend runs in a browser, so every [`Support`](crcbl_hal::Support) answer
 /// [`WebGpuDevice`] gives is a declaration nothing
 /// holds it to — the browser gate's other groups drive the writer and the
 /// replayer and never construct a [`Device`] at all. This is

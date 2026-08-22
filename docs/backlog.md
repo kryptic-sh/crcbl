@@ -3381,6 +3381,17 @@ CI runs `cargo doc --workspace --all-features --no-deps` and it is green. Adding
 diagnostics** on the Linux target — 139 when re-measured on 2026-08-19, of which
 the 48 mechanical ones have since been fixed.
 
+**`crcbl-vk` and `crcbl-webgpu` are now covered and are out of scope for this
+entry.** Their broken links were fixed 2026-08-22 and CI runs
+`cargo doc -p crcbl-vk -p crcbl-webgpu … --document-private-items` as a second
+step in the `docs` job, red-checked by unqualifying a link. Those two rather
+than the workspace because they are where new backend work goes; widening the
+`-p` list as crates are cleaned is the way in, and turning it on workspace-wide
+today would pin a job nobody can make green. Measured the same day, unresolved
+links by crate: `crcbl-shell` 24, `crcbl-render` 4, `crcbl-audio` 3,
+`crcbl-rand` 2, and one each in `crcbl-wl-scanner`, `crcbl-store`, `crcbl-scene`
+and `crcbl-hal`. `crcbl-shell` is most of the work and is the obvious next `-p`.
+
 This entry used to list them per crate, and that breakdown rotted while the
 total stayed put — the crates traded places without the sum moving. Ask the
 command instead:

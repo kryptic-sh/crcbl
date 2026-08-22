@@ -28,9 +28,9 @@ pub const API_VERSION: u32 = vk::API_VERSION_1_3;
 ///
 /// `crcbl-hal`'s [`device`](crcbl_hal::device) rule 3 obliges every backend to
 /// stamp an owner identity into its own side table, because a
-/// [`Handle`] has no room for one and two instances genuinely do issue
-/// identical bits. A counter is enough and is cheaper to compare than a
-/// `VkInstance` pointer.
+/// [`Handle`](crcbl_core::Handle) has no room for one and two instances
+/// genuinely do issue identical bits. A counter is enough and is cheaper to
+/// compare than a `VkInstance` pointer.
 static NEXT_OWNER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub(crate) fn next_owner_id() -> u64 {

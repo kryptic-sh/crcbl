@@ -210,6 +210,21 @@ jobs:
       # intra-doc links, which is what a workspace of cross-referencing crates
       # accumulates fastest.
       - run: cargo doc --workspace --all-features --no-deps --locked
+      # **And the same again with private items, for the two backends that get
+      # new work.** The step above documents the public surface, so a broken
+      # link on a private item is invisible to it — 39 of them had accumulated
+      # workspace-wide before anyone ran rustdoc this way, none of which CI could
+      # see. `crcbl-shell` alone holds 24 and is not covered here; that job is
+      # its own entry in `docs/backlog.md`.
+      #
+      # These two are, because they are where the work is going: a link that
+      # rots in `crcbl-vk` or `crcbl-webgpu` rots in the crate somebody is
+      # reading this month. Widen the list as crates are cleaned rather than
+      # turning it on workspace-wide and pinning 39 failures to a job nobody can
+      # make green today.
+      - run:
+          cargo doc -p crcbl-vk -p crcbl-webgpu --all-features --no-deps
+          --locked --document-private-items
 
   machete:
     name: cargo-machete (unused deps)

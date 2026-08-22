@@ -51,7 +51,7 @@ pub struct WebGpuCommandEncoder {
     refused: Option<String>,
 }
 
-/// WebGPU's answer for [`Capability::DrawIndirectCount`], shared by the
+/// WebGPU's answer for [`Capability::DrawIndirectCount`](crcbl_hal::Capability::DrawIndirectCount), shared by the
 /// encoder's refusal and the device's declaration so the two cannot drift.
 ///
 /// `GPURenderPassEncoder.drawIndirect` takes a buffer and an offset and reads
@@ -61,8 +61,9 @@ pub struct WebGpuCommandEncoder {
 pub(super) const NO_COUNT_BUFFER_DRAW: &str =
     "WebGPU has no count-buffer draw, and the stream has no tag for one";
 
-/// WebGPU's answer for [`Capability::MeshShading`] and
-/// [`Capability::TaskShaderStage`], shared for the same reason.
+/// WebGPU's answer for [`Capability::MeshShading`](crcbl_hal::Capability::MeshShading) and
+/// [`Capability::TaskShaderStage`](crcbl_hal::Capability::TaskShaderStage), shared for the
+/// same reason.
 pub(super) const NO_MESH_STAGE: &str = "WebGPU has no mesh stage";
 
 impl WebGpuCommandEncoder {

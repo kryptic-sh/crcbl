@@ -11,8 +11,9 @@
 //! validation message about a stage that "does not contain the specified entry
 //! point", by which time the caller has a pipeline error naming neither the
 //! module nor the name it asked for. `crcbl-hal` promises
-//! [`HalError::ShaderCompilation`] with a reason, and a reason is only possible
-//! if this layer knows what the module contains.
+//! [`HalError::ShaderCompilation`](crcbl_hal::HalError::ShaderCompilation) with
+//! a reason, and a reason is only possible if this layer knows what the module
+//! contains.
 //!
 //! It also catches the mistake the seam explicitly worries about — bytes passed
 //! where words were wanted — one call earlier than the driver would, and with a

@@ -270,7 +270,8 @@ impl ByteWriter {
         self.put_bool(primitive.depth_clamp);
     }
 
-    /// One [`StencilFaceState`]: its compare op, then its three [`StencilOp`]s in
+    /// One [`StencilFaceState`]: its compare op, then its three
+    /// [`StencilOp`](crcbl_hal::StencilOp)s in
     /// the order the struct declares them — `fail_op`, `depth_fail_op`, `pass_op`.
     ///
     /// The three ops are the same table three times in a row, so their order is
@@ -296,7 +297,7 @@ impl ByteWriter {
     /// **There is no stencil `reference` on the wire.** WebGPU has no such
     /// pipeline member and neither does the seam — the value a draw compares
     /// against is pass state, and
-    /// [`set_stencil_reference`](Self::set_stencil_reference) is the only thing
+    /// [`set_stencil_reference`](StreamWriter::set_stencil_reference) is the only thing
     /// that carries it. The stencil block therefore ends at `write_mask`, and
     /// the bias floats follow immediately; see
     /// [`STREAM_VERSION`](tag::STREAM_VERSION), which this moved.
