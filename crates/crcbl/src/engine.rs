@@ -5769,6 +5769,14 @@ mod tests {
         /// against. A fake whose counters were a constant would pass every test
         /// a counter wired to a constant also passes.
         counters: crcbl_render::FrameCounters,
+        /// The extent this fake held each time [`GameGpu::frame`] was called,
+        /// in order.
+        ///
+        /// Recorded rather than merely overwritten because the claim it serves
+        /// is about *order*: a resize that reached the GPU after the frame it
+        /// belongs to leaves the same final extent behind as one that reached it
+        /// before, and only the per-frame record tells the two apart.
+        frame_extents: Vec<(u32, u32)>,
     }
 
     impl FakeGpu {
@@ -5781,6 +5789,7 @@ mod tests {
                 frames: 0,
                 timings: None,
                 counters: crcbl_render::FrameCounters::default(),
+                frame_extents: Vec::new(),
             }
         }
     }
@@ -5859,6 +5868,7 @@ mod tests {
 
         fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
             self.frames += 1;
+            self.frame_extents.push(self.extent);
             // One draw for the whole list, one instance per command in it, and
             // two triangles a command — a stand-in for the real renderers'
             // arithmetic whose only job is to be a function of what the frame
@@ -9204,6 +9214,56 @@ mod tests {
             windowed: false,
             limit: FrameLimit::fps(FrameLimit::DEFAULT_FPS),
         }
+    }
+
+    /// **A resize reaches the GPU before the frame that follows it**, and that
+    /// ordering is load-bearing on one backend in a way no gate would catch.
+    ///
+    /// [`Loop::frame_body`] pumps events, calls [`GpuSurface::resize`] for a
+    /// pending size, and only then calls [`GameGpu::frame`]. On `crcbl-vk` a
+    /// frame drawn at a stale extent comes back `VK_SUBOPTIMAL_KHR`, and
+    /// `crcbl-mtl` reads the layer — both notice. **`crcbl-webgpu` cannot.** A
+    /// canvas context is sized by `canvas.width`/`canvas.height` rather than by
+    /// anything `configure()` carries, so that backend answers
+    /// `AcquiredFrame::extent` from the last configure it was handed and reports
+    /// `suboptimal: false` unconditionally; the `acquired.extent` check in
+    /// [`GpuContext::acquire`] compares the mirror against itself. Move the
+    /// resize below the frame and the browser renders one frame at the previous
+    /// size with every other gate still green.
+    ///
+    /// The observable is the extent the fake **held when `frame` ran**, not the
+    /// one it ended on: both orderings leave the same extent behind afterwards,
+    /// which is exactly why an end-state assertion would pass either way.
+    #[test]
+    fn a_resize_reaches_the_gpu_before_the_frame_that_follows_it() {
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        shell
+            .resize(window, PhysicalSize::new(800, 450))
+            .expect("the window was just created");
+
+        let mut engine: Loop<_, FakeGame> = Loop::new(
+            Booted {
+                shell: Box::new(shell),
+                window,
+                gpu: FakeGpu::at((640, 480)),
+                clock_source: Clock::new(true),
+                events: 0,
+            },
+            FakeGame::default(),
+            hosted_config(None),
+        );
+        assert_eq!(
+            engine.frame_body().expect("the fake never fails"),
+            Flow::Continue
+        );
+        assert_eq!(
+            engine.gpu.frame_extents,
+            vec![(800, 450)],
+            "the frame after a resize has to run at the new extent; running it at (640, 480)              means the resize landed after the frame it belongs to"
+        );
     }
 
     /// A loop hosting [`FakeGame`] on a headless shell.

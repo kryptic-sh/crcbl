@@ -5312,16 +5312,14 @@ recorded anywhere else.
   `the_acquired_extent_is_the_one_last_configured` drives the device and proves
   a reconfigure moves what a later acquire reports.
 
-  **The third link is in `crcbl` and nothing holds it.** `Loop::frame_body`
-  pumps events, calls `gpu.resize(...)`, then calls `gpu.frame()`. Move the
-  resize below the frame and web renders a frame at the previous extent while
-  every gate stays green — `AcquiredFrame::extent` on this backend mirrors the
-  last configure rather than answering from the texture, so the
-  `acquired.extent != configured_extent` check in `crcbl::engine` can never fire
-  there. A guard belongs in `crcbl`, driving a `Loop` with a recording GPU that
-  asserts the call order, not in the backend. `crcbl-vk` folds
-  `VK_SUBOPTIMAL_KHR` into the next acquire and `crcbl-mtl` reads the layer, so
-  both would catch it; the browser is the one that would not.
+  **All three links are held now.** The third is `Loop::frame_body`'s
+  pump-resize-frame ordering in `crcbl`, guarded by
+  `a_resize_reaches_the_gpu_before_the_frame_that_follows_it`, which asserts on
+  the extent the GPU **held when `frame` ran** rather than the one it ended on —
+  both orderings leave the same extent behind, so an end-state assertion would
+  have passed either way. Measured when it was written: moving the resize below
+  the frame fails that test and **nothing else in `crcbl`'s 191**, which is what
+  it was written for.
 
 - **The browser gate renders at one size, and a second was deliberately
   blessed.** `render_e2e.rs` has `EXTENT_ODD` at 97×61 with three goldens,
