@@ -62,6 +62,31 @@ use std::collections::BTreeSet;
 /// compiling, which is a failure nobody can read as a pass.
 const GPU_STREAM_JS: &str = include_str!("../../../web/engine/gpu-stream.js");
 
+/// The same source with CRLF folded to LF, which is what every parse and every
+/// pin below reads.
+///
+/// **Not tidiness — the guards are wrong on Windows without it.**
+/// `.gitattributes` says `* text=auto`, so a Windows checkout hands these files
+/// CRLF, and a pin like [`FLAGS_READ_AS_U32`] is a multi-line `&str` written
+/// with `\n`. `contains` then answers `false` on a file nobody edited, which is
+/// the same defect `.gitattributes` already records for the shader manifest —
+/// and it failed exactly that way on `build + test (windows-latest)` for
+/// commit `f610557`, while every Linux gate passed.
+///
+/// Folding here rather than pinning the files to LF in `.gitattributes`: that
+/// would fix the checkout this repository controls and leave a contributor with
+/// a different `core.autocrlf` reading a guard that cannot match.
+/// Leaked, so the folded copy is `'static` like the `include_str!` it replaces
+/// and every parser below can keep returning slices of it. A handful of
+/// kilobytes for the life of a test binary, once per file.
+pub(crate) fn lf(source: &'static str) -> &'static str {
+    if source.contains('\r') {
+        String::leak(source.replace("\r\n", "\n"))
+    } else {
+        source
+    }
+}
+
 /// `web/engine/gpu-reply.js` — the page's half of the reply stream, for
 /// [`GPU_STREAM_JS`]'s reason.
 const GPU_REPLY_JS: &str = include_str!("../../../web/engine/gpu-reply.js");
@@ -595,7 +620,7 @@ fn stream_flag_mirrors() -> Vec<FlagMirror> {
             table: "BUFFER_USAGE",
             rust: "BufferUsage",
             module: "crcbl-hal/src/resource.rs",
-            src: HAL_RESOURCE_RS,
+            src: lf(HAL_RESOURCE_RS),
             bits: flag_bits![
                 BufferUsage,
                 TRANSFER_SRC,
@@ -613,7 +638,7 @@ fn stream_flag_mirrors() -> Vec<FlagMirror> {
             table: "SHADER_STAGES",
             rust: "ShaderStages",
             module: "crcbl-hal/src/shader.rs",
-            src: HAL_SHADER_RS,
+            src: lf(HAL_SHADER_RS),
             bits: flag_bits![ShaderStages, VERTEX, FRAGMENT, COMPUTE, MESH, TASK],
             composites: flag_unions![
                 ShaderStages,
@@ -627,7 +652,7 @@ fn stream_flag_mirrors() -> Vec<FlagMirror> {
             table: "BINDING_FLAGS",
             rust: "BindingFlags",
             module: "crcbl-hal/src/pipeline.rs",
-            src: HAL_PIPELINE_RS,
+            src: lf(HAL_PIPELINE_RS),
             bits: flag_bits![
                 BindingFlags,
                 PARTIALLY_BOUND,
@@ -640,7 +665,7 @@ fn stream_flag_mirrors() -> Vec<FlagMirror> {
             table: "IMAGE_USAGE",
             rust: "ImageUsage",
             module: "crcbl-hal/src/resource.rs",
-            src: HAL_RESOURCE_RS,
+            src: lf(HAL_RESOURCE_RS),
             bits: flag_bits![
                 ImageUsage,
                 TRANSFER_SRC,
@@ -657,7 +682,7 @@ fn stream_flag_mirrors() -> Vec<FlagMirror> {
             table: "IMAGE_ASPECT",
             rust: "ImageAspect",
             module: "crcbl-hal/src/resource.rs",
-            src: HAL_RESOURCE_RS,
+            src: lf(HAL_RESOURCE_RS),
             bits: flag_bits![ImageAspect, COLOR, DEPTH, STENCIL],
             composites: flag_unions![ImageAspect],
         },
@@ -665,7 +690,7 @@ fn stream_flag_mirrors() -> Vec<FlagMirror> {
             table: "COLOR_WRITES",
             rust: "ColorWrites",
             module: "crcbl-hal/src/pipeline.rs",
-            src: HAL_PIPELINE_RS,
+            src: lf(HAL_PIPELINE_RS),
             bits: flag_bits![ColorWrites, R, G, B, A],
             composites: flag_unions![
                 ColorWrites,
@@ -710,7 +735,7 @@ fn stream_mirror() -> FileMirror {
 
     FileMirror {
         file: "gpu-stream.js",
-        src: GPU_STREAM_JS,
+        src: lf(GPU_STREAM_JS),
         scalars: codes![
             STREAM_VERSION,
             MAX_FIELD_BYTES,
@@ -1016,7 +1041,7 @@ fn reply_mirror() -> FileMirror {
 
     FileMirror {
         file: "gpu-reply.js",
-        src: GPU_REPLY_JS,
+        src: lf(GPU_REPLY_JS),
         scalars: codes![
             REPLY_VERSION,
             MAX_FIELD_BYTES,
@@ -1481,7 +1506,7 @@ fn gpu_stream_js_mirrors_every_command_tag_and_enum_code_tag_rs_declares() {
     let claimed = check_file(&mirror);
 
     assert_eq!(
-        js_decls("gpu-stream.js", GPU_STREAM_JS).len(),
+        js_decls("gpu-stream.js", lf(GPU_STREAM_JS)).len(),
         109,
         "gpu-stream.js's top-level declaration count moved; the mirror above has to move with it"
     );
@@ -1534,12 +1559,12 @@ fn gpu_stream_js_mirrors_every_bit_of_the_crcbl_hal_flag_sets_it_restates() {
     check_file(&mirror);
 
     assert!(
-        GPU_STREAM_JS.contains(FLAGS_READ_AS_U32),
+        lf(GPU_STREAM_JS).contains(FLAGS_READ_AS_U32),
         "gpu-stream.js no longer reads a bitflags word as a u32, so its bitflag tables are \
          checked against a width the stream does not use"
     );
     assert!(
-        GPU_STREAM_JS.contains(FEATURES_READ_AS_U64),
+        lf(GPU_STREAM_JS).contains(FEATURES_READ_AS_U64),
         "gpu-stream.js no longer reads a crcbl_hal::Features word as a u64, so FEATURES_CLAIMED \
          is checked against a width the stream does not use"
     );
@@ -1593,10 +1618,10 @@ fn gpu_stream_js_mirrors_every_bit_of_the_crcbl_hal_flag_sets_it_restates() {
 fn gpu_reply_js_mirrors_every_reply_tag_and_capability_code_tag_rs_declares() {
     let mirror = reply_mirror();
     let claimed = check_file(&mirror);
-    let (tables, codes) = check_frozen("gpu-reply.js", GPU_REPLY_JS, &reply_frozen_mirror());
+    let (tables, codes) = check_frozen("gpu-reply.js", lf(GPU_REPLY_JS), &reply_frozen_mirror());
 
     assert_eq!(
-        js_decls("gpu-reply.js", GPU_REPLY_JS).len(),
+        js_decls("gpu-reply.js", lf(GPU_REPLY_JS)).len(),
         25,
         "gpu-reply.js's top-level declaration count moved; the mirror above has to move with it"
     );
@@ -1638,7 +1663,7 @@ fn every_wire_code_tag_rs_declares_is_named_in_web_engine_js() {
             .iter()
             .flat_map(|(_, _, codes)| codes.iter().map(|(name, _)| *name)),
     );
-    let declared = pub_const_value_names(TAG_RS);
+    let declared = pub_const_value_names(lf(TAG_RS));
 
     for &name in NOT_MIRRORED {
         assert!(

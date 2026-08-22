@@ -15508,8 +15508,11 @@ mod tests {
     /// with itself, so an added or retired table has to move them deliberately.
     #[test]
     fn gpu_probe_js_mirrors_every_state_code_this_crate_publishes() {
-        let (tables, codes) =
-            crate::js_mirror::check_frozen("gpu-probe.js", GPU_PROBE_JS, &mirror());
+        let (tables, codes) = crate::js_mirror::check_frozen(
+            "gpu-probe.js",
+            crate::js_mirror::lf(GPU_PROBE_JS),
+            &mirror(),
+        );
 
         assert_eq!(
             tables, 20,
