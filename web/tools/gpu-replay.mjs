@@ -9121,6 +9121,290 @@ async function main() {
     );
   }
 
+  // ---- the compressed formats, whose rows are rows of BLOCKS ---------------
+  //
+  // **A BC TEXTURE'S BUFFER ROW IS A ROW OF BLOCKS, AND NOTHING REFUSES THE
+  // OTHER ANSWER.** WebGPU's `GPUTexelCopyBufferLayout` strides between block
+  // rows and counts block rows, while the seam — mirroring Vulkan — states both
+  // pitches in texels, so a BC1 copy eight texels wide is two blocks wide and
+  // its row is 16 bytes where the same arithmetic done per texel gives 64. Both
+  // are legal-looking `GPUSize32`s and the copy is recorded either way: what a
+  // texel-wise pitch buys is every row of the image read from the wrong offset,
+  // with no validation message and nothing to attribute it to. So the extents
+  // below are wider and taller than one block, which is what keeps the two
+  // formulas from agreeing by accident.
+  //
+  // AND THE COPY `size` STAYS IN TEXELS, which is the same trap in the opposite
+  // direction and is asserted beside the pitch: dividing it too would shrink
+  // every BC copy to a quarter of the region it names.
+  /**
+   * A BC image at `h`, larger than one block in both directions.
+   *
+   * `TRANSFER_SRC | TRANSFER_DST` so the same image serves either direction, and
+   * `SAMPLED` because a compressed texture is one nothing renders to.
+   *
+   * @param {{ index: number, generation: number }} h
+   * @param {string} format A `crcbl_hal::Format` name.
+   */
+  const blockImageAt = (h, format, mipLevels = 1) => ({
+    name: 'CreateImage',
+    image: h,
+    label: null,
+    imageType: 'D2',
+    extent: { width: 8, height: 8, depthOrLayers: 1 },
+    format,
+    mipLevels,
+    samples: 1,
+    usage: ['SAMPLED', 'TRANSFER_SRC', 'TRANSFER_DST'],
+  });
+  /**
+   * Replays a buffer, an image of `format` and an encoder on a device that
+   * enabled every gated format, then one copy of the whole 8×8 image in
+   * whichever direction `name` names.
+   *
+   * The device holds `texture-compression-bc` because a BC image is refused at
+   * creation without it, and a refusal there would leave every assertion past it
+   * talking about a handle nothing created — `image` comes back so a check can
+   * say the copy had a texture to resolve.
+   *
+   * `bufferRowLength` and `bufferImageHeight` default to `0`, the seam's
+   * "tightly packed", and are in TEXELS when they are not.
+   *
+   * `mip` selects the level the copy names and `mipLevels` how many the image
+   * declares, which is the only way to reach an extent a block does not divide:
+   * WebGPU refuses to create a compressed texture whose size is not a whole
+   * number of blocks, so a partial block exists only where halving produced one.
+   *
+   * @param {string} name `'CopyImageToBuffer'` or `'CopyBufferToImage'`.
+   * @param {string} format A `crcbl_hal::Format` name.
+   * @param {{ bufferRowLength?: number, bufferImageHeight?: number,
+   *   features?: string[], mip?: number, mipLevels?: number,
+   *   extent?: { width: number, height: number } }} [pitch]
+   */
+  const blockCopyCase = async (
+    name,
+    format,
+    {
+      bufferRowLength = 0,
+      bufferImageHeight = 0,
+      features = ['texture-compression-bc'],
+      mip = 0,
+      mipLevels = 1,
+      extent = { width: 8, height: 8 },
+    } = {}
+  ) => {
+    const bufH = handle(80, 1);
+    const imgH = handle(90, 1);
+    const { replayer, device } = await readyWithDevice({
+      device: stubDevice(features),
+    });
+    replayer.replay(frameOf(storageBufferAt(bufH), 700n));
+    replayer.replay(frameOf(blockImageAt(imgH, format, mipLevels), 701n));
+    replayer.replay(frameOf(encoderCommand, 702n));
+    replayer.replay(
+      frameOf(
+        {
+          name,
+          buffer: bufH,
+          bufferOffset: 0n,
+          bufferRowLength,
+          bufferImageHeight,
+          image: imgH,
+          imageSubresource: {
+            aspect: ['COLOR'],
+            mip,
+            baseLayer: 0,
+            layerCount: 1,
+          },
+          imageOffset: { x: 0, y: 0, z: 0 },
+          imageExtent: { ...extent, depthOrLayers: 1 },
+        },
+        703n
+      )
+    );
+    const encoder = device.createdEncoders.at(-1);
+    return {
+      recorded:
+        name === 'CopyImageToBuffer'
+          ? encoder.imageToBufferCopies
+          : encoder.bufferToImageCopies,
+      error: replayer.takeError(),
+      image: replayer.images.get(imgH),
+    };
+  };
+  {
+    // **THE UPLOAD: a BC1 block is 8 bytes and 4×4 texels**, so 8 texels of row
+    // are 2 blocks and 16 bytes, and 8 texels of height are 2 block rows. A
+    // per-texel pitch would say 64 and 8 — every number here differs between the
+    // two formulas, and the extent, which is not converted at all, is the one
+    // that must not.
+    const { recorded, error, image } = await blockCopyCase(
+      'CopyBufferToImage',
+      'BC1_RGBA_UNORM'
+    );
+    check(
+      error === null &&
+        recorded.length === 1 &&
+        recorded[0].destination.texture === image &&
+        recorded[0].source.bytesPerRow === 2 * 8 &&
+        recorded[0].source.rowsPerImage === 2 &&
+        recorded[0].size.width === 8 &&
+        recorded[0].size.height === 8,
+      `a bc1-rgba-unorm buffer→image copy strides by the block row and keeps the extent in texels (${JSON.stringify(
+        [
+          error,
+          recorded.map((copy) => [
+            copy.source.bytesPerRow,
+            copy.source.rowsPerImage,
+            copy.size.width,
+          ]),
+        ]
+      )})`
+    );
+  }
+  {
+    // **AND THE READBACK, which is the direction a compressed texture is
+    // actually read through** — a BC page is uploaded once and read back to be
+    // compared. The layout member moves to the copy's `destination` here and the
+    // texture to its `source`, so a mapping that converted only one direction is
+    // visible.
+    const { recorded, error, image } = await blockCopyCase(
+      'CopyImageToBuffer',
+      'BC1_RGBA_UNORM'
+    );
+    check(
+      error === null &&
+        recorded.length === 1 &&
+        recorded[0].source.texture === image &&
+        recorded[0].destination.bytesPerRow === 2 * 8 &&
+        recorded[0].destination.rowsPerImage === 2 &&
+        recorded[0].size.width === 8,
+      `a bc1-rgba-unorm image→buffer copy strides by the block row (${JSON.stringify(
+        [
+          error,
+          recorded.map((copy) => [
+            copy.destination.bytesPerRow,
+            copy.destination.rowsPerImage,
+          ]),
+        ]
+      )})`
+    );
+  }
+  {
+    // **AN EXPLICIT PITCH IS IN TEXELS TOO, and is the case a tightly packed
+    // copy cannot tell apart.** `buffer_row_length` and `buffer_image_height`
+    // are the caller's own numbers rather than the copy extent, so they take the
+    // same division — 16 texels of row are 4 blocks and 32 bytes, and 12 texels
+    // of height are 3 block rows. Neither matches the tightly packed answer
+    // above nor the texel counts they arrive as.
+    const { recorded, error } = await blockCopyCase(
+      'CopyBufferToImage',
+      'BC1_RGBA_UNORM',
+      { bufferRowLength: 16, bufferImageHeight: 12 }
+    );
+    check(
+      error === null &&
+        recorded.length === 1 &&
+        recorded[0].source.bytesPerRow === 4 * 8 &&
+        recorded[0].source.rowsPerImage === 3,
+      `an explicit buffer_row_length on a BC format converts through the block extent (${JSON.stringify(
+        [
+          error,
+          recorded.map((copy) => [
+            copy.source.bytesPerRow,
+            copy.source.rowsPerImage,
+          ]),
+        ]
+      )})`
+    );
+  }
+  {
+    // **A PARTIAL BLOCK STILL OCCUPIES A WHOLE ONE, which is the case rounding
+    // down gets wrong and every block-aligned copy above agrees with it on.**
+    // Mip 1 of an 8×8 BC1 image is 2×2 texels — half a block each way — and
+    // WebGPU permits a copy naming a mip level's own size even when a block does
+    // not divide it. Its row is one whole 8-byte block and its image one whole
+    // block row; truncating the division would hand WebGPU a zero pitch, which
+    // is a layout no buffer has. Reaching it needs a mip because a compressed
+    // texture cannot be *created* at a size a block does not divide.
+    const { recorded, error } = await blockCopyCase(
+      'CopyBufferToImage',
+      'BC1_RGBA_UNORM',
+      { mip: 1, mipLevels: 2, extent: { width: 2, height: 2 } }
+    );
+    check(
+      error === null &&
+        recorded.length === 1 &&
+        recorded[0].source.bytesPerRow === 8 &&
+        recorded[0].source.rowsPerImage === 1 &&
+        recorded[0].destination.mipLevel === 1 &&
+        recorded[0].size.width === 2 &&
+        recorded[0].size.height === 2,
+      `a copy of a mip level a block does not divide rounds up to the whole block (${JSON.stringify(
+        [
+          error,
+          recorded.map((copy) => [
+            copy.source.bytesPerRow,
+            copy.source.rowsPerImage,
+            copy.destination.mipLevel,
+            copy.size.width,
+          ]),
+        ]
+      )})`
+    );
+  }
+  {
+    // **EVERY FORMAT THIS BACKEND CAN CREATE MUST HAVE A COPY FOOTPRINT**, and
+    // the list is not written out here: it is the formats
+    // {@link webgpuTextureFormatFor} answers a `GPUTextureFormat` for, asked
+    // about `gpu-reply.js`'s wire table — a different module from the one under
+    // question, and the whole of `crcbl_hal::Format`. A format added to
+    // `TEXTURE_FORMAT` and forgotten in the footprint table therefore fails
+    // here, on the run that adds it, rather than at whichever caller first
+    // copies one.
+    //
+    // WHAT IS DRIVEN IS A COPY, NOT A TABLE LOOKUP. Each format gets an image
+    // and a real `CopyImageToBuffer`, and what the check reads is that no
+    // refusal named a missing footprint. A depth format refuses this copy for a
+    // different reason — its `'all'` aspect names both planes — and that is the
+    // right answer for it, so only the footprint refusal counts. The image being
+    // created is asserted alongside: a copy whose image never resolved is
+    // refused before the footprint is ever consulted, which would pass this
+    // vacuously for every row.
+    const gatedFeatures = ['texture-compression-bc', 'depth32float-stencil8'];
+    const produced = Object.keys(FORMAT).filter(
+      (format) =>
+        webgpuTextureFormatFor(format, new Set(gatedFeatures)).name !== null
+    );
+    // A walk over an empty list passes whatever the table says, so its length is
+    // its own check.
+    check(
+      produced.length > 0,
+      `TEXTURE_FORMAT has rows to hold to the copy path (${produced.length}: ${produced.join(', ')})`
+    );
+    /** @type {string[]} */
+    const footprintless = [];
+    /** @type {string[]} */
+    const uncreated = [];
+    for (const format of produced) {
+      const { error, image } = await blockCopyCase(
+        'CopyImageToBuffer',
+        format,
+        { features: gatedFeatures }
+      );
+      if (image === undefined) uncreated.push(format);
+      if (error !== null && error.includes('no block footprint')) {
+        footprintless.push(format);
+      }
+    }
+    check(
+      footprintless.length === 0 && uncreated.length === 0,
+      `every format TEXTURE_FORMAT produces has a copy footprint (${produced.length} driven, missing: ${
+        footprintless.join(', ') || 'none'
+      }; uncreated: ${uncreated.join(', ') || 'none'})`
+    );
+  }
+
   {
     // **An image→image copy reaches the encoder with both images resolved and the
     // two sides' mip levels, origins and the shared extent passed through.** The

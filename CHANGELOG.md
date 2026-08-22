@@ -1168,6 +1168,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A block-compressed buffer↔texture copy is no longer refused by the WebGPU
+  backend.** The replayer derived a copy's `bytesPerRow` from a bytes-per-texel
+  table, which no BC format has an entry in, so every `copy_buffer_to_image` or
+  `copy_image_to_buffer` naming one failed with "has no single bytes-per-texel"
+  — despite `crcbl_hal::Format` spelling the BC formats and the replayer already
+  mapping each to its WebGPU name behind `texture-compression-bc`. Both pitches
+  now convert through the format's block footprint, which is what WebGPU's
+  buffer layout measures and what `Format::block_extent` and
+  `Format::block_size` state on the seam. An uncompressed format's block is one
+  texel, so its layout is unchanged. A copy of a mip level a block does not
+  divide rounds up to the whole block it occupies.
+
 - **`render-harness-e2e.mjs` left a Chromium and its profile behind on every
   error it diagnosed.** It stopped the browser from a `finally` in `main`, and
   its own `fail` calls `process.exit`, which does not unwind one — so a harness

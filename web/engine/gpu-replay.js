@@ -363,35 +363,66 @@ const QUERY_RESOLVE_BUFFER_ALIGNMENT = 256n;
 const QUERY_RESULT_BYTES = 8;
 
 /**
- * Bytes per texel for the colour formats a linear buffer↔image copy makes sense
- * for, keyed by the `GPUTextureFormat` string {@link TEXTURE_FORMAT} maps to.
+ * What one texel block of a colour format occupies in a linear buffer, keyed by
+ * the `GPUTextureFormat` string {@link TEXTURE_FORMAT} maps to.
  *
  * **Why this table and not {@link TEXTURE_FORMAT}**: a copy carries no format —
  * it names the image, and the texture's own `format` is read back off it — so
  * the conversion from `crcbl_hal::BufferImageCopy::buffer_row_length` (which is
- * in *texels*) to WebGPU's `bytesPerRow` (which is in *bytes*) needs the block
- * size the format string does not carry. Only the uncompressed, single-plane
- * colour formats are here: a block-compressed format has no bytes per *texel* at
- * all, and a depth or stencil plane's footprint depends on which plane the copy
- * names — that is {@link DEPTH_STENCIL_COPY}'s table, not this one.
+ * in *texels*) to WebGPU's `bytesPerRow` (which is in *bytes*) needs a footprint
+ * the format string does not carry.
+ *
+ * **A TEXEL IS THE DEGENERATE BLOCK, WHICH IS WHY THERE IS NO SECOND TABLE FOR
+ * THE COMPRESSED ONES.** WebGPU's `GPUTexelCopyBufferLayout` strides between
+ * *block* rows and counts *block* rows — `bytesPerRow` is the distance between
+ * one row of whole blocks and the next, and `rowsPerImage` is how many such rows
+ * an image has — while the seam, mirroring Vulkan, states both pitches in
+ * texels. `width` and `height` are the block's extent in texels and `bytes` is
+ * what one block occupies, which is `crcbl_hal::Format::block_extent` and
+ * `Format::block_size` restated in the two numbers this file's arithmetic wants.
+ * An uncompressed format's extent is `1 × 1`, so dividing by it is a no-op and
+ * {@link Replayer#textureCopyLayout} needs one formula rather than a compressed
+ * branch beside an uncompressed one — two branches being where the arithmetic
+ * for the rarer case would rot unnoticed.
+ *
+ * Every BC row is gated behind `texture-compression-bc` at creation, so a
+ * texture reaching a copy with one of these formats is one the device enabled;
+ * {@link webgpuTextureFormatFor} is where that was decided, and a row here for a
+ * format that never got created costs nothing.
+ *
+ * A depth or stencil plane is the case this table does *not* answer: its
+ * footprint depends on which plane the copy names, which is
+ * {@link DEPTH_STENCIL_COPY}'s table. No depth format is block compressed, so
+ * each of its planes is a `1 × 1` block of that plane's own byte count.
+ *
+ * @see https://www.w3.org/TR/webgpu/#gputexelcopybufferlayout
  */
-const TEXEL_BYTES = Object.freeze({
-  r8unorm: 1,
-  rg8unorm: 2,
-  rgba8unorm: 4,
-  'rgba8unorm-srgb': 4,
-  bgra8unorm: 4,
-  'bgra8unorm-srgb': 4,
-  rgb10a2unorm: 4,
-  rg11b10ufloat: 4,
-  r16float: 2,
-  rg16float: 4,
-  rgba16float: 8,
-  r32float: 4,
-  rg32float: 8,
-  rgba32float: 16,
-  r32uint: 4,
-  rg32uint: 8,
+const BLOCK_FOOTPRINT = Object.freeze({
+  r8unorm: { width: 1, height: 1, bytes: 1 },
+  rg8unorm: { width: 1, height: 1, bytes: 2 },
+  rgba8unorm: { width: 1, height: 1, bytes: 4 },
+  'rgba8unorm-srgb': { width: 1, height: 1, bytes: 4 },
+  bgra8unorm: { width: 1, height: 1, bytes: 4 },
+  'bgra8unorm-srgb': { width: 1, height: 1, bytes: 4 },
+  rgb10a2unorm: { width: 1, height: 1, bytes: 4 },
+  rg11b10ufloat: { width: 1, height: 1, bytes: 4 },
+  r16float: { width: 1, height: 1, bytes: 2 },
+  rg16float: { width: 1, height: 1, bytes: 4 },
+  rgba16float: { width: 1, height: 1, bytes: 8 },
+  r32float: { width: 1, height: 1, bytes: 4 },
+  rg32float: { width: 1, height: 1, bytes: 8 },
+  rgba32float: { width: 1, height: 1, bytes: 16 },
+  r32uint: { width: 1, height: 1, bytes: 4 },
+  rg32uint: { width: 1, height: 1, bytes: 8 },
+  'bc1-rgba-unorm': { width: 4, height: 4, bytes: 8 },
+  'bc1-rgba-unorm-srgb': { width: 4, height: 4, bytes: 8 },
+  'bc3-rgba-unorm': { width: 4, height: 4, bytes: 16 },
+  'bc3-rgba-unorm-srgb': { width: 4, height: 4, bytes: 16 },
+  'bc4-r-unorm': { width: 4, height: 4, bytes: 8 },
+  'bc5-rg-unorm': { width: 4, height: 4, bytes: 16 },
+  'bc6h-rgb-ufloat': { width: 4, height: 4, bytes: 16 },
+  'bc7-rgba-unorm': { width: 4, height: 4, bytes: 16 },
+  'bc7-rgba-unorm-srgb': { width: 4, height: 4, bytes: 16 },
 });
 
 /**
@@ -405,7 +436,7 @@ const TEXEL_BYTES = Object.freeze({
  *
  *   * **The footprint is per plane.** `depth32float-stencil8` moves four bytes a
  *     texel through its depth plane and one through its stencil plane, so
- *     {@link TEXEL_BYTES}'s one-number-per-format shape cannot hold it.
+ *     {@link BLOCK_FOOTPRINT}'s one-row-per-format shape cannot hold it.
  *   * **So is the direction.** `depth32float` is a legal copy *source* and an
  *     illegal copy *destination*, and `depth24plus-stencil8`'s depth plane is
  *     neither — `depth24plus` names whatever the driver chose to store, so there
@@ -416,8 +447,8 @@ const TEXEL_BYTES = Object.freeze({
  *
  * Keyed by `GPUTextureFormat`, then by the `GPUTextureAspect`
  * {@link webgpuTextureAspectFor} answers. A format absent from this table is a
- * colour one and goes through {@link TEXEL_BYTES}; an aspect absent from a row
- * is a plane the format does not have or one WebGPU will not copy in either
+ * colour one and goes through {@link BLOCK_FOOTPRINT}; an aspect absent from a
+ * row is a plane the format does not have or one WebGPU will not copy in either
  * direction. `source` and `destination` are the two directions separately,
  * because that is how the specification states them.
  *
@@ -6514,12 +6545,20 @@ export class Replayer {
    * THE 256-BYTE TRAP. `BufferImageCopy::buffer_row_length` is in TEXELS (`0` =
    * tightly packed), and WebGPU's `bytesPerRow` is in BYTES and must be a
    * multiple of {@link COPY_BYTES_PER_ROW_ALIGNMENT}. So the texel pitch is
-   * multiplied by the texture's bytes-per-texel here, and the result is passed
-   * through UNPADDED: padding it would change the buffer layout the other side
-   * expects, so a misaligned pitch is left for WebGPU to refuse on
+   * converted through the format's block footprint here, and the result is
+   * passed through UNPADDED: padding it would change the buffer layout the other
+   * side expects, so a misaligned pitch is left for WebGPU to refuse on
    * `uncapturederror` rather than silently repaired. The copy-chain probe picks
    * a 64×64 `rgba8unorm` texture precisely so its natural row is 64 × 4 = 256
    * bytes, already aligned, and the happy path needs no padding at all.
+   *
+   * AND THE CONVERSION IS IN BLOCKS, WHICH IS NOT THE SAME STATEMENT. WebGPU
+   * measures a buffer layout's two pitches in whole texel blocks and the seam
+   * measures both in texels, so a block-compressed format's row is a quarter of
+   * the texels it names — {@link BLOCK_FOOTPRINT} carries the extent to divide
+   * by, and carries `1 × 1` for every uncompressed format so the one formula
+   * covers them too. The copy `size` is the exception and stays in TEXELS: it is
+   * a `GPUExtent3D`, which WebGPU keeps in texels for every format.
    *
    * The texture side's origin comes from {@link copyOrigin}: a page's layer
    * arrives in `imageSubresource.baseLayer`, and WebGPU wants it in `origin.z`.
@@ -6528,7 +6567,7 @@ export class Replayer {
    * plane and `'all'` is the only aspect it accepts, so the colour path reads as
    * though the field were absent; a depth-stencil format accepts exactly one
    * named plane and rejects `'all'`, and which plane it is decides both the
-   * bytes-per-texel above and whether this direction is legal at all —
+   * footprint above and whether this direction is legal at all —
    * {@link DEPTH_STENCIL_COPY} is where those two facts live.
    *
    * Returns the `GPUImageCopyTexture`, the `GPUImageDataLayout` WITHOUT its
@@ -6563,12 +6602,12 @@ export class Replayer {
       return null;
     }
     const planes = DEPTH_STENCIL_COPY[texture.format];
-    let texelBytes;
+    let block;
     if (planes === undefined) {
-      texelBytes = TEXEL_BYTES[texture.format];
-      if (texelBytes === undefined) {
+      block = BLOCK_FOOTPRINT[texture.format];
+      if (block === undefined) {
         this.#deviceError(
-          `${named} touches a ${texture.format} texture, which has no single bytes-per-texel ` +
+          `${named} touches a ${texture.format} texture, which has no block footprint ` +
             'this replayer can turn buffer_row_length into a bytesPerRow with'
         );
         return null;
@@ -6596,20 +6635,29 @@ export class Replayer {
       );
       return null;
     } else {
-      texelBytes = planes[aspect.aspect].bytes;
+      // No depth-stencil format is block compressed, so a plane's block is one
+      // texel wide and one texel tall and holds that plane's own byte count.
+      block = { width: 1, height: 1, bytes: planes[aspect.aspect].bytes };
     }
-    // `0` means tightly packed, so the row is the copy width; otherwise the
-    // caller's explicit texel pitch. Multiplied to bytes, passed through unpadded
-    // — see the 256-byte trap above.
+    // `0` means tightly packed, so the pitch is the copy extent; otherwise the
+    // caller's explicit one.
     const rowTexels =
       command.bufferRowLength === 0
         ? command.imageExtent.width
         : command.bufferRowLength;
-    const bytesPerRow = rowTexels * texelBytes;
-    const rowsPerImage =
+    const imageTexelRows =
       command.bufferImageHeight === 0
         ? command.imageExtent.height
         : command.bufferImageHeight;
+    // BOTH PITCHES ARRIVE IN TEXELS AND WEBGPU WANTS BLOCKS, so each is divided
+    // by the format's block extent — by `1` for an uncompressed format, which is
+    // why there is one formula here and not two. Rounded up rather than
+    // truncated: a copy that reaches the image's edge may end in a partial
+    // block, and a partial block still occupies a whole one in the buffer, so
+    // truncating would hand WebGPU a `GPUSize32` short of a block per row.
+    // The byte pitch is passed through UNPADDED — see the 256-byte trap above.
+    const bytesPerRow = Math.ceil(rowTexels / block.width) * block.bytes;
+    const rowsPerImage = Math.ceil(imageTexelRows / block.height);
     return {
       texture,
       textureView: {
