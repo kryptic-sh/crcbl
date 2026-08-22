@@ -5415,22 +5415,34 @@ item lives.
   Win32 half of the same claim is already recorded separately in this file; this
   is the X11 half, which had no entry.
 
-- **No golden audio buffer exists, and nobody has listened to the mixer's
-  output.** `crates/crcbl-audio/tests/` holds `spatial_chain.rs` and no fixture
-  that pins rendered samples against a known-good buffer, so every claim about
-  panning, attenuation and mixing is a claim about the arithmetic rather than
-  about the sound. The same shape as the RenderDoc gap and a different remedy:
-  this one _can_ be asserted — a short deterministic mix compared against
-  committed samples would catch a regression that the per-voice unit tests
-  cannot, because they never combine.
+- **Nobody has listened to the mixer's output.** Every claim about it is
+  numeric, and the numeric coverage is real — this entry replaces one that said
+  no golden audio existed at all, which was wrong and was written from a search
+  of `crates/crcbl-audio/tests/` rather than from opening the crate.
+  `mixer.rs`'s own tests hold `golden_buffer_dc_sum` (two DC voices at known
+  volumes, exact sums, then silence and a zero voice count),
+  `two_voices_playing_at_once_sum_into_the_same_output_buffer`, per-channel ITD
+  delay, fractional-tap interpolation, pan re-aiming and pitch channel
+  separation; `tests/spatial_chain.rs` drives a 220 Hz tone through
+  `compute_cue` → `SoundBank` → `Mixer` and asserts centre symmetry, right pans
+  right, and that an orbit hashes the same twice and differently reversed. What
+  is genuinely absent is a human ear: no artifact anyone can play, so a
+  regression that keeps every invariant and still sounds wrong — a click at a
+  block boundary, an artefact in the resampler — would pass. Same shape as the
+  RenderDoc gap, and the same honest form: this is a coverage gap, not a task,
+  because "listen to it" is not something a runner can assert.
 
-- **`crcbl_audio::CueDeck` — the seam under four samples' audio plumbing.** The
-  stream-open-with-null-fallback, the unknown-id guard, the cue→`VoiceMix`
-  conversion and the `plays` counter with its `id - 1` indexing repeat in
-  `apps/{asteroids,breakout,flappy,horde}/src/audio.rs`. **Not the sound
-  design**, which is supposed to differ, and not the per-sample debug sections.
-  **Blocked on the `CueGrammar` decision recorded above** — building the deck
-  first means building it around a parameter that is about to disappear.
+- **`crcbl_audio::CueDeck` — the seam under the samples' audio plumbing.** The
+  stream-open-with-null-fallback, the unknown-id guard and the cue→`VoiceMix`
+  conversion repeat in `apps/{asteroids,breakout,flappy,horde}/src/audio.rs`.
+  The `plays` counter with its `id - 1` indexing repeats in **three** of those
+  four — **breakout has none**, which is the drift the earlier sample-findings
+  lists predicted and is why breakout's cues cannot be asserted about. That
+  asymmetry is an argument for the seam rather than against it: the copy that
+  was never made is the one with no coverage. **Not the sound design**, which is
+  supposed to differ, and not the per-sample debug sections. **Blocked on the
+  `CueGrammar` decision recorded above** — building the deck first means
+  building it around a parameter that is about to disappear.
 
 - **DECISION NEEDED — does each game keep re-flattening `RunSummary`?** Every
   sample declares its own `Summary` struct that re-states `RunSummary`'s fields
