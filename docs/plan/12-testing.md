@@ -247,12 +247,12 @@ A file named for a tier — `integration.rs` — tells a reader what the build
 system already knows and nothing about what is inside. Anything under `tests/`
 is an integration target by definition, so the name is spent on a fact you get
 for free, and the file becomes the place unrelated tests accumulate because
-nothing in its name says they do not belong.
-`crates/crcbl-server/tests/integration.rs` was the one file carrying it, and it
-is now `client_server_session.rs` — named for the handshake, resume and
-replication it actually asserts. No file in the workspace carries a tier name
-today, which is the state to keep rather than a rule with nothing left to point
-at.
+nothing in its name says they do not belong. `crcbl-server`'s integration target
+was the one file carrying it, and it is now
+`crates/crcbl-server/tests/client_server_session.rs` — named for the handshake,
+resume and replication it actually asserts. No file in the workspace carries a
+tier name today, which is the state to keep rather than a rule with nothing left
+to point at.
 
 **Every file in a `tests/` directory carries a `//!` header** saying what it
 covers _and why it is a separate target_ — the second half is the one that gets

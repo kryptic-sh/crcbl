@@ -891,9 +891,9 @@ file rots.
 **What the deletion left behind, measured on 2026-08-21.** The code went in one
 commit; the prose did not. `git grep -lI 'crcbl-wgpu\|crcbl_wgpu'` finds the
 name in **92 files** outside this backlog — plan documents, crate docs, test
-comments, `CHANGELOG.md`, `docs/code-review.md`. Most of that is history and
-correct as history. Three are justifications that are now false and will mislead
-whoever reads them next:
+comments and `CHANGELOG.md`. Most of that is history and correct as history.
+Three are justifications that are now false and will mislead whoever reads them
+next:
 
 - **`crates/crcbl-mtl/Cargo.toml`** justifies `objc2-quartz-core` and
   `objc2-core-foundation` as "already in this workspace's lockfile — `wgpu-hal`
@@ -5130,6 +5130,122 @@ confirmed; the rest of this file assumes them.
   Preserves sample rule 7 and demonstrates the matchmaker and rating curve; only
   the transport is absent.
 
+## The 2026-08-01 full-workspace review, aggregated (2026-08-22)
+
+**The review document is deleted.** The earlier decision — recorded below as "a
+record, left unedited" — is **reversed by the user**: it is folded into this
+file and gone. What follows is everything from it that survived verification
+against the tree, plus the caveats a future reader would otherwise re-derive.
+
+Every one of its ~210 findings was re-checked by reading today's code, never by
+trusting the review or a grep. The result is that **nothing above Low severity
+is still live.** Every Critical is fixed or dead — the QOA LMS sign inversion,
+the unsound `unsafe impl Send/Sync for Mixer` (now a `Mutex`, zero `unsafe`),
+the 62-byte save that aborted the process, the BVH pre-sort refit index,
+breakout's restart/per-frame-stepping/invisible-ball trio, `apps/sim`'s
+`--tick-rate 0` divide-by-zero. Many fixes carry a comment or a regression test
+naming the original defect, which is the strongest evidence the deletion loses
+nothing.
+
+### What is still live, all Low
+
+- **`fill_audio`'s multichannel fan-out writes only the front pair**
+  (`crates/crcbl-audio/src/lib.rs`). The `else` branch — any device that is
+  neither mono nor stereo — writes `data[i * channels]` and `+ 1` and leaves
+  channels 2..n at the zero `data.fill(0.0)` left. A 5.1 or 7.1 output plays a
+  stereo image with four dead speakers and no diagnostic anywhere. Nothing in
+  the surrounding comments justifies it.
+- **`FrameClock::new`'s `# Panics` is incomplete**
+  (`crates/crcbl-core/src/time.rs`). It names `tick_hz == 0`;
+  `tick_hz > 1_000_000_000` also panics, because the period truncates to zero
+  and `with_period` rejects it.
+- **`log::is_installed` answers for the wrong thing**
+  (`crates/crcbl-core/src/log.rs`). It is `LOGGER.get().is_some()`, but
+  `init_logging` runs `LOGGER.get_or_init` _before_ `log::set_logger`, so a host
+  application that already owns the process slot leaves this answering `true`
+  while the module installed nothing. The file documents a `set_logger` race
+  elsewhere, for the capture path.
+- **A non-UTF-8 `settings.toml` is mangled, not reported**
+  (`crates/crcbl-store/src/settings.rs`) — `String::from_utf8_lossy` before
+  `toml::from_str`, so replacement characters reach the parser.
+- **X11 `wait_events` can sleep with events already decoded**
+  (`crates/crcbl-shell/src/x11/shell.rs`). `collect_events` drains libxcb's
+  queue _and_ the socket via `xcb_poll_for_event`, then stops at
+  `MAX_EVENTS_PER_PUMP`. A burst past that cap leaves the remainder in libxcb's
+  internal queue, and `wait_events` then polls only the connection fd — which is
+  not readable, because the socket was already drained. Its comment still
+  asserts the opposite as fact.
+- **Wayland `global_remove` is handled for `wl_output` and `wl_seat` only**
+  (`crates/crcbl-shell/src/wayland/mod.rs`). A compositor removing and
+  re-advertising `xdg_wm_base` leaves a non-null dead proxy, and `bind_global`'s
+  `is_null()` guard then refuses to re-bind; the next `create_window` marshals
+  on a destroyed object, which disconnects the client.
+- **One clipboard payload copy per `wl_data_source.send`, uncapped**
+  (`crates/crcbl-shell/src/wayland/mod.rs`). Each `receive` costs a `to_vec()`
+  held in `self.writes` until the transfer completes or idles out — a
+  peer-controlled multiplier bounded only by their fd limit. Notable because the
+  sibling findings in the same sweep were all fixed _with_ caps
+  (`Offer::MAX_OFFER_MIMES`, `Device::MAX_PENDING_OFFERS`, `fd::MAX_BYTES`), so
+  this is a gap in a finished sweep rather than a decision.
+- **X11 `refresh_of` re-issues a full screen-resources round trip per CRTC**
+  (`crates/crcbl-shell/src/x11/monitors.rs`) — six monitors cost twelve extra
+  synchronous round trips on connect and on every RandR change. The sibling
+  `read_crtcs` in the same file is written two-phase to avoid exactly this.
+- **No ICCCM `MULTIPLE` target** (`crates/crcbl-shell/src/x11/xselection.rs`);
+  the `TIMESTAMP` half of that finding is fixed. An undocumented omission,
+  unlike the many deliberate ones in that file.
+- **Three `Limits` fields are written by backends and enforced by nothing** —
+  `max_uniform_buffer_range`, `max_storage_buffer_range`,
+  `optimal_buffer_copy_offset_alignment` (`crates/crcbl-hal/src/caps.rs`). Five
+  of the eight the review named are now enforced.
+- **`fp3232` divides the fraction by `u32::MAX` rather than `2^32`**
+  (`crates/crcbl-shell/src/x11/input.rs`) — ~2.3e-10 relative error,
+  unobservable, and the new test asserts to `1e-6` so it does not pin the
+  exactness either.
+- Assorted DRY/YAGNI survivors: the Wayland `data_device_mut` chain and
+  `destroy_offer(&data::Offer)` taking a throwaway; `crcbl-vk`'s three
+  independent teardown sweeps (`destroy_trash`, `Drop`, `build_swapchain`'s
+  `unwind`) — note the _bug_ under that bullet is fixed by `take_owned`;
+  `crcbl-hal`'s hand-written handle marker/alias pairs and `ObjectKind`'s three
+  parallel lists; `ConditionSimulator::send_reliable`/`send_unreliable`;
+  `RenderGraph::physical_buffer_count` (now zero callers, not even tests);
+  `AudioEvent::range`; the inert `Schedule::debug_draw` path; `_start_tick` in
+  `ReplayReader`; `ClipboardContent::into_bytes`.
+- **Five wall-clock `thread::sleep` timing assertions**
+  (`crates/crcbl-net/src/condition.rs`) will flake on a loaded runner.
+
+### Findings that became documented decisions, not defects
+
+Do not re-file these: the behaviour is unchanged but the code now argues for it.
+`System::attach` accepting an already-swept entity; `Transform::encoded_len`
+ignoring `self`; `Message.kind` duplicating the channel choice; the resume token
+being authenticated but not encrypted (`crcbl-net`'s `auth.rs` states the threat
+model it does and does not cover); `ui_pass`'s push constants, fixed by removing
+them entirely; `crcbl-vk`'s `Trash::Swapchain` boxing; `SHADER_DEBUG_PRINTF`
+never being set.
+
+### Caveats worth keeping
+
+- **The 24 `crcbl-wgpu` findings are DEAD, not fixed.** That crate was deleted
+  (`6b5e17a`). `crcbl-webgpu` is a different design — a command-stream encoder
+  with a JS mirror, not a `wgpu` hal impl — so none of them transfer. Two
+  otherwise-live findings elsewhere cited `crcbl-wgpu` paths as their
+  counter-example; both are fixed anyway.
+- **A grep by name is not proof of deletion.** The review's own citations outran
+  two renames: `mime_for_target` moved from `xselection.rs` into `Atoms`, and
+  `X11Shell::pointer_button` became `keys::button` + `evdev_of`. Both read as
+  removals to a name search and are not.
+- **Nothing in the review was wrong when it was written**, as far as three
+  independent passes could reconstruct — several fixes restate the original bug
+  almost verbatim in a comment, which is unusually good corroboration for a
+  review of that size.
+- **Not re-checked**: `query.rs`'s absolute-`f64::EPSILON` parallelism threshold
+  (the original site is gone, but `solve_quadratic` still tests
+  `a <= f64::EPSILON`, so the scale-dependence class may survive under a new
+  name), the `add_collider_to_world`/`sync_collider_from_cached` destructure,
+  and `PhysicsWorld::closest_hit`/`closest_swept`, verified at symbol level
+  only.
+
 ## Steamworks: four decisions the plan is waiting on (2026-08-22)
 
 `docs/plan/42-steam.md` designs `crcbl-steam` end to end and is blocked on none
@@ -5252,18 +5368,13 @@ phase attached to it.
   field the type was made `#[non_exhaustive]` to be able to gain; nothing needs
   it until a game turns its camera.
 
-- **`docs/code-review.md` cites two latent panics in `play_panned` that are not
-  there and now cannot be.** The entry names
-  `apps/breakout/src/audio.rs:130,169` for an `id as usize - 1` underflow and a
-  `fade_env` underflow. The first was already fixed before this session — the
-  current code takes `bank.create_voice(id)` behind a `let Some(…)` guard and
-  its comment says in so many words that the `id - 1` index it used to have is
-  gone — and `play_panned` itself no longer exists, so the citation is doubly
-  stale. Left alone because it is unclear whether that file is a living findings
-  list to be pruned or a dated snapshot to be preserved; **that is the decision
-  needed**, and it applies to the whole document rather than this one entry. The
-  `fade_env` half was not re-checked.
-
+- **Resolved by the review's deletion: the `play_panned` panics.** The review
+  named an `id as usize - 1` underflow and a `fade_env` underflow in
+  `apps/breakout/src/audio.rs`. Neither can happen: the first was fixed before
+  the review was even filed — the code takes `bank.create_voice(id)` behind a
+  `let Some(…)` guard and says so — and `play_panned` itself no longer exists,
+  every sample having moved onto `crcbl_audio::mixer`. The `fade_env` half was
+  never re-checked and now has no function to check.
 - **Nothing has listened to the migrated cues on a real device.** Every sample's
   audio was rewritten onto `crcbl_audio::mixer` and the checks are all
   structural: buffer shapes, pan ordering, voice counts, loop seams. Two
@@ -7306,14 +7417,17 @@ uncertainty.
   arguing itself out, which sample rule 11 requires it to do in its own doc with
   a reason.
 
-- **Is `docs/code-review.md` a record or a description of current state?**
-  Taken: **a record**, and left unedited except for a line in its header saying
-  so. It is dated 2026-08-01, was added in one commit and never amended, and the
-  roadmap already says its findings were fixed across eight commits. Several of
-  its findings now describe code that no longer exists — the `paddle_model`
-  finding is the clearest, since breakout has no forward pass at all. _Changes
-  it_: a decision to keep it live, which would mean re-running the review rather
-  than patching the findings that happen to have been noticed.
+- **Was the 2026-08-01 review document a record or a description of current
+  state?** Taken 2026-08-10: **a record**, left unedited. **Reversed 2026-08-22
+  by the user: aggregated into this file and deleted** — see "The 2026-08-01
+  full-workspace review, aggregated" above. The reasoning below is kept because
+  it is why the file survived as long as it did. It is dated 2026-08-01, was
+  added in one commit and never amended, and the roadmap already says its
+  findings were fixed across eight commits. Several of its findings now describe
+  code that no longer exists — the `paddle_model` finding is the clearest, since
+  breakout has no forward pass at all. _Changes it_: a decision to keep it live,
+  which would mean re-running the review rather than patching the findings that
+  happen to have been noticed.
 
 - **What does a paused frame do to the fixed-tick accumulator?** Taken: **update
   the clock and drain the accumulator without stepping the game.** The three
@@ -9264,16 +9378,15 @@ that is not there:
 - `crates/crcbl/src/engine.rs` names `tests/library_seam.rs` in the doc comment
   about the hand-driven loop; it is now `tests/seam_from_outside.rs`.
 - `docs/plan/12-testing.md` names `tests/churn.rs` and `tests/property.rs` in
-  its seeded-generator paragraph, and names
-  `crates/crcbl-server/tests/integration.rs` as the one file carrying a taxonomy
-  tier for a name. That example is now spent — the file is
-  `client_server_session.rs` — so the paragraph needs rewriting rather than a
-  path substitution, and there is no remaining file in the workspace to point at
-  as the counter-example.
-- `docs/code-review.md` cites `crates/crcbl-server/tests/integration.rs:15` and
-  `crates/crcbl-audio/tests/orbit.rs:191`. That file is a dated record of past
-  reviews, so leaving the paths as they were written may be right; the decision
-  was not made either way.
+  its seeded-generator paragraph. Its taxonomy-tier example is **fixed**: it
+  cited `crcbl-server`'s old `integration.rs`, which the doc-citation gate had
+  been masking behind an `allowed()` entry added for an unrelated reason. The
+  paragraph now names `client_server_session.rs` and no longer claims a
+  counter-example that does not exist.
+- The review cited `crates/crcbl-server/tests/integration.rs:15` and
+  `crates/crcbl-audio/tests/orbit.rs:191`; both files are gone (the first
+  replaced by `client_server_session.rs`, the second by `spatial_chain.rs`).
+  Settled by deleting the review — see the aggregated section above.
 
 **Test _names_ inside these files were not touched.** `docs/plan/12-testing.md`
 records six crates as drifted below the prose-sentence-name convention —
@@ -9424,26 +9537,20 @@ name of three words or fewer outside the backend crates. Measured with a
 test-name collisions still open between non-backend crates" above are resolved;
 the rest of that entry's list still stands.
 
-- **`orbit_integration_deterministic` was renamed after all, and the citation it
-  was being held back to protect is now stranded.** This entry used to say the
-  name was deliberately left alone because `docs/code-review.md` cites it. The
-  test in `crates/crcbl-audio/tests/spatial_chain.rs` is now
-  `an_orbit_hashes_the_same_twice_and_differently_in_reverse`, and no
-  `orbit_integration_deterministic` exists anywhere in the tree.
+- **Closed: the stranded `orbit_integration_deterministic` citation.** The test
+  is `an_orbit_hashes_the_same_twice_and_differently_in_reverse` in
+  `crates/crcbl-audio/tests/spatial_chain.rs`; the old name exists nowhere. The
+  review that cited it was wrong in three ways at once by the end — the path (an
+  `orbit.rs` that no longer exists), the name, and the finding itself, which
+  said the test XORs per-block hashes and is order-insensitive when it feeds one
+  hasher in block order and asserts the reversed order hashes _differently_.
+  Deleting the review closed all three.
 
-  `docs/code-review.md:1775` is therefore wrong in **three** ways at once: the
-  path (`crates/crcbl-audio/tests/orbit.rs:191` — that file is
-  `tests/spatial_chain.rs`), the test name, and the finding itself. It says the
-  test XORs per-block hashes and is order-insensitive; the test feeds one hasher
-  in block order and asserts the reversed event order hashes _differently_,
-  which is the property the old name could not express and the new one does.
-
-  **Not fixed here on purpose.** Whether `docs/code-review.md` is a living
-  findings list to be pruned or a dated snapshot to be preserved is an open
-  question recorded under _Owed_, and it governs the whole document rather than
-  this one line. Fix them together. Found by sweeping every backticked symbol in
-  this file against the tree — a check the doc-citation gate does not make,
-  since it resolves paths and not names.
+  **The method is the part worth keeping.** It was found by sweeping every
+  backticked symbol in this file against the tree — a check
+  `tools/check-doc-citations.sh` does not make, since it resolves paths and not
+  names. That sweep is worth re-running after any rename: it also caught
+  `draw_pause_menu`, deleted long before the entry naming it.
 
 - **The four `the_workgroup_size_matches_the_numthreads_the_shader_declares`
   copies and the three `the_params_block_matches_the_offsets_slangc_emits`
