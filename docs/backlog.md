@@ -6199,6 +6199,35 @@ thing to give — horde works around it by handing `Pool::with_workers` an
     `apps/horde`'s determinism tests already use — `pool.workers()` and two
     distinct thread ids — not "a worker backend was selected".
 
+## The private-item doc gate only ever runs on Linux
+
+`ci.yml`'s `rustdoc` job is `runs-on: ubuntu-latest`, so
+`cargo doc --document-private-items` compiles the Linux `cfg` and nothing else.
+`crcbl-shell`'s Win32 and AppKit halves are therefore uncovered by it, and they
+have rot the Linux run cannot see. Measured 2026-08-22 with the same flags plus
+`--target`, on the two targets that are installed here:
+
+- `x86_64-pc-windows-msvc`: 46 errors — 23 unresolved links and 23 redundant
+  explicit link targets.
+- `aarch64-apple-darwin`: 82 errors — 48 unresolved links, 26 redundant explicit
+  link targets, and 8 cases of public documentation linking a private item.
+
+Pre-existing rather than introduced: the Linux half was cleaned on 2026-08-22
+and these two were never in scope. **Both targets are installed locally, so this
+is fixable without a CI round trip** — the same reason the cross-target clippy
+checks exist.
+
+Two things make this bigger than the count suggests. The
+`redundant explicit link target` rows are a _consequence_ of fixing the others —
+Linux hit exactly one of those once a link resolved in its own scope — so the
+real total moves as work proceeds. And a doc gate added per target is a third
+and fourth rustdoc invocation in a job that already runs four; whether that
+belongs in the `rustdoc` job or alongside the cross-target clippy steps is a
+placement question nobody has answered.
+
+The same question applies to every other crate with platform-gated code, and was
+not measured: only `crcbl-shell` was.
+
 ## What the scaffold's gate does not cover
 
 `crcbl new`'s template now hosts `crcbl::engine::Loop`, and the scaffold e2e
@@ -7524,44 +7553,29 @@ not:
   module doc claimed byte-identical output across builds; that claim is now
   corrected rather than repeated.
 
-  `a_burst_is_the_waveform_that_shipped` replaces it: eight probe samples at a
-  1e-5 absolute tolerance plus total energy at 1e-6 relative. Both halves are
-  live and they catch different things — shifting the noise sequence by one
-  index moves a probe by 0.040, and nudging the low-pass coefficient by 0.006%
-  leaves every probe inside tolerance and moves the energy. What it gives up
-  against a digest is per-sample coverage of the 30,718 samples between the
-  probes; **a full reference buffer with a tolerance would restore that**, which
-  is what `crcbl-golden` does for images, and it would want the same thing the
-  next item asks for — a file a human can open.
+  `a_burst_is_the_waveform_that_shipped` replaced it with eight probe samples at
+  a 1e-5 absolute tolerance plus total energy at 1e-6 relative, and **that is
+  now a per-sample comparison instead** (2026-08-22). `crcbl_audio::wav` gained
+  an `encode` to match the IEEE-float decoder it already had, and
+  `crates/crcbl-audio/tests/burst-reference.wav` holds the burst — mono, because
+  the generator is mono-in-stereo, so one channel halves the file and drops no
+  claim. The test decodes it through the crate's own decoder and checks every
+  frame, so the 30,718 samples that used to sit between the probes are covered.
 
-  Still open, and not fixable by any golden: **nobody has listened to it.** No
-  test can tell a good explosion from a bad one, and these only say it has not
-  changed. Emitting a WAV a human opens is the way, the way `crcbl-golden`
-  argues for PNG.
+  The energy assertion stayed alongside it rather than being retired as
+  redundant, and the reason is measured: a thousandth of a percent on
+  `NOISE_AMPLITUDE` leaves the worst frame at 2.31e-6 — four times inside the
+  per-frame tolerance — and moves the energy twenty times outside its own. A
+  per-frame bound cannot see a small coherent drift; only the total can.
 
-  **Both halves are cheaper than this entry assumed, measured 2026-08-22:
-  `crcbl-audio/src/wav.rs` already exists and already decodes IEEE-float WAV**
-  (`format = 3`), held by
-  `format_tag_three_is_read_as_float_samples_rather_than_integers` and
-  `float32_non_finite_becomes_silence`. What the crate has no half of is an
-  _encoder_. So the two items collapse into one slice producing one artifact:
-  - Add a float32 WAV encoder to `wav.rs` — the header and the byte copy
-    described above — round-tripped against the decoder already sitting next to
-    it.
-  - Commit the burst as a reference WAV under `crates/crcbl-audio/tests/`, the
-    way each sample commits its golden PNG. **Mono**, not stereo: the generator
-    is mono-in-stereo and the test already asserts the two channels agree, so
-    storing one channel halves the fixture without dropping a claim. About 61
-    KB.
-  - `a_burst_is_the_waveform_that_shipped` then decodes the fixture and compares
-    _every_ frame at `PROBE_TOLERANCE` — the per-sample coverage the probes gave
-    up — and asserts channel equality over the whole buffer rather than at eight
-    indices.
-
-  The same file is the one a human opens, so "nobody has listened to it" stops
-  needing a CI artifact: anyone with the repo can play it. Regenerating it is a
-  wholesale change to a binary blob, which is the real cost and is the one every
-  golden PNG here already carries.
+  **The listening gap is now possible to close and still is not closed.** The
+  fixture reads as `IEEE Float, mono 48000 Hz` and plays anywhere, so anyone
+  with the repo can hear the explosion — but nobody has, and no test can tell a
+  good explosion from a bad one. What is gone is the excuse that there was
+  nothing to play. Note also that a _passing_ run measures nothing about drift:
+  the fixture was written by this machine, so the worst deviation here is
+  exactly zero and the tolerance's real headroom is only exercised on the macOS
+  and Windows runners.
 
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
