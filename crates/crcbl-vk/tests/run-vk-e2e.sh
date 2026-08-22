@@ -40,7 +40,11 @@
 #   The gate for that *class* of bug is therefore deliberately not here: it is
 #   `crcbl-render`'s graph-compile suite, which compiles two frames against one
 #   `TransientPool` and asserts the second one's barriers name what the first
-#   left behind. No layer, no ICD, no GPU, no packaging opinions.
+#   left behind. That covers transients, whose state the pool knows, and — since
+#   `ImportedImage` gained `InitialClaim` — imports too: the pool records what
+#   each executed graph left every tracked import in, and a second frame whose
+#   `initial` contradicts it is refused at compile time rather than barriered
+#   against. No layer, no ICD, no GPU, no packaging opinions.
 #
 # ENVIRONMENT
 #   CRCBL_VK_ICD              Pin an ICD manifest, e.g. lavapipe's `lvp_icd.json`.
