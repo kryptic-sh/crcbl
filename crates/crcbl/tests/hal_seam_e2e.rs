@@ -4884,9 +4884,11 @@ fn exercise_draw_indirect_count(headless: &Headless) -> Exercise {
 /// * [`RASTER_FIRST`] — the stride was honoured. [`Exercise::Worked`].
 /// * [`RASTER_SECOND`] — the arguments were walked at
 ///   [`DRAW_ARGS_TIGHT_STRIDE`] and the decoy between them was executed, which
-///   is reading the wrong words silently and is exactly what
-///   `crcbl-wgpu` refuses rather than does. A panic, because the call did
-///   something and did the wrong thing.
+///   is reading the wrong words silently. A panic, because the call did
+///   something and did the wrong thing. The one backend that used to refuse
+///   this rather than do it was `crcbl-wgpu`, deleted in `6b5e17a`; every
+///   surviving backend answers `Yes` here, `crcbl-webgpu` included, where the
+///   replayer walks the stride itself.
 /// * [`RASTER_BACKGROUND`] — nothing was drawn, so the call was accepted and
 ///   dropped. [`Exercise::SilentlyIgnored`].
 ///

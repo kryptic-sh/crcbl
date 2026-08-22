@@ -468,10 +468,34 @@ impl Device for WebGpuDevice {
             // which of two draws survived.
             Capability::StencilReference => Support::Yes,
             Capability::DrawIndirectCount => Support::No(NO_COUNT_BUFFER_DRAW),
-            Capability::IndirectArgumentPaddedStride => Support::No(
-                "WebGPU's drawIndirect reads one tightly packed argument structure and has no \
-                 stride parameter to honour",
-            ),
+            // **An API with no stride parameter, and a backend that honours a
+            // stride anyway.** `GPURenderPassEncoder.drawIndirect(buffer,
+            // offset)` really does read one tightly packed structure, which is
+            // what this arm used to refuse over; but a HAL indirect draw does
+            // not become one of those calls, it becomes `draw_count` of them.
+            // `stride` crosses the stream beside the count — `crate::writer`
+            // writes it, `crate::reader` reads it back — and
+            // `web/engine/gpu-replay.js` unrolls the draw at `offset + i *
+            // stride`, so where the `i`th structure is read from is exactly
+            // where the caller put it, padded or tight. The indexed sibling does
+            // the same thing with the same expression.
+            //
+            // The browser gate's indirect group is what holds this `Yes` to a
+            // value rather than to a survived call: `crate::probe` fills
+            // `PROBE_INDIRECT_ARGS_BYTES` so that the structure at offset 0 and
+            // the decoy a tightly packed walk would land on both draw nothing,
+            // and only the structure at `PROBE_INDIRECT_STRIDE` draws the
+            // triangle — so the whole target comes back the draw colour when the
+            // stride was honoured and the clear when it was not.
+            //
+            // What this does not claim away is the alignment every backend
+            // wants: `indirectOffset` must be a multiple of 4, so `offset + i *
+            // stride` is one only for a stride that is one. That is
+            // `Capability::IndirectArgumentPaddedStride`'s own rule rather than
+            // a narrowing here — Vulkan asks for the same multiple of 4 — and
+            // nothing on this side rounds or refuses a stride that breaks it;
+            // the browser names it on the device error queue.
+            Capability::IndirectArgumentPaddedStride => Support::Yes,
             Capability::MeshShading | Capability::TaskShaderStage => Support::No(NO_MESH),
             // The sentence `crcbl_hal::DIVERGENCES` carries for this pair, so
             // the declaration and the parity record cannot drift apart — they

@@ -1060,7 +1060,8 @@ fn a_timestamp_set_follows_the_feature_the_device_opened_with() {
 /// open: `crcbl::backend::open` answers "the crcbl-webgpu backend is not active
 /// in this build — it reaches a device only on wasm32". So the driver that holds
 /// every other backend to `(Support::No, Exercise::Refused)` has never run
-/// against this one, and nine of its rows are unconditional `Support::No`.
+/// against this one, and its unconditional `Support::No` rows have never been
+/// held to a refusal by it.
 ///
 /// It needs no browser, which is the point. `WebGpuDevice` records commands to a
 /// stream rather than executing them, so a refusal is a decision this crate
@@ -1071,11 +1072,16 @@ fn a_timestamp_set_follows_the_feature_the_device_opened_with() {
 /// The rows whose refusal is a single device call: the four timeline rows,
 /// through `create_semaphore`, and `PipelineStatisticsQuery` through
 /// `create_query_set`. The rest — `PushConstants`, `MeshShading`,
-/// `DrawIndirectCount`, `IndirectArgumentPaddedStride`, `UpdateBindGroup`,
-/// `BindlessDescriptorArray`, `PolygonModeLine` — need a pipeline or a layout
-/// built first, which is the seam suite's `exercise_*` machinery and is not
-/// worth a second copy here. Those stay uncovered on this backend and the
-/// backlog says so.
+/// `DrawIndirectCount`, `UpdateBindGroup`, `BindlessDescriptorArray`,
+/// `PolygonModeLine` — need a pipeline or a layout built first, which is the
+/// seam suite's `exercise_*` machinery and is not worth a second copy here.
+/// Those stay uncovered on this backend and the backlog says so.
+///
+/// `IndirectArgumentPaddedStride` was on that list and is not a refusal any
+/// more: the stride crosses the stream whole and `web/engine/gpu-replay.js`
+/// unrolls the draw at `offset + i * stride`, so the declaration is
+/// `Support::Yes` and the browser gate's indirect group is what holds it to a
+/// value.
 #[test]
 fn a_capability_declared_unsupported_is_refused_by_its_own_call() {
     use crcbl_hal::{Capability, QueryKind, QuerySetDesc, SemaphoreDesc, SemaphoreKind, Support};

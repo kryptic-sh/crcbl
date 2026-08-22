@@ -298,10 +298,21 @@ capabilities! {
     /// than tightly packed.
     ///
     /// Distinct from drawing indirectly at all. Vulkan's `vkCmdDrawIndirect`
-    /// takes a stride and honours it, and D3D12 builds an `ID3D12CommandSignature`
-    /// per stride; `wgpu`'s `multi_draw_indirect` reads its own packed structures
-    /// and has nowhere to put one, so a padded stride there would silently read
-    /// the wrong words — which is why it is refused rather than ignored.
+    /// takes a stride and honours it, D3D12 builds an `ID3D12CommandSignature`
+    /// per stride, `crcbl_mtl::indirect_count` walks the structures itself, and
+    /// `crcbl-webgpu`'s replayer unrolls the draw into one `drawIndirect` per
+    /// structure at `offset + i * stride` — an API with no stride parameter can
+    /// still honour one, and the `Yes` says it does rather than that the
+    /// parameter exists.
+    ///
+    /// **The stride a caller may ask for is every API's stride, not this
+    /// seam's.** All four want a multiple of 4 that is at least the argument
+    /// structure's own width, because all four ultimately address the buffer in
+    /// words: Vulkan says so in `vkCmdDrawIndirect`'s own rule for a
+    /// `drawCount` above one, and WebGPU says so as `indirectOffset` being a
+    /// multiple of 4, which `offset + i * stride` only stays for a stride that
+    /// is one too. Nothing this declaration promises makes a stride of 14 legal
+    /// anywhere.
     IndirectArgumentPaddedStride,
 
     /// The mesh-shading path: a [`MeshPipelineDesc`](crate::MeshPipelineDesc)
@@ -808,13 +819,18 @@ pub const DIVERGENCES: &[Divergence] = &[
               count-buffer form of either, so the draw count can only come from the CPU; the \
               stream has no tag for one because there is nothing to encode",
     },
-    Divergence {
-        capability: Capability::IndirectArgumentPaddedStride,
-        backend: BackendKind::WebGpu,
-        kind: DivergenceKind::ApiAbsence,
-        why: "GPURenderPassEncoder.drawIndirect(indirectBuffer, indirectOffset) reads one tightly \
-              packed argument structure and has no stride parameter to honour",
-    },
+    // `IndirectArgumentPaddedStride` on WebGPU is not here either, and it is the
+    // third worked example — the one where the row was never true of the
+    // backend in the first place. It said
+    // `GPURenderPassEncoder.drawIndirect(indirectBuffer, indirectOffset)` reads
+    // one tightly packed structure and has no stride to honour, which is a true
+    // sentence about the WebGPU call and a false one about this backend: the
+    // stride crosses the stream whole and `web/engine/gpu-replay.js` unrolls the
+    // draw into one `drawIndirect` per structure at `offset + i * stride`, so a
+    // padded stride is honoured by walking rather than by a parameter. An
+    // `ApiAbsence` that is only an absence in the API is how a row survives
+    // review: the reason reads as checkable and the thing it describes is not
+    // the thing being declared.
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::Metal,
@@ -1447,22 +1463,24 @@ mod tests {
             ),
             ParityVerdict::Supported
         );
-        // A backend refusal the list names: reviewed.
+        // A backend refusal the list names: reviewed. An *ungated* pair, so the
+        // verdict cannot be coming from a flag the device happens to report —
+        // `IndirectArgumentPaddedStride` stood here until its row left, and the
+        // replacement was chosen to keep that property rather than only to
+        // compile.
         assert_eq!(
             parity_verdict(
-                Capability::IndirectArgumentPaddedStride,
+                Capability::UpdateBindGroup,
                 BackendKind::WebGpu,
                 refused,
                 all
             ),
             ParityVerdict::Reviewed(
-                divergence(
-                    Capability::IndirectArgumentPaddedStride,
-                    BackendKind::WebGpu
-                )
-                .expect("WebGPU's packed-only indirect stride is on the list")
+                divergence(Capability::UpdateBindGroup, BackendKind::WebGpu)
+                    .expect("WebGPU's immutable bind groups are on the list")
             )
         );
+        assert_eq!(Capability::UpdateBindGroup.gating_feature(), None);
         // The device withheld the gate: this run proves nothing either way, and
         // saying so is not a failure.
         assert_eq!(
@@ -1523,11 +1541,17 @@ mod tests {
             )
             .is_gap()
         );
-        // Ungated and listed: never a gap. The indirect stride, because
-        // nothing in `Features` describes it and WebGPU's row is permanent.
+        // Ungated and listed: never a gap. WebGPU's immutable bind groups,
+        // because nothing in `Features` describes rewriting one.
+        //
+        // The indirect stride used to stand here, on the grounds that the row
+        // was permanent. No row is: that one left when somebody read the
+        // replayer and found it already walking the stride. A fixture is picked
+        // for the shape it exercises — ungated, and on the list — and the pair
+        // that has it is checked rather than assumed.
         assert!(
             !parity_verdict(
-                Capability::IndirectArgumentPaddedStride,
+                Capability::UpdateBindGroup,
                 BackendKind::WebGpu,
                 refused,
                 Features::empty()

@@ -43,10 +43,19 @@
 //! The [`DeviceCaps`](crcbl_hal::DeviceCaps) in an answered probe is
 //! `web/engine/gpu-replay.js`'s reading of `adapter.features` and
 //! `adapter.limits`. It is not a promise that this backend can execute those
-//! capabilities: there is no `create_query_set` command yet, so a probe on a
-//! browser with `timestamp-query` reports
+//! capabilities: this side reads what the browser said, and
+//! [`Device::supports`](crcbl_hal::Device::supports) is the only place this
+//! crate answers for itself.
+//!
+//! **The example that used to stand here has closed**, and it is left named
+//! rather than deleted because the split it illustrated has not. It read "there
+//! is no `create_query_set` command yet, so a probe on a browser with
+//! `timestamp-query` reports
 //! [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) while
-//! nothing here could serve it.
+//! nothing here could serve it" — and there is one now:
+//! [`Command::CreateQuerySet`](crate::Command::CreateQuerySet) crosses the
+//! stream, [`crate::probe`] builds both an occlusion set and a timestamp set
+//! through it, and the browser gate reads a timed pass's two ticks back.
 //!
 //! That is the right split while there is no device — the wire's job is to
 //! carry the browser's answer intact — but it stops being right the moment an

@@ -3534,20 +3534,30 @@ export async function runProbeGroups({
           `${reconfig.error ? ` — ${reconfig.error}` : ''}`
   );
 
-  // **THE INDIRECT-DRAW GATE, AND THE FIRST THAT PROVES AN INDIRECT DRAW RAN.**
+  // **THE INDIRECT-DRAW GATE, AND THE ONLY EVIDENCE ANYWHERE FOR
+  // `Capability::IndirectArgumentPaddedStride` ON THIS BACKEND.**
   // Group T proved a direct `draw` overwrites a clear. This proves a
   // `drawIndexedIndirect` — the live 3D-forward geometry path — puts exactly the
   // same pixels there: wasm records the same fullscreen-triangle pipeline, fills
-  // an indirect-args buffer with `[3,1,0,0,0]` (a 3-index single draw) and an
-  // index buffer with `[0,1,2,0]` via `write_buffer`, clears the texture blue,
-  // binds the pipeline and index buffer, and records `drawIndexedIndirect`
-  // reading its counts from the buffer; the page loop replays it; and the
-  // bytes that come back are the red draw colour, every pixel — not the blue
-  // clear. A stub that skips the draw leaves blue; only an indirect draw that
-  // actually rasterised leaves red. `gpu-replay.mjs` cannot reach this for group
-  // S's reason: only a real device reads args from a buffer and rasterises.
+  // an index buffer with `[0,1,2,0]` and an indirect-args buffer with THREE
+  // argument structures via `write_buffer`, clears the texture blue, binds the
+  // pipeline and index buffer, and records `drawIndexedIndirect` reading TWO of
+  // them at a PADDED stride of two structures; the page loop replays it, which
+  // means `gpu-replay.js` unrolling the draw into one `drawIndirect` per
+  // structure at `offset + i * stride`; and the bytes that come back are the red
+  // draw colour, every pixel — not the blue clear.
+  //
+  // WHICH STRUCTURE DRAWS IS THE WHOLE CHECK. The first structure draws nothing
+  // and so does the decoy sitting one *tight* stride in; only the structure the
+  // padded stride reaches has the triangle's three indices. So blue is left by a
+  // stub that skips the draw, by a replayer that walked the arguments tightly,
+  // and by one that ignored the draw count — and red is left only by an indirect
+  // draw that rasterised from the offset it was told to. `crcbl_webgpu::probe`'s
+  // `PROBE_INDIRECT_ARGS_BYTES` is where that layout is written and asserted.
+  // `gpu-replay.mjs` cannot reach this for group S's reason: only a real device
+  // reads args from a buffer and rasterises.
   group(
-    'Z — an indirect-drawn triangle is read back as the draw colour, not the clear'
+    'Z — an indirect draw walking a padded stride is read back as the draw colour, not the clear'
   );
 
   const PROBE_INDIRECT_PIXELS = 64 * 64;
@@ -3588,7 +3598,8 @@ export async function runProbeGroups({
            // Ready: check every pixel here rather than shipping 16384 numbers
            // out. \`want\` is the fragment's constant red; the clear beneath it
            // was blue, so a texel still blue is an indirect draw that did not
-           // happen.
+           // happen — or one that read its second argument structure somewhere
+           // other than where the padded stride put it.
            const want = ${JSON.stringify(PROBE_INDIRECT_COLOR_BYTES)};
            let allMatch = r.bytes.length === ${PROBE_INDIRECT_PIXELS} * 4;
            let firstWrong = -1;
@@ -3622,7 +3633,7 @@ export async function runProbeGroups({
   );
   check(
     'Z',
-    'the indirect-drawn pixels came back as the draw colour, not the clear, every one',
+    'the indirect-drawn pixels came back as the draw colour, not the clear, every one — so the draw read its second argument structure at the padded stride',
     indirect?.done === true &&
       indirect.allMatch === true &&
       indirect.len === PROBE_INDIRECT_PIXELS * 4,

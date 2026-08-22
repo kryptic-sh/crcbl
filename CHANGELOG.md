@@ -14,6 +14,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **`crcbl-webgpu` answers `Support::Yes` for
+  `Capability::IndirectArgumentPaddedStride`**, where it answered `No`. The old
+  reason — "WebGPU's drawIndirect reads one tightly packed argument structure
+  and has no stride parameter to honour" — is true of the WebGPU call and false
+  of this backend: the stride crosses the stream whole and the replayer unrolls
+  the draw into one `drawIndirect` per structure at `offset + i * stride`. A
+  caller that was avoiding a padded stride on WebGPU, or branching on this
+  capability, can stop. The stride must still be a multiple of 4 and at least
+  the argument structure's width, which is every backend's rule rather than this
+  one's. The matching `DIVERGENCES` row is gone, so `parity_blockers()` is one
+  shorter.
+
 ### Breaking
 
 - **`PhysicsSystem::sweep_body` no longer reports the swept entity's own

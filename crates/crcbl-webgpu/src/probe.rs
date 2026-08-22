@@ -779,8 +779,9 @@ pub const RECONFIG_FAILED: u32 = 6;
 pub const INDIRECT_UNASKED: u32 = 0;
 /// The setup frame — the pipeline, the args and index buffers filled by
 /// `write_buffer`, a clear, a bound pipeline, a bound index buffer, an indexed
-/// indirect draw, the copy, the submit and the request — is on the stream, and no
-/// poll has been issued.
+/// indirect draw walking [`PROBE_INDIRECT_ARGS_BYTES`] at
+/// [`PROBE_INDIRECT_STRIDE`], the copy, the submit and the request — is on the
+/// stream, and no poll has been issued.
 pub const INDIRECT_REQUESTED: u32 = 1;
 /// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
 /// has not arrived.
@@ -791,7 +792,9 @@ pub const INDIRECT_PENDING: u32 = 3;
 /// The bytes are in. [`shim::__crcbl_web_gpu_probe_indirect_bytes_ptr`] and
 /// [`shim::__crcbl_web_gpu_probe_indirect_bytes_len`] carry them — one drawn texel
 /// per four, which the gate checks is the draw colour and not the clear, proving
-/// an indirect draw put exactly what a direct draw would on the frame.
+/// an indirect draw put exactly what a direct draw would on the frame **and that
+/// it read its second argument structure where [`PROBE_INDIRECT_STRIDE`] put
+/// it**.
 pub const INDIRECT_READY: u32 = 4;
 /// The committed reply buffer would not decode, or answered a command nobody
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
@@ -3262,12 +3265,68 @@ pub const PROBE_INDIRECT_CLEAR: [f32; 4] = PROBE_DRAW_CLEAR;
 /// produces.
 pub const PROBE_INDIRECT_COLOR_BYTES: [u8; 4] = PROBE_DRAW_COLOR_BYTES;
 
-/// The `VkDrawIndexedIndirectCommand` the args buffer is filled with, as the 20
-/// little-endian bytes WebGPU's `drawIndexedIndirect` reads: `indexCount = 3`,
-/// `instanceCount = 1`, then `firstIndex = 0`, `baseVertex = 0`,
-/// `firstInstance = 0`. Three indices of one instance from the origin — exactly
-/// the direct `draw_indexed(0..3, 0, 0..1)` the fullscreen triangle would make.
-pub const PROBE_INDIRECT_ARGS_BYTES: [u8; 20] = [
+/// One tightly packed `VkDrawIndexedIndirectCommand` — the five `u32`s
+/// `indexCount`, `instanceCount`, `firstIndex`, `baseVertex` and
+/// `firstInstance`, which is the structure WebGPU's `drawIndexedIndirect` reads.
+///
+/// Not the stride the draw asks for: [`PROBE_INDIRECT_STRIDE`] is, and this is
+/// what makes that one *padded*.
+pub const PROBE_INDIRECT_TIGHT_STRIDE: u32 = 20;
+
+/// The stride the indirect draw walks its arguments at — twice
+/// [`PROBE_INDIRECT_TIGHT_STRIDE`], so the structures are **padded** rather than
+/// tightly packed, and a multiple of 4 so every offset the walk lands on is one
+/// `drawIndexedIndirect` accepts.
+///
+/// This is the whole of what `Capability::IndirectArgumentPaddedStride` claims
+/// on this backend, and [`PROBE_INDIRECT_ARGS_BYTES`] is laid out so that a
+/// replayer which ignored it cannot pass.
+pub const PROBE_INDIRECT_STRIDE: u32 = PROBE_INDIRECT_TIGHT_STRIDE * 2;
+
+/// How many argument structures the draw reads — the CPU-known `draw_count`
+/// `web/engine/gpu-replay.js` unrolls into that many single-draw WebGPU calls.
+///
+/// More than one, because a stride between structures means nothing to a draw
+/// that reads one.
+pub const PROBE_INDIRECT_DRAWS: u32 = 2;
+
+/// The args buffer's contents: two argument structures
+/// [`PROBE_INDIRECT_STRIDE`] apart, with a **decoy** in the padding between
+/// them, as the little-endian bytes WebGPU's `drawIndexedIndirect` reads.
+///
+/// **Where the second structure is read from decides the whole picture**, which
+/// is what makes the readback evidence for a padded stride rather than only for
+/// an indirect draw. The first structure draws nothing at all, so nothing is
+/// decided by it; the decoy sitting one *tight* stride in draws nothing either;
+/// and the real 3-index single draw — `indexCount = 3`, `instanceCount = 1`,
+/// then `firstIndex = 0`, `baseVertex = 0`, `firstInstance = 0`, exactly the
+/// direct `draw_indexed(0..3, 0, 0..1)` the fullscreen triangle would make —
+/// sits where the padded stride puts it. So the target comes back the draw
+/// colour only if the walk was `offset + i * PROBE_INDIRECT_STRIDE`, and comes
+/// back the clear if the stride was ignored, if the draw count was, or if the
+/// draw never happened.
+///
+/// [`PROBE_DISPATCH_INDIRECT_ARGS_BYTES`]'s decoy is the same idea one call
+/// over, and for the same reason: a probe that reads its arguments from the
+/// start of the buffer proves nothing about the offset it was told to use.
+pub const PROBE_INDIRECT_ARGS_BYTES: [u8; 60] = [
+    // The first structure, at offset 0 — the one every reading of the stride
+    // lands on, and it draws nothing.
+    0, 0, 0, 0, // indexCount = 0
+    1, 0, 0, 0, // instanceCount = 1
+    0, 0, 0, 0, // firstIndex = 0
+    0, 0, 0, 0, // baseVertex = 0
+    0, 0, 0, 0, // firstInstance = 0
+    // The decoy, one tight stride in: what a walk that ignored the stride would
+    // read as its second structure. It draws nothing, so that walk leaves the
+    // clear.
+    0, 0, 0, 0, // decoy indexCount = 0
+    1, 0, 0, 0, // decoy instanceCount = 1
+    0, 0, 0, 0, // decoy firstIndex = 0
+    0, 0, 0, 0, // decoy baseVertex = 0
+    0, 0, 0, 0, // decoy firstInstance = 0
+    // The second structure, where PROBE_INDIRECT_STRIDE puts it — the only one
+    // that draws.
     3, 0, 0, 0, // indexCount = 3
     1, 0, 0, 0, // instanceCount = 1
     0, 0, 0, 0, // firstIndex = 0
@@ -3366,9 +3425,15 @@ pub const PROBE_INDIRECT_ARGS_BUFFER: BufferHandle = match BufferHandle::from_bi
     None => panic!("generation 7 is not zero"),
 };
 
-/// The indirect-args buffer — [`PROBE_INDIRECT_ARGS_BYTES`]'s 20 bytes on the
-/// device, [`BufferUsage::INDIRECT`] so it can back the draw and
+/// The indirect-args buffer — [`PROBE_INDIRECT_ARGS_BYTES`] on the device,
+/// [`BufferUsage::INDIRECT`] so it can back the draw and
 /// [`BufferUsage::TRANSFER_DST`] so `queue.writeBuffer` can fill it.
+///
+/// Sized from those bytes, which is what keeps the last structure the padded
+/// walk reaches inside the buffer: WebGPU refuses a `drawIndexedIndirect` whose
+/// `indirectOffset` leaves fewer than [`PROBE_INDIRECT_TIGHT_STRIDE`] bytes
+/// behind it, and the padded walk's last offset is the widest one this buffer
+/// has to cover.
 #[must_use]
 pub const fn probe_indirect_args_buffer_desc() -> BufferDesc<'static> {
     BufferDesc {
@@ -7532,13 +7597,22 @@ impl Probe {
     /// buffer ([`BufferUsage::INDIRECT`]) and the index buffer
     /// ([`BufferUsage::INDEX`]), the pipeline's three resources, then **fills the
     /// args and index buffers with [`write_buffer`](crate::StreamWriter::write_buffer)**
-    /// — the args are [`PROBE_INDIRECT_ARGS_BYTES`] (a 3-index single draw), the
-    /// indices [`PROBE_INDIRECT_INDEX_BYTES`]. A command encoder, a render pass that
+    /// — the args are [`PROBE_INDIRECT_ARGS_BYTES`] (two structures a padded
+    /// stride apart, with a decoy in between), the indices
+    /// [`PROBE_INDIRECT_INDEX_BYTES`]. A command encoder, a render pass that
     /// clears [`PROBE_INDIRECT_VIEW_DESC`]'s view to [`PROBE_INDIRECT_CLEAR`], binds
     /// the pipeline, binds the index buffer and records
     /// [`draw_indexed_indirect`](crate::StreamWriter::draw_indexed_indirect) reading
-    /// the args at offset 0 with `draw_count` 1. The copy out, the finish, the
-    /// submit, and the `request_readback` under [`PROBE_INDIRECT_READBACK`] close it.
+    /// the args from offset 0, [`PROBE_INDIRECT_DRAWS`] of them at
+    /// [`PROBE_INDIRECT_STRIDE`]. The copy out, the finish, the submit, and the
+    /// `request_readback` under [`PROBE_INDIRECT_READBACK`] close it.
+    ///
+    /// **The stride is the point of the draw being this shape**, not
+    /// decoration: only the structure the padded stride reaches draws the
+    /// triangle, so the pixels that come back are what holds
+    /// `Capability::IndirectArgumentPaddedStride`'s `Support::Yes` to a value.
+    /// [`PROBE_INDIRECT_ARGS_BYTES`] says which reading of the buffer each
+    /// outcome is.
     ///
     /// The writes are recorded before the encoder so `queue.writeBuffer` is ordered
     /// on the queue ahead of the submit that reads the buffers.
@@ -7602,7 +7676,12 @@ impl Probe {
                 });
                 stream.bind_graphics_pipeline(PROBE_INDIRECT_PIPELINE);
                 stream.bind_index_buffer(PROBE_INDIRECT_INDEX_BUFFER, 0, IndexFormat::Uint16);
-                stream.draw_indexed_indirect(PROBE_INDIRECT_ARGS_BUFFER, 0, 1, 0);
+                stream.draw_indexed_indirect(
+                    PROBE_INDIRECT_ARGS_BUFFER,
+                    0,
+                    PROBE_INDIRECT_DRAWS,
+                    PROBE_INDIRECT_STRIDE,
+                );
                 stream.end_render_pass();
                 stream.copy_image_to_buffer(&probe_indirect_copy());
                 stream.finish(PROBE_INDIRECT_COMMAND_BUFFER);
@@ -12418,8 +12497,8 @@ mod tests {
             ],
             "the frame builds the pipeline, fills the buffers, binds and draws indirect, then reads back"
         );
-        // The args write carries the 3-index single-draw command, and the indirect
-        // draw reads it at offset 0 with a CPU-known count of one.
+        // The args write carries the padded pair and its decoy, and the indirect
+        // draw reads them from offset 0 at the padded stride.
         assert!(commands.contains(&Command::WriteBuffer {
             buffer: PROBE_INDIRECT_ARGS_BUFFER,
             offset: 0,
@@ -12428,9 +12507,82 @@ mod tests {
         assert!(commands.contains(&Command::DrawIndexedIndirect {
             buffer: PROBE_INDIRECT_ARGS_BUFFER,
             offset: 0,
-            draw_count: 1,
-            stride: 0,
+            draw_count: PROBE_INDIRECT_DRAWS,
+            stride: PROBE_INDIRECT_STRIDE,
         }));
+    }
+
+    /// **The args buffer is laid out so that a replayer which ignored the stride
+    /// cannot leave the draw colour** — which is the whole of what the browser
+    /// gate's indirect group holds
+    /// `Capability::IndirectArgumentPaddedStride`'s `Support::Yes` to, asserted
+    /// here on the bytes rather than trusted from a comment.
+    ///
+    /// Three offsets and one rule: the structure at 0 and the decoy one *tight*
+    /// stride in have `indexCount == 0`, and only the structure at
+    /// [`PROBE_INDIRECT_STRIDE`] has the fullscreen triangle's three indices. A
+    /// walk at the tight stride, a draw count of one, or no draw at all
+    /// therefore all leave the clear.
+    ///
+    /// **What turns it red.** The stride shrinking to the tight one, so the
+    /// padded and decoy structures become the same words; the drawing structure
+    /// moving to offset 0, which a tight walk would reach too; the decoy growing
+    /// a draw, which would make a tight walk pass; or the buffer no longer
+    /// covering the last offset the walk lands on, which WebGPU refuses rather
+    /// than draws.
+    #[test]
+    fn only_the_structure_at_the_padded_stride_draws_the_triangle() {
+        let index_count = |at: u32| -> u32 {
+            let at = at as usize;
+            u32::from_le_bytes(
+                PROBE_INDIRECT_ARGS_BYTES[at..at + 4]
+                    .try_into()
+                    .expect("four bytes of an argument structure"),
+            )
+        };
+
+        // Both constants are literals, so this one settles before the test runs
+        // — which is the earliest a stride that stopped being padded can be
+        // caught, and clippy asks for it in this form rather than as an
+        // assertion nothing can fail at runtime.
+        const {
+            assert!(
+                PROBE_INDIRECT_STRIDE > PROBE_INDIRECT_TIGHT_STRIDE,
+                "the stride the draw walks at must be wider than the structure, or nothing about \
+                 it is padded"
+            );
+        }
+        assert_eq!(
+            PROBE_INDIRECT_STRIDE % 4,
+            0,
+            "every offset the walk lands on is an indirectOffset, which WebGPU requires to be a \
+             multiple of four"
+        );
+        assert_eq!(
+            PROBE_INDIRECT_ARGS_BYTES.len() as u32,
+            PROBE_INDIRECT_STRIDE * (PROBE_INDIRECT_DRAWS - 1) + PROBE_INDIRECT_TIGHT_STRIDE,
+            "the buffer must cover the last structure the padded walk reads and no more, or the \
+             browser refuses the draw instead of making it"
+        );
+
+        assert_eq!(
+            index_count(0),
+            0,
+            "the first structure must draw nothing, or the picture is the same whatever the \
+             stride was"
+        );
+        assert_eq!(
+            index_count(PROBE_INDIRECT_TIGHT_STRIDE),
+            0,
+            "the decoy a tightly packed walk lands on must draw nothing, or that walk leaves the \
+             draw colour too and the gate cannot tell the two apart"
+        );
+        assert_eq!(
+            index_count(PROBE_INDIRECT_STRIDE),
+            3,
+            "the structure at the padded stride is the only one that draws, and it draws the \
+             fullscreen triangle's three indices"
+        );
     }
 
     /// **A device has to have opened first**, the draw probe's ordering rule:
@@ -16430,6 +16582,9 @@ mod tests {
         "PROBE_DISPATCH_INDIRECT_AXIS_SLOTS",
         "PROBE_DISPATCH_INDIRECT_SLOTS",
         "PROBE_DISPATCH_INDIRECT_MARK",
+        "PROBE_INDIRECT_TIGHT_STRIDE",
+        "PROBE_INDIRECT_STRIDE",
+        "PROBE_INDIRECT_DRAWS",
         "PROBE_COPYCHAIN_PATTERN",
         "PROBE_COPYCHAIN_SIZE",
         "PROBE_COPYCHAIN_SLOTS",

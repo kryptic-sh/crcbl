@@ -3976,13 +3976,6 @@ Written 2026-08-18, when `PassTimestampWrites` replaced
 answers `Support::Yes`, and the design question the row hid is now its own
 entry, `BindingKind::StorageImage` has no way to say "reads _and_ writes".
 
-1. **`IndirectArgumentPaddedStride` is classified `ApiAbsence` and is already
-   implemented.** True of the WebGPU call, false of this backend: `stride`
-   crosses the stream whole and the replayer unrolls it into one `drawIndirect`
-   per draw at `offset + i * stride`, so any stride is honoured, padded
-   included. `Support::Yes` is the correct declaration. It is `ApiAbsence` so it
-   is not in the 27, but it costs one probe check to make honest.
-
 The `TimestampQuery` entry that used to sit here — "there is no arbitrary-point
 write to narrow, implement rather than narrow" — was half right and the half it
 got wrong is the interesting half. It reasoned that because every
