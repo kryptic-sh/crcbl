@@ -5501,16 +5501,49 @@ raised to 180 to let one cold run complete and seed the cache. Run
 hours — and still died: job started `08:12:35Z`, ended `11:12:47Z`, conclusion
 `cancelled`, with the single step
 `Compare every golden scene rendered in a browser` consuming the whole budget.
-`Post Run Swatinem/rust-cache@v2` is `skipped` again. Two attempts, two
-different timeouts, same ending.
 
-**So the "give it a bigger number" option is measurably dead**, and it should
-not be tried a third time. Each attempt costs three hours of wall clock and
-produces nothing, GitHub's own ceiling is six hours, and nothing in the evidence
-says the next number is the one that works — the step was still running when it
-was killed, so its actual cold duration is unknown and unbounded by anything
-measured. A fix has to remove the cold rebuild or stop the leg needing one; it
-cannot wait it out.
+**And then the log was read, which changes the diagnosis entirely
+(2026-08-23).** That step is not slow. Its own timestamps:
+
+| what                                                       | when                    |
+| ---------------------------------------------------------- | ----------------------- |
+| step starts                                                | `08:13:30`              |
+| `cargo build --lib -p render-harness --target wasm32` done | `08:14:00`              |
+| all eleven scenes rendered, driver prints its last line    | `08:14:24`              |
+| _nothing whatsoever_                                       | `08:14:24` → `11:12:43` |
+| cancelled by the timeout                                   | `11:12:43`              |
+
+**The work takes 54 seconds and then the process hangs for three hours.** The
+wasm build — the thing the cold-cache story was about — is 30 seconds of it. The
+next line the shell script would print,
+`==> comparing each readback against crates/crcbl/tests/golden`, never appears,
+so `node render-harness-e2e.mjs` had finished its work and never exited.
+
+So **every earlier conclusion here about cold caches was measuring the wrong
+thing.** The cache _is_ skipped on a cancelled job and that _is_ true, but it is
+a consequence of the hang, not its cause; a warm cache would save 30 seconds of
+a three-hour failure. "The step's actual cold duration is unknown and unbounded"
+is also wrong — it is 54 seconds.
+
+**What was done about it, and what is still not known.** The exact handle
+holding node's event loop open is _not_ established, and nothing here should be
+read as saying it is. `stopBrowser` already does the right Windows thing
+(`taskkill /pid … /T /F`); the teardown order in `render-harness-e2e.mjs` was
+the reverse of `error-scope-bench.mjs`'s — it awaited `server.close()` before
+`browser.stop()`, so a server that did not close would strand the kill — and
+`serve.mjs`'s `close()` did not call `closeAllConnections()`. Both are now fixed
+and both are **hardening rather than a demonstrated fix**: an attempt to
+reproduce the hang locally, by holding a keep-alive socket open across
+`close()`, did **not** reproduce it, because Node ≥ 19's `close()` already drops
+idle connections.
+
+What _is_ guaranteed is that it can no longer cost three hours. `main()` now
+arms an `unref`'d watchdog: it cannot itself keep the process alive, so on the
+healthy path it never fires, and it fires only when something else is holding
+the loop open — printing that fact and exiting with the code the run had earned.
+Red-checked both ways locally. The next Windows run therefore either passes or
+says _"teardown finished but something is still holding the event loop open"_,
+and either way it takes minutes.
 
 **DECISION NEEDED — and the trade-off has changed shape.** The four options
 already recorded below were written when "raise the timeout" was still live. It
