@@ -55,6 +55,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   non-finite sample is written through as it stands and still comes back as
   silence, because `decode` is where NaN and the infinities are stopped.
 
+- **`crcbl_webgpu::probe` gained the texture-sampling fixture and its shims**,
+  and with them the first probe in this crate whose shader binds anything at
+  all. `PROBE_TEXTURE_SAMPLE_*` uploads a two-by-two `rgba8unorm` source with
+  four different texels, binds it with a nearest sampler through a
+  `BindingKind::SampledImage`/`BindingKind::Sampler` pair, samples it across a
+  fullscreen quad and reads the target back; the browser gate's group **AJ**
+  holds each quadrant against the source texel from the same corner. Until now
+  the seam could describe a sampled binding and nothing had ever shown one
+  reaching a fragment shader in a real browser — `SampledImage` appeared in this
+  crate only inside a bind-group _layout_, an object WebGPU reports nothing
+  about but its label. The four colours are chosen so that no channel
+  permutation maps any of them onto any other and no alpha is `0` or `255`,
+  which is what makes a swapped channel or a dropped alpha fail rather than
+  pass.
+
 ### Changed
 
 - **`crcbl_webgpu::probe::probe_device_desc` now asks for `DEPTH_CLAMP` as well

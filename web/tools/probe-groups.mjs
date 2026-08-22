@@ -1,4 +1,4 @@
-// The `crcbl-webgpu` seam groups — G through AI — and nothing else.
+// The `crcbl-webgpu` seam groups, and nothing else.
 //
 // The letters are allocation order rather than run order: AC, AD and AE run
 // between W and X, where a group that reads bytes back has to sit on a platform
@@ -3833,6 +3833,294 @@ export async function runProbeGroups({
               ` first unexpected texel at ${firstInstance.zeroLeft?.firstOther}/${firstInstance.zeroRight?.firstOther}/` +
               `${firstInstance.oneLeft?.firstOther}/${firstInstance.oneRight?.firstOther})` +
               `${firstInstance.error ? ` — ${firstInstance.error}` : ''}`
+  );
+
+  // **THE GATE THAT SHOWS A TEXTURE REACHING A FRAGMENT SHADER.** Group M asks a
+  // browser to build a bind-group layout declaring a `SampledImage` and a
+  // `Sampler`, and group N asks it to build a bind group holding a real view and
+  // a real sampler — and both stop there, because a `GPUBindGroupLayout` and a
+  // `GPUBindGroup` each report their `label` and nothing else. Until this group
+  // no probe shader contained a `textureSample` at all: the seam could describe a
+  // sampled-image binding and nothing had ever shown that a texture bound through
+  // one reaches a shader, let alone that the texel it delivers is the right one.
+  //
+  // **WHAT IS ASSERTED IS WHICH COLOUR EACH QUADRANT CAME BACK AS.** wasm uploads
+  // a two-by-two `rgba8unorm` source whose four texels are four *different*
+  // colours, binds its view and a **nearest** sampler, and draws a fullscreen quad
+  // whose fragment shader samples it — so the target's four quadrants must be the
+  // four source texels, each in the corner it came from. Every wrong way of
+  // sampling produces a different block, and each is a separate reading here:
+  //
+  //   * one colour everywhere — the shader returned a constant and sampled
+  //     nothing. The four colours differ, so no single value satisfies more than
+  //     one quadrant.
+  //   * top and bottom exchanged — the V axis is flipped. Clip space runs `y` up
+  //     and texture space runs `v` down, so this is the one an author gets wrong
+  //     by writing the obvious thing, and it renders a picture either way.
+  //   * left and right exchanged — the U axis is flipped.
+  //   * top-right and bottom-left exchanged, the diagonal unmoved — `u` and `v`
+  //     are transposed. Those two quadrants are the ONLY place a transpose shows,
+  //     which is why the four are checked corner by corner rather than as "all
+  //     four colours are present somewhere".
+  //   * a channel permutation everywhere — a swap on the way out. The four
+  //     colours are pairwise distinct as multisets and no colour is a permutation
+  //     of itself, so no swap can land on a value this accepts. Their alphas are
+  //     pairwise distinct and none is `255`, so a dropped alpha cannot either.
+  //   * the clear everywhere — the draw produced no fragments. The clear is a
+  //     fifth colour held to the same rules, so this reads as "nothing was drawn"
+  //     rather than "the wrong colour".
+  //   * a gradient — the sampler filtered. Every texel of a quadrant has to
+  //     match, not a majority.
+  //
+  // **NO FEATURE GATES IT, so there is no absent branch.** Groups AH and AI each
+  // excuse a browser whose adapter lacks the feature they need; sampling a
+  // `rgba8unorm` texture is core WebGPU and every runner — SwiftShader included —
+  // owes this group its bytes. There is no `supported` flag to read and no
+  // `UNSUPPORTED` state to reach.
+  //
+  // WHERE IT BELONGS IN THE RUN: **before X**, group AI's reason exactly. This
+  // group reads bytes back, so behind X's stuck canvas readback it would be
+  // stranded on Windows, and it is not in that platform's `--expect-fail` list.
+  group(
+    'AJ — a sampled texture reaches a fragment shader and the right texel comes out'
+  );
+
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_TEXTURE_SAMPLE_*`, spelled out
+  // here rather than imported, as every expected value in this file is.
+  const PROBE_TEXTURE_SAMPLE_SIZE = 64;
+  const PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS =
+    (PROBE_TEXTURE_SAMPLE_SIZE / 2) * (PROBE_TEXTURE_SAMPLE_SIZE / 2);
+  const PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES = [43, 99, 214, 233];
+  const PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES = [214, 62, 33, 191];
+  const PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES = [88, 176, 71, 143];
+  const PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES = [131, 120, 245, 90];
+  const PROBE_TEXTURE_SAMPLE_CLEAR_BYTES = [150, 30, 105, 60];
+
+  const textureSampleStart = await evaluate(
+    page,
+    `(async () => {
+     const { startTextureSampleProbe } = await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     return { started: startTextureSampleProbe({ exports }) };
+   })()`
+  );
+  // Poll across frames exactly as group AI does.
+  const textureSample = textureSampleStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readTextureSampleProbe, pollTextureSampleProbe, TEXTURE_SAMPLE } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readTextureSampleProbe({ exports, memory: exports.memory });
+           if (
+             r.state === TEXTURE_SAMPLE.FAILED ||
+             r.state === TEXTURE_SAMPLE.UNDECODABLE
+           ) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
+           }
+           if (r.state !== TEXTURE_SAMPLE.READY) {
+             pollTextureSampleProbe({ exports });
+             return null;
+           }
+           // Ready: classify every texel here rather than shipping 16384 bytes
+           // out. Each quadrant crosses as two things — how many of its texels
+           // are the colour that BELONGS there, and which named colour it holds
+           // uniformly if it holds one — because those are different failures.
+           // The count alone cannot say whether a wrong quadrant is a flipped
+           // axis or a mixture, and the name alone cannot say how much of it is.
+           const size = ${PROBE_TEXTURE_SAMPLE_SIZE};
+           const palette = [
+             ['top-left', ${JSON.stringify(PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES)}],
+             ['top-right', ${JSON.stringify(PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES)}],
+             ['bottom-left', ${JSON.stringify(PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES)}],
+             ['bottom-right', ${JSON.stringify(PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES)}],
+             ['the clear', ${JSON.stringify(PROBE_TEXTURE_SAMPLE_CLEAR_BYTES)}],
+           ];
+           const same = (at, colour) =>
+             r.bytes[at] === colour[0] &&
+             r.bytes[at + 1] === colour[1] &&
+             r.bytes[at + 2] === colour[2] &&
+             r.bytes[at + 3] === colour[3];
+           // Rows are tight — 64 Rgba8Unorm texels is 256 bytes, the alignment
+           // copyTextureToBuffer wants — so a texel's offset is its own index
+           // times four and nothing has to be skipped.
+           const quadrant = (topHalf, leftHalf, expected) => {
+             let matched = 0;
+             let holds = null;
+             let firstWrong = -1;
+             let first = null;
+             for (let row = 0; row < size; row += 1) {
+               if (row < size / 2 !== topHalf) continue;
+               for (let column = 0; column < size; column += 1) {
+                 if (column < size / 2 !== leftHalf) continue;
+                 const at = (row * size + column) * 4;
+                 if (first === null) first = [...r.bytes.slice(at, at + 4)];
+                 if (same(at, expected)) matched += 1;
+                 else if (firstWrong < 0) firstWrong = at;
+                 const named = palette.find(([, colour]) => same(at, colour));
+                 const label = named ? named[0] : 'an unnamed colour';
+                 if (holds === null) holds = label;
+                 else if (holds !== label) holds = 'a mixture';
+               }
+             }
+             return { matched, holds, firstWrong, first };
+           };
+           const midpoint = (size / 2) * 4;
+           const half = ((size * size) / 2) * 4;
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.length,
+             topLeft: quadrant(true, true, palette[0][1]),
+             topRight: quadrant(true, false, palette[1][1]),
+             bottomLeft: quadrant(false, true, palette[2][1]),
+             bottomRight: quadrant(false, false, palette[3][1]),
+             sample: [
+               ...r.bytes.slice(0, 4),
+               ...r.bytes.slice(midpoint, midpoint + 4),
+               ...r.bytes.slice(half, half + 4),
+               ...r.bytes.slice(half + midpoint, half + midpoint + 4),
+             ],
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+
+  check(
+    'AJ',
+    'wasm encoded the texture-sample frame — a two-by-two source uploaded with four different texels, a nearest sampler, a bind group holding that source view and that sampler, a pass that samples it across a fullscreen quad, the copy, the request',
+    textureSampleStart?.started === true,
+    textureSampleStart?.started
+      ? 'the upload, the bind group and the sampling pass are on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is ' +
+          'installed. Nothing else can refuse this frame: sampling is core WebGPU ' +
+          'and no device can withhold it'
+  );
+  // The arity first, then the four corners. A block of the wrong length means the
+  // quadrant walk read texels that are not there, and its tallies would be
+  // meaningless rather than merely wrong.
+  const textureSampleLanded =
+    textureSample?.done === true &&
+    textureSample.len ===
+      PROBE_TEXTURE_SAMPLE_SIZE * PROBE_TEXTURE_SAMPLE_SIZE * 4 &&
+    textureSample.topLeft?.matched === PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS &&
+    textureSample.topRight?.matched === PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS &&
+    textureSample.bottomLeft?.matched ===
+      PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS &&
+    textureSample.bottomRight?.matched === PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS;
+  // Which source texel each quadrant actually holds, named so a failure says what
+  // arrived where rather than only that something did.
+  const held = [
+    textureSample?.topLeft?.holds,
+    textureSample?.topRight?.holds,
+    textureSample?.bottomLeft?.holds,
+    textureSample?.bottomRight?.holds,
+  ];
+  const holding = (expected) => held.every((name, at) => name === expected[at]);
+  // **A LABEL CANNOT SAY TWO STRANGERS APART.** Every colour the palette does not
+  // recognise is labelled `an unnamed colour`, so four *different* wrong colours
+  // compare equal by name and read as one — which is how a shader that returned
+  // the right rgb with the alpha overwritten was diagnosed as returning a
+  // constant. These compare the bytes instead: `uniform` is the claim "every
+  // quadrant really is the same colour", and `channelsWrong` is the set of
+  // channels that is wrong in the same way everywhere while the rest are right,
+  // which is what a dropped or overwritten channel looks like.
+  const firsts = [
+    textureSample?.topLeft?.first,
+    textureSample?.topRight?.first,
+    textureSample?.bottomLeft?.first,
+    textureSample?.bottomRight?.first,
+  ];
+  const expectedFirsts = [
+    PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES,
+    PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES,
+    PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES,
+    PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES,
+  ];
+  const complete = firsts.every(
+    (texel) => Array.isArray(texel) && texel.length === 4
+  );
+  const uniform =
+    complete &&
+    firsts.every((texel) => texel.every((byte, at) => byte === firsts[0][at]));
+  const CHANNELS = ['red', 'green', 'blue', 'alpha'];
+  const channelsWrong = complete
+    ? CHANNELS.map((_, channel) => channel).filter((channel) =>
+        firsts.every(
+          (texel, at) => texel[channel] !== expectedFirsts[at][channel]
+        )
+      )
+    : [];
+  const channelsRight = complete
+    ? CHANNELS.map((_, channel) => channel).filter((channel) =>
+        firsts.every(
+          (texel, at) => texel[channel] === expectedFirsts[at][channel]
+        )
+      )
+    : [];
+  // Every channel is accounted for one way or the other, so the wrong ones are
+  // wrong *everywhere* rather than in a quadrant or two — the shape a shader
+  // that touched one channel leaves, and not the shape a wrong uv leaves.
+  const onlyChannels =
+    complete &&
+    channelsWrong.length > 0 &&
+    channelsWrong.length + channelsRight.length === CHANNELS.length;
+  const wrongWay = holding([
+    'bottom-left',
+    'bottom-right',
+    'top-left',
+    'top-right',
+  ])
+    ? 'top and bottom are exchanged, so the V axis is flipped — clip space runs y up ' +
+      'and texture space runs v down, and the shader did not turn one into the other'
+    : holding(['top-right', 'top-left', 'bottom-right', 'bottom-left'])
+      ? 'left and right are exchanged, so the U axis is flipped'
+      : holding(['top-left', 'bottom-left', 'top-right', 'bottom-right'])
+        ? 'the diagonal is unmoved and the other two corners are exchanged, so u and v ' +
+          'are transposed'
+        : held.every((name) => name === 'the clear')
+          ? 'every quadrant is the clear, so the draw produced no fragments at all'
+          : onlyChannels
+            ? `the ${channelsWrong.map((channel) => CHANNELS[channel]).join(' and ')} channel ` +
+              'is wrong in every quadrant and the rest are right, so the texel arrived at the ' +
+              'correct uv and the shader dropped or overwrote that channel on the way out'
+            : uniform && held.every((name) => name !== 'a mixture')
+              ? 'every quadrant holds the same colour byte for byte, so the fragment shader ' +
+                'returned a constant rather than the texel under it'
+              : held.some((name) => name === 'a mixture')
+                ? 'a quadrant holds more than one colour, so the sampler filtered across the ' +
+                  'source or something other than the uv decided which texel each fragment read'
+                : 'the four corners hold colours the fixture does not account for';
+  check(
+    'AJ',
+    'a texture reached the fragment shader and the texel it delivered was the right one — each quadrant of the target is the source texel from the same corner',
+    textureSampleLanded,
+    textureSampleStart?.started !== true
+      ? 'no frame was encoded, so there is nothing to read — see the check above for why'
+      : textureSample?.done !== true
+        ? `no texture-sample readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+        : textureSampleLanded
+          ? `${textureSample.len} bytes: the four quadrants are ` +
+            `[${PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES.join(', ')}], ` +
+            `[${PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES.join(', ')}], ` +
+            `[${PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES.join(', ')}] and ` +
+            `[${PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES.join(', ')}] throughout, ` +
+            'each in the corner its source texel came from — so a real GPUTexture and a ' +
+            'real GPUSampler were bound to a fragment shader and sampled at the right uv'
+          : `state ${textureSample.state}, ${textureSample.len ?? 0} bytes: the quadrants hold ` +
+            `${held.join(', ')} in reading order from the top left ` +
+            `(${textureSample.topLeft?.matched}/${textureSample.topRight?.matched}/` +
+            `${textureSample.bottomLeft?.matched}/${textureSample.bottomRight?.matched} of ` +
+            `${PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS} texels right in each) — ${wrongWay}` +
+            ` (first texel of each quadrant ${JSON.stringify(textureSample.sample)},` +
+            ` first wrong texel at ${textureSample.topLeft?.firstWrong}/${textureSample.topRight?.firstWrong}/` +
+            `${textureSample.bottomLeft?.firstWrong}/${textureSample.bottomRight?.firstWrong})` +
+            `${textureSample.error ? ` — ${textureSample.error}` : ''}`
   );
 
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**

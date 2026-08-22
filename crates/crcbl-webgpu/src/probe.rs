@@ -178,6 +178,13 @@
 //! | [`__crcbl_web_gpu_probe_first_instance_reason_len`](shim::__crcbl_web_gpu_probe_first_instance_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_first_instance_bytes_ptr`](shim::__crcbl_web_gpu_probe_first_instance_bytes_ptr) | `() -> i32` | Where the two targets' texels start — the zero draw's block first — once [`__crcbl_web_gpu_probe_first_instance_state`](shim::__crcbl_web_gpu_probe_first_instance_state) answers [`FIRST_INSTANCE_READY`]. |
 //! | [`__crcbl_web_gpu_probe_first_instance_bytes_len`](shim::__crcbl_web_gpu_probe_first_instance_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the first-instance probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_texture_sample`](shim::__crcbl_web_gpu_probe_texture_sample) | `() -> i32` | Encode one frame — a two-by-two `Rgba8Unorm` source uploaded with four different texels, a **nearest** sampler, a bind group holding that source's view and that sampler, and a pass drawing a fullscreen quad whose fragment shader samples it — then copy the target out and ask for the bytes. |
+//! | [`__crcbl_web_gpu_probe_texture_sample_poll`](shim::__crcbl_web_gpu_probe_texture_sample_poll) | `() -> i32` | Poll that readback once, and register the wait. |
+//! | [`__crcbl_web_gpu_probe_texture_sample_state`](shim::__crcbl_web_gpu_probe_texture_sample_state) | `() -> i32` | Drain, and answer one of the `TEXTURE_SAMPLE_*` codes. |
+//! | [`__crcbl_web_gpu_probe_texture_sample_reason_ptr`](shim::__crcbl_web_gpu_probe_texture_sample_reason_ptr) | `() -> i32` | Where the reason the texture-sample readback stopped starts. Empty unless the state is [`TEXTURE_SAMPLE_FAILED`] or [`TEXTURE_SAMPLE_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_texture_sample_reason_len`](shim::__crcbl_web_gpu_probe_texture_sample_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_texture_sample_bytes_ptr`](shim::__crcbl_web_gpu_probe_texture_sample_bytes_ptr) | `() -> i32` | Where the sampled target's texels start, once [`__crcbl_web_gpu_probe_texture_sample_state`](shim::__crcbl_web_gpu_probe_texture_sample_state) answers [`TEXTURE_SAMPLE_READY`]. |
+//! | [`__crcbl_web_gpu_probe_texture_sample_bytes_len`](shim::__crcbl_web_gpu_probe_texture_sample_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the texture-sampling probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -1176,6 +1183,47 @@ pub const FIRST_INSTANCE_UNSUPPORTED: u32 = 6;
 /// **A settled code, not a step**, [`CLAMP_FAILED`]'s reasoning: a readback is
 /// answered exactly once, so nothing further is coming.
 pub const FIRST_INSTANCE_FAILED: u32 = 7;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const TEXTURE_SAMPLE_UNASKED: u32 = 0;
+/// The setup frame — a two-by-two source image and a
+/// [`PROBE_TEXTURE_SAMPLE_SIZE`] target, the upload buffer filled and copied
+/// into the source, a nearest sampler, a bind group holding the source's view
+/// and that sampler, one pipeline, a pass that clears to
+/// [`PROBE_TEXTURE_SAMPLE_CLEAR_BYTES`] and draws a quad sampling the source,
+/// the copy out, the submit and the request — is on the stream, and no poll has
+/// been issued.
+pub const TEXTURE_SAMPLE_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const TEXTURE_SAMPLE_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const TEXTURE_SAMPLE_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_texture_sample_bytes_ptr`]
+/// and [`shim::__crcbl_web_gpu_probe_texture_sample_bytes_len`] carry them — one
+/// block of `Rgba8Unorm` texels, and the texture reached the fragment shader
+/// exactly when each quadrant of it is the source texel in the same corner.
+pub const TEXTURE_SAMPLE_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`DRAW_UNDECODABLE`]'s twin.
+pub const TEXTURE_SAMPLE_UNDECODABLE: u32 = 5;
+/// The browser refused the texture-sample readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_texture_sample_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_texture_sample_reason_len`].
+///
+/// **A settled code, not a step**, [`CLAMP_FAILED`]'s reasoning: a readback is
+/// answered exactly once, so nothing further is coming.
+///
+/// **`6`, and there is no `7`.** The depth-clamp and first-instance probes spend
+/// `6` on an `UNSUPPORTED` because a device can withhold the feature their
+/// fixtures need; sampling a texture is core WebGPU and no device can withhold
+/// it, so this probe's codes are [`DRAW_FAILED`]'s seven rather than those eight.
+/// An arm nothing can reach would read as covered and cover nothing.
+pub const TEXTURE_SAMPLE_FAILED: u32 = 6;
 
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
@@ -6115,6 +6163,659 @@ pub const fn probe_first_instance_pipeline_desc() -> GraphicsPipelineDesc<'stati
     }
 }
 
+// The texture-sampling probe (group AJ): the one gate that shows a texture
+// reaching a fragment shader. Every handle it names is `16 << 32` — a
+// generation past the first-instance probe's `15 << 32` — so its live resources
+// never land in another probe's slot in the shared page. It creates two images
+// and two views, which those two types distinguish by index, and two buffers,
+// which that type distinguishes the same way; the sampler, the bind-group
+// layout, the bind group, the module, the pipeline layout, the pipeline, the
+// queue, the command buffer and the readback are each the only one of their
+// kind at this generation.
+//
+// It is here because [`BindingKind::SampledImage`] and [`BindingKind::Sampler`]
+// had never been exercised past *creation*. [`PROBE_BIND_GROUP_LAYOUT_ENTRIES`]
+// declares both, and group M asks a browser to build that layout — but a
+// `GPUBindGroupLayout` reports its `label` and nothing else, so what group M can
+// hold it to is that the device queued no error. No probe shader had ever
+// contained a `textureSample` at all: the seam could describe a sampled-image
+// binding and nothing had ever shown that a texture bound through one reaches a
+// fragment shader, let alone that the texel it delivers is the right one.
+//
+// **THE OBSERVABLE IS WHICH COLOUR EACH QUADRANT OF THE TARGET CAME BACK AS.** A
+// sampler bound to the wrong slot, a view resolved out of the wrong table, an
+// axis flipped between the vertex shader and the texture — none of them raises
+// an error anywhere. The pass runs, the readback resolves, and a plausible
+// picture comes back. So the source image carries **four different colours, one
+// per texel**, the fullscreen quad maps the whole source over the whole target,
+// and the four quadrants that come back are the claim. See
+// [`probe_texture_sample_pipeline_desc`] for which wrong reading each quadrant
+// rules out.
+//
+// **NO FEATURE GATES IT.** Sampling a `rgba8unorm` texture is core WebGPU: there
+// is no adapter that can refuse this and no device that can withhold it, so
+// unlike the depth-clamp probe (group AH) and the first-instance one (group AI)
+// this probe has no `Unsupported` state. Its codes are
+// [`DRAW_UNASKED`]'s seven, not those two probes' eight, precisely so there is
+// no arm a runner could take that reads as covered while proving nothing.
+
+/// Texels across and down the colour target the sampling pass draws into and
+/// reads back. [`PROBE_READBACK_SIZE`]'s figure, for its 256-byte-row reason.
+pub const PROBE_TEXTURE_SAMPLE_SIZE: u32 = PROBE_READBACK_SIZE;
+
+/// Texels across and down the **source** image — the one the shader samples.
+///
+/// Two, which is the smallest image with a quadrant to put each colour in. One
+/// texel could not tell "sampled the texture" from "returned a constant"; a
+/// single row could not tell a flipped V axis from a correct one; a single
+/// column could not tell a flipped U. Two by two is the smallest fixture where
+/// every one of those readings differs from every other.
+pub const PROBE_TEXTURE_SAMPLE_SOURCE_SIZE: u32 = 2;
+
+/// How many corners [`PROBE_TEXTURE_SAMPLE_WGSL`]'s array holds, and so the
+/// vertex count the draw records: two triangles of a quad, with no index buffer
+/// and no vertex buffer.
+pub const PROBE_TEXTURE_SAMPLE_CORNERS: u32 = 6;
+
+/// The **padded** row pitch of [`PROBE_TEXTURE_SAMPLE_UPLOAD_BYTES`], in texels.
+///
+/// A `copyBufferToTexture` whose copy is more than one row deep must name a
+/// `bytesPerRow` that is a multiple of 256, and this image is two rows deep. Its
+/// own row is `PROBE_TEXTURE_SAMPLE_SOURCE_SIZE` `Rgba8Unorm` texels — eight
+/// bytes — so the upload cannot be tight and the second row starts 256 bytes in
+/// with the space between them unread. [`PROBE_READBACK_SIZE`]'s figure again
+/// and for its reason: this many `Rgba8Unorm` texels is exactly that alignment.
+pub const PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS: u32 = PROBE_READBACK_SIZE;
+
+/// The source texel the **top-left** quadrant of the target must come back as.
+///
+/// # Why these four colours, and not four arbitrary ones
+///
+/// The four are pairwise distinct as *multisets*, not merely as tuples: sort
+/// each one's `r`, `g` and `b` and no two agree, and no colour's own three
+/// channels agree either. So a path that swapped two channels on the way out
+/// cannot turn any of the four into any other — including into itself, which is
+/// what a same-colour-in-every-quadrant fixture could not have caught.
+/// [`PROBE_FIRST_INSTANCE_CLEAR_BYTES`]'s reasoning, applied across four values
+/// rather than two.
+///
+/// Their alphas are pairwise distinct too, and none of them is `255`: an alpha
+/// channel dropped somewhere between the upload and the readback reads back as
+/// opaque, and a fixture whose alphas were all `255` would call that a pass.
+///
+/// Every channel is a mid-tone — away from the `0` and `255` an untouched or
+/// saturated one reads as. `the_four_texture_sample_colours_survive_a_channel_swap`
+/// is what holds all of that to the constants.
+pub const PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES: [u8; 4] = [43, 99, 214, 233];
+
+/// The source texel the **top-right** quadrant of the target must come back as.
+/// See [`PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES`] for why the four differ the way
+/// they do.
+pub const PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES: [u8; 4] = [214, 62, 33, 191];
+
+/// The source texel the **bottom-left** quadrant of the target must come back
+/// as. See [`PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES`].
+pub const PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES: [u8; 4] = [88, 176, 71, 143];
+
+/// The source texel the **bottom-right** quadrant of the target must come back
+/// as. See [`PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES`].
+pub const PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES: [u8; 4] = [131, 120, 245, 90];
+
+/// The colour the pass clears its target to.
+///
+/// **The reading that means no fragment reached the target at all**, which the
+/// four above cannot express between them: a quad that produced no fragments
+/// leaves this, and a gate that only knew the four would report it as "the wrong
+/// colour" rather than "nothing was drawn". Held to the same multiset rule as
+/// the four, so it cannot be confused with any of them by a channel swap either.
+pub const PROBE_TEXTURE_SAMPLE_CLEAR_BYTES: [u8; 4] = [150, 30, 105, 60];
+
+/// The upload buffer's contents: the four source texels laid out the way
+/// `copyBufferToTexture` reads them, with the padding
+/// [`PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS`] requires between the two rows.
+///
+/// Built rather than written out, because all but sixteen of these bytes are
+/// padding the copy never reads. The two texels of the top row sit at the start;
+/// the two of the bottom row sit one padded row in. Two padded rows long, which
+/// is `rowsPerImage` × `bytesPerRow` and so comfortably past the
+/// `(rows - 1) × bytesPerRow + last row` a copy of this shape actually needs.
+///
+/// `the_texture_sample_upload_places_each_colour_in_its_own_texel` is what holds
+/// the layout to the four constants.
+pub const PROBE_TEXTURE_SAMPLE_UPLOAD_BYTES: [u8; PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS as usize
+    * 4
+    * 2] = {
+    let row = PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS as usize * 4;
+    let mut bytes = [0u8; PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS as usize * 4 * 2];
+    let mut channel = 0;
+    while channel < 4 {
+        bytes[channel] = PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES[channel];
+        bytes[4 + channel] = PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES[channel];
+        bytes[row + channel] = PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES[channel];
+        bytes[row + 4 + channel] = PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES[channel];
+        channel += 1;
+    }
+    bytes
+};
+
+/// The queue the texture-sampling probe names in its command encoder.
+/// `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_QUEUE: QueueHandle = match QueueHandle::from_bits(16 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 16 is not zero"),
+};
+
+/// The command buffer the texture-sampling probe finishes its encoder into.
+/// `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(16 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// The in-flight readback the texture-sampling probe requests and polls.
+/// `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(16 << 32)
+{
+    Some(readback) => readback,
+    None => panic!("generation 16 is not zero"),
+};
+
+/// The image the four colours are uploaded into and the shader samples.
+/// `16 << 32`, index `0`.
+pub const PROBE_TEXTURE_SAMPLE_SOURCE_IMAGE: ImageHandle = match ImageHandle::from_bits(16 << 32) {
+    Some(image) => image,
+    None => panic!("generation 16 is not zero"),
+};
+
+/// The image the pass draws into and the copy reads back. `16 << 32`, index `1`.
+pub const PROBE_TEXTURE_SAMPLE_TARGET_IMAGE: ImageHandle =
+    match ImageHandle::from_bits((16 << 32) | 1) {
+        Some(image) => image,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// The source image's descriptor — [`ImageUsage::SAMPLED`] so a bind group can
+/// name a view of it, and [`ImageUsage::TRANSFER_DST`] so the upload copy can
+/// fill it. One mip level and one sample, which is what makes
+/// [`PROBE_TEXTURE_SAMPLE_SAMPLER_DESC`]'s lod clamp and mip filter unable to
+/// change what comes back.
+pub const PROBE_TEXTURE_SAMPLE_SOURCE_IMAGE_DESC: ImageDesc<'static> = ImageDesc {
+    label: Some("crcbl-webgpu texture-sample source image"),
+    image_type: ImageType::D2,
+    extent: Extent3d::d2(
+        PROBE_TEXTURE_SAMPLE_SOURCE_SIZE,
+        PROBE_TEXTURE_SAMPLE_SOURCE_SIZE,
+    ),
+    format: Format::Rgba8Unorm,
+    mip_levels: 1,
+    samples: 1,
+    usage: ImageUsage::TRANSFER_DST.union(ImageUsage::SAMPLED),
+};
+
+/// The target's descriptor — the shape every readback probe here uses, at
+/// [`PROBE_TEXTURE_SAMPLE_SIZE`].
+pub const PROBE_TEXTURE_SAMPLE_TARGET_IMAGE_DESC: ImageDesc<'static> = ImageDesc {
+    label: Some("crcbl-webgpu texture-sample target image"),
+    image_type: ImageType::D2,
+    extent: Extent3d::d2(PROBE_TEXTURE_SAMPLE_SIZE, PROBE_TEXTURE_SAMPLE_SIZE),
+    format: Format::Rgba8Unorm,
+    mip_levels: 1,
+    samples: 1,
+    usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+};
+
+/// The view of the source the bind group binds. `16 << 32`, index `0`.
+pub const PROBE_TEXTURE_SAMPLE_SOURCE_VIEW: ImageViewHandle =
+    match ImageViewHandle::from_bits(16 << 32) {
+        Some(view) => view,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// The view of the target the pass renders into. `16 << 32`, index `1`.
+pub const PROBE_TEXTURE_SAMPLE_TARGET_VIEW: ImageViewHandle =
+    match ImageViewHandle::from_bits((16 << 32) | 1) {
+        Some(view) => view,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// The source view's descriptor — the whole image, in the image's own format.
+pub const PROBE_TEXTURE_SAMPLE_SOURCE_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu texture-sample source view"),
+    image: PROBE_TEXTURE_SAMPLE_SOURCE_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The target view's descriptor.
+pub const PROBE_TEXTURE_SAMPLE_TARGET_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu texture-sample target view"),
+    image: PROBE_TEXTURE_SAMPLE_TARGET_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The buffer `write_buffer` fills with [`PROBE_TEXTURE_SAMPLE_UPLOAD_BYTES`]
+/// and the upload copy reads out of. `16 << 32`, index `0`.
+pub const PROBE_TEXTURE_SAMPLE_UPLOAD_BUFFER: BufferHandle = match BufferHandle::from_bits(16 << 32)
+{
+    Some(buffer) => buffer,
+    None => panic!("generation 16 is not zero"),
+};
+
+/// The upload buffer — [`BufferUsage::TRANSFER_DST`] so `queue.writeBuffer` can
+/// fill it and [`BufferUsage::TRANSFER_SRC`] so the copy into the image can read
+/// it. `DeviceLocal`, on [`probe_first_instance_args_buffer_desc`]'s terms.
+#[must_use]
+pub const fn probe_texture_sample_upload_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu texture-sample upload buffer"),
+        size: PROBE_TEXTURE_SAMPLE_UPLOAD_BYTES.len() as u64,
+        usage: BufferUsage::TRANSFER_SRC.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The buffer the target is copied into and read back from. `16 << 32`,
+/// index `1`.
+pub const PROBE_TEXTURE_SAMPLE_BUFFER: BufferHandle = match BufferHandle::from_bits((16 << 32) | 1)
+{
+    Some(buffer) => buffer,
+    None => panic!("generation 16 is not zero"),
+};
+
+/// How many bytes the target occupies in the readback buffer, which is the whole
+/// of it: one target, one block, unlike the two the depth-clamp and
+/// first-instance probes each read back.
+pub const PROBE_TEXTURE_SAMPLE_BLOCK_BYTES: u64 =
+    (PROBE_TEXTURE_SAMPLE_SIZE as u64) * (PROBE_TEXTURE_SAMPLE_SIZE as u64) * 4;
+
+/// The readback buffer's descriptor.
+#[must_use]
+pub const fn probe_texture_sample_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu texture-sample buffer"),
+        size: PROBE_TEXTURE_SAMPLE_BLOCK_BYTES,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The sampler the bind group binds. `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_SAMPLER: SamplerHandle = match SamplerHandle::from_bits(16 << 32) {
+    Some(sampler) => sampler,
+    None => panic!("generation 16 is not zero"),
+};
+
+/// The sampler the fragment shader samples through.
+///
+/// **[`FilterMode::Nearest`] on all three filters, and that is the whole point.**
+/// Every texel of the target must come back as one of the four source texels
+/// exactly; a linear filter would blend across the source's two-texel span and
+/// hand back gradients no byte comparison could name. `PROBE_SAMPLER_DESC` is
+/// linear for the opposite reason — it exists to be *refused or accepted* by a
+/// browser and never sampled through.
+///
+/// **[`SamplerAddressMode::ClampToEdge`] on all three axes**, so a `u` or `v` a
+/// hair outside `0..1` cannot wrap round to the opposite texel and turn a flipped
+/// axis into a reading that still looks right.
+///
+/// **`compare` is `None`.** A comparison sampler is a `'comparison'` binding in
+/// WebGPU and can only be bound to a `texture_depth_*`; this one is bound
+/// alongside a float texture, which is the pairing
+/// [`PROBE_TEXTURE_SAMPLE_LAYOUT_ENTRIES`] declares.
+///
+/// `lod_max` is [`f32::MAX`], the seam's "no limit" sentinel and the value
+/// `PROBE_SAMPLER_DESC` already puts in front of a real `createSampler`. The
+/// source has one mip level, so no clamp here can change which one is read.
+pub const PROBE_TEXTURE_SAMPLE_SAMPLER_DESC: SamplerDesc<'static> = SamplerDesc {
+    label: Some("crcbl-webgpu texture-sample sampler"),
+    mag_filter: FilterMode::Nearest,
+    min_filter: FilterMode::Nearest,
+    mip_filter: FilterMode::Nearest,
+    address_mode: [
+        SamplerAddressMode::ClampToEdge,
+        SamplerAddressMode::ClampToEdge,
+        SamplerAddressMode::ClampToEdge,
+    ],
+    lod_min: 0.0,
+    lod_max: f32::MAX,
+    anisotropy: 1.0,
+    compare: None,
+};
+
+/// The bind-group layout handle the pipeline layout is built from. `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
+    match BindGroupLayoutHandle::from_bits(16 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// The two slots [`PROBE_TEXTURE_SAMPLE_WGSL`] declares, in the order it
+/// declares them.
+///
+/// **The first [`BindingKind::SampledImage`] and [`BindingKind::Sampler`]
+/// anywhere that a shader actually reads through.** The pair in
+/// [`PROBE_BIND_GROUP_LAYOUT_ENTRIES`] and the pair in
+/// [`PROBE_GROUP_LAYOUT_ENTRIES`] are declared and built and never sampled from;
+/// these two are named by `@group(0) @binding(0)` and `@binding(1)` in the
+/// shader below.
+///
+/// Both are [`ShaderStages::FRAGMENT`], which is where `textureSample` is legal.
+pub const PROBE_TEXTURE_SAMPLE_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 2] = [
+    BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::FRAGMENT,
+        kind: BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+    BindGroupLayoutEntry {
+        binding: 1,
+        visibility: ShaderStages::FRAGMENT,
+        kind: BindingKind::Sampler { comparison: false },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+];
+
+/// The layout the sampling bind group conforms to.
+pub const PROBE_TEXTURE_SAMPLE_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> =
+    BindGroupLayoutDesc {
+        label: Some("crcbl-webgpu texture-sample layout"),
+        entries: &PROBE_TEXTURE_SAMPLE_LAYOUT_ENTRIES,
+    };
+
+/// The bind group the pass binds. `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_BIND_GROUP: BindGroupHandle =
+    match BindGroupHandle::from_bits(16 << 32) {
+        Some(group) => group,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// What the bind group binds: the source's view, then the sampler.
+///
+/// The two handles are the same eight bytes as each other and resolve in
+/// different tables, which is [`PROBE_BIND_GROUP_ENTRIES`]'s point — and here a
+/// replayer that crossed them would not merely queue an error, it would hand the
+/// shader the wrong object and the readback is where that shows.
+pub const PROBE_TEXTURE_SAMPLE_BIND_GROUP_ENTRIES: [BindGroupEntry; 2] = [
+    BindGroupEntry {
+        binding: 0,
+        array_index: 0,
+        resource: BindingResource::ImageView(PROBE_TEXTURE_SAMPLE_SOURCE_VIEW),
+    },
+    BindGroupEntry {
+        binding: 1,
+        array_index: 0,
+        resource: BindingResource::Sampler(PROBE_TEXTURE_SAMPLE_SAMPLER),
+    },
+];
+
+/// The bind group's descriptor.
+pub const PROBE_TEXTURE_SAMPLE_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
+    label: Some("crcbl-webgpu texture-sample bind group"),
+    layout: PROBE_TEXTURE_SAMPLE_BIND_GROUP_LAYOUT,
+    entries: &PROBE_TEXTURE_SAMPLE_BIND_GROUP_ENTRIES,
+    variable_count: None,
+};
+
+/// The clear the pass loads with — [`PROBE_TEXTURE_SAMPLE_CLEAR_BYTES`] in the
+/// colour slot, and a depth and stencil slot the pass has no attachment for.
+#[must_use]
+pub const fn probe_texture_sample_clear_value() -> ClearValue {
+    ClearValue {
+        color: [
+            unorm8(PROBE_TEXTURE_SAMPLE_CLEAR_BYTES[0]),
+            unorm8(PROBE_TEXTURE_SAMPLE_CLEAR_BYTES[1]),
+            unorm8(PROBE_TEXTURE_SAMPLE_CLEAR_BYTES[2]),
+            unorm8(PROBE_TEXTURE_SAMPLE_CLEAR_BYTES[3]),
+        ],
+        depth: 0.0,
+        stencil: 0,
+    }
+}
+
+/// The colour attachment the sampling pass writes — cleared to
+/// [`PROBE_TEXTURE_SAMPLE_CLEAR_BYTES`] and stored, so the copy afterwards reads
+/// what the draw left.
+#[must_use]
+pub const fn probe_texture_sample_color_attachment() -> ColorAttachment {
+    ColorAttachment {
+        view: PROBE_TEXTURE_SAMPLE_TARGET_VIEW,
+        resolve: None,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: probe_texture_sample_clear_value(),
+    }
+}
+
+/// The buffer→image copy that puts the four colours into the source image.
+///
+/// `buffer_row_length` is [`PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS`] and not `0`:
+/// the seam spells "tightly packed" as `0`, and a tight row here would be eight
+/// bytes, which is the one thing WebGPU will not accept from a copy two rows
+/// deep. `buffer_image_height` stays `0`, which is the copy's own height and
+/// carries no alignment rule.
+#[must_use]
+pub const fn probe_texture_sample_upload_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_TEXTURE_SAMPLE_UPLOAD_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS,
+        buffer_image_height: 0,
+        image: PROBE_TEXTURE_SAMPLE_SOURCE_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(
+            PROBE_TEXTURE_SAMPLE_SOURCE_SIZE,
+            PROBE_TEXTURE_SAMPLE_SOURCE_SIZE,
+        ),
+    }
+}
+
+/// The image→buffer copy that moves the target's texels into the readback
+/// buffer. Tightly packed, because a row of
+/// [`PROBE_TEXTURE_SAMPLE_SIZE`] `Rgba8Unorm` texels is already 256 bytes.
+#[must_use]
+pub const fn probe_texture_sample_readback_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_TEXTURE_SAMPLE_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: PROBE_TEXTURE_SAMPLE_TARGET_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_TEXTURE_SAMPLE_SIZE, PROBE_TEXTURE_SAMPLE_SIZE),
+    }
+}
+
+/// A fullscreen quad that samples the whole source over the whole target.
+///
+/// **No vertex buffers**, [`PROBE_DRAW_WGSL`]'s trick: `vsMain` positions from
+/// `@builtin(vertex_index)` alone, out of a
+/// [`PROBE_TEXTURE_SAMPLE_CORNERS`]-corner array covering clip space twice over
+/// as two triangles.
+///
+/// **`textureSample` is the whole of the fixture**, and the first anywhere in
+/// this crate. The vertex shader hands the fragment shader a `uv`, and what
+/// comes out is whatever the sampler reads at it — a shader that returned a
+/// literal would compile, run and paint one flat colour, which is the reading
+/// group AJ calls a failure.
+///
+/// **The `uv` is derived from the clip-space corner, and its `y` is flipped.**
+/// Clip space runs `y` up and texture space runs `v` down, so `y = +1` — the row
+/// the readback hands back *first* — has to be `v = 0`, the source's top row.
+/// That is what `0.5 - corner.y * 0.5` is; write `0.5 + corner.y * 0.5` and the
+/// two rows of the source arrive swapped, which is the failure group AJ names as
+/// a flipped V axis. `u` needs no flip: clip `x` and texture `u` both run right.
+///
+/// `the_texture_sample_wgsl_samples_the_bound_texture` and
+/// `the_texture_sample_wgsl_flips_v_and_not_u` hold the string to both halves.
+pub const PROBE_TEXTURE_SAMPLE_WGSL: &str = concat!(
+    "struct Varyings { @builtin(position) position: vec4<f32>, ",
+    "@location(0) uv: vec2<f32> }; ",
+    "@group(0) @binding(0) var source: texture_2d<f32>; ",
+    "@group(0) @binding(1) var source_sampler: sampler; ",
+    "@vertex fn vsMain(@builtin(vertex_index) vertex: u32) -> Varyings { ",
+    "var corners = array<vec2<f32>, 6>(",
+    "vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0), ",
+    "vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)); ",
+    "let corner = corners[vertex]; ",
+    "var varyings: Varyings; ",
+    "varyings.position = vec4<f32>(corner.x, corner.y, 0.0, 1.0); ",
+    "varyings.uv = vec2<f32>(0.5 + corner.x * 0.5, 0.5 - corner.y * 0.5); ",
+    "return varyings; } ",
+    "@fragment fn fsMain(varyings: Varyings) -> @location(0) vec4<f32> { ",
+    "return textureSample(source, source_sampler, varyings.uv); }"
+);
+
+/// The shader module the texture-sampling probe's frame creates. WGSL only, on
+/// [`PROBE_GRAPHICS_SHADER_MODULE_DESC`]'s terms.
+pub const PROBE_TEXTURE_SAMPLE_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu texture-sample shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_TEXTURE_SAMPLE_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The shader-module handle the sampling pipeline names. `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(16 << 32) {
+        Some(module) => module,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// The pipeline-layout handle the sampling pipeline is built against.
+/// `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(16 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// The one set the sampling pipeline layout names — the layout the texture and
+/// the sampler are declared in. **Not empty**, unlike every other pipeline
+/// layout in this module: this is the first probe whose shader binds anything at
+/// all.
+pub const PROBE_TEXTURE_SAMPLE_SET_LAYOUTS: [BindGroupLayoutHandle; 1] =
+    [PROBE_TEXTURE_SAMPLE_BIND_GROUP_LAYOUT];
+
+/// The pipeline layout the texture-sampling probe's frame creates.
+pub const PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> =
+    PipelineLayoutDesc {
+        label: Some("crcbl-webgpu texture-sample pipeline layout"),
+        bind_group_layouts: &PROBE_TEXTURE_SAMPLE_SET_LAYOUTS,
+        push_constants: None,
+    };
+
+/// The pipeline handle the pass binds. `16 << 32`.
+pub const PROBE_TEXTURE_SAMPLE_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits(16 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 16 is not zero"),
+    };
+
+/// The one colour target [`probe_texture_sample_pipeline_desc`] writes.
+///
+/// **Unblended, and that is load-bearing here rather than incidental.** The
+/// four source alphas are all below `255`; with a blend state on, each sampled
+/// colour would be mixed with the clear underneath it and the readback would
+/// carry neither. `ColorWrites::ALL` for the same reason — a mask that dropped
+/// alpha would leave the clear's alpha in place and make the four colours'
+/// alphas unobservable.
+pub const PROBE_TEXTURE_SAMPLE_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTargetState {
+    format: Format::Rgba8Unorm,
+    blend: None,
+    write_mask: ColorWrites::ALL,
+}];
+
+/// The pipeline the sampling pass draws its quad through.
+///
+/// # The readings, and which part of the assertion rules each of them out
+///
+/// The pass clears the target to [`PROBE_TEXTURE_SAMPLE_CLEAR_BYTES`] and draws
+/// a quad over all of it, sampling a two-by-two source whose four texels are
+/// four different colours. Each quadrant of the readback must be, uniformly, the
+/// source texel that lies in the same corner:
+///
+/// * **the four quadrants hold the four colours, each in its own corner** — the
+///   only pass. A texture reached the fragment shader and the texel it delivered
+///   was the right one.
+/// * **all four quadrants hold one colour** — the shader returned a constant, or
+///   the sampler read one texel for every `uv`. Caught by the four colours being
+///   four *different* colours: no single value satisfies more than one quadrant.
+/// * **top and bottom exchanged** — the V axis is flipped: the vertex shader's
+///   `uv.y` runs the wrong way, or the upload's two rows were written in the
+///   wrong order. Caught by the top pair differing from the bottom pair.
+/// * **left and right exchanged** — the U axis is flipped. Caught by the left
+///   pair differing from the right pair.
+/// * **top-right and bottom-left exchanged, the other two unmoved** — `u` and
+///   `v` are transposed. This is the reading a fixture with a symmetric source
+///   could not see at all, and the *only* two quadrants that can see it are those
+///   two: a transpose leaves the diagonal alone. It is why those two colours are
+///   asserted separately rather than as "the four are all present".
+/// * **a channel permutation of the right answer in every quadrant** — a swap on
+///   the way out. Caught by [`PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES`]'s multiset
+///   rule, which no permutation of any of the four can satisfy.
+/// * **the clear, in every quadrant** — the draw produced no fragments at all.
+///   Caught by [`PROBE_TEXTURE_SAMPLE_CLEAR_BYTES`] being none of the four, and
+///   named separately so the failure says "nothing was drawn" rather than "the
+///   wrong colour".
+/// * **a gradient rather than four flats** — the sampler filtered. Caught by the
+///   quadrant tallies requiring *every* texel of a quadrant to match, not a
+///   majority.
+///
+/// The rest is the shape [`probe_first_instance_pipeline_desc`] settled on: a
+/// [`PrimitiveTopology::TriangleList`] with counter-clockwise winding and no
+/// culling — so neither triangle's winding is a second reason it could disappear
+/// — no depth-stencil state, and a single-sampled `Rgba8Unorm` target.
+#[must_use]
+pub const fn probe_texture_sample_pipeline_desc() -> GraphicsPipelineDesc<'static> {
+    GraphicsPipelineDesc {
+        label: Some("crcbl-webgpu texture-sample pipeline"),
+        layout: PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT,
+        vertex: ShaderEntry {
+            module: PROBE_TEXTURE_SAMPLE_SHADER_MODULE,
+            entry_point: "vsMain",
+        },
+        fragment: Some(ShaderEntry {
+            module: PROBE_TEXTURE_SAMPLE_SHADER_MODULE,
+            entry_point: "fsMain",
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleList,
+            front_face: FrontFace::Ccw,
+            cull_mode: CullMode::None,
+            polygon_mode: PolygonMode::Fill,
+            depth_clamp: false,
+        },
+        depth_stencil: None,
+        multisample: MultisampleState {
+            samples: 1,
+            alpha_to_coverage: false,
+        },
+        color_targets: &PROBE_TEXTURE_SAMPLE_COLOR_TARGETS,
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -7518,6 +8219,84 @@ impl FirstInstanceProbe {
     }
 }
 
+/// One texture-sampling probe, from the frame that asked for it up to the bytes
+/// that came back.
+///
+/// [`FirstInstanceProbe`]'s state machine on the texture-sampling probe's
+/// handle, **without its `Unsupported` arm**: the setup frame ends in the same
+/// `request_readback` and is answered by the same [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`], but nothing can stop this one before it starts.
+/// Sampling a `rgba8unorm` texture is core WebGPU, so there is no feature for a
+/// device to withhold and no state for a runner to settle in that would read as
+/// covered while proving nothing.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum TextureSampleProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — the target's `Rgba8Unorm` texels, one block of
+        /// [`PROBE_TEXTURE_SAMPLE_BLOCK_BYTES`].
+        bytes: Vec<u8>,
+    },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step, [`ClampProbe::Failed`]'s reasoning: a
+    /// readback is answered exactly once, so there is nothing left for a later
+    /// frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
+}
+
+impl TextureSampleProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`FirstInstanceProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -7692,6 +8471,12 @@ struct Probe {
     /// drain hit under [`FIRST_INSTANCE_UNDECODABLE`]. Its own string for
     /// [`reason`](Self::reason)'s reason.
     first_instance_reason: String,
+    texture_sample: TextureSampleProbe,
+    /// Why the texture-sampling probe stopped: the browser's own words under
+    /// [`TEXTURE_SAMPLE_FAILED`], or the [`DecodeError`](crate::DecodeError) the
+    /// drain hit under [`TEXTURE_SAMPLE_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
+    texture_sample_reason: String,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -7739,6 +8524,8 @@ impl Probe {
             clamp_reason: String::new(),
             first_instance: FirstInstanceProbe::Unasked,
             first_instance_reason: String::new(),
+            texture_sample: TextureSampleProbe::Unasked,
+            texture_sample_reason: String::new(),
             parity: ParityReport::new(),
         }
     }
@@ -8170,6 +8957,7 @@ impl Probe {
                 self.timestamp.absorb(&replies);
                 self.clamp.absorb(&replies);
                 self.first_instance.absorb(&replies);
+                self.texture_sample.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -10019,6 +10807,184 @@ impl Probe {
     fn first_instance_bytes(&self) -> &[u8] {
         match &self.first_instance {
             FirstInstanceProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Encode the texture-sampling setup frame and register its readback.
+    ///
+    /// `false` on two counts, and neither of them is a feature:
+    ///
+    /// * no device has opened — [`request_readback`](Self::request_readback)'s
+    ///   ordering rule, since every command here is a device method;
+    /// * the channel had no room, or another channel is installed.
+    ///
+    /// **There is no third**, which is the difference between this probe and the
+    /// two beside it. [`request_clamp`](Self::request_clamp) and
+    /// [`request_first_instance`](Self::request_first_instance) each refuse on a
+    /// device that withheld an optional feature; sampling a `rgba8unorm` texture
+    /// is core WebGPU, so every device that opens at all can run this frame.
+    fn request_texture_sample(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(
+                    PROBE_TEXTURE_SAMPLE_SOURCE_IMAGE,
+                    &PROBE_TEXTURE_SAMPLE_SOURCE_IMAGE_DESC,
+                );
+                stream.create_image_view(
+                    PROBE_TEXTURE_SAMPLE_SOURCE_VIEW,
+                    &PROBE_TEXTURE_SAMPLE_SOURCE_VIEW_DESC,
+                );
+                stream.create_image(
+                    PROBE_TEXTURE_SAMPLE_TARGET_IMAGE,
+                    &PROBE_TEXTURE_SAMPLE_TARGET_IMAGE_DESC,
+                );
+                stream.create_image_view(
+                    PROBE_TEXTURE_SAMPLE_TARGET_VIEW,
+                    &PROBE_TEXTURE_SAMPLE_TARGET_VIEW_DESC,
+                );
+                stream.create_buffer(
+                    PROBE_TEXTURE_SAMPLE_UPLOAD_BUFFER,
+                    &probe_texture_sample_upload_buffer_desc(),
+                );
+                stream.create_buffer(
+                    PROBE_TEXTURE_SAMPLE_BUFFER,
+                    &probe_texture_sample_buffer_desc(),
+                );
+                stream.create_sampler(
+                    PROBE_TEXTURE_SAMPLE_SAMPLER,
+                    &PROBE_TEXTURE_SAMPLE_SAMPLER_DESC,
+                );
+                // The layout before the group that names it, and both before the
+                // pipeline layout built from the layout.
+                stream.create_bind_group_layout(
+                    PROBE_TEXTURE_SAMPLE_BIND_GROUP_LAYOUT,
+                    &PROBE_TEXTURE_SAMPLE_BIND_GROUP_LAYOUT_DESC,
+                );
+                stream.create_bind_group(
+                    PROBE_TEXTURE_SAMPLE_BIND_GROUP,
+                    &PROBE_TEXTURE_SAMPLE_BIND_GROUP_DESC,
+                );
+                stream.create_shader_module(
+                    PROBE_TEXTURE_SAMPLE_SHADER_MODULE,
+                    &PROBE_TEXTURE_SAMPLE_SHADER_MODULE_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT,
+                    &PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_graphics_pipeline(
+                    PROBE_TEXTURE_SAMPLE_PIPELINE,
+                    &probe_texture_sample_pipeline_desc(),
+                );
+                stream.write_buffer(
+                    PROBE_TEXTURE_SAMPLE_UPLOAD_BUFFER,
+                    0,
+                    &PROBE_TEXTURE_SAMPLE_UPLOAD_BYTES,
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu texture-sample encoder"),
+                    queue: PROBE_TEXTURE_SAMPLE_QUEUE,
+                });
+                // The four colours reach the source image here, before the pass
+                // that samples it. WebGPU tracks the hazard itself, which is why
+                // no barrier sits between the two.
+                stream.copy_buffer_to_image(&probe_texture_sample_upload_copy());
+                let target = [probe_texture_sample_color_attachment()];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu texture-sample pass"),
+                    color_attachments: &target,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(
+                        PROBE_TEXTURE_SAMPLE_SIZE,
+                        PROBE_TEXTURE_SAMPLE_SIZE,
+                    ),
+                    timestamp_writes: None,
+                });
+                stream.bind_graphics_pipeline(PROBE_TEXTURE_SAMPLE_PIPELINE);
+                stream.bind_group(
+                    0,
+                    PROBE_TEXTURE_SAMPLE_BIND_GROUP,
+                    &[],
+                    PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT,
+                );
+                stream.draw(0..PROBE_TEXTURE_SAMPLE_CORNERS, 0..1);
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_texture_sample_readback_copy());
+                stream.finish(PROBE_TEXTURE_SAMPLE_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_TEXTURE_SAMPLE_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_TEXTURE_SAMPLE_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu texture-sample readback"),
+                        buffer: PROBE_TEXTURE_SAMPLE_BUFFER,
+                        offset: 0,
+                        size: probe_texture_sample_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.texture_sample = TextureSampleProbe::Requested;
+            self.texture_sample_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// texture-sampling readback and register its wait, unless it is already
+    /// waiting or ready — [`poll_first_instance`](Self::poll_first_instance)'s
+    /// protocol on the texture-sampling handle.
+    fn poll_texture_sample(&mut self) -> bool {
+        if !matches!(
+            self.texture_sample,
+            TextureSampleProbe::Requested | TextureSampleProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_TEXTURE_SAMPLE_READBACK))
+        else {
+            return false;
+        };
+        self.texture_sample = TextureSampleProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the texture-sampling readback has got to.
+    fn texture_sample_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.texture_sample_reason = error.to_string();
+            return TEXTURE_SAMPLE_UNDECODABLE;
+        }
+        match &self.texture_sample {
+            TextureSampleProbe::Unasked => TEXTURE_SAMPLE_UNASKED,
+            TextureSampleProbe::Requested => TEXTURE_SAMPLE_REQUESTED,
+            TextureSampleProbe::Waiting { .. } => TEXTURE_SAMPLE_WAITING,
+            TextureSampleProbe::Pending => TEXTURE_SAMPLE_PENDING,
+            TextureSampleProbe::Ready { .. } => TEXTURE_SAMPLE_READY,
+            TextureSampleProbe::Failed { reason } => {
+                self.texture_sample_reason.clone_from(reason);
+                TEXTURE_SAMPLE_FAILED
+            }
+        }
+    }
+
+    /// The bytes the texture-sampling readback came back with, or an empty slice
+    /// if it has not.
+    fn texture_sample_bytes(&self) -> &[u8] {
+        match &self.texture_sample {
+            TextureSampleProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -13010,6 +13976,91 @@ pub mod shim {
         })
     }
 
+    /// Encode the texture-sampling setup frame — a two-by-two source image
+    /// uploaded with four different texels, a nearest sampler, a bind group
+    /// holding the source's view and that sampler, one pipeline, a pass that
+    /// draws a fullscreen quad sampling the source, the copy and the readback
+    /// request.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// probe is re-entered, or another channel is installed.
+    ///
+    /// **No `_supported` flag beside it**, unlike the depth-clamp and
+    /// first-instance probes: sampling is core WebGPU, so there is nothing a
+    /// device can withhold and no absent branch for this export to explain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_texture_sample() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_texture_sample()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the texture-sampling readback once. `1` when a poll is on the
+    /// stream, `0` when there is nothing to poll for.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_texture_sample_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_texture_sample()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `TEXTURE_SAMPLE_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_texture_sample_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.texture_sample_state(),
+            Err(_) => super::TEXTURE_SAMPLE_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_texture_sample_state`] starts — the browser's
+    /// words under [`TEXTURE_SAMPLE_FAILED`](super::TEXTURE_SAMPLE_FAILED), the
+    /// decode error under
+    /// [`TEXTURE_SAMPLE_UNDECODABLE`](super::TEXTURE_SAMPLE_UNDECODABLE), and
+    /// empty otherwise. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_texture_sample_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.texture_sample_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_texture_sample_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.texture_sample_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// Where the sampled target's texels start, once
+    /// [`__crcbl_web_gpu_probe_texture_sample_state`] answers
+    /// [`super::TEXTURE_SAMPLE_READY`]. Null while it has not; the pointer is
+    /// stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_texture_sample_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.texture_sample_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_texture_sample_bytes_ptr`] points
+    /// at — the texture-sampling readback's length, or `0` if it has not
+    /// answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_texture_sample_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.texture_sample_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -13196,9 +14247,13 @@ mod tests {
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
         __crcbl_web_gpu_probe_text_len, __crcbl_web_gpu_probe_text_ptr,
-        __crcbl_web_gpu_probe_timestamp, __crcbl_web_gpu_probe_timestamp_len,
-        __crcbl_web_gpu_probe_timestamp_ptr, __crcbl_web_gpu_probe_timestamp_state,
-        __crcbl_web_gpu_probe_timestamp_supported,
+        __crcbl_web_gpu_probe_texture_sample, __crcbl_web_gpu_probe_texture_sample_bytes_len,
+        __crcbl_web_gpu_probe_texture_sample_bytes_ptr, __crcbl_web_gpu_probe_texture_sample_poll,
+        __crcbl_web_gpu_probe_texture_sample_reason_len,
+        __crcbl_web_gpu_probe_texture_sample_reason_ptr,
+        __crcbl_web_gpu_probe_texture_sample_state, __crcbl_web_gpu_probe_timestamp,
+        __crcbl_web_gpu_probe_timestamp_len, __crcbl_web_gpu_probe_timestamp_ptr,
+        __crcbl_web_gpu_probe_timestamp_state, __crcbl_web_gpu_probe_timestamp_supported,
     };
     use super::*;
     use crate::web::shim::{
@@ -19350,6 +20405,317 @@ mod tests {
         );
     }
 
+    /// **The shader really samples the texture the bind group holds.**
+    ///
+    /// The whole of the fixture: a fragment shader returning a literal would
+    /// compile, run, paint one flat colour and read back as a browser that
+    /// sampled nothing. The call is matched with both of its bound operands
+    /// rather than by the name `textureSample` alone, so a shader that sampled
+    /// *something else* — a second texture, a different sampler — would not
+    /// satisfy it either.
+    #[test]
+    fn the_texture_sample_wgsl_samples_the_bound_texture() {
+        for fragment in [
+            "@group(0) @binding(0) var source: texture_2d<f32>;",
+            "@group(0) @binding(1) var source_sampler: sampler;",
+            "textureSample(source, source_sampler, varyings.uv)",
+        ] {
+            assert!(
+                PROBE_TEXTURE_SAMPLE_WGSL.contains(fragment),
+                "the shader binds a texture and a sampler and samples through \
+                 them: {PROBE_TEXTURE_SAMPLE_WGSL}"
+            );
+        }
+    }
+
+    /// **`v` is flipped against clip space and `u` is not.**
+    ///
+    /// Clip space runs `y` up and texture space runs `v` down, so the row the
+    /// readback hands back first is `y = +1` and must be `v = 0`. Both halves are
+    /// asserted because both are wrong in a way that still renders: flip `u` as
+    /// well and the picture is rotated rather than mirrored, and a gate that only
+    /// knew one axis would name the other one's failure.
+    #[test]
+    fn the_texture_sample_wgsl_flips_v_and_not_u() {
+        assert!(
+            PROBE_TEXTURE_SAMPLE_WGSL
+                .contains("vec2<f32>(0.5 + corner.x * 0.5, 0.5 - corner.y * 0.5)"),
+            "u follows clip x and v is flipped against clip y: {PROBE_TEXTURE_SAMPLE_WGSL}"
+        );
+        // The corner array spans all of clip space, so the quad covers the whole
+        // target and every one of its texels is a sample rather than a clear.
+        for corner in ["vec2<f32>(-1.0, -1.0)", "vec2<f32>(1.0, 1.0)"] {
+            assert!(
+                PROBE_TEXTURE_SAMPLE_WGSL.contains(corner),
+                "the quad spans -1..1 on both axes: {PROBE_TEXTURE_SAMPLE_WGSL}"
+            );
+        }
+    }
+
+    /// **No two of the five colours are a channel permutation of each other, no
+    /// colour is a permutation of itself, and no two share an alpha.**
+    ///
+    /// Three separate claims, and each rules out a different silent failure. The
+    /// multiset rule is what makes a channel swap on the way out visible: with it
+    /// no permutation of any colour is any colour, so a swapped path cannot land
+    /// on a value the gate accepts. The alphas being pairwise distinct — and none
+    /// of them `255` — is what makes a dropped alpha visible, since a dropped one
+    /// reads back opaque. The clear is held to the same rules as the four, so
+    /// "nothing was drawn" cannot be mistaken for "the wrong texel".
+    #[test]
+    fn the_four_texture_sample_colours_survive_a_channel_swap() {
+        let sorted = |bytes: [u8; 4]| {
+            let mut rgb = [bytes[0], bytes[1], bytes[2]];
+            rgb.sort_unstable();
+            rgb
+        };
+        let colours = [
+            ("top left", PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES),
+            ("top right", PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES),
+            ("bottom left", PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES),
+            ("bottom right", PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES),
+            ("the clear", PROBE_TEXTURE_SAMPLE_CLEAR_BYTES),
+        ];
+        for (name, colour) in colours {
+            let rgb = sorted(colour);
+            assert!(
+                rgb[0] != rgb[1] && rgb[1] != rgb[2],
+                "{name} has two channels alike, so swapping them leaves it unchanged: {colour:?}"
+            );
+            assert_ne!(
+                colour[3], 255,
+                "{name}'s alpha is opaque, which is what a dropped alpha channel reads back as"
+            );
+            assert_ne!(
+                colour[3], 0,
+                "{name}'s alpha is what an untouched one reads as"
+            );
+        }
+        for (at, (name, colour)) in colours.iter().enumerate() {
+            for (other_name, other) in &colours[at + 1..] {
+                assert_ne!(
+                    sorted(*colour),
+                    sorted(*other),
+                    "{name} and {other_name} are channel permutations of each other, so a swap on \
+                     the way out turns one into the other"
+                );
+                assert_ne!(
+                    colour[3], other[3],
+                    "{name} and {other_name} share an alpha"
+                );
+            }
+        }
+    }
+
+    /// **The upload puts each colour in the texel whose quadrant the gate reads
+    /// it back from**, and puts the two rows a padded row apart.
+    ///
+    /// The bytes are built rather than written out, so this is what says the
+    /// build is right: a loop that wrote the bottom row at the wrong offset would
+    /// upload two texels of black and the browser gate would report the failure
+    /// as "the wrong colour" with no hint of where it came from.
+    #[test]
+    fn the_texture_sample_upload_places_each_colour_in_its_own_texel() {
+        let row = PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS as usize * 4;
+        let bytes = &PROBE_TEXTURE_SAMPLE_UPLOAD_BYTES;
+        assert_eq!(&bytes[..4], &PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES);
+        assert_eq!(&bytes[4..8], &PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES);
+        assert_eq!(
+            &bytes[row..row + 4],
+            &PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES
+        );
+        assert_eq!(
+            &bytes[row + 4..row + 8],
+            &PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES
+        );
+        // The gap between the two rows is padding the copy skips, and it is only
+        // padding while nothing is written into it.
+        assert!(
+            bytes[8..row].iter().all(|byte| *byte == 0),
+            "the space between the two rows carries a colour, so the row pitch is not what it says"
+        );
+        assert_eq!(
+            bytes.len() as u64,
+            probe_texture_sample_upload_buffer_desc().size,
+            "the buffer is sized from these bytes"
+        );
+        // The row pitch reaches WebGPU as a `bytesPerRow`, which a copy this deep
+        // requires to be 256-aligned. The seam carries it in texels.
+        assert_eq!(row % 256, 0, "the padded row is not a legal bytesPerRow");
+        assert_eq!(
+            probe_texture_sample_upload_copy().buffer_row_length,
+            PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS,
+            "the copy reads the rows at the pitch these bytes were laid out at"
+        );
+    }
+
+    /// **One export, a whole frame**: the source and its view, the target and
+    /// its view, the two buffers, the sampler, the layout and the group built
+    /// against it, the module, the pipeline layout and the pipeline, the upload
+    /// write and copy, a pass that binds the group and draws, the copy out and
+    /// the readback — then the answer reaching the bytes exports.
+    ///
+    /// The bind and the draw are read out of the frame and their operands
+    /// asserted rather than only their names: a pass that bound the group to a
+    /// slot the pipeline layout does not declare, or drew a vertex count that
+    /// covered half the target, has the same command names and replays to a
+    /// picture. A `cargo test` has no `navigator.gpu`, so the replayer is stood
+    /// in for by a `ReplyWriter` — which is why this proves the state machine and
+    /// the browser gate proves the pixels.
+    #[test]
+    fn the_texture_sample_export_encodes_the_upload_the_bind_group_and_the_sampling_pass() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_texture_sample(), 1);
+        let frame = take_frame();
+        let names: Vec<&str> = frame.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateSampler",
+                "CreateBindGroupLayout",
+                "CreateBindGroup",
+                "CreateShaderModule",
+                "CreatePipelineLayout",
+                "CreateGraphicsPipeline",
+                "WriteBuffer",
+                "CreateCommandEncoder",
+                "CopyBufferToImage",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "BindGroup",
+                "Draw",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the colours reach the source before the pass that samples it, and the target is \
+             copied out after"
+        );
+        assert!(frame.contains(&Command::BindGroup {
+            slot: 0,
+            group: PROBE_TEXTURE_SAMPLE_BIND_GROUP,
+            dynamic_offsets: Vec::new(),
+            layout: PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT,
+        }));
+        // The whole quad, one instance: a shorter range leaves part of the target
+        // on the clear and the quadrant tallies would report it as a mixture.
+        assert!(frame.contains(&Command::Draw {
+            vertices: 0..PROBE_TEXTURE_SAMPLE_CORNERS,
+            instances: 0..1,
+        }));
+        assert_eq!(
+            __crcbl_web_gpu_probe_texture_sample_state(),
+            TEXTURE_SAMPLE_REQUESTED
+        );
+
+        // The poll, and the answer that resolves it.
+        assert_eq!(__crcbl_web_gpu_probe_texture_sample_poll(), 1);
+        assert_eq!(
+            __crcbl_web_gpu_probe_texture_sample_state(),
+            TEXTURE_SAMPLE_WAITING
+        );
+        // `open_device` spent sequences 0 and 1, so the frame above occupies the
+        // next `frame.len()` and the poll follows it.
+        let poll_sequence = 2 + frame.len() as u64;
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_TEXTURE_SAMPLE_READBACK,
+            }]
+        );
+        // A target whose four quadrants are the four source texels — what a
+        // browser that sampled correctly hands back.
+        let size = PROBE_TEXTURE_SAMPLE_SIZE as usize;
+        let mut bytes: Vec<u8> = Vec::with_capacity(size * size * 4);
+        for row in 0..size {
+            for column in 0..size {
+                bytes.extend_from_slice(match (row < size / 2, column < size / 2) {
+                    (true, true) => &PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES,
+                    (true, false) => &PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES,
+                    (false, true) => &PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES,
+                    (false, false) => &PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES,
+                });
+            }
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_TEXTURE_SAMPLE_READBACK, &bytes);
+        deliver(replies.bytes());
+        assert_eq!(
+            __crcbl_web_gpu_probe_texture_sample_state(),
+            TEXTURE_SAMPLE_READY
+        );
+        assert_eq!(
+            u64::from(__crcbl_web_gpu_probe_texture_sample_bytes_len()),
+            PROBE_TEXTURE_SAMPLE_BLOCK_BYTES
+        );
+        let ptr = __crcbl_web_gpu_probe_texture_sample_bytes_ptr();
+        assert!(!ptr.is_null());
+        // SAFETY: the length above is the probe's own, and nothing has called
+        // back into wasm since it was read.
+        let read =
+            unsafe { core::slice::from_raw_parts(ptr, PROBE_TEXTURE_SAMPLE_BLOCK_BYTES as usize) };
+        // The first texel of each quadrant — the four corners the gate reads.
+        let midpoint = size / 2 * 4;
+        let half = size * size / 2 * 4;
+        assert_eq!(&read[..4], &PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES);
+        assert_eq!(
+            &read[midpoint..midpoint + 4],
+            &PROBE_TEXTURE_SAMPLE_TOP_RIGHT_BYTES
+        );
+        assert_eq!(
+            &read[half..half + 4],
+            &PROBE_TEXTURE_SAMPLE_BOTTOM_LEFT_BYTES
+        );
+        assert_eq!(
+            &read[half + midpoint..half + midpoint + 4],
+            &PROBE_TEXTURE_SAMPLE_BOTTOM_RIGHT_BYTES
+        );
+    }
+
+    /// **A device has to have opened first**, the readback probe's ordering
+    /// rule: every command the frame carries is a device method.
+    #[test]
+    fn a_texture_sample_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_texture_sample(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(
+            __crcbl_web_gpu_probe_texture_sample_state(),
+            TEXTURE_SAMPLE_UNASKED
+        );
+    }
+
+    /// The texture-sampling probe's `Failed` reaches the ABI: the state export
+    /// answers [`TEXTURE_SAMPLE_FAILED`] and the reason exports carry the
+    /// browser's own words.
+    #[test]
+    fn the_texture_sample_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().texture_sample = TextureSampleProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(
+            __crcbl_web_gpu_probe_texture_sample_state(),
+            TEXTURE_SAMPLE_FAILED
+        );
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_texture_sample_reason_ptr,
+                __crcbl_web_gpu_probe_texture_sample_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
     /// `web/engine/gpu-probe.js` — the page's half of this file's state codes,
     /// pulled in whole so the mirror can be checked without a browser.
     ///
@@ -19403,6 +20769,10 @@ mod tests {
         "PROBE_CLAMP_SIZE",
         "PROBE_FIRST_INSTANCE_SIZE",
         "PROBE_FIRST_INSTANCE_DRAWS",
+        "PROBE_TEXTURE_SAMPLE_SIZE",
+        "PROBE_TEXTURE_SAMPLE_SOURCE_SIZE",
+        "PROBE_TEXTURE_SAMPLE_CORNERS",
+        "PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS",
     ];
 
     /// Every state code this crate publishes, against the
@@ -19630,6 +21000,19 @@ mod tests {
                 ],
             ),
             (
+                "TEXTURE_SAMPLE",
+                "TEXTURE_SAMPLE",
+                codes![
+                    TEXTURE_SAMPLE_UNASKED,
+                    TEXTURE_SAMPLE_REQUESTED,
+                    TEXTURE_SAMPLE_WAITING,
+                    TEXTURE_SAMPLE_PENDING,
+                    TEXTURE_SAMPLE_READY,
+                    TEXTURE_SAMPLE_UNDECODABLE,
+                    TEXTURE_SAMPLE_FAILED
+                ],
+            ),
+            (
                 "COMPUTE",
                 "COMPUTE",
                 codes![
@@ -19725,11 +21108,11 @@ mod tests {
         );
 
         assert_eq!(
-            tables, 23,
+            tables, 24,
             "gpu-probe.js's table count moved; the mirror above has to move with it"
         );
         assert_eq!(
-            codes, 139,
+            codes, 146,
             "gpu-probe.js's code count moved; the mirror above has to move with it"
         );
     }
@@ -19773,7 +21156,7 @@ mod tests {
                 .iter()
                 .filter(|name| mirrored.contains(*name))
                 .count(),
-            134,
+            141,
             "probe.rs's state-code count moved; the mirror above has to move with it"
         );
 
@@ -19952,7 +21335,7 @@ mod tests {
 
         assert_eq!(
             shims.len(),
-            161,
+            168,
             "`shim`'s export count moved; the `# Exports` table has to move with it"
         );
         let documented: BTreeSet<&str> = rows.iter().copied().collect();

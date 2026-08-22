@@ -12612,6 +12612,14 @@ and would not notice, so what is left is `web/engine/gpu-replay.js`, which
 builds a real `GPUTextureBindingLayout` from the wire and refuses a `sampleType`
 it cannot map — a browser run, not a `cargo test`.
 
+**Group AJ is now a browser witness for the one shape that is expressible**, and
+only that one. It binds `SampleType::Float` on an `ImageViewType::D2` and reads
+back the texels, so that combination is held end to end on every runner. The two
+shapes this entry is about — an integer texture and an MSAA source — still
+cannot be _said_, so AJ cannot cover them and no gate can: the seam has no way
+to ask for either. AJ narrows what is unwitnessed rather than settling the
+design question.
+
 ## Settled: the `D2Array` page samples on Metal and D3D12
 
 Was an open coverage gap — `SampledImage { view_type }` is dropped by
@@ -14733,22 +14741,25 @@ for the replayer, and only a group like AH answers for the wire.
 off argument structures differing only in `firstInstance`, landing a half-target
 apart — so **two mapped features are left without one**:
 
-- **`texture-compression-bc`.** What actually blocked this was not the block:
-  the replayer derived `bytesPerRow` from a bytes-per-texel table with no BC
-  row, so a BC copy was refused before any texel could be compared. That is
-  fixed — `BLOCK_FOOTPRINT` in `web/engine/gpu-replay.js` converts both pitches
-  through the block extent — so what is left is the group itself. It needs a BC
-  block with known decoded texels; the workspace has no BC encoder and adding
-  one is not in scope, but a single hand-written BC1 block is small and the
-  format is exactly specified, so this is a transcription job with a
-  specification to check against rather than a design problem. **Assert only on
-  the endpoint texels.** A BC1 block's two endpoints decode by exact bit
-  replication, but its 1/3 and 2/3 interpolants are where vendors have always
-  differed by a step, so a block of `0xFFFF`/`0x0000` read at index 0 and index
-  1 is white and black on every decoder while indices 2 and 3 need a tolerance.
-  CI matters here: SwiftShader does not report the feature, so the absent branch
-  is what most runners would take and the present branch would rest on the local
-  hardware adapter.
+- **`texture-compression-bc`.** Both things that blocked this have gone. The
+  replayer derived `bytesPerRow` from a bytes-per-texel table with no BC row, so
+  a BC copy was refused before any texel could be compared; and no probe sampled
+  a texture at all, so there was no pipeline to read a decoded block through.
+  Group **AJ** is now that pipeline — a sampled source, a nearest sampler and a
+  quadrant-by-quadrant readback — and a BC group is AJ with a compressed source
+  and the feature gate around it. The first half is fixed — `BLOCK_FOOTPRINT` in
+  `web/engine/gpu-replay.js` converts both pitches through the block extent — so
+  what is left is the group itself. It needs a BC block with known decoded
+  texels; the workspace has no BC encoder and adding one is not in scope, but a
+  single hand-written BC1 block is small and the format is exactly specified, so
+  this is a transcription job with a specification to check against rather than
+  a design problem. **Assert only on the endpoint texels.** A BC1 block's two
+  endpoints decode by exact bit replication, but its 1/3 and 2/3 interpolants
+  are where vendors have always differed by a step, so a block of
+  `0xFFFF`/`0x0000` read at index 0 and index 1 is white and black on every
+  decoder while indices 2 and 3 need a tolerance. CI matters here: SwiftShader
+  does not report the feature, so the absent branch is what most runners would
+  take and the present branch would rest on the local hardware adapter.
 - **`timestamp-query`.** The cheapest to encode and the hardest to assert on.
   Browsers quantise timestamp values for privacy, so "non-zero" and "strictly
   increasing" are not safe claims without measuring first what this browser

@@ -320,6 +320,35 @@ export const FIRST_INSTANCE = Object.freeze({
 });
 
 /**
+ * The `TEXTURE_SAMPLE_*` codes `__crcbl_web_gpu_probe_texture_sample_state`
+ * answers, from `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The texture-sampling probe is a readback at heart — its setup frame ends in
+ * the same `request_readback` — so its codes are {@link DRAW}'s **seven**, and
+ * that is the difference worth reading: {@link CLAMP} and
+ * {@link FIRST_INSTANCE} each spend `6` on an `UNSUPPORTED` because a device can
+ * withhold the feature their fixtures need, and sampling a `rgba8unorm` texture
+ * is core WebGPU. There is no device that can refuse this, so there is no
+ * `UNSUPPORTED` here and `FAILED` is `6`.
+ *
+ * `READY` carries one block of `Rgba8Unorm` texels: the target a fullscreen quad
+ * painted by sampling a two-by-two source whose four texels are four different
+ * colours. Which colour each *quadrant* of the block came back as is the whole
+ * evidence — that a texture reached the fragment shader at all, and that the
+ * texel it delivered was the one under that quadrant rather than a flipped,
+ * transposed or channel-swapped neighbour.
+ */
+export const TEXTURE_SAMPLE = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+  FAILED: 6,
+});
+
+/**
  * The `OCCLUSION_*` codes `__crcbl_web_gpu_probe_occlusion_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -2109,6 +2138,98 @@ export function readFirstInstanceProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: firstInstanceStateName(state), reason, bytes };
+}
+
+/**
+ * The same state-name helper again, for the texture-sampling codes. Its own
+ * function for {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function textureSampleStateName(state) {
+  const found = Object.entries(TEXTURE_SAMPLE).find(
+    ([, code]) => code === state
+  );
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to upload a two-by-two texture, sample it across a fullscreen quad
+ * through a nearest sampler, and start reading the target back on the device it
+ * opened.
+ *
+ * **The only gate anywhere that puts a `textureSample` in front of a GPU.**
+ * `BindingKind::SampledImage` and `BindingKind::Sampler` are declared, built and
+ * accepted by a browser elsewhere — a `GPUBindGroupLayout` reports its `label`
+ * and nothing else, so that is as far as those checks reach. This one binds a
+ * real view and a real sampler to a fragment shader and asserts the texels that
+ * come out.
+ *
+ * What comes back is one block, and the claim is *which colour each quadrant
+ * holds*: the four source texels are four different colours, so a shader that
+ * returned a constant, a flipped V axis, a transposed UV and a swapped channel
+ * each produce a different block from the correct one.
+ *
+ * There is no `supported` flag beside this, and no `UNSUPPORTED` state, because
+ * sampling is core WebGPU — no device can withhold it.
+ * {@link pollTextureSampleProbe} drives the poll and
+ * {@link readTextureSampleProbe} reads the bytes when they land.
+ *
+ * Its answer is *data* and it needs a **device**, so `false` before one has
+ * opened is ordering rather than failure — wait for {@link readDeviceProbe} to
+ * say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame.
+ */
+export function startTextureSampleProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_texture_sample() === 1;
+}
+
+/**
+ * Poll the texture-sampling readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_texture_sample_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollTextureSampleProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_texture_sample_poll() === 1;
+}
+
+/**
+ * Read where the texture-sampling readback has got to, and its bytes once it is
+ * `READY` — one block of the sampled target's texels.
+ *
+ * {@link readFirstInstanceProbe}'s sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
+ */
+export function readTextureSampleProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_texture_sample_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_texture_sample_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_texture_sample_reason_len()
+  );
+  const ptr = exports.__crcbl_web_gpu_probe_texture_sample_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_texture_sample_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: textureSampleStateName(state), reason, bytes };
 }
 
 /**

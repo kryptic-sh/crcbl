@@ -22,8 +22,9 @@
 # chain, a sub-range fill, a presented canvas frame, a reconfigured swapchain, an
 # indirect draw, a dispatch that reads its workgroup counts out of a buffer, and
 # a triangle past the far plane that one pipeline clamps and the pipeline beside
-# it clips, and two indirect draws whose argument structures differ only in
-# `firstInstance` landing a half-target apart. `web/run-browser-e2e.sh` proves
+# it clips, two indirect draws whose argument structures differ only in
+# `firstInstance` landing a half-target apart, and a fullscreen quad whose
+# fragment shader samples a four-texel texture. `web/run-browser-e2e.sh` proves
 # the demos render through this
 # backend; nothing but this proves the seam underneath them command by command.
 #
@@ -310,7 +311,7 @@ if [ -z "$LETTERS" ]; then
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI AJ; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;
@@ -578,6 +579,21 @@ CLAMP_TRIP="$(grep -F 'depth clamping decided which fragments survived' "${OUTPU
 if [ -z "$CLAMP_TRIP" ]; then
     echo "crcbl probe e2e: the driver never read back what depth clamping changed;" >&2
     echo "                 crcbl-webgpu reports Features::DEPTH_CLAMP and no GPU ever tried it" >&2
+    exit 1
+fi
+
+# And the texels a fragment shader read out of a texture, which is group AJ and
+# is the only exercise `BindingKind::SampledImage` and `BindingKind::Sampler`
+# have past *creation* anywhere. Groups M and N build a layout and a group naming
+# both, and a `GPUBindGroupLayout` reports its `label` and nothing else, so that
+# is as far as they reach. It is worth its own line because of what a wrong
+# answer looks like: not an error but a picture — a flipped V axis, a transposed
+# uv or a swapped channel each render a plausible frame, and the readback is the
+# only place any of them shows.
+SAMPLED_TEXTURE_TRIP="$(grep -F 'a texture reached the fragment shader and the texel it delivered was the right one' "${OUTPUT}.plain" || true)"
+if [ -z "$SAMPLED_TEXTURE_TRIP" ]; then
+    echo "crcbl probe e2e: the driver never read back what a shader sampled out of a texture;" >&2
+    echo "                 crcbl-webgpu's sampled-image and sampler bindings are ungated in a real browser" >&2
     exit 1
 fi
 
