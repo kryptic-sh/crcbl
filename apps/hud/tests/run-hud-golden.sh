@@ -66,7 +66,6 @@ hud golden: CRCBL_GPU is not set, so nothing would pin the backend and a
   fallback would pass. Name one:
 
     CRCBL_GPU=vk   $0     # Vulkan
-    CRCBL_GPU=wgpu $0     # wgpu
     CRCBL_GPU=mtl  $0     # Metal, macOS
     CRCBL_GPU=dx12 $0     # Direct3D 12, Windows
 NOBACKEND
