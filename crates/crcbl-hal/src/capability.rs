@@ -1664,6 +1664,46 @@ mod tests {
         // pass descriptor, which is `timestampWrites`' own shape.
     ];
 
+    /// The two backends whose remaining work is parked rather than owed.
+    ///
+    /// `crcbl-mtl` and `crcbl-dx12` were deferred on 2026-08-21 —
+    /// `docs/plan/09-backends-metal-dx12.md` holds the state and
+    /// `docs/backlog.md` the two `DEFERRED` entries. The crates and their CI
+    /// jobs stay so a regression still shows; what stops is feature work on
+    /// them.
+    const DEFERRED_BACKENDS: &[BackendKind] = &[BackendKind::Metal, BackendKind::Dx12];
+
+    /// **`parity_blockers` cannot reach empty while the deferral holds, and
+    /// this is what says so instead of the count quietly redefining done.**
+    ///
+    /// Every row [`parity_blockers`] yields is on a
+    /// [deferred backend](DEFERRED_BACKENDS), so the honest reading of a
+    /// non-zero blocker count today is "parked", not "outstanding". Nothing
+    /// about that is expressed by the number itself, and a reader who saw only
+    /// the number would conclude there was work to pick up.
+    ///
+    /// **A failure here is the useful case.** A blocker on `crcbl-vk` or
+    /// `crcbl-webgpu` is work somebody is meant to do, and it would otherwise
+    /// join five parked rows and read as more of the same. The second assertion
+    /// is what stops the first going vacuous: with no blockers at all, "none of
+    /// them is live" is true and says nothing, and the deferral note above has
+    /// become the thing to delete.
+    #[test]
+    fn every_parity_blocker_is_on_a_deferred_backend() {
+        let live: Vec<String> = parity_blockers()
+            .filter(|entry| !DEFERRED_BACKENDS.contains(&entry.backend))
+            .map(|entry| format!("{} on {}", entry.capability, entry.backend))
+            .collect();
+        assert!(
+            live.is_empty(),
+            "these parity blockers are on backends nobody deferred, so they are work that is              actually owed rather than parked: {live:?}. Say which in the report instead of              leaving them to be read as more deferred rows"
+        );
+        assert!(
+            parity_blockers().next().is_some(),
+            "there are no parity blockers left at all, which makes the assertion above vacuous.              The deferral note on DEFERRED_BACKENDS and this test have outlived their subject"
+        );
+    }
+
     /// The one that makes the goal checkable: what
     /// [`parity_blockers`] answers must be what somebody reviewed, row for row.
     ///
