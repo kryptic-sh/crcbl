@@ -14,6 +14,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl_audio::wav::encode`** writes a `WavFile` back out as an IEEE-float
+  WAV (`format = 3`) — the inverse of `wav::decode`, which until now was the
+  only direction the module went. It writes f32 and nothing else: every integer
+  depth is a quantisation, and what this exists to write are reference waveforms
+  that get decoded and compared against, where rounding on the way out puts the
+  error in the file instead of in the thing under test. It refuses the two files
+  `decode` would refuse to read back — `WavError::MissingFmt` for no channels,
+  `WavError::MissingData` for no samples — and `WavError` gains
+  `Unrepresentable`, for a buffer larger than RIFF's fixed-width size fields can
+  describe. An exhaustive `match` on `WavError` therefore needs one more arm. A
+  non-finite sample is written through as it stands and still comes back as
+  silence, because `decode` is where NaN and the infinities are stopped.
+
 ### Changed
 
 - **`crcbl-webgpu` answers `Support::Yes` for

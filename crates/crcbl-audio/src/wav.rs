@@ -1,11 +1,18 @@
-//! WAV (RIFF) PCM decoder — reads interleaved integer samples and converts
-//! them to the engine's [`AudioSample`] (f32).
+//! WAV (RIFF) PCM codec — [`decode`] reads interleaved integer samples and
+//! converts them to the engine's [`AudioSample`] (f32); [`encode`] writes an
+//! f32 buffer back out.
 //!
 //! # What this handles
 //!
 //! Uncompressed PCM in the canonical WAV container: integer samples at any
 //! supported bit depth (8/16/24/32, signed and unsigned), any channel count,
 //! any sample rate.  IEEE float WAV (`format = 3`) is also decoded.
+//!
+//! **Encoding writes IEEE float and nothing else.** Every integer depth is a
+//! quantisation, and what this writes are reference waveforms that get decoded
+//! and compared against — rounding them on the way out would put the error in
+//! the file instead of in the thing under test. Reading stays catholic because
+//! files arrive from elsewhere; writing does not, because they do not.
 //!
 //! # What this deliberately does not handle
 //!
@@ -27,7 +34,12 @@ pub struct WavFile {
     pub channels: u16,
 }
 
-/// Parse errors.
+/// What can go wrong in either direction.
+///
+/// Most are parse failures. [`Unrepresentable`](Self::Unrepresentable) is the
+/// one only [`encode`] reaches; the two `Missing` variants are reached from
+/// both, because [`encode`] refuses to write a file [`decode`] would refuse to
+/// read back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WavError {
     /// The file is shorter than a valid header.
@@ -42,6 +54,10 @@ pub enum WavError {
     UnsupportedBitsPerSample(u16),
     /// No `data` chunk, or it is empty.
     MissingData,
+    /// Some part of the buffer does not fit the fixed-width field RIFF has for
+    /// it: sample data past a 32-bit chunk size, a channel count whose block
+    /// alignment passes 16 bits, or a byte rate past 32. Encoding only.
+    Unrepresentable,
 }
 
 impl core::fmt::Display for WavError {
@@ -57,6 +73,9 @@ impl core::fmt::Display for WavError {
                 write!(f, "unsupported bits per sample: {bits}")
             }
             Self::MissingData => f.write_str("WAV file has no data chunk"),
+            Self::Unrepresentable => {
+                f.write_str("WAV file does not fit the RIFF container's fields")
+            }
         }
     }
 }
@@ -158,6 +177,94 @@ pub fn decode(bytes: &[u8]) -> Result<WavFile, WavError> {
         sample_rate,
         channels,
     })
+}
+
+// ── Encoding ─────────────────────────────────────────────────────────────────
+
+/// The format tag [`encode`] writes: IEEE float, which is [`AudioSample`] as it
+/// already sits in memory.
+const FLOAT_FORMAT_TAG: u16 = 3;
+
+/// The sample width [`encode`] writes, matching [`FLOAT_FORMAT_TAG`].
+const FLOAT_BITS_PER_SAMPLE: u16 = 32;
+
+/// The `fmt ` chunk body's width, for the canonical PCM/float layout.
+const FMT_CHUNK_SIZE: u32 = 16;
+
+/// A RIFF chunk's id and size field, which precede every payload.
+const CHUNK_HEADER: u32 = 8;
+
+/// Writes a [`WavFile`] as an IEEE-float WAV — the inverse of [`decode`].
+///
+/// The header is the canonical one, `fmt ` then `data` and no `fact` chunk, so
+/// what comes out is read by anything that reads WAV and not only by [`decode`].
+///
+/// # What survives the round trip
+///
+/// Every finite sample exactly: an `f32` in, the same four bytes out, the same
+/// `f32` back. A **non-finite** sample is written as it stands and comes back
+/// as silence, because [`decode`] is where NaN and the infinities are stopped
+/// and where that is documented. Stopping them here as well would put one rule
+/// in two places and hide from a caller that its buffer ever held them.
+///
+/// # Errors
+///
+/// [`WavError::MissingFmt`] for no channels and [`WavError::MissingData`] for
+/// no samples — the error [`decode`] would return on the file this would
+/// otherwise have written, because writing a file that cannot be read back is
+/// a failure discovered at the far end and attributed to the wrong side.
+/// [`WavError::Unrepresentable`] is the encoder's own: a buffer larger than
+/// RIFF's fixed-width fields can describe, which written anyway would wrap a
+/// size and produce a file that parses and is wrong.
+pub fn encode(wav: &WavFile) -> Result<Vec<u8>, WavError> {
+    if wav.channels == 0 {
+        return Err(WavError::MissingFmt);
+    }
+    if wav.samples.is_empty() {
+        return Err(WavError::MissingData);
+    }
+
+    let bytes_per_sample = u32::from(FLOAT_BITS_PER_SAMPLE / 8);
+    let block_align = u32::from(wav.channels)
+        .checked_mul(bytes_per_sample)
+        .and_then(|align| u16::try_from(align).ok())
+        .ok_or(WavError::Unrepresentable)?;
+    let byte_rate = wav
+        .sample_rate
+        .checked_mul(u32::from(block_align))
+        .ok_or(WavError::Unrepresentable)?;
+    let data_size = wav
+        .samples
+        .len()
+        .checked_mul(bytes_per_sample as usize)
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or(WavError::Unrepresentable)?;
+    // Everything after RIFF's own id and size: the `WAVE` tag, the `fmt ` chunk
+    // whole, the `data` chunk's header, and the payload.
+    let riff_size = (4 + CHUNK_HEADER + FMT_CHUNK_SIZE + CHUNK_HEADER)
+        .checked_add(data_size)
+        .ok_or(WavError::Unrepresentable)?;
+
+    let mut out = Vec::with_capacity((riff_size as usize).saturating_add(CHUNK_HEADER as usize));
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&FMT_CHUNK_SIZE.to_le_bytes());
+    out.extend_from_slice(&FLOAT_FORMAT_TAG.to_le_bytes());
+    out.extend_from_slice(&wav.channels.to_le_bytes());
+    out.extend_from_slice(&wav.sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&FLOAT_BITS_PER_SAMPLE.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+    for sample in &wav.samples {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    // The payload is a whole number of four-byte samples, so RIFF's odd-size
+    // pad byte never applies here.
+    Ok(out)
 }
 
 // ── Raw helpers ──────────────────────────────────────────────────────────────
@@ -406,6 +513,88 @@ mod tests {
         bytes.extend_from_slice(b"junk data after the chunks");
         let wav = decode(&bytes).unwrap();
         assert_eq!(wav.samples.len(), 1);
+    }
+
+    /// The claim [`encode`] exists to make: what goes in comes back out.
+    ///
+    /// Values chosen to walk the format's edges — full scale both ways, the
+    /// smallest normal, a magnitude near the top of the range — because a
+    /// scaling bug that survives 0.5 does not survive these.
+    #[test]
+    fn an_encoded_float_wav_decodes_back_to_the_samples_it_was_given() {
+        let wav = WavFile {
+            samples: vec![0.0, -0.0, 1.0, -1.0, 0.5, -0.75, 3.3e38, f32::MIN_POSITIVE],
+            sample_rate: 48000,
+            channels: 2,
+        };
+        let bytes = encode(&wav).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), wav);
+    }
+
+    /// `decode` reads neither `byte_rate` nor `block_align` nor the RIFF size,
+    /// so a round trip through this module cannot catch any of them being
+    /// wrong — and every other player in the world reads them. Offsets are the
+    /// canonical header's, which is the layout `encode` promises to write.
+    #[test]
+    fn the_encoded_header_carries_the_fields_the_decoder_ignores() {
+        let wav = WavFile {
+            samples: vec![0.25; 4],
+            sample_rate: 44100,
+            channels: 2,
+        };
+        let bytes = encode(&wav).unwrap();
+        let frame_bytes = u32::from(wav.channels) * u32::from(FLOAT_BITS_PER_SAMPLE / 8);
+
+        assert_eq!(
+            bytes.len(),
+            44 + wav.samples.len() * 4,
+            "not a canonical header"
+        );
+        assert_eq!(
+            bytes[4..8],
+            (bytes.len() as u32 - CHUNK_HEADER).to_le_bytes()
+        );
+        assert_eq!(bytes[20..22], FLOAT_FORMAT_TAG.to_le_bytes());
+        assert_eq!(bytes[28..32], (wav.sample_rate * frame_bytes).to_le_bytes());
+        assert_eq!(bytes[32..34], (frame_bytes as u16).to_le_bytes());
+        assert_eq!(bytes[34..36], FLOAT_BITS_PER_SAMPLE.to_le_bytes());
+    }
+
+    /// A file with no channels or no samples is one `decode` refuses, and an
+    /// encoder that writes it moves the failure to whoever reads it next.
+    #[test]
+    fn encoding_refuses_the_files_its_own_decoder_would_refuse() {
+        let silent = WavFile {
+            samples: Vec::new(),
+            sample_rate: 48000,
+            channels: 1,
+        };
+        assert_eq!(encode(&silent), Err(WavError::MissingData));
+        assert_eq!(
+            decode(&minimal_wav(&[], 48000, 1, 32)),
+            Err(WavError::MissingData)
+        );
+
+        let channelless = WavFile {
+            samples: vec![0.5],
+            sample_rate: 48000,
+            channels: 0,
+        };
+        assert_eq!(encode(&channelless), Err(WavError::MissingFmt));
+    }
+
+    /// The non-finite asymmetry, asserted so it is a decision rather than a
+    /// surprise: `encode` writes NaN through and `decode` lands it on silence.
+    #[test]
+    fn a_non_finite_sample_is_written_through_and_read_back_as_silence() {
+        let wav = WavFile {
+            samples: vec![f32::NAN, 0.5],
+            sample_rate: 48000,
+            channels: 1,
+        };
+        let bytes = encode(&wav).unwrap();
+        assert!(f32::from_le_bytes(bytes[44..48].try_into().unwrap()).is_nan());
+        assert_eq!(decode(&bytes).unwrap().samples, vec![0.0, 0.5]);
     }
 
     #[test]

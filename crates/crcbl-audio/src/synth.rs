@@ -210,6 +210,30 @@ mod tests {
 
     const RATE: u32 = 48_000;
 
+    /// Asteroids' explosion, the longest burst any sample plays and the one
+    /// `tests/burst-reference.wav` holds. Named here rather than at each use
+    /// because the reference and the test that reads it have to ask the
+    /// generator for the same sound, and a golden compared against a different
+    /// request fails for a reason that is not a regression.
+    const BURST_SEED: u64 = 0x4173_7465_726F_6964;
+    const BURST_SECONDS: f32 = 0.32;
+    const BURST_DECAY: f32 = 9.0;
+    /// `BURST_SECONDS * RATE` lands a frame short of 15_360 because `0.32` is
+    /// not exact in `f32` and the product is floored.
+    const BURST_FRAMES: usize = 15_359;
+
+    /// The committed waveform: one channel of the burst above, as an
+    /// IEEE-float WAV this crate's own encoder wrote and its own decoder reads.
+    ///
+    /// A WAV rather than an array of literals so that it can be *played*. The
+    /// generator's output had never been listened to by anyone; a reference a
+    /// human can open in an editor and hear is the only kind that catches the
+    /// class of change every numeric assertion here passes through.
+    ///
+    /// Rewritten by `the_burst_reference_is_rewritten_from_the_generator`,
+    /// below, which names the command.
+    const BURST_REFERENCE: &[u8] = include_bytes!("../tests/burst-reference.wav");
+
     /// Interleaving is what the mixer's playhead assumes, and getting it wrong
     /// produces a sound rather than a failure — which is why it is asserted
     /// here for every generator rather than left to a listener.
@@ -415,75 +439,153 @@ mod tests {
     /// is `x86_64` like the Linux runner, so the difference is the maths
     /// library and not the instruction set.
     ///
-    /// So the bytes are not pinnable and this checks the waveform instead:
-    /// eight samples spread across the burst, and its total energy. A tolerance
-    /// of [`PROBE_TOLERANCE`] is roughly fifty times the drift an `exp` an ULP
-    /// out can produce through a filter whose pole contracts error rather than
-    /// growing it, and still some three orders tighter than any real change —
-    /// a different seed, decay, amplitude or filter moves these samples by
-    /// their own magnitude, not by their last digit.
+    /// So the bytes are not pinnable, and this checks the waveform instead —
+    /// every frame of it, against `BURST_REFERENCE`, at `PROBE_TOLERANCE`. That
+    /// tolerance is roughly fifty times the drift an `exp` an ULP out can
+    /// produce through a filter whose pole *contracts* error rather than
+    /// growing it. Contracting is why the bound does not have to widen as the
+    /// comparison goes from a handful of samples to all of them: the error a
+    /// frame inherits from the frames before it decays instead of accumulating,
+    /// so the worst frame of the whole burst is bounded by the same figure as
+    /// the worst of eight probes was. And it still sits far below any change
+    /// worth catching — nudging [`NOISE_LOWPASS_ALPHA`] by a tenth of a
+    /// percent, which is nothing a listener could hear, already moves the worst
+    /// frame by 1.45e-4, and a different seed, decay or amplitude moves these
+    /// samples by their own magnitude rather than by their last digit.
     ///
-    /// What this gives up against the digest is coverage of every sample; what
-    /// it buys is a test that is true. `docs/backlog.md` carries what a full
-    /// reference buffer would take.
+    /// **The total energy stays, alongside the per-sample comparison**, because
+    /// it is not the same check made twice. A per-sample bound is blind to a
+    /// small *coherent* drift spread over the whole buffer: a change that moves
+    /// every sample by less than `PROBE_TOLERANCE` passes it however many
+    /// samples it moves, and the energy moves by the sum. The band where that
+    /// matters is real, and was measured rather than argued: a **thousandth**
+    /// of a percent on [`NOISE_AMPLITUDE`] leaves the worst frame at 2.31e-6,
+    /// four times inside the tolerance, and moves the energy by two parts in a
+    /// hundred thousand — twenty times outside `ENERGY_TOLERANCE`. Only the
+    /// second assertion sees it.
+    ///
+    /// The argument against keeping it is that a differing libm produces that
+    /// same coherent shape, so it is the assertion most exposed to a platform
+    /// we cannot run here. That is measured rather than guessed: this figure at
+    /// `ENERGY_TOLERANCE` has been green on the macOS and Windows runners since
+    /// it landed, which is the evidence the byte digest never had.
+    ///
+    /// A failure names the worst frame and by how much it missed, because the
+    /// platforms that can fail this are ones we cannot reproduce locally: that
+    /// message is the whole diagnosis, and "a sample differed" spends a CI
+    /// round trip to learn nothing.
     #[test]
     fn a_burst_is_the_waveform_that_shipped() {
-        /// Asteroids' explosion, the longest burst any sample plays.
-        const SEED: u64 = 0x4173_7465_726F_6964;
-        /// `0.32 * 48_000` lands a frame short of 15_360 because `0.32` is not
-        /// exact in `f32` and the product is floored.
-        const FRAMES: usize = 15_359;
-        /// Left-channel samples at `k * FRAMES / 8`, measured on the Linux
-        /// runner's build.
-        const PROBE: [f32; 8] = [
-            // Silent: `fade_gain` is zero at the first frame.
-            0.0,
-            -0.000_696_863,
-            -0.014_059_698,
-            0.005_607_709,
-            0.043_979_72,
-            -0.008_442_327,
-            -0.014_862_902,
-            -0.001_449_375,
-        ];
-        /// Sum of squares over both channels, which no single probe sample
-        /// would catch a change in the parts of the burst between them.
-        const ENERGY: f64 = 32.695_741_201;
-        /// Absolute, on samples whose magnitudes run to about 0.044.
+        /// Absolute, on a burst that peaks at about 0.23.
         const PROBE_TOLERANCE: f32 = 1e-5;
-        /// Relative, on a sum of 30_718 squares.
+        /// Sum of squares over both channels, in `f64`. Read back out of the
+        /// committed reference rather than typed from the old test.
+        const ENERGY: f64 = 32.695_741_201;
+        /// Relative, on a sum of two squares per frame.
         const ENERGY_TOLERANCE: f64 = 1e-6;
 
-        let data = noise_burst(0.32, 9.0, SEED, RATE);
-        let frames = data.len() / CHANNELS;
+        let reference = crate::wav::decode(BURST_REFERENCE)
+            .expect("the committed reference is not a WAV this crate can read");
         assert_eq!(
-            frames, FRAMES,
-            "the burst changed length, so the probes below index into a different sound"
+            reference.channels, 1,
+            "the reference is not mono, so its samples are not frames"
+        );
+        assert_eq!(
+            reference.sample_rate, RATE,
+            "the reference was written at another rate, so it is another sound"
+        );
+        assert_eq!(
+            reference.samples.len(),
+            BURST_FRAMES,
+            "the reference is a different length from the burst it pins"
+        );
+        // A reference of silence would agree with a generator that had stopped
+        // producing anything, and the comparison below would pass.
+        let peak = reference.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(
+            peak > 1e-3,
+            "the reference peaks at {peak}, which is silence — nothing below is saying anything"
         );
 
-        for (k, &want) in PROBE.iter().enumerate() {
-            let i = k * FRAMES / 8;
+        let data = noise_burst(BURST_SECONDS, BURST_DECAY, BURST_SEED, RATE);
+        assert_eq!(
+            data.len(),
+            BURST_FRAMES * CHANNELS,
+            "the burst changed length, so it is a different sound from the reference"
+        );
+
+        let mut worst_frame = 0;
+        let mut worst = 0.0f32;
+        for (i, &want) in reference.samples.iter().enumerate() {
             let got = data[i * CHANNELS];
-            assert!(
-                (got - want).abs() <= PROBE_TOLERANCE,
-                "frame {i} is {got}, not {want} — off by {} against a tolerance of \
-                 {PROBE_TOLERANCE:e}, which is far more than a differing libm can explain",
-                (got - want).abs()
-            );
             assert_eq!(
                 got,
                 data[i * CHANNELS + 1],
                 "frame {i}'s two channels differ, and this generator is mono in stereo"
             );
+            let deviation = (got - want).abs();
+            // The `is_nan` arm is load-bearing: every comparison against a NaN
+            // is false, so `>` alone would walk past one and report the buffer
+            // as its best frame.
+            if deviation.is_nan() || deviation > worst {
+                worst_frame = i;
+                worst = deviation;
+            }
         }
+        // Captured unless the run asks for `--nocapture`, and shown by the
+        // harness when the assertion below fails. On the machine that wrote the
+        // reference this is exactly zero, so the number only says anything on a
+        // platform whose libm differs from that machine's.
+        eprintln!("worst frame deviates by {worst:e}, against {PROBE_TOLERANCE:e}");
+        assert!(
+            worst <= PROBE_TOLERANCE,
+            "frame {worst_frame} is {got}, not {want} — the worst of {BURST_FRAMES} frames, \
+             off by {worst:e} against a tolerance of {PROBE_TOLERANCE:e}, which is far more \
+             than a differing libm can explain",
+            got = data[worst_frame * CHANNELS],
+            want = reference.samples[worst_frame],
+        );
 
         let energy: f64 = data.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
         assert!(
             (energy - ENERGY).abs() <= ENERGY * ENERGY_TOLERANCE,
-            "the burst carries {energy} of energy, not {ENERGY} — the samples between \
-             the probes changed"
+            "the burst carries {energy} of energy, not {ENERGY} — every frame is inside \
+             {PROBE_TOLERANCE:e} of the reference and the total still moved, which is the \
+             coherent drift the per-frame bound cannot see"
         );
     }
+
+    /// Rewrites `tests/burst-reference.wav` from the generator as it stands:
+    ///
+    /// ```text
+    /// cargo test -p crcbl-audio --lib -- --ignored --exact \
+    ///     synth::tests::the_burst_reference_is_rewritten_from_the_generator
+    /// ```
+    ///
+    /// `#[ignore]` because it is not a check. It makes
+    /// `a_burst_is_the_waveform_that_shipped` pass by construction, so running
+    /// it is a decision that the burst *should* now sound different — never a
+    /// way to clear a failure. **Play the file it writes before committing
+    /// it**; that a human can hear the reference is half of why it is a WAV.
+    ///
+    /// Mono, because `noise_burst` puts one signal in both ears and the test
+    /// above asserts that frame by frame. The second copy would double the blob
+    /// and pin nothing the first does not.
+    #[test]
+    #[ignore = "rewrites the committed reference rather than checking it"]
+    fn the_burst_reference_is_rewritten_from_the_generator() {
+        let data = noise_burst(BURST_SECONDS, BURST_DECAY, BURST_SEED, RATE);
+        let left: Vec<AudioSample> = data.chunks_exact(CHANNELS).map(|frame| frame[0]).collect();
+        let bytes = crate::wav::encode(&crate::wav::WavFile {
+            samples: left,
+            sample_rate: RATE,
+            channels: 1,
+        })
+        .expect("the burst does not fit a WAV, which is a change to the generator");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/burst-reference.wav");
+        std::fs::write(path, bytes).expect("could not write the reference");
+    }
+
     /// The decay is what makes it a burst rather than a wash, and it is an
     /// argument rather than a constant so that a kill and a death can differ.
     #[test]
