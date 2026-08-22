@@ -1185,29 +1185,34 @@ uncovered is motion. Closing it needs a scripted-input path into gameplay, which
 neither sample has — `horde`'s `--prefill` is the only fixture of that kind in
 the tree, and it is what lets horde's golden picture a playing frame.
 
-### The other hand-kept Rust-to-JS mirrors have no guard
+### What the JS mirror guards still do not reach
 
-`probe.rs`'s state codes are now checked against `web/engine/gpu-probe.js` by
-`gpu_probe_js_mirrors_every_state_code_this_crate_publishes` and its twin.
-**That is the small half of the problem.**
+`crates/crcbl-webgpu/src/js_mirror.rs` now holds `gpu-stream.js` and
+`gpu-reply.js` to the Rust side by value: `tag.rs`'s wire codes across three JS
+shapes, and the six `crcbl_hal` bitflag tables. `probe.rs`'s state codes are
+held the same way. What is left, in the order it is worth taking:
 
-`crates/crcbl-webgpu/src/tag.rs` declares 319 `pub const` wire codes; the guard
-reaches exactly five of them — the `PRESENT_MODE_*` and `SURFACE_CAPS_FAILURE_*`
-pairs that happen to appear in `gpu-probe.js`'s tables. The rest are the command
-tags, the reply tags and the enum code tables (`STENCIL_OP_*`, `DEVICE_TYPE_*`
-and their kind), and they are restated by hand in `web/engine/gpu-stream.js` and
-`web/engine/gpu-reply.js`, where **nothing compares them at all**. Same defect,
-much larger surface, and a wire tag that drifts is worse than a state code that
-does: the browser decodes the wrong command rather than merely failing to name a
-state.
-
-`probe.rs`'s `js_state_tables` parser is reusable if those two files use the
-same frozen-table shape. That was not checked.
-
-**One property to keep if it is reused.** The parser refuses a line it cannot
-read, naming the file line and the text, rather than skipping it, and asserts
-its table count against the file's own `Object.freeze` count. Both exist because
-a mirror guard's failure mode is matching less than it claims and passing.
+- **A textual pin is only as portable as the checkout.** The bitflag guard
+  passed every Linux gate and failed `build + test (windows-latest)` on
+  `f610557`, because `.gitattributes` says `* text=auto` and a Windows checkout
+  hands the JS CRLF while the pin was written with `\n`. Fixed by folding in
+  `lf()` rather than pinning those files to LF, so a contributor with a
+  different `core.autocrlf` is covered too — but **any new textual pin over a
+  checked-out file has this failure mode**, and it does not show up here.
+- **Prose is not guarded and should not be.** `gpu-stream.js`'s `STREAM_VERSION`
+  doc explained versions 4, 3 and 2 while the constant read 5; the reason for 5
+  lived only in `tag.rs`. The value agreed, so no guard could catch it. This is
+  the residue after a mirror is checked, and noticing it is the only defence.
+- **`js_mirror` is `#[cfg(test)]`, so `cargo doc` never resolves its links** —
+  and the same blindness hides pre-existing unresolved intra-doc links in
+  `probe.rs` (`Support`, `StencilOp`) and `writer.rs` (`StencilOp`,
+  `Self::set_stencil_reference`). CI's rustdoc does not pass
+  `--document-private-items`, so nothing sees them. Running it that way is how
+  they were found; whether the gate should is a separate question, because that
+  flag also surfaces the ~73 diagnostics the doc-gate entry already records.
+- **`FileMirror::opaque` is now empty for both files.** The machinery stays
+  because it is what makes `js_decls` total, but nothing exercises it, so it is
+  a path that could rot without anything noticing.
 
 ### `System<T>`'s internals are not observable, so a desync surfaces as a panic
 
