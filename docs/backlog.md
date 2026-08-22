@@ -6152,11 +6152,26 @@ executed graph left every `InitialClaim::Tracked` import in, and `compile`
 answers `GraphError::ImportStateMismatch` when the next frame's declaration
 disagrees. Four things it still does not cover.
 
-- **`ImportedBuffer` has the same hole and was deliberately left out.** It
-  carries the same `initial`/`final_state` pair with nothing checking it. The
-  recorded defects were all images, and widening doubles the call-site churn.
-  The ledger, the error variant and `validate_imports` all generalise directly;
-  this is a scope decision rather than a design problem.
+- **The buffer half is checked but not compiler-enforced, and that asymmetry is
+  the thing to know.** `ImportedBuffer` is now validated the same way, against
+  its own ledger and `GraphError::BufferImportStateMismatch` — but it gained no
+  field, so unlike the image half **nothing fails to compile** when a new buffer
+  import is added with a wrong `initial`. It is caught only when a test actually
+  executes two frames against one `TransientPool`. What carries it today:
+  `cull_stats`, `crcbl::screenshot`'s null-backend replay, the forward e2e and
+  the draw-gen e2e. A buffer import on a path none of those reach is declared on
+  trust.
+
+- **A buffer arriving behind external synchronisation would need `InitialClaim`
+  extended to buffers.** It is unconditional today because no buffer in this
+  tree comes from behind an acquire semaphore — verified against every import
+  site: `DrawGen::add_passes`, `ForwardRenderer::add_passes`' selection ring and
+  probe table, `LightGrid::add_pass`, `CullStatsRing::add_copy_pass`. If one
+  ever does — a buffer shared with another API, or a WebGPU import — the answer
+  is to give `ImportedBuffer` a claim field, **not** to weaken
+  `validate_imports`. The reasoning lives in `ImportedBuffer`'s and
+  `InitialClaim`'s doc comments; this only records what would trigger revisiting
+  it.
 
 - **A graph that is built and never executed desynchronises the audit.**
   `ForwardRenderer::add_passes` advances `shadow_imported` with a `mem::replace`
