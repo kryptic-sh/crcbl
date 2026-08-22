@@ -1221,6 +1221,59 @@ impl Device for WebGpuDevice {
             .remove(&swapchain.to_bits());
     }
 
+    /// Acquires the canvas's frame, and never reports it stale.
+    ///
+    /// # Why there is no [`SurfaceError::OutOfDate`] arm
+    ///
+    /// **A `GPUCanvasContext` is not a swapchain bound to a size it can
+    /// outgrow.** `configure()` fixes the format, the usage and the alpha mode
+    /// and says nothing about the resolution: WebGPU's *Canvas Context sizing*
+    /// takes that from the element's `width` and `height` attributes, and
+    /// setting either runs the spec's *update the canvas size*, which replaces
+    /// the drawing buffer and rebuilds the context's texture descriptor from
+    /// the canvas there and then. `getCurrentTexture()` therefore hands back a
+    /// texture at the canvas's size **as of the call**. There is no stale
+    /// configuration for the browser to notice, and correspondingly no signal
+    /// in the API — no `OutOfDate`, no `VK_SUBOPTIMAL_KHR` — for this to
+    /// translate. That is why [`AcquiredFrame::suboptimal`] is `false` rather
+    /// than a measurement, and why `present` cannot report one either.
+    ///
+    /// # What that leaves, and why the recorded extent is still the right answer
+    ///
+    /// `extent` comes out of `self.swapchains`, which
+    /// [`create_swapchain`](Device::create_swapchain) and
+    /// [`reconfigure_swapchain`](Device::reconfigure_swapchain) fill from
+    /// [`SwapchainDesc::extent`] — the size the caller *asked* for.
+    /// `web/engine/gpu-replay.js`'s canvas branch drops that field, because a
+    /// canvas owns its own size, so a reconfigure changes the format and the
+    /// alpha mode and nothing about the resolution. Reporting the request back
+    /// is nevertheless the swapchain seam's obligation 2 answered exactly: a
+    /// canvas has no permitted range to clamp into, so what was configured *is*
+    /// what was asked for.
+    ///
+    /// **The request and the texture stay the same number because of how a
+    /// browser frame is shaped**, and this crate can only see two of the three
+    /// links:
+    ///
+    /// * `web/engine/shell.js`'s `syncSize` is the only writer of
+    ///   `canvas.width`/`canvas.height`, and it reports those very numbers
+    ///   through `__crcbl_web_resize` in the next statement — so a size the
+    ///   shell delivers is one the canvas already has.
+    ///   `the_shim_reports_the_canvas_size_it_just_wrote` holds that.
+    /// * The extent this reports is the one the last configure carried, never a
+    ///   create-time cache.
+    ///   `the_acquired_extent_is_the_one_last_configured` holds that.
+    /// * `crcbl::engine`'s `Loop::frame_body` pumps the shell, calls
+    ///   `GpuContext::resize` — hence `reconfigure_swapchain` — and only then
+    ///   runs the frame that acquires. That link lives in a crate this one
+    ///   cannot see, so it is stated here and held nowhere.
+    ///
+    /// Nothing can slip between them: a browser frame is one
+    /// `requestAnimationFrame` turn holding both the wasm step and
+    /// `web/engine/demo.js`'s replay of this very command, and a
+    /// `ResizeObserver` callback cannot run in the middle of one.
+    ///
+    /// Both guards are in `super::tests`.
     fn acquire_next_frame(
         &self,
         swapchain: SwapchainHandle,
@@ -1248,6 +1301,10 @@ impl Device for WebGpuDevice {
             index: 0,
             acquire_semaphore: None,
             present_semaphore: None,
+            // Never `true`, and there is no `OutOfDate` arm to reach it from:
+            // a canvas is sized by its own attributes rather than by the
+            // configure, so it has no stale state to report. See the method
+            // docs for the whole of it.
             suboptimal: false,
         })
     }

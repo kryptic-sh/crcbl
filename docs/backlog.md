@@ -5296,26 +5296,32 @@ section was deleted because the work shipped. Every entry in it was re-verified
 against the tree first; these four are what survived, and none of them was
 recorded anywhere else.
 
-- **`crcbl-webgpu`'s `acquire_next_frame` never reports `OutOfDate` or
-  `suboptimal`.** `WebGpuDevice::acquire_next_frame` hard-codes
-  `suboptimal: false` and has no `SurfaceError::OutOfDate` path at all —
-  `OutOfDate` appears nowhere in that backend. `crcbl_hal`'s own `Device` docs
-  call `OutOfDate` **expected traffic** after a resize, and `crcbl::engine`
-  matches on it. It may well be correct by construction — a canvas context does
-  not go out of date the way a Vulkan swapchain does — but unlike the adjacent
-  `wait_until_presented`, which carries a comment explaining exactly why its
-  no-op is the honest answer, this one says nothing. Decide which it is and
-  write it down; a silent `false` is indistinguishable from an unwritten arm.
+- **The ordering that makes `crcbl-webgpu`'s `suboptimal: false` true is guarded
+  nowhere.** Settled 2026-08-22: the hard-coded `false` is correct, and correct
+  by construction of the platform rather than by anything this engine does.
+  WebGPU's _Canvas Context sizing_ algorithm re-derives a canvas context's
+  texture descriptor from `canvas.width`/`canvas.height` whenever either is set,
+  and `configure()`'s own note says its early validation "remains valid until
+  the next `configure()` call, **except** for validation of the `size`, which
+  changes when the canvas is resized". A canvas context is not a swapchain that
+  can outgrow a size, so the API has no out-of-date signal for a backend to
+  translate. `crcbl-webgpu` now says this at the literal, and two tests hold the
+  two links it can reach: `the_shim_reports_the_canvas_size_it_just_wrote` pins
+  `web/engine/shell.js` to sizing the backing store and then reporting those
+  same locals, from exactly one place;
+  `the_acquired_extent_is_the_one_last_configured` drives the device and proves
+  a reconfigure moves what a later acquire reports.
 
-- **`crates/crcbl-dx12/Cargo.toml`'s reason for naming `windows` 0.62 is now
-  false.** The comment says the crate is "already in this workspace's lockfile
-  on Windows — `wgpu-hal`, `gpu-allocator` and `cpal` all resolve it — so what
-  this line buys is the three feature gates below". `wgpu` and `gpu-allocator`
-  are at **zero** occurrences in `Cargo.lock`; only `cpal` still resolves it, so
-  naming it is now what puts the crate in the graph rather than merely selecting
-  features from someone else's resolution. `crcbl-mtl` got exactly this
-  correction and dx12 did not. A comment fix, not backend work — it does not
-  conflict with the dx12 deferral.
+  **The third link is in `crcbl` and nothing holds it.** `Loop::frame_body`
+  pumps events, calls `gpu.resize(...)`, then calls `gpu.frame()`. Move the
+  resize below the frame and web renders a frame at the previous extent while
+  every gate stays green — `AcquiredFrame::extent` on this backend mirrors the
+  last configure rather than answering from the texture, so the
+  `acquired.extent != configured_extent` check in `crcbl::engine` can never fire
+  there. A guard belongs in `crcbl`, driving a `Loop` with a recording GPU that
+  asserts the call order, not in the backend. `crcbl-vk` folds
+  `VK_SUBOPTIMAL_KHR` into the next acquire and `crcbl-mtl` reads the layer, so
+  both would catch it; the browser is the one that would not.
 
 - **The browser gate renders at one size, and a second was deliberately
   blessed.** `render_e2e.rs` has `EXTENT_ODD` at 97×61 with three goldens,

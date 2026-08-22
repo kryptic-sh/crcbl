@@ -16,7 +16,7 @@ use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
     CompositeAlpha, Device, DeviceCaps, DeviceDesc, DeviceType, Features, Format, HalError,
     Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc,
-    ReadbackState, SubmitInfo, SurfaceCaps,
+    ReadbackState, SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc,
 };
 
 use crate::ReplyWriter;
@@ -1509,4 +1509,124 @@ fn mesh_pipeline_desc() -> crcbl_hal::MeshPipelineDesc<'static> {
         multisample: crcbl_hal::MultisampleState::default(),
         color_targets: &[],
     }
+}
+
+// ── the extent an acquired frame carries ───────────────────────────────────
+
+/// `web/engine/shell.js` — the shell's half of the browser, pulled in whole so
+/// the one thing `WebGpuDevice::acquire_next_frame` claims about the canvas can
+/// be checked without one.
+///
+/// `include_str!` resolves against this file, so moving the shim stops this
+/// crate compiling — a failure nobody can read as a pass, which is why
+/// [`crate::js_mirror`] pulls the page's other halves in the same way.
+const SHELL_JS: &str = include_str!("../../../../web/engine/shell.js");
+
+/// The three statements that make the extent this backend reports and the size
+/// of the texture the browser hands back one number, in the order that keeps
+/// them one: **write the backing store, then tell the engine what was written.**
+const SIZED_THEN_REPORTED: &str = "canvas.width = width; canvas.height = height; \
+     exports.__crcbl_web_resize(canvasId, width, height, scale);";
+
+/// A canvas swapchain descriptor at `extent`, shaped the way the engine's is —
+/// the browser's preferred format's sRGB counterpart, the ring a canvas reports,
+/// and the only present mode a browser has.
+fn canvas_swapchain_desc(surface: SurfaceHandle, extent: (u32, u32)) -> SwapchainDesc<'static> {
+    SwapchainDesc {
+        label: Some("test canvas swapchain"),
+        surface,
+        format: Format::Rgba8UnormSrgb,
+        extent,
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    }
+}
+
+/// **The shim sizes the canvas backing store to the number it then reports, in
+/// that order, and it is the only thing that sizes it.**
+///
+/// `acquire_next_frame` reports the extent the last configure carried and
+/// declares the frame never suboptimal, while the texture the browser hands back
+/// is sized by `canvas.width`/`canvas.height` — WebGPU's *Canvas Context sizing*,
+/// which no `configure()` has a say in. The two are the same number only because
+/// `syncSize` writes the backing store and then hands the engine those very
+/// locals. A shim that reported CSS pixels while sizing the store in device
+/// pixels, that told the engine first and resized afterwards, or that grew a
+/// second place to resize the canvas from, would each make that `false` a lie
+/// with nothing anywhere to catch it.
+///
+/// Read off the whitespace-folded source, so prettier decides where these
+/// statements wrap and not what this guard covers, and pinned by **count** as
+/// well as by text — one writer of each half of the backing store, one report,
+/// and the three of them adjacent.
+#[test]
+fn the_shim_reports_the_canvas_size_it_just_wrote() {
+    let shim = crate::js_mirror::collapsed(SHELL_JS);
+    assert_eq!(
+        shim.matches("canvas.width =").count(),
+        1,
+        "web/engine/shell.js must have exactly one writer of the canvas backing store's width"
+    );
+    assert_eq!(
+        shim.matches("canvas.height =").count(),
+        1,
+        "web/engine/shell.js must have exactly one writer of the canvas backing store's height"
+    );
+    assert_eq!(
+        shim.matches("__crcbl_web_resize").count(),
+        1,
+        "web/engine/shell.js must report a size to the engine from exactly one place"
+    );
+    assert_eq!(
+        shim.matches(SIZED_THEN_REPORTED).count(),
+        1,
+        "web/engine/shell.js must size the canvas and then report those same numbers, as \
+         `{SIZED_THEN_REPORTED}` — the extent `acquire_next_frame` hands back is only the \
+         texture's size because of this"
+    );
+}
+
+/// **The extent an acquired frame carries is the one the *last* configure
+/// carried**, never the one the swapchain was created at.
+///
+/// `crcbl::engine` renders at `AcquiredFrame::extent` rather than at the size it
+/// asked for — the swapchain seam's obligation 3 — and a resize reaches this
+/// backend only as a `reconfigure_swapchain`. A reconfigure that left the map
+/// alone would go on reporting the size the canvas had before the resize, and
+/// `suboptimal: false` would insist nothing was wrong while every pass rendered
+/// to the wrong viewport.
+#[test]
+fn the_acquired_extent_is_the_one_last_configured() {
+    let (_channel, device) = device_on_fresh_channel();
+    let surface: SurfaceHandle = Handle::from_bits(1 << 32).expect("a real handle");
+
+    let swapchain = device
+        .create_swapchain(&canvas_swapchain_desc(surface, (640, 360)))
+        .expect("configuring a canvas needs no reply");
+    assert_eq!(
+        device
+            .acquire_next_frame(swapchain)
+            .expect("an acquire needs no reply")
+            .extent,
+        (640, 360),
+        "a fresh swapchain reports the extent it was created at"
+    );
+
+    device
+        .reconfigure_swapchain(swapchain, &canvas_swapchain_desc(surface, (800, 450)))
+        .expect("reconfiguring a canvas needs no reply");
+    let acquired = device
+        .acquire_next_frame(swapchain)
+        .expect("an acquire needs no reply");
+    assert_eq!(
+        acquired.extent,
+        (800, 450),
+        "the reconfigure is what moves the extent every later frame is told"
+    );
+    assert!(
+        !acquired.suboptimal,
+        "a canvas is sized by its own width and height, so a configure can never fall behind \
+         it and there is nothing to report as suboptimal"
+    );
 }

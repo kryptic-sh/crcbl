@@ -118,7 +118,7 @@ pub(crate) fn lf(source: &'static str) -> &'static str {
 /// same soft-wrap rule the markdown tests use.
 ///
 /// Leaked for [`lf`]'s reason, and called once per test for the same one.
-fn collapsed(source: &'static str) -> &'static str {
+pub(crate) fn collapsed(source: &'static str) -> &'static str {
     String::leak(source.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
