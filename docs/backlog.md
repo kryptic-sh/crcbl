@@ -6511,7 +6511,7 @@ changes what an existing command does.
 `ImportedImage::initial` is enforced now — `TransientPool` records what each
 executed graph left every `InitialClaim::Tracked` import in, and `compile`
 answers `GraphError::ImportStateMismatch` when the next frame's declaration
-disagrees. Four things it still does not cover.
+disagrees. What it still does not cover:
 
 - **The buffer half is checked but not compiler-enforced, and that asymmetry is
   the thing to know.** `ImportedBuffer` is now validated the same way, against
@@ -6534,23 +6534,9 @@ disagrees. Four things it still does not cover.
   `InitialClaim`'s doc comments; this only records what would trigger revisiting
   it.
 
-- **A graph that is built and never executed desynchronises the audit.**
-  `ForwardRenderer::add_passes` advances `shadow_imported` with a `mem::replace`
-  (`forward.rs`, in `add_passes`), while the ledger is only written in
-  `CompiledGraph::execute`. So a graph compiled and dropped leaves
-  `shadow_imported` moved and the ledger untouched, and the next frame declares
-  `ShaderRead` against an absent entry — where the guard is silent, because
-  nothing recorded contradicts it. Making `shadow_imported` read from the pool
-  instead would close it and delete the field.
-
 - **A first frame cannot be checked at all**, by construction: there is nothing
   recorded to contradict. The check catches drift between frames, not a wrong
   declaration on the first one.
-
-- **Two virtual images importing one `ImageHandle` in a single graph** get
-  separate compile-time trackers — they are keyed by `ImageId`, not by handle —
-  and the ledger takes whichever executes last. Pre-existing and not introduced
-  by the check; nothing in the tree does it today.
 
 Ledger growth is bounded in practice rather than by anything in the code: one
 entry per distinct tracked `ImageHandle`, pruned only at
