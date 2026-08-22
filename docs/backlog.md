@@ -6153,24 +6153,34 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   is declined, the demos run single-threaded through `Inline` and the roadmap's
   `crossOriginIsolated` gate should be struck rather than left unmeetable.
 
-- **Blocked 2026-08-06: the wasm worker backend needs `rust-src` on
-  `nightly-2026-07-02`, which is not installed.** The plan stands — a nightly
-  pinned by date for that one target, in the shape `decoder-fuzz` already uses,
-  because `rust-toolchain.toml` pins an **exact stable** (`1.97.0`) on purpose
-  and its own comment calls a floating channel a broken promise. Measured:
-  `rustup component list --toolchain nightly-2026-07-02 --installed` lists
-  `cargo`, `rust-std` and `rustc` and **not** `rust-src`, and the build fails
-  with
-  `library/Cargo.lock does not exist, unable to build with the standard library`.
-  No backend was written against a toolchain that cannot build it:
-  `default_spawner` still yields `Inline` on wasm, which is a whole answer
-  rather than a stub.
+- **Unblocked 2026-08-22: the pinned nightly can build a threaded wasm
+  artifact.** This entry read "Blocked 2026-08-06" because `rust-src` was
+  missing on `nightly-2026-07-02`. It was installed with the
+  `rustup component add` the entry itself named, and `21-jobs.md`'s finding 1
+  was then re-run rather than assumed:
 
-  To unblock:
-  `rustup component add rust-src --toolchain nightly-2026-07-02-x86_64-unknown-linux-gnu`,
-  then re-check `21-jobs.md`'s finding 1 before building on it. Beyond the
-  toolchain, three things are known to be in the way and are worth deciding
-  before writing code:
+  ```
+  RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals" \
+    cargo +nightly-2026-07-02 build -p crcbl-jobs \
+    --target wasm32-unknown-unknown -Z build-std=std,panic_abort
+  ```
+
+  exits 0 with the single warning finding 1 predicted,
+  `unstable feature specified for -Ctarget-feature: atomics`. The pinned-nightly
+  plan stands unchanged — a second toolchain pinned by date for that one target,
+  in the shape `decoder-fuzz` already uses, because `rust-toolchain.toml` pins
+  an **exact stable** (`1.97.0`) on purpose and its own comment calls a floating
+  channel a broken promise.
+
+  **`rust-src` was installed locally and CI does not add it.** `ci.yml`'s
+  nightly toolchain step installs the toolchain and not the component, so a job
+  running the command above would fail there while passing here. Adding
+  `components: rust-src` to that step is owed before any CI work depends on it.
+
+  No backend was written against a toolchain that could not build it:
+  `default_spawner` still yields `Inline` on wasm, which is a whole answer
+  rather than a stub. Three things are still known to be in the way and are
+  worth deciding before writing code:
   - **A wasm module cannot start its own worker** (`21-jobs.md` finding 2), so
     the backend is an `extern "C"` import the `web/` half implements — the same
     hand-written ABI shape `crcbl-audio`'s `web` module and `crcbl-store`'s OPFS
@@ -9133,9 +9143,10 @@ the transport seam over a third transport shape.
 - **`DeviceId` is per-kind on every backend**, which blocks local-multiplayer
   device assignment that `19-input.md` says is supported "from day one". A test
   asserting two devices are distinguishable would pass vacuously.
-- **`21-jobs.md`'s threaded-wasm finding is not reproducible today**: it needs
-  `rust-src` on `nightly-2026-07-02`. Unblock with
-  `rustup component add rust-src --toolchain nightly-2026-07-02-x86_64-unknown-linux-gnu`.
+- **`21-jobs.md`'s threaded-wasm finding is reproducible again** since
+  `rust-src` was installed on `nightly-2026-07-02` (2026-08-22). Re-verified by
+  running finding 1's build; the P5B entry above carries the command, its
+  output, and the `components: rust-src` that `ci.yml` still owes.
 
 ### Owed by the shader guardrails
 
