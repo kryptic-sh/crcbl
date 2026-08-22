@@ -9707,11 +9707,18 @@ green run over content that does not use the feature.
   `SurfaceCaps::current_extent` is hardcoded `None`, so the "surface reports X
   but the shell configured Y" path is unreachable; `NullInstance::adapters`
   returns exactly one adapter, so "no adapter can serve this surface" is
-  unreachable; `AcquiredFrame::suboptimal` is hardcoded `false`, so the
-  reconfigure-after-present path is unreachable; `wait_until_presented` always
-  returns `Ok`, so the lapsed-timeout path is unreachable; and **neither preset
-  advertises `PRESENT_FEEDBACK`**, so a device that claims it has to be
-  hand-built in the test.
+  unreachable; `wait_until_presented` always returns `Ok`, so the lapsed-timeout
+  path is unreachable; and **neither preset advertises `PRESENT_FEEDBACK`**, so
+  a device that claims it has to be hand-built in the test.
+
+  **One of these has been closed, and it is the worked example for the rest.**
+  `AcquiredFrame::suboptimal` is now `Recorder::report_suboptimal_acquires`,
+  beside `lose_device` and `report_swapchain_out_of_date`. The part worth
+  copying is not the plumbing but the question it forced: whether the injector
+  should _latch_ or _run out_. It runs out, because the engine answers
+  suboptimal by reconfiguring, so a latched one would rebuild on every frame and
+  a test that drove such a loop would hang instead of failing. Each remaining
+  injector owes the same question an answer.
 
 - **The observed half of the pacing line is pinned to `Unknown` in every test.**
   `NullDevice::display_timing` returns `Unknown` unconditionally, and no driver

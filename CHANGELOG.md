@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_hal::null::Recorder::report_suboptimal_acquires`** makes a null
+  device hand back an `AcquiredFrame` with `suboptimal` set, which it could not
+  do before — the field was a hardcoded `false`, so the engine's
+  reconfigure-after-present policy was reachable from no test. It is _counted_
+  rather than latched, unlike `report_swapchain_out_of_date` beside it: a
+  suboptimal swapchain still presents and the engine answers it by
+  reconfiguring, so a latched one would rebuild every frame for as long as a
+  loop ran.
+
 - **`crcbl_audio::wav::encode`** writes a `WavFile` back out as an IEEE-float
   WAV (`format = 3`) — the inverse of `wav::decode`, which until now was the
   only direction the module went. It writes f32 and nothing else: every integer
