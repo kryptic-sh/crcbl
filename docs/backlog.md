@@ -5555,6 +5555,18 @@ expires again, the extent in the message is the thing to read first.
 exactly once. It counts the `Resized` events carrying the new size and asserts
 there is one, so a repeated request would break the assertion it exists for.
 
+**The same shape exists elsewhere and was left alone.** `crcbl-shell`'s
+`x11_e2e.rs` waits on "the window manager's answer" after a `set_mode`, in
+`a_mode_request_is_a_request_and_the_effective_mode_is_the_answer` and
+`a_window_created_borderless_does_not_report_its_own_request_as_the_answer`: one
+`_NET_WM_STATE` client message, then a deadline. If a manager can drop a
+`ConfigureRequest` it can drop one of these, and the failure would look
+identical. Re-asking would be safe — `WmStateAction` has only `Add` and
+`Remove`, no `Toggle`, so a repeat is idempotent — but nothing has been observed
+failing there, and hardening a green suite on a hypothesis is churn. Recorded so
+that if one of those waits ever expires, this is the first thing to try rather
+than the last.
+
 ## Findings the roadmap carried that nothing else did (2026-08-22)
 
 Folding `docs/plan/ROADMAP.md`'s three sample-findings sections and its
