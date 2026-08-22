@@ -7335,13 +7335,21 @@ annotated.
 S2 is done — simulation, art, audio, persistence and the browser demo. What is
 not:
 
-- **No golden buffer for the cues.** The three sounds are synthesised
-  deterministically — `crcbl_audio::synth::noise_burst` runs splitmix64 from a
-  fixed seed — so a golden buffer is _possible_, and there is not one. What the
-  tests assert is that each cue fires, that it carries the position of the thing
-  that raised it, and that the explosion decays and is not a tone. Nobody has
-  listened to the result on a real device and no test can tell a good explosion
-  from a bad one.
+- **No golden buffer for the cues, and the job is smaller than it sounds.** Two
+  of the three are analytic: `SOUND_SHOT` is `synth::sine(900.0, 0.05)` and the
+  engine is `synth::looped_sine(ENGINE_HZ, ENGINE_CYCLES)`, so the right check
+  is each sample against the closed form, which needs no golden file at all and
+  nobody has written it. Only the explosion needs pinning —
+  `synth::noise_burst(0.32, EXPLOSION_DECAY, EXPLOSION_SEED)` runs splitmix64,
+  so it is byte-reproducible and nothing pins the bytes.
+  `the_explosion_is_a_decaying_burst_of_noise` asserts it decays and is not a
+  tone, which a different noise generator would also satisfy. If a digest is
+  used it must be taken over `f32::to_bits`, or over the i16 quantisation that
+  actually reaches a device — never over the samples' memory, which folds in
+  signed zero and NaN payloads. Nobody has listened to the result on a real
+  device and no test can tell a good explosion from a bad one; that half is not
+  fixable by a golden, only by emitting a WAV a human opens, the way
+  `crcbl-golden` argues for PNG.
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
   simulated play), 337 rocks spawned, 1,221 bullets fired, six waves cleared,
