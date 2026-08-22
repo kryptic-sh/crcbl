@@ -4644,16 +4644,31 @@ the honest reachable state on this machine is four rows, not zero.
   `actions/deploy-pages` during an outage; the _build_ job passed every gate.
   The site on Pages is therefore one commit behind until that deploy is re-run.
 
-### The probe module-doc export table is missing the readback shims
+### What the exports-table gate does not hold
 
-`crates/crcbl-webgpu/src/probe.rs`'s `# Exports` table lists every shim through
-`__crcbl_web_gpu_probe_surface_caps_has_extent`, then jumps to the draw shims
-this slice added — the five `__crcbl_web_gpu_probe_readback*` exports from the
-prior readback slice were never added to the table. The functions and their doc
-comments exist; only the summary table skipped them. Left out of the draw slice
-as out of scope: add the readback rows between the surface-caps and draw rows so
-the table is whole again. Verified by reading the table (lines ~27–65) against
-the `pub extern "C"` shim fns.
+`probe.rs`'s `# Exports` table and its `shim` module are compared by
+`the_exports_table_names_every_shim_the_module_writes_out_and_no_others`, which
+fails by name in both directions. Two things it deliberately or unavoidably does
+not cover:
+
+- **A shim a macro expands into would be invisible to it.** The parser reads
+  `pub extern "C" fn` out of the file's own text, so an export produced by macro
+  expansion has no line for it to find, and would be undocumented with nothing
+  to say so. There is none today — the file's only `macro_rules!` are the JS
+  mirror's `codes!` and `wire_codes!`, and neither emits an item — so this is a
+  trap for a future slice rather than a live gap.
+- **Row order is not held, on purpose.** The table groups the adapter's
+  `features_lo` / `features_hi` / `max_image_2d` beside the adapter and the
+  device's beside the device, while `shim` declares them in the order the slices
+  arrived. A row inserted in the wrong place therefore passes. Gating order
+  would mean reordering the table into declaration order and losing the
+  grouping, which is what makes it readable.
+
+The entry this replaces claimed the table was missing the readback rows. It was
+wrong when it was written down or went stale immediately after: commit `e76c275`
+added them, and a set comparison of all 140 rows against all 140 exports at
+`HEAD` — before the gate was written — found no drift in either direction. It
+also said five readback exports where there are seven.
 
 ### Nothing on the WebGPU backend can ever say "try the next adapter"
 
