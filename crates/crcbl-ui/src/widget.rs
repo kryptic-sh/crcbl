@@ -723,6 +723,70 @@ mod tests {
         assert!(!btn.hit_test(pos, Vec2::new(0.0, 0.0), &atlas()));
     }
 
+    /// **The sweep `docs/plan/12-testing.md` asks for**, where the two tests
+    /// above are two points.
+    ///
+    /// Two points cannot see a transposed axis: the centre is inside whichever
+    /// way the comparison is spelled, and the origin is outside both ways. A
+    /// grid that straddles all four edges can — every sample is held against the
+    /// rectangle the button itself reports, so a swapped comparison, a wrong
+    /// corner, or a bound that stopped being inclusive each show up as a named
+    /// disagreement at a named point rather than as a count.
+    #[test]
+    fn button_hit_test_agrees_with_its_rect_over_a_grid() {
+        /// How far outside the button the sweep reaches, so every edge is
+        /// crossed rather than approached.
+        const MARGIN: f32 = 6.0;
+        /// Sample spacing. A negative power of two, so stepping accumulates no
+        /// error and the samples are the ones this test says they are.
+        const STEP: f32 = 0.5;
+
+        let btn = Button::new("Go");
+        let atlas = atlas();
+        let pos = Vec2::new(10.0, 10.0);
+        let (min, max) = btn.rect(pos, &atlas);
+        let size = max - min;
+        assert!(
+            (size.x - size.y).abs() > STEP,
+            "the premise: a square button hides a transposed axis, and the sweep \
+             below would pass on one. This button is {size:?}"
+        );
+
+        let mut samples = 0_u32;
+        let mut inside = 0_u32;
+        let mut x = min.x - MARGIN;
+        while x <= max.x + MARGIN {
+            let mut y = min.y - MARGIN;
+            while y <= max.y + MARGIN {
+                let mouse = Vec2::new(x, y);
+                let want = x >= min.x && x <= max.x && y >= min.y && y <= max.y;
+                assert_eq!(
+                    btn.hit_test(pos, mouse, &atlas),
+                    want,
+                    "at {mouse:?}, against a button spanning {min:?} to {max:?}"
+                );
+                samples += 1;
+                inside += u32::from(want);
+                y += STEP;
+            }
+            x += STEP;
+        }
+        assert!(
+            inside > 0 && inside < samples,
+            "a sweep entirely inside or entirely outside asserts nothing about an \
+             edge: {inside} of {samples} samples hit"
+        );
+
+        // The boundary itself, which a grid only straddles: every corner is on
+        // it, and `hit_test` documents an inclusive rectangle.
+        for corner in [min, Vec2::new(max.x, min.y), Vec2::new(min.x, max.y), max] {
+            assert!(
+                btn.hit_test(pos, corner, &atlas),
+                "the rectangle is inclusive, so its own corner {corner:?} is a hit"
+            );
+        }
+    }
+
     #[test]
     fn a_press_and_release_over_one_button_is_a_click_and_frees_the_capture() {
         let btn = Button::new("Fire");

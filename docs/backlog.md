@@ -10239,9 +10239,6 @@ in place.
   and `horde` each compare a real frame now, and `lantern` has one by its own
   route; `quarry` and `viewer` do not. Both are tools rather than demos, so the
   question is whether the plan's rule reaches them at all.
-- **`crcbl-ui` owes a hit-test grid and has two points.**
-  `button_hit_test_inside` and `button_hit_test_outside` exist; the sweep the
-  plan names does not.
 
 ## Decisions taken 2026-08-10, so they are not re-argued
 
