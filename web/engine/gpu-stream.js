@@ -60,15 +60,19 @@ const STREAM_MAGIC = new Uint8Array([
 /**
  * `tag::STREAM_VERSION`.
  *
- * `4` since `CreateGraphicsPipeline`'s multisample block lost its `mask` word —
- * the seam dropped `MultisampleState::mask` because Metal's pipeline descriptor
- * has no member to put it in, so every pipeline covers all of its samples and
- * `readMultisampleState` no longer reads a mask. It went to `3` when the stencil
- * block lost its trailing `reference` word, leaving `SetStencilReference` as the
- * only thing that carries one, and to `2` for the trailing `timestampWrites`
- * both pass commands grew.
+ * `5` since the buffer fill lost its trailing `value` word and became a clear:
+ * `CommandEncoder::fill_buffer` took a `u32` that most of the backends had to
+ * refuse most values of, so the seam dropped it and the tag became
+ * `CLEAR_BUFFER_TAG`. It went to `4` when `CreateGraphicsPipeline`'s
+ * multisample block lost its `mask` word — the seam dropped
+ * `MultisampleState::mask` because Metal's pipeline descriptor has no member to
+ * put it in, so every pipeline covers all of its samples and
+ * `readMultisampleState` no longer reads a mask. To `3` when the stencil block
+ * lost its trailing `reference` word, leaving `SetStencilReference` as the only
+ * thing that carries one, and to `2` for the trailing `timestampWrites` both
+ * pass commands grew.
  *
- * All three are *changed records* rather than new tags: an older decoder meeting
+ * All four are *changed records* rather than new tags: an older decoder meeting
  * a newer stream reads the `alphaToCoverage` byte and three bytes of the
  * colour-target count as a sample mask and carries on, decoding a stream that
  * still parses and means something else — which is the one defect a version word
