@@ -193,6 +193,11 @@
 //! | [`__crcbl_web_gpu_probe_bc_sample_reason_len`](shim::__crcbl_web_gpu_probe_bc_sample_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_bc_sample_bytes_ptr`](shim::__crcbl_web_gpu_probe_bc_sample_bytes_ptr) | `() -> i32` | Where the decoded target's texels start, once [`__crcbl_web_gpu_probe_bc_sample_state`](shim::__crcbl_web_gpu_probe_bc_sample_state) answers [`BC_SAMPLE_READY`]. |
 //! | [`__crcbl_web_gpu_probe_bc_sample_bytes_len`](shim::__crcbl_web_gpu_probe_bc_sample_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the BC probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_pass_span_supported`](shim::__crcbl_web_gpu_probe_pass_span_supported) | `() -> i32` | Whether the opened device has the browser's `timestamp-query`, as `1` or `0`. [`__crcbl_web_gpu_probe_timestamp_supported`](shim::__crcbl_web_gpu_probe_timestamp_supported)'s answer, read for this probe's own set. |
+//! | [`__crcbl_web_gpu_probe_pass_span`](shim::__crcbl_web_gpu_probe_pass_span) | `(i32) -> i32` | Encode [`PROBE_PASS_SPAN_SUBMITS`] submissions of [`PROBE_PASS_SPAN_PASSES`] empty compute passes and [`PROBE_PASS_SPAN_PASSES`] passes dispatching `workgroups` workgroups of [`PROBE_PASS_SPAN_WGSL`], every one timed through its own descriptor, and ask for every boundary. **`workgroups` is the caller's number**, the way [`__crcbl_web_gpu_probe_buffer`](shim::__crcbl_web_gpu_probe_buffer)'s size is. `1`, or `0` if no device has opened, the device has no `timestamp-query`, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_pass_span_state`](shim::__crcbl_web_gpu_probe_pass_span_state) | `() -> i32` | Drain, and answer one of the `PASS_SPAN_*` codes. |
+//! | [`__crcbl_web_gpu_probe_pass_span_ptr`](shim::__crcbl_web_gpu_probe_pass_span_ptr) | `() -> i32` | Where the boundaries start, as little-endian `u64` in [`probe_pass_span_query`]'s order. |
+//! | [`__crcbl_web_gpu_probe_pass_span_len`](shim::__crcbl_web_gpu_probe_pass_span_len) | `() -> i32` | How many bytes there are. **Zero is a failed read**, not an empty success. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -261,8 +266,11 @@
 //!
 //! [`TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) is the first. A
 //! `GPUQuerySet` of type `'timestamp'` needs the browser's `timestamp-query`, so
-//! a device that did not ask could not create one and group AF would have no
-//! claim to hold.
+//! a device that did not ask could not create one and groups AF and AL would
+//! have no claim to hold. What the device buys group AL is the *separation* it
+//! reads back: passes that dispatch a loop span more of the browser's own clock
+//! than the empty passes beside them in the same frame, and no device that
+//! withheld the gate can show that.
 //!
 //! [`DEPTH_CLAMP`](crcbl_hal::Features::DEPTH_CLAMP) is the second, on the same
 //! test and for a sharper reason: this crate *reports* it to callers off the
@@ -298,8 +306,9 @@
 //!
 //! Each is *optional* rather than required, so a browser without any of them
 //! still opens a device and the probe reports [`TIMESTAMP_UNSUPPORTED`],
-//! [`CLAMP_UNSUPPORTED`], [`FIRST_INSTANCE_UNSUPPORTED`] or
-//! [`BC_SAMPLE_UNSUPPORTED`] with a reason rather than failing to start.
+//! [`PASS_SPAN_UNSUPPORTED`], [`CLAMP_UNSUPPORTED`],
+//! [`FIRST_INSTANCE_UNSUPPORTED`] or [`BC_SAMPLE_UNSUPPORTED`] with a reason
+//! rather than failing to start.
 //! `web/tools/probe-groups.mjs` opens its reference device with the same
 //! request, so the two are compared like for like.
 //!
@@ -1295,6 +1304,35 @@ pub const BC_SAMPLE_UNSUPPORTED: u32 = 6;
 /// **A settled code, not a step**, [`CLAMP_FAILED`]'s reasoning: a readback is
 /// answered exactly once, so nothing further is coming.
 pub const BC_SAMPLE_FAILED: u32 = 7;
+
+/// Nothing has asked for a run of timed passes, or there is no channel to ask
+/// through.
+pub const PASS_SPAN_UNASKED: u32 = 0;
+/// The measuring frame — a [`PROBE_PASS_SPAN_QUERIES`]-query
+/// [`QueryKind::Timestamp`] set, [`PROBE_PASS_SPAN_SUBMITS`] submissions each
+/// holding [`PROBE_PASS_SPAN_PASSES`] empty passes and
+/// [`PROBE_PASS_SPAN_PASSES`] passes that dispatch
+/// [`PROBE_PASS_SPAN_WGSL`]'s loop, and the
+/// [`query_results`](crate::StreamWriter::query_results) ask that reads every
+/// boundary — is on the stream, and its [`Reply::QueryResults`] has not
+/// arrived.
+///
+/// **No poll**, for [`TIMESTAMP_WAITING`]'s reason: the replayer answers when
+/// its own map settles.
+pub const PASS_SPAN_WAITING: u32 = 1;
+/// The ticks are in. [`shim::__crcbl_web_gpu_probe_pass_span_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_pass_span_len`] carry them — one little-endian
+/// `u64` per query, in the order
+/// [`probe_pass_span_query`] lays them out.
+///
+/// **An empty list means the read failed**, exactly as it does for
+/// [`TIMESTAMP_READY`].
+pub const PASS_SPAN_READY: u32 = 2;
+/// The **device** opened without the browser's `timestamp-query` feature, so
+/// nothing was encoded — [`TIMESTAMP_UNSUPPORTED`]'s arm, on this probe's set,
+/// and [`shim::__crcbl_web_gpu_probe_pass_span_supported`] is what the device
+/// reported.
+pub const PASS_SPAN_UNSUPPORTED: u32 = 3;
 
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
@@ -7522,6 +7560,296 @@ pub const fn probe_bc_sample_pipeline_desc() -> GraphicsPipelineDesc<'static> {
     )
 }
 
+// The pass-span probe (group AL): the timestamp probe's frame with MORE THAN ONE
+// PASS IN IT, so that what comes back is a *distribution* of pass boundaries
+// rather than the single pair group AF reads. Every handle it names is
+// `18 << 32` — a generation past the BC probe's `17 << 32` — so its live
+// resources never land in another probe's slot in the shared page. It creates
+// one buffer, one of every other kind, and two command buffers, which the type
+// that carries two here distinguishes by index.
+//
+// **WHY A SECOND TIMESTAMP PROBE AT ALL.** Group AF asks whether the browser
+// writes the two queries a pass names, and a single pair of ticks is all that
+// question needs. It cannot ask what a *difference* between two ticks means,
+// because it has exactly one difference and nothing to hold it against — so
+// `Features::TIMESTAMP_QUERY` is declared with no exercise anywhere showing that
+// the numbers track work. This probe is the machinery for that: passes that do
+// nothing and passes that dispatch a loop, timed side by side in one set.
+//
+// **NO NANOSECOND CONSTANT LIVES ANYWHERE IN THIS PROBE, AND THAT IS THE
+// DESIGN.** What a pass's span reads as is a property of a browser's clock and
+// its quantisation rather than of the work — a browser that rounds its
+// timestamps for privacy reports the same frame as different numbers — so this
+// side hands the raw `u64`s out and `web/tools/probe-groups.mjs`'s group AL
+// compares them only with *each other*: every busy pass's span against every
+// idle pass's, in the one frame that produced both. A comparison between two
+// values off the same clock survives a rounding that no absolute figure would.
+//
+// The one number chosen from measurement is the **workgroup count**, and it is
+// the caller's rather than this module's — `probe_buffer_desc`'s size is the
+// same arrangement, and for the same reason: a value the gate passes in is
+// evidence, and a value fixed here would be a constant checked against itself.
+
+/// How many passes of each kind each submission holds.
+///
+/// Four, so that one call answers with a spread rather than a single reading:
+/// the idle passes are what the granularity of this browser's clock shows up in,
+/// and one of them could not show it.
+pub const PROBE_PASS_SPAN_PASSES: u32 = 4;
+
+/// How many submissions the measuring frame makes.
+///
+/// Two, which is the fewest that can tell "ordered inside one submission" from
+/// "ordered across submissions" — the second is the claim a profiler stitching
+/// frames together actually needs, and one submission cannot make it.
+pub const PROBE_PASS_SPAN_SUBMITS: u32 = 2;
+
+/// How many queries the set holds: two boundaries for each of the two kinds of
+/// pass, [`PROBE_PASS_SPAN_PASSES`] of each, in each of
+/// [`PROBE_PASS_SPAN_SUBMITS`] submissions.
+pub const PROBE_PASS_SPAN_QUERIES: u32 = PROBE_PASS_SPAN_PASSES * 4 * PROBE_PASS_SPAN_SUBMITS;
+
+/// Which query a pass's opening boundary is written into.
+///
+/// **The whole layout, in one place**, because the reader on the JS side has to
+/// take the same view of the array and a second transcription of the arithmetic
+/// is where the two would part. `submit` counts submissions, `busy` is `false`
+/// for the empty passes and `true` for the ones that dispatch, and `pass` counts
+/// within that run; the closing boundary is the query after the one this
+/// answers.
+///
+/// The order is monotonic in encode order — every query of submission `0`
+/// precedes every query of submission `1`, and within a submission the empty
+/// passes precede the busy ones — which is what lets the whole array be read as
+/// one sequence and asked whether it rises.
+#[must_use]
+pub const fn probe_pass_span_query(submit: u32, busy: bool, pass: u32) -> u32 {
+    let run = submit * 2 + if busy { 1 } else { 0 };
+    (run * PROBE_PASS_SPAN_PASSES + pass) * 2
+}
+
+/// The set the probe creates, times every pass with, and reads. `18 << 32`.
+pub const PROBE_PASS_SPAN_SET: QuerySetHandle = match QuerySetHandle::from_bits(18 << 32) {
+    Some(set) => set,
+    None => panic!("generation 18 is not zero"),
+};
+
+/// The set's descriptor: [`QueryKind::Timestamp`] again, at
+/// [`PROBE_PASS_SPAN_QUERIES`] queries.
+#[must_use]
+pub const fn probe_pass_span_set_desc() -> QuerySetDesc<'static> {
+    QuerySetDesc {
+        label: Some("crcbl-webgpu pass-span set"),
+        kind: QueryKind::Timestamp,
+        count: PROBE_PASS_SPAN_QUERIES,
+    }
+}
+
+/// How many `u32` slots the busy pass's storage buffer holds — one per
+/// invocation of a workgroup, so every invocation has somewhere to land its
+/// accumulator and the loop cannot be optimised away.
+///
+/// **64, matching the shader's `@workgroup_size(64)`**, as
+/// [`PROBE_DISPATCH_SLOTS`] does. Invocations past the first workgroup write the
+/// same slots as the first, which is a race whose value nothing reads: what the
+/// buffer is for is that the loop has a destination, not what ends up in it.
+pub const PROBE_PASS_SPAN_SLOTS: u32 = 64;
+
+/// How many times each invocation goes round the shader's loop.
+///
+/// Fixed here rather than passed in, because the caller already has a knob on
+/// the same product — `__crcbl_web_gpu_probe_pass_span` takes the workgroup
+/// count — and two knobs multiplying to one number is one more than the claim
+/// needs. Changing this one costs a wasm rebuild per reading and buys nothing
+/// the other cannot.
+pub const PROBE_PASS_SPAN_ITERATIONS: u32 = 4096;
+
+/// The multiplier the shader's loop steps its accumulator by.
+///
+/// Numerical Recipes' linear congruential constants, which are here for one
+/// property only: each step depends on the last, so the loop is a chain a
+/// compiler cannot fold, hoist or vectorise away. Nothing reads the values.
+pub const PROBE_PASS_SPAN_MULTIPLIER: u32 = 1_664_525;
+
+/// The increment of the same step. [`PROBE_PASS_SPAN_MULTIPLIER`]'s partner.
+pub const PROBE_PASS_SPAN_INCREMENT: u32 = 1_013_904_223;
+
+/// The storage buffer the busy pass's dispatch writes. `18 << 32`.
+pub const PROBE_PASS_SPAN_STORAGE_BUFFER: BufferHandle = match BufferHandle::from_bits(18 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 18 is not zero"),
+};
+
+/// The storage buffer's descriptor: [`PROBE_PASS_SPAN_SLOTS`] `u32`s the
+/// dispatch writes and nothing reads back, so [`BufferUsage::STORAGE`] alone.
+#[must_use]
+pub const fn probe_pass_span_storage_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu pass-span storage buffer"),
+        size: (PROBE_PASS_SPAN_SLOTS as u64) * 4,
+        usage: BufferUsage::STORAGE,
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The compute WGSL the busy pass dispatches: a dependent chain of
+/// [`PROBE_PASS_SPAN_ITERATIONS`] steps per invocation, landing in the storage
+/// buffer.
+///
+/// **The store is what makes the loop real.** Without a write nothing the loop
+/// computes escapes the invocation, and a shader compiler is entitled to delete
+/// the whole of it — which would leave the busy pass as empty as the idle one
+/// and the measurement comparing nothing.
+/// `the_pass_span_shader_writes_the_loop_it_is_timed_for` is what holds the
+/// three pieces to the constants above.
+pub const PROBE_PASS_SPAN_WGSL: &str = concat!(
+    "@group(0) @binding(0) var<storage, read_write> out: array<u32>; ",
+    "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) ",
+    "{ var acc: u32 = gid.x; ",
+    "for (var i: u32 = 0u; i < 4096u; i = i + 1u) { acc = acc * 1664525u + 1013904223u; } ",
+    "out[gid.x % 64u] = acc; }"
+);
+
+/// The shader-module handle the busy pass's pipeline names. `18 << 32`.
+pub const PROBE_PASS_SPAN_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(18 << 32) {
+        Some(module) => module,
+        None => panic!("generation 18 is not zero"),
+    };
+
+/// The shader module the measuring frame creates, holding
+/// [`PROBE_PASS_SPAN_WGSL`].
+pub const PROBE_PASS_SPAN_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu pass-span shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_PASS_SPAN_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The bind-group-layout handle the busy pipeline is built against. `18 << 32`.
+pub const PROBE_PASS_SPAN_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
+    match BindGroupLayoutHandle::from_bits(18 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 18 is not zero"),
+    };
+
+/// The one binding the shader declares — [`PROBE_DISPATCH_BIND_GROUP_LAYOUT_ENTRIES`]'
+/// entry, because it is the same `read_write` storage buffer at
+/// `@group(0) @binding(0)`.
+pub const PROBE_PASS_SPAN_BIND_GROUP_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 1] =
+    PROBE_DISPATCH_BIND_GROUP_LAYOUT_ENTRIES;
+
+/// The bind-group layout the measuring frame creates just before the group.
+pub const PROBE_PASS_SPAN_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> =
+    BindGroupLayoutDesc {
+        label: Some("crcbl-webgpu pass-span layout"),
+        entries: &PROBE_PASS_SPAN_BIND_GROUP_LAYOUT_ENTRIES,
+    };
+
+/// The bind-group handle the busy pass binds at slot 0. `18 << 32`.
+pub const PROBE_PASS_SPAN_BIND_GROUP: BindGroupHandle = match BindGroupHandle::from_bits(18 << 32) {
+    Some(group) => group,
+    None => panic!("generation 18 is not zero"),
+};
+
+/// The one assignment that bind group carries: the whole of
+/// [`PROBE_PASS_SPAN_STORAGE_BUFFER`] at binding 0.
+pub const PROBE_PASS_SPAN_BIND_GROUP_ENTRIES: [BindGroupEntry; 1] = [BindGroupEntry {
+    binding: 0,
+    array_index: 0,
+    resource: BindingResource::whole_buffer(PROBE_PASS_SPAN_STORAGE_BUFFER),
+}];
+
+/// The descriptor the measuring frame's `create_bind_group` asks with.
+pub const PROBE_PASS_SPAN_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
+    label: Some("crcbl-webgpu pass-span bind group"),
+    layout: PROBE_PASS_SPAN_BIND_GROUP_LAYOUT,
+    entries: &PROBE_PASS_SPAN_BIND_GROUP_ENTRIES,
+    variable_count: None,
+};
+
+/// The pipeline-layout handle the busy pipeline is built against. `18 << 32`.
+pub const PROBE_PASS_SPAN_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(18 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 18 is not zero"),
+    };
+
+/// The one bind-group layout [`PROBE_PASS_SPAN_PIPELINE_LAYOUT_DESC`] names.
+pub const PROBE_PASS_SPAN_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS: [BindGroupLayoutHandle; 1] =
+    [PROBE_PASS_SPAN_BIND_GROUP_LAYOUT];
+
+/// The pipeline layout the measuring frame creates — the one bind-group layout
+/// above, no push constants.
+pub const PROBE_PASS_SPAN_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu pass-span pipeline layout"),
+    bind_group_layouts: &PROBE_PASS_SPAN_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS,
+    push_constants: None,
+};
+
+/// The compute-pipeline handle the busy pass binds. `18 << 32`.
+pub const PROBE_PASS_SPAN_PIPELINE: ComputePipelineHandle =
+    match ComputePipelineHandle::from_bits(18 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 18 is not zero"),
+    };
+
+/// The pipeline the busy pass binds and runs, on
+/// [`PROBE_DISPATCH_PIPELINE_DESC`]'s terms and with a `workgroup_size` chosen
+/// to agree with the module's for the same reason.
+pub const PROBE_PASS_SPAN_PIPELINE_DESC: ComputePipelineDesc<'static> = ComputePipelineDesc {
+    label: Some("crcbl-webgpu pass-span pipeline"),
+    layout: PROBE_PASS_SPAN_PIPELINE_LAYOUT,
+    compute: ShaderEntry {
+        module: PROBE_PASS_SPAN_SHADER_MODULE,
+        entry_point: "main",
+    },
+    workgroup_size: [PROBE_PASS_SPAN_SLOTS, 1, 1],
+};
+
+/// The label every pass in the measuring frame carries.
+///
+/// One label for both kinds, because the difference between them is what each
+/// pass *records* and not what it is called — a label that said "idle" or "busy"
+/// would be this side's belief about the pass rather than the browser's report
+/// of it.
+pub const PROBE_PASS_SPAN_PASS_LABEL: &str = "crcbl-webgpu pass-span pass";
+
+/// The queue the measuring frame names in its command encoders. `18 << 32`.
+pub const PROBE_PASS_SPAN_QUEUE: QueueHandle = match QueueHandle::from_bits(18 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 18 is not zero"),
+};
+
+/// The command buffer the first submission's encoder is finished into.
+/// `18 << 32`, index `0`.
+pub const PROBE_PASS_SPAN_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(18 << 32) {
+        Some(buffer) => buffer,
+        None => panic!("generation 18 is not zero"),
+    };
+
+/// The command buffer the second submission's encoder is finished into.
+/// `18 << 32`, index `1` — a distinct handle because both are live at once, in
+/// the way [`PROBE_DISPATCH_HOST_BUFFER`] is distinct from
+/// [`PROBE_DISPATCH_STORAGE_BUFFER`].
+pub const PROBE_PASS_SPAN_COMMAND_BUFFER_SECOND: CommandBufferHandle =
+    match CommandBufferHandle::from_bits((18 << 32) | 1) {
+        Some(buffer) => buffer,
+        None => panic!("generation 18 is not zero"),
+    };
+
+/// Which command buffer submission `submit` is finished into.
+#[must_use]
+pub const fn probe_pass_span_command_buffer(submit: u32) -> CommandBufferHandle {
+    if submit == 0 {
+        PROBE_PASS_SPAN_COMMAND_BUFFER
+    } else {
+        PROBE_PASS_SPAN_COMMAND_BUFFER_SECOND
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -9085,6 +9413,73 @@ impl BcSampleProbe {
     }
 }
 
+/// A run of timed passes: the [`query_results`](crate::StreamWriter::query_results)
+/// ask that reads every boundary and the [`Reply::QueryResults`] that answers
+/// it.
+///
+/// [`TimestampProbe`]'s state machine on a larger set. What differs is what is
+/// being read *for*: that probe asks whether the two queries were written at
+/// all, and this one asks what the numbers do — across passes that did nothing,
+/// passes that dispatched a loop, and a submission boundary in the middle.
+///
+/// **Nothing here interprets them.** The values are handed out raw and the
+/// browser gate says what it makes of them, because the meaning of a difference
+/// between two ticks is a property of the browser's quantisation rather than of
+/// this frame.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the values.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum PassSpanProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The device opened without `timestamp-query`, so nothing was encoded.
+    Unsupported,
+    /// The ask is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`QueryResults`](crate::Command::QueryResults), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The values are in — **empty if the replayer could not serve the read**.
+    Ready {
+        /// One little-endian `u64` per query, in [`probe_pass_span_query`]'s
+        /// order.
+        bytes: Vec<u8>,
+    },
+}
+
+impl PassSpanProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`TimestampProbe::absorb`]'s logic on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        if let Reply::QueryResults { values, .. } = reply {
+            *self = Self::Ready {
+                bytes: values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            };
+            return true;
+        }
+        false
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -9271,6 +9666,9 @@ struct Probe {
     /// drain hit under [`BC_SAMPLE_UNDECODABLE`]. Its own string for
     /// [`reason`](Self::reason)'s reason.
     bc_sample_reason: String,
+    /// A run of timed passes — see [`PassSpanProbe`]. No reason of its own, for
+    /// [`occlusion_values`](Self::occlusion_values)'s reason.
+    pass_span: PassSpanProbe,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -9322,6 +9720,7 @@ impl Probe {
             texture_sample_reason: String::new(),
             bc_sample: BcSampleProbe::Unasked,
             bc_sample_reason: String::new(),
+            pass_span: PassSpanProbe::Unasked,
             parity: ParityReport::new(),
         }
     }
@@ -9755,6 +10154,7 @@ impl Probe {
                 self.first_instance.absorb(&replies);
                 self.texture_sample.absorb(&replies);
                 self.bc_sample.absorb(&replies);
+                self.pass_span.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -11986,6 +12386,152 @@ impl Probe {
     fn bc_sample_bytes(&self) -> &[u8] {
         match &self.bc_sample {
             BcSampleProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Whether the device this page opened has the browser's `timestamp-query`.
+    ///
+    /// [`timestamp_supported`](Self::timestamp_supported)'s answer, read again
+    /// rather than shared: the two probes ask separately so that either can be
+    /// driven on its own, and neither reads as skipped when the feature is
+    /// absent.
+    fn pass_span_supported(&mut self) -> bool {
+        self.opened()
+            .is_some_and(|caps| caps.features.contains(Features::TIMESTAMP_QUERY))
+    }
+
+    /// Encode the measuring frame — [`PROBE_PASS_SPAN_SUBMITS`] submissions of
+    /// [`PROBE_PASS_SPAN_PASSES`] empty passes and [`PROBE_PASS_SPAN_PASSES`]
+    /// passes dispatching `workgroups` workgroups of
+    /// [`PROBE_PASS_SPAN_WGSL`] — and the read of every boundary.
+    ///
+    /// **`workgroups` is the caller's number**, in
+    /// [`request_buffer`](Self::request_buffer)'s arrangement: how much work it
+    /// takes before a browser's clock resolves it is a fact about that browser,
+    /// so the gate that measured one passes it in rather than reading a constant
+    /// this module fixed.
+    ///
+    /// Re-encodable, which is what lets a caller ask again with another count:
+    /// the replayer files a create over the slot its handle names, so a second
+    /// ask replaces this probe's resources rather than colliding with them.
+    ///
+    /// Answers `false` and encodes nothing on a device without the feature,
+    /// leaving [`PassSpanProbe::Unsupported`] —
+    /// [`request_timestamp`](Self::request_timestamp)'s arm, for its reason.
+    fn request_pass_span(&mut self, workgroups: u32) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        if !self.pass_span_supported() {
+            self.pass_span = PassSpanProbe::Unsupported;
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_query_set(PROBE_PASS_SPAN_SET, &probe_pass_span_set_desc());
+                stream.create_buffer(
+                    PROBE_PASS_SPAN_STORAGE_BUFFER,
+                    &probe_pass_span_storage_buffer_desc(),
+                );
+                stream.create_shader_module(
+                    PROBE_PASS_SPAN_SHADER_MODULE,
+                    &PROBE_PASS_SPAN_SHADER_MODULE_DESC,
+                );
+                stream.create_bind_group_layout(
+                    PROBE_PASS_SPAN_BIND_GROUP_LAYOUT,
+                    &PROBE_PASS_SPAN_BIND_GROUP_LAYOUT_DESC,
+                );
+                stream.create_bind_group(
+                    PROBE_PASS_SPAN_BIND_GROUP,
+                    &PROBE_PASS_SPAN_BIND_GROUP_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_PASS_SPAN_PIPELINE_LAYOUT,
+                    &PROBE_PASS_SPAN_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_compute_pipeline(
+                    PROBE_PASS_SPAN_PIPELINE,
+                    &PROBE_PASS_SPAN_PIPELINE_DESC,
+                );
+                let mut last = 0;
+                for submit in 0..PROBE_PASS_SPAN_SUBMITS {
+                    stream.create_command_encoder(&CommandEncoderDesc {
+                        label: Some("crcbl-webgpu pass-span encoder"),
+                        queue: PROBE_PASS_SPAN_QUEUE,
+                    });
+                    if submit == 0 {
+                        // Unconditional, as the seam asks of every caller: a
+                        // documented no-op on WebGPU and required on Vulkan.
+                        // Once, because one reset covers the whole set and a
+                        // second would name queries the first submission has
+                        // already written.
+                        stream.reset_query_set(PROBE_PASS_SPAN_SET, 0..PROBE_PASS_SPAN_QUERIES);
+                    }
+                    for busy in [false, true] {
+                        for pass in 0..PROBE_PASS_SPAN_PASSES {
+                            let opening = probe_pass_span_query(submit, busy, pass);
+                            stream.begin_compute_pass(&ComputePassDesc {
+                                label: Some(PROBE_PASS_SPAN_PASS_LABEL),
+                                timestamp_writes: Some(PassTimestampWrites {
+                                    set: PROBE_PASS_SPAN_SET,
+                                    beginning_of_pass: opening,
+                                    end_of_pass: opening + 1,
+                                }),
+                            });
+                            if busy {
+                                stream.bind_compute_pipeline(PROBE_PASS_SPAN_PIPELINE);
+                                stream.bind_group(
+                                    0,
+                                    PROBE_PASS_SPAN_BIND_GROUP,
+                                    &[],
+                                    PROBE_PASS_SPAN_PIPELINE_LAYOUT,
+                                );
+                                stream.dispatch(workgroups, 1, 1);
+                            }
+                            stream.end_compute_pass();
+                        }
+                    }
+                    let buffer = probe_pass_span_command_buffer(submit);
+                    stream.finish(buffer);
+                    last = stream.submit(&SubmitInfo::new(&[buffer]));
+                }
+                last
+            })
+            .is_some();
+        if !encoded {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        if let Some(sequence) = channel.encode_awaited(|stream| {
+            stream.query_results(PROBE_PASS_SPAN_SET, 0, PROBE_PASS_SPAN_QUERIES)
+        }) {
+            self.pass_span = PassSpanProbe::Waiting { sequence };
+        }
+        true
+    }
+
+    /// Drain, absorb, and report where the measuring frame's read has got to.
+    fn pass_span_state(&mut self) -> u32 {
+        let _ = self.drain();
+        match &self.pass_span {
+            PassSpanProbe::Unasked => PASS_SPAN_UNASKED,
+            PassSpanProbe::Unsupported => PASS_SPAN_UNSUPPORTED,
+            PassSpanProbe::Waiting { .. } => PASS_SPAN_WAITING,
+            PassSpanProbe::Ready { .. } => PASS_SPAN_READY,
+        }
+    }
+
+    /// Every boundary the measuring frame recorded, as little-endian bytes, or
+    /// an empty slice if it has not answered.
+    fn pass_span_bytes(&self) -> &[u8] {
+        match &self.pass_span {
+            PassSpanProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -15155,6 +15701,76 @@ pub mod shim {
         })
     }
 
+    /// Whether the opened device has the browser's `timestamp-query` feature,
+    /// as `1` or `0`; `0` if no device has opened.
+    ///
+    /// [`__crcbl_web_gpu_probe_timestamp_supported`]'s job for this probe's set:
+    /// it is what says whether a [`super::PASS_SPAN_UNSUPPORTED`] is a device
+    /// that cannot serve a timestamp set or a request that never happened.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_pass_span_supported() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.pass_span_supported()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Encode the measuring frame — two submissions of empty passes and passes
+    /// dispatching `workgroups` workgroups of the pass-span shader, every one
+    /// timed through its own descriptor — and the read of every boundary.
+    ///
+    /// **`workgroups` is the caller's number**, the way
+    /// [`__crcbl_web_gpu_probe_buffer`]'s size is: how much work it takes before
+    /// a browser's clock resolves it is a fact about that browser, so the gate
+    /// that measured one passes it in. Calling again with another count is
+    /// supported and replaces the last answer, so read
+    /// [`__crcbl_web_gpu_probe_pass_span_state`] to
+    /// [`super::PASS_SPAN_READY`] before asking again.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// device has no `timestamp-query`, the probe is re-entered, or another
+    /// channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_pass_span(workgroups: u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_pass_span(workgroups)),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `PASS_SPAN_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_pass_span_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.pass_span_state(),
+            Err(_) => super::PASS_SPAN_UNASKED,
+        })
+    }
+
+    /// Where the boundaries start, once
+    /// [`__crcbl_web_gpu_probe_pass_span_state`] answers
+    /// [`super::PASS_SPAN_READY`]. Null while it has not; the pointer is stable
+    /// until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_pass_span_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.pass_span_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_pass_span_ptr`] points at — eight
+    /// per query of [`super::PROBE_PASS_SPAN_QUERIES`] once the read is
+    /// answered, and **zero when the replayer could not serve it**, which is the
+    /// only way [`Reply::QueryResults`](crate::Reply) says so.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_pass_span_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.pass_span_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -15324,23 +15940,25 @@ mod tests {
         __crcbl_web_gpu_probe_parity_checked, __crcbl_web_gpu_probe_parity_failures_len,
         __crcbl_web_gpu_probe_parity_failures_ptr, __crcbl_web_gpu_probe_parity_held,
         __crcbl_web_gpu_probe_parity_report_len, __crcbl_web_gpu_probe_parity_report_ptr,
-        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_present,
-        __crcbl_web_gpu_probe_present_bytes_len, __crcbl_web_gpu_probe_present_bytes_ptr,
-        __crcbl_web_gpu_probe_present_poll, __crcbl_web_gpu_probe_present_reason_len,
-        __crcbl_web_gpu_probe_present_reason_ptr, __crcbl_web_gpu_probe_present_state,
-        __crcbl_web_gpu_probe_readback_reason_len, __crcbl_web_gpu_probe_readback_reason_ptr,
-        __crcbl_web_gpu_probe_readback_state, __crcbl_web_gpu_probe_reconfigure,
-        __crcbl_web_gpu_probe_reconfigure_bytes_len, __crcbl_web_gpu_probe_reconfigure_bytes_ptr,
-        __crcbl_web_gpu_probe_reconfigure_poll, __crcbl_web_gpu_probe_reconfigure_reason_len,
-        __crcbl_web_gpu_probe_reconfigure_reason_ptr, __crcbl_web_gpu_probe_reconfigure_state,
-        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
-        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_stencil,
-        __crcbl_web_gpu_probe_stencil_bytes_len, __crcbl_web_gpu_probe_stencil_bytes_ptr,
-        __crcbl_web_gpu_probe_stencil_poll, __crcbl_web_gpu_probe_stencil_reason_len,
-        __crcbl_web_gpu_probe_stencil_reason_ptr, __crcbl_web_gpu_probe_stencil_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_pass_span, __crcbl_web_gpu_probe_pass_span_len,
+        __crcbl_web_gpu_probe_pass_span_ptr, __crcbl_web_gpu_probe_pass_span_state,
+        __crcbl_web_gpu_probe_pass_span_supported, __crcbl_web_gpu_probe_pipeline_layout,
+        __crcbl_web_gpu_probe_present, __crcbl_web_gpu_probe_present_bytes_len,
+        __crcbl_web_gpu_probe_present_bytes_ptr, __crcbl_web_gpu_probe_present_poll,
+        __crcbl_web_gpu_probe_present_reason_len, __crcbl_web_gpu_probe_present_reason_ptr,
+        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_readback_reason_len,
+        __crcbl_web_gpu_probe_readback_reason_ptr, __crcbl_web_gpu_probe_readback_state,
+        __crcbl_web_gpu_probe_reconfigure, __crcbl_web_gpu_probe_reconfigure_bytes_len,
+        __crcbl_web_gpu_probe_reconfigure_bytes_ptr, __crcbl_web_gpu_probe_reconfigure_poll,
+        __crcbl_web_gpu_probe_reconfigure_reason_len, __crcbl_web_gpu_probe_reconfigure_reason_ptr,
+        __crcbl_web_gpu_probe_reconfigure_state, __crcbl_web_gpu_probe_sampler,
+        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
+        __crcbl_web_gpu_probe_stencil, __crcbl_web_gpu_probe_stencil_bytes_len,
+        __crcbl_web_gpu_probe_stencil_bytes_ptr, __crcbl_web_gpu_probe_stencil_poll,
+        __crcbl_web_gpu_probe_stencil_reason_len, __crcbl_web_gpu_probe_stencil_reason_ptr,
+        __crcbl_web_gpu_probe_stencil_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -19227,6 +19845,247 @@ mod tests {
         assert_eq!(ticks, vec![41, 99]);
     }
 
+    /// **The shader writes the loop it is timed for.** The WGSL is a string, so
+    /// nothing but this holds it to the constants above — and a loop a compiler
+    /// is free to delete would leave the busy pass as empty as the idle one,
+    /// which is a measurement of nothing that reads exactly like a measurement.
+    #[test]
+    fn the_pass_span_shader_writes_the_loop_it_is_timed_for() {
+        for (name, expected) in [
+            (
+                "the loop bound",
+                format!("i < {PROBE_PASS_SPAN_ITERATIONS}u"),
+            ),
+            (
+                "the dependent step",
+                format!("acc = acc * {PROBE_PASS_SPAN_MULTIPLIER}u + {PROBE_PASS_SPAN_INCREMENT}u"),
+            ),
+            (
+                "the store that keeps it",
+                format!("out[gid.x % {PROBE_PASS_SPAN_SLOTS}u] = acc"),
+            ),
+            (
+                "one invocation per slot",
+                format!("@workgroup_size({PROBE_PASS_SPAN_SLOTS})"),
+            ),
+        ] {
+            assert!(
+                PROBE_PASS_SPAN_WGSL.contains(&expected),
+                "{name}: the shader does not write `{expected}`, so the pass being timed is not \
+                 the one these constants describe"
+            );
+        }
+        assert_eq!(
+            PROBE_PASS_SPAN_PIPELINE_DESC.workgroup_size,
+            [PROBE_PASS_SPAN_SLOTS, 1, 1],
+            "the descriptor's workgroup size disagrees with the module's"
+        );
+    }
+
+    /// **Every pass gets two queries of its own, and no two passes share one.**
+    /// The layout is arithmetic in one function and the JS side reads the array
+    /// with the same view of it, so a collision here would have two passes
+    /// overwriting each other's boundaries and the difference between them
+    /// reading as a plausible number.
+    ///
+    /// Monotonic as well as distinct, because the run order the gate reads the
+    /// array as depends on it: submission `0`'s queries all precede submission
+    /// `1`'s, and inside a submission the empty passes precede the busy ones.
+    #[test]
+    fn every_pass_span_pass_gets_two_queries_of_its_own() {
+        let mut seen: Vec<u32> = Vec::new();
+        for submit in 0..PROBE_PASS_SPAN_SUBMITS {
+            for busy in [false, true] {
+                for pass in 0..PROBE_PASS_SPAN_PASSES {
+                    let opening = probe_pass_span_query(submit, busy, pass);
+                    seen.push(opening);
+                    seen.push(opening + 1);
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            (0..PROBE_PASS_SPAN_QUERIES).collect::<Vec<u32>>(),
+            "the query layout is not the whole set in encode order"
+        );
+        assert_eq!(
+            PROBE_PASS_SPAN_SUBMITS, 2,
+            "`probe_pass_span_command_buffer` names two command buffers and no more"
+        );
+        assert_ne!(
+            PROBE_PASS_SPAN_COMMAND_BUFFER, PROBE_PASS_SPAN_COMMAND_BUFFER_SECOND,
+            "both submissions' command buffers are live at once, so they cannot share a handle"
+        );
+    }
+
+    /// A device without `timestamp-query` gets no set of another kind —
+    /// `a_timestamp_request_without_the_feature_encodes_nothing_and_says_why`'s
+    /// claim for this probe's frame, and for its reason.
+    #[test]
+    fn a_pass_span_request_without_the_feature_encodes_nothing_and_says_why() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_pass_span_supported(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_pass_span(64), 0);
+        assert!(take_frame().is_empty(), "a refused request encodes nothing");
+        assert_eq!(
+            __crcbl_web_gpu_probe_pass_span_state(),
+            PASS_SPAN_UNSUPPORTED
+        );
+        assert_eq!(__crcbl_web_gpu_probe_pass_span_len(), 0);
+    }
+
+    /// **Two submissions of timed passes, and one read that covers every
+    /// boundary** — the measuring frame as a command stream.
+    ///
+    /// The pipeline's resources, then a command encoder per submission, the
+    /// reset the seam requires of every caller, the empty passes, the passes
+    /// that bind and dispatch, a finish and a submit each, and the direct read.
+    /// The two kinds of pass are asserted whole rather than by name: a busy pass
+    /// that lost its `Dispatch`, or an idle pass that gained one, would give the
+    /// same names and replay as a frame measuring one thing twice.
+    #[test]
+    fn the_pass_span_export_encodes_two_submissions_of_timed_passes() {
+        grant(&granted("has timestamps"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.device(
+            1,
+            &DeviceCaps {
+                features: Features::COMPUTE | Features::TIMESTAMP_QUERY,
+                ..device_caps()
+            },
+        );
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+
+        assert_eq!(__crcbl_web_gpu_probe_pass_span_supported(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_pass_span(7), 1);
+        let frame = take_frame();
+        let names: Vec<&str> = frame.iter().map(Command::name).collect();
+
+        let mut expected = vec![
+            "CreateQuerySet",
+            "CreateBuffer",
+            "CreateShaderModule",
+            "CreateBindGroupLayout",
+            "CreateBindGroup",
+            "CreatePipelineLayout",
+            "CreateComputePipeline",
+        ];
+        for submit in 0..PROBE_PASS_SPAN_SUBMITS {
+            expected.push("CreateCommandEncoder");
+            if submit == 0 {
+                expected.push("ResetQuerySet");
+            }
+            for _ in 0..PROBE_PASS_SPAN_PASSES {
+                expected.push("BeginComputePass");
+                expected.push("EndComputePass");
+            }
+            for _ in 0..PROBE_PASS_SPAN_PASSES {
+                expected.push("BeginComputePass");
+                expected.push("BindComputePipeline");
+                expected.push("BindGroup");
+                expected.push("Dispatch");
+                expected.push("EndComputePass");
+            }
+            expected.push("Finish");
+            expected.push("Submit");
+        }
+        expected.push("QueryResults");
+        assert_eq!(names, expected);
+
+        assert_eq!(
+            frame[0],
+            Command::CreateQuerySet {
+                set: PROBE_PASS_SPAN_SET,
+                label: Some("crcbl-webgpu pass-span set".into()),
+                kind: QueryKind::Timestamp,
+                count: PROBE_PASS_SPAN_QUERIES,
+            }
+        );
+        // The first empty pass of the first submission, and the first busy one:
+        // the two differ in what they record and in nothing else, which is what
+        // makes the difference between their spans attributable to the work.
+        let idle = names
+            .iter()
+            .position(|name| *name == "BeginComputePass")
+            .expect("the frame opens a pass");
+        assert_eq!(
+            frame[idle],
+            Command::BeginComputePass {
+                label: Some(PROBE_PASS_SPAN_PASS_LABEL.into()),
+                timestamp_writes: Some(PassTimestampWrites {
+                    set: PROBE_PASS_SPAN_SET,
+                    beginning_of_pass: probe_pass_span_query(0, false, 0),
+                    end_of_pass: probe_pass_span_query(0, false, 0) + 1,
+                }),
+            }
+        );
+        let busy = idle + (PROBE_PASS_SPAN_PASSES as usize) * 2;
+        assert_eq!(
+            frame[busy],
+            Command::BeginComputePass {
+                label: Some(PROBE_PASS_SPAN_PASS_LABEL.into()),
+                timestamp_writes: Some(PassTimestampWrites {
+                    set: PROBE_PASS_SPAN_SET,
+                    beginning_of_pass: probe_pass_span_query(0, true, 0),
+                    end_of_pass: probe_pass_span_query(0, true, 0) + 1,
+                }),
+            }
+        );
+        assert_eq!(frame[busy + 3], Command::Dispatch { x: 7, y: 1, z: 1 });
+
+        // Every pass in the frame names a distinct pair, covering the set.
+        let mut written: Vec<u32> = frame
+            .iter()
+            .filter_map(|command| match command {
+                Command::BeginComputePass {
+                    timestamp_writes: Some(writes),
+                    ..
+                } => Some([writes.beginning_of_pass, writes.end_of_pass]),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        written.sort_unstable();
+        assert_eq!(written, (0..PROBE_PASS_SPAN_QUERIES).collect::<Vec<u32>>());
+
+        assert_eq!(
+            frame[frame.len() - 1],
+            Command::QueryResults {
+                set: PROBE_PASS_SPAN_SET,
+                first_query: 0,
+                query_count: PROBE_PASS_SPAN_QUERIES,
+            }
+        );
+        assert_eq!(__crcbl_web_gpu_probe_pass_span_state(), PASS_SPAN_WAITING);
+
+        // And the answer reaches the bytes exports. Sequence: the enumeration
+        // spent 0 and the device request 1, so the frame above starts at 2 and
+        // the awaited read is its last command.
+        let read = 2 + (frame.len() as u64) - 1;
+        let ticks: Vec<u64> = (0..u64::from(PROBE_PASS_SPAN_QUERIES))
+            .map(|query| 1_000 + query)
+            .collect();
+        let mut replies = ReplyWriter::new();
+        replies.query_results(read, PROBE_PASS_SPAN_SET, 0, &ticks);
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_pass_span_state(), PASS_SPAN_READY);
+        let len = __crcbl_web_gpu_probe_pass_span_len() as usize;
+        assert_eq!(len, ticks.len() * 8);
+        let ptr = __crcbl_web_gpu_probe_pass_span_ptr();
+        assert!(!ptr.is_null());
+        // SAFETY: the length above is the probe's own, and nothing has called
+        // back into wasm since it was read.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        let read_back: Vec<u64> = bytes
+            .chunks_exact(8)
+            .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+            .collect();
+        assert_eq!(read_back, ticks);
+    }
+
     /// **The sentinel covers the whole destination**, so a resolve that reached
     /// only part of it leaves the rest saying so rather than reading as a zero the
     /// resolve wrote. And the sentinel is not zero, which is the value the gate
@@ -22417,6 +23276,13 @@ mod tests {
         "PROBE_BC_SAMPLE_BLOCK_SIZE",
         "PROBE_BC_SAMPLE_SOURCE_SIZE",
         "PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS",
+        "PROBE_PASS_SPAN_PASSES",
+        "PROBE_PASS_SPAN_SUBMITS",
+        "PROBE_PASS_SPAN_QUERIES",
+        "PROBE_PASS_SPAN_SLOTS",
+        "PROBE_PASS_SPAN_ITERATIONS",
+        "PROBE_PASS_SPAN_MULTIPLIER",
+        "PROBE_PASS_SPAN_INCREMENT",
     ];
 
     /// Every state code this crate publishes, against the
@@ -22671,6 +23537,16 @@ mod tests {
                 ],
             ),
             (
+                "PASS_SPAN",
+                "PASS_SPAN",
+                codes![
+                    PASS_SPAN_UNASKED,
+                    PASS_SPAN_WAITING,
+                    PASS_SPAN_READY,
+                    PASS_SPAN_UNSUPPORTED
+                ],
+            ),
+            (
                 "COMPUTE",
                 "COMPUTE",
                 codes![
@@ -22766,11 +23642,11 @@ mod tests {
         );
 
         assert_eq!(
-            tables, 25,
+            tables, 26,
             "gpu-probe.js's table count moved; the mirror above has to move with it"
         );
         assert_eq!(
-            codes, 154,
+            codes, 158,
             "gpu-probe.js's code count moved; the mirror above has to move with it"
         );
     }
@@ -22814,7 +23690,7 @@ mod tests {
                 .iter()
                 .filter(|name| mirrored.contains(*name))
                 .count(),
-            149,
+            153,
             "probe.rs's state-code count moved; the mirror above has to move with it"
         );
 
@@ -22993,7 +23869,7 @@ mod tests {
 
         assert_eq!(
             shims.len(),
-            176,
+            181,
             "`shim`'s export count moved; the `# Exports` table has to move with it"
         );
         let documented: BTreeSet<&str> = rows.iter().copied().collect();

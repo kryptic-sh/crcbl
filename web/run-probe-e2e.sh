@@ -311,7 +311,7 @@ if [ -z "$LETTERS" ]; then
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI AJ AK; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI AJ AK AL; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;
@@ -610,6 +610,23 @@ BC_ANSWER_TRIP="$(grep -F "the browser's own answer about bc1-rgba-unorm is the 
 if [ -z "$BC_ANSWER_TRIP" ]; then
     echo "crcbl probe e2e: the driver never asked the browser whether it takes a BC texture;" >&2
     echo "                 crcbl-webgpu reports Features::TEXTURE_COMPRESSION_BC and nothing tried it" >&2
+    exit 1
+fi
+
+# And the browser's own answer about a timestamp query set, which is group AL and
+# is the only exercise anywhere showing that `Features::TIMESTAMP_QUERY`'s
+# numbers track work rather than merely existing. **This is the line here that
+# holds on every platform**: the separation between a busy pass and an empty one
+# is excused where the device lacks the feature — which is CI's macOS runner,
+# every run — so the claim that survives everywhere is that the browser refuses a
+# 'timestamp' GPUQuerySet exactly where wasm declined to encode a frame using
+# one. Without it the whole group would be excusable on that runner, and a probe
+# that silently stopped asking would look identical to one that asked and was
+# told no.
+TIMESTAMP_ANSWER_TRIP="$(grep -F "the browser's own answer about a 'timestamp' query set is the one wasm acted on" "${OUTPUT}.plain" || true)"
+if [ -z "$TIMESTAMP_ANSWER_TRIP" ]; then
+    echo "crcbl probe e2e: the driver never asked the browser whether it takes a timestamp query set;" >&2
+    echo "                 crcbl-webgpu reports Features::TIMESTAMP_QUERY and nothing tried it" >&2
     exit 1
 fi
 

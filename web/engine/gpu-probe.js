@@ -442,6 +442,28 @@ export const TIMESTAMP = Object.freeze({
 });
 
 /**
+ * The `PASS_SPAN_*` codes `__crcbl_web_gpu_probe_pass_span_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * {@link TIMESTAMP}'s four codes on a larger set: one ask, no poll, and an
+ * `UNSUPPORTED` for a browser that opened without `timestamp-query`. What
+ * differs is what the answer is *for* — that probe asks whether a pass's two
+ * queries were written at all, and this one reads a whole run of passes so that
+ * the numbers can be compared with each other.
+ *
+ * **`READY` with no values is a failed read**, exactly as it is there. Nothing
+ * else about the values is interpreted here: an absolute tick means whatever a
+ * browser's clock and its quantisation make it mean, so the gate compares them
+ * only with each other.
+ */
+export const PASS_SPAN = Object.freeze({
+  UNASKED: 0,
+  WAITING: 1,
+  READY: 2,
+  UNSUPPORTED: 3,
+});
+
+/**
  * The `COMPUTE_*` codes `__crcbl_web_gpu_probe_compute_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -2559,6 +2581,81 @@ export function readTimestampProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: timestampStateName(state), bytes };
+}
+
+/**
+ * The same helper again, for the pass-span codes.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function passSpanStateName(state) {
+  const found = Object.entries(PASS_SPAN).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Whether the device this page opened has the browser's `timestamp-query`.
+ *
+ * {@link timestampSupported}'s answer, read through this probe's own export so
+ * that an `UNSUPPORTED` here is a stated fact rather than a silent skip.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean}
+ */
+export function passSpanSupported({ exports }) {
+  return exports.__crcbl_web_gpu_probe_pass_span_supported() === 1;
+}
+
+/**
+ * Ask wasm to submit two submissions of timed compute passes — empty ones and
+ * ones that dispatch `workgroups` workgroups of a loop — and to read every
+ * boundary back.
+ *
+ * **`workgroups` is the caller's number**, the way {@link startBufferProbe}'s
+ * size is: how much work it takes before a browser's clock resolves it is a fact
+ * about that browser, so the gate that measured one passes it in rather than
+ * reading a constant wasm fixed. Calling again with another count is supported
+ * and replaces the last answer: wait for {@link readPassSpanProbe} to report
+ * `READY` before asking again.
+ *
+ * Its answer is *data* and it needs a **device**, so `false` before one has
+ * opened is ordering rather than failure — and `false` on a browser without
+ * `timestamp-query` is that browser's answer, which {@link passSpanSupported} is
+ * how the caller tells apart.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {number} options.workgroups How many workgroups each busy pass
+ *   dispatches. `0` is legal and makes the busy passes do no work.
+ * @returns {boolean} Whether wasm encoded the measuring frame.
+ */
+export function startPassSpanProbe({ exports, workgroups }) {
+  return exports.__crcbl_web_gpu_probe_pass_span(workgroups) === 1;
+}
+
+/**
+ * Read where the measuring frame's read has got to, and its boundaries once it
+ * is `READY` — one little-endian `u64` per query.
+ *
+ * {@link readTimestampProbe}'s shape, and the values are handed over as bytes
+ * for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ */
+export function readPassSpanProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_pass_span_state() >>> 0;
+  const ptr = exports.__crcbl_web_gpu_probe_pass_span_ptr();
+  const len = exports.__crcbl_web_gpu_probe_pass_span_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: passSpanStateName(state), bytes };
 }
 
 /**

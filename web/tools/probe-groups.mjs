@@ -3294,12 +3294,26 @@ export async function runProbeGroups({
   //
   // **THE ORDERING IS ASSERTED AND THE DURATION IS NOT.** `end >= start` is the
   // one relationship a clock obeys whatever it counts. A *strict* inequality is
-  // not asserted here although the native suite asserts one: Chromium quantises
-  // timestamp-query results (to 100 µs at the time of writing) unless started
-  // with `--disable-dawn-features=timestamp_quantization`, so an empty pass can
-  // legitimately open and close inside one quantum and report the same tick
-  // twice. The native suite times a pass that clears a megabyte on hardware that
-  // does not quantise, and asserts the strict form there.
+  // not asserted here although the native suite asserts one, because a browser
+  // is free to quantise its timestamp-query results for privacy and an empty
+  // pass can then legitimately open and close inside one quantum and report the
+  // same tick twice. The native suite times a pass that clears a megabyte on
+  // hardware that does not quantise, and asserts the strict form there.
+  //
+  // WHAT WAS ACTUALLY MEASURED HERE, AND WHAT WAS NOT. Group AL's sweep on
+  // 2026-08-23 found **no quantisation on either adapter of the machine it ran
+  // on**: over 288 distinct ticks on SwiftShader the greatest common divisor of
+  // the gaps between adjacent ones was 1 ns, over 320 on Chromium's
+  // `amd rdna-3` every intra-frame value sat on a 40 ns grid, and no empty pass
+  // in 152 samples reported zero. Passing
+  // `--enable-dawn-features=timestamp_quantization` explicitly changed nothing.
+  // **The mechanism was not established** — the suspicion is
+  // `--enable-unsafe-webgpu`, which `browserFlags` passes on every platform and
+  // every adapter mode, but only the outcome is known, and nothing here should
+  // be read as a claim about which toggle decides it. Neither is any of this
+  // measured on CI's runners, whose browsers may well quantise; that is why the
+  // check below stays non-strict and why group AL compares two spans with each
+  // other instead of either with a number.
   //
   // WHERE IT BELONGS IN THE RUN: beside AE and **before X**, for AE's reason —
   // the read is a `mapAsync` of the replayer's own making, so behind X's stuck
@@ -3410,6 +3424,280 @@ export async function runProbeGroups({
             ' (a browser reports nanoseconds, quantised)'
           : `the pass opened at ${timestamp.ticks?.[0]} and closed at ${timestamp.ticks?.[1]}, ` +
             'which is a clock running backwards or two queries read in the wrong order'
+  );
+
+  // **THE CONTRAST GATE FOR `Features::TIMESTAMP_QUERY`, AND THE ONLY EXERCISE
+  // ANYWHERE SHOWING THAT ITS NUMBERS TRACK WORK.** Group AF establishes that
+  // the browser writes the two queries a pass names. It cannot go on to ask what
+  // the *difference* between two ticks means, because it has one difference and
+  // nothing to hold it against — so until this group the capability was declared
+  // on the strength of two ticks that were merely present and ordered.
+  //
+  // WHAT IT DOES: wasm submits two submissions, each holding a run of empty
+  // compute passes and a run of passes that dispatch PASS_SPAN_WORKGROUPS
+  // workgroups of a dependent-arithmetic loop, every one timed through its own
+  // descriptor — then reads every boundary back with one `query_results`. The
+  // two kinds of pass differ in the dispatch and in nothing else: same label,
+  // same set, same submission, adjacent in the same command buffer.
+  //
+  // **THE CLAIM IS A SEPARATION, NOT A DURATION, AND THAT IS THE WHOLE DESIGN.**
+  // No nanosecond constant enters any assertion here. Every busy span is held
+  // against every idle span *from the same frame*, so the two sides come off one
+  // clock and a browser that rounds its timestamps for privacy rounds both. An
+  // absolute figure — "at least a microsecond", "never zero" — would be a claim
+  // about a browser's quantisation wearing this seam's clothes, and the empty
+  // passes are exactly where a coarse quantiser lands on zero.
+  //
+  // WHAT WAS MEASURED, AND WHERE THE RUNG COMES FROM. Swept on 2026-08-23 over
+  // workgroup counts 0…65535, eight passes of each kind per rung, on the two
+  // adapters of one developer machine. At 4096 workgroups the smallest busy span
+  // beat the largest idle span by **229×** on the hardware adapter (Chromium's
+  // `amd rdna-3`, an RX 7900 XTX: idle 3360–3440 ns, busy 788040–789600 ns) and
+  // by **38297×** on SwiftShader (idle 251–2705 ns, busy 103593401–109525860
+  // ns). Those figures are the evidence for choosing 4096 and are checked by
+  // nothing — the assertion compares the two sides and names no number. The rung
+  // above it, 16384, buys a fatter hardware margin and costs SwiftShader 4.6 s
+  // of wall clock, which is the wrong trade for the runner CI's Linux job has.
+  //
+  // **THE QUANTISATION ON CI'S RUNNERS IS UNMEASURED.** The same sweep found
+  // none on either adapter it ran on — see group AF's comment for the numbers
+  // and for what that does not establish — but those are two adapters on one
+  // machine. A runner whose browser *does* quantise still passes the separation
+  // check, because rounding moves both sides; what stops describing that runner
+  // is the pair of margins above. The checks are the claim, the margins are
+  // provenance, and nobody has read the margins off a runner.
+  //
+  // WHICH RUNNER TAKES WHICH BRANCH, read off the Pages run of `ab706a0` on
+  // 2026-08-23 rather than reasoned about: **macOS opens a device without
+  // `timestamp-query` and takes the absent branch every run**, Windows opens one
+  // with it and takes the present branch, and Linux runs SwiftShader, which
+  // grants it. That is a fact about runner images and about the Apple
+  // Paravirtual device behind them, so it is dated — `ci.yml` already records
+  // that macOS runner images differ between versions on exactly this kind of
+  // question.
+  //
+  // Which is why the absent branch below is a **check and not an excuse**. It is
+  // load-bearing here in a way group AK's is not: taken on a third of the
+  // matrix, every run.
+  //
+  // WHERE IT BELONGS IN THE RUN: beside AF and **before X**, for AF's reason —
+  // the read is a `mapAsync` of the replayer's own making, so behind X's stuck
+  // canvas readback it would be stranded.
+  group('AL — a pass that dispatches work outlasts the empty one beside it');
+
+  // How many workgroups each busy pass dispatches. The one number in this group
+  // chosen from a measurement rather than from an argument — see the block
+  // above — and it is the driver's rather than wasm's for the reason
+  // PROBE_BUFFER_BYTES is: a count fixed in `probe.rs` would be a constant
+  // checked against itself.
+  const PASS_SPAN_WORKGROUPS = 4096;
+
+  const passSpanStart = await evaluate(
+    page,
+    `(async () => {
+     const { startPassSpanProbe, passSpanSupported } =
+       await import('/engine/gpu-probe.js');
+     const { exports, gpu } = globalThis.crcbl;
+     // Supported first: it is what tells a device that withheld the feature
+     // from a request that never happened.
+     const supported = passSpanSupported({ exports });
+     // **THE ABSENT BRANCH'S OWN CLAIM.** Ask the real device for the object
+     // this whole probe is built on, inside a validation scope so the answer is
+     // caught rather than reported as an uncaptured error. What a device without
+     // the feature refuses is a 'timestamp' set of *any* size, so the smallest
+     // one is what is asked for — the two-query set group AF creates. Either way
+     // this is the browser answering, not wasm.
+     const device = gpu.replayer.device;
+     let refusal = null;
+     let asked = false;
+     if (device) {
+       asked = true;
+       device.pushErrorScope('validation');
+       let set = null;
+       try {
+         set = device.createQuerySet({ type: 'timestamp', count: 2 });
+       } catch (error) {
+         refusal = String(error?.message ?? error);
+       }
+       const scoped = await device.popErrorScope();
+       if (scoped) refusal = scoped.message;
+       try {
+         set?.destroy();
+       } catch {
+         // An invalid query set may refuse to be destroyed; it is going away
+         // with the device either way and this is not what is under test.
+       }
+     }
+     return {
+       supported,
+       asked,
+       refusal,
+       started: startPassSpanProbe({
+         exports,
+         workgroups: ${PASS_SPAN_WORKGROUPS},
+       }),
+     };
+   })()`
+  );
+  const passSpan = passSpanStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readPassSpanProbe, PASS_SPAN } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readPassSpanProbe({ exports, memory: exports.memory });
+           if (r.state !== PASS_SPAN.READY) return null;
+           // Decimal strings, for group AF's reason: a BigInt does not survive
+           // the DevTools JSON round trip.
+           const view = new DataView(r.bytes.buffer, r.bytes.byteOffset,
+                                     r.bytes.byteLength);
+           const ticks = [];
+           for (let at = 0; at + 8 <= r.bytes.byteLength; at += 8) {
+             ticks.push(view.getBigUint64(at, true));
+           }
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.byteLength,
+             ticks: ticks.map(String),
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+
+  // The layout `probe_pass_span_query` lays down, read back: four runs in encode
+  // order — the first submission's empty passes, its busy ones, then the second
+  // submission's two runs — each holding one pair of boundaries per pass. Every
+  // count comes off the array's own length, so nothing here restates a constant
+  // `probe.rs` owns, and a probe that came back with a different number of
+  // queries is read as the layout it actually sent.
+  const PASS_SPAN_RUNS = [
+    'submit 0 idle',
+    'submit 0 busy',
+    'submit 1 idle',
+    'submit 1 busy',
+  ];
+  /** @param {{ ticks: Array<string> } | null} answer */
+  function passSpanReading(answer) {
+    if (answer?.done !== true || answer.ticks.length === 0) return null;
+    const values = answer.ticks.map((tick) => BigInt(tick));
+    if (values.length % (PASS_SPAN_RUNS.length * 2) !== 0) return null;
+    const perRun = values.length / PASS_SPAN_RUNS.length;
+    const idle = [];
+    const busy = [];
+    PASS_SPAN_RUNS.forEach((name, run) => {
+      const slice = values.slice(run * perRun, (run + 1) * perRun);
+      const spans = name.endsWith('busy') ? busy : idle;
+      for (let at = 0; at + 1 < slice.length; at += 2) {
+        spans.push(slice[at + 1] - slice[at]);
+      }
+    });
+    // Non-decreasing over the WHOLE array, which is what makes this one claim
+    // cover three things at once: the two boundaries of each pass, consecutive
+    // passes inside a submission, and the submission boundary in the middle.
+    let ordered = true;
+    let firstBackwards = -1;
+    for (let at = 1; at < values.length; at += 1) {
+      if (values[at] < values[at - 1] && ordered) {
+        ordered = false;
+        firstBackwards = at;
+      }
+    }
+    const max = (list) => list.reduce((a, b) => (b > a ? b : a));
+    const min = (list) => list.reduce((a, b) => (b < a ? b : a));
+    return {
+      values,
+      idle,
+      busy,
+      ordered,
+      firstBackwards,
+      idleMax: max(idle),
+      idleMin: min(idle),
+      busyMax: max(busy),
+      busyMin: min(busy),
+      separated: min(busy) > max(idle),
+    };
+  }
+  const passSpanRead = passSpanReading(passSpan);
+
+  // A browser without `timestamp-query` cannot be held to the two measurement
+  // checks — there is no set to time a pass with — and CI's macOS runner is that
+  // browser on every run. What it *is* held to is the last check in this group,
+  // which runs everywhere and can fail on either side.
+  const passSpanAbsent = passSpanStart?.supported === false;
+  const passSpanAbsentDetail =
+    "this browser opened a device without 'timestamp-query', so there is no " +
+    'timestamp set to time a pass with — the last check in this group is what ' +
+    'holds that answer to the browser rather than excusing it';
+  check(
+    'AL',
+    'wasm encoded the measuring frame — two submissions, each of empty compute passes and passes that dispatch a loop, every one timed through its own descriptor',
+    passSpanStart?.started === true || passSpanAbsent,
+    passSpanStart?.started
+      ? `the ${PASS_SPAN_WORKGROUPS}-workgroup frame and the read of every boundary are on the stream`
+      : passSpanAbsent
+        ? passSpanAbsentDetail
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'AL',
+    'the browser timed the work — every pass that dispatched the loop spans more of its own clock than every empty pass in the same frame',
+    passSpanAbsent || passSpanRead?.separated === true,
+    passSpanAbsent
+      ? passSpanAbsentDetail
+      : passSpan?.done !== true
+        ? `no answer in ${TIMEOUT_MS} ms — the replayer's own map never resolved or the reply never reached wasm`
+        : passSpanRead === null
+          ? `state ${passSpan.state} with ${passSpan.len} bytes, which is neither a whole set of boundaries nor a read this page can lay out${passSpan.error ? ` — ${passSpan.error}` : ''}`
+          : passSpanRead.separated
+            ? `${passSpanRead.busy.length} busy passes span ${passSpanRead.busyMin}–${passSpanRead.busyMax} and ${passSpanRead.idle.length} empty ones ${passSpanRead.idleMin}–${passSpanRead.idleMax}, so the smallest measured piece of work is ${passSpanRead.busyMin / passSpanRead.idleMax}× the largest measured piece of nothing`
+            : `busy spans ${passSpanRead.busyMin}–${passSpanRead.busyMax} against empty ones ${passSpanRead.idleMin}–${passSpanRead.idleMax} — the two overlap, which is a clock that did not resolve the dispatch or a dispatch that did not happen` +
+              `${passSpan.error ? ` — ${passSpan.error}` : ''}`
+  );
+  check(
+    'AL',
+    'and no boundary is before the one recorded ahead of it — across the two of a pass, across consecutive passes, and across the submission in the middle',
+    passSpanAbsent || passSpanRead?.ordered === true,
+    passSpanAbsent
+      ? passSpanAbsentDetail
+      : passSpanRead === null
+        ? 'no boundaries to order'
+        : passSpanRead.ordered
+          ? `${passSpanRead.values.length} boundaries rise from ${passSpanRead.values[0]} to ${passSpanRead.values.at(-1)}, over two submissions`
+          : `boundary ${passSpanRead.firstBackwards} reads ${passSpanRead.values[passSpanRead.firstBackwards]} after ${passSpanRead.values[passSpanRead.firstBackwards - 1]}, which is a clock running backwards or a set read in the wrong order`
+  );
+  // **THE CHECK THAT MAKES THE ABSENT BRANCH A CHECK**, on group AK's terms —
+  // and unlike AK's, this one has a runner that really takes the absent side:
+  // macOS, every run, as of the date in the block above. Every platform runs it
+  // and it can fail on either side: a device that lacks the feature must refuse
+  // the query set this probe is built on, and a device that has it must not. It
+  // is what stops "not supported here" arriving as "passed".
+  const passSpanRefused =
+    passSpanStart?.refusal !== null && passSpanStart?.refusal !== undefined;
+  check(
+    'AL',
+    "the browser's own answer about a 'timestamp' query set is the one wasm acted on — the real device refuses one where the feature is absent and accepts one where it is present",
+    passSpanStart?.asked === true &&
+      passSpanRefused === !passSpanStart?.supported,
+    passSpanStart?.asked !== true
+      ? 'no GPUDevice to ask — the replayer has not opened one, so this proves nothing and ' +
+          'fails rather than being skipped'
+      : passSpanRefused === !passSpanStart?.supported
+        ? passSpanStart.supported
+          ? 'the device has the feature, wasm encoded the frame, and createQuerySet accepted a ' +
+            "'timestamp' set with no validation error"
+          : 'the device lacks the feature, wasm encoded nothing, and createQuerySet was refused ' +
+            `by the browser — ${passSpanStart.refusal}`
+        : passSpanStart.supported
+          ? 'wasm reports the device HAS timestamp-query and the browser refused a timestamp ' +
+            `query set anyway — ${passSpanStart.refusal}`
+          : 'wasm reports the device WITHOUT timestamp-query and the browser created a ' +
+            'timestamp query set regardless, so the probe skipped a frame this device could ' +
+            'have run — which is exactly the shape that reads as covered while proving nothing'
   );
 
   // **THE DEPTH-CLAMP GATE, AND THE ONLY PLACE `Features::DEPTH_CLAMP` IS EVER

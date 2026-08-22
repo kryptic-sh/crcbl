@@ -85,6 +85,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Features::TEXTURE_COMPRESSION_BC` optionally, so a device that has it opens
   with it.
 
+- **`crcbl_webgpu::probe` gained the pass-span fixture and group AL**, the
+  contrast group for `timestamp-query` and the last mapped WebGPU feature
+  without one. Two submissions each hold four empty compute passes and four that
+  dispatch a dependent-arithmetic loop, every pass timed through its own
+  descriptor, and the group asserts a **separation** rather than a duration:
+  every busy pass outspans every empty pass in the same frame, and the whole
+  boundary array is non-decreasing across passes and across the submission
+  boundary. **No nanosecond constant enters either claim**, which is what lets
+  it survive a browser that quantises — rounding moves both sides. The workgroup
+  count was chosen from a measured sweep rather than picked. `probe_device_desc`
+  asks for `Features::TIMESTAMP_QUERY` optionally, and the group's fourth check
+  holds the browser's own refusal of a `'timestamp'` query set against the
+  probe's answer, so a device without the feature cannot report as covered.
+
 ### Changed
 
 - **`crcbl_webgpu::probe::probe_device_desc` now asks for `DEPTH_CLAMP` as well

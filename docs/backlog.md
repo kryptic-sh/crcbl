@@ -14774,13 +14774,42 @@ apart — so **two mapped features are left without one**:
   arrive as "passed" — but the branch itself has run nowhere. Whether the macOS
   or Windows runner reaches it is the open question; if none does, the branch is
   reasoned-about code with no execution anywhere, which is the same standing as
-  group AI's absent branch and should be recorded the same way.
+  group AI's absent branch.
 
-- **`timestamp-query`.** The cheapest to encode and the hardest to assert on.
-  Browsers quantise timestamp values for privacy, so "non-zero" and "strictly
-  increasing" are not safe claims without measuring first what this browser
-  actually returns — sweep the values before fixing any threshold, or the gate
-  becomes the flake it was meant to catch.
+  **Answered 2026-08-23 on `ab706a0`'s Pages run: no runner reaches it either.**
+  Both seam-probe jobs report `texture-compression-bc` on the device — Windows
+  `[core-features-and-limits, depth-clip-control, indirect-first-instance, texture-compression-bc, timestamp-query]`,
+  macOS the same without `timestamp-query`. So AK's absent branch is taken by no
+  adapter and no runner, and is code reasoned about and never executed. Group
+  **AL** is the contrast: macOS lacks `timestamp-query`, so its absent branch
+  runs on a real job every time, which makes it the first of these whose absent
+  half anybody can watch. Runner images drift, so both readings are dated and
+  were read off a CI log rather than reasoned about.
+
+- **`timestamp-query` has group AL, and the sweep it demanded refuted the
+  premise this entry gave.** The entry said browsers quantise timestamps for
+  privacy, so "non-zero" and "strictly increasing" were unsafe without measuring
+  first. The measuring happened on 2026-08-23 and **nothing quantises on either
+  adapter here**: SwiftShader's ticks have gcd 1 with gaps as small as 70 ns
+  over 288 distinct values, and `amd rdna-3` sits on a 40 ns intra-frame grid
+  over 320 — what a 25 MHz counter gives. An empty pass's span was never zero in
+  152 samples. Explicitly _enabling_ `timestamp_quantization` changed nothing,
+  so the mechanism is not established; `--enable-unsafe-webgpu`, which
+  `browserFlags` passes everywhere, is a suspicion and no more. Group AF's
+  comment asserted the 100 µs figure and now states what was measured instead.
+
+  The advice survives its own premise: AL gates a **separation**, not a duration
+  — every busy pass outspans every empty pass in the same frame, plus a
+  non-decreasing boundary array — so no nanosecond constant enters the assertion
+  and a quantising browser only widens the gap.
+
+  **What is unmeasured is the Windows runner's margin.** Linux runs SwiftShader
+  and macOS takes the absent branch, so Windows is the one job where the present
+  branch runs on a device nobody here has profiled. AL's second check prints the
+  ratio, so the next Pages run reports it: a margin near 1 means the workgroup
+  count wants revisiting, and a quantised one would be the first evidence of
+  what quantisation does to this group. Both gcd findings are from one developer
+  machine.
 
 AI cost about as much as AH and bought the same kind of witness, so the pattern
 is proven; what is unanswered is only whether these two are worth it.
