@@ -1,28 +1,28 @@
-//! Lumen — the native front end.
+//! Lantern — the native front end.
 //!
 //! ```text
-//! lumen [--camera fixed|free] [--force-geometry P] [--force-binding B]
+//! lantern [--camera fixed|free] [--force-geometry P] [--force-binding B]
 //!       [--no-shadows] [--no-ao] [--no-reflections] [--headless]
 //! ```
 //!
 //! Argv in, exit code out, and nothing else: the fixture itself is the
-//! `crcbl_lumen` library this binary links.
+//! `crcbl_lantern` library this binary links.
 //!
 //! Exit codes: 0 ran, 1 it failed, 2 bad arguments.
 
 use std::process::ExitCode;
 
-use crcbl_lumen::{USAGE, parse, run};
+use crcbl_lantern::{USAGE, parse, run};
 
 fn main() -> ExitCode {
     crcbl::args::run_front_end(
-        "lumen",
+        "lantern",
         USAGE,
         parse(std::env::args().skip(1)),
         run,
         |summary| {
             format!(
-                "lumen: {} frames, {} ticks on the {} shell at {}x{}, {} \
+                "lantern: {} frames, {} ticks on the {} shell at {}x{}, {} \
                  (camera {}, {:?} / {:?} / {:?}, effects {}, {:?})",
                 summary.frames,
                 summary.ticks,

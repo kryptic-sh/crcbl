@@ -711,7 +711,7 @@ pub fn demo() -> SceneDesc<'static> {
         // **No probes**, and that is what keeps every golden in the tree
         // byte-identical: the grid is authored per scene, this description
         // authors none, and a grid of nothing adds exactly zero. The sample
-        // that has one is `apps/lumen`'s room.
+        // that has one is `apps/lantern`'s room.
         probes: ProbeGrid::default(),
         capacities: Capacities::default(),
     }

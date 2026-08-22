@@ -6,7 +6,7 @@
 //! look(motion) ───────┘
 //! ```
 //!
-//! `docs/plan/sample/13-lumen.md`'s Scope asks for "a free-fly camera, a fixed
+//! `docs/plan/sample/13-lantern.md`'s Scope asks for "a free-fly camera, a fixed
 //! camera set for goldens". The two are the same [`Camera`] type and the same
 //! projection — what differs is whether anything moves it — so this module is
 //! the moving half, and the pose it starts at is the app's to choose. It is here

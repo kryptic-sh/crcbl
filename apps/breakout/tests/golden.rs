@@ -3,7 +3,7 @@
 //!
 //! # This is the flag's test as much as the frame's
 //!
-//! `apps/lumen/tests/golden.rs` builds its scene in-process and renders it
+//! `apps/lantern/tests/golden.rs` builds its scene in-process and renders it
 //! through [`OffscreenSetup`](crcbl::screenshot::OffscreenSetup). This suite
 //! does the opposite on purpose: it runs the **compiled binary** with
 //! `--screenshot`, and everything it asserts is about the file that binary
@@ -35,7 +35,7 @@
 //!
 //! # Feature-gated *and* ignored
 //!
-//! The pair `crcbl`'s `render-e2e` and lumen's `golden-e2e` use. A plain
+//! The pair `crcbl`'s `render-e2e` and lantern's `golden-e2e` use. A plain
 //! `cargo test --workspace --all-features` on a machine with no GPU must stay
 //! green, and `tests/run-breakout-golden.sh` is the only thing that turns both
 //! off — and it fails when the suite reports zero tests run.

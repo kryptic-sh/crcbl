@@ -892,6 +892,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lantern"
+version = "0.1.0"
+dependencies = [
+ "crcbl",
+ "crcbl-golden",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -939,14 +947,6 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
-name = "lumen"
-version = "0.1.0"
-dependencies = [
- "crcbl",
- "crcbl-golden",
-]
 
 [[package]]
 name = "mach2"

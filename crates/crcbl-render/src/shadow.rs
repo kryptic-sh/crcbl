@@ -229,7 +229,7 @@ const CASTER_REACH: f32 = 40.0;
 /// — the argument the shader used to carry. What it actually scaled with was the
 /// cascade's whole depth range, [`CASTER_REACH`] included, so it grew when a
 /// scene needed more caster reach and shrank when it needed less. The visible
-/// consequence was `apps/lumen`'s room: a lit strip 0.60 m wide along the foot
+/// consequence was `apps/lantern`'s room: a lit strip 0.60 m wide along the foot
 /// of a wall, and a band down the left of the back wall three times too bright.
 ///
 /// # This is the term the *slope* cannot predict, and one scene sets it
@@ -251,7 +251,7 @@ const CASTER_REACH: f32 = 40.0;
 /// of them. Three is where the frame stops showing it and there is **no margin
 /// above it**, which is a deliberate difference from what this number used to be:
 /// what it now covers is a bounded, understood quantity rather than a cover for
-/// an unknown, so buying margin in it is buying `apps/lumen`'s wall-foot strip
+/// an unknown, so buying margin in it is buying `apps/lantern`'s wall-foot strip
 /// back for nothing.
 ///
 /// Six was the number before `sun_visibility` read the slope off the geometric
@@ -259,10 +259,10 @@ const CASTER_REACH: f32 = 40.0;
 /// shading one. `geometric_normal_of` in `shaders/mesh.slang` is that change and
 /// argues it; what it removed was a *broad cross-hatch* over the dunes' whole
 /// valley floor, which was the artefact six texels were paying for. Measured
-/// through `apps/lumen`'s review frames, the strip at the `-x` wall's foot went
+/// through `apps/lantern`'s review frames, the strip at the `-x` wall's foot went
 /// 0.382 m → 0.256 and the band down the back wall's left edge 0.373 → 0.244.
 ///
-/// Measured on radv, at 1280×960 for `apps/lumen` and at both 1280×960 and the
+/// Measured on radv, at 1280×960 for `apps/lantern` and at both 1280×960 and the
 /// golden's 256×192 for the dunes patch.
 const DEPTH_BIAS_TEXELS: f32 = 3.0;
 
@@ -279,7 +279,7 @@ const DEPTH_BIAS_TEXELS: f32 = 3.0;
 ///
 /// The 3×3 kernel's taps reach one texel out and each is a hardware-bilinear
 /// comparison over a 2×2 neighbourhood, so the furthest a comparison is made is
-/// a texel and a half from the receiver's own. `apps/lumen`'s floor is the
+/// a texel and a half from the receiver's own. `apps/lantern`'s floor is the
 /// fixture that pins it: it lies at a slope of 3.17, and with the constant term
 /// held at a half texel its sunlit stretch is exactly as bright as an unshadowed
 /// one from two of these and dims measurably below — a couple of percent at one

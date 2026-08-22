@@ -71,7 +71,7 @@ const DEMOS = [
   ['asteroids', 'asteroids', '/demos/asteroids/'],
   ['horde', 'horde', '/demos/horde/'],
   ['hud', 'hud', '/demos/hud/'],
-  ['lumen', 'lumen', '/demos/lumen/'],
+  ['lantern', 'lantern', '/demos/lantern/'],
   ['quarry', 'quarry', '/demos/quarry/'],
 ];
 

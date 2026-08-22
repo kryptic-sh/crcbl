@@ -5,7 +5,7 @@ Geometry acceptance test and the living fixture for the meshlet path (topic 3
 `GeometryPath`, with the cluster hierarchy made visible. Not a game — the
 geometry is the content.
 
-Where lumen proves the two lighting paths agree, quarry proves the three
+Where lantern proves the two lighting paths agree, quarry proves the three
 geometry paths do. It is also the only place the QEM generator's output is
 looked at rather than measured: an error metric can be within budget and the
 mesh can still be visibly wrong at a seam.

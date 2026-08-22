@@ -4024,7 +4024,7 @@ async function main() {
     // flight by rejecting it with an `AbortError`, so it arrives at the same
     // `.catch` a device lost mid-map would.
     //
-    // Filing it there is what the lumen demo hit: `readback … could not be
+    // Filing it there is what the lantern demo hit: `readback … could not be
     // mapped: AbortError: … Buffer was unmapped before mapping was resolved` on
     // the device error queue, and any message `take_error` hands back is
     // something `Engine::acquire` stops the frame loop over. So an abandoned
@@ -4088,7 +4088,7 @@ async function main() {
     // reported two messages on consecutive loads of the deployed demos —
     // `vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY` while
     // creating a kilobyte-sized buffer on a GPU with 1.9 GB free, and
-    // `mapAsync … [Device "lumen"] is lost` — and neither was about memory or
+    // `mapAsync … [Device "lantern"] is lost` — and neither was about memory or
     // about mapping. They were one device dying, reported through whichever
     // call touched it next, because `GPUDevice.lost` was not watched at all.
     //
@@ -4114,7 +4114,7 @@ async function main() {
     // completes the steps waiting on the loss. The words are Chromium's.
     buffer.settleMap(
       new DOMException(
-        "Failed to execute 'mapAsync' on 'GPUBuffer': [Device \"lumen\"] is lost.",
+        "Failed to execute 'mapAsync' on 'GPUBuffer': [Device \"lantern\"] is lost.",
         'AbortError'
       )
     );

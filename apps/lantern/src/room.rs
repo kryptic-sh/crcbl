@@ -17,7 +17,7 @@
 //!
 //! # The plan
 //!
-//! `docs/plan/sample/13-lumen.md`'s Scope asks for "a room with a window, a
+//! `docs/plan/sample/13-lantern.md`'s Scope asks for "a room with a window, a
 //! mirror-grade surface, a rough metal surface, a coloured bounce wall, and a
 //! moving light". Each of those is one thing below, and each is placed where the
 //! [`fixed_camera`] can see it at once.
@@ -42,7 +42,7 @@
 //! that same environment directly because its roughness is above the cutoff a
 //! single ray is honest at ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); it never
 //! fakes a sharp screen-space hit, and most of what lights it is the sun's own
-//! specular with the environment on top. `apps/lumen/tests/golden.rs`'s
+//! specular with the environment on top. `apps/lantern/tests/golden.rs`'s
 //! `zero_probes_only_remove_the_ssr_and_rough_fallbacks` is what measures each
 //! share, by zeroing the probe rows and reading the difference at
 //! [`MIRROR_MISSES`], [`MIRROR_FOOT`] and [`BRASS_AT`]. That the environment is
@@ -164,7 +164,7 @@ const MIRROR_MID_X: f32 = 0.5 * (MIRROR_MIN.x + MIRROR_MAX.x);
 /// screen-space march can find anything at all.
 ///
 /// So this is the bottom edge itself, and
-/// `apps/lumen/tests/golden.rs` hangs its block directly above it rather than
+/// `apps/lantern/tests/golden.rs` hangs its block directly above it rather than
 /// centring one here. `the_mirror_panel_reflects_at_its_foot_and_not_at_its_head`
 /// is what says the band is real, with no GPU: it computes the height at which a
 /// reflected ray stops landing in frame and checks this point is below it and
@@ -244,7 +244,7 @@ const BLOCK_MAX: Vec3 = Vec3::new(1.45, 0.95, -0.45);
 
 /// A point in the centre of the brass block's camera-facing face.
 ///
-/// It is clear of every silhouette, and is the read point lumen's authored-vs-
+/// It is clear of every silhouette, and is the read point lantern's authored-vs-
 /// zero-probe control uses: its roughness is above the SSR cutoff, so any probe
 /// contribution here must be the direct rough fallback rather than a screen hit.
 pub const BRASS_AT: Vec3 = Vec3::new(

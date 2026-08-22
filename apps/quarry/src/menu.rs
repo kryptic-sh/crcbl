@@ -1,6 +1,6 @@
 //! Quarry's menu: the pause panel, and the rows of its own.
 //!
-//! Smaller than a game's, for `apps/lumen/src/menu.rs`'s reason: this is a
+//! Smaller than a game's, for `apps/lantern/src/menu.rs`'s reason: this is a
 //! fixture, not a game — there is no run to start, no score to lose and nothing
 //! to win, so a `GAME OVER` panel would be a screen it could never show.
 //!

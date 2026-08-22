@@ -373,7 +373,7 @@ mod tests {
     ///
     /// The claim is made against the camera's *own* starting basis, never
     /// against a world axis, so it holds at every orientation — which is why the
-    /// loop runs it again from an already-orbited pose. `apps/lumen` shipped a
+    /// loop runs it again from an already-orbited pose. `apps/lantern` shipped a
     /// camera that turned the wrong way because its only yaw test compared a
     /// stored angle, and a stored angle is right on a controller that builds its
     /// basis backwards too.

@@ -405,7 +405,7 @@ mod tests {
     /// bounce's tint is measured in.
     ///
     /// A ratio between two channels of one value rather than an absolute, for
-    /// `apps/lumen/tests/golden.rs`'s reason: an absolute is a second golden
+    /// `apps/lantern/tests/golden.rs`'s reason: an absolute is a second golden
     /// written in numbers, and it moves when the sun's intensity does.
     fn redness(colour: [f32; 3]) -> f32 {
         colour[0] / colour[2]
@@ -550,7 +550,7 @@ mod tests {
 
     /// **The environment beside the coloured wall is redder than the
     /// environment across the room from it**, with no GPU — the claim
-    /// `apps/lumen/tests/golden.rs` makes about pixels, made about the values
+    /// `apps/lantern/tests/golden.rs` makes about pixels, made about the values
     /// those pixels are shaded from.
     ///
     /// # What is compared, and why it is the sum rather than the probe alone

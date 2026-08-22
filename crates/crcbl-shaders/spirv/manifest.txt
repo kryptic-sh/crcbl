@@ -110,7 +110,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = c1547ea8e485638d076b942710786025ac55aeeeedd2c78fab67f580a5077515
+source-sha256 = 8ea0338fe36e769e02612c18547410ea830144278a7cc68294ab97a1f0310b77
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = bca565176f4993d2a2f324614159ebd236a9da1caa751d28419b696f75c1b9e7

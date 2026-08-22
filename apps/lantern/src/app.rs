@@ -1,13 +1,13 @@
-//! Lumen's start-up, and the methods the engine's loop calls.
+//! Lantern's start-up, and the methods the engine's loop calls.
 //!
 //! ```text
 //! Loop::frame()                     ← the engine's
 //!   pump, input, menu, pause, resize
-//!   run_ticks  ─────────────────────→ Lumen::tick      (the camera, the lamp)
+//!   run_ticks  ─────────────────────→ Lantern::tick      (the camera, the lamp)
 //!   draw_list.clear()
-//!     ─────────────────────────────→ Lumen::draw      (hands the camera over)
-//!     menu ───────────────────────→ Lumen::menu_kind
-//!     debug overlay ──────────────→ Lumen::debug_sections
+//!     ─────────────────────────────→ Lantern::draw      (hands the camera over)
+//!     menu ───────────────────────→ Lantern::menu_kind
+//!     debug overlay ──────────────→ Lantern::debug_sections
 //!   gpu.frame()
 //! ```
 //!
@@ -21,13 +21,13 @@
 //!
 //! [`HostedGame::debug_sections`] is handed a panel and `&self`, and no GPU:
 //! the panel is gathered before the frame runs, and the bundle is the loop's to
-//! hold. So [`Lumen`] keeps the [`Paths`] the device resolved, copied once from
+//! hold. So [`Lantern`] keeps the [`Paths`] the device resolved, copied once from
 //! [`Gpu::paths`] in `assemble` — which is also what puts them in
 //! [`Summary`], where a headless run can print them.
 //!
 //! The pause menu's effect rows are the same shape and the same reason:
 //! [`HostedGame::apply`] is handed no GPU either, so a press edits the
-//! [`EffectRequest`] [`Lumen`] holds and [`HostedGame::draw`] — which is handed
+//! [`EffectRequest`] [`Lantern`] holds and [`HostedGame::draw`] — which is handed
 //! one — hands it over and re-reads what came back out of the four layers. The
 //! device layer is copied once beside it, because it cannot change mid-run and
 //! a row cannot be labelled without it.
@@ -44,10 +44,10 @@ use crcbl::ui::draw_list::DrawList;
 
 use crate::args::Options;
 use crate::gpu::{Gpu, Paths, Unbuilt};
-use crate::menu::{self, CameraMode, LumenAction, Menus};
+use crate::menu::{self, CameraMode, LanternAction, Menus};
 use crate::room;
 
-/// How often [`Lumen::log_heartbeat`] logs, in ticks.
+/// How often [`Lantern::log_heartbeat`] logs, in ticks.
 ///
 /// A second of simulated time at [`crate::DEFAULT_TICK_HZ`], which is what every
 /// other sample's heartbeat is spaced at.
@@ -85,17 +85,17 @@ pub struct Summary {
     pub camera: CameraMode,
 }
 
-/// Anything that can stop lumen before it starts.
+/// Anything that can stop lantern before it starts.
 ///
 /// An alias rather than an enum: [`crcbl::engine::LoopError`] owns these
 /// variants for every sample. A lighting fixture has no simulation of its own to
 /// fail, so it takes the default type parameter and its `Game` variant is
 /// uninhabited.
-pub type LumenError = crcbl::engine::LoopError;
+pub type LanternError = crcbl::engine::LoopError;
 
-/// Lumen, as the engine's loop hosts it.
+/// Lantern, as the engine's loop hosts it.
 #[derive(Debug)]
-pub struct Lumen {
+pub struct Lantern {
     /// Which camera the next frame is drawn from.
     camera: CameraMode,
     /// The free camera, whether or not it is the one in use — kept across a
@@ -127,11 +127,11 @@ pub struct Lumen {
     /// [`HostedGame::pointer_mode`] is asked with no argument and has to answer
     /// "is a panel up", and `menu_kind` is the one place the loop says so.
     paused: bool,
-    /// Fixed steps run, for [`Lumen::log_heartbeat`]'s cadence.
+    /// Fixed steps run, for [`Lantern::log_heartbeat`]'s cadence.
     ticks: u64,
 }
 
-impl Lumen {
+impl Lantern {
     /// A fixture starting on `camera`, drawn through `paths` with `effects`
     /// asked for on a device that permits `device_effects`, and with the free
     /// camera at the golden pose.
@@ -224,17 +224,17 @@ impl Lumen {
     }
 }
 
-/// The loop lumen runs in. A type alias, because the loop is the engine's.
-pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Lumen>;
+/// The loop lantern runs in. A type alias, because the loop is the engine's.
+pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Lantern>;
 
 /// Runs the full loop.
 ///
 /// # Errors
 ///
-/// [`LumenError`] if the shell or the GPU refused. Teardown runs on every path:
+/// [`LanternError`] if the shell or the GPU refused. Teardown runs on every path:
 /// a failing frame must still release the swapchain, the surface and the window,
 /// or `crcbl-vk`'s device teardown logs objects still alive.
-pub fn run(options: &Options) -> Result<Summary, LumenError> {
+pub fn run(options: &Options) -> Result<Summary, LanternError> {
     crcbl::engine::drive(start(options)?)
 }
 
@@ -242,8 +242,8 @@ pub fn run(options: &Options) -> Result<Summary, LumenError> {
 ///
 /// # Errors
 ///
-/// [`LumenError`] if any of them refused.
-pub fn start(options: &Options) -> Result<Loop, LumenError> {
+/// [`LanternError`] if any of them refused.
+pub fn start(options: &Options) -> Result<Loop, LanternError> {
     let shell = crcbl::engine::open_shell(options.common.headless)?;
     with_shell(shell, options)
 }
@@ -256,11 +256,11 @@ pub fn start(options: &Options) -> Result<Loop, LumenError> {
 ///
 /// # Errors
 ///
-/// [`LumenError`] if the window never configured or the HAL seam failed.
+/// [`LanternError`] if the window never configured or the HAL seam failed.
 pub fn with_shell<S: Shell + ?Sized>(
     mut shell: Box<S>,
     options: &Options,
-) -> Result<Loop<S>, LumenError> {
+) -> Result<Loop<S>, LanternError> {
     let clock_source = Clock::new(options.common.headless);
     let window = open_the_window(shell.as_mut(), &clock_source, options)?;
 
@@ -292,18 +292,18 @@ pub fn with_shell<S: Shell + ?Sized>(
 ///
 /// # Errors
 ///
-/// [`LumenError`] if the shell refused it.
+/// [`LanternError`] if the shell refused it.
 fn open_the_window<S: Shell + ?Sized>(
     shell: &mut S,
     clock_source: &Clock,
     options: &Options,
-) -> Result<WindowId, LumenError> {
+) -> Result<WindowId, LanternError> {
     Ok(open_window(
         shell,
         clock_source,
         &WindowDesc {
-            title: "Crucible — lumen",
-            app_id: "sh.kryptic.crcbl.lumen",
+            title: "Crucible — lantern",
+            app_id: "sh.kryptic.crcbl.lantern",
             // 4:3, so a windowed frame and a golden are the same framing: the
             // fixed camera's field of view is vertical, and a different aspect
             // crops or reveals the room's side walls.
@@ -328,21 +328,21 @@ fn assemble<S: Shell + ?Sized>(booted: Booted<S, Gpu>, options: &Options) -> Loo
 
     Loop::new(
         booted,
-        Lumen::new(options.camera, paths, effects, device_effects),
+        Lantern::new(options.camera, paths, effects, device_effects),
         options.common.loop_config(),
     )
 }
 
-impl HostedGame for Lumen {
+impl HostedGame for Lantern {
     /// A lighting fixture has nothing of its own to fail at.
     type Error = core::convert::Infallible;
     type Gpu = Gpu;
     /// Paused or not, which is the whole of its state machine.
     type MenuKind = bool;
-    type MenuAction = LumenAction;
+    type MenuAction = LanternAction;
     type Summary = Summary;
 
-    const NAME: &'static str = "lumen";
+    const NAME: &'static str = "lantern";
 
     fn menus() -> Menus {
         menu::menus()
@@ -407,13 +407,13 @@ impl HostedGame for Lumen {
         }
     }
 
-    fn menu_action(id: crcbl::ui::WidgetId) -> Option<LumenAction> {
+    fn menu_action(id: crcbl::ui::WidgetId) -> Option<LanternAction> {
         menu::action_for(id)
     }
 
-    fn apply(&mut self, action: LumenAction) {
+    fn apply(&mut self, action: LanternAction) {
         match action {
-            LumenAction::ToggleCamera => {
+            LanternAction::ToggleCamera => {
                 self.camera = self.camera.toggled();
                 // Leaving the free camera is also how a reviewer gets back to
                 // the golden pose, so it is put back there — otherwise "look at
@@ -429,7 +429,7 @@ impl HostedGame for Lumen {
             // Read-modify-write on the layer a panel owns, leaving the camera
             // stack and `[engine.video]` as they were — `menu::toggled_effect`
             // is where that is argued. It reaches the renderer in `draw`.
-            LumenAction::ToggleEffect(effect) => {
+            LanternAction::ToggleEffect(effect) => {
                 self.effect_request =
                     menu::toggled_effect(self.effect_request, self.device_effects, effect);
             }
@@ -514,7 +514,7 @@ impl HostedGame for Lumen {
 
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
-            "lumen: {} frames, {} ticks on the {} shell at {}x{} ({:?}), {:?} / {:?} / {:?}",
+            "lantern: {} frames, {} ticks on the {} shell at {}x{} ({:?}), {:?} / {:?} / {:?}",
             summary.frames,
             summary.ticks,
             summary.backend,
@@ -530,11 +530,11 @@ impl HostedGame for Lumen {
 
 /// Where the camera is, as a panel section.
 ///
-/// On [`Lumen`] itself because that is what owns the numbers — the rule
+/// On [`Lantern`] itself because that is what owns the numbers — the rule
 /// [`crcbl::ui::DebugModule`] states — and because the answer is the *mode* as
 /// much as the position: a reviewer looking at an unexpected frame needs to know
 /// whether they are standing at the golden pose or somewhere they walked to.
-impl crcbl::ui::DebugModule for Lumen {
+impl crcbl::ui::DebugModule for Lantern {
     fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
         let eye = self.camera().eye;
         section.set_title("camera");
@@ -578,12 +578,12 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
     ///
     /// # Errors
     ///
-    /// [`LumenError`] if the shell refused the window.
+    /// [`LanternError`] if the shell refused the window.
     pub fn request(
         mut shell: Box<S>,
         options: &Options,
         clock_source: Clock,
-    ) -> Result<Self, LumenError> {
+    ) -> Result<Self, LanternError> {
         let window = open_the_window(shell.as_mut(), &clock_source, options)?;
         Ok(Self {
             boot: crcbl::engine::PolledBoot::request(
@@ -600,10 +600,10 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
     ///
     /// # Errors
     ///
-    /// [`LumenError`] if the window went away before it had a size, or if the
+    /// [`LanternError`] if the window went away before it had a size, or if the
     /// device request failed.
-    pub fn poll(&mut self) -> Result<Option<Loop<S>>, LumenError> {
-        let Some(booted) = self.boot.poll::<LumenError>()? else {
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, LanternError> {
+        let Some(booted) = self.boot.poll::<LanternError>()? else {
             return Ok(None);
         };
         Ok(Some(assemble(booted, &self.options)))
@@ -775,7 +775,7 @@ mod tests {
         }
     }
 
-    /// **F3 turns the panel on, and the sections it shows are lumen's own.**
+    /// **F3 turns the panel on, and the sections it shows are lantern's own.**
     ///
     /// Rule 4 in one test: the panel opens, and the two rows that make this a
     /// *fixture* rather than a picture — which path drew it, and what is not
@@ -913,7 +913,7 @@ mod tests {
     /// **An effect row reaches the renderer, and every report follows it.**
     ///
     /// The observable is the **resolved** set read back off the renderer, not a
-    /// field on [`Lumen`]: a press that edited the request and never reached
+    /// field on [`Lantern`]: a press that edited the request and never reached
     /// `set_effect_request` would leave the frame drawing every effect while the
     /// row and the panel both said `OFF`. What the removed passes do to the
     /// picture is `tests/golden.rs`'s
@@ -997,7 +997,7 @@ mod tests {
     /// **The pointer is grabbed while the room is being flown and given back
     /// while the pause panel is up.**
     ///
-    /// Read off the window rather than off [`Lumen::pointer_mode`], so what this
+    /// Read off the window rather than off [`Lantern::pointer_mode`], so what this
     /// asserts is the whole path: the fixture's answer, the loop's poll, and the
     /// shell call. A hook that returned the right value and was never polled
     /// leaves this window free for the whole run.
@@ -1047,7 +1047,7 @@ mod tests {
     /// End to end, because every piece of this is a seam: `HeadlessShell` drops
     /// the absolute position while the pointer is locked, exactly as a
     /// compositor does; the loop delivers that as a `PointerUpdate` with a
-    /// `motion` and no `at`; and [`Lumen::pointer_event`] looks only on that
+    /// `motion` and no `at`; and [`Lantern::pointer_event`] looks only on that
     /// shape. The second half is what the gate is for — the same movement with a
     /// visible cursor under it must move nothing, or a shell that refused the
     /// lock would have the view swinging while the cursor walks off the window.

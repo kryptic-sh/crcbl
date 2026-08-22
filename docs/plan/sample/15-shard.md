@@ -36,7 +36,7 @@ far comes from a 2D sample.
   obvious. A dark interior is the honest test; daylight hides exactly the
   mistakes this path is prone to.
 - **Both geometry fallbacks on content built to be played**, not content built
-  to be tested. lumen and quarry are the acceptance fixtures; this is the load.
+  to be tested. lantern and quarry are the acceptance fixtures; this is the load.
 - **A large material set against `ArrayPages`.** Armour, weapons, environment
   kits and effects are the worst case for the paged binding model.
 - **Server-authoritative gameplay in a browser** — client and server over

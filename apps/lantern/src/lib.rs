@@ -1,9 +1,9 @@
-//! Lumen — the engine's lighting acceptance fixture.
+//! Lantern — the engine's lighting acceptance fixture.
 //!
 //! One indoor room, chosen for lighting rather than for geometry, rendered under
 //! whatever paths the device offers. **Not a game**: the lighting is the
 //! content, and there is nothing to play.
-//! [`docs/plan/sample/13-lumen.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/13-lumen.md)
+//! [`docs/plan/sample/13-lantern.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/13-lantern.md)
 //! is the charter, and its non-goals are a hard cap.
 //!
 //! # What is here at milestone 1a
@@ -70,16 +70,16 @@ pub mod room;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
-pub use app::{Loop, Lumen, LumenError, PendingLoop, Summary, run, start, with_shell};
+pub use app::{Lantern, LanternError, Loop, PendingLoop, Summary, run, start, with_shell};
 pub use args::{
     DEFAULT_TICK_HZ, Invocation, Options, USAGE, binding_from_name, geometry_from_name, parse,
 };
 /// Re-exported rather than defined here: the free-fly camera moved into
 /// `crcbl-render` so a second sample could fly the same one, and this keeps
-/// `crcbl_lumen::Flyer` resolving for anything that already named it.
+/// `crcbl_lantern::Flyer` resolving for anything that already named it.
 pub use crcbl::render::{Flyer, SPEED, TURN};
 pub use gpu::{Forced, Gpu, GpuError, Paths, Unbuilt};
 pub use menu::{
-    AO_ID, CAMERA_ID, CameraMode, LumenAction, Menus, REFLECTIONS_ID, SHADOWS_ID, action_for,
+    AO_ID, CAMERA_ID, CameraMode, LanternAction, Menus, REFLECTIONS_ID, SHADOWS_ID, action_for,
     menus, pause_menu, toggled_effect,
 };

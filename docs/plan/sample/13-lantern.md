@@ -1,4 +1,4 @@
-# Sample 13 — lumen (S4B, gates P7B–P7C)
+# Sample 13 — lantern (S4B, gates P7B–P7C)
 
 Lighting acceptance test and the living fixture for topic 18. One scene,
 rendered under both `LightingPath` values, with every effect toggleable
@@ -61,18 +61,19 @@ lighting fixture without them is not a fixture.
 
 ## Status: milestone 1a, and the blocker is gone (2026-08-14)
 
-**`apps/lumen` exists and renders the charter's room.** The blocker this section
-used to record — "the engine has no way for an app to describe a scene" — was
-answered by six slices in `crcbl-render`: the resident set is a `SceneDesc` an
-application writes, instances are `add_instance` / `set_instance` /
-`remove_instance`, `begin_frame` places nothing of its own, and `crcbl-scene`'s
-meshlet builder is reachable through `crcbl`'s non-default `scene` feature so an
-app can bake a mesh. `docs/backlog.md` carries what that left owed.
+**`apps/lantern` exists and renders the charter's room.** The blocker this
+section used to record — "the engine has no way for an app to describe a scene"
+— was answered by six slices in `crcbl-render`: the resident set is a
+`SceneDesc` an application writes, instances are `add_instance` / `set_instance`
+/ `remove_instance`, `begin_frame` places nothing of its own, and
+`crcbl-scene`'s meshlet builder is reachable through `crcbl`'s non-default
+`scene` feature so an app can bake a mesh. `docs/backlog.md` carries what that
+left owed.
 
 ### What milestone 1a delivers
 
 - **The room the Scope section names**, described by the sample rather than by
-  the engine: `crcbl_lumen::room` bakes nine meshes from literals through
+  the engine: `crcbl_lantern::room` bakes nine meshes from literals through
   `crcbl::scene::build_meshlets`, declares five material rows and a two-layer
   page, and sizes its own `Capacities`. A window the sun comes through, a
   mirror-grade panel, a rough metal block, a coloured wall, a moving point
@@ -121,7 +122,7 @@ app can bake a mesh. `docs/backlog.md` carries what that left owed.
   `--no-*` flags already use — each labelled with what the frame draws and each
   swapping it on ENTER, so holding a lit room against an unlit one is a keypress
   rather than a restart of the fixture. A row is read-modify-write on the
-  **programmatic** layer and nothing else (`crcbl_lumen::toggled_effect`): it
+  **programmatic** layer and nothing else (`crcbl_lantern::toggled_effect`): it
   leaves the camera-stack and `[engine.video]` fields as it found them, which is
   what stops a panel silently discarding a decision it was never asked about
   once either of those gains a source, and it is the one layer that can move a
@@ -140,14 +141,14 @@ app can bake a mesh. `docs/backlog.md` carries what that left owed.
   that reports one.
 
 - **A golden frame with six structural claims in front of it**
-  (`apps/lumen/tests/golden.rs`): the sun reaches the floor through the opening
-  and not beside it, the shaded floor is ambient rather than black, a conductor
-  reflects the probe environment where a screen-space ray finds nothing, the
-  reflection follows the geometry down to the panel's foot, the coloured wall's
-  base-colour factor reached the fragment stage, and that wall tints the plaster
-  beside it. Each is a ratio between two blocks of pixels, and each is re-run at
-  twenty-five times the pixel count so it is a claim about the room rather than
-  about the sampling.
+  (`apps/lantern/tests/golden.rs`): the sun reaches the floor through the
+  opening and not beside it, the shaded floor is ambient rather than black, a
+  conductor reflects the probe environment where a screen-space ray finds
+  nothing, the reflection follows the geometry down to the panel's foot, the
+  coloured wall's base-colour factor reached the fragment stage, and that wall
+  tints the plaster beside it. Each is a ratio between two blocks of pixels, and
+  each is re-run at twenty-five times the pixel count so it is a claim about the
+  room rather than about the sampling.
 
 ### Two surfaces are lit by reflection alone, and that is the model
 
@@ -172,10 +173,10 @@ What is still owed there is that the environment is **baked** rather than
 traced: it is a blurry static grid, and it is the only answer this path has for
 anything outside the frame. Ray tracing is what replaces it. Nothing here fakes
 it — the debug panel's `unbuilt` section says so on the screen, and
-`crcbl_lumen::room`'s module docs say it where a reader of the scene will find
+`crcbl_lantern::room`'s module docs say it where a reader of the scene will find
 it.
 
-**The coloured wall bounces**, and `crcbl_lumen::bounce` is how: a single
+**The coloured wall bounces**, and `crcbl_lantern::bounce` is how: a single
 analytic gather of the sun's first bounce off the room's axis-aligned shell,
 baked from the room's own dimensions into the probe volume the scene carries. It
 is one bounce off one box rather than a global-illumination solve — nothing

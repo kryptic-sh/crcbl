@@ -86,7 +86,7 @@ crcbl/
 │   ├── asteroids/
 │   ├── horde/
 │   ├── hud/
-│   └── lumen/
+│   └── lantern/
 └── docs/plan/
 ```
 

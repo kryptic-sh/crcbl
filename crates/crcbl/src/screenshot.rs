@@ -1451,7 +1451,7 @@ fn ui_draw_list(extent: (u32, u32)) -> DrawList {
 /// is seen from, and the sun it stands under.
 ///
 /// The way in for a caller whose room is not one of the [`Scene`] variants —
-/// `apps/lumen` is the first, and the reason this exists. Everything below the
+/// `apps/lantern` is the first, and the reason this exists. Everything below the
 /// renderer is the same offscreen path either way: the surface, the adapter
 /// pin, the ring, the barriers around the readback and the row unpadding are
 /// [`OffscreenSetup`]'s, and a sample rebuilding them for itself is
@@ -2275,7 +2275,7 @@ impl OffscreenSetup {
     /// a feature the adapter has. Without it every frame an application's scene
     /// draws comes off the best tail this machine offers, and the lesser ones —
     /// which is what browsers and Apple devices run — are code no run here
-    /// executes. `apps/lumen/tests/golden.rs` draws its room through both and
+    /// executes. `apps/lantern/tests/golden.rs` draws its room through both and
     /// holds the two arms to one golden.
     ///
     /// # Errors

@@ -4,7 +4,7 @@
 //! [`GeometryPath`](crcbl::hal::GeometryPath), with the cluster hierarchy made
 //! visible. Not a game: the geometry is the content.
 //!
-//! Where `apps/lumen` proves the two lighting paths agree, this proves the
+//! Where `apps/lantern` proves the two lighting paths agree, this proves the
 //! three geometry paths do — and it is the only place the QEM generator's
 //! output is *looked at* rather than measured, because an error metric can be
 //! inside its budget while the mesh is visibly wrong at a seam.

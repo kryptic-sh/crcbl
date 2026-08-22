@@ -1,4 +1,4 @@
-//! Lumen's menu: the pause panel, and the rows of its own.
+//! Lantern's menu: the pause panel, and the rows of its own.
 //!
 //! Smaller than a game's, for `apps/sandbox/src/menu.rs`'s reason: this is a
 //! fixture, not a game — there is no run to start, no score to lose and nothing
@@ -76,7 +76,7 @@ impl CameraMode {
 
 /// The actions this sample's menus have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LumenAction {
+pub enum LanternAction {
     /// Swap the camera, and put the free one back at the golden pose when
     /// switching away from it.
     ToggleCamera,
@@ -88,11 +88,11 @@ pub enum LumenAction {
     ToggleEffect(RenderEffects),
 }
 
-/// The id carrying [`LumenAction::ToggleCamera`]. The first id a game may use,
+/// The id carrying [`LanternAction::ToggleCamera`]. The first id a game may use,
 /// per [`FIRST_GAME_ID`].
 pub const CAMERA_ID: crcbl::ui::WidgetId = FIRST_GAME_ID;
 
-/// The id carrying the shadow atlas's [`LumenAction::ToggleEffect`].
+/// The id carrying the shadow atlas's [`LanternAction::ToggleEffect`].
 pub const SHADOWS_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 1;
 
 /// The ambient-occlusion row's, on [`SHADOWS_ID`]'s terms.
@@ -119,14 +119,14 @@ pub(crate) const EFFECT_ROWS: [(crcbl::ui::WidgetId, RenderEffects, &str); 3] = 
 /// The action a widget id names, or `None` for an id this game's menus do not
 /// use.
 #[must_use]
-pub fn action_for(id: crcbl::ui::WidgetId) -> Option<LumenAction> {
+pub fn action_for(id: crcbl::ui::WidgetId) -> Option<LanternAction> {
     if id == CAMERA_ID {
-        return Some(LumenAction::ToggleCamera);
+        return Some(LanternAction::ToggleCamera);
     }
     EFFECT_ROWS
         .iter()
         .find(|(row, _, _)| *row == id)
-        .map(|&(_, effect, _)| LumenAction::ToggleEffect(effect))
+        .map(|&(_, effect, _)| LanternAction::ToggleEffect(effect))
 }
 
 /// What ENTER on `effect`'s row leaves the request as.
@@ -206,7 +206,7 @@ pub fn pause_menu(camera: CameraMode, request: EffectRequest, device: RenderEffe
     Menu::new("PAUSED", items)
 }
 
-/// Lumen's menus, keyed by whether it is paused.
+/// Lantern's menus, keyed by whether it is paused.
 pub type Menus = MenuSet<bool>;
 
 /// The pause menu, not shown.
@@ -237,8 +237,8 @@ pub fn menus() -> Menus {
 mod tests {
     use super::*;
 
-    /// Lumen's whole menu vocabulary: the loop's three, plus its own rows.
-    type MenuAction = crcbl::engine::MenuAction<LumenAction>;
+    /// Lantern's whole menu vocabulary: the loop's three, plus its own rows.
+    type MenuAction = crcbl::engine::MenuAction<LanternAction>;
 
     /// The action the highlighted button carries, which is what the loop reads.
     fn activate(menus: &mut Menus) -> Option<MenuAction> {
@@ -301,10 +301,12 @@ mod tests {
             assert!(!item.hint.is_empty(), "{} has no key", item.label);
         }
         for expected in [
-            MenuAction::Game(LumenAction::ToggleCamera),
-            MenuAction::Game(LumenAction::ToggleEffect(RenderEffects::SHADOWS)),
-            MenuAction::Game(LumenAction::ToggleEffect(RenderEffects::AMBIENT_OCCLUSION)),
-            MenuAction::Game(LumenAction::ToggleEffect(RenderEffects::REFLECTIONS)),
+            MenuAction::Game(LanternAction::ToggleCamera),
+            MenuAction::Game(LanternAction::ToggleEffect(RenderEffects::SHADOWS)),
+            MenuAction::Game(LanternAction::ToggleEffect(
+                RenderEffects::AMBIENT_OCCLUSION,
+            )),
+            MenuAction::Game(LanternAction::ToggleEffect(RenderEffects::REFLECTIONS)),
         ] {
             assert!(actions.contains(&expected), "no row fires {expected:?}");
         }
@@ -347,7 +349,7 @@ mod tests {
             (AO_ID, RenderEffects::AMBIENT_OCCLUSION, "AO"),
             (REFLECTIONS_ID, RenderEffects::REFLECTIONS, "REFLECTIONS"),
         ] {
-            let Some(LumenAction::ToggleEffect(fired)) = action_for(id) else {
+            let Some(LanternAction::ToggleEffect(fired)) = action_for(id) else {
                 panic!("the {name} row fires no effect");
             };
             assert_eq!(fired, effect, "the {name} row fires the wrong effect");

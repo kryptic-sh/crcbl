@@ -33,7 +33,7 @@ DEMOS=(
   "asteroids:crcbl_asteroids:demos/asteroids"
   "horde:crcbl_horde:demos/horde"
   "hud:crcbl_hud:demos/hud"
-  "lumen:crcbl_lumen:demos/lumen"
+  "lantern:crcbl_lantern:demos/lantern"
   "quarry:crcbl_quarry:demos/quarry"
 )
 

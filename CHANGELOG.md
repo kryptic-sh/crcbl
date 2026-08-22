@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`apps/lumen` is renamed to `apps/lantern`.** Lumen is Unreal Engine 5's
+  global-illumination system, and this sample is a _lighting_ acceptance
+  fixture, so the collision sat squarely where it would mislead. The crate, the
+  binary, the `Lantern` type, `docs/plan/sample/13-lantern.md`,
+  `apps/lantern/tests/run-lantern-golden.sh` and the published demo all move
+  with it: **`/demos/lumen/` becomes `/demos/lantern/` and the old path is not
+  kept.** No release has been tagged and nothing durable pointed at the old URL.
+  The room, the goldens and every measurement are unchanged — the sole
+  behavioural difference is the name.
+
 - **`ForwardRenderer::add_passes` now takes a `&TransientPool` as its second
   argument**, and the shadow atlas's and shadow placeholder's
   `ImportedImage::initial` are read from the pool's ledger
@@ -361,8 +371,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `web/build.sh` copies a small loader beside the artifact instead of running
   `wasm-bindgen`. Deploying the site needs `cargo`, `python3` and `node`, with
   nothing to `cargo install` first. The demo artifacts roughly **halved** —
-  breakout 3,182,323 → 1,609,109 bytes, lumen 3,565,467 → 1,995,548 — and their
-  generated glue went from 72 KB to 3 KB.
+  breakout 3,182,323 → 1,609,109 bytes, lantern 3,565,467 → 1,995,548 — and
+  their generated glue went from 72 KB to 3 KB.
 
   **What this costs:** a browser without WebGPU has no fallback any more. The
   WebGL2 path came from `wgpu`, which is no longer linkable there.
@@ -1254,7 +1264,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   it.
 
 - **`crcbl::render::Flyer` is the engine's free-fly camera**, moved out of
-  `apps/lumen` so a second sample can fly the same one. It is the same
+  `apps/lantern` so a second sample can fly the same one. It is the same
   controller — WASD and Space/Shift on a fixed timestep, arrow keys and
   `PointerUpdate::motion` for the turn, a pitch clamped short of vertical — and
   it now sits beside `OrbitCamera` where it needs no device and every claim it
@@ -1266,7 +1276,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   that already flew one moves differently. The turn rates stay constants: an
   angle is an angle at every scale.
 
-  `crcbl_lumen`'s public surface is unchanged — it re-exports `Flyer`, `SPEED`
+  `crcbl_lantern`'s public surface is unchanged — it re-exports `Flyer`, `SPEED`
   and `TURN` from the engine rather than defining them.
 
 ### Changed
@@ -1738,8 +1748,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   drops the tail and says how much it dropped — the counts survive, the skip
   list is what shortens, and stderr still has all of it.
 
-- **`apps/lumen` has mouse look.** Moving the mouse turns the view while flying;
-  the pause panel releases the pointer. The keyboard turn is unchanged.
+- **`apps/lantern` has mouse look.** Moving the mouse turns the view while
+  flying; the pause panel releases the pointer. The keyboard turn is unchanged.
 
 - **`HostedGame::pointer_mode` lets a hosted game ask for the pointer.** A
   defaulted, polled hook returning `PointerMode`, so every existing game is
@@ -1821,7 +1831,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   in `crcbl_render::orbit` names a key, a button or a modifier, so an editor
   whose input model is not a sample's can reuse the arithmetic. `orbit` turns
   the eye about a fixed pivot — a positive yaw swings it toward the camera's own
-  right, the same rotation sense as `apps/lumen`'s `Flyer` — and clamps the
+  right, the same rotation sense as `apps/lantern`'s `Flyer` — and clamps the
   elevation to `orbit::PITCH_LIMIT` short of vertical, where `Camera::view`
   panics on a degenerate basis. `pan` slides the pivot across the view plane in
   **fractions of the viewport height**, so a drag tracks the pointer at any zoom
@@ -2284,7 +2294,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and would make each sample's "the features I ask for are the engine's own"
   test vacuous — a check that cannot fail is not a check, so those tests would
   have had to go, and what replaced them would have been harder to write than
-  what it replaced. `apps/lumen` could not use a generated one at all:
+  what it replaced. `apps/lantern` could not use a generated one at all:
   overriding `optional_features` is how it forces a lesser path.
 
 - **`crcbl::impl_game_gpu!` and `crcbl::impl_polled_gpu!`**, which write the
@@ -2294,7 +2304,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `impl_polled_gpu!(gpu: Gpu, pending: PendingGpu)` replace them.
 
   They are two macros rather than one with a flag because `PolledGpu` is the
-  half a bundle can outgrow — `apps/lumen` threads its own defaults into
+  half a bundle can outgrow — `apps/lantern` threads its own defaults into
   `request_open` and writes that impl by hand.
 
   **`impl_game_gpu!` opens with a `const _` block coercing each inherent method
@@ -2319,13 +2329,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   to supply it — that constant is generated per crate, so the rate is the
   caller's and only the failure policy is shared.
 
-- **`apps/lumen` runs in a browser.** The sixth demo on the Pages site, and the
-  first written against `crcbl::web_exports!` rather than migrated onto it:
-  `apps/lumen/src/web.rs` is the macro invocation naming the ten
-  `__crcbl_lumen_*` symbols plus a `crcbl::web::WebPending` impl, and nothing
-  else. The package is a `cdylib` now, `apps/lumen/src/gpu.rs` implements
+- **`apps/lantern` runs in a browser.** The sixth demo on the Pages site, and
+  the first written against `crcbl::web_exports!` rather than migrated onto it:
+  `apps/lantern/src/web.rs` is the macro invocation naming the ten
+  `__crcbl_lantern_*` symbols plus a `crcbl::web::WebPending` impl, and nothing
+  else. The package is a `cdylib` now, `apps/lantern/src/gpu.rs` implements
   `crcbl::engine::PolledGpu` — the browser's non-blocking device request — and
-  `crcbl_lumen::PendingLoop` is its polled start-up.
+  `crcbl_lantern::PendingLoop` is its polled start-up.
 
   It is worth publishing for one reason: WebGPU exposes no ray query, so the
   page draws the room through `LightingPath::Rasterised` **by construction**,
@@ -2338,10 +2348,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   carries the measurement — including why `.github/workflows/pages.yml` has no
   browser-gate step for this one demo.
 
-  `Lumen` also logs a `[HUD]` heartbeat from inside the tick, the same shape and
-  cadence every other sample uses: the lighting path the frame took, and the
+  `Lantern` also logs a `[HUD]` heartbeat from inside the tick, the same shape
+  and cadence every other sample uses: the lighting path the frame took, and the
   orbiting lamp's position. Those are the two things
-  `web/tools/browser-e2e.mjs`'s new `lumen` row asserts.
+  `web/tools/browser-e2e.mjs`'s new `lantern` row asserts.
 
 - **`crcbl::web_exports!`: a sample's browser entry point, written once.** The
   ten `#[unsafe(no_mangle)] extern "C"` symbols a demo's JS shim calls —
@@ -2381,7 +2391,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   prerequisite rather than on taste: a gather bake needs a ray-triangle
   intersector and a BVH, and `crcbl-phys` has neither.
 
-  `apps/lumen` now authors a deterministic volume baked from the room's own
+  `apps/lantern` now authors a deterministic volume baked from the room's own
   dimensions: cube-face quadrature gathers the sun's first bounce from the
   axis-aligned shell, including visibility through the window reveal. The
   coloured wall measurably tints neighbouring plaster; interior props, lamp
@@ -2403,7 +2413,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   blend it with screen-space hits by the march's confidence. The pass removes
   the diffuse clamped-cosine transfer from each stored SH band before specular
   evaluation; a zero volume preserves the previous hit arithmetic exactly.
-  lumen's golden gate renders authored and zeroed rows separately, proving the
+  lantern's golden gate renders authored and zeroed rows separately, proving the
   off-screen part of its mirror is lit by probe data while its screen-space hit
   remains. Rough surfaces receive the same environment specular even though
   `ROUGHNESS_CUTOFF` prevents them from screen-space marching: attachment alpha
@@ -2415,8 +2425,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Scene::Probes` fixture disables reflections so its absolute Rust comparison
   remains a diffuse-irradiance contract.
 
-- **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
-  `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,
+- **`apps/lantern`'s pause menu switches the effects, mid-run.** Three rows
+  below `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,
   `--no-ao` and `--no-reflections` already use — each labelled with what the
   frame is drawing and each swapping it on ENTER. Comparing a shadowed room with
   an unshadowed one is now a keypress instead of a restart with a different
@@ -2426,7 +2436,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   effect a device cannot draw reads `UNAVAILABLE` rather than `OFF` and the
   panel never offers a switch that does nothing. Pressing such a row changes
   nothing, since the device clamp is the last layer and no override can escape
-  it. Under the row, `crcbl_lumen::toggled_effect` is read-modify-write on the
+  it. Under the row, `crcbl_lantern::toggled_effect` is read-modify-write on the
   **programmatic** layer of the resolution order alone: the camera stack and
   `[engine.video]` fields come back as they went in.
 
@@ -2461,7 +2471,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   ambient occlusion off records neither occlusion pass and binds a
   renderer-owned 1×1 white image in place of the channel, which `mesh.slang`
   reads as "nothing occludes" because it clamps that fetch to the image it is
-  reading. `apps/lumen` reaches all three from the command line with
+  reading. `apps/lantern` reaches all three from the command line with
   `--no-shadows`, `--no-ao` and `--no-reflections`, and its debug panel and
   headless summary both name the **resolved** set.
 
@@ -2522,7 +2532,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   clears it to zero, so a pixel no geometry covered says "nothing reflects here"
   rather than holding whatever was in the memory.
 
-- **`apps/lumen` — the lighting acceptance fixture, at milestone 1a.** One
+- **`apps/lantern` — the lighting acceptance fixture, at milestone 1a.** One
   indoor room, described by the sample rather than by the engine: nine meshes
   baked from literals through `crcbl::scene::build_meshlets`, five material
   rows, a two-layer base-colour page and its own `Capacities`. A window the sun
@@ -2538,10 +2548,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   — so the debug panel's `unbuilt` section no longer reports the metal as black;
   its `metal` row now names what a reflection actually falls back to, which is a
   baked probe volume rather than a trace of the room.
-  `docs/plan/sample/13-lumen.md` says what is still owed — ray tracing, the
+  `docs/plan/sample/13-lantern.md` says what is still owed — ray tracing, the
   monitor camera and the web demo.
 
-  `apps/lumen/tests/run-lumen-golden.sh` renders the fixed camera on a named
+  `apps/lantern/tests/run-lantern-golden.sh` renders the fixed camera on a named
   backend and checks five claims about **where** the frame is bright and dark
   before comparing it against a golden. It is the first application scene in the
   tree; every other frame draws `crcbl_render::scene::demo`.
@@ -3214,7 +3224,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   absorb-everywhere rule, the opposite of what the dependency does, and the
   fixture had been built around the wrong half deliberately.
 
-- **lumen's free-fly camera turned the wrong way.** The left arrow turned the
+- **lantern's free-fly camera turned the wrong way.** The left arrow turned the
   view right and the right arrow turned it left. Yaw is measured from `-Z` and
   rises toward `+X`, which is the right-hand side — so
   `axis(turn_left, turn_right)`, whose positive argument is the _left_ key,
@@ -3309,17 +3319,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reads the slope off it, and `crcbl_render::shadow::DEPTH_BIAS_TEXELS` comes
   down from 6.0 to 3.0.
 
-  In `apps/lumen`'s room the strip at a wall's foot goes 0.382 m → 0.256, the
+  In `apps/lantern`'s room the strip at a wall's foot goes 0.382 m → 0.256, the
   band down the back wall's left edge 0.373 → 0.244, and the cornice under the
   ceiling from 61 luma over the shadowed wall to 21. Both light types read the
   same normal, so a spot's and a point light's maps are biased against their
   receivers' facets too; no punctual golden moved, because the scenes that
   exercise them receive on flat floors. The two goldens that moved are
-  `apps/lumen/tests/golden/room.png` and `crates/crcbl/tests/golden/dunes.png`.
+  `apps/lantern/tests/golden/room.png` and
+  `crates/crcbl/tests/golden/dunes.png`.
 
 - **The sun lit a strip along the foot of every wall, a band down the side of
   anything standing against one, and a bright cornice under a ceiling.** In
-  `apps/lumen`'s room those measured 0.60 m, 0.58 m and a band three times
+  `apps/lantern`'s room those measured 0.60 m, 0.58 m and a band three times
   brighter than the surface it sat on — enough to read as a pillar or a window
   reveal that is not in the scene. The sun's shadow bias was denominated in a
   cascade's clip depth, so its world meaning was that number times the cascade's
@@ -3335,7 +3346,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   proportionally less than a far one, where the old denomination had that
   backwards.
 
-  Two goldens moved with it: `apps/lumen/tests/golden/room.png` and
+  Two goldens moved with it: `apps/lantern/tests/golden/room.png` and
   `crates/crcbl/tests/golden/dunes.png`. Nothing new self-shadows —
   `docs/plan/18-render-features.md` carries the measurements either side, and
   what stops the strip shrinking further.

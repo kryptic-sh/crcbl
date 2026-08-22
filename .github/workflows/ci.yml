@@ -1290,11 +1290,11 @@ jobs:
       # Added because the golden existed and nothing ran it — it passed on three
       # configurations on the author's machine and on none in CI, which is a
       # check that cannot fail where it matters.
-      - name: Draw lumen's room on lavapipe
+      - name: Draw lantern's room on lavapipe
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-        run: apps/lumen/tests/run-lumen-golden.sh
+        run: apps/lantern/tests/run-lantern-golden.sh
       # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
       # `--package sandbox` and every other harness script does too, so until
       # this step existed nothing outside breakout's own unit tests ever ran the

@@ -1,6 +1,6 @@
 [package]
-name = "lumen"
-description = "Lumen — the lighting acceptance fixture: one room, every effect"
+name = "lantern"
+description = "Lantern — the lighting acceptance fixture: one room, every effect"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,20 +12,20 @@ publish = false
 # can only reach the room it renders through a lib target — a bin crate has no
 # linkable artifact. `src/main.rs` owns argv and the exit code, and `src/web.rs`
 # is the `extern "C"` entry point a browser's JS shim drives once per
-# `requestAnimationFrame`, which `docs/plan/sample/13-lumen.md`'s Scope asks for.
+# `requestAnimationFrame`, which `docs/plan/sample/13-lantern.md`'s Scope asks for.
 #
 # `cdylib` is what `wasm32-unknown-unknown` links into a `.wasm`; `rlib` is what
 # `main.rs` and the golden suite link against. Both are needed — a `cdylib`-only
 # lib cannot be a dependency of the binary in the same package.
 #
-# The lib is not called `lumen`: a lib and a bin of the same name in one package
+# The lib is not called `lantern`: a lib and a bin of the same name in one package
 # write the same file, which cargo calls an output filename collision.
 [lib]
-name = "crcbl_lumen"
+name = "crcbl_lantern"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "lumen"
+name = "lantern"
 path = "src/main.rs"
 
 # One engine dependency, like every other sample — with the `scene` feature on,
@@ -50,7 +50,7 @@ workspace = true
 # `tests/golden.rs` — the fixed camera's frame off a real device, against a
 # checked-in golden. Feature-gated *and* `#[ignore]`d, the same pair
 # `crcbl`'s `render-e2e` uses: a plain `cargo test --workspace --all-features`
-# on a machine with no GPU must stay green, and `tests/run-lumen-golden.sh` is
+# on a machine with no GPU must stay green, and `tests/run-lantern-golden.sh` is
 # the only thing that turns it on — and it fails when the suite reports zero
 # tests run.
 golden-e2e = []

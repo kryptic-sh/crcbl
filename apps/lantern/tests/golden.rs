@@ -30,7 +30,7 @@
 //!
 //! The pair `crcbl`'s `render-e2e` uses. A plain `cargo test --workspace
 //! --all-features` on a machine with no GPU must stay green, and
-//! `tests/run-lumen-golden.sh` is the only thing that turns both off — and it
+//! `tests/run-lantern-golden.sh` is the only thing that turns both off — and it
 //! fails when the suite reports zero tests run.
 
 #![cfg(feature = "golden-e2e")]
@@ -41,7 +41,7 @@ use crcbl::render::{Camera, EffectOverride, EffectRequest, ForwardRenderer, Rend
 use crcbl::screenshot::{ForwardScene, OffscreenSetup};
 use crcbl::shaders::probe::GpuProbe;
 use crcbl_golden::{ChannelOrder, Golden, Image};
-use crcbl_lumen::{Forced, room};
+use crcbl_lantern::{Forced, room};
 
 /// The extent the checked-in golden is blessed at.
 ///
@@ -61,7 +61,7 @@ const REVIEW_EXTENT: (u32, u32) = (1280, 960);
 ///
 /// Under `target/`, which is already ignored, so a reviewer has a path to open
 /// and CI has a directory it can upload with no new rule.
-const REVIEW_DIR: &str = "target/lumen";
+const REVIEW_DIR: &str = "target/lantern";
 
 /// How many distinct colours a frame of this room has to have.
 ///
@@ -152,7 +152,7 @@ const BOUNCE_REDNESS: f32 = 0.55;
 const BOUNCE_AT: Vec3 = Vec3::new(room::HALF_WIDTH, 1.4, -2.0);
 
 /// A point on the mirror-grade panel's `+Z` face, above everything of it that
-/// reflects — see `crcbl_lumen::room::MIRROR_MISSES`, which is this point and
+/// reflects — see `crcbl_lantern::room::MIRROR_MISSES`, which is this point and
 /// carries the proof.
 const MIRROR_AT: Vec3 = room::MIRROR_MISSES;
 
@@ -182,7 +182,7 @@ const TINTED_AT: Vec3 = room::TINTED_PLASTER;
 /// shading added to a flat ambient, and the tonemap and the sRGB encode both
 /// compress that difference rather than preserving it — the same tint is half as
 /// large again in the linear irradiance the shader read, which is what
-/// `crcbl_lumen::bounce`'s own CPU claim measures.
+/// `crcbl_lantern::bounce`'s own CPU claim measures.
 const BOUNCE_TINT: f32 = 1.10;
 
 /// Floor in the plinth's contact corner, where ambient occlusion is strongest.
@@ -228,7 +228,7 @@ const UNCHANGED: f32 = 0.02;
 /// holds its lesser arm at.
 ///
 /// The floor of both axes — the browser's shape, which
-/// `docs/plan/sample/13-lumen.md` already names as the combination this desktop
+/// `docs/plan/sample/13-lantern.md` already names as the combination this desktop
 /// can be made to run. The floor rather than one named step down because an
 /// adapter reports what it reports: from here, *any* adapter offering anything
 /// above the floor gives the two arms a real difference to compare, and the one
@@ -242,7 +242,7 @@ const BELOW: Forced = Forced {
 /// What to ask the lesser arm's device for: [`draw`]'s own set, minus the flags
 /// whose presence would select something above [`BELOW`].
 ///
-/// **The subtraction is `crcbl_lumen`'s, not this file's.** `Forced` is what the
+/// **The subtraction is `crcbl_lantern`'s, not this file's.** `Forced` is what the
 /// binary's `--force-geometry` and `--force-binding` go through, so taking the
 /// difference there and applying it here means a selector that grows a flag
 /// moves this arm too, instead of leaving a second table behind still naming the
@@ -319,7 +319,7 @@ fn draw_with_probes(
             })
         },
     )
-    .unwrap_or_else(|why| panic!("a GPU backend opens for lumen's room: {why}"));
+    .unwrap_or_else(|why| panic!("a GPU backend opens for lantern's room: {why}"));
 
     let backend = setup.backend();
     let caps = setup.caps();
@@ -328,7 +328,7 @@ fn draw_with_probes(
     // green run — the run where the selected path is worth knowing — nextest
     // captures this and it is otherwise invisible.
     eprintln!(
-        "lumen golden: device on adapter {id} {name:?} type={kind:?}",
+        "lantern golden: device on adapter {id} {name:?} type={kind:?}",
         id = adapter.id.0,
         name = adapter.name,
         kind = adapter.device_type,
@@ -340,7 +340,7 @@ fn draw_with_probes(
         caps.lighting_path(),
     );
     eprintln!(
-        "lumen golden: {paths} at {}x{}, asked for {optional_features:?}",
+        "lantern golden: {paths} at {}x{}, asked for {optional_features:?}",
         extent.0, extent.1,
     );
     // **The device landed on exactly the path its request names.** The frame
@@ -411,7 +411,7 @@ fn build(
         renderer.destroy(device);
         return Err(crcbl::screenshot::OffscreenError::Hal(
             crcbl::hal::HalError::InvalidDescriptor(format!(
-                "lumen's room does not fit its own instance pool: {error}"
+                "lantern's room does not fit its own instance pool: {error}"
             )),
         ));
     }
@@ -648,7 +648,7 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
 
 /// **The room, from the fixed camera, against the checked-in golden.**
 #[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
 fn the_fixed_camera_draws_the_room_and_matches_its_golden() {
     let (image, paths) = draw(EXTENT, RenderEffects::all());
     inspect(&image, EXTENT, BLOCK);
@@ -661,7 +661,7 @@ fn the_fixed_camera_draws_the_room_and_matches_its_golden() {
 /// The zero control retains the authored volume and row count, so it exercises
 /// the same binding and lookup shape while removing only the fallback radiance.
 #[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
 fn zero_probes_only_remove_the_ssr_and_rough_fallbacks() {
     let effects = RenderEffects::all();
     let (authored, _, authored_adapter) =
@@ -685,7 +685,7 @@ fn zero_probes_only_remove_the_ssr_and_rough_fallbacks() {
     let authored_brass = brightness(&authored, brass, BLOCK);
     let zeroed_brass = brightness(&zeroed, brass, BLOCK);
     eprintln!(
-        "lumen probes: SSR miss {authored_miss:.1} -> {zeroed_miss:.1}, \
+        "lantern probes: SSR miss {authored_miss:.1} -> {zeroed_miss:.1}, \
          SSR hit {authored_hit:.1} -> {zeroed_hit:.1}, \
          rough brass {authored_brass:.1} -> {zeroed_brass:.1}"
     );
@@ -744,7 +744,7 @@ fn zero_probes_only_remove_the_ssr_and_rough_fallbacks() {
 /// purpose to watch it fail. So the withheld set is asserted non-empty first,
 /// which is the claim that the second arm is a second arm at all.
 #[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
 fn the_room_draws_the_same_on_a_path_below_the_devices_own() {
     let below = below_features();
     // Only the flags a *selector* reads decide whether the arms can differ:
@@ -778,7 +778,7 @@ fn the_room_draws_the_same_on_a_path_below_the_devices_own() {
 
     let offers_better = adapter.caps.features.intersects(withheld);
     eprintln!(
-        "lumen golden: {best_paths} against {lesser_paths} — withheld {withheld:?}, \
+        "lantern golden: {best_paths} against {lesser_paths} — withheld {withheld:?}, \
          adapter {name} has {held:?}",
         name = adapter.name,
         held = adapter.caps.features.intersection(withheld),
@@ -817,7 +817,7 @@ fn check_golden(image: &Image, label: &str) {
         .expect("the reference is readable")
         .into_result()
         .unwrap_or_else(|message| panic!("on {label}: {message}"));
-    eprintln!("lumen golden: room on {label} — {}", comparison.summary());
+    eprintln!("lantern golden: room on {label} — {}", comparison.summary());
 }
 
 /// **The same claims at twenty-five times the pixels**, written where a human
@@ -836,7 +836,7 @@ fn check_golden(image: &Image, label: &str) {
 /// Nothing is blessed — there is no reference at this extent — so the picture is
 /// an artefact of the run rather than a gate.
 #[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
 fn the_room_reads_the_same_at_presentation_size() {
     let image = review(RenderEffects::all(), "fixed-camera");
 
@@ -862,7 +862,7 @@ fn the_room_reads_the_same_at_presentation_size() {
 /// Nothing here is blessed. One frame per state is written for a reviewer, at
 /// the size a shadow's edge can be judged at.
 #[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
 fn every_effect_toggles_and_the_frame_says_so() {
     let block = review_block();
     let camera = room::fixed_camera();
@@ -892,7 +892,7 @@ fn every_effect_toggles_and_the_frame_says_so() {
     let sunlit_on = brightness(&all_on, at(SUNLIT), block);
     let sunlit_off = brightness(&no_shadows, at(SUNLIT), block);
     eprintln!(
-        "lumen toggles: shadowed floor {shaded_on:.1} -> {shaded_off:.1}, \
+        "lantern toggles: shadowed floor {shaded_on:.1} -> {shaded_off:.1}, \
          sunlit floor {sunlit_on:.1} -> {sunlit_off:.1}"
     );
     assert!(
@@ -918,7 +918,7 @@ fn every_effect_toggles_and_the_frame_says_so() {
     let open_on = brightness(&all_on, at(SHADED), block);
     let open_off = brightness(&no_ao, at(SHADED), block);
     eprintln!(
-        "lumen toggles: contact corner {corner_on:.1} -> {corner_off:.1}, \
+        "lantern toggles: contact corner {corner_on:.1} -> {corner_off:.1}, \
          open floor {open_on:.1} -> {open_off:.1}"
     );
     assert!(
@@ -952,7 +952,7 @@ fn every_effect_toggles_and_the_frame_says_so() {
     let missing_on = brightness(&all_on, at(MIRROR_AT), block);
     let missing_off = brightness(&no_reflections, at(MIRROR_AT), block);
     eprintln!(
-        "lumen toggles: mirror foot {foot_on:.1} -> {foot_off:.1}, \
+        "lantern toggles: mirror foot {foot_on:.1} -> {foot_off:.1}, \
          mirror face {missing_on:.1} -> {missing_off:.1}"
     );
     assert!(
@@ -983,7 +983,7 @@ fn review(effects: RenderEffects, name: &str) -> Image {
         REVIEW_EXTENT.0, REVIEW_EXTENT.1
     ));
     image.save_png(&path).expect("the review frame is writable");
-    eprintln!("lumen golden: {paths} review frame at {}", path.display());
+    eprintln!("lantern golden: {paths} review frame at {}", path.display());
     image
 }
 

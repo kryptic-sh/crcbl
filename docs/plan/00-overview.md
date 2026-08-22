@@ -148,9 +148,9 @@ baked in from the start — wasm is a first-class target, not a port.
 Each roadmap S-phase is proven by a **sample project** — small complete
 games/tools in `apps/`, numbered in build order: see
 [sample/00-samples-overview.md](sample/00-samples-overview.md) (breakout,
-asteroids, flappy, horde, hud, lumen, viewer, orbit, flagship co-op tower
+asteroids, flappy, horde, hud, lantern, viewer, orbit, flagship co-op tower
 defense, post-MVP arena). What is in `apps/` today is breakout, flappy,
-asteroids, horde, hud and lumen, beside the three that are not games — `bare`,
+asteroids, horde, hud and lantern, beside the three that are not games — `bare`,
 `sandbox` and `sim`. Every game sample ships as a browser demo on the Pages
 site.
 

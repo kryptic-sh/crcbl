@@ -140,7 +140,7 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * required of every row.
  *
  * Three rows use it and they are `null` for different reasons: hud takes no
- * input at all, while lumen and quarry take plenty but have no run to begin —
+ * input at all, while lantern and quarry take plenty but have no run to begin —
  * which is why this says "no start key" rather than "no input".
  *
  * `backdrop` is the other optional key, and it is what group G reads. It names
@@ -153,7 +153,7 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * **A row without one is a demo whose clear colour is not a constant it owns**,
  * and there are four: asteroids ends its run under the start menu's full-screen
  * scrim, so `art::SPACE` is only ever seen dimmed; horde tiles grass sprites
- * over every pixel of `art::GROUND`; lumen has no `clear_color` pass at all —
+ * over every pixel of `art::GROUND`; lantern has no `clear_color` pass at all —
  * it is a lit room, and the nearest thing to a flat region in its frame is under
  * a tenth of the canvas; and quarry has none either, and the flat region behind
  * its face is whatever `crcbl-render` clears a 3D frame to rather than a byte
@@ -297,7 +297,7 @@ const EXPECTATIONS = {
       share: 0.6,
     },
   },
-  // **The other demo with no start key.** `apps/lumen` is a lighting fixture
+  // **The other demo with no start key.** `apps/lantern` is a lighting fixture
   // rather than a game: there is no run to begin, so there is no waiting state
   // and nothing for a `Space` to leave. It does take input — the arrows and WASD
   // fly the free camera — but the page opens on the fixed pose the goldens are
@@ -309,7 +309,7 @@ const EXPECTATIONS = {
   // A browser has **no ray query**, so `LightingPath::Rasterised` is the arm the
   // selector resolves to by construction, and the first heartbeat naming it is
   // what separates a rasterised room from a page that opened some other device
-  // or fell over before the first tick. `Lumen::log_heartbeat` prints the
+  // or fell over before the first tick. `Lantern::log_heartbeat` prints the
   // selector's own `Debug`, which is a deliberate coupling to
   // `crates/crcbl-hal/src/caps.rs`: a renamed variant fails here loudly.
   //
@@ -320,7 +320,7 @@ const EXPECTATIONS = {
   // standing still. `room::LAMP_PERIOD` is slow enough to read as a moving light
   // and still quick enough that consecutive heartbeats differ far above the two
   // decimal places the line prints them to.
-  lumen: {
+  lantern: {
     // **One of the two demos that draw mesh instances**, so one of the two whose
     // cull pass has anything to count — quarry is the other. Every demo builds a
     // `ForwardRenderer`, and the rest fill their frames with sprites and text,
@@ -337,13 +337,13 @@ const EXPECTATIONS = {
   // geometry. `apps/quarry` is the geometry acceptance fixture: there is no run
   // to begin and no state to leave, so there is nothing for a `Space` to do. It
   // takes input — the free camera flies on WASD — but reaching that camera is a
-  // pause-menu row rather than a key, exactly as it is in lumen.
+  // pause-menu row rather than a key, exactly as it is in lantern.
   //
   // `waiting` is this sample's own claim and it is the exit criterion the page
   // exists to satisfy: "web demo renders the scene on `IndirectPerBatch` … and
   // the summary line names the path it took". A browser has **no mesh stage and
   // no GPU-side draw count**, so `GeometryPath::IndirectPerBatch` is the arm the
-  // selector resolves to by construction — the same shape of claim lumen's row
+  // selector resolves to by construction — the same shape of claim lantern's row
   // makes about `LightingPath::Rasterised` — and the first heartbeat naming it
   // is what separates a per-batch page from one that opened some other device or
   // fell over before the first tick. `Quarry::log_heartbeat` prints the
@@ -360,7 +360,7 @@ const EXPECTATIONS = {
   // and still moves the eye three metres between consecutive heartbeats, which
   // is far above the two decimal places the line prints it to.
   quarry: {
-    // The other demo whose cull pass has something to count — see lumen's row
+    // The other demo whose cull pass has something to count — see lantern's row
     // and group D. This one is the sample that pass exists for.
     culls: true,
     key: null,

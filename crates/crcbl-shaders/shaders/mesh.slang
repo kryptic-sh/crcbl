@@ -1952,8 +1952,8 @@ FragmentOutput fragmentMain(VertexOutput input)
     // the result on top of this pass's output. So a fully metallic surface out
     // of every light's reach is the environment rather than black, and black
     // only under a zeroed probe volume with nothing on screen for it to
-    // reflect. `apps/lumen/src/room.rs`'s `MIRROR` and `ROUGH_METAL` rows are
-    // conductors, and `apps/lumen/tests/golden.rs`'s
+    // reflect. `apps/lantern/src/room.rs`'s `MIRROR` and `ROUGH_METAL` rows are
+    // conductors, and `apps/lantern/tests/golden.rs`'s
     // `zero_probes_only_remove_the_ssr_and_rough_fallbacks` is what measures
     // those two shares apart on them.
     //

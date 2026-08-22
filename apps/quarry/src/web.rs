@@ -27,7 +27,7 @@
 //! *instance* rather than once per cluster, and one flat level is drawn for the
 //! whole face. That is the honest picture of what a browser visitor gets, which
 //! is exactly what `docs/plan/sample/14-quarry.md`'s Scope asks this demo to be
-//! — and it is the same shape of claim `apps/lumen`'s page makes about
+//! — and it is the same shape of claim `apps/lantern`'s page makes about
 //! [`crcbl::hal::LightingPath::Rasterised`]. `Quarry::log_heartbeat` names the
 //! arm it resolved to once a second, so the claim is checkable from the console
 //! rather than taken on trust.

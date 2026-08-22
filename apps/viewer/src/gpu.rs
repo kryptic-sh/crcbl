@@ -73,7 +73,7 @@ const KEY_INTENSITY: f32 = 2.0;
 
 /// The flat ambient term, which is the only indirect light there is.
 ///
-/// Larger than `apps/lumen`'s, and deliberately: that fixture is lit to show
+/// Larger than `apps/lantern`'s, and deliberately: that fixture is lit to show
 /// what its lighting does, and this one has to keep the side of a model that
 /// faces away from the key readable, because a user turning a model round is
 /// looking at that side on purpose.

@@ -3966,9 +3966,9 @@ macro_rules! impl_game_gpu {
 /// Implements [`PolledGpu`] for a bundle whose request is a plain forward.
 ///
 /// Separate from [`impl_game_gpu!`] because it is the half a sample can
-/// outgrow: `apps/lumen` threads its own defaults into `request_open`, so it
+/// outgrow: `apps/lantern` threads its own defaults into `request_open`, so it
 /// takes the other macro and writes this impl by hand. Folding the two together
-/// behind a flag would put lumen's exception into every other sample's
+/// behind a flag would put lantern's exception into every other sample's
 /// invocation.
 ///
 /// # Examples
@@ -4017,14 +4017,14 @@ macro_rules! impl_polled_gpu {
 ///   render every sample's "the features I ask for are the engine's own" test
 ///   vacuous — a check that cannot fail is not a check, so those tests would
 ///   have to go, and what replaced them would be harder to write than what it
-///   replaced. `apps/lumen` could not use a generated one at all: overriding
+///   replaced. `apps/lantern` could not use a generated one at all: overriding
 ///   `optional_features` is how it forces a lesser path.
 /// * **`from_context`** — an inherent `fn(GpuContext) -> Result<Self,
 ///   GpuError>` building this game's renderers. Not a trait method, so a bundle
 ///   without one fails to compile rather than recursing; see
 ///   [`impl_game_gpu!`] for why that distinction matters here.
 ///
-/// A bundle whose pending state carries more than the context — `apps/lumen`
+/// A bundle whose pending state carries more than the context — `apps/lantern`
 /// again, which holds its forced path and effect set across the request —
 /// writes these out by hand.
 ///

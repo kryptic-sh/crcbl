@@ -48,18 +48,18 @@ in its own `env` block, and re-derived the same way on 2026-08-21 after
 claim this project rests a lot on, and it had never been read off the workflow
 rather than believed:
 
-| runner                | backends      |
-| --------------------- | ------------- |
-| `run-hal-seam-e2e.sh` | dx12, mtl, vk |
-| `run-render-e2e.sh`   | dx12, mtl, vk |
-| `run-forward-e2e.sh`  | dx12, mtl, vk |
-| `run-draw-gen-e2e.sh` | dx12, mtl, vk |
-| `run-sprite-e2e.sh`   | dx12, mtl, vk |
-| `run-mesh-e2e.sh`     | dx12, mtl, vk |
-| `run-tiling-e2e.sh`   | dx12, mtl, vk |
-| `run-gltf-e2e.sh`     | dx12, mtl, vk |
-| `run-lumen-golden.sh` | vk            |
-| `run-quarry-e2e.sh`   | vk            |
+| runner                  | backends      |
+| ----------------------- | ------------- |
+| `run-hal-seam-e2e.sh`   | dx12, mtl, vk |
+| `run-render-e2e.sh`     | dx12, mtl, vk |
+| `run-forward-e2e.sh`    | dx12, mtl, vk |
+| `run-draw-gen-e2e.sh`   | dx12, mtl, vk |
+| `run-sprite-e2e.sh`     | dx12, mtl, vk |
+| `run-mesh-e2e.sh`       | dx12, mtl, vk |
+| `run-tiling-e2e.sh`     | dx12, mtl, vk |
+| `run-gltf-e2e.sh`       | dx12, mtl, vk |
+| `run-lantern-golden.sh` | vk            |
+| `run-quarry-e2e.sh`     | vk            |
 
 **Every agnostic suite really does run on every native backend.** The two
 exceptions are the sample golden suites, and quarry's is vk-only for a reason
@@ -581,7 +581,7 @@ consecutive loads:
 gpu error: the device reported vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY
   - While calling [Device "horde"].CreateBuffer([BufferDescriptor "sprite instances"])
 gpu error: readback 386.1 (command 989) could not be mapped: AbortError: Failed to
-  execute 'mapAsync' on 'GPUBuffer': [Device "lumen"] is lost.
+  execute 'mapAsync' on 'GPUBuffer': [Device "lantern"] is lost.
 ```
 
 **Neither is a memory problem and the first is not a horde bug.** Measured on
@@ -647,18 +647,18 @@ engine running.
 **What remains is that only `breakout`, `flappy` and `hud` can make the claim.**
 The other three carry no `backdrop` row and the driver says why per demo:
 `asteroids` ends under its start menu's full-screen scrim, `horde` tiles grass
-sprites over every pixel of `GROUND`, and `lumen` has no `clear_color` pass at
+sprites over every pixel of `GROUND`, and `lantern` has no `clear_color` pass at
 all. So a regression that spared those three demos' clears and broke only
-`lumen`'s tone mapping would still pass. Closing it needs a different observable
-than a flat fill — the flat fill is what makes the current check exact on
-SwiftShader and paravirtual Metal without a tolerance, and that property is
-worth keeping rather than trading for coverage.
+`lantern`'s tone mapping would still pass. Closing it needs a different
+observable than a flat fill — the flat fill is what makes the current check
+exact on SwiftShader and paravirtual Metal without a tolerance, and that
+property is worth keeping rather than trading for coverage.
 
 **But it is not a gap in coverage of the sRGB bug, and that distinction decides
 whether it is worth a slice.** The canvas encode is one shared mechanism — the
 configuration `web/engine/gpu-replay.js` applies for every demo — so a
 regression in it cannot spare three demos and break the other three; whichever
-demos are covered would catch it. The escape this entry names is _lumen's tone
+demos are covered would catch it. The escape this entry names is _lantern's tone
 mapping_, which is a per-demo rendering regression and a different class of
 thing. So three of six is enough for the bug this group was built for, and the
 open half is end-to-end output coverage in general.
@@ -925,10 +925,10 @@ also owe is a bug in the split.
 
 The standing pattern from the roadmap — build the feature, then ship the sample
 that consumes it — resumes once the migration and its test coverage are done.
-Built so far: breakout, asteroids, flappy, horde, hud, lumen. **The next unbuilt
-sample in sequence is `docs/plan/sample/05-viewer.md`**, a glTF model viewer:
-open a file, orbit it, inspect it. It is the asset pipeline's acceptance test
-and the editor viewport's warm-up act.
+Built so far: breakout, asteroids, flappy, horde, hud, lantern. **The next
+unbuilt sample in sequence is `docs/plan/sample/05-viewer.md`**, a glTF model
+viewer: open a file, orbit it, inspect it. It is the asset pipeline's acceptance
+test and the editor viewport's warm-up act.
 
 **What it needs**, sliced so each lands on its own — one of these turned out to
 be built already, which is why the list says what was checked and when:
@@ -3306,7 +3306,7 @@ ever select the floor path. A three-way quarry gate would follow `draw_gen.rs`'s
 shape, not `render_e2e.rs`'s.
 
 **Which sample came next was decided** — quarry, over `breakout-as-wasm` (P6A, a
-`wasmtime` `WasmHost` seam), lumen's second half (S4B, blocked on P7C's ray
+`wasmtime` `WasmHost` seam), lantern's second half (S4B, blocked on P7C's ray
 tracing) and orbit (S5, behind three physics phases). quarry was the only one
 whose prerequisites were already built.
 
@@ -4860,7 +4860,7 @@ time.
 
 Apps confirmed to have none of the shape, so nobody need look again:
 `asteroids`, `flappy` and `breakout`'s in-crate `game.rs` tests all funnel
-through a single `Harness::new` that passes `headless` once; `hud` and `lumen`
+through a single `Harness::new` that passes `headless` once; `hud` and `lantern`
 have no audio, score file or headless knob in their game code; `sim`'s binary
 has no shell, audio or store, so its e2e helper needs no isolation flag at all.
 `crcbl-shell`'s `WindowDesc::default` has `visible: true`, but its callers are
@@ -5120,8 +5120,8 @@ confirmed; the rest of this file assumes them.
   proposed to fill the web-flagship vacancy; shard's web milestone fills it, and
   two samples in one genre is duplication. **To override:** split them again.
 - **New phase and gate names are inventions**: P7B (raster twin), P7C
-  (ray-traced path), S4B (lumen), S4C (quarry), S6B (shard web slice), S7
-  (bracket). So are the sample names lumen, quarry, shard and bracket.
+  (ray-traced path), S4B (lantern), S4C (quarry), S6B (shard web slice), S7
+  (bracket). So are the sample names lantern, quarry, shard and bracket.
 - **Point-light shadows moved into MVP.** They were post-MVP; the raster twin
   has to cover every light type ray-traced shadows cover, so they follow from
   the parity decision rather than being a separate call.
@@ -9346,7 +9346,7 @@ stays green on a machine with no compositor and no GPU. Measured rather than
 argued, and re-derived on 2026-08-21 after `crcbl-wgpu` went:
 `cargo nextest list --workspace --all-features --run-ignored only` on Linux
 selects 215 tests, across `crcbl-vk::vk_e2e`, `crcbl-shell`'s `wayland_e2e` and
-`x11_e2e`, the agnostic `crcbl::*_e2e` suites, `lumen::golden` and
+`x11_e2e`, the agnostic `crcbl::*_e2e` suites, `lantern::golden` and
 `crcbl-cli::cli_e2e`. The per-suite counts are deliberately not written out —
 the list this replaced had rotted by more than the deleted suite alone.
 `--all-features` compiles the Vulkan and render suites on the macOS and Windows
@@ -9559,7 +9559,7 @@ in place.
 ### Coverage the testing plan asks for and nothing provides
 
 - **One sample owns no golden frame.** `breakout`, `flappy`, `hud`, `asteroids`
-  and `horde` each compare a real frame now, and `lumen` has one by its own
+  and `horde` each compare a real frame now, and `lantern` has one by its own
   route; `quarry` and `viewer` do not. Both are tools rather than demos, so the
   question is whether the plan's rule reaches them at all.
 - **`crcbl-ui` owes a hit-test grid and has two points.**
@@ -11190,7 +11190,7 @@ reasons. What the first slice deferred or turned up:
 - **`SSAO_RADIUS` is 0.5 and the kernel reaches ~⅞ of it laterally**, both tuned
   against `Scene::Ao` alone. The first, normal-hugging kernel gave a ratio of
   1.03 — visually nothing. Neither has been retuned; both have now been
-  **measured** against a real room — see "The AO constants against lumen's
+  **measured** against a real room — see "The AO constants against lantern's
   room", which finds the radius sane at room scale.
 - **`AO_RATIO` is 1.10 rather than a shadow-like 1.5**, and that is not
   slackness: bands are read after the sRGB encode and AO scales ambient alone,
@@ -11237,10 +11237,10 @@ slice deferred or turned up:
   done, and not obviously worth it: it is a two-level artifact on one row.
 - **`DEPTH_TOLERANCE_RADII` is 2.0 and has been tuned against nothing.** It puts
   half weight at exactly one `SSAO_RADIUS` and zero at two, which is derived
-  rather than fitted. `apps/lumen`'s room is the first scene with two surfaces a
-  metre apart in view depth inside one kernel footprint, and it shows no halo at
-  2.0 — see "The AO constants against lumen's room", including why that is an
-  upper bound rather than a tuning result.
+  rather than fitted. `apps/lantern`'s room is the first scene with two surfaces
+  a metre apart in view depth inside one kernel footprint, and it shows no halo
+  at 2.0 — see "The AO constants against lantern's room", including why that is
+  an upper bound rather than a tuning result.
 - **The halo check lives in `Scene::Cube`, not `Scene::Ao`.**
   `the_clear_does_not_brighten_the_silhouette_in_front_of_it` reads the plain
   pyramid's underside, because the AO scene's camera looks into a closed trough
@@ -12316,21 +12316,21 @@ manifest hashes the **source**), and the `msl/` churn in that diff is noise
 rather than codegen — a reviewer should read the `#line` numbers and stop, not
 go looking for what moved.
 
-## `apps/lumen` is at milestone 1a: what it owes next (2026-08-14)
+## `apps/lantern` is at milestone 1a: what it owes next (2026-08-14)
 
-The entry this replaces said lumen could not be built because the engine had no
-way for an app to describe a scene. That is gone: the six scene-API slices
-landed and `apps/lumen` renders the charter's room from a `SceneDesc` of its
+The entry this replaces said lantern could not be built because the engine had
+no way for an app to describe a scene. That is gone: the six scene-API slices
+landed and `apps/lantern` renders the charter's room from a `SceneDesc` of its
 own. What follows is what the sample still owes, and the findings the first real
-room produced. `docs/plan/sample/13-lumen.md` carries the status.
+room produced. `docs/plan/sample/13-lantern.md` carries the status.
 
 ### Owed, in the order a slice would take them
 
 - **Ray tracing** — acceleration structures, `LightingPath::RayTraced`, and the
   side-by-side and A/B-flip modes the charter's milestones 2 and 3 want. The
   selector already exists and every device in the tree resolves to `Rasterised`
-  because nothing builds a structure; lumen's panel says so on a row rather than
-  implying a choice was made.
+  because nothing builds a structure; lantern's panel says so on a row rather
+  than implying a choice was made.
 - **The render-to-texture monitor camera**, and with it a consumer for the
   camera-stack layer of the toggle resolution order. One camera per frame today.
 - **The rest of milestone 4's matrix.** The three effect rows are on the pause
@@ -12348,18 +12348,18 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   shape as the shadow-atlas rule considered and declined below: the arm exists
   and nothing can reach it here.
 - **The Pages web demo shipped, and the software-adapter blocker is gone.** This
-  bullet pointed at an entry called "lumen's browser gate needs a real GPU",
+  bullet pointed at an entry called "lantern's browser gate needs a real GPU",
   which was deleted when the cause was: `crcbl-render`'s draw-argument pass
   bound fourteen storage buffers against SwiftShader's ceiling of ten and binds
-  eight now. Measured 2026-08-20 — `CRCBL_WEB_E2E_DEMO=lumen` passes 34 of 34 on
-  Chromium under Xvfb against bundled SwiftShader. What is left is only whether
-  a GitHub runner is fast enough to host it; quarry's step went first to answer
-  that, and "DECISION NEEDED — add the `lumen` and `quarry` browser steps to
-  Pages CI?" carries it.
-- **Sound.** Rule 8 says no sample ships silent after P4A. lumen has no audio at
-  all, and it is not obvious it should: it is an acceptance fixture with no
+  eight now. Measured 2026-08-20 — `CRCBL_WEB_E2E_DEMO=lantern` passes 34 of 34
+  on Chromium under Xvfb against bundled SwiftShader. What is left is only
+  whether a GitHub runner is fast enough to host it; quarry's step went first to
+  answer that, and "DECISION NEEDED — add the `lantern` and `quarry` browser
+  steps to Pages CI?" carries it.
+- **Sound.** Rule 8 says no sample ships silent after P4A. lantern has no audio
+  at all, and it is not obvious it should: it is an acceptance fixture with no
   events, and `hud` — the other fixture — is the precedent for a sample with no
-  cue grammar. **Left as a decision rather than as work**: either lumen claims
+  cue grammar. **Left as a decision rather than as work**: either lantern claims
   the exemption in its own doc the way rule 11's is claimed, or it gets a hum
   positioned at the lamp, which would at least give the moving light an audible
   correlate.
@@ -12376,31 +12376,32 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   places.
 - **A single-quad wall casts no shadow at all.** Back faces are culled in the
   shadow pass as well as the colour one, so an inward-facing quad is invisible
-  to the sun. lumen's first frame was an evenly lit floor with a window that did
-  nothing; the room is built of slabs for that reason and `room::SHELL` records
-  it. Worth knowing before the next scene is authored: it is not a bug, it is
-  what `CullMode::Back` means on an open surface, and nothing warns about it.
-- **A gap in a shell leaks light and reads as an artefact.** Stopping lumen's
+  to the sun. lantern's first frame was an evenly lit floor with a window that
+  did nothing; the room is built of slabs for that reason and `room::SHELL`
+  records it. Worth knowing before the next scene is authored: it is not a bug,
+  it is what `CullMode::Back` means on an open surface, and nothing warns about
+  it.
+- **A gap in a shell leaks light and reads as an artefact.** Stopping lantern's
   ceiling at the room's own footprint left a slot over the top of every wall;
   the sun came through the one above the window wall and laid a band along the
   back wall that looked exactly like a shadow-map failure. The ceiling caps the
   walls now. Same class as the row above: authoring hazard, not an engine
   defect.
-- **`crcbl::screenshot::Scene` is not where lumen belongs, and that is
-  decided.** Considered: adding a `Scene::Lumen` variant so
-  `crcbl screenshot --scene lumen` would work. **Declined** — the room is an
+- **`crcbl::screenshot::Scene` is not where lantern belongs, and that is
+  decided.** Considered: adding a `Scene::Lantern` variant so
+  `crcbl screenshot --scene lantern` would work. **Declined** — the room is an
   _application's_ scene description and putting it in `crates/crcbl` would make
   the engine own sample content, which is the exact thing this sample exists to
   prove is no longer necessary; and the enum's stated job is one variant per
-  engine shader pair that has pixels of its own, which lumen adds none of. What
-  it needed instead was a way in: `OffscreenSetup::open_forward` takes a
+  engine shader pair that has pixels of its own, which lantern adds none of.
+  What it needed instead was a way in: `OffscreenSetup::open_forward` takes a
   caller-built `ForwardScene` and reuses the surface, adapter pin, ring,
   readback barriers and row unpadding. That is rule 1 working as designed — a
   sample needing a backdoor is an engine API gap, filed and fixed in the engine.
-- **`crcbl new` scaffolds a shape lumen would have had to undo.** The template
+- **`crcbl new` scaffolds a shape lantern would have had to undo.** The template
   is one `src/main.rs` with a bin target and a `Game` with a simulation in it.
-  lumen needs a lib target — an integration test cannot reach a bin crate's room
-  — and has no simulation. Not a defect in the template, which is aimed at
+  lantern needs a lib target — an integration test cannot reach a bin crate's
+  room — and has no simulation. Not a defect in the template, which is aimed at
   games; recorded so the next fixture does not start from it either.
 - **`OffscreenSetup` leaked a swapchain and a surface when a scene refused.**
   `Scene::Dunes`' "no amplification stage" arm destroyed its own renderer and
@@ -12408,10 +12409,10 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   because the new entry point made the refusal path reachable from an
   application.
 - **Coverage gap: nothing in the tree asserts a debug row's _text_.**
-  `apps/lumen/src/app.rs`'s `f3_shows_the_path_report_and_the_unbuilt_notice`
+  `apps/lantern/src/app.rs`'s `f3_shows_the_path_report_and_the_unbuilt_notice`
   checks that the section titles exist and that the row _labels_ — `geometry`,
   `lighting`, `metal`, `mode` — reached the draw list. The value each row
-  carries is asserted nowhere: `apps/lumen/src/gpu.rs`'s `row_str("metal", …)`
+  carries is asserted nowhere: `apps/lantern/src/gpu.rs`'s `row_str("metal", …)`
   changed from calling the metals black to calling them reflection-lit and no
   test went red. Verified by grepping the whole tree for both strings; only the
   `gpu.rs` call site has either. **A test that closed it** would read the row's
@@ -12420,20 +12421,20 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   against the shader fails instead of drifting. **Not written, because it is a
   judgement rather than a correction:** pinning the panel's prose in a test
   makes every wording pass a test edit too, which is friction on exactly the
-  copy that should stay current; against that, the panel is lumen's user-visible
-  claim about what the renderer did, and it has now been wrong once. Whether the
-  assertion should be on the exact string or on a keyword the wording must
-  contain is the same call.
+  copy that should stay current; against that, the panel is lantern's
+  user-visible claim about what the renderer did, and it has now been wrong
+  once. Whether the assertion should be on the exact string or on a keyword the
+  wording must contain is the same call.
 
 ## The AO tuning constants, measured against a real frame (2026-08-13)
 
 Two entries above — under "What screen-space AO left owed" and "What the
 depth-weighted blur left owed" — say `SSAO_RADIUS`, the kernel's lateral reach
 and `DEPTH_TOLERANCE_RADII` were tuned against `Scene::Ao` alone and that
-`lumen` is what would tune them. This is what `Scene::Ao` could say on its own;
-the section after it is the same three questions asked of lumen's room, which
-now exists. **Nothing has been retuned in either**; the numbers are here so the
-retune has a starting point.
+`lantern` is what would tune them. This is what `Scene::Ao` could say on its
+own; the section after it is the same three questions asked of lantern's room,
+which now exists. **Nothing has been retuned in either**; the numbers are here
+so the retune has a starting point.
 
 Measured on this box — AMD RX 7900 XTX, radv, Mesa 26.1.6,
 `MeshShader / Bindless / Rasterised` — from
@@ -12483,10 +12484,10 @@ own printed numbers at its 256×192.
   reachable from an app, which is its own small finding: a retune is an engine
   edit and a re-bless, not a sample knob.
 
-## The AO constants against lumen's room (2026-08-14)
+## The AO constants against lantern's room (2026-08-14)
 
 The measurement the entry above could not make, now that there is an eye-height
-camera inside a real room. Read off `apps/lumen/tests/golden.rs`'s own
+camera inside a real room. Read off `apps/lantern/tests/golden.rs`'s own
 projection at 1280×960 on AMD RX 7900 XTX, radv, Mesa 26.1.6,
 `MeshShader / Bindless / Rasterised`, averaging a 21×21 block about each world
 point. **Nothing was retuned.**
@@ -12522,13 +12523,13 @@ point. **Nothing was retuned.**
 - **That is an upper bound on the artefact, not a tuning measurement, and the
   reason is the missing toggle.** Every number here is AO folded into a shaded
   pixel. Isolating the term needs the same frame with the occlusion pass off,
-  which is the first row of the lumen entry above. Until that exists,
+  which is the first row of the lantern entry above. Until that exists,
   `DEPTH_TOLERANCE_RADII` can be said not to be _visibly_ wrong and cannot be
   said to be right.
 - **A finding worth more than any of them: the sun's shadow bias contaminates
   the floor's occlusion profile near a wall.** The first profile taken —
   approaching the `-x` wall — read 49 at 0.8 m and 138 at 0.25 m, which is
-  backwards. That is the peter-panning recorded in the lumen entry above, not
+  backwards. That is the peter-panning recorded in the lantern entry above, not
   AO. Anyone repeating this measurement must take it on a wall whose foot the
   sun does not reach, which is why the numbers above are from the back wall.
 
@@ -12537,7 +12538,7 @@ point. **Nothing was retuned.**
 Two slices have run at this. The bias was re-denominated from cascade clip depth
 into cascade texels (`DEPTH_BIAS_TEXELS`, `sun_visibility`), then its slope term
 was moved from the interpolated shading normal onto the rasterised facet
-(`geometric_normal_of`, `shadow_slope`). `apps/lumen`'s wall-foot strip went
+(`geometric_normal_of`, `shadow_slope`). `apps/lantern`'s wall-foot strip went
 0.601 m → 0.382 → 0.256, and the band down the back wall's left edge 0.579 →
 0.373 → 0.244. Both shipped. What is left is below.
 
@@ -12556,17 +12557,17 @@ stores the steeper one's depth. No slope read off either facet predicts the
 other's, so a constant still covers it — a smaller one. Measured, slope
 coefficient held at 2.0:
 
-| `DEPTH_BIAS_TEXELS` | lumen's strip | dunes, shading `N` | dunes, facet `Ng`   |
-| ------------------- | ------------- | ------------------ | ------------------- |
-| 0                   | 0.128 m       | heavy cross-hatch  | seam on most edges  |
-| 1                   | 0.170 m       | —                  | seam on some edges  |
-| 2                   | 0.213 m       | faint cross-hatch  | a few isolated dots |
-| 3 (shipped)         | 0.256 m       | —                  | clean               |
-| 6 (was)             | 0.382 m       | clean              | clean               |
+| `DEPTH_BIAS_TEXELS` | lantern's strip | dunes, shading `N` | dunes, facet `Ng`   |
+| ------------------- | --------------- | ------------------ | ------------------- |
+| 0                   | 0.128 m         | heavy cross-hatch  | seam on most edges  |
+| 1                   | 0.170 m         | —                  | seam on some edges  |
+| 2                   | 0.213 m         | faint cross-hatch  | a few isolated dots |
+| 3 (shipped)         | 0.256 m         | —                  | clean               |
+| 6 (was)             | 0.382 m         | clean              | clean               |
 
 Shipped at 3.0 with **no margin above it**, deliberately unlike the 6-over-5 it
 replaced: six covered an unexplained shortfall, three covers a bounded and
-understood one, so margin here is lumen's strip bought back for nothing. 4.0
+understood one, so margin here is lantern's strip bought back for nothing. 4.0
 would cost about 0.29 m if that judgement is ever revisited.
 
 **The facet-seam mechanism is inference from the pictures, not instrumented.**
@@ -12679,19 +12680,19 @@ reason occlusion did not.
    endpoint colours and the centre against the Rust mirror, asserts the outer
    regions stay flat, and runs both geometry paths. See "the probes fixture is a
    full-frame gradient" below for why the first version was reverted.
-3. ~~lumen's room gets a volume.~~ **Shipped in this slice:** `bounce::probes()`
-   computes the sun's analytic first bounce from the room's own constants. The
-   coloured wall measurably tints the plaster beside it, and the golden moves
-   for the reason its module docs name.
+3. ~~lantern's room gets a volume.~~ **Shipped in this slice:**
+   `bounce::probes()` computes the sun's analytic first bounce from the room's
+   own constants. The coloured wall measurably tints the plaster beside it, and
+   the golden moves for the reason its module docs name.
 4. ~~The specular fallback.~~ **Shipped in this slice:** `SsrParams` carries
    `inv_view` and the probe volume, the SSR pass binds the existing read-only
    probe table, and misses return its approximate L1 radiance through the same
    Fresnel term as hits. The stored diffuse-irradiance rows have their per-band
    clamped-cosine transfer removed before evaluation. The arithmetic keeps the
    old hit multiplication order, so a zero volume adds exact zero rather than
-   changing half-float rounding. lumen's authored-versus-zero control moves the
-   SSR miss from 20.3 to 0.0 while its real hit moves 51.6 to 49.0, within the
-   measured 6% budget.
+   changing half-float rounding. lantern's authored-versus-zero control moves
+   the SSR miss from 20.3 to 0.0 while its real hit moves 51.6 to 49.0, within
+   the measured 6% budget.
 5. ~~The roughness cutoff decision.~~ **Shipped without raising it:**
    `ROUGHNESS_CUTOFF` gates only screen-space marching. Rough surfaces still
    evaluate probe environment specular and return it with exact-zero sharpness,
@@ -12700,14 +12701,14 @@ reason occlusion did not.
    linear share, it keeps the existing SSR fixture below its fixed-stride
    stepping limit. The reflectivity attachment stores sharpness rather than
    quantised roughness so the cutoff endpoint survives `Rgba8Unorm` exactly;
-   Vulkan readback asserts alpha zero. lumen's fully metallic brass at roughness
-   0.55 measures 97.4 with authored probes and 89.7 with zeroed rows.
+   Vulkan readback asserts alpha zero. lantern's fully metallic brass at
+   roughness 0.55 measures 97.4 with authored probes and 89.7 with zeroed rows.
    `Scene::Probes` disables reflections so its diffuse Rust-mirror contract
    remains absolute.
 
 **The cheapest useful version is not a separate slice.** One probe and a 1×1×1
 grid is slice 1 with `probes.len() == 1` — the ambient becomes directional,
-which is most of what a probe buys on a picture, and lumen's panel goes
+which is most of what a probe buys on a picture, and lantern's panel goes
 non-black across its whole face. Stopping after slice 4 with a single probe
 requires rewriting nothing to add the grid later. The grid is recommended anyway
 because a room needs light that differs between the window and the far corner.
@@ -12719,24 +12720,24 @@ because a room needs light that differs between the window and the far corner.
   probe is more honest than one screen-space ray. The cutoff therefore gates the
   march only; rough surfaces return probe environment with zero sharpness, and
   the blur composites that centre value without filtering. This keeps
-  `UNTINTED`'s exact-zero march endpoint without leaving lumen's brass black.
+  `UNTINTED`'s exact-zero march endpoint without leaving lantern's brass black.
 - **Q2: does this get a `RenderEffects` bit?** **Resolved no.** The off-switch
   is the scene, and a zero volume is bit-identical, so there is nothing to
   resolve through four layers. `effects.rs`'s own rule is that an effect which
   is off is a frame with fewer passes and never a shader branch — a probe bit
-  removes no pass. If lumen's milestone-4 matrix wants a row anyway, it should
+  removes no pass. If lantern's milestone-4 matrix wants a row anyway, it should
   swap the bound table for the zero one, which is still data and still no
   branch. It is public API shape, so it is yours.
 
 ### Named limits, so they are not rediscovered
 
 - **Light leaking is the grid's real weakness** — a probe inside a wall lights
-  the room beyond it. lumen's room is a single box so it will not show there; a
-  scene with two rooms will. The literature's answers are per-probe visibility
+  the room beyond it. lantern's room is a single box so it will not show there;
+  a scene with two rooms will. The literature's answers are per-probe visibility
   or DDGI's depth moments, neither in scope.
 - **An L1 probe in a mirror is a gradient, not a room.** Fixing that is
   prefiltered radiance cubemaps, which need the filtered read `ssr.slang`
-  refuses. Trigger: when somebody looks at lumen's panel and objects.
+  refuses. Trigger: when somebody looks at lantern's panel and objects.
 - **With `REFLECTIONS` off, metals go black again**, because the reflection pair
   is what draws the environment specular. Coherent rather than a defect, and
   `--no-reflections` showing it is honest.
@@ -12903,7 +12904,7 @@ for:
 | horde     | 1023 ms  | 1.0x   | 47/47  | —     |
 | hud       | 1003 ms  | 1.0x   | 37/37  | —     |
 | quarry    | 26243 ms | 26.2x  | 37/37  | 5m54s |
-| lumen     | 19339 ms | 19.3x  | 37/37  | 5m23s |
+| lantern   | 19339 ms | 19.3x  | 37/37  | 5m23s |
 
 The five 2D demos sit at exactly nominal and are untouched by the scaling, which
 is the property that makes it safe; only the two heavy frames are behind, and by
@@ -12917,7 +12918,7 @@ also slow. If a tap sequence ever fails on a slow runner where the deadline
 plainly did not expire, event coalescing is the first thing to suspect.
 
 **Both stale prose claims are fixed**: `web/pages/index.html`'s excusing clause
-and `web/pages/lumen.html`'s "This one wants a real GPU" note, which said the
+and `web/pages/lantern.html`'s "This one wants a real GPU" note, which said the
 canvas stays black on a software adapter and had been false since the pass was
 packed.
 
@@ -12966,7 +12967,7 @@ point missing two of its inputs cannot be shown to apply them in the right order
 - **Camera stack.** There is no render-stack RON. Nothing in the workspace reads
   or writes RON at all, there is no `ron` dependency and no `.ron` file, and
   `crcbl-render` has one camera per frame. The consumer topic 18 names is the
-  render-to-texture monitor camera, which is on lumen's owed list.
+  render-to-texture monitor camera, which is on lantern's owed list.
 - **`[engine.video]`.** Closer, and the gap is smaller than it looks.
   `crcbl_store::settings::SettingsStack` implements the whole four-layer TOML
   resolution and `get_section::<T>("engine.video")` is one call. What is missing
@@ -13003,8 +13004,8 @@ effect on. The first rule that fires arrives with the ray-traced variants, which
 ### Coverage gaps this slice leaves
 
 - **The toggle frames do run in CI**, and this entry said they did not. The
-  `Draw lumen's room on lavapipe` step in `vk e2e (lavapipe)` runs
-  `apps/lumen/tests/run-lumen-golden.sh`, which drives the whole suite —
+  `Draw lantern's room on lavapipe` step in `vk e2e (lavapipe)` runs
+  `apps/lantern/tests/run-lantern-golden.sh`, which drives the whole suite —
   `every_effect_toggles_and_the_frame_says_so` included, three tests, all
   passing there. What is still missing is rule 12's second half: the run
   exercises the runner's own path and not one below it, which
@@ -13019,12 +13020,12 @@ effect on. The first rule that fires arrives with the ray-traced variants, which
 
 ## The scene API: the slice plan (decided 2026-08-13)
 
-`apps/lumen` could not be built because an application cannot describe a scene:
-`ForwardRenderer::begin_frame` takes the cube's transform as an argument, five
-`set_*` methods place instances of meshes the renderer holds the ids of, and
-there is no material call on the type. The roadmap already put P9's scene work
-before S4B while P7B's deliverable named lumen. **Resolved by pulling the scene
-work forward**, rather than by moving lumen.
+`apps/lantern` could not be built because an application cannot describe a
+scene: `ForwardRenderer::begin_frame` takes the cube's transform as an argument,
+five `set_*` methods place instances of meshes the renderer holds the ids of,
+and there is no material call on the type. The roadmap already put P9's scene
+work before S4B while P7B's deliverable named lantern. **Resolved by pulling the
+scene work forward**, rather than by moving lantern.
 
 The resident set is a description now — `crcbl_render::scene` and
 `ForwardRenderer::with_scene`, with `new` as `with_scene(&scene::demo())`;
@@ -13037,7 +13038,7 @@ too: `PageDesc` at the caller's own extent, `push_layer` per layer,
 `SceneDesc::materials` row by row, refused at build when a row names a layer the
 page has not got. The pools are sized by `Capacities`, and a description that
 outgrows one of the four is refused up front rather than part way through
-filling it. `apps/lumen` is the application that consumed it, and what still
+filling it. `apps/lantern` is the application that consumed it, and what still
 binds a future caller is everything below.
 
 ### The shape
@@ -13053,10 +13054,10 @@ already assign to P9.
 
 ### The slices left, in dependency order
 
-None. `apps/lumen` shipped on top of this API at milestone 1a, and it is the
+None. `apps/lantern` shipped on top of this API at milestone 1a, and it is the
 first and only consumer of it — everything else in the tree still draws
-`scene::demo`. What the sample still owes is its own entry, "`apps/lumen` is at
-milestone 1a"; what the API still owes is "Deliberately left at P9-proper"
+`scene::demo`. What the sample still owes is its own entry, "`apps/lantern` is
+at milestone 1a"; what the API still owes is "Deliberately left at P9-proper"
 below.
 
 ### Flat meshes only, and why that is not negotiable yet
@@ -13442,12 +13443,12 @@ before writing the next one:
   delta 1, zero pixels over `Tolerance::RASTERISER`** — a _less_ divergent frame
   than `cube.png`, which has no reflection in it and differs on 60% of its
   pixels at the same delta. The structural ratio reads 92.8 against 64.0 on all
-  three, to the decimal. `lumen`'s room is where the exposure is visible: of the
-  nine pixels over tolerance between llvmpipe and radv, five are in the panel's
-  reflecting band and two of those are gross (deltas 66 and 33). That is one
-  fixture's worth of evidence, not a general argument, and the design's recorded
-  resolution — flatten the reflected content or drop the golden and keep the
-  ratio — has not had to be used.
+  three, to the decimal. `lantern`'s room is where the exposure is visible: of
+  the nine pixels over tolerance between llvmpipe and radv, five are in the
+  panel's reflecting band and two of those are gross (deltas 66 and 33). That is
+  one fixture's worth of evidence, not a general argument, and the design's
+  recorded resolution — flatten the reflected content or drop the golden and
+  keep the ratio — has not had to be used.
 - **The stepping is gone, and it is measured rather than eyeballed.**
   `the_reflection_does_not_step_down_the_band` in
   `crates/crcbl/tests/render_e2e.rs` takes the **second** difference of the
@@ -13457,7 +13458,7 @@ before writing the next one:
   one, limit 8. A block average hides it, which is why every other claim on that
   scene cannot see it and why the review PNG was the only evidence before.
 - **The blur reduced cross-driver divergence where it mattered.** On the 192
-  pixels of `lumen`'s room the blur changed, llvmpipe and radv disagree by at
+  pixels of `lantern`'s room the blur changed, llvmpipe and radv disagree by at
   most **8** and 27 are over `Tolerance::RASTERISER`; the unfiltered march's
   worst inside the panel's band was 66. The pixels over tolerance that remain
   gross (worst 134) are **bit-identical to the pre-blur frame** on llvmpipe, so
@@ -13465,7 +13466,7 @@ before writing the next one:
   denominator turning one whole-pixel disagreement into a spread of small ones
   is exactly what the AO pair's design predicts.
 
-1. ~~**The roughness cutoff.**~~ **Resolved without raising it.** lumen's
+1. ~~**The roughness cutoff.**~~ **Resolved without raising it.** lantern's
    `ROUGH_METAL` receives probe environment specular above the cutoff; one
    screen-space ray remains disabled because it cannot represent that broad
    lobe. The authored-versus-zero control is the observable.
@@ -13474,7 +13475,7 @@ before writing the next one:
    direction, and blends fallback against hits by confidence. A zero table
    preserves the old hit arithmetic exactly.
 
-### lumen's mirror panel is close to SSR's worst case
+### lantern's mirror panel is close to SSR's worst case
 
 Worked out by hand before the slice and **measured** by it since. The panel
 faces `+Z` at the camera, so its rays point back past the viewer and its centre
@@ -13499,7 +13500,7 @@ ambient is still exactly true and its number has not moved. `MIRROR_GRADIENT` is
 the new central claim beside it, and `reflecting > LIT_FLOOR` is the floor that
 stops a ratio against zero from being a check that cannot fail.
 
-**Considered, and for the sample's owner rather than the SSR slice:** if lumen
+**Considered, and for the sample's owner rather than the SSR slice:** if lantern
 wants a mirror showing the room, the panel wants angling or moving to a side
 wall. That is a change to the sample's content and should not be done on the way
 past.
@@ -13514,13 +13515,13 @@ guess.
 **Two questions to settle before writing it.**
 
 - **Is 0.75 the smallest cutoff that gets `ROUGH_METAL` reflecting?** It was not
-  derived; it was placed between `lumen`'s brass at 0.55 and its plaster at 0.9.
-  The ramp is `1 - roughness/cutoff`, so brass weighs 0.083 at a cutoff of 0.6,
-  0.214 at 0.7 and 0.267 at 0.75 — and the falloff comparison needs the brass
-  reflection to clear `LIT_FLOOR` and to turn that face's own downward gradient
-  around, which at 0.083 it may not. **Unmeasured below 0.75**, and worth
-  measuring: a lower cutoff buys nothing in blast radius (any value over 0.5
-  takes `UNTINTED` in) but it does keep more of the frame's arithmetic near
+  derived; it was placed between `lantern`'s brass at 0.55 and its plaster at
+  0.9. The ramp is `1 - roughness/cutoff`, so brass weighs 0.083 at a cutoff of
+  0.6, 0.214 at 0.7 and 0.267 at 0.75 — and the falloff comparison needs the
+  brass reflection to clear `LIT_FLOOR` and to turn that face's own downward
+  gradient around, which at 0.083 it may not. **Unmeasured below 0.75**, and
+  worth measuring: a lower cutoff buys nothing in blast radius (any value over
+  0.5 takes `UNTINTED` in) but it does keep more of the frame's arithmetic near
   zero.
 - **Does any cutoff over 0.5 cost the determinism claim?** Yes, and it should go
   on the record as a decision rather than arrive as a side effect.
@@ -13536,7 +13537,7 @@ at delta 3, `dunes` 6.6% at 9, `spot_shadow` 5.5% at 16, `cube` 0.07% at 1,
 `lights` 0.04% at 1, `crcbl-vk/mesh_clusters` 12% at 5 — all of those purely
 because `UNTINTED` entered the ramp — plus `ssr` and `point_shadow` moving
 further than the blur alone moved them (0.25 weighs 0.667 where it weighed 0.5)
-and `lumen/room` gaining the brass block's reflection. `ui`, `sprite`, `spot`
+and `lantern/room` gaining the brass block's reflection. `ui`, `sprite`, `spot`
 and every sprite and UI golden in `crcbl-vk` stayed byte-identical.
 
 **What it broke.** Two byte-exact geometry-path comparisons: `Scene::Ao` in
@@ -13551,8 +13552,8 @@ measured value per comparison and not `render_e2e`'s 16**: that constant is
 per-scene there and zero everywhere it holds, and handing a second suite a
 blanket sixteen is slack nobody measured.
 
-**What the observable would be.** A sixth claim in `apps/lumen/tests/golden.rs`,
-in the shape of `render_e2e`'s
+**What the observable would be.** A sixth claim in
+`apps/lantern/tests/golden.rs`, in the shape of `render_e2e`'s
 `the_smooth_pyramid_holds_a_tighter_highlight_than_the_rough_one`: two blocks up
 each conductor's face, hung off its bottom edge five half-extents apart, and the
 brass block's falloff asserted above one while the panel's is not. It reads
@@ -13572,7 +13573,7 @@ eighth of its own.
 `ssr_blur.slang`'s second weight is the design's stated reason for this kernel
 rather than a box, and **nothing in the tree separates it**. No fixture puts a
 mirror-sharp surface next to a rough one at the same depth, which is the case it
-exists for. Dropping the factor and re-running at a cutoff of 0.75: `lumen`'s
+exists for. Dropping the factor and re-running at a cutoff of 0.75: `lantern`'s
 panel foot moves 26.6 → 24.3 and the brass block's 110.7 → 108.9, and the
 falloff comparison, `MIRROR_GRADIENT`, `Scene::Ssr`'s ratio and the stepping
 number all stay where they were.
@@ -13808,9 +13809,9 @@ work not yet done.
 ### The e2e scripts' backend hints omit `webgpu` deliberately
 
 `crates/crcbl/tests/run-render-e2e.sh` and
-`apps/lumen/tests/run-lumen-golden.sh` carry a "Name one:" usage hint listing
-the backends that can draw a golden. `webgpu` is not among them and should not
-be until it can render. **No script validates backend names against a
+`apps/lantern/tests/run-lantern-golden.sh` carry a "Name one:" usage hint
+listing the backends that can draw a golden. `webgpu` is not among them and
+should not be until it can render. **No script validates backend names against a
 whitelist** — every one passes `CRCBL_GPU` and `--backend` straight through and
 lets the Rust reject them — so these hints are documentation, not gates, and
 nothing fails if they lag.

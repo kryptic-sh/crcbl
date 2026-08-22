@@ -256,7 +256,7 @@ mesh-e2e = []
 # a parser a shipped game reads no bytes through and a browser build has no use
 # for at all. An application that describes its own resident meshes turns it on
 # and gets the builders whose output `render::scene::Geometry` is spelled in.
-# `apps/lumen` is the one that does; every other sample leaves it off and links
+# `apps/lantern` is the one that does; every other sample leaves it off and links
 # no glTF parser, which `cargo tree -p <sample> -e normal` is what says.
 #
 # `crcbl-scene/render` comes with it — `crcbl_scene::gltf_render`, the bridge

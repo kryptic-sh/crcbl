@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Draw lumen's room on a named backend, check every lighting claim, and
+# Draw lantern's room on a named backend, check every lighting claim, and
 # compare the frame against its checked-in golden.
 #
-#   CRCBL_GPU=vk apps/lumen/tests/run-lumen-golden.sh [extra nextest args…]
+#   CRCBL_GPU=vk apps/lantern/tests/run-lantern-golden.sh [extra nextest args…]
 #
 # # What this is for
 #
-# `docs/plan/sample/13-lumen.md`'s milestone 1a. The suite is
-# `apps/lumen/tests/golden.rs`, and it is the only thing in the tree that renders
+# `docs/plan/sample/13-lantern.md`'s milestone 1a. The suite is
+# `apps/lantern/tests/golden.rs`, and it is the only thing in the tree that renders
 # an **application's** `SceneDesc` — every other frame comes from
 # `crcbl_render::scene::demo`. A description that reached the device short by a
 # mesh, a material row or a page layer draws a perfectly plausible room, so the
@@ -52,14 +52,14 @@ REPO_ROOT="$(cd "${APP_DIR}/../.." && pwd)"
 
 # shellcheck source=crates/crcbl-vk/tests/vulkan-icd.sh
 source "${REPO_ROOT}/crates/crcbl-vk/tests/vulkan-icd.sh"
-crcbl_pin_vk_icd "lumen golden"
+crcbl_pin_vk_icd "lantern golden"
 
 # shellcheck source=tools/nextest-summary.sh
 source "${REPO_ROOT}/tools/nextest-summary.sh"
 
 if [ -z "${CRCBL_GPU:-}" ]; then
     cat >&2 <<'NOBACKEND'
-lumen golden: CRCBL_GPU is not set, so nothing would pin the backend and a
+lantern golden: CRCBL_GPU is not set, so nothing would pin the backend and a
   fallback would pass. Name one:
 
     CRCBL_GPU=vk   $0     # Vulkan
@@ -74,9 +74,9 @@ cd "$REPO_ROOT"
 
 # Echoed rather than defaulted: unset means "whatever this machine enumerated
 # first", which is a legitimate thing to run deliberately.
-echo "lumen golden: CRCBL_ADAPTER=${CRCBL_ADAPTER:-<unset>}"
+echo "lantern golden: CRCBL_ADAPTER=${CRCBL_ADAPTER:-<unset>}"
 
-LOG="$(mktemp -t crcbl-lumen-golden.XXXXXX.log)"
+LOG="$(mktemp -t crcbl-lantern-golden.XXXXXX.log)"
 cleanup() {
     local status=$?
     rm -f "$LOG" "${LOG}.plain"
@@ -89,13 +89,13 @@ trap cleanup EXIT INT TERM
 # frame was written — are only interesting on a green run, which is exactly the
 # run nextest captures them on.
 set +e
-cargo nextest run --locked -p lumen --features golden-e2e --test golden \
+cargo nextest run --locked -p lantern --features golden-e2e --test golden \
     --run-ignored all --no-tests fail --success-output immediate "$@" 2>&1 | tee "$LOG"
 STATUS=${PIPESTATUS[0]}
 set -e
 
 if [ "$STATUS" -ne 0 ]; then
-    echo "lumen golden: the suite failed on $CRCBL_GPU" >&2
+    echo "lantern golden: the suite failed on $CRCBL_GPU" >&2
     exit "$STATUS"
 fi
 
@@ -104,20 +104,20 @@ fi
 # suite which ran everything and passed.
 crcbl_nextest_plain "$LOG" "${LOG}.plain"
 
-if ! crcbl_nextest_summary "${LOG}.plain" "lumen golden" \
+if ! crcbl_nextest_summary "${LOG}.plain" "lantern golden" \
     "The golden-e2e feature or the ignore attribute stopped matching the tests."; then
     exit 1
 fi
 
 # Which adapter the frames were drawn on, from the suite rather than from the
 # variable this script exported.
-ADAPTER="$(grep -F 'lumen golden: device on adapter ' "${LOG}.plain" | head -1 || true)"
+ADAPTER="$(grep -F 'lantern golden: device on adapter ' "${LOG}.plain" | head -1 || true)"
 if [ -z "$ADAPTER" ]; then
-    echo "lumen golden: the suite never named the adapter it drew on." >&2
+    echo "lantern golden: the suite never named the adapter it drew on." >&2
     echo "  The test must print it and this script must be able to find it, or a" >&2
     echo "  green run claims evidence about a device nobody wrote down." >&2
     exit 1
 fi
-echo "lumen golden: ${ADAPTER#*lumen golden: }"
+echo "lantern golden: ${ADAPTER#*lantern golden: }"
 
-echo "lumen golden: the room drew, made its lighting claims and matched on $CRCBL_GPU"
+echo "lantern golden: the room drew, made its lighting claims and matched on $CRCBL_GPU"

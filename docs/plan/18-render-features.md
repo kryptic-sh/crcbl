@@ -70,7 +70,7 @@ taste:
 
 - **Tiled / Forward+** is simpler and degrades badly with depth range: a tile
   spanning a near wall and a far skybox gathers every light in between. The
-  samples that motivate lighting (lumen, towers) are exactly that shape.
+  samples that motivate lighting (lantern, towers) are exactly that shape.
 - **Deferred** conflicts with two rules already locked here: "one material
   model, one BRDF, one set of inputs" shared with the ray-traced twin, and the
   post stack running identically after either path. It also fights MSAA and
@@ -170,7 +170,7 @@ means a **near** cascade is biased proportionally less than a far one; the old
 denomination had that backwards, giving cascade 0 the larger world slack of the
 two because its depth range is a larger multiple of its texel.
 
-Measured on radv (and confirmed on llvmpipe) through `apps/lumen`'s 1280×960
+Measured on radv (and confirmed on llvmpipe) through `apps/lantern`'s 1280×960
 review frames, which is the tree's grazing-sun fixture — `N·L` of 0.30 on the
 floor, a slope of 3.17, and a 0.15 m shell for the slack to show past:
 
@@ -196,7 +196,7 @@ sixth decision below**, which removed the cross-hatch it is a schedule of; it is
 kept because the sixth's own table is read against it. All at a slope
 coefficient of 2:
 
-| Constant, in texels | lumen's strip | dunes' valley floor |
+| Constant, in texels | lantern's strip | dunes' valley floor |
 | ------------------- | ------------- | ------------------- |
 | 0.5                 | 0.140 m       | heavy cross-hatch   |
 | 1                   | 0.160 m       | cross-hatch         |
@@ -207,7 +207,7 @@ coefficient of 2:
 | 6 (shipped then)    | 0.375 m       | clean               |
 
 Five is where the trace stops being visible in the dunes frame; six is that with
-margin, and the margin costs four and a half centimetres of lumen's strip.
+margin, and the margin costs four and a half centimetres of lantern's strip.
 
 The next move on this path is a bias driven from the **geometric** normal, or a
 normal-offset bias — either would let the constant fall back and take the strip
@@ -250,7 +250,7 @@ one's depth. No slope read off either facet predicts the other's, so a constant
 is still what covers it; it is simply a much smaller one. The re-measured trade,
 slope coefficient still 2, on radv:
 
-| Constant, in texels | lumen's strip | dunes, shading normal | dunes, facet normal |
+| Constant, in texels | lantern's strip | dunes, shading normal | dunes, facet normal |
 | ------------------- | ------------- | --------------------- | ------------------- |
 | 0                   | 0.128 m       | heavy cross-hatch     | seam on most edges  |
 | 0.5                 | 0.149 m       | —                     | seam on many edges  |
@@ -260,7 +260,7 @@ slope coefficient still 2, on radv:
 | 6 (shipped before)  | 0.382 m       | clean                 | clean               |
 
 Graded from the 1280×960 frame and from the golden's own 256×192, which is where
-the aliasing is worst. The lumen column does not depend on which normal is read:
+the aliasing is worst. The lantern column does not depend on which normal is read:
 that room is built of flat slabs, so its frames at 6.0 are **byte-identical**
 either way, which is also the cleanest evidence that the change does nothing
 except where the two normals disagree.
@@ -268,9 +268,9 @@ except where the two normals disagree.
 **Three is shipped with no margin above it**, deliberately unlike the six it
 replaces. Six was one over the first clean value because what it covered was an
 unexplained shortfall; three covers a bounded, understood quantity, so margin in
-it is lumen's strip bought back for nothing.
+it is lantern's strip bought back for nothing.
 
-Re-measured through `apps/lumen`'s 1280×960 review frames, on the same fixtures
+Re-measured through `apps/lantern`'s 1280×960 review frames, on the same fixtures
 as the fifth decision's table:
 
 | Artefact                            | Texels off `N` | Texels off `Ng` |
@@ -290,7 +290,7 @@ tall, which is nearer that decision's _before_ figure than its after. Whatever
 statistic produced 5.7 is not recorded and was not recovered, so the two rows
 above are a matched pair and the 5.7 is not comparable with either.
 
-Goldens moved: `apps/lumen/tests/golden/room.png` (145 of 49152 pixels, all in
+Goldens moved: `apps/lantern/tests/golden/room.png` (145 of 49152 pixels, all in
 the three fixtures above plus the metal block's and plinth's contact shadows)
 and `crates/crcbl/tests/golden/dunes.png` (19 pixels, all along shadow
 terminators on the dune flanks). Every other golden in the tree still matches
@@ -657,7 +657,7 @@ refinement pass.
   That has the mirror image of the defect the paragraph refuses, one level up:
   the same scene at five times the resolution grows five times as many pixels
   between a surface and what it reflects, so the reflection got _shorter_ as the
-  window got bigger. `lumen`'s panel is where it showed — the reflection its
+  window got bigger. `lantern`'s panel is where it showed — the reflection its
   golden asserts at 256×192 was simply absent from the 1280×960 review frame of
   the same room. `ssr.slang` therefore derives its stride from
   `REACH_FRACTION * min(width, height) / MAX_STEPS`: the stride is still a fixed
@@ -792,7 +792,7 @@ should say.
 march leaves is gone: `render_e2e`'s `Scene::Ssr` band bends 17.7 levels per row
 with a kernel that keeps only its centre tap and 2.8 with the real one, and that
 is asserted. Cross-driver divergence fell where it mattered — on the 192 pixels
-of `lumen`'s room the blur changed, llvmpipe and radv disagree by at most 8,
+of `lantern`'s room the blur changed, llvmpipe and radv disagree by at most 8,
 where the unfiltered march's worst in the panel's band was 66. **The roughness
 weight, though, is not separable by any assertion this tree's fixtures
 support**: no fixture puts a mirror-sharp surface beside a rough one at the same
@@ -869,7 +869,7 @@ so the half of a frame that parametrises the shadow culls and the half that
 dispatches them cannot disagree.
 
 - **Programmatic** is wired: `ForwardRenderer::set_effect_request`, and
-  `apps/lumen`'s `--no-shadows` / `--no-ao` / `--no-reflections` drive it.
+  `apps/lantern`'s `--no-shadows` / `--no-ao` / `--no-reflections` drive it.
 - **Device** is wired to `DeviceCaps` and **removes nothing**, which is a fact
   about these three effects rather than an unfinished clamp — the AO section
   above says it of the occlusion pair in as many words, the reflection pair's
@@ -916,7 +916,7 @@ browser use, so it is the one whose absence would block more platforms than it
 unblocked, and it is the reference the ray-traced path is reviewed against.
 
 Sample impact: horde (S3) onward renders shadowed + tonemapped; orbit's planet
-terminator and towers' map lighting are the showcase beneficiaries; **`lumen`
+terminator and towers' map lighting are the showcase beneficiaries; **`lantern`
 (sample 13) is the dedicated lighting sample** and exists to show the same scene
 under both paths side by side. Exit criteria of the other samples inherit
 "shadows on, stack on" implicitly via the phase gates.
@@ -939,7 +939,7 @@ what was P7B's last unbuilt row. **It is built now, as designed here** —
 the frame uniforms, `crcbl_shaders::probe` fixes the row layout both sides
 write, `mesh.slang`'s `probe_irradiance` does the interpolation and the three
 dot products, `SceneDesc::probes` is where an application hands the volume over,
-and `apps/lumen`'s `bounce` module bakes the sun's first bounce into one. The
+and `apps/lantern`'s `bounce` module bakes the sun's first bounce into one. The
 paragraphs below describe what shipped rather than what was intended.
 
 ### A static grid of L1 spherical-harmonic probes, and no new pass
@@ -992,7 +992,7 @@ determinism argument rests on.
 
 ### The irradiance is authored, not baked and not computed at runtime
 
-`SceneDesc.probes`, filled by the application — for `apps/lumen`, computed
+`SceneDesc.probes`, filled by the application — for `apps/lantern`, computed
 analytically from the room's own dimension constants so that moving a wall moves
 the probes.
 

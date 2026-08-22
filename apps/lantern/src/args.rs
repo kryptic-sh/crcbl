@@ -1,4 +1,4 @@
-//! Lumen's command line: the shared set, plus the camera and the two path
+//! Lantern's command line: the shared set, plus the camera and the two path
 //! forcings.
 //!
 //! The shared half is [`crcbl::args::Common`] verbatim — `--headless`,
@@ -16,7 +16,7 @@ use crate::menu::CameraMode;
 /// lamp's orbit, so it is the engine's ordinary 60.
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
-/// How lumen was asked to run.
+/// How lantern was asked to run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     /// The flags every sample has.
@@ -54,15 +54,15 @@ impl Default for Options {
 /// `the_shared_half_of_the_usage_text_is_the_engines_verbatim` is what stops the
 /// two copies drifting.
 pub const USAGE: &str = "\
-lumen — the lighting acceptance fixture: one room, every effect
+lantern — the lighting acceptance fixture: one room, every effect
 
 USAGE:
-    lumen [OPTIONS]
+    lantern [OPTIONS]
 
 Not a game. One indoor scene chosen for lighting rather than for geometry: a
 window, a mirror-grade panel, a rough metal block, a coloured wall and a moving
 light. The two metals have no ambient term and are lit by reflection alone —
-see the debug panel's 'unbuilt' section, and docs/plan/sample/13-lumen.md.
+see the debug panel's 'unbuilt' section, and docs/plan/sample/13-lantern.md.
 
 OPTIONS:
     --headless           Run without a window (for CI / determinism tests)

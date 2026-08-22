@@ -70,7 +70,7 @@ cargo run -p sandbox -- --headless        # needs neither; what CI runs
 
 # A game.
 cargo run -p breakout
-cargo run -p lumen                        # one room, every lighting effect
+cargo run -p lantern                        # one room, every lighting effect
 
 # The glTF viewer. Bring your own model:
 curl -sSLO https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Avocado/glTF-Binary/Avocado.glb
@@ -151,7 +151,7 @@ built it.
 | `asteroids`      | churn: entities spawn and die every tick                               | ✓              |
 | `horde`          | scale: thousands of agents, one broadphase, a job pool                 | ✓              |
 | `hud`            | the UI system's living fixture — draw-list primitives and nothing else | ✓              |
-| `lumen`          | the lighting acceptance fixture: one room, every effect                | ✓              |
+| `lantern`          | the lighting acceptance fixture: one room, every effect                | ✓              |
 | `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          |                |
 | `bare`           | the engine as a plain library, with a hand-written loop                |                |
 | `crcbl-sim`      | the determinism harness: headless server simulation                    |                |

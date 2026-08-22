@@ -275,7 +275,7 @@ jobs:
       # buffers in a single compute stage, Chrome's SwiftShader adapter — the
       # only WebGPU adapter a runner with no GPU has — reports a ceiling of ten,
       # so the pipeline was never created and the canvas stayed black. Both
-      # samples draw through that pass: lumen because it is a lit room of mesh
+      # samples draw through that pass: lantern because it is a lit room of mesh
       # instances, quarry because a cluster DAG is nothing but mesh instances.
       #
       # **That pass binds eight now** — see `crates/crcbl-render/src/draw_gen.rs`,
@@ -285,7 +285,7 @@ jobs:
       # no longer holds, and it was checked rather than assumed: on Chromium
       # 151.0.7922.137 under Xvfb against the bundled SwiftShader — this job's
       # own configuration — `CRCBL_WEB_E2E_DEMO=quarry` and
-      # `CRCBL_WEB_E2E_DEMO=lumen` each passed 34 of 34 checks, and quarry passed
+      # `CRCBL_WEB_E2E_DEMO=lantern` each passed 34 of 34 checks, and quarry passed
       # 34 of 34 against real hardware as well. **Every count on this page is the
       # total that run had**: group H took the driver to 37, so a fresh run scores
       # 37 of 37 and these older figures are history rather than drift.
@@ -339,7 +339,7 @@ jobs:
       # reason to leave the machinery alone: on this runner the five 2D demos
       # report a beat of 992–1034 ms and a factor of `1.0x` — exactly nominal,
       # untouched by any of this — while quarry reports 26243 ms (`26.2x`, step
-      # 5m54s) and lumen 19339 ms (`19.3x`, 5m23s). Only the two heavy frames are
+      # 5m54s) and lantern 19339 ms (`19.3x`, 5m23s). Only the two heavy frames are
       # behind, and each by the factor its own heartbeat measured.
       #
       # Ten-minute timeouts against those. If one goes red, read **which** check
@@ -350,11 +350,11 @@ jobs:
         timeout-minutes: 10
         run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
 
-      # lumen last: it is the heaviest frame the site ships, and its local
+      # lantern last: it is the heaviest frame the site ships, and its local
       # evidence is the same 34-of-34 SwiftShader run quarry's was.
-      - name: Render lumen in a real browser
+      - name: Render lantern in a real browser
         timeout-minutes: 10
-        run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
+        run: CRCBL_WEB_E2E_DEMO=lantern ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
@@ -501,9 +501,9 @@ jobs:
         timeout-minutes: 12
         run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh --headless
 
-      - name: Render lumen in a real browser
+      - name: Render lantern in a real browser
         timeout-minutes: 12
-        run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh --headless
+        run: CRCBL_WEB_E2E_DEMO=lantern ./web/run-browser-e2e.sh --headless
 
   probe-windows:
     name: probe the seam on Windows

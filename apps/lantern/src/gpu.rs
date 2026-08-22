@@ -1,9 +1,9 @@
-//! Lumen's GPU side: the shared shell↔HAL join, the forward renderer over
+//! Lantern's GPU side: the shared shell↔HAL join, the forward renderer over
 //! [`crate::room`], and the UI and menu passes rule 4 asks every sample for.
 //!
 //! Everything that is not this sample's is [`crcbl::engine::GpuContext`]'s —
 //! opening a backend, choosing an adapter, the swapchain, the frames-in-flight
-//! ring, resize and teardown. What is here is the part that is lumen's: a
+//! ring, resize and teardown. What is here is the part that is lantern's: a
 //! renderer built from an **application's** scene description rather than from
 //! [`ForwardRenderer::new`]'s demo one, and the capability report rule 12 asks
 //! for.
@@ -222,7 +222,7 @@ impl crcbl::ui::DebugModule for Unbuilt {
     }
 }
 
-/// Lumen's GPU side.
+/// Lantern's GPU side.
 #[derive(Debug)]
 pub struct Gpu {
     ctx: GpuContext,
@@ -260,7 +260,7 @@ pub struct Gpu {
 /// draw the room through different selectors.
 fn desc(gpu: GpuOptions, forced: Forced) -> GpuContextDesc<'static> {
     GpuContextDesc {
-        label: "lumen",
+        label: "lantern",
         optional_features: forced.optional_features(),
         ..GpuContextDesc::from(gpu)
     }
@@ -366,9 +366,9 @@ impl Gpu {
         // and which the line above would otherwise be silent about.
         let report = downgrades(optional_features, &caps);
         if report.is_empty() {
-            crcbl::log::info!("lumen: device granted every optional feature asked for");
+            crcbl::log::info!("lantern: device granted every optional feature asked for");
         } else {
-            crcbl::log::info!("lumen: {report}");
+            crcbl::log::info!("lantern: {report}");
         }
         let mut renderer =
             ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &room::room())?;
@@ -378,11 +378,11 @@ impl Gpu {
             Err(error) => {
                 renderer.destroy(ctx.device());
                 return Err(GpuError::Hal(crcbl::hal::HalError::InvalidDescriptor(
-                    format!("lumen's room does not fit its own instance pool: {error}"),
+                    format!("lantern's room does not fit its own instance pool: {error}"),
                 )));
             }
         };
-        crcbl::log::info!("lumen: {placed} object(s) placed in the room");
+        crcbl::log::info!("lantern: {placed} object(s) placed in the room");
 
         // The **programmatic** layer of topic 39's resolution order, which is
         // the one a command line has any business driving: the camera stack and
@@ -399,7 +399,7 @@ impl Gpu {
         // panel and the summary report has to come back off the renderer.
         let paths = Paths::of(&caps, forced, renderer.resolved_effects());
         crcbl::log::info!(
-            "lumen: {:?} / {:?} / {:?}, effects {}",
+            "lantern: {:?} / {:?} / {:?}, effects {}",
             paths.geometry,
             paths.binding,
             paths.lighting,
@@ -603,7 +603,7 @@ impl Gpu {
             self.last_dump = compiled.dump();
         }
         if !self.dumped {
-            crcbl::log::debug!("render graph for the lumen frame:\n{}", compiled.dump());
+            crcbl::log::debug!("render graph for the lantern frame:\n{}", compiled.dump());
             self.dumped = true;
         }
 
@@ -611,7 +611,7 @@ impl Gpu {
             .ctx
             .device()
             .create_command_encoder(&CommandEncoderDesc {
-                label: Some("lumen frame"),
+                label: Some("lantern frame"),
                 queue: self.ctx.queue(),
             });
         compiled.execute(
@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn an_unforced_run_asks_for_everything_the_engine_does() {
         let asked = desc(GpuOptions::default(), Forced::default());
-        assert_eq!(asked.label, "lumen");
+        assert_eq!(asked.label, "lantern");
 
         let engine = GpuContextDesc::default().optional_features;
         assert!(

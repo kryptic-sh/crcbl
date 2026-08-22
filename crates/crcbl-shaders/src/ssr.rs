@@ -32,10 +32,10 @@ pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE;
 /// Half, so [`crate::mesh::GpuMaterial::UNTINTED`]'s roughness lands on the zero
 /// end exactly. Public because a *sample* has to distinguish materials the
 /// screen-space march can see from rough conductors that receive only probe
-/// fallback — see `lumen`'s room.
+/// fallback — see `lantern`'s room.
 ///
 /// **The blur widens the lobe a single ray can stand for and this number has
-/// deliberately not moved with it.** Raising it past `lumen`'s brass block at
+/// deliberately not moved with it.** Raising it past `lantern`'s brass block at
 /// 0.55 would take `UNTINTED` in as well, because no monotone ramp passes 0.55
 /// and stops at 0.5 — and that costs the unconditional claim the assertion below
 /// makes. It is a change of blast radius rather than of filtering, and

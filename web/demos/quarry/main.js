@@ -14,7 +14,7 @@
 // opens: `apps/quarry/src/web.rs` boots on the animated dolly, so a visitor who
 // wants the goldens' pose or the free camera reaches them by cycling that row
 // rather than by pressing a key. The free camera's own keys are listed after it
-// for the same reason lumen's are — `apps/quarry` integrates the flyer whether
+// for the same reason lantern's are — `apps/quarry` integrates the flyer whether
 // or not it is being drawn from, so W before the swap moves a camera nobody is
 // looking through. `savedLabel` is "Nothing" and that is literal: the status bar
 // says "Nothing saved." when the demo stops, which is the truth about a geometry
