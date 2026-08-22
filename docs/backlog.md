@@ -14644,20 +14644,42 @@ that chain is separately held — `writer.rs` puts the bool, `reader.rs` reads i
 `gpu-stream.js` decodes it — which is why this is a coverage note and not a
 defect.
 
-**The concrete instance, and it is `depth-clip-control`.**
-`PROBE_GRAPHICS_PIPELINE_DESC` sets `depth_clamp: false`, and so does every
-other pipeline in `probe.rs`. That is deliberate and its doc says so — `true`
-needs the feature enabled, and keeping it `false` lets the probe build
-everywhere. The consequence is that **no Rust-originated command has ever
-carried `depth_clamp: true` to a real browser**: the only place the `true` path
-runs is `gpu-replay.mjs`, against a stub, in node. The bit is reported to
-callers as available on the strength of that.
+**The instance this named has shipped.** It read: every pipeline in `probe.rs`
+sets `depth_clamp: false`, so no Rust-originated command had ever carried
+`depth_clamp: true` to a real browser, and the bit was reported to callers on
+the strength of a node stub. Group AH now draws a triangle past the far plane
+through two pipelines differing only in that flag and reads back that the
+clamped one kept its fragments and the control one did not — on SwiftShader
+under Xvfb and on the RX 7900 XTX. `probe_device_desc` asks for `DEPTH_CLAMP`
+optionally to get a device that can, and the module's parsimony argument is now
+an admission test rather than a list.
 
-So the useful work here is not a filter. It is either a probe pipeline that
-opens with `depth-clip-control` and sets `depth_clamp: true` where the browser
-grants it — which would make the browser gate the evidence — or an explicit note
-in the capability's own docs that the end-to-end path is stubbed. The first is
-better and is not large; it is unscheduled rather than declined.
+What that leaves is the general point, which still stands: the JS gate answers
+for the replayer, and only a group like AH answers for the wire. **The other
+three mapped features have no such group.** `texture-compression-bc`,
+`timestamp-query` and `indirect-first-instance` are each driven end to end by
+some existing group or corpus command, which is weaker than AH's construction —
+none of them contrasts a device that has the feature against one that does not.
+Whether that is worth building three more of is unanswered; AH cost more than a
+one-line check and bought a real witness.
+
+### The probe gate's expected local failure is documented in the wrong file
+
+`./web/run-probe-e2e.sh` passes 74/74 on SwiftShader under Xvfb. Run with
+`--adapter hardware` on this machine it exits 1 on **group X alone** — the
+presented-canvas-frame readback — and every other group, including AH, passes
+identically to the SwiftShader run.
+
+That is expected, not a regression: `web/run-browser-e2e.sh`'s header carries
+the table, and its `Xvfb` + `hardware` row reads "transparent black —
+_silently_". **The table is in the demo harness and the failure is in the probe
+harness**, so somebody running the probe gate on hardware for the first time
+finds a red group and no explanation anywhere they were looking.
+
+Either the row belongs in `run-probe-e2e.sh`'s header too, or group X should
+refuse to run on that combination and say why rather than failing — the second
+is better, because a documented expected failure still trains a reader to ignore
+a red line. Neither is done.
 
 **Every mapped feature is served today**, so nothing is currently misreported
 through either half. `TIMESTAMP_QUERY` used to be the standing example and is

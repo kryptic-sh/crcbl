@@ -192,15 +192,18 @@ pattern the command asked for. It needs a site with `probe/index.html` in it,
 which `build.sh` puts there:
 
 ```sh
-./web/run-probe-e2e.sh --build        # Xvfb + Chromium, then groups G-Z and AA
+./web/run-probe-e2e.sh --build        # Xvfb + Chromium, then the probe groups
 ```
 
 It prints the group letters it recorded a check under beside the count, and
-fails when any of G-Z or AA is missing from that line — a page that silently
-drove only some of the probes is the failure mode it has to be able to see. Xvfb
-is not optional on a machine with no GPU: under `--headless=new` plus
-SwiftShader the three groups that acquire or present a canvas frame never
-resolve their readback map.
+fails when any group **the script itself enumerates** is missing from that line
+— a page that silently drove only some of the probes is the failure mode it has
+to be able to see. The list of letters lives in `run-probe-e2e.sh` and is not
+repeated here: it was written out as "G-Z and AA" once and every group added
+after that made it staler, unnoticed, because nothing checks prose. Xvfb is not
+optional on a machine with no GPU: under `--headless=new` plus SwiftShader the
+three groups that acquire or present a canvas frame never resolve their readback
+map.
 
 ## Checking it without a browser
 
