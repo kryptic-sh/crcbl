@@ -749,13 +749,27 @@ jobs:
             label: windows
             adapter: swiftshader
             excuse: --expect-fail ssr,ui
-            # **Twice the others, measured rather than padded.** The first run of
-            # this leg was cancelled at 45m20s — and it had got all the way to
-            # `11/11 scene(s) rendered and saved`, with the clock running out
-            # inside the *native* comparator's cargo build. Nothing about it was
-            # stuck: a Windows runner compiles this workspace twice, once to wasm
-            # and once for the host, and that is simply slower here.
-            timeout: 90
+            # **Sized for one cold run, because this leg has never had a warm
+            # one.** 90 was extrapolated from a first attempt cancelled at
+            # 45m20s — it had reached `11/11 scene(s) rendered and saved` with
+            # the clock running out inside the *native* comparator's cargo
+            # build — and the extrapolation was wrong: run 32557088937 spent
+            # 5358s in that single step and was still killed by the timeout.
+            #
+            # That failure is self-perpetuating, which is the reason for the
+            # number rather than the slowness. `Swatinem/rust-cache`'s save runs
+            # in a post step, and a post step does not run when the job is
+            # cancelled: on that run Windows' `Post Run Swatinem/rust-cache@v2`
+            # is **skipped** while Linux's is `success`. So the cache is never
+            # written, the next run is cold again, and it times out again. The
+            # same thing happened nine times in a row before it through
+            # `cancel-in-progress` — see `docs/backlog.md`.
+            #
+            # Linux and macOS finish the identical step in 43s and 31s off a
+            # warm cache. Once one Windows run completes and saves, this leg
+            # should join them and the number can come back down — lower it
+            # against a measured warm run, not a guess.
+            timeout: 180
     runs-on: ${{ matrix.os }}
     # Longer than `build`'s: this one compiles `render-harness` twice, once to
     # wasm and once for the host, and the host half pulls in the native backend.

@@ -4,10 +4,10 @@
 //!
 //! # Why this exists, and why here
 //!
-//! `docs/backlog.md`'s "The render layer has only ever run on Vulkan and wgpu"
-//! is the gap: the frame graph, the cull pass, draw generation, forward and
-//! tonemap execute on `crcbl-vk` (`crates/crcbl-vk/tests/vk_e2e/mesh.rs`) and on
-//! native wgpu, and on nothing else. `crcbl-mtl`'s own suite proves the *HAL* —
+//! `docs/backlog.md`'s "The render layer has only ever run on Vulkan" is the
+//! gap: the frame graph, the cull pass, draw generation, forward and tonemap
+//! execute on `crcbl-vk` (`crates/crcbl-vk/tests/vk_e2e/mesh.rs`) and on nothing
+//! else below the seam. `crcbl-mtl`'s own suite proves the *HAL* —
 //! dispatch, encoders, bindings, copies — and has never constructed a
 //! [`ForwardRenderer`]. A green `mtl e2e` is therefore not evidence about the
 //! renderer.
@@ -37,6 +37,22 @@
 //!   both were caught only by rendering one scene through two targets. MSL is a
 //!   target nothing has ever crossed. Comparing Metal's frame against a
 //!   Vulkan-blessed reference is the same detector pointed at the third target.
+//!
+//! # One reference set, shared by every backend
+//!
+//! **Do not split the references per backend.** The shared set _is_ the
+//! cross-backend detector: a reference blessed on one backend and checked on
+//! the others is the same comparison a dedicated compare script performs,
+//! spread across CI jobs. A per-backend split deletes exactly the detection
+//! this file exists for — every backend would then agree with itself and
+//! nothing would compare them.
+//!
+//! `crcbl_golden::Tolerance::RASTERISER` was measured for this and not chosen:
+//! radv against lavapipe differs over most of the frame on the HDR path at a
+//! max channel delta of 1, which is why `max_channel_delta` is the load-bearing
+//! number and the failing-pixel ratio is not. **A mean-error budget was tried and
+//! rejected** — legitimate HDR drift exceeds a visible recolour regression, so
+//! a budget loose enough to pass the first admits the second.
 //!
 //! # Why all three scenes, and why one test each
 //!

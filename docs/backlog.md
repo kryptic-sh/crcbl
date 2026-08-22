@@ -5289,50 +5289,104 @@ version strings, which were read from Steamworks.NET's header mirror rather than
 Valve's login-gated zip. The plan mandates re-reading both from a real SDK
 before any declaration is trusted.
 
-## DECISION NEEDED — the browser golden gate is cancelled before it can answer (2026-08-22)
+## What the deleted WebGPU plan left behind (2026-08-22)
 
-**Measured, not suspected.** `gh run list --workflow Pages --limit 10` on
-2026-08-22 returned one run in progress and **nine consecutive `cancelled`
-runs** before it. Every one was killed by the next push. The Windows leg of
-`hold the browser's pixels against the goldens` has a measured 90-minute budget
-(the matrix entry says why: a Windows runner compiles this workspace twice, once
-to wasm and once for the host, and the first attempt was cancelled at 45m20s
-inside the _native_ comparator's build), so on any afternoon of ordinary commits
-it never reaches a verdict at all. The three-OS browser golden comparison is
-currently a gate that reports nothing.
+`docs/plan/ROADMAP.md`'s 530-line "Replacing `wgpu` with our own WebGPU path"
+section was deleted because the work shipped. Every entry in it was re-verified
+against the tree first; these four are what survived, and none of them was
+recorded anywhere else.
 
-`pages.yml` sets `cancel-in-progress: true` at the workflow level, with the
-comment "a superseded deploy is worth cancelling; two of them racing to publish
-is not". That argument is right about the **deploy** and is being applied to the
-whole run, including three verification jobs that are not deploys and are not
-superseded by anything. Job-level `concurrency:` cannot rescue them —
-workflow-level cancellation kills the run outright, whatever a job declares.
+- **`crcbl-webgpu`'s `acquire_next_frame` never reports `OutOfDate` or
+  `suboptimal`.** `WebGpuDevice::acquire_next_frame` hard-codes
+  `suboptimal: false` and has no `SurfaceError::OutOfDate` path at all —
+  `OutOfDate` appears nowhere in that backend. `crcbl_hal`'s own `Device` docs
+  call `OutOfDate` **expected traffic** after a resize, and `crcbl::engine`
+  matches on it. It may well be correct by construction — a canvas context does
+  not go out of date the way a Vulkan swapchain does — but unlike the adjacent
+  `wait_until_presented`, which carries a comment explaining exactly why its
+  no-op is the honest answer, this one says nothing. Decide which it is and
+  write it down; a silent `false` is indistinguishable from an unwritten arm.
 
-Worth noting before choosing: the deploy is **not** gated on the harness. On the
-run in flight, `deploy to GitHub Pages` completed successfully while the Windows
-leg was still going, so the site ships either way and what is lost is only the
-signal.
+- **`crates/crcbl-dx12/Cargo.toml`'s reason for naming `windows` 0.62 is now
+  false.** The comment says the crate is "already in this workspace's lockfile
+  on Windows — `wgpu-hal`, `gpu-allocator` and `cpal` all resolve it — so what
+  this line buys is the three feature gates below". `wgpu` and `gpu-allocator`
+  are at **zero** occurrences in `Cargo.lock`; only `cpal` still resolves it, so
+  naming it is now what puts the crate in the graph rather than merely selecting
+  features from someone else's resolution. `crcbl-mtl` got exactly this
+  correction and dx12 did not. A comment fix, not backend work — it does not
+  conflict with the dx12 deferral.
 
-- _Leave it._ Cheapest in runner minutes, and the gate does answer on a quiet
-  branch. The cost is that it answers least often exactly when the tree is
-  moving fastest, which is when a regression is most likely.
-- _`cancel-in-progress: false` on the whole workflow._ Every push queues a full
-  three-OS run and each one finishes. Correct final deploy either way — the
-  newest run publishes last. The cost is real: a burst of nine pushes becomes
-  nine queued 90-minute Windows legs.
+- **The browser gate renders at one size, and a second was deliberately
+  blessed.** `render_e2e.rs` has `EXTENT_ODD` at 97×61 with three goldens,
+  blessed precisely because a 256-byte row-pitch rule made every width that was
+  a multiple of 64 pass. The browser harness runs at a fixed 256×192 only, so
+  "every scene is compared in a browser" is true and "every scene at every
+  blessed extent" is not — the odd size is covered natively and nowhere else.
+
+- **The plan's slice 4i did not land, and it is unclear whether it was
+  superseded or dropped.** It asked for the stream to be drained by "a loop the
+  backend owns rather than `demo.js`'s", and for the probe module and its
+  exports to be deleted once the HAL path worked. Neither happened:
+  `web/engine/demo.js`'s frame loop is still the only drain, and
+  `crcbl-webgpu`'s `probe` module is not only alive but is the primary browser
+  gate, now running groups G through AF. `web/engine/demo.js` contains a comment
+  reading as though the split were deliberate. Say which it is — if
+  `hal/channel` superseded the requirement, the plan's version should not be
+  resurrected from git by the next reader.
+
+## The Windows browser-golden leg cannot finish, and that is self-perpetuating (2026-08-22)
+
+**Measured on run 32557088937, which had a clear field — no push landed on top
+of it.** The three legs of `pages.yml`'s `render-harness` job ran the identical
+`Compare every golden scene rendered in a browser` step on the same commit:
+Linux **43s**, macOS **31s**, Windows **5358s and then killed** by its
+`timeout-minutes: 90`. Whole jobs: 97s, 69s, 5412s.
+
+That is a 100× gap on a commit that changed only markdown, so it is not platform
+slowness — Linux and macOS restored a warm Rust cache and rebuilt nothing.
+**Windows has never had a warm cache, and cannot get one.**
+`Swatinem/rust-cache` saves in a post step, and a post step does not run when a
+job is cancelled. On that run Windows' `Post Run Swatinem/rust-cache@v2` is
+**`skipped`** while Linux's is `success`. So: cold run → over 90 minutes →
+timeout → save skipped → next run cold. The nine consecutive
+`cancel-in-progress` kills before it did the same thing for the same reason.
+
+**Acted on:** the Windows `timeout` in the matrix is now 180, sized to let one
+cold run complete and seed the cache. Once it has, this leg should join the
+other two at well under a minute — **lower the number then, against a measured
+warm run rather than another extrapolation.** The 90 that failed was itself
+extrapolated from a partial run.
+
+**Still open, and it is the user's call**, because it is about runner minutes
+rather than correctness:
+
+- `pages.yml` sets `cancel-in-progress: true` at the workflow level, with the
+  comment "a superseded deploy is worth cancelling; two of them racing to
+  publish is not". That argument is right about the **deploy** and is applied to
+  the whole run, including three verification jobs that are not deploys.
+  Job-level `concurrency:` cannot rescue them — workflow-level cancellation
+  kills the run outright, whatever a job declares. The deploy is not gated on
+  the harness: on this run `deploy to GitHub Pages` succeeded while the Windows
+  leg was still going, so the site ships either way and what is lost is only the
+  signal.
+- _Leave it._ Cheapest, and the gate does answer on a quiet branch — but least
+  often exactly when the tree is moving fastest.
+- _`cancel-in-progress: false`._ Every push queues a full three-OS run and each
+  finishes; the newest still publishes last. A burst of nine pushes becomes nine
+  queued runs.
 - _Split the verification jobs into their own workflow_ with
-  `cancel-in-progress: false`, leaving `pages.yml` as a fast deploy pipeline
-  that keeps cancelling. Costs one more workflow file and the two would drift
-  unless the shared setup is factored; the repo already has this shape in
-  `cron.yml` for the `miri` job.
-- _Move the harness to `cron.yml`._ Always finishes, costs the least, and turns
-  a per-push gate into a nightly one — a regression is then found by a scheduled
-  run rather than by the push that caused it, which is a different debugging
-  problem.
+  `cancel-in-progress: false`, leaving `pages.yml` a fast deploy pipeline. The
+  repo already has this shape in `cron.yml` for `miri`.
+- _Move the harness to `cron.yml`._ Always finishes, costs least, and turns a
+  per-push gate into a nightly one — a regression is then found by a scheduled
+  run rather than by the push that caused it.
 
-The trade-off is runner minutes against how soon a browser-pixel regression is
-attributable to a commit. Nothing here is blocked on the answer; the gate has
-simply not been answering, and the record should not pretend otherwise.
+**Considered and not taken:** `Swatinem/rust-cache`'s `cache-on-failure` input.
+It would seed the cache from a _failed_ job, but a timeout is recorded as
+`cancelled`, not `failed`, so it does not address this loop. Worth adding for
+its own sake, once someone has confirmed the input exists on the pinned version
+rather than recalling it.
 
 ## Findings the roadmap carried that nothing else did (2026-08-22)
 
@@ -5402,25 +5456,19 @@ the first thing in this tree to put two cameras and two `ForwardRenderer`s in
 one graph. Four findings came out of that, none of them fixed, all of them in
 `crcbl-render` rather than the sample.
 
-- **`ForwardRenderer::add_passes` does not declare the page it samples.** The
-  base-colour page is bound through the material descriptor rather than imported
-  into the graph, so a graph that also _writes_ that page — which is exactly
-  what a render-to-texture monitor does — has no declared ordering between the
-  write and the draws that read it. `apps/lantern` gets a correct barrier only
-  because its own `feed_monitor` imports the page and declares
-  `ShaderRead → TransferDst → ShaderRead` around the copy; a caller that copied
-  into the page without importing it would get none. **Import deduplication is
-  the enabler and has now landed**, so `add_passes` can import the page it
-  samples and receive the same `ImageId` `feed_monitor` holds — the edge the
-  graph needs in order to order the two. What is left is the `forward.rs` change
-  and the decision about whether every caller of `add_passes` should pay for an
-  import it may not need. Twenty-four frames under Vulkan synchronization
-  validation report zero hazards, which says the barrier the sample declares is
-  doing the job, not that the renderer declared it — and the copy and the draws
-  that sample the page are in one submission, which is the reach this machine's
-  layer has (`run-vk-e2e.sh` prints
-  `record-time=yes one-submission=yes cross-submission=no` on radv), so that is
-  the half the run actually checked.
+- **Two nodes in lantern's graph now share the label `base-colour-page`.** The
+  frame holds two `ForwardRenderer`s, each owning its own page, and both import
+  under `ForwardRenderer::BASE_COLOR_PAGE_LABEL`. Labels are not keys and
+  nothing misbehaves — the dump simply shows six read declarations, three per
+  renderer, and a reader cannot tell the room's page from the monitor's. A
+  per-renderer label would fix the dump and reintroduce the string a caller has
+  to match, which is what the constant exists to remove. Left as it is.
+- **`ImportedImage` carries no layer count.** An import's tracker is seeded
+  `Subrect::UNBOUNDED`, so a whole-image read covers every layer and a
+  subresource copy splits it correctly. The consequence is that `compile`'s
+  `SubresourceOutOfRange` check — which only runs for `ImageSource::Transient` —
+  cannot catch a caller naming a page layer that does not exist; that lands on
+  the backend's validation instead of on the graph's own check.
 - **One `ForwardRenderer` cannot serve two views.** `add_passes` takes
   `&'a mut self` against the graph's lifetime, so two calls on one renderer do
   not compile (`E0499`), and `begin_frame` writes one camera into the frame's
