@@ -104,9 +104,6 @@ viewer is `sample/05-viewer.md`'s own milestones.
   the screen-error heatmap, and the skinned case — the last behind skeletal
   animation, which is also what `puppet` waits on.
 
-- **`crcbl-wgpu` is slated for deletion** once the parity list closes. The bar
-  and the trade are in `docs/backlog.md`, awaiting a decision.
-
 ### As of 2026-08-15
 
 **Since S3, the work has been the render side and two fixtures rather than a
@@ -923,10 +920,10 @@ tables):
 - **Our own WebGPU** (see the 2026-08-15 section at the end of this file) — in
   progress, and out of the browser: a wasm build links `crcbl-webgpu` and
   nothing else, which took `wasm-bindgen` out of the toolchain with it.
-  `crcbl-wgpu` remains a native backend (`CRCBL_GPU=wgpu`) and the last place
-  the engine draws through someone else's abstraction. The section carries the
-  survey, the architectural decision it needed first, and what a replacement
-  does _not_ buy.
+  `crcbl-wgpu` was the last place the engine drew through someone else's
+  abstraction, and it is gone — deleted in `6b5e17a`, so there is no
+  `CRCBL_GPU=wgpu` any more. The section carries the survey, the architectural
+  decision it needed first, and what the replacement did _not_ buy.
 - **Sample→engine seams** (see the 2026-08-15 section at the end of this file) —
   a standing sweep rather than a phase. When two samples carry the same
   machinery, it belongs behind an engine seam; when they carry the same
