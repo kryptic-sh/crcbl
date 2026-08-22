@@ -9098,9 +9098,14 @@ golden cube on dx12 — 256x192: max channel delta 1, 0 over tolerance (0.0000%)
 ssim 0.999879
 ```
 
-So `render_e2e.rs` now passes on **Vulkan, native wgpu, Metal and D3D12**, and
-the step is a real gate — the `continue-on-error` is gone. One golden, blessed
-on lavapipe, matched by four independent implementations.
+So `render_e2e.rs` now passes on **Vulkan, Metal and D3D12** and the step is a
+real gate — the `continue-on-error` is gone. The fourth backend reaches the same
+goldens by a different road: `crcbl-webgpu` has no native binary to run this
+suite from, so `pages.yml`'s `render-harness` job renders every scene in a real
+browser and compares it against the same committed references. One golden,
+blessed on lavapipe, matched by four independent implementations. (It read
+"Vulkan, native wgpu, Metal and D3D12" until `crcbl-wgpu` was deleted on
+2026-08-21; the count did not change, the fourth name did.)
 
 The two causes, both found by asking the device rather than reasoning about it:
 

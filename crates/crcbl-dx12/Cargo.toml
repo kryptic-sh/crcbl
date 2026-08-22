@@ -25,12 +25,22 @@ workspace = true
 # building on Linux, macOS and wasm32 at all: off Windows the whole backend is
 # `#[cfg]`-ed out and this is neither fetched nor built.
 #
-# **Naming it adds features to the build graph, not a crate.** `windows` 0.62 is
-# already in this workspace's lockfile on Windows — `wgpu-hal`, `gpu-allocator`
-# and `cpal` all resolve it — so what this line buys is the three feature gates
-# below, and what `default-features = false` buys is not silently widening the
-# set those crates resolved for themselves. `std` is the crate's own default and
-# is kept: `windows_core::Error` carries a `String` message.
+# **Naming it still adds features to the build graph rather than a crate, but
+# only just.** `windows` 0.62 is already in this workspace's lockfile on Windows
+# because `cpal` names it — `cargo tree --target x86_64-pc-windows-msvc -i
+# windows` reports `cpal` and this crate as its only dependents. That list used
+# to read `wgpu-hal`, `gpu-allocator` and `cpal`; the first two left the graph
+# with `crcbl-wgpu` on 2026-08-21, so `cpal` is the only thing holding the claim
+# up — `crcbl-audio` takes it unconditionally, not behind a feature. If that
+# ever changes, this line becomes what puts the crate in the graph rather than
+# what selects from someone else's resolution, and the claim above has to be
+# re-made.
+#
+# `default-features = false` narrows nothing on its own here: `windows`'s only
+# default is `std`, and the feature list below asks for `std` again because
+# `windows_core::Error` carries a `String` message. It is kept so the feature
+# list is the whole set this crate asks for rather than an addition to a default
+# that could grow.
 #
 # Each feature is here because one call needs it, not because it looked related:
 #

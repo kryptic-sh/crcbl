@@ -277,11 +277,12 @@ jobs:
 
   # The only job that compiles the `cfg(target_arch = "wasm32")` code at all.
   #
-  # `crcbl-shell` (the Web/canvas backend, P5), `crcbl-wgpu` (the WebGPU target,
-  # P5.3b) and `crcbl-hal` all carry wasm-gated code that was added deliberately
-  # and then compiled by nothing: every other job in this file runs on a host
-  # target, so a `#[cfg(target_arch = "wasm32")]` block could stop compiling and
-  # no gate would notice. That is the same argument this file makes for the
+  # `crcbl-shell` (the Web/canvas backend, P5), `crcbl-webgpu` (the WebGPU
+  # command stream, `docs/plan/41-webgpu-stream.md`) and `crcbl-hal` all carry
+  # wasm-gated code that was added deliberately and then compiled by nothing:
+  # every other job in this file runs on a host target, so a
+  # `#[cfg(target_arch = "wasm32")]` block could stop compiling and no gate would
+  # notice. That is the same argument this file makes for the
   # macOS/Windows jobs — "platform code is validated *exclusively* here, so
   # these jobs are load-bearing from day one".
   #
@@ -438,8 +439,8 @@ jobs:
       # `docs/plan/12-testing.md` reserves the workspace sweep as the run that
       # deliberately does *not* execute the ignored suites, so it stays green on
       # a machine with no compositor, no X server, no Vulkan loader and no GPU —
-      # which these runners are. `--all-features` compiles `vk-e2e`, `wgpu-e2e`
-      # and `render-e2e` here, so turning the ignored set on would try to open a
+      # which these runners are. `--all-features` compiles `vk-e2e` and
+      # `render-e2e` here, so turning the ignored set on would try to open a
       # Vulkan device on a runner with no loader and fail for reasons that are
       # not about this workspace.
       #
@@ -490,7 +491,9 @@ jobs:
       # committing to the DX12 phase**: whether WARP — D3D12's software
       # rasteriser, which ships in Windows — clears Tier A. If it does, this
       # runner can render, and Windows gains the golden-image coverage it has
-      # never had; if it does not, `crcbl-wgpu` already covers Tier B here and
+      # never had; if it does not, nothing else covers this runner: the second
+      # native backend that used to answer for Tier B here, `crcbl-wgpu`, was
+      # deleted on 2026-08-21, so the fallback half of this argument is gone and
       # DX12's justification is Xbox plus tooling.
       #
       # nextest captures a passing test's stdout, so on a green run — the run
@@ -848,8 +851,8 @@ jobs:
 
       # The same HAL-seam behaviours on this backend, from the one agnostic
       # binary. It replaces per-backend copies that had drifted apart; without
-      # this step the tests deleted from `vk_e2e`/`wgpu_e2e` would be a net loss
-      # of coverage rather than a consolidation.
+      # this step the tests deleted from `vk_e2e` would be a net loss of
+      # coverage rather than a consolidation.
       # **The other direction of the parity contract**, on this backend. See the
       # lavapipe job's copy for why a capable device cannot exercise it: every
       # capability gated on a device feature is declared supported when the
@@ -918,9 +921,9 @@ jobs:
       # `menu.rs`, `nine_slice.rs` and `button_skin.rs` became — and until this
       # step existed D3D12 had no evidence that a single sprite quad was drawn.
       #
-      # This backend has the most to say about the readback: it and wgpu are the
-      # two that refuse an image-to-buffer copy whose row pitch is not a multiple
-      # of 256, where Vulkan and Metal take a tightly packed row. The menu
+      # This backend has the most to say about the readback: it and WebGPU are
+      # the two that refuse an image-to-buffer copy whose row pitch is not a
+      # multiple of 256, where Vulkan and Metal take a tightly packed row. The
       # module's 416-wide framebuffers are the only frames in the suite that are
       # not aligned by accident, so the fixture pads every row and says so with
       # `BufferImageCopy::buffer_row_length`.
@@ -1143,8 +1146,8 @@ jobs:
 
       # The same HAL-seam behaviours on this backend, from the one agnostic
       # binary. It replaces per-backend copies that had drifted apart; without
-      # this step the tests deleted from `vk_e2e`/`wgpu_e2e` would be a net loss
-      # of coverage rather than a consolidation.
+      # this step the tests deleted from `vk_e2e` would be a net loss of
+      # coverage rather than a consolidation.
       - name: Run the HAL seam suite on lavapipe
         env:
           CRCBL_GPU: vk
@@ -1805,7 +1808,7 @@ jobs:
       # has ever failed — five times in one evening, shading one primitive to the
       # clear colour with zero validation errors and zero DRED breadcrumbs. The
       # migration moved it into `forward_e2e`, which runs on Windows under
-      # **dx12/WARP**, on Linux under vk and wgpu and on macOS under Metal — every
+      # **dx12/WARP**, on Linux under vk and on macOS under Metal — every
       # combination except this one. So the six quiet days since were a closed
       # channel rather than evidence, and this step reopens it.
       #
@@ -2020,10 +2023,10 @@ jobs:
       #
       # `crates/crcbl/tests/render_e2e.rs` draws one frame of each of the cube,
       # sprite and UI scenes and compares them against the goldens the `vk e2e`
-      # job re-derives on lavapipe. It closes `docs/backlog.md`'s "the render
-      # layer runs on Vulkan and wgpu" on a second backend — and the sprite and
-      # UI frames are the first time `sprite.slang` and `ui.slang` are compared
-      # against anything on MSL at all.
+      # job re-derives on lavapipe. It is what put the render layer on a second
+      # backend — the question `docs/backlog.md` now records as settled — and the
+      # sprite and UI frames are the first time `sprite.slang` and `ui.slang` are
+      # compared against anything on MSL at all.
       #
       # **It ran once before, on `878f582`, and hung** — every draw this backend
       # recorded did, because `bind_graphics_pipeline` passed nil to
@@ -2069,8 +2072,8 @@ jobs:
 
       # The same HAL-seam behaviours on this backend, from the one agnostic
       # binary. It replaces per-backend copies that had drifted apart; without
-      # this step the tests deleted from `vk_e2e`/`wgpu_e2e` would be a net loss
-      # of coverage rather than a consolidation.
+      # this step the tests deleted from `vk_e2e` would be a net loss of
+      # coverage rather than a consolidation.
       # **The other direction of the parity contract**, on this backend. See the
       # lavapipe job's copy for why a capable device cannot exercise it: every
       # capability gated on a device feature is declared supported when the
@@ -2402,12 +2405,12 @@ jobs:
       # ALSA headers for `cpal`; see the `clippy` job for why.
       #
       # The Vulkan loader and lavapipe are here for a different reason: without
-      # a driver, every `crcbl-vk` and `crcbl-wgpu` test still *runs* and still
-      # passes, because each one opens the backend and returns early when there
-      # is none. Same test count, a fifth of the code executed — measured, once
-      # this job could compile again: `device.rs` 3.97% against 63.39% on a
-      # machine with a driver, `command.rs` 7.01% against 57.39%, `pipeline.rs`
-      # 28.69% against 78.12%, and the workspace total 72.06% against 77.57%.
+      # a driver, every `crcbl-vk` test still *runs* and still passes, because
+      # each one opens the backend and returns early when there is none. Same
+      # test count, a fifth of the code executed — measured, once this job could
+      # compile again: `device.rs` 3.97% against 63.39% on a machine with a
+      # driver, `command.rs` 7.01% against 57.39%, `pipeline.rs` 28.69% against
+      # 78.12%, and the workspace total 72.06% against 77.57%.
       # A coverage number that says how much of the *backend* code a runner
       # happens to be able to reach is not measuring the test suite.
       - name: Install the ALSA headers, the Vulkan loader and lavapipe
@@ -2422,7 +2425,6 @@ jobs:
       - name: Run tests under instrumentation
         env:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          CRCBL_WGPU_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run:
           cargo llvm-cov --no-report nextest --workspace --all-features --locked
       - name: Generate lcov report

@@ -44,8 +44,8 @@ jobs:
   #
   # **It cannot run over `crcbl-vk` itself**, and that is not a gap this job can
   # close: miri interprets MIR and has no way to execute a `dlopen`ed
-  # `libvulkan.so.1`, so every FFI and GPU crate — `crcbl-vk`, `crcbl-wgpu`,
-  # `crcbl-mtl`, `crcbl-shell`'s Wayland/X11 backends, `crcbl-audio`'s device
+  # `libvulkan.so.1`, so every FFI and GPU crate — `crcbl-vk`, `crcbl-mtl`,
+  # `crcbl-dx12`, `crcbl-shell`'s Wayland/X11 backends, `crcbl-audio`'s device
   # path — is outside its reach by construction. What it *does* cover is the
   # crates whose unsafe is pure Rust: the handle allocators and the frame arena
   # in `crcbl-core`, the seam types and the null backend in `crcbl-hal`, the

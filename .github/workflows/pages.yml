@@ -132,10 +132,10 @@ jobs:
       #
       # `target/site` — the directory the upload step takes and the `deploy` job
       # publishes — renders through our own WebGPU path. There is no flag saying
-      # so any more: `crcbl-wgpu` is a `cfg(not(target_arch = "wasm32"))`
-      # dependency of the umbrella, so `crcbl-webgpu` is the only GPU backend a
-      # wasm build links and `crcbl::backend` picks it because the target says
-      # so. This step used to pass `CRCBL_WEB_BACKEND=webgpu` to choose between
+      # so any more: `crcbl-webgpu` is the only GPU backend a wasm build links
+      # at all, and `crcbl::backend` picks it because the target says so. The
+      # crate that used to sit beside it, `crcbl-wgpu`, was deleted on
+      # 2026-08-21. This step used to pass `CRCBL_WEB_BACKEND=webgpu` to choose between
       # the two. Every demo step below reuses this one build and therefore gates
       # the artifact that actually ships.
       - name: Build the site

@@ -768,9 +768,11 @@ before it believes any render result.
 The cross-backend row counts **comparisons**, not `#[test]`s: it renders one
 frame through each backend per size and compares the pair with `crcbl-golden`'s
 measured tolerance, and it fails when zero comparisons ran for the same reason
-the others fail when zero tests ran. Cross the ICDs (`CRCBL_VK_ICD` and
-`CRCBL_WGPU_ICD` pointing at different drivers) to run it in the configuration
-the tolerance was measured in; CI has only lavapipe and says so.
+the others fail when zero tests ran. It compares a browser's readback against a
+live native render now — `--reference vk` on Linux and Windows,
+`--reference mtl` on macOS — so the two sides come from different
+implementations rather than from two ICDs, which is what the tolerance was
+measured against. CI has only lavapipe under Vulkan and says so.
 
 **Two runs that are not optional**, because both have caught bugs a normal run
 could not:

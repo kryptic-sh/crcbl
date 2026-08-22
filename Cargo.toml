@@ -12,7 +12,7 @@ license = "MIT"
 repository = "https://github.com/kryptic-sh/crcbl"
 
 # Shared dependency versions. Add a crate here only in the slice that first uses
-# it — `wgpu`, `objc2`, `windows-rs` and friends land with their backends.
+# it — `ash`, `objc2`, `windows-rs` and friends land with their backends.
 [workspace.dependencies]
 # The one sanctioned binding, per `docs/plan/01-foundations.md` §1.1 and
 # §1.3: `crcbl-vk` is the only crate that may name it. Default features keep
