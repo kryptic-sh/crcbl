@@ -14617,6 +14617,31 @@ can. What a filter would need is a list, on the Rust side, of the capabilities
 this crate's command set can encode — which is what `Device::supports` already
 answers for a device, and what nothing answers for an adapter.
 
+**What a runtime filter would still add is narrower than it sounds, measured
+2026-08-22.** The new gate drives each mapped feature against a **stub** device
+in node and reads the descriptor back, so it answers for the _replayer_. It does
+not answer for the Rust encoder: the gate builds the command object in JS
+(`{ ...graphicsPipeline, primitive: { ...primitive, depthClamp: true } }`), so a
+`crcbl-webgpu` that could not encode the field would still pass it. Each link of
+that chain is separately held — `writer.rs` puts the bool, `reader.rs` reads it,
+`gpu-stream.js` decodes it — which is why this is a coverage note and not a
+defect.
+
+**The concrete instance, and it is `depth-clip-control`.**
+`PROBE_GRAPHICS_PIPELINE_DESC` sets `depth_clamp: false`, and so does every
+other pipeline in `probe.rs`. That is deliberate and its doc says so — `true`
+needs the feature enabled, and keeping it `false` lets the probe build
+everywhere. The consequence is that **no Rust-originated command has ever
+carried `depth_clamp: true` to a real browser**: the only place the `true` path
+runs is `gpu-replay.mjs`, against a stub, in node. The bit is reported to
+callers as available on the strength of that.
+
+So the useful work here is not a filter. It is either a probe pipeline that
+opens with `depth-clip-control` and sets `depth_clamp: true` where the browser
+grants it — which would make the browser gate the evidence — or an explicit note
+in the capability's own docs that the end-to-end path is stubbed. The first is
+better and is not large; it is unscheduled rather than declined.
+
 **Every mapped feature is served today**, so nothing is currently misreported
 through either half. `TIMESTAMP_QUERY` used to be the standing example and is
 not one any more: `crcbl-webgpu/src/command.rs` defines
