@@ -22,10 +22,11 @@ fn main() -> ExitCode {
         run,
         |summary| {
             format!(
-                "flappy: {} frames, {} ticks on the {} shell at {}x{}, {} \
+                "flappy: {} frames, {} ticks ({} simulated) on the {} shell at {}x{}, {} \
                  (score {}, {:?}, {:?})",
                 summary.frames,
                 summary.ticks,
+                summary.sim_ticks,
                 summary.backend,
                 summary.extent.0,
                 summary.extent.1,

@@ -1174,17 +1174,36 @@ KB for every other golden in the tree. Worth deciding before it fires: raise
 horde's tolerance alone, re-bless on the CI adapter rather than on hardware, or
 accept the re-bless when it happens.
 
-### flappy's and asteroids' goldens cannot see the simulation stop
+### The sample goldens and a stopped simulation (2026-08-22)
 
-**flappy's title screen is completely static** — frames 24, 60 and 61 are
-byte-identical. asteroids' rocks move sub-pixel per tick. So both goldens are
-insensitive to the exact frame index, which is robustness, and both would go on
-passing if the simulation halted entirely.
+**Measured by emptying each sample's `Game::tick` and running its golden**, not
+argued from the images.
 
-Their content claims still catch a lost pass or a channel swap; what is
-uncovered is motion. Closing it needs a scripted-input path into gameplay, which
-neither sample has — `horde`'s `--prefill` is the only fixture of that kind in
-the tree, and it is what lets horde's golden picture a playing frame.
+- **asteroids catches it** — the entry that stood here said it did not.
+  `apps/asteroids/tests/golden.rs`'s first content claim wants a rock at
+  `ROCK_AT` brighter than the space beside it, and a frozen simulation never
+  moves one there, so the run panics at that assertion. The catch is incidental
+  rather than designed: it is a positional content claim that happens to need
+  motion, not a check of motion.
+- **flappy did not, and now does.** Its picture is of a title screen that does
+  not animate — frames 24, 60 and 61 are byte-identical — so a frozen build
+  presented its frames, wrote a byte-identical image and passed every claim.
+  Fixed by giving the summary the simulation's own tick count.
+
+**The trap worth keeping, because the first fix was wrong.** The summary already
+carried a tick count and asserting it did **not** catch the frozen build: that
+number is the _loop's_, counting the times it called `Game::tick`, and it reads
+59 whether or not the call did anything. `Summary::sim_ticks` is the game's own
+`ticks_run` and is the one that goes to zero. Two quantities with one name is
+what hid this, and the summary now prints both — `59 ticks (59 simulated)`.
+
+**Still open: no sample golden is sensitive to motion in its picture.** Both now
+detect a wholly stopped simulation, which is the crude case. Neither would
+notice a simulation running at the wrong rate, or one advancing everything but
+the thing under test, because the image is insensitive to the frame index by
+construction. Closing that needs a scripted-input path into gameplay, which only
+`apps/horde`'s `--prefill` has. breakout and horde were not tested this way and
+are a coverage gap in this entry rather than a claim either way.
 
 ### What the JS mirror guards still do not reach
 

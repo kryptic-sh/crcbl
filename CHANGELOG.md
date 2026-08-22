@@ -71,6 +71,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`flappy`'s run summary reports the simulation's own tick count**, as
+  `60 frames, 59 ticks (59 simulated)`, from the newly public `Game::ticks_run`.
+  The existing `ticks` counts the times the loop called `Game::tick` and rises
+  whether or not the call did anything; a caller that wants to know the
+  simulation ran wants the new one. `Summary` gains a `sim_ticks` field, so an
+  exhaustive construction of it must add one.
+
 - **`crcbl-audio`'s generators are held to their waveform.** `synth`'s tests now
   check `sine` and `looped_sine` against `x[n+1] = 2cos(w)x[n] - x[n-1]`, which
   every sinusoid and no other shape satisfies, and hold `noise_burst` to probe

@@ -210,6 +210,36 @@ fn screenshot_from_a_real_run(backend: &str) -> (Image, String) {
         stdout.contains(&format!("{FRAMES} frames")),
         "the summary does not say the run presented {FRAMES} frames:\n{stdout}"
     );
+    // **And that the simulation actually advanced, which the frames do not
+    // say.** This suite used to stop at the line above, and the picture it
+    // guards is of a title screen that does not animate — frames 24, 60 and 61
+    // are byte-identical — so a build whose simulation never ran presented its
+    // frames, wrote a byte-identical image and passed. Measured by emptying
+    // `Game::tick`: every pixel claim below still held.
+    //
+    // It has to be the *simulated* count and not the loop's. The loop counts
+    // the times it called `tick`, so it reads 59 either way; `sim_ticks` comes
+    // from `Game::ticks_run` and only moves when the call did something. The
+    // first version of this check asserted the loop's number, passed the frozen
+    // build, and was the same defect it was written to catch.
+    //
+    // The bound is half rather than the exact 59 a 60-frame run produces,
+    // because the exact figure is the accumulator's business and would fail for
+    // a reason this does not mean. Zero is the case that matters.
+    //
+    // What this does *not* buy is a picture sensitive to motion. That needs
+    // scripted input into gameplay, which only `apps/horde`'s `--prefill` has;
+    // see `docs/backlog.md`.
+    let simulated: u32 = stdout
+        .split_once(" simulated)")
+        .and_then(|(before, _)| before.rsplit('(').next())
+        .and_then(|word| word.parse().ok())
+        .unwrap_or_else(|| panic!("the summary names no simulated tick count:\n{stdout}"));
+    assert!(
+        simulated >= FRAMES / 2,
+        "the simulation advanced {simulated} times over {FRAMES} frames, so it was not \
+         running and this image is of a game that never started:\n{stdout}"
+    );
     assert!(
         stdout.contains("WaitingToStart"),
         "the run left the title screen, so this is not the frame the golden was \

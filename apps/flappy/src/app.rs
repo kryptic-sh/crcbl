@@ -48,7 +48,13 @@ pub use crate::args::Options;
 pub struct Summary {
     pub backend: Backend,
     pub frames: u64,
+    /// Times the loop called [`Game::tick`].
+    ///
+    /// Distinct from [`Self::sim_ticks`], and the distinction is the point: this
+    /// one counts calls and rises whether or not the call did anything.
     pub ticks: u64,
+    /// Times the simulation actually advanced, from [`Game::ticks_run`].
+    pub sim_ticks: u64,
     pub events: u64,
     pub extent: (u32, u32),
     pub exit: ExitReason,
@@ -379,6 +385,7 @@ impl HostedGame for Flappy {
             backend: run.backend,
             frames: run.frames,
             ticks: run.ticks,
+            sim_ticks: self.game.ticks_run,
             events: run.events,
             extent: run.extent,
             exit: run.exit,
