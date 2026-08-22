@@ -321,8 +321,10 @@ was intended.
   cross-platform (macOS + Windows), coverage, a weekly advisory cron, a decoder
   fuzz job, the shader-manifest check, and an e2e job per platform seam (Wayland
   under nested sway, X11 under Xvfb, Win32, Vulkan on lavapipe and again on
-  Windows, wgpu on lavapipe under Xvfb, the cross-backend vk↔wgpu image compare,
-  Metal, D3D12, and the CLI scaffold).
+  Windows, Metal, D3D12, and the CLI scaffold). The `wgpu e2e` and
+  `cross-backend image compare (vk vs wgpu)` jobs this list used to name went
+  with `crcbl-wgpu` in `6b5e17a`; the browser's own gate is the Pages
+  workflow's, and `web/run-cross-backend-e2e.sh` is what replaced the compare.
 - **`crcbl-core`**: `Handle`/`Pool`, sector-tiled `WorldPos` (`I64Vec3` sectors,
   2^20 m cells), `FrameArena`, `FrameClock` with an injected `TimeSource`, the
   input vocabulary, `SurfaceTarget`, logging.
@@ -373,23 +375,14 @@ was intended.
   `crcbl_store::write_atomic`, on-screen HUD via `UiRenderer` (glyph atlas
   texture, per-frame vertex/index upload, alpha-blended compositing pass), and
   its own tests including scripted-input determinism and persistence RT.
-- **`crcbl-wgpu`** (P5): wgpu 30 backend — `WgpuInstance` (adapter enumeration,
-  registered in backend table), `WgpuDevice` with full resource/pipeline/
-  bind-group creation and pool-based handle tracking, command encoder finish
-  flow with pre-allocated handle slots, `conv` mappings (formats, blend states,
-  rasteriser, binding kinds). Available via `CRCBL_GPU=wgpu` on native.
-  Surface/swapchain (Wayland, Xcb via raw-window-handle) and full command
-  recording (render/compute passes, draw/bind/state calls via forget_lifetime)
-  implemented. Push constants ride wgpu 30's **immediates** — one block shared
-  by every stage, so the stage mask is information wgpu does not need rather
-  than information it loses, and a device without the `IMMEDIATES` feature is
-  refused by name. Indirect draws (including the `_count` forms) and both copy
-  directions are implemented.
-- **`crcbl-wgpu` cross-platform**: Compiles on both native (Vulkan/Metal/DX12)
-  and `wasm32-unknown-unknown` (WebGPU) via `cell` module (polymorphic
-  `Arc`/`Mutex` ↔ `Rc`/`RefCell`). `HalThreadSafe` marker trait in `crcbl-hal`
-  relaxes `Send + Sync` bounds on wasm32. `create_native()` gated to non-wasm
-  targets.
+- **`crcbl-wgpu` is deleted** (2026-08-21, `6b5e17a`). This list carried two
+  entries for it — the wgpu 30 backend and its cross-platform `cell` module —
+  long after the crate, its suite, both its CI jobs, the `GpuBackend::Wgpu` and
+  `BackendKind::Wgpu` variants and `CRCBL_GPU=wgpu` all went. `wgpu` and
+  `gpu-allocator` are at zero occurrences in `Cargo.lock`. What replaced it is
+  `crcbl-webgpu` below; see "The WebGPU backend replaced `wgpu`" further down
+  this file, which recorded the deletion while this section went on describing
+  the crate as present.
 - **`crcbl-shell`** (P5): `WebShell` backend — single-canvas window,
   `extern "C"` entry points for JS→wasm input (resize/key/pointer/frame), event
   queue over `RefCell<VecDeque>`, `SurfaceTarget::Web { canvas_id }`. Registered

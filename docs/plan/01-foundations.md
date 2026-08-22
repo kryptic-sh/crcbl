@@ -14,9 +14,10 @@ Nothing draws yet; everything after this stage has a place to live.
   that small — `.github/workflows/ci.yml` now also runs rustdoc, `cargo-deny`,
   `cargo-machete`, coverage with a floor, a wasm32 build, a Windows and a macOS
   build, a shader-artifact check, a decoder fuzz job, and a per-backend and
-  per-window-system e2e job apiece (`vk`, `wgpu`, `mtl`, `dx12`, Wayland, X11,
-  Win32, the CLI, and the cross-backend image compare). `cron.yml` and
-  `pages.yml` are the other two workflows.
+  per-window-system e2e job apiece (`vk`, `mtl`, `dx12`, Wayland, X11, Win32 and
+  the CLI). The `wgpu` job and the cross-backend image compare this list used to
+  name went with `crcbl-wgpu` in `6b5e17a`. `cron.yml` and `pages.yml` are the
+  other two workflows.
 
 ## Platform matrix (canonical — settled 2026-08-05)
 
@@ -24,12 +25,12 @@ The one place this is stated. Everything else that needs it links here rather
 than restating it, because it had drifted into three half-versions across the
 plan and the backlog.
 
-| Backend       | Platforms                  | Crate        |
-| ------------- | -------------------------- | ------------ |
-| Vulkan        | Linux, Windows, Android    | `crcbl-vk`   |
-| Metal         | macOS, iOS                 | `crcbl-mtl`  |
-| DX12          | Windows                    | `crcbl-dx12` |
-| wgpu / WebGPU | Browser, and native triage | `crcbl-wgpu` |
+| Backend | Platforms               | Crate          |
+| ------- | ----------------------- | -------------- |
+| Vulkan  | Linux, Windows, Android | `crcbl-vk`     |
+| Metal   | macOS, iOS              | `crcbl-mtl`    |
+| DX12    | Windows                 | `crcbl-dx12`   |
+| WebGPU  | Browser                 | `crcbl-webgpu` |
 
 Windows deliberately carries **two** backends; DX12 never replaces Vulkan there.
 `crcbl-vk` exists for Linux and Android regardless, so Windows support falls out
@@ -58,10 +59,12 @@ crcbl/
 │   ├── crcbl-vk/           # stage 2: ash implementation of the HAL
 │   ├── crcbl-mtl/          # stage 9: Metal — macOS
 │   ├── crcbl-dx12/         # stage 9: Direct3D 12 — Windows
-│   ├── crcbl-wgpu/         # stage 10: wgpu — native triage + WebGPU
+│   ├── crcbl-webgpu/       # stage 10: the browser's command stream
 │   ├── crcbl-shaders/      # Slang sources and their committed artifacts
 │   ├── crcbl-render/       # render graph, frame loop, meshes, materials
 │   ├── crcbl-golden/       # golden-image comparison for render tests
+│   ├── crcbl-greybox/      # untextured stand-in meshes for samples
+│   ├── crcbl-rand/         # deterministic pseudo-random source
 │   ├── crcbl-sprite/       # sprite sheets: frames, clips, nine-slice
 │   ├── crcbl-ecs/          # stage 4: system-owned arrays
 │   ├── crcbl-net/          # stage 4: transport seam, replication
@@ -86,7 +89,10 @@ crcbl/
 │   ├── asteroids/
 │   ├── horde/
 │   ├── hud/
-│   └── lantern/
+│   ├── lantern/
+│   ├── quarry/
+│   ├── viewer/
+│   └── render-harness/     # draws every Scene for the cross-backend compare
 └── docs/plan/
 ```
 

@@ -172,29 +172,43 @@ reads as though the work is done:
 - **API** — can the platform express this at all?
 - **crcbl** — has this backend implemented it yet?
 
-| Feature               | Vulkan     | Metal             | D3D12      | wgpu (native) | WebGPU   |
-| --------------------- | ---------- | ----------------- | ---------- | ------------- | -------- |
-| Compute               | yes / yes  | yes / yes         | yes / yes  | yes / yes     | yes      |
-| Descriptor indexing   | yes / yes  | yes / withdrawn   | yes / yes  | yes / —       | **no**   |
-| Buffer device address | yes / yes  | yes / —           | yes / yes  | **no**        | **no**   |
-| Multi-draw-indirect   | yes / yes  | yes / yes         | yes / yes  | yes / —       | **no**   |
-| Draw-indirect-count   | yes / yes  | **no**            | yes / yes  | yes / —       | **no**   |
-| Mesh shaders          | yes / yes  | yes / owed        | yes / owed | yes / —       | **no**   |
-| Ray query / RT        | yes / owed | yes / **blocked** | yes / owed | yes / —       | **no**   |
-| Timestamp query       | yes / yes  | refused           | yes / owed | yes / —       | yes      |
-| Push constants        | yes / yes  | yes / yes         | yes / owed | yes / —       | proposed |
-| Persistent mapping    | yes / yes  | yes / yes         | yes / yes  | **no**        | **no**   |
+> **This matrix is a design record, not the live answer.** What each backend
+> reports today is `crcbl_hal::Capability`, answered through an exhaustive
+> `match` per backend and driven in both directions by
+> `crates/crcbl/tests/hal_seam_e2e.rs`; `DIVERGENCES` and `REVIEWED_BLOCKERS` in
+> `crcbl-hal/src/capability.rs` are what a human has reviewed as still owed.
+> Read those before acting on a cell here. **And no `owed` cell on Metal or
+> D3D12 is a task**: both backends were deferred 2026-08-21 — see
+> `docs/plan/09-backends-metal-dx12.md`.
+>
+> Corrected 2026-08-23, having gone stale in both directions: the table carried
+> a `wgpu (native)` column for a crate deleted 2026-08-21, and still showed
+> `owed` for D3D12 push constants, D3D12 mesh shaders and D3D12 timestamp query,
+> and `refused` for Metal timestamp query, all of which had landed. The
+> paragraph under it already contradicted the timestamp cell in so many words.
+
+| Feature               | Vulkan     | Metal             | D3D12      | WebGPU   |
+| --------------------- | ---------- | ----------------- | ---------- | -------- |
+| Compute               | yes / yes  | yes / yes         | yes / yes  | yes      |
+| Descriptor indexing   | yes / yes  | yes / withdrawn   | yes / yes  | **no**   |
+| Buffer device address | yes / yes  | yes / —           | yes / yes  | **no**   |
+| Multi-draw-indirect   | yes / yes  | yes / yes         | yes / yes  | **no**   |
+| Draw-indirect-count   | yes / yes  | yes / yes         | yes / yes  | **no**   |
+| Mesh shaders          | yes / yes  | yes / owed        | yes / owed | **no**   |
+| Ray query / RT        | yes / owed | yes / **blocked** | yes / owed | **no**   |
+| Timestamp query       | yes / yes  | yes / owed        | yes / yes  | yes      |
+| Push constants        | yes / yes  | yes / yes         | yes / yes  | proposed |
+| Persistent mapping    | yes / yes  | yes / yes         | yes / yes  | **no**   |
 
 The D3D12 column moved because `crcbl-dx12`'s `adapter.rs` now reports those
 flags — descriptor indexing on binding tier 3, and the rest unconditionally,
-each with its reason written on `features_of`. Its remaining `owed` cells are
-withheld deliberately and argued in the same place: push constants need the
-root-signature design to fix the budget, and mesh shaders are reported clear
-outright. The timestamp-query entry that stood here is retired twice over —
-`crcbl-dx12` reports the flag, and the `Limits::timestamp_period_ns` it was said
-to need no longer exists, the seam returning nanoseconds and each backend
-converting where it knows how. **A withheld flag is not an oversight there, it
-is the rule of this document applied to a backend mid-build.**
+each with its reason written on `features_of`. Push constants landed as root
+constants and timestamp query as query heaps, so both cells moved; the
+`Limits::timestamp_period_ns` the latter was once said to need no longer exists
+either, the seam returning nanoseconds and each backend converting where it
+knows how. Mesh shading is the one D3D12 row still open, and it is parked rather
+than owed. **A withheld flag is not an oversight there, it is the rule of this
+document applied to a backend mid-build.**
 
 Vulkan's mesh-shader cell moved for the whole feature, not just the report:
 `crcbl-vk` reads `PhysicalDeviceMeshShaderFeaturesEXT`, `create_mesh_pipeline`

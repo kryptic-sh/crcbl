@@ -11,9 +11,10 @@
 # the two backends are held against each other rather than each against a
 # reference that could have drifted with them.
 #
-# That is what `the native vk-against-wgpu gate` does for vk against
-# wgpu, and it is the one thing `crcbl-wgpu` is still kept for. This is its
-# replacement, and a wider one: eleven scenes rather than three, and against a
+# That is what the native vk-against-wgpu gate did for vk against wgpu, and it
+# was the last thing `crcbl-wgpu` was kept for before that crate was deleted.
+# This is its replacement, and a wider one: eleven scenes rather than three, and
+# against a
 # backend that is a genuinely separate implementation instead of a second
 # abstraction over the same Vulkan driver.
 #

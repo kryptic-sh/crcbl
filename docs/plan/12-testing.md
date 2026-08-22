@@ -89,13 +89,15 @@ interesting part is the order of many.
   records as the remaining place it can drift.
 - **The harness that drives no nextest guards on its own count instead, and that
   is the right shape rather than a gap.** `web/run-cross-backend-e2e.sh` never
-  invokes nextest: it drives `crcbl screenshot` per scene per size and compares
-  the pairs, so there is no summary line to parse. What it guards is the number
-  the run is _supposed_ to produce — it refuses an empty scene list outright,
-  computes the expected comparison count from the scene and size lists, and
-  fails when a scene completed fewer comparisons than there are sizes. The
-  property is the same one `nextest-summary.sh` protects: a run that silently
-  did less work than it claimed cannot pass.
+  invokes nextest: it holds the browser harness's readbacks against a frame a
+  native backend rendered in the same run, so there is no summary line to parse.
+  What it guards is the number the run is _supposed_ to produce — it refuses an
+  empty scene list outright and fails when a scene produced no comparison. (This
+  paragraph described the _deleted_ per-scene-per-size script under the
+  surviving script's name until 2026-08-23: `6b5e17a` rewrote the paths here and
+  left the prose attached to a different program.) The property is the same one
+  `nextest-summary.sh` protects: a run that silently did less work than it
+  claimed cannot pass.
 - **Software GPU in CI**: render e2e runs on **lavapipe** (Vulkan) and wgpu's
   GL/software fallbacks — every commit exercises real render paths without
   hardware runners. The mac and Windows arms did not wait for a scheduled
@@ -273,10 +275,10 @@ validation-report assertion once, for all of them.
 
 - `crcbl-core`: property tests on `WorldPos` rebase round-trips and pool handle
   invalidation.
-- `crcbl-hal`/`crcbl-vk`/`crcbl-wgpu`: graph-compile unit suite on NullBackend;
-  triangle/mesh golden images on lavapipe + wgpu; identical- scene cross-backend
-  image compare (vk vs wgpu within tolerance) — the tier system's regression
-  net.
+- `crcbl-hal`/`crcbl-vk`/`crcbl-webgpu`: graph-compile unit suite on
+  NullBackend; triangle/mesh golden images on lavapipe; identical-scene
+  cross-backend image compare, the browser against a live native render — the
+  regression net that catches a divergence no single backend's golden can.
 - `crcbl-ecs`+`net`: replication roundtrip (server tick → snapshot → client
   state == server state); churn soak with leak assert.
 - `crcbl-phys`: analytic cases with known answers (orbit period, terminal
@@ -323,11 +325,11 @@ validation-report assertion once, for all of them.
 
 - **"wgpu's GL/software fallbacks" do not run in CI.** The infrastructure
   section says render e2e runs on lavapipe _and_ those fallbacks; nothing
-  exercises a GL device anywhere. GL is reachable through `crcbl-wgpu` (wgpu
-  enumerates `Backends::all()`) and is unproven rather than supported —
-  `docs/backlog.md` carries the OpenGL decline and its reasoning. Either point
-  the wgpu e2e suite at a GL device or drop the claim; it currently reads as
-  coverage that exists.
+  exercises a GL device anywhere. **The action this asked for is moot**: GL was
+  reachable only through `crcbl-wgpu`, which was deleted 2026-08-21, so there is
+  no suite left to point at a GL device and no GL path in the tree at all.
+  `docs/backlog.md` carries the OpenGL decline and its reasoning. The claim is
+  what has to go, not the coverage.
 - **Shader artifacts are validated one target in four.** `spirv-val` runs on the
   SPIR-V; the WGSL, MSL and DXIL emitted from the same source are checked by
   nothing, which is how a shader Dawn rejects passed every gate and shipped a
@@ -351,11 +353,13 @@ validation-report assertion once, for all of them.
   currently covers two backends and one scene. Extending it to every engine
   shader and every backend is a testing deliverable, not a rendering one.
 
-  **Half closed, 2026-08-15.** `web/run-cross-backend-e2e.sh` defaults to the
-  cube, sprite and UI scenes, each at every size in its size list and each with
-  its own colour floor. Still two backends: it drives `vk` and `wgpu`, so the
-  target-semantics bug class is unchecked on Metal and D3D12, whose own jobs
-  compare against a golden rather than against each other.
+  **Closed wider than this asked, and re-read 2026-08-23.**
+  `web/run-cross-backend-e2e.sh` now holds every scene the browser draws against
+  a live native render — `--reference vk`, and `--reference mtl` on macOS — so
+  the pair is two genuinely separate implementations rather than two
+  abstractions over one Vulkan driver. This entry claimed it still drove `vk`
+  against `wgpu` over three scenes at several sizes; that was the deleted
+  script, and Metal is no longer outside the compare.
 
 ## Superseded (2026-08-10)
 

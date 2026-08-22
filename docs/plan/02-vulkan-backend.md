@@ -233,7 +233,10 @@ workaround. Recorded in `docs/backlog.md` rather than argued again here.
 >    and UI scenes at every size in its list, each with its own colour floor. It
 >    is still `vk` against `wgpu`; Metal and D3D12 compare against a golden
 >    instead, so the divergence class stays undetected between _those_ two
->    targets.
+>    targets. **Superseded 2026-08-23**: that described the script deleted with
+>    `crcbl-wgpu`. The gate now holds every scene the browser draws against a
+>    live native render, `--reference vk` and `--reference mtl`, so Metal is
+>    inside the compare and D3D12 is the one left against a golden alone.
 
 ### Considered, and reopenable: SPIR-V as the single native IR
 

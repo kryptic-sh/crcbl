@@ -37,9 +37,21 @@ below and back-referenced from the relevant stage docs.
 If any of these turn out violated when this stage starts, that's a bug in the
 earlier stage, not a wasm special case.
 
-## Backend choice: `crcbl-wgpu`
+## Backend choice: reversed — `crcbl-webgpu`, not `crcbl-wgpu`
 
-Implement the HAL on the **`wgpu` crate**, not raw `web-sys` WebGPU:
+> **This decision was taken and then overturned.** What follows is the original
+> reasoning, kept because the trade-off it weighed is the one anybody revisiting
+> this would weigh again. **Do not build on it**: `crcbl-wgpu` was deleted on
+> 2026-08-21 in `6b5e17a`, along with the whole `wgpu` dependency family, both
+> its CI jobs and `CRCBL_GPU=wgpu`. The backend is `crcbl-webgpu` — wasm
+> serialises HAL calls into a buffer it owns and JS decodes and replays them
+> against WebGPU, which is `docs/plan/41-webgpu-stream.md`'s subject. The native
+> portability fallback the argument below rests on does not exist; there is no
+> triage backend, and `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` are the native
+> set.
+
+The original reasoning — implement the HAL on the **`wgpu` crate**, not raw
+`web-sys` WebGPU:
 
 - One implementation gives wasm/WebGPU **and** a native portability fallback
   (wgpu runs on vk/mtl/dx12/GL) — useful for old-Intel-iGPU Windows machines and
@@ -78,8 +90,10 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
 
 ## Tasks
 
-1. `crcbl-wgpu` HAL impl (native first — faster iteration, same code), Tier B
-   renderer path validated on native wgpu against the stage 3 scene.
+1. ~~`crcbl-wgpu` HAL impl (native first — faster iteration, same code), Tier B
+   renderer path validated on native wgpu against the stage 3 scene.~~ Overtaken
+   by the reversal above: the HAL implementation that shipped is
+   `crcbl-webgpu`'s command stream, and it has no native leg to validate first.
 2. wasm build of sandbox: canvas, rAF, FetchSource, single-thread loop.
 3. Slang→WGSL artifact pipeline.
 4. WebTransport/WebSocket transport + server listener; sandbox client-in-browser

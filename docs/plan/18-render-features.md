@@ -981,10 +981,12 @@ determinism argument rests on.
   — the exact class of filtered read the AO and SSR designs spent their
   determinism arguments avoiding. An 8-tap manual lerp over a cache-resident
   table costs less and risks nothing.
-- **A compute pass writing a probe volume.** `crcbl-wgpu` refuses
-  `BindingKind::StorageImage` outright, so the browser tier could not run it; a
-  storage buffer would be permitted, but the temporal-accumulation refusal above
-  applies regardless.
+- **A compute pass writing a probe volume.** One of the two reasons given here
+  has gone: it was that `crcbl-wgpu` refused `BindingKind::StorageImage`
+  outright, and that crate was deleted 2026-08-21 — `crcbl-webgpu` answers
+  `Capability::StorageImageBinding` with `Support::Yes`. So the browser tier
+  could run it; a storage buffer would be permitted, but the
+  temporal-accumulation refusal above applies regardless.
 - **Prefiltered radiance cubemaps** — the only thing that puts a recognisable
   room in a mirror — need cube arrays, mip chains and `SampleLevel` at a
   computed LOD, which `ssr.slang` refuses in writing. Deferred with a named
