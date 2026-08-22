@@ -14831,8 +14831,17 @@ apart — so **two mapped features are left without one**:
   non-decreasing boundary array — so no nanosecond constant enters the assertion
   and a quantising browser only widens the gap.
 
-  **What is unmeasured is the Windows runner's margin.** Linux runs SwiftShader
-  and macOS takes the absent branch, so Windows is the one job where the present
+  **The Windows runner is measured now, and it does not quantise either.**
+  `14c89de`'s Pages run reported AL's margin there as **155053×** — 8 busy
+  passes spanning 527181300–532648300 ns against 8 empty ones at 400–3400 ns. A
+  browser quantising to 100 µs would have floored every empty span to zero; none
+  did. That is a third independent environment agreeing with the sweep, and the
+  rung needs no revisiting. macOS took the absent branch and **asserted** it —
+  "opened a device without `timestamp-query`, so no `GPUQuerySet` of that type
+  could exist" — which is the branch running rather than being excused.
+
+  The original note, kept for what it still covers: Linux runs SwiftShader and
+  macOS takes the absent branch, so Windows is the one job where the present
   branch runs on a device nobody here has profiled. AL's second check prints the
   ratio, so the next Pages run reports it: a margin near 1 means the workgroup
   count wants revisiting, and a quantised one would be the first evidence of
