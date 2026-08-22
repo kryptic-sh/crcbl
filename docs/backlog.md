@@ -5130,6 +5130,49 @@ confirmed; the rest of this file assumes them.
   Preserves sample rule 7 and demonstrates the matchmaker and rating curve; only
   the transport is absent.
 
+## Steamworks: four decisions the plan is waiting on (2026-08-22)
+
+`docs/plan/42-steam.md` designs `crcbl-steam` end to end and is blocked on none
+of these to _start_ — slice 1 (lifecycle, pump, overlay event) runs on SpaceWar
+app id 480. Each of these gates something later, and each is the user's call.
+
+- **The binding route, and whether this MIT repo publishes our own flat-API
+  declarations.** (a) hand-write `extern "C"` declarations and `repr(C)` structs
+  transcribing no header text — zero dependencies, a loader we control, a drift
+  gate against the SDK's `steam_api.json` as the net. (b) depend on
+  `steamworks-rs` — the ABI risk becomes theirs, at the cost of a link-time
+  `DT_NEEDED` (so no graceful "Steam absent"), a vendored SDK in the dependency
+  graph, and an event model to wrap over. The plan recommends (a). Either way a
+  new dependency is the user's call by standing rule. Note the access agreement
+  licenses the SDK "solely to develop" and does not address publishing one's own
+  ABI declarations; the ecosystem precedent is strong (Steamworks.NET, a decade,
+  MIT) but **precedent is not permission, and this was read by an agent and not
+  a lawyer**.
+- **An app id of our own.** Achievement definitions, stats schema, Auto-Cloud
+  config, rich presence and game-server logins are all configured per-app on the
+  partner site and 480 cannot carry them. Needs a partner account and the
+  app-credit fee, and names a product decision — _which sample, if any, is the
+  thing on Steam_. `towers` and `bracket` are what the ladder suggests. Until
+  then slices 2+ build against 480 with mechanism-only smoke tests that never
+  assert a value read back, since 480's data is shared with everyone.
+- **Cloud saves: Auto-Cloud config, or a `StorageSource` backend.** (a) zero
+  code over `crcbl-store`'s existing atomic layout, sync timing is Valve's and
+  no in-game sync UI is possible. (b) a `SteamCloudStorage` backend over
+  `ISteamRemoteStorage` — per-file control, quota, conflict surfacing, and a
+  real slice of async work behind the seam. The plan leans (a) first.
+- **Steam Input, or topic 19's own backends alone.** Declined in the plan
+  because `ISteamInput` is a competing action mapper against `ActionMap`. The
+  counterweight is Steam Deck verification, which requires first-class Steam
+  Input. If Deck becomes a target it returns as a slice feeding `ActionMap`
+  through `Binding::Virtual`, origins and glyphs included.
+
+**Two things the plan could not verify**, recorded so nobody reads them as
+settled: whether SDK **1.64** exists at all (`steamworks-rs` pins it; 1.63 of
+2026-01-29 is the last confirmed release), and the exact interface accessor
+version strings, which were read from Steamworks.NET's header mirror rather than
+Valve's login-gated zip. The plan mandates re-reading both from a real SDK
+before any declaration is trusted.
+
 ## Owed
 
 The S1B findings in `docs/plan/ROADMAP.md` were the substantive list — six
