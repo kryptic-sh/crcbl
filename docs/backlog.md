@@ -10278,39 +10278,40 @@ that produces them is now documented in `docs/plan/12-testing.md`. Revisit if a
 collapse ever actually happens — at that point the floor has evidence behind it
 instead of a guess.
 
-### The seam does not describe what `wait_semaphores` does with an impossible wait
+### `wait_semaphores` refuses a binary semaphore and the seam does not say so
 
-Found while writing `crcbl-wgpu`'s timeline-semaphore test, 2026-08-10, and
-verified against all three implementations.
+**Re-verified 2026-08-23, and the entry it replaces was stale in its premise.**
+That entry said the seam "says nothing" about an outcome other than satisfied or
+timed out. It does: `wait_semaphores`' own `# Errors` in
+`crates/crcbl-hal/src/device.rs` names `HalError::Unsupported` "on a backend
+with no timeline to block on at all", which is WebGPU. What it does not name is
+the case every live backend actually produces.
 
-`crates/crcbl-hal/src/device.rs` documents `wait_semaphores` as returning
-`Ok(true)` when the waits are satisfied and `Ok(false)` on timeout — "a timeout
-is a normal outcome for a frame-pacing poll, not an error" — with
-`InvalidHandle` and `DeviceLost` as the only errors. It says nothing about a
-wait on a value **nothing submitted will ever signal**, which is neither
-satisfied nor a timeout.
+**All three of `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` refuse a CPU wait on a
+_binary_ semaphore**, with the same `HalError::Unsupported` and the same
+sentence — "a binary semaphore cannot be waited on from the CPU". They agree, so
+this is not a disagreement to settle; it is behaviour the seam does not
+document. `signal_semaphore`, one method above it, names the same case in its
+own `# Errors`. Nothing in the tree tests it: grepping for that sentence finds
+only the three backend sources.
 
-The backends disagree, and both answers are defensible:
+**The half that _was_ the entry's subject is now moot.** A wait on a value
+nothing will ever signal was detected only by `crcbl-wgpu`, deleted 2026-08-21.
+`crcbl-vk` cannot detect it and should not try — a later submission may still
+signal the value, so a Vulkan wait that expires really has timed out, and
+`Ok(false)` is the right answer there.
 
-- `crcbl-wgpu`'s device module (deleted 2026-08-21) returns
-  `HalError::Unsupported` naming the cause, because wgpu has no standalone
-  semaphore that could signal the value later, so waiting would hang until the
-  deadline and then lie by calling it a timeout. That error is **not in the
-  seam's documented set**.
-- `crcbl-mtl` treats the same case as an ordinary unsatisfied wait.
-
-**Decided: the seam grows the third outcome.** Failing fast with a reason beats
-blocking for the full timeout to report a timeout that was never going to be
-anything else — a frame-pacing poll wants to know it asked for something
-impossible, not to pay the deadline first. So `wait_semaphores`' docs should
-name `Unsupported` for an unsatisfiable wait, and the other backends should
-adopt it when next touched.
-
-Not done in the slice that found it: changing a seam contract means changing
-every implementation of it plus the tests that assert the current behaviour, and
-that slice was adding coverage rather than moving a contract. The tests as
-written assert each backend's _current_ answer, so whoever takes this will see
-exactly which ones move.
+**Why this is not just a one-line doc fix.** `NullDevice::wait_semaphores`
+returns `Ok(true)` for every wait, binary ones included — "no work is ever
+outstanding, so every wait is satisfied immediately". So an agnostic test in
+`crates/crcbl/tests/hal_seam_e2e.rs` asserting the refusal passes on vk and
+fails on null. Whoever takes this chooses first: either the null backend grows
+the same refusal (it already refuses plenty, so this is in character), or the
+seam documents the refusal as permitted rather than required and the test is
+written per-backend. The first is the better shape — a seam that permits two
+answers to one question is one callers must branch on — but it is a behaviour
+change to a backend other suites assert against, so it is a decision, not a
+detail.
 
 ### `crcbl-dx12` has no timeline-semaphore test because it has no timeline semaphore
 
