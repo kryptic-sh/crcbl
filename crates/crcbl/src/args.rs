@@ -354,10 +354,10 @@ impl Common {
     /// Everything [`crcbl::engine::Loop`](crate::engine::Loop) takes from the
     /// command line.
     ///
-    /// All four sample parsers built this struct literal from these same five
-    /// expressions, which is four places to forget a field: `--fps` would have
-    /// been wired into three of them and silently ignored by the fourth, and
-    /// nothing would have failed to compile.
+    /// Every sample parser built this struct literal from the same expressions,
+    /// which is one place per sample to forget a field: `--fps` would have been
+    /// wired into some of them and silently ignored by the rest, and nothing
+    /// would have failed to compile.
     #[must_use]
     pub fn loop_config(&self) -> LoopConfig {
         LoopConfig {

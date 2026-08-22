@@ -44,8 +44,8 @@
 // a dropped reply one seam over.
 //
 // THE IMAGE PAIR AND THE VIEW PAIR ANSWER NOTHING EITHER, and they are where
-// the translations get interesting: `ImageDesc`'s five fields become a
-// `GPUTextureDescriptor`'s seven, three of them through tables that lose
+// the translations get interesting: `ImageDesc`'s fields become a
+// `GPUTextureDescriptor`'s, three of them through tables that lose
 // something, and `ImageViewDesc`'s range becomes members WebGPU wants *absent*
 // rather than numbered. Each table is driven row by row below against values
 // written out here, and each refusal — a usage flag with no bit, a format this
@@ -4379,7 +4379,7 @@ async function main() {
   // ---- the image pair ------------------------------------------------------
   //
   // The buffer pair's shape with a descriptor that loses more: `ImageDesc`'s
-  // five fields become a `GPUTextureDescriptor`'s seven, through three tables
+  // fields become a `GPUTextureDescriptor`'s, through three tables
   // that each have something to refuse. What is checked is what reached
   // `createTexture`, what the table holds afterwards, and where each refusal
   // went.

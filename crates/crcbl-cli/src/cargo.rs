@@ -15,7 +15,7 @@
 //!
 //! # Decision: `--target wasm` fails, and names what to run instead
 //!
-//! P5 has shipped and six samples deploy to Pages, so the refusal is no longer
+//! P5 has shipped and the samples deploy to Pages, so the refusal is no longer
 //! "not yet" — it is that **a browser bundle is not a `cargo build`**. Getting
 //! one means `cargo build --target wasm32-unknown-unknown`, then the loader
 //! beside the artifact, the shim, the shader artifacts and the site layout.

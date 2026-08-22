@@ -28,10 +28,10 @@
 //!
 //! `apps/breakout/build.rs` and `apps/flappy/build.rs` are already the same
 //! script with a different `ASSETS` array, and `docs/backlog.md` has carried the
-//! duplication since they were written. This is the third copy and it does not
+//! duplication since they were written. This is another copy and it does not
 //! close it — the fix is a real `crcbl_sprite::bake::bake_dir` entry point, and
-//! it is a change to `crcbl-sprite` rather than to any of the three callers. The
-//! backlog entry now names three.
+//! it is a change to `crcbl-sprite` rather than to any of its callers, which are
+//! every `build.rs` carrying an `ASSETS` array.
 
 use std::path::PathBuf;
 

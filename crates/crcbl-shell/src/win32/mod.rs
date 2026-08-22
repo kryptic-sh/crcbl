@@ -242,7 +242,7 @@ use crcbl_core::EventTime;
 
 /// Puts `MSG::time` on the engine's clock.
 ///
-/// # The easiest of the three native backends, and still not free
+/// # The easiest of the native backends, and still not free
 ///
 /// [`EventTime`] wants "a duration measured from the same origin as the
 /// [`TimeSource`](crcbl_core::time::TimeSource) driving

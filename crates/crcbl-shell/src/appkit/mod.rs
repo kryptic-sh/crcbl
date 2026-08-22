@@ -274,7 +274,7 @@ use crate::ShellCaps;
 /// are why this is not the Win32 one with a different constant.
 ///
 /// **There is no wrap.** A 32-bit millisecond counter turns over after seven
-/// weeks of uptime and both other native backends carry machinery for it; an
+/// weeks of uptime and every other native backend carries machinery for it; an
 /// `f64` of seconds does not turn over at all. What it has instead is
 /// *precision*, and it is not a problem: at a year of uptime (about 3×10⁷
 /// seconds) a `double`'s ulp is still under a microsecond, which is finer than
@@ -513,8 +513,8 @@ mod tests {
             error < Duration::from_micros(1),
             "a millisecond at a year of uptime came back as {apart:?}, off by {error:?}"
         );
-        // And the wrap the other two native backends carry machinery for does
-        // not exist here at all: seven weeks in, the arithmetic is the same.
+        // And the wrap the other native backends carry machinery for does not
+        // exist here at all: seven weeks in, the arithmetic is the same.
         let weeks = 4_294_967.296;
         let base = TimeBase::at(weeks);
         assert_eq!(

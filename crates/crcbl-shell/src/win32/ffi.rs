@@ -1509,7 +1509,7 @@ unsafe extern "system" {
     pub fn GlobalSize(mem: Handle) -> usize;
     // Milliseconds since the system started, 64-bit: the clock `MSG::time` is
     // on. See `TimeBase` for why that makes Win32's timestamp rebasing the
-    // easiest of the three native backends' and still not free.
+    // easiest of the native backends' and still not free.
     pub fn GetTickCount64() -> u64;
 }
 

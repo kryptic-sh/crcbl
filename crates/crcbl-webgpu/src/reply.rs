@@ -136,7 +136,7 @@
 //! because this crate is what decoded. Carrying it would let a replayer claim to
 //! be Vulkan and be believed.
 //!
-//! **Three fields a browser cannot fill, and what the replayer puts there.**
+//! **The fields a browser cannot fill, and what the replayer puts there.**
 //! WebGPU's `GPUAdapterInfo` is four strings and nothing else; it has no numeric
 //! ids and does not say what class of device it found. So
 //! `web/engine/gpu-replay.js` writes the values that *mean absent* rather than
@@ -513,8 +513,8 @@ pub enum Reply {
     ///
     /// **[`backend`](crcbl_hal::AdapterInfo::backend) did not cross the wire**
     /// and is always [`BackendKind::WebGpu`]
-    /// here; the three fields WebGPU cannot supply arrive as the values that
-    /// mean absent. The [module docs](self) carry both lists.
+    /// here; the fields WebGPU cannot supply arrive as the values that mean
+    /// absent. The [module docs](self) carry both lists.
     Adapter {
         /// What the browser said about the adapter it granted.
         info: AdapterInfo,

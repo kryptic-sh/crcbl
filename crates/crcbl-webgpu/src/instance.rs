@@ -97,7 +97,7 @@
 //! let probe = AdapterProbe::request(&channel).expect("a fresh channel has room");
 //! let sequence = probe.sequence().expect("a fresh request is waiting");
 //!
-//! // What JS replays, and what it answers with. The three fields WebGPU cannot
+//! // What JS replays, and what it answers with. The fields WebGPU cannot
 //! // supply are the values that mean absent, not plausible-looking numbers.
 //! let commands = channel.encode(|stream| decode_stream(stream.bytes())).unwrap()?;
 //! assert_eq!(commands, vec![Command::EnumerateAdapters]);

@@ -183,7 +183,7 @@ impl Owned for SwapchainEntry {
 impl SwapchainEntry {
     /// Whether this is the offscreen ring rather than a real DXGI swapchain.
     ///
-    /// One question, asked in one way, so the four call sites that branch on it
+    /// One question, asked in one way, so every call site that branches on it
     /// cannot each pick a different field to read.
     pub(crate) fn is_offscreen(&self) -> bool {
         self.raw.is_none()

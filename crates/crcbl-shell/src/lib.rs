@@ -50,7 +50,7 @@
 //! slice after it, and [`ShellCaps`] is clear on every bit they would set. It is
 //! hand-written `extern "system"` FFI to `user32`, `gdi32`, `shcore` and
 //! `kernel32` — **linked rather than `dlopen`ed**, which is the one place the
-//! three native backends deliberately disagree: a Linux box can genuinely lack
+//! native backends deliberately disagree: a Linux box can genuinely lack
 //! libwayland, and a Windows cannot lack `user32.dll`. There is no
 //! `windows-rs`.
 //!

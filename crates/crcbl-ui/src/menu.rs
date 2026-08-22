@@ -37,11 +37,11 @@
 //! unit**. Its panel has to be measured before any button can be placed, because
 //! the panel's width is the widest button's width and the buttons are centred in
 //! the panel. Handing a caller three `Button`s and letting it do the arithmetic
-//! is handing three samples the same arithmetic to get subtly differently wrong.
+//! is handing every sample the same arithmetic to get subtly differently wrong.
 //!
 //! # The keyboard is the primary input, and the pointer is optional
 //!
-//! Both samples are played with the keyboard, so a menu that could only be
+//! The samples are played with the keyboard, so a menu that could only be
 //! clicked would be a regression. The model here is keyboard-first:
 //! [`Menu::select_next`]/[`Menu::select_previous`] move a **selection**, and the
 //! selected item draws as [`ButtonState::Hovered`] — the same art the pointer
