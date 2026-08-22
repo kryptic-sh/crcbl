@@ -1234,6 +1234,43 @@ leak — `entity_to_index.get().copied()` where `remove()` belongs — is caught
 per-tick assertion stays green through it. Do not delete that loop as duplicated
 work.
 
+### DECISION NEEDED — `data:` URI glTF needs base64, and the workspace has no decoder
+
+**The gap.** `crcbl_scene::gltf_import` refuses a `data:` URI buffer outright
+(`StorageError::Unsupported`, in the buffer-loading match), and the same holds
+for images. That is **Blender's "glTF Embedded" export** — the single-file form
+an artist is most likely to hand over — so it is the highest-value thing the
+importer still cannot open.
+
+**Why it is a decision rather than a task.** A `data:` URI carries its payload
+as base64, and `git grep` finds no base64 decoder anywhere in the workspace and
+no such crate in `Cargo.lock`. CLAUDE.md's reach-outward rule puts a dependency
+the project already has ahead of writing one, and names **encoding**
+specifically as a thing not to hand-roll — while also making a _new_ dependency
+the owner's call. So the two halves of the rule point in different directions
+here and only the owner can settle it.
+
+- **(a) Take a base64 crate.** `base64` is the ecosystem's answer, is widely
+  used, and has had its edge cases found in public — padding, whitespace, the
+  URL-safe alphabet, and rejecting trailing bits that decode to nothing. One new
+  dependency in `crcbl-scene`, which today has none of this kind.
+- **(b) Write the decoder.** RFC 4648 §4 is small and the workspace has a
+  precedent for transcribing a named algorithm with specification test vectors.
+  The risk is precisely what the rule warns about: a decoder that is right on
+  every file anyone tries and wrong on one padding case, which compiles, reads
+  plausibly and passes every test somebody thought to write. It also has to
+  decide what to do with the things real exporters emit — whitespace inside the
+  payload, a missing `;base64` for a plain-text URI, percent-encoding.
+- **(c) Keep refusing, and say so better.** The current message already tells
+  the user to re-export as `.glb` or keep the `.bin` beside the `.gltf`, which
+  is honest and actionable. Costs nothing and closes nothing.
+
+**Worth knowing before choosing:** whichever way this goes, the payload is
+untrusted input from a file the user was handed, so the decoder needs a length
+bound before it allocates — `crcbl-sprite`'s PNG path already refuses a tiny
+file declaring a huge size, and this wants the same treatment. That argues
+mildly for (a), since a maintained crate has already been made to care.
+
 ### glTF reaches the renderer — what it still cannot open
 
 `crcbl_scene::gltf_render::build_render_scene` turns an imported document into a
