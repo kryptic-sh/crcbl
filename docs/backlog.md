@@ -9970,27 +9970,67 @@ the rest of that entry's list still stands.
   `crcbl-net`. The rename's cut was at three words, so these were never read;
   whether they state what the body asserts is unmeasured, not judged fine.
 
+### The duplicate-name census, and why most of it stays
+
+Measured 2026-08-22 by extracting the `fn` after every `#[test]` in the tracked
+Rust and grouping by name: **4882 test functions, 4691 distinct names, 115 names
+carried by more than one test.** Grouping each duplicated name by the crate or
+app its copies live in:
+
+- **53 across the sample apps** —
+  `a_paused_game_shows_the_pause_menu_and_nothing_else` in all four of
+  `asteroids`, `breakout`, `flappy` and `horde`,
+  `the_art_bakes_to_the_sheets_it_declares` in the same four, and so on.
+- **35 inside one crate, across its modules** — `crcbl-shell`'s `appkit` and
+  `win32` halves account for most of them (`control_characters_are_not_text`,
+  `two_windows_resizing_do_not_collapse_into_each_other`), `crcbl-jobs`'
+  `assert_send` across four containers for the rest.
+- **21 spanning unrelated units**, listed below.
+- **6 across the GPU backends**, which `docs/plan/12-testing.md` already
+  governs.
+
+**So the great majority is deliberate parallel structure and renaming it would
+be a loss, not a fix.** One contract instantiated per sample, per platform half
+or per container is exactly the shape that should share a name: the name is the
+contract, and making the copies differ by a suffix would hide that they are the
+same claim. This is the opposite conclusion from the `crcbl-shaders` rename
+recorded above, and the difference is real — those copies each read a
+_different_ source file and asserted _different_ offsets, so one name over
+several claims was wrong there.
+
+**What the duplication does cost** is already recorded under "Declined:
+extending the citation gate from paths to symbols": a bare test name quoted in
+prose does not identify a test, and `cargo test <name>` runs all the copies.
+That is the price of the parallel structure and is accepted.
+
+**The residue worth a second look** — pairs that share a name by coincidence
+rather than by contract, where the two tests assert unrelated things:
+
+- `every_index_is_in_range` — `apps/quarry/src/face.rs` and
+  `crcbl-shaders/src/mesh.rs`.
+- `every_normal_is_unit_length` — `apps/quarry/src/face.rs` and
+  `crcbl-greybox/tests/greybox.rs`.
+- `the_entry_points_answer_zero_until_a_source_is_installed` —
+  `crcbl-audio/src/web.rs` and `crcbl-store/src/web/fetch.rs`.
+- `the_sections_labels_are_its_own` — `crcbl-render/src/counters.rs` and
+  `crcbl-ui/src/budget.rs`.
+
+None is a defect and none is scheduled; they are named so the next sweep does
+not have to re-derive which of the 115 are accidents. The other 17 mixed groups
+are contract-sharing after all — the sample apps against `crcbl-ui`'s own menu
+tests, `crcbl-client` against `crcbl-server`, `crcbl-hal` against
+`crcbl-shell`'s matching error convention.
+
 ### Fixed sleeps left in tests the assert-nothing slice did not own
 
 The slice that gave the assert-nothing tests real assertions removed two fixed
 sleeps as part of the work — `absurd_latency_and_jitter_do_not_panic`'s 50 ms in
 `crcbl-net/src/condition.rs` and
 `the_null_stream_fills_its_source_until_it_is_dropped`'s 20 ms in
-`crcbl-audio/src/lib.rs`, both now poll-with-deadline. (This entry named both by
-their pre-rename names until 2026-08-20, while quoting the second one's current
-name six lines further down.) Its brief named those two tests, so the neighbours
-that sleep the same way were left alone and are recorded here rather than left
-to be re-derived:
+`crcbl-audio/src/lib.rs`, both now poll-with-deadline. Its brief named those two
+tests, so the neighbours that sleep the same way were left alone and are
+recorded here rather than left to be re-derived:
 
-- **`source_fill_receives_stereo_buffer`** (`crcbl-audio/src/lib.rs`) sleeps 30
-  ms and drops the stream. Its `CheckSource::fill` asserts the rate and the
-  buffer shape, so the assertions are real — but they run on the stream's
-  polling thread, and a run where the thread never got scheduled inside 30 ms
-  executes none of them and still passes. It is the same shape as the loop with
-  no count that `the_value_column_starts_past_the_longest_label` had. The fix is
-  the one `the_null_stream_fills_its_source_until_it_is_dropped` now uses next
-  to it: count the fills in the source, poll for a non-zero count against a
-  deadline, and assert the count before dropping the stream.
 - **`the_latency_only_constructor_delays_delivery_and_still_delivers`** and
   **`a_message_under_latency_does_not_arrive_until_the_delay_has_passed`**
   (`crcbl-net/src/condition.rs`) sleep past a configured latency and then assert
