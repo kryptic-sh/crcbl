@@ -256,6 +256,40 @@ every clippy job runs `-D warnings` and a new release turns CI red on an
 untouched repository. A threaded wasm build therefore needs a _second_, pinned
 nightly for that target only, in the shape the `decoder-fuzz` job already uses.
 
+**Correction (2026-08-23): that command's artifact is not usable by a worker, so
+this finding read stronger than it was.** Built exactly as above,
+`crcbl_horde.wasm` has **zero imports** and **exports** its memory. A worker can
+only attach to a memory the host constructs and the module imports, so nothing
+about that artifact is threaded beyond the atomic instructions being legal. The
+link arguments are the missing half:
+
+```
+-C link-arg=--shared-memory  -C link-arg=--import-memory
+-C link-arg=--max-memory=1073741824
+-C link-arg=--export=__wasm_init_tls   -C link-arg=--export=__tls_base
+-C link-arg=--export=__tls_size        -C link-arg=--export=__tls_align
+-C link-arg=--export=__stack_pointer   -C link-arg=--export=__heap_base
+```
+
+With those, the module imports `env.memory`, and the bootstrap was **run**
+rather than designed: under `node:worker_threads`, three workers instantiated
+the same module against one shared memory and each executed Rust — shared-heap
+allocation, a shared `AtomicU32`, and a per-worker `thread_local` all behaved,
+and the main thread's own `thread_local` survived. Each worker needs its
+`__stack_pointer` set and `__wasm_init_tls` called before it runs anything.
+
+**Two facts from that session belong in this plan, not only in the backlog.**
+First, `Mutex` and `Condvar` work across workers, which is what decides whether
+the pool needs redesigning: a worker blocked in `Condvar::wait` was woken with
+the right count by three others, and a `wait_timeout(500 ms)` with nothing to
+satisfy it returned in 500 ms reporting `timed_out` rather than in microseconds
+— so it is a real futex wait, and `Pool` needs no change to run on workers.
+Second, omitting the `__stack_pointer` export is a **silent** failure: every
+worker keeps the main thread's stack, a closure that merely allocates still
+returns the right answer every time, and the damage appears only where a worker
+writes a large stack array. Any gate over this has to make a worker use its
+stack.
+
 ### Finding 2 — `std::thread::spawn` compiles on wasm and fails at run time
 
 This is the one that matters. In `library/std/src/sys/thread/mod.rs`, the arm
