@@ -261,6 +261,35 @@ export const MSAA = Object.freeze({
 });
 
 /**
+ * The `CLAMP_*` codes `__crcbl_web_gpu_probe_clamp_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The depth-clamp probe is a readback at heart — its setup frame ends in the
+ * same `request_readback` — so its codes are {@link MSAA}'s, `UNSUPPORTED` and
+ * the `FAILED` of `7` included. `READY` carries two blocks of `Rgba8Unorm`
+ * texels: the target a pipeline with `depth_clamp` drew into, then the target
+ * the pipeline beside it drew into with the flag off and nothing else changed.
+ * Which colour each block holds is the whole evidence that depth clamping
+ * happened, because the same triangle was drawn into both, past the far plane.
+ *
+ * `UNSUPPORTED` is the device opening without `depth-clip-control`, which is
+ * also why this probe has a supported flag beside it: WebGPU refuses
+ * `primitive.unclippedDepth` on such a device, so nothing was encoded rather
+ * than two identical blocks being read back and called a pass. Read
+ * `__crcbl_web_gpu_probe_clamp_supported` to say which happened.
+ */
+export const CLAMP = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+  UNSUPPORTED: 6,
+  FAILED: 7,
+});
+
+/**
  * The `OCCLUSION_*` codes `__crcbl_web_gpu_probe_occlusion_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1707,6 +1736,105 @@ export function readMsaaProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: msaaStateName(state), reason, bytes };
+}
+
+/**
+ * The same state-name helper again, for the depth-clamp codes. Its own function
+ * for {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function clampStateName(state) {
+  const found = Object.entries(CLAMP).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Whether the device this page opened has the browser's `depth-clip-control`.
+ *
+ * Read this *before* {@link startClampProbe}, and read it again when the state
+ * is `UNSUPPORTED`: it is what tells "this device withheld the feature the
+ * clamped pipeline needs" from "nothing asked it to". `false` before a device
+ * opens.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean}
+ */
+export function clampSupported({ exports }) {
+  return exports.__crcbl_web_gpu_probe_clamp_supported() === 1;
+}
+
+/**
+ * Ask wasm to draw one triangle past the far plane twice — through a pipeline
+ * whose `depth_clamp` is set and through one whose is not — and start reading
+ * both targets back on the device it opened.
+ *
+ * The only gate anywhere that carries `depth_clamp` to a browser at all. What
+ * comes back is a *difference*: with depth clipping disabled the triangle
+ * rasterises, with it enabled the triangle is discarded, and the two blocks the
+ * readback holds are those two outcomes side by side. The unclamped half is the
+ * control and is not optional — without it, geometry that turned out to be
+ * inside the depth range after all would paint both blocks and prove nothing.
+ * {@link pollClampProbe} drives the poll and {@link readClampProbe} reads the
+ * bytes when they land.
+ *
+ * Its answer is *data* and it needs a **device**, so `false` before one has
+ * opened is ordering rather than failure — wait for {@link readDeviceProbe} to
+ * say `OPENED`. `false` also means the device opened without the feature, which
+ * {@link clampSupported} and a state of `UNSUPPORTED` are what distinguish.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame.
+ */
+export function startClampProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_clamp() === 1;
+}
+
+/**
+ * Poll the depth-clamp readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered, the bytes are already
+ * in, or the device withheld the feature, so the gate can call it every frame.
+ * See `__crcbl_web_gpu_probe_clamp_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollClampProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_clamp_poll() === 1;
+}
+
+/**
+ * Read where the depth-clamp readback has got to, and its bytes once it is
+ * `READY` — the clamped target's block first, the clipped one's second.
+ *
+ * {@link readMsaaProbe}'s sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
+ */
+export function readClampProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_clamp_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_clamp_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_clamp_reason_len()
+  );
+  const ptr = exports.__crcbl_web_gpu_probe_clamp_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_clamp_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: clampStateName(state), reason, bytes };
 }
 
 /**

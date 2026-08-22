@@ -31,6 +31,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl_webgpu::probe::probe_device_desc` now asks for `DEPTH_CLAMP` as well
+  as `TIMESTAMP_QUERY`**, both optional, so a browser without
+  `depth-clip-control` still opens a device and the probe reports the reason. It
+  comes with `probe_clamp_clamped_pipeline_desc` and
+  `probe_clamp_clipped_pipeline_desc`, a pair differing only in `depth_clamp`.
+
+  The reason it matters to a caller is what it now proves.
+  `Features::DEPTH_CLAMP` has been reported off the browser's
+  `depth-clip-control` all along, but every pipeline the probe built set
+  `depth_clamp: false`, so no command originating in Rust had ever carried the
+  flag to a real browser — the only place the `true` path ran was a Node stub
+  that recorded the descriptor it was handed. The browser gate now draws a
+  triangle past the far plane through both pipelines and reads back that the
+  clamped one kept its fragments and the control one did not, on SwiftShader and
+  on hardware. The capability was always answered `Yes`; it is now witnessed.
+
 - **`crcbl-webgpu` answers `Support::Yes` for
   `Capability::IndirectArgumentPaddedStride`**, where it answered `No`. The old
   reason — "WebGPU's drawIndirect reads one tightly packed argument structure

@@ -157,6 +157,14 @@
 //! | [`__crcbl_web_gpu_probe_timestamp_state`](shim::__crcbl_web_gpu_probe_timestamp_state) | `() -> i32` | Drain, and answer one of the `TIMESTAMP_*` codes. |
 //! | [`__crcbl_web_gpu_probe_timestamp_ptr`](shim::__crcbl_web_gpu_probe_timestamp_ptr) | `() -> i32` | Where the two ticks start, as little-endian `u64`. |
 //! | [`__crcbl_web_gpu_probe_timestamp_len`](shim::__crcbl_web_gpu_probe_timestamp_len) | `() -> i32` | How many bytes there are. **Zero is a failed read**, and two zero values are a pass nothing timed. |
+//! | [`__crcbl_web_gpu_probe_clamp_supported`](shim::__crcbl_web_gpu_probe_clamp_supported) | `() -> i32` | Whether the opened device has the browser's `depth-clip-control`, as `1` or `0`. Read this before asking. |
+//! | [`__crcbl_web_gpu_probe_clamp`](shim::__crcbl_web_gpu_probe_clamp) | `() -> i32` | Encode two passes that draw one triangle past the far plane through two pipelines differing only in `depth_clamp`, copy both targets out and ask for the bytes. |
+//! | [`__crcbl_web_gpu_probe_clamp_poll`](shim::__crcbl_web_gpu_probe_clamp_poll) | `() -> i32` | Poll that readback once, and register the wait. |
+//! | [`__crcbl_web_gpu_probe_clamp_state`](shim::__crcbl_web_gpu_probe_clamp_state) | `() -> i32` | Drain, and answer one of the `CLAMP_*` codes. |
+//! | [`__crcbl_web_gpu_probe_clamp_reason_ptr`](shim::__crcbl_web_gpu_probe_clamp_reason_ptr) | `() -> i32` | Where the reason the depth-clamp readback stopped starts. Empty unless the state is [`CLAMP_FAILED`] or [`CLAMP_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_clamp_reason_len`](shim::__crcbl_web_gpu_probe_clamp_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_clamp_bytes_ptr`](shim::__crcbl_web_gpu_probe_clamp_bytes_ptr) | `() -> i32` | Where the two targets' texels start — the clamped one's block first — once [`__crcbl_web_gpu_probe_clamp_state`](shim::__crcbl_web_gpu_probe_clamp_state) answers [`CLAMP_READY`]. |
+//! | [`__crcbl_web_gpu_probe_clamp_bytes_len`](shim::__crcbl_web_gpu_probe_clamp_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the depth-clamp probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -183,24 +191,42 @@
 //! # The device this asks for, and why it asks for so little
 //!
 //! [`probe_device_desc`] requires [`Features::COMPUTE`](crcbl_hal::Features::COMPUTE)
-//! — core WebGPU, so every browser can satisfy it — and asks for **one optional
-//! feature and no more**. The parsimony is not timidity: it is what makes the
-//! answer checkable. A device opened with nearly nothing is one the page can
-//! open a second time for itself and compare against, and its capabilities
-//! differ from the *adapter's* on any machine whose adapter reports more than
-//! what was asked for. A request that asked for everything the adapter had would
-//! produce a device whose capabilities equal the adapter's, and a backend that
-//! reported the adapter's record for its device would then pass.
+//! — core WebGPU, so every browser can satisfy it — and asks for **nothing
+//! optional it cannot then observe**. The parsimony is not timidity: it is what
+//! makes the answer checkable. A device opened with nearly nothing is one the
+//! page can open a second time for itself and compare against, and its
+//! capabilities differ from the *adapter's* on any machine whose adapter reports
+//! more than what was asked for. A request that asked for everything the adapter
+//! had would produce a device whose capabilities equal the adapter's, and a
+//! backend that reported the adapter's record for its device would then pass.
 //!
-//! The one exception is
-//! [`TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY), and it is asked
-//! for because without it there is nothing to observe: a `GPUQuerySet` of type
-//! `'timestamp'` needs the browser's `timestamp-query`, so a device that did not
-//! ask could not create one and group AF would have no claim to hold. It is
-//! *optional* rather than required, so a browser without it still opens a device
-//! and the probe reports [`TIMESTAMP_UNSUPPORTED`] with a reason rather than
-//! failing to start. `web/tools/probe-groups.mjs` opens its reference device
-//! with the same request, so the two are compared like for like.
+//! **The exceptions are the features whose capability has no witness without
+//! them**, and there is one test for admitting a feature to this list: the
+//! backend declares a capability, and the only way to see that capability
+//! *happen* is a device that enabled the gate. A feature admitted for any other
+//! reason spends the distinction above and buys nothing.
+//!
+//! [`TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) is the first. A
+//! `GPUQuerySet` of type `'timestamp'` needs the browser's `timestamp-query`, so
+//! a device that did not ask could not create one and group AF would have no
+//! claim to hold.
+//!
+//! [`DEPTH_CLAMP`](crcbl_hal::Features::DEPTH_CLAMP) is the second, on the same
+//! test and for a sharper reason: this crate *reports* it to callers off the
+//! browser's `depth-clip-control`, and
+//! [`depth_clamp`](crcbl_hal::PrimitiveState::depth_clamp) is refused on a
+//! device that did not enable it — so before group AH there was no pipeline
+//! anywhere with the flag set that a browser had ever seen, and the capability
+//! was reported on the strength of a node stub recording a descriptor. What the
+//! device buys is the *difference* group AH reads back: geometry past the far
+//! plane rasterises through the clamped pipeline and is clipped away by the one
+//! beside it, and no device that withheld the gate can show that.
+//!
+//! Both are *optional* rather than required, so a browser without either still
+//! opens a device and the probe reports [`TIMESTAMP_UNSUPPORTED`] or
+//! [`CLAMP_UNSUPPORTED`] with a reason rather than failing to start.
+//! `web/tools/probe-groups.mjs` opens its reference device with the same
+//! request, so the two are compared like for like.
 //!
 //! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) is
 //! deliberately *not* what this uses: it requires
@@ -1016,6 +1042,50 @@ pub const TIMESTAMP_READY: u32 = 2;
 /// reported.
 pub const TIMESTAMP_UNSUPPORTED: u32 = 3;
 
+/// Nothing has been asked, or there is no channel to ask through.
+pub const CLAMP_UNASKED: u32 = 0;
+/// The setup frame — two colour targets of the same size, two pipelines that
+/// differ in [`depth_clamp`](crcbl_hal::PrimitiveState::depth_clamp) and in
+/// nothing else, a pass into each that clears to
+/// [`PROBE_CLAMP_CLEAR_BYTES`] and draws the same triangle at
+/// [`PROBE_CLAMP_NDC_DEPTH`], the two copies into one buffer, the submit and the
+/// request — is on the stream, and no poll has been issued.
+pub const CLAMP_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const CLAMP_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const CLAMP_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_clamp_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_clamp_bytes_len`] carry them — the clamped
+/// target's `Rgba8Unorm` texels followed by the clipped target's, and depth
+/// clamping happened exactly when the first block is
+/// [`PROBE_CLAMP_DRAW_BYTES`] and the second [`PROBE_CLAMP_CLEAR_BYTES`].
+pub const CLAMP_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`DRAW_UNDECODABLE`]'s twin.
+pub const CLAMP_UNDECODABLE: u32 = 5;
+/// The **device** opened without [`Features::DEPTH_CLAMP`], so nothing was
+/// encoded: a `createRenderPipeline` carrying `primitive.unclippedDepth` is
+/// refused on such a device, and a frame that quietly built both pipelines
+/// unclamped instead would read back two identical halves and prove nothing.
+/// [`MSAA_UNSUPPORTED`]'s shape, and
+/// [`shim::__crcbl_web_gpu_probe_clamp_supported`] is what the device reported.
+pub const CLAMP_UNSUPPORTED: u32 = 6;
+/// The browser refused the clamp readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_clamp_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_clamp_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const CLAMP_FAILED: u32 = 7;
+
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
 pub const PARITY_UNASKED: u32 = 0;
@@ -1148,17 +1218,18 @@ pub const fn probe_readback_copy() -> BufferImageCopy {
 /// The descriptor [`shim::__crcbl_web_gpu_probe_device`] asks with.
 ///
 /// Requires only [`Features::COMPUTE`], which core WebGPU grants with no
-/// `GPUFeatureName` behind it, and asks for exactly one optional feature — see
-/// the [module docs](self#the-device-this-asks-for-and-why-it-asks-for-so-little)
-/// for why the parsimony is the point rather than a placeholder, and why
-/// [`Features::TIMESTAMP_QUERY`] is the exception.
+/// `GPUFeatureName` behind it, and asks for the optional features whose
+/// capability cannot be witnessed without them and no others — see the
+/// [module docs](self#the-device-this-asks-for-and-why-it-asks-for-so-little)
+/// for why the parsimony is the point rather than a placeholder, and for the one
+/// test [`Features::TIMESTAMP_QUERY`] and [`Features::DEPTH_CLAMP`] meet.
 #[must_use]
 pub const fn probe_device_desc(adapter: AdapterId) -> DeviceDesc<'static> {
     DeviceDesc {
         label: Some("crcbl-webgpu probe"),
         adapter,
         required_features: Features::COMPUTE,
-        optional_features: Features::TIMESTAMP_QUERY,
+        optional_features: Features::TIMESTAMP_QUERY.union(Features::DEPTH_CLAMP),
         compatible_surface: None,
     }
 }
@@ -5072,6 +5143,397 @@ pub const fn probe_dispatch_indirect_copy() -> BufferCopy {
     }
 }
 
+// The depth-clamp probe (group AH): the one gate that shows DEPTH CLAMPING
+// changing what a GPU produced. Every handle it names is `14 << 32` — a
+// generation past the indirect-dispatch probe's `13 << 32` — so its live
+// resources never land in another probe's slot in the shared page. It creates two
+// images, two views and two graphics pipelines, which the three types that carry
+// two here distinguish by index; the buffer, the module, the layout and the
+// encoder are each the only one of their kind at this generation.
+//
+// It is here because `Features::DEPTH_CLAMP` is reported to callers off the
+// browser's `depth-clip-control` and no other check anywhere has ever carried
+// [`PrimitiveState::depth_clamp`](crcbl_hal::PrimitiveState::depth_clamp) `true`
+// to a browser: [`PROBE_GRAPHICS_PIPELINE_DESC`] keeps it `false` so that it
+// builds on a device without the feature, and the `true` path was driven only by
+// `web/tools/gpu-replay.mjs` under node, against a stub device that records the
+// descriptor it was handed. A recorded descriptor is not a clamped fragment.
+//
+// **THE OBSERVABLE IS A DIFFERENCE IN THE PICTURE, NOT A SURVIVED CALL.** A
+// pipeline built with `unclippedDepth` and a GPU that ignores it raise no error
+// anywhere — the pipeline is created, the pass runs, the readback resolves — so
+// the probe draws the *same* triangle twice, at [`PROBE_CLAMP_NDC_DEPTH`], through
+// two pipelines that differ in `depth_clamp` and in nothing else, into two
+// targets of the same size cleared to the same colour. Depth clipping is what
+// separates them: geometry past the far plane rasterises under the clamped
+// pipeline and is discarded under the other, so the pair of readings is the
+// claim. See [`probe_clamp_clamped_pipeline_desc`] for the four readings and
+// what each of them means.
+
+/// The clip-space `z` both draws emit, with `w` at `1.0` — so it is the NDC
+/// depth too, and it is **past the far plane**, which WebGPU puts at `1.0`.
+///
+/// That is the whole fixture: a value inside the range would rasterise under
+/// both pipelines and the probe could not tell them apart. The
+/// `the_clamp_wgsl_puts_the_triangle_past_the_far_plane` test is what holds the
+/// WGSL below to this number and this number to the range it must be outside.
+pub const PROBE_CLAMP_NDC_DEPTH: f32 = 1.5;
+
+/// Texels across and down each of the two colour targets. [`PROBE_READBACK_SIZE`]'s
+/// figure, for its 256-byte-row reason.
+pub const PROBE_CLAMP_SIZE: u32 = PROBE_READBACK_SIZE;
+
+/// The colour both passes clear their target to.
+///
+/// **The reading that means the triangle was clipped away**, which is what the
+/// clipped target must show and what the clamped one must not. It is not a
+/// channel permutation of [`PROBE_CLAMP_DRAW_BYTES`] and its alpha differs, so no
+/// swap on the way out can turn one reading into the other, and every colour
+/// channel is a mid-tone — away from the `0` and `255` an untouched or saturated
+/// one reads as.
+pub const PROBE_CLAMP_CLEAR_BYTES: [u8; 4] = [45, 125, 85, 255];
+
+/// The colour the fragment shader writes.
+///
+/// **The reading that means the triangle rasterised**, which is what the clamped
+/// target must show.
+pub const PROBE_CLAMP_DRAW_BYTES: [u8; 4] = [215, 95, 35, 240];
+
+/// The queue the depth-clamp probe names in its command encoder. `14 << 32`.
+pub const PROBE_CLAMP_QUEUE: QueueHandle = match QueueHandle::from_bits(14 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 14 is not zero"),
+};
+
+/// The command buffer the depth-clamp probe finishes its encoder into.
+/// `14 << 32`.
+pub const PROBE_CLAMP_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(14 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 14 is not zero"),
+    };
+
+/// The in-flight readback the depth-clamp probe requests and polls. `14 << 32`.
+pub const PROBE_CLAMP_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(14 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 14 is not zero"),
+};
+
+/// The target the **clamped** pipeline draws into. `14 << 32`, index `0`.
+pub const PROBE_CLAMP_CLAMPED_IMAGE: ImageHandle = match ImageHandle::from_bits(14 << 32) {
+    Some(image) => image,
+    None => panic!("generation 14 is not zero"),
+};
+
+/// The target the **clipped** pipeline draws into. `14 << 32`, index `1`.
+pub const PROBE_CLAMP_CLIPPED_IMAGE: ImageHandle = match ImageHandle::from_bits((14 << 32) | 1) {
+    Some(image) => image,
+    None => panic!("generation 14 is not zero"),
+};
+
+/// Either target's descriptor — they are the same size, the same format and the
+/// same usage, because the *only* difference the probe permits between the two
+/// halves of its readback is the pipeline that drew them.
+#[must_use]
+pub const fn probe_clamp_image_desc(label: &'static str) -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some(label),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_CLAMP_SIZE, PROBE_CLAMP_SIZE),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The clamped target's view. `14 << 32`, index `0`.
+pub const PROBE_CLAMP_CLAMPED_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(14 << 32) {
+    Some(view) => view,
+    None => panic!("generation 14 is not zero"),
+};
+
+/// The clipped target's view. `14 << 32`, index `1`.
+pub const PROBE_CLAMP_CLIPPED_VIEW: ImageViewHandle =
+    match ImageViewHandle::from_bits((14 << 32) | 1) {
+        Some(view) => view,
+        None => panic!("generation 14 is not zero"),
+    };
+
+/// The view of the clamped target the first pass renders into.
+pub const PROBE_CLAMP_CLAMPED_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu clamped view"),
+    image: PROBE_CLAMP_CLAMPED_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The view of the clipped target the second pass renders into.
+pub const PROBE_CLAMP_CLIPPED_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu clipped view"),
+    image: PROBE_CLAMP_CLIPPED_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The buffer both targets are copied into and read back from. `14 << 32`.
+pub const PROBE_CLAMP_BUFFER: BufferHandle = match BufferHandle::from_bits(14 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 14 is not zero"),
+};
+
+/// How many bytes one target occupies in [`probe_clamp_buffer_desc`]'s buffer —
+/// and the offset the clipped target's copy lands at, since the clamped one
+/// starts at zero.
+///
+/// A multiple of 256 by construction, which is what `copyTextureToBuffer`
+/// requires of a `bufferLayout.offset` here: [`PROBE_CLAMP_SIZE`] rows of
+/// [`PROBE_CLAMP_SIZE`] `Rgba8Unorm` texels are 256-byte rows, so any whole
+/// number of them is aligned.
+pub const PROBE_CLAMP_BLOCK_BYTES: u64 = (PROBE_CLAMP_SIZE as u64) * (PROBE_CLAMP_SIZE as u64) * 4;
+
+/// The readback buffer's descriptor — **both** targets, the clamped one first.
+///
+/// One buffer rather than two, and one readback rather than two, because the
+/// evidence is the *pair*: a gate that polled two readbacks could see one land
+/// and the other not, and would have to decide what a half-answer means. Here
+/// there is one answer and it either holds both blocks or holds nothing.
+#[must_use]
+pub const fn probe_clamp_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu clamp buffer"),
+        size: PROBE_CLAMP_BLOCK_BYTES * 2,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The clear both passes load with — [`PROBE_CLAMP_CLEAR_BYTES`] in the colour
+/// slot, and a depth and stencil slot neither pass has an attachment for.
+#[must_use]
+pub const fn probe_clamp_clear_value() -> ClearValue {
+    ClearValue {
+        color: [
+            unorm8(PROBE_CLAMP_CLEAR_BYTES[0]),
+            unorm8(PROBE_CLAMP_CLEAR_BYTES[1]),
+            unorm8(PROBE_CLAMP_CLEAR_BYTES[2]),
+            unorm8(PROBE_CLAMP_CLEAR_BYTES[3]),
+        ],
+        depth: 0.0,
+        stencil: 0,
+    }
+}
+
+/// The colour attachment a clamp pass writes — cleared to
+/// [`PROBE_CLAMP_CLEAR_BYTES`] and stored, so the copy afterwards reads what the
+/// draw left.
+#[must_use]
+pub const fn probe_clamp_color_attachment(view: ImageViewHandle) -> ColorAttachment {
+    ColorAttachment {
+        view,
+        resolve: None,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: probe_clamp_clear_value(),
+    }
+}
+
+/// The image→buffer copy that moves one target's texels into its block of the
+/// readback buffer.
+#[must_use]
+pub const fn probe_clamp_copy(image: ImageHandle, buffer_offset: u64) -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_CLAMP_BUFFER,
+        buffer_offset,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_CLAMP_SIZE, PROBE_CLAMP_SIZE),
+    }
+}
+
+/// One oversized triangle, past the far plane, in a flat colour.
+///
+/// **No vertex buffers**, [`PROBE_DRAW_WGSL`]'s trick: `vsMain` positions from
+/// `@builtin(vertex_index)` alone, and the three vertices are the oversized
+/// triangle that covers the whole target rather than a fitted quad, so one draw
+/// of three vertices reaches every texel.
+///
+/// **`w` is `1.0` and `z` is [`PROBE_CLAMP_NDC_DEPTH`]**, so the clip-space
+/// depth survives the perspective divide as itself and every fragment of the
+/// triangle is outside `0..=1`. Both pipelines are handed this same module —
+/// what separates them is `depth_clamp` and nothing else, which is what makes
+/// the two readings comparable.
+///
+/// **Each channel is spelled `n.0/255.0`**, the byte the readback is compared
+/// against divided by the `Rgba8Unorm` maximum, rather than a decimal that would
+/// have to be kept in step by hand.
+/// `the_clamp_wgsl_paints_the_colour_the_gate_asserts` is what holds the string
+/// to the constants, and
+/// `the_clamp_wgsl_puts_the_triangle_past_the_far_plane` what holds its depth to
+/// [`PROBE_CLAMP_NDC_DEPTH`].
+pub const PROBE_CLAMP_WGSL: &str = concat!(
+    "@vertex fn vsMain(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> { ",
+    "var positions = array<vec2<f32>, 3>(",
+    "vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0)); ",
+    "return vec4<f32>(positions[vertex], 1.5, 1.0); } ",
+    "@fragment fn fsMain() -> @location(0) vec4<f32> { return vec4<f32>(",
+    "215.0/255.0, 95.0/255.0, 35.0/255.0, 240.0/255.0); }"
+);
+
+/// The shader module the depth-clamp probe's frame creates. WGSL only, on
+/// [`PROBE_GRAPHICS_SHADER_MODULE_DESC`]'s terms.
+pub const PROBE_CLAMP_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu clamp shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_CLAMP_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The shader-module handle both depth-clamp pipelines name. `14 << 32`.
+pub const PROBE_CLAMP_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(14 << 32) {
+        Some(module) => module,
+        None => panic!("generation 14 is not zero"),
+    };
+
+/// The pipeline-layout handle both depth-clamp pipelines are built against.
+/// `14 << 32`.
+pub const PROBE_CLAMP_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(14 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 14 is not zero"),
+    };
+
+/// The pipeline layout the depth-clamp probe's frame creates. **Empty** — the
+/// shaders bind nothing.
+pub const PROBE_CLAMP_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu clamp pipeline layout"),
+    bind_group_layouts: &[],
+    push_constants: None,
+};
+
+/// The pipeline whose `depth_clamp` is `true`. `14 << 32`, index `0`.
+pub const PROBE_CLAMP_CLAMPED_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits(14 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 14 is not zero"),
+    };
+
+/// The pipeline whose `depth_clamp` is `false`. `14 << 32`, index `1`.
+pub const PROBE_CLAMP_CLIPPED_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits((14 << 32) | 1) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 14 is not zero"),
+    };
+
+/// The one colour target either depth-clamp pipeline writes — opaque, so a
+/// surviving fragment's colour reaches the texel exactly rather than blended
+/// with the clear underneath it.
+pub const PROBE_CLAMP_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTargetState {
+    format: Format::Rgba8Unorm,
+    blend: None,
+    write_mask: ColorWrites::ALL,
+}];
+
+/// Either depth-clamp pipeline, `depth_clamp` apart.
+///
+/// **`depth_stencil` is `None`**, and that is a decision rather than an economy:
+/// depth clipping is a rasterisation-stage test on clip coordinates and needs no
+/// depth attachment to happen, while a depth test *would* be a second reason a
+/// fragment could vanish — and the whole evidence here is that a fragment vanished
+/// for exactly one reason. Nothing writes or reads depth, so there is no plane to
+/// attach.
+///
+/// The rest is the shape [`PROBE_GRAPHICS_PIPELINE_DESC`] settled on: a
+/// [`PrimitiveTopology::TriangleList`] with counter-clockwise winding, no culling
+/// — so the oversized triangle's winding is not a second reason it could
+/// disappear — and a single-sampled, unblended `Rgba8Unorm` target.
+#[must_use]
+const fn probe_clamp_pipeline_desc(
+    label: &'static str,
+    depth_clamp: bool,
+) -> GraphicsPipelineDesc<'static> {
+    GraphicsPipelineDesc {
+        label: Some(label),
+        layout: PROBE_CLAMP_PIPELINE_LAYOUT,
+        vertex: ShaderEntry {
+            module: PROBE_CLAMP_SHADER_MODULE,
+            entry_point: "vsMain",
+        },
+        fragment: Some(ShaderEntry {
+            module: PROBE_CLAMP_SHADER_MODULE,
+            entry_point: "fsMain",
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleList,
+            front_face: FrontFace::Ccw,
+            cull_mode: CullMode::None,
+            polygon_mode: PolygonMode::Fill,
+            depth_clamp,
+        },
+        depth_stencil: None,
+        multisample: MultisampleState {
+            samples: 1,
+            alpha_to_coverage: false,
+        },
+        color_targets: &PROBE_CLAMP_COLOR_TARGETS,
+    }
+}
+
+/// The pipeline that keeps the triangle: `depth_clamp` is **`true`**, which the
+/// replayer lowers to `primitive.unclippedDepth` and WebGPU refuses on a device
+/// without `depth-clip-control`.
+///
+/// # The four readings, and why only one of them is a pass
+///
+/// Both pipelines draw [`PROBE_CLAMP_WGSL`]'s triangle at
+/// [`PROBE_CLAMP_NDC_DEPTH`], past the far plane, into targets cleared to
+/// [`PROBE_CLAMP_CLEAR_BYTES`]. Reading the clamped block first and the clipped
+/// block second:
+///
+/// * **draw, clear** — the only pass. The flag reached the browser, the browser
+///   disabled depth clipping for that pipeline alone, and the fragments the other
+///   pipeline lost are the fragments this one kept.
+/// * **clear, clear** — the flag reached nothing. Either it was dropped on the
+///   wire, or the browser took `unclippedDepth` and clipped anyway; both
+///   pipelines behaved as the unclamped one, which is the state this probe was
+///   written to end.
+/// * **draw, draw** — nothing was clipped anywhere, so the triangle is not
+///   outside the depth range after all and the clamped reading means nothing.
+///   That is the probe's own control failing, and it is a failure of the fixture
+///   rather than of the browser.
+/// * **clear, draw** — inverted: the two pipelines, the two passes or the two
+///   copies were crossed, and the clamped flag is on the pipeline that was
+///   supposed to be the control.
+///
+/// The control is not optional. Without it, a vertex shader that quietly put the
+/// triangle *inside* the range would produce the draw colour whatever
+/// `depth_clamp` did, and the gate would be green and worthless.
+#[must_use]
+pub const fn probe_clamp_clamped_pipeline_desc() -> GraphicsPipelineDesc<'static> {
+    probe_clamp_pipeline_desc("crcbl-webgpu clamped pipeline", true)
+}
+
+/// The control pipeline: the one above with `depth_clamp` **`false`** and every
+/// other field identical, so what separates the two readings is the flag and
+/// nothing else. See [`probe_clamp_clamped_pipeline_desc`] for what the pair
+/// means.
+#[must_use]
+pub const fn probe_clamp_clipped_pipeline_desc() -> GraphicsPipelineDesc<'static> {
+    probe_clamp_pipeline_desc("crcbl-webgpu clipped pipeline", false)
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -6313,6 +6775,86 @@ impl TimestampProbe {
     }
 }
 
+/// One depth-clamp exercise's **readback** half, from the frame that set it up
+/// to the bytes that came back.
+///
+/// [`MsaaProbe`]'s state machine on the depth-clamp probe's handle, down to the
+/// [`Unsupported`](Self::Unsupported) arm: the setup frame ends in the same
+/// `request_readback` and is answered by the same [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`], and the one thing that can stop it before it
+/// starts is a device that withheld the feature its fixture needs.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum ClampProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — the clamped target's `Rgba8Unorm` texels
+        /// followed by the clipped target's, each
+        /// [`PROBE_CLAMP_BLOCK_BYTES`] long.
+        bytes: Vec<u8>,
+    },
+    /// The device opened without [`Features::DEPTH_CLAMP`], so nothing was
+    /// encoded and nothing will be: the clamped pipeline would be refused, and
+    /// two unclamped ones would agree with each other while proving nothing.
+    Unsupported,
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly once,
+    /// so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
+}
+
+impl ClampProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`MsaaProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -6475,6 +7017,12 @@ struct Probe {
     /// A pass's two timestamps — see [`TimestampProbe`]. No reason of its own,
     /// for [`occlusion_values`](Self::occlusion_values)'s reason.
     timestamp: TimestampProbe,
+    clamp: ClampProbe,
+    /// Why the depth-clamp probe stopped: the browser's own words under
+    /// [`CLAMP_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`CLAMP_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
+    clamp_reason: String,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -6518,6 +7066,8 @@ impl Probe {
             occlusion_reason: String::new(),
             occlusion_values: OcclusionValuesProbe::Unasked,
             timestamp: TimestampProbe::Unasked,
+            clamp: ClampProbe::Unasked,
+            clamp_reason: String::new(),
             parity: ParityReport::new(),
         }
     }
@@ -6947,6 +7497,7 @@ impl Probe {
                 self.occlusion.absorb(&replies);
                 self.occlusion_values.absorb(&replies);
                 self.timestamp.absorb(&replies);
+                self.clamp.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -8385,6 +8936,183 @@ impl Probe {
     fn timestamp_bytes(&self) -> &[u8] {
         match &self.timestamp {
             TimestampProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Whether the device this page opened has the browser's
+    /// `depth-clip-control`.
+    ///
+    /// [`timestamp_supported`](Self::timestamp_supported)'s shape and its reason:
+    /// a fact the *device* reported, so a probe that could not run says why
+    /// rather than being silently skipped.
+    fn clamp_supported(&mut self) -> bool {
+        self.opened()
+            .is_some_and(|caps| caps.features.contains(Features::DEPTH_CLAMP))
+    }
+
+    /// Encode the depth-clamp setup frame: two colour targets, the two pipelines
+    /// that differ only in
+    /// [`depth_clamp`](crcbl_hal::PrimitiveState::depth_clamp), a pass into each
+    /// that clears and draws [`PROBE_CLAMP_WGSL`]'s triangle at
+    /// [`PROBE_CLAMP_NDC_DEPTH`], the two copies into one buffer, and the request
+    /// that reads both blocks back.
+    ///
+    /// **One frame, two passes, one reply** — [`request_stencil`](Self::request_stencil)'s
+    /// shape with the second draw moved into a pass of its own, because the two
+    /// draws must not share an attachment: what is being compared is what each
+    /// pipeline left behind, and one target could only hold whichever drew last.
+    ///
+    /// `false` on three counts, and the third is not a failure:
+    ///
+    /// * no device has opened — [`request_readback`](Self::request_readback)'s
+    ///   ordering rule, since every command here is a device method;
+    /// * the channel had no room, or another channel is installed;
+    /// * **the device opened without [`Features::DEPTH_CLAMP`]**, which leaves
+    ///   the probe [`CLAMP_UNSUPPORTED`] and encodes nothing. WebGPU refuses
+    ///   `primitive.unclippedDepth` on such a device, and a frame that quietly
+    ///   built both pipelines unclamped instead would read back two identical
+    ///   blocks and call that a pass.
+    fn request_clamp(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        if !self.clamp_supported() {
+            self.clamp = ClampProbe::Unsupported;
+            self.clamp_reason.clear();
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(
+                    PROBE_CLAMP_CLAMPED_IMAGE,
+                    &probe_clamp_image_desc("crcbl-webgpu clamped image"),
+                );
+                stream.create_image_view(PROBE_CLAMP_CLAMPED_VIEW, &PROBE_CLAMP_CLAMPED_VIEW_DESC);
+                stream.create_image(
+                    PROBE_CLAMP_CLIPPED_IMAGE,
+                    &probe_clamp_image_desc("crcbl-webgpu clipped image"),
+                );
+                stream.create_image_view(PROBE_CLAMP_CLIPPED_VIEW, &PROBE_CLAMP_CLIPPED_VIEW_DESC);
+                stream.create_buffer(PROBE_CLAMP_BUFFER, &probe_clamp_buffer_desc());
+                stream.create_shader_module(
+                    PROBE_CLAMP_SHADER_MODULE,
+                    &PROBE_CLAMP_SHADER_MODULE_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_CLAMP_PIPELINE_LAYOUT,
+                    &PROBE_CLAMP_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_graphics_pipeline(
+                    PROBE_CLAMP_CLAMPED_PIPELINE,
+                    &probe_clamp_clamped_pipeline_desc(),
+                );
+                stream.create_graphics_pipeline(
+                    PROBE_CLAMP_CLIPPED_PIPELINE,
+                    &probe_clamp_clipped_pipeline_desc(),
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu clamp encoder"),
+                    queue: PROBE_CLAMP_QUEUE,
+                });
+                let clamped = [probe_clamp_color_attachment(PROBE_CLAMP_CLAMPED_VIEW)];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu clamped pass"),
+                    color_attachments: &clamped,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(PROBE_CLAMP_SIZE, PROBE_CLAMP_SIZE),
+                    timestamp_writes: None,
+                });
+                stream.bind_graphics_pipeline(PROBE_CLAMP_CLAMPED_PIPELINE);
+                stream.draw(0..3, 0..1);
+                stream.end_render_pass();
+                let clipped = [probe_clamp_color_attachment(PROBE_CLAMP_CLIPPED_VIEW)];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu clipped pass"),
+                    color_attachments: &clipped,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(PROBE_CLAMP_SIZE, PROBE_CLAMP_SIZE),
+                    timestamp_writes: None,
+                });
+                stream.bind_graphics_pipeline(PROBE_CLAMP_CLIPPED_PIPELINE);
+                stream.draw(0..3, 0..1);
+                stream.end_render_pass();
+                // The clamped block first, so the readback's two halves are in
+                // the order the gate names them.
+                stream.copy_image_to_buffer(&probe_clamp_copy(PROBE_CLAMP_CLAMPED_IMAGE, 0));
+                stream.copy_image_to_buffer(&probe_clamp_copy(
+                    PROBE_CLAMP_CLIPPED_IMAGE,
+                    PROBE_CLAMP_BLOCK_BYTES,
+                ));
+                stream.finish(PROBE_CLAMP_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_CLAMP_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_CLAMP_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu clamp readback"),
+                        buffer: PROBE_CLAMP_BUFFER,
+                        offset: 0,
+                        size: probe_clamp_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.clamp = ClampProbe::Requested;
+            self.clamp_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// depth-clamp readback and register its wait, unless it is already waiting,
+    /// ready or unsupported — [`poll_msaa`](Self::poll_msaa)'s protocol on the
+    /// clamp handle.
+    fn poll_clamp(&mut self) -> bool {
+        if !matches!(self.clamp, ClampProbe::Requested | ClampProbe::Pending) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_CLAMP_READBACK))
+        else {
+            return false;
+        };
+        self.clamp = ClampProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the depth-clamp readback has got to.
+    fn clamp_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.clamp_reason = error.to_string();
+            return CLAMP_UNDECODABLE;
+        }
+        match &self.clamp {
+            ClampProbe::Unasked => CLAMP_UNASKED,
+            ClampProbe::Requested => CLAMP_REQUESTED,
+            ClampProbe::Waiting { .. } => CLAMP_WAITING,
+            ClampProbe::Pending => CLAMP_PENDING,
+            ClampProbe::Ready { .. } => CLAMP_READY,
+            ClampProbe::Unsupported => CLAMP_UNSUPPORTED,
+            ClampProbe::Failed { reason } => {
+                self.clamp_reason.clone_from(reason);
+                CLAMP_FAILED
+            }
+        }
+    }
+
+    /// The bytes the depth-clamp readback came back with, or an empty slice if
+    /// it has not.
+    fn clamp_bytes(&self) -> &[u8] {
+        match &self.clamp {
+            ClampProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -11009,6 +11737,100 @@ pub mod shim {
         })
     }
 
+    /// Whether the device this page opened has the browser's
+    /// `depth-clip-control`.
+    ///
+    /// **Read before `__crcbl_web_gpu_probe_clamp`, and the reason the
+    /// depth-clamp probe has a flag of its own**: it is what says whether a
+    /// [`super::CLAMP_UNSUPPORTED`] is a device that withheld the feature or a
+    /// request that never happened. `0` before a device opens.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_clamp_supported() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.clamp_supported()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Encode the depth-clamp setup frame — the two targets, the two pipelines
+    /// that differ only in `depth_clamp`, a pass into each that draws the same
+    /// triangle past the far plane, the two copies, the submit and the readback
+    /// request.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// device opened without `depth-clip-control`, the probe is re-entered, or
+    /// another channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_clamp() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_clamp()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the depth-clamp readback once. `1` when a poll is on the stream, `0`
+    /// when there is nothing to poll for.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_clamp_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_clamp()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `CLAMP_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_clamp_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.clamp_state(),
+            Err(_) => super::CLAMP_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_clamp_state`] starts — the browser's words under
+    /// [`CLAMP_FAILED`](super::CLAMP_FAILED), the decode error under
+    /// [`CLAMP_UNDECODABLE`](super::CLAMP_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_clamp_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.clamp_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_clamp_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.clamp_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// Where the two targets' texels start, once
+    /// [`__crcbl_web_gpu_probe_clamp_state`] answers [`super::CLAMP_READY`] —
+    /// the clamped target's block first. Null while it has not; the pointer is
+    /// stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_clamp_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.clamp_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_clamp_bytes_ptr`] points at — the
+    /// depth-clamp readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_clamp_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.clamp_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -11118,7 +11940,11 @@ mod tests {
 
     use super::shim::{
         __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_bind_group,
-        __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_compute,
+        __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_clamp,
+        __crcbl_web_gpu_probe_clamp_bytes_len, __crcbl_web_gpu_probe_clamp_bytes_ptr,
+        __crcbl_web_gpu_probe_clamp_poll, __crcbl_web_gpu_probe_clamp_reason_len,
+        __crcbl_web_gpu_probe_clamp_reason_ptr, __crcbl_web_gpu_probe_clamp_state,
+        __crcbl_web_gpu_probe_clamp_supported, __crcbl_web_gpu_probe_compute,
         __crcbl_web_gpu_probe_compute_bytes_len, __crcbl_web_gpu_probe_compute_bytes_ptr,
         __crcbl_web_gpu_probe_compute_pipeline, __crcbl_web_gpu_probe_compute_poll,
         __crcbl_web_gpu_probe_compute_reason_len, __crcbl_web_gpu_probe_compute_reason_ptr,
@@ -11428,7 +12254,7 @@ mod tests {
                 adapter: AdapterId(0),
                 label: Some("crcbl-webgpu probe".into()),
                 required_features: Features::COMPUTE,
-                optional_features: Features::TIMESTAMP_QUERY,
+                optional_features: Features::TIMESTAMP_QUERY.union(Features::DEPTH_CLAMP),
                 compatible_surface: None,
             }]
         );
@@ -16550,6 +17376,348 @@ mod tests {
         );
     }
 
+    /// **The shader paints the colour the gate calls "the triangle rasterised".**
+    #[test]
+    fn the_clamp_wgsl_paints_the_colour_the_gate_asserts() {
+        let colour = wgsl_colour(PROBE_CLAMP_DRAW_BYTES);
+        assert!(
+            PROBE_CLAMP_WGSL.contains(&colour),
+            "the WGSL's fragment colour is the byte the readback is compared against: \
+             {PROBE_CLAMP_WGSL}"
+        );
+    }
+
+    /// **The triangle the shader emits is outside the depth range, and it is
+    /// outside it by the number the constant names.**
+    ///
+    /// The whole probe rests on this: a `z` inside `0..=1` rasterises under both
+    /// pipelines, the two blocks come back identical, and a gate reading the
+    /// clamped one alone would call that a pass. `w` is matched with it because a
+    /// perspective divide by anything else would move the depth somewhere the
+    /// constant no longer describes.
+    #[test]
+    fn the_clamp_wgsl_puts_the_triangle_past_the_far_plane() {
+        // WebGPU's far plane is 1.0, so the fixture depth has to be past it.
+        const { assert!(PROBE_CLAMP_NDC_DEPTH > 1.0) };
+        let emitted = format!("{PROBE_CLAMP_NDC_DEPTH:.1}, 1.0)");
+        assert!(
+            PROBE_CLAMP_WGSL.contains(&emitted),
+            "the WGSL emits the fixture depth with w at 1.0, so clip space is NDC: \
+             {PROBE_CLAMP_WGSL}"
+        );
+    }
+
+    /// **The two colours are not a channel permutation of each other and their
+    /// alphas differ**, so a path that swapped `r` and `b` on the way out cannot
+    /// turn "clipped" into "rasterised". Each colour channel is a mid-tone, away
+    /// from the `0` and `255` an untouched or saturated one reads as.
+    #[test]
+    fn the_two_clamp_colours_survive_a_channel_swap() {
+        let sorted = |bytes: [u8; 4]| {
+            let mut rgb = [bytes[0], bytes[1], bytes[2]];
+            rgb.sort_unstable();
+            rgb
+        };
+        assert_ne!(
+            sorted(PROBE_CLAMP_CLEAR_BYTES),
+            sorted(PROBE_CLAMP_DRAW_BYTES)
+        );
+        assert_ne!(PROBE_CLAMP_CLEAR_BYTES[3], PROBE_CLAMP_DRAW_BYTES[3]);
+        for bytes in [PROBE_CLAMP_CLEAR_BYTES, PROBE_CLAMP_DRAW_BYTES] {
+            for channel in &bytes[..3] {
+                assert!(
+                    *channel > 0 && *channel < 255,
+                    "every colour channel is a mid-tone: {bytes:?}"
+                );
+            }
+        }
+    }
+
+    /// **The clear the passes load with is the clipped-reading byte for byte**,
+    /// so a texel the draw did not reach reads back as the value the gate calls
+    /// "clipped" rather than as something near it.
+    #[test]
+    fn the_clamp_clear_is_the_colour_the_gate_asserts() {
+        let clear = probe_clamp_clear_value();
+        for (channel, byte) in clear.color.iter().zip(PROBE_CLAMP_CLEAR_BYTES) {
+            let encoded = (channel * 255.0).round() as u8;
+            assert_eq!(
+                encoded, byte,
+                "the clear encodes to the clipped-reading bytes"
+            );
+        }
+    }
+
+    /// **The two pipelines differ in `depth_clamp` and in nothing else but their
+    /// labels**, which is what makes the pair of readings a comparison rather
+    /// than two unrelated draws.
+    ///
+    /// Checked by flipping the flag back and comparing the whole descriptor: a
+    /// field that quietly diverged — a different blend, a different topology, a
+    /// depth-stencil state on one side — would give the two targets a second
+    /// reason to disagree, and the gate would read it as depth clamping.
+    #[test]
+    fn the_two_clamp_pipelines_differ_in_depth_clamp_and_nothing_else() {
+        let mut clamped = probe_clamp_clamped_pipeline_desc();
+        let clipped = probe_clamp_clipped_pipeline_desc();
+        assert!(clamped.primitive.depth_clamp, "the clamped one sets it");
+        assert!(!clipped.primitive.depth_clamp, "the control does not");
+        assert_ne!(clamped.label, clipped.label, "each says which it is");
+        clamped.primitive.depth_clamp = false;
+        clamped.label = clipped.label;
+        assert_eq!(
+            clamped, clipped,
+            "the flag is the only difference between the two pipelines"
+        );
+        // And neither has a depth attachment to give a fragment a second way to
+        // disappear.
+        assert_eq!(clipped.depth_stencil, None);
+    }
+
+    /// **Every depth-clamp handle is generation fourteen**, a generation past the
+    /// indirect-dispatch probe's `13 << 32` and every probe before it: the two
+    /// images, their two views, the buffer, the module, the layout, the two
+    /// pipelines, the command buffer, the queue and the readback are all live at
+    /// once and none may land in another probe's slot in the shared page.
+    #[test]
+    fn the_clamp_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_CLAMP_CLAMPED_IMAGE.to_bits(),
+            PROBE_CLAMP_CLIPPED_IMAGE.to_bits(),
+            PROBE_CLAMP_CLAMPED_VIEW.to_bits(),
+            PROBE_CLAMP_CLIPPED_VIEW.to_bits(),
+            PROBE_CLAMP_BUFFER.to_bits(),
+            PROBE_CLAMP_SHADER_MODULE.to_bits(),
+            PROBE_CLAMP_PIPELINE_LAYOUT.to_bits(),
+            PROBE_CLAMP_CLAMPED_PIPELINE.to_bits(),
+            PROBE_CLAMP_CLIPPED_PIPELINE.to_bits(),
+            PROBE_CLAMP_COMMAND_BUFFER.to_bits(),
+            PROBE_CLAMP_QUEUE.to_bits(),
+            PROBE_CLAMP_READBACK.to_bits(),
+        ] {
+            assert_eq!(
+                bits >> 32,
+                14,
+                "every depth-clamp handle is generation fourteen"
+            );
+        }
+        // The pairs that share a generation are kept apart by their indices.
+        assert_ne!(
+            PROBE_CLAMP_CLAMPED_IMAGE.to_bits(),
+            PROBE_CLAMP_CLIPPED_IMAGE.to_bits()
+        );
+        assert_ne!(
+            PROBE_CLAMP_CLAMPED_VIEW.to_bits(),
+            PROBE_CLAMP_CLIPPED_VIEW.to_bits()
+        );
+        assert_ne!(
+            PROBE_CLAMP_CLAMPED_PIPELINE.to_bits(),
+            PROBE_CLAMP_CLIPPED_PIPELINE.to_bits()
+        );
+        // A generation clear of the indirect-dispatch probe (`13 << 32`), the
+        // nearest neighbour.
+        assert_ne!(
+            PROBE_CLAMP_BUFFER.to_bits(),
+            PROBE_DISPATCH_INDIRECT_HOST_BUFFER.to_bits()
+        );
+    }
+
+    /// **The two copies land in two blocks of one buffer, in the order the gate
+    /// reads them**, and the second block's offset is 256-aligned — which
+    /// `copyTextureToBuffer` requires and a size that was not a whole number of
+    /// rows would break.
+    #[test]
+    fn the_clamp_copies_fill_two_blocks_of_one_buffer() {
+        let clamped = probe_clamp_copy(PROBE_CLAMP_CLAMPED_IMAGE, 0);
+        let clipped = probe_clamp_copy(PROBE_CLAMP_CLIPPED_IMAGE, PROBE_CLAMP_BLOCK_BYTES);
+        assert_eq!(clamped.buffer, clipped.buffer);
+        assert_eq!(clamped.buffer_offset, 0);
+        assert_eq!(clipped.buffer_offset, PROBE_CLAMP_BLOCK_BYTES);
+        assert_eq!(PROBE_CLAMP_BLOCK_BYTES % 256, 0);
+        assert_eq!(
+            probe_clamp_buffer_desc().size,
+            PROBE_CLAMP_BLOCK_BYTES * 2,
+            "the buffer holds both blocks and nothing more"
+        );
+        assert_eq!(
+            (PROBE_CLAMP_SIZE as u64) * 4 % 256,
+            0,
+            "the rows are aligned"
+        );
+        assert_ne!(clamped.image, clipped.image);
+    }
+
+    /// **A device without `depth-clip-control` gets no frame at all**, and says
+    /// so by name.
+    ///
+    /// The alternative is the failure this repository names outright: a probe
+    /// that quietly built both pipelines unclamped would read back two identical
+    /// blocks, and "not supported here" would arrive as "passed".
+    #[test]
+    fn the_clamp_export_is_refused_on_a_device_without_the_feature() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_clamp_supported(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_clamp(), 0);
+        assert!(take_frame().is_empty(), "a refused request encodes nothing");
+        assert_eq!(__crcbl_web_gpu_probe_clamp_state(), CLAMP_UNSUPPORTED);
+        assert_eq!(__crcbl_web_gpu_probe_clamp_bytes_len(), 0);
+    }
+
+    /// **One export, a whole frame**: two targets, two pipelines that differ only
+    /// in the flag, a pass into each, two copies into one buffer, and the
+    /// readback — then the answer reaching the bytes exports.
+    ///
+    /// The two `CreateGraphicsPipeline` commands are read out of the frame and
+    /// their flags asserted, rather than only their names: a frame that built two
+    /// unclamped pipelines has the same command names and replays to two
+    /// identical blocks, which is precisely the reading this probe must not be
+    /// able to produce by accident. A `cargo test` has no `navigator.gpu`, so the
+    /// replayer is stood in for by a `ReplyWriter` — which is why this proves the
+    /// state machine and the browser gate proves the pixels.
+    #[test]
+    fn the_clamp_export_encodes_two_passes_that_differ_only_in_the_flag() {
+        grant(&granted("has depth clip control"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.device(
+            1,
+            &DeviceCaps {
+                features: Features::COMPUTE | Features::DEPTH_CLAMP,
+                ..device_caps()
+            },
+        );
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+
+        assert_eq!(__crcbl_web_gpu_probe_clamp_supported(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_clamp(), 1);
+        let frame = take_frame();
+        let names: Vec<&str> = frame.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateShaderModule",
+                "CreatePipelineLayout",
+                "CreateGraphicsPipeline",
+                "CreateGraphicsPipeline",
+                "CreateCommandEncoder",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "Draw",
+                "EndRenderPass",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "Draw",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "each pipeline draws into a target of its own, and both are copied out"
+        );
+        let flags: Vec<(GraphicsPipelineHandle, bool)> = frame
+            .iter()
+            .filter_map(|command| match command {
+                Command::CreateGraphicsPipeline {
+                    pipeline,
+                    primitive,
+                    ..
+                } => Some((*pipeline, primitive.depth_clamp)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                (PROBE_CLAMP_CLAMPED_PIPELINE, true),
+                (PROBE_CLAMP_CLIPPED_PIPELINE, false),
+            ],
+            "exactly one of the two pipelines carries depth_clamp"
+        );
+        // The clamped target is copied to offset zero, so the first block the
+        // gate reads is the one the flag was set for.
+        let offsets: Vec<(ImageHandle, u64)> = frame
+            .iter()
+            .filter_map(|command| match command {
+                Command::CopyImageToBuffer {
+                    image,
+                    buffer_offset,
+                    ..
+                } => Some((*image, *buffer_offset)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offsets,
+            vec![
+                (PROBE_CLAMP_CLAMPED_IMAGE, 0),
+                (PROBE_CLAMP_CLIPPED_IMAGE, PROBE_CLAMP_BLOCK_BYTES),
+            ]
+        );
+        assert_eq!(__crcbl_web_gpu_probe_clamp_state(), CLAMP_REQUESTED);
+
+        // The poll, and the answer that resolves it.
+        assert_eq!(__crcbl_web_gpu_probe_clamp_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_clamp_state(), CLAMP_WAITING);
+        // The enumeration spent sequence 0 and the device request 1, so the
+        // frame above occupies the next `frame.len()` and the poll follows it.
+        let poll_sequence = 2 + frame.len() as u64;
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_CLAMP_READBACK,
+            }]
+        );
+        let block = PROBE_CLAMP_BLOCK_BYTES as usize;
+        let repeated = |colour: [u8; 4]| colour.into_iter().cycle().take(block);
+        let bytes: Vec<u8> = repeated(PROBE_CLAMP_DRAW_BYTES)
+            .chain(repeated(PROBE_CLAMP_CLEAR_BYTES))
+            .collect();
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_CLAMP_READBACK, &bytes);
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_clamp_state(), CLAMP_READY);
+        assert_eq!(
+            u64::from(__crcbl_web_gpu_probe_clamp_bytes_len()),
+            PROBE_CLAMP_BLOCK_BYTES * 2
+        );
+        let ptr = __crcbl_web_gpu_probe_clamp_bytes_ptr();
+        assert!(!ptr.is_null());
+        // SAFETY: the length above is the probe's own, and nothing has called
+        // back into wasm since it was read.
+        let read = unsafe { core::slice::from_raw_parts(ptr, block * 2) };
+        assert_eq!(&read[..4], &PROBE_CLAMP_DRAW_BYTES);
+        assert_eq!(&read[block..block + 4], &PROBE_CLAMP_CLEAR_BYTES);
+    }
+
+    /// The depth-clamp probe's `Failed` reaches the ABI: the state export answers
+    /// [`CLAMP_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_clamp_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().clamp = ClampProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_clamp_state(), CLAMP_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_clamp_reason_ptr,
+                __crcbl_web_gpu_probe_clamp_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
     /// `web/engine/gpu-probe.js` — the page's half of this file's state codes,
     /// pulled in whole so the mirror can be checked without a browser.
     ///
@@ -16600,6 +17768,7 @@ mod tests {
         "PROBE_MSAA_HEIGHT",
         "PROBE_OCCLUSION_QUERIES",
         "PROBE_TIMESTAMP_QUERIES",
+        "PROBE_CLAMP_SIZE",
     ];
 
     /// Every state code this crate publishes, against the
@@ -16799,6 +17968,20 @@ mod tests {
                 ],
             ),
             (
+                "CLAMP",
+                "CLAMP",
+                codes![
+                    CLAMP_UNASKED,
+                    CLAMP_REQUESTED,
+                    CLAMP_WAITING,
+                    CLAMP_PENDING,
+                    CLAMP_READY,
+                    CLAMP_UNDECODABLE,
+                    CLAMP_UNSUPPORTED,
+                    CLAMP_FAILED
+                ],
+            ),
+            (
                 "COMPUTE",
                 "COMPUTE",
                 codes![
@@ -16894,11 +18077,11 @@ mod tests {
         );
 
         assert_eq!(
-            tables, 21,
+            tables, 22,
             "gpu-probe.js's table count moved; the mirror above has to move with it"
         );
         assert_eq!(
-            codes, 123,
+            codes, 131,
             "gpu-probe.js's code count moved; the mirror above has to move with it"
         );
     }
@@ -16942,7 +18125,7 @@ mod tests {
                 .iter()
                 .filter(|name| mirrored.contains(*name))
                 .count(),
-            118,
+            126,
             "probe.rs's state-code count moved; the mirror above has to move with it"
         );
 
@@ -17121,7 +18304,7 @@ mod tests {
 
         assert_eq!(
             shims.len(),
-            140,
+            148,
             "`shim`'s export count moved; the `# Exports` table has to move with it"
         );
         let documented: BTreeSet<&str> = rows.iter().copied().collect();

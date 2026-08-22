@@ -582,10 +582,12 @@ export async function runProbeGroups({
   // engine: a reference device opened by the code under test would agree with it
   // whatever it asked for.
   //
-  // `timestamp-query` is in the request because `probe_device_desc` asks for it
-  // — group AF has nothing to observe without a `'timestamp'` query set, and
-  // that needs the feature. Optional on both sides: a browser without it opens a
-  // device here and there, and the two still match.
+  // `timestamp-query` and `depth-clip-control` are in the request because
+  // `probe_device_desc` asks for both — group AF has nothing to observe without
+  // a `'timestamp'` query set, and group AH nothing without a pipeline WebGPU
+  // will accept `unclippedDepth` on, and each needs its feature. Optional on both
+  // sides: a browser without either opens a device here and there, and the two
+  // still match.
   const liveDevice = await evaluate(
     page,
     `(async () => {
@@ -597,9 +599,8 @@ export async function runProbeGroups({
          requiredLimits[key] = value;
        }
      }
-     const requiredFeatures = adapter.features.has('timestamp-query')
-       ? ['timestamp-query']
-       : [];
+     const requiredFeatures = ['timestamp-query', 'depth-clip-control']
+       .filter((name) => adapter.features.has(name));
      const device = await adapter.requestDevice({ requiredLimits, requiredFeatures });
      return {
        features: [...device.features].sort(),
@@ -3273,6 +3274,207 @@ export async function runProbeGroups({
             ' (a browser reports nanoseconds, quantised)'
           : `the pass opened at ${timestamp.ticks?.[0]} and closed at ${timestamp.ticks?.[1]}, ` +
             'which is a clock running backwards or two queries read in the wrong order'
+  );
+
+  // **THE DEPTH-CLAMP GATE, AND THE ONLY PLACE `Features::DEPTH_CLAMP` IS EVER
+  // TESTED AGAINST A GPU.** This crate reports that feature to callers off the
+  // browser's `depth-clip-control`, and until this group existed no
+  // Rust-originated `CreateGraphicsPipeline` had ever carried
+  // `primitive.depth_clamp` set: `PROBE_GRAPHICS_PIPELINE_DESC` keeps it `false`
+  // so the pipeline builds on a device that withheld the feature, and the `true`
+  // path was exercised only by `web/tools/gpu-replay.mjs` under node, against a
+  // stub device that records the descriptor it is handed. A recorded descriptor
+  // is not a clamped fragment, and the capability was reported on the strength of
+  // one.
+  //
+  // WHAT IT DOES: wasm records two `Rgba8Unorm` targets of the same size, two
+  // pipelines that differ in `depth_clamp` and in nothing else, and a render pass
+  // into each — same shader, same oversized triangle, same clear. The triangle is
+  // emitted at a clip-space `z` **past the far plane** with `w` at 1, so it is
+  // outside the depth range every fragment of it. Both targets are copied into one
+  // buffer, the clamped one's block first, and the page loop replays it.
+  //
+  // **THE OBSERVABLE IS A DIFFERENCE IN THE PICTURE.** Depth clipping is what
+  // separates the two blocks: with `unclippedDepth` the primitive is not clipped
+  // against near and far and rasterises, without it the primitive is discarded
+  // before it reaches a fragment. So the pair of readings is the claim, and only
+  // one pair is a pass:
+  //
+  //   draw,  clear   the flag reached the browser and the GPU honoured it. The
+  //                  only pass.
+  //   clear, clear   the flag reached nothing — dropped on the wire, or taken and
+  //                  ignored. Both pipelines behaved as the control.
+  //   draw,  draw    nothing was clipped anywhere, so the triangle is not outside
+  //                  the range after all and the clamped block means nothing.
+  //                  That is this probe's own fixture failing, and it is why the
+  //                  control is here: without it, geometry that quietly landed
+  //                  inside the range would paint both blocks and read as a pass.
+  //   clear, draw    inverted — the pipelines, the passes or the copies were
+  //                  crossed.
+  //
+  // "The pipeline was created without error" is deliberately not the check, and
+  // neither is "`unclippedDepth` appeared in the descriptor": the first proves a
+  // browser accepted a descriptor and the second is what the node stub already
+  // does. What is asserted here is which texels came back.
+  //
+  // **A BROWSER WITHOUT `depth-clip-control` OWES THIS GROUP NOTHING — BUT IT
+  // HAS TO BE THE BROWSER THAT SAID SO.** WebGPU refuses `unclippedDepth` on a
+  // device that did not enable it, so wasm encodes nothing there and the probe
+  // answers `UNSUPPORTED` by name. That excuse is only honest if the adapter
+  // really lacks the feature, so the page asks `navigator.gpu` for itself and the
+  // two answers are held together: an adapter that HAS `depth-clip-control` while
+  // wasm reports it unsupported is a device request that lost the optional
+  // feature, and it fails here rather than being waved through as a platform
+  // limit. That is the "not supported here arriving as passed" failure, and it is
+  // the one this shape exists to keep out.
+  //
+  // WHERE IT BELONGS IN THE RUN: **before X**, group AC's reason exactly. X, Y, Z
+  // and AA are expected to fail on Windows because the page has one `GPUDevice`
+  // and therefore one queue, and X's stuck canvas readback strands every
+  // `mapAsync` queued after it. This group reads bytes back, so behind X it would
+  // be stranded too — and it is not in that platform's `--expect-fail` list, so it
+  // would turn the Windows job red.
+  group(
+    'AH — a triangle past the far plane survives the clamped pipeline and not the one beside it'
+  );
+
+  const PROBE_CLAMP_PIXELS = 64 * 64;
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_CLAMP_*_BYTES`, spelled out here
+  // rather than imported, as every expected value in this file is.
+  const PROBE_CLAMP_CLEAR_BYTES = [45, 125, 85, 255];
+  const PROBE_CLAMP_DRAW_BYTES = [215, 95, 35, 240];
+
+  const clampStart = await evaluate(
+    page,
+    `(async () => {
+     const { startClampProbe, clampSupported } =
+       await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     // Supported first: it is what tells a device that withheld the feature
+     // from a request that never happened.
+     const supported = clampSupported({ exports });
+     // And what the browser itself says, so the excuse below cannot be given
+     // by the thing under test. Asked of navigator.gpu, not of anything of ours.
+     const adapter = await navigator.gpu.requestAdapter();
+     const adapterHas = adapter?.features?.has('depth-clip-control') === true;
+     return { supported, adapterHas, started: startClampProbe({ exports }) };
+   })()`
+  );
+  // Poll across frames exactly as group AC does.
+  const clamp = clampStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readClampProbe, pollClampProbe, CLAMP } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readClampProbe({ exports, memory: exports.memory });
+           if (r.state === CLAMP.FAILED || r.state === CLAMP.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
+           }
+           if (r.state !== CLAMP.READY) {
+             pollClampProbe({ exports });
+             return null;
+           }
+           // Ready: classify every texel here rather than shipping 32768 bytes
+           // out. Which colour each block came back as is the whole verdict, so
+           // the counts are what crosses — a block that produced a mixture is a
+           // different failure from one that produced the wrong colour evenly,
+           // and the message has to be able to say which.
+           const draw = ${JSON.stringify(PROBE_CLAMP_DRAW_BYTES)};
+           const clear = ${JSON.stringify(PROBE_CLAMP_CLEAR_BYTES)};
+           const same = (at, colour) =>
+             r.bytes[at] === colour[0] &&
+             r.bytes[at + 1] === colour[1] &&
+             r.bytes[at + 2] === colour[2] &&
+             r.bytes[at + 3] === colour[3];
+           const block = r.bytes.length / 2;
+           const tally = (from) => {
+             let drawn = 0;
+             let cleared = 0;
+             let other = 0;
+             let firstOther = -1;
+             for (let at = from; at + 3 < from + block; at += 4) {
+               if (same(at, draw)) drawn += 1;
+               else if (same(at, clear)) cleared += 1;
+               else {
+                 if (firstOther < 0) firstOther = at;
+                 other += 1;
+               }
+             }
+             return { drawn, cleared, other, firstOther };
+           };
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.length,
+             clamped: tally(0),
+             clipped: tally(block),
+             sample: [...r.bytes.slice(0, 4), ...r.bytes.slice(block, block + 4)],
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+
+  const clampAbsent =
+    clampStart?.supported === false && clampStart?.adapterHas === false;
+  const absentClampDetail =
+    "this browser's adapter reports no 'depth-clip-control', so the device could " +
+    'not enable it and WebGPU would refuse the clamped pipeline — the capability ' +
+    'is NotOnThisDevice here and there is nothing to hold it to';
+  check(
+    'AH',
+    'wasm encoded the depth-clamp frame — two targets, two pipelines differing only in depth_clamp, a pass into each, both copies, the request',
+    clampStart?.started === true || clampAbsent,
+    clampStart?.started
+      ? 'the clamped and clipped passes are on the stream'
+      : clampStart?.supported === false
+        ? clampStart?.adapterHas
+          ? "this browser's adapter HAS 'depth-clip-control' and wasm still reports the " +
+            'device without it — the optional feature was lost between the request and the ' +
+            'device that opened, which is a bug here and not a platform limit'
+          : absentClampDetail
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'AH',
+    'depth clamping decided which fragments survived — the clamped target is the draw colour and the control target is still the clear',
+    clampAbsent ||
+      (clamp?.done === true &&
+        clamp.len === PROBE_CLAMP_PIXELS * 4 * 2 &&
+        clamp.clamped?.drawn === PROBE_CLAMP_PIXELS &&
+        clamp.clipped?.cleared === PROBE_CLAMP_PIXELS),
+    clampAbsent
+      ? absentClampDetail
+      : clampStart?.started !== true
+        ? 'no frame was encoded, so there is nothing to read — see the check above for why'
+        : clamp?.done !== true
+          ? `no depth-clamp readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+          : clamp.clamped?.drawn === PROBE_CLAMP_PIXELS &&
+              clamp.clipped?.cleared === PROBE_CLAMP_PIXELS
+            ? `${clamp.len} bytes: the clamped target is [${PROBE_CLAMP_DRAW_BYTES.join(', ')}] throughout ` +
+              'and the control target is untouched clear, so the triangle past the far plane ' +
+              'rasterised through one pipeline and was clipped away by the other'
+            : `state ${clamp.state}, ${clamp.len ?? 0} bytes: clamped ` +
+              `${clamp.clamped?.drawn} drawn / ${clamp.clamped?.cleared} clear / ${clamp.clamped?.other} other, ` +
+              `control ${clamp.clipped?.drawn} drawn / ${clamp.clipped?.cleared} clear / ${clamp.clipped?.other} other — ` +
+              (clamp.clamped?.cleared === PROBE_CLAMP_PIXELS &&
+              clamp.clipped?.cleared === PROBE_CLAMP_PIXELS
+                ? 'both were clipped, so depth_clamp reached nothing'
+                : clamp.clamped?.drawn === PROBE_CLAMP_PIXELS &&
+                    clamp.clipped?.drawn === PROBE_CLAMP_PIXELS
+                  ? 'neither was clipped, so the triangle is not outside the depth range and ' +
+                    'the clamped reading proves nothing'
+                  : clamp.clamped?.cleared === PROBE_CLAMP_PIXELS &&
+                      clamp.clipped?.drawn === PROBE_CLAMP_PIXELS
+                    ? 'the two are inverted — the flag is on the pipeline that was meant to be the control'
+                    : 'a mixture, so something other than the flag decided which fragments survived') +
+              ` (first texel of each block ${JSON.stringify(clamp.sample)})` +
+              `${clamp.error ? ` — ${clamp.error}` : ''}`
   );
 
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**
