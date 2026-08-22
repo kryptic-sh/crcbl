@@ -113,7 +113,7 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                         extent,
                     ),
                 );
-                let _ = renderer.add_passes(&mut graph, target, extent);
+                let _ = renderer.add_passes(&mut graph, &pool, target, extent);
                 graph.compile(&pool).expect("a legal frame")
             };
             per_frame = compiled.physical_image_count();

@@ -188,7 +188,7 @@ fn per_pass_gpu_timers_report_real_numbers() {
                     MESH_EXTENT,
                 ),
             );
-            let _ = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+            let _ = renderer.add_passes(&mut graph, &pool, target, MESH_EXTENT);
             graph.compile(&pool).expect("a legal frame")
         };
         compiled

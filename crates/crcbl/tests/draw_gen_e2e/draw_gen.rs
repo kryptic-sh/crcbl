@@ -324,7 +324,7 @@ fn generate_with(
                 final_state: ResourceState::Present,
             },
         );
-        let _ = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+        let _ = renderer.add_passes(&mut graph, &*pool, target, MESH_EXTENT);
         graph.compile(&*pool).expect("a legal frame")
     };
     compiled

@@ -518,7 +518,9 @@ impl Gpu {
                 "swapchain",
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
-            let _hdr = self.renderer.add_passes(&mut graph, target, extent);
+            let _hdr = self
+                .renderer
+                .add_passes(&mut graph, &self.pool, target, extent);
             // **Between the scene and the text, and that order is the whole
             // join.** The menu's scrim dims what is already in the target, so it
             // has to come after the tonemap; the panel is opaque and the labels

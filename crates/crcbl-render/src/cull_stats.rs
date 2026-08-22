@@ -240,14 +240,13 @@ struct Slot {
     /// [`CullStatsRing::add_copy_pass`] imports it as.
     ///
     /// [`ResourceState::Undefined`] until a copy has been declared into it, and
-    /// [`ResourceState::TransferDst`] thereafter — the shape
-    /// `ForwardRenderer::shadow_imported` has, for the same reason. **This is
-    /// the field the whole cross-frame hazard turns on**: the previous write to
-    /// this buffer is another frame's `copy_buffer_to_buffer`, in another
-    /// submission, and a barrier naming `Undefined` as its source carries no
-    /// source scope at all — `srcStageMask = NONE` — so it would order the two
-    /// writes against nothing. Naming `TransferDst` is what gives the graph's
-    /// barrier a real prior access to depend on.
+    /// [`ResourceState::TransferDst`] thereafter. **This is the field the whole
+    /// cross-frame hazard turns on**: the previous write to this buffer is
+    /// another frame's `copy_buffer_to_buffer`, in another submission, and a
+    /// barrier naming `Undefined` as its source carries no source scope at all —
+    /// `srcStageMask = NONE` — so it would order the two writes against nothing.
+    /// Naming `TransferDst` is what gives the graph's barrier a real prior
+    /// access to depend on.
     imported: ResourceState,
     /// Whether this slot is free, recording, or waiting on an answer.
     state: SlotState,

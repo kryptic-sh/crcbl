@@ -631,7 +631,9 @@ impl Gpu {
                 "swapchain",
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
-            let _hdr = self.renderer.add_passes(&mut graph, target, extent);
+            let _hdr = self
+                .renderer
+                .add_passes(&mut graph, &self.pool, target, extent);
             // Between the face and the text, on `apps/sandbox`'s terms: the
             // menu's scrim dims what is already in the target and the overlay
             // has to stay readable over both.

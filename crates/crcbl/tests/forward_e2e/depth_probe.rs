@@ -132,15 +132,6 @@ struct DepthProbe {
     shadow_atlas: crcbl::hal::ImageHandle,
     shadow_atlas_view: crcbl::hal::ImageViewHandle,
     shadow_sampler: crcbl::hal::SamplerHandle,
-    /// What the last frame left [`DepthProbe::shadow_atlas`] in.
-    ///
-    /// The probe outlives its frames and this image is not a swapchain image, so
-    /// nothing else orders one frame's use of it against the next: re-declaring
-    /// [`ResourceState::Undefined`] every frame would give the incoming layout
-    /// transition `srcStageMask = NONE` and leave it racing the previous frame's
-    /// sampled read. `ForwardRenderer` carries the same field for the same
-    /// reason — see `crcbl::render::ForwardRenderer`'s `shadow_imported`.
-    shadow_imported: ResourceState,
     layout: crcbl::hal::BindGroupLayoutHandle,
     group: crcbl::hal::BindGroupHandle,
     pipeline_layout: crcbl::hal::PipelineLayoutHandle,
@@ -937,9 +928,6 @@ impl DepthProbe {
             shadow_atlas,
             shadow_atlas_view,
             shadow_sampler,
-            // Nothing has touched it yet, so the first frame's graph is what
-            // gives it a layout.
-            shadow_imported: ResourceState::Undefined,
             layout,
             group,
             pipeline_layout,
@@ -1182,7 +1170,14 @@ fn render_probe(
         // probe owns this image across frames and no semaphore orders one frame's
         // draw against the next frame's transition, so a second `Undefined` is a
         // barrier with no source scope sitting after a fragment shader read of
-        // the same image: `SYNC-HAZARD-WRITE-AFTER-READ`. See the field.
+        // the same image: `SYNC-HAZARD-WRITE-AFTER-READ`.
+        //
+        // Read out of the pool rather than remembered here, on
+        // `crcbl::render::ForwardRenderer`'s terms: the ledger records what a
+        // graph *executed*, so a frame that was described and then refused
+        // cannot leave a probe-side field claiming a transition that never
+        // happened. `None` is the first frame, and `Undefined` is what an image
+        // no barrier has moved is in.
         let shadow = graph.import_image(
             "probe-shadow-atlas",
             crcbl::render::ImportedImage {
@@ -1190,7 +1185,9 @@ fn render_probe(
                 view: probe.shadow_atlas_view,
                 format: Format::D32Float,
                 extent: (1, 1),
-                initial: std::mem::replace(&mut probe.shadow_imported, ResourceState::ShaderRead),
+                initial: pool
+                    .imported_image_use(probe.shadow_atlas)
+                    .unwrap_or(ResourceState::Undefined),
                 // The probe owns this image across calls and no semaphore sits
                 // between them, so the declaration above is one the graph can
                 // and does check — this is the site whose second `Undefined`

@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`ForwardRenderer::add_passes` now takes a `&TransientPool` as its second
+  argument**, and the shadow atlas's and shadow placeholder's
+  `ImportedImage::initial` are read from the pool's ledger
+  (`TransientPool::imported_image_use`, `None` meaning
+  `ResourceState::Undefined`) instead of from a renderer field. The field
+  advanced at graph-build time, so a frame whose `compile` failed left it
+  claiming `ShaderRead` for an image no barrier had touched — and with the
+  ledger untouched, `InitialClaim::Tracked` had nothing to contradict and passed
+  the wrong declaration through. The placeholder fared worse: it was declared in
+  the state it was wanted in, so the graph emitted no barrier for it at all and
+  bound a descriptor to an image with no layout. Every caller already holds the
+  pool it passes to `graph.compile`.
+
 - **`ImportedImage` gained a required `claim: InitialClaim` field, and a
   contradicting `initial` is now a compile error rather than a silent hazard.**
   `initial` was a declaration the graph could not check, and a declaration that

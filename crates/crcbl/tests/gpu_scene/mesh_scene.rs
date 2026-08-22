@@ -221,7 +221,7 @@ pub(crate) fn render_mesh(
                 final_state: ResourceState::TransferSrc,
             },
         );
-        let scene = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+        let scene = renderer.add_passes(&mut graph, &*pool, target, MESH_EXTENT);
         if hdr_staging.is_some() {
             // One extra declaration, and the graph works out that the HDR
             // target has to move from `ShaderRead` (the tonemap sampled it) to

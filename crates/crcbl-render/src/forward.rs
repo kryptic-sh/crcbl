@@ -175,7 +175,7 @@ use crate::shadow::{self, Cascades};
 use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
-use crate::transient::TransientImageDesc;
+use crate::transient::{TransientImageDesc, TransientPool};
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -527,6 +527,30 @@ const fn shadow_view(slot: usize, face: usize) -> usize {
 /// Which cull light slot `slot` draws from.
 const fn shadow_cull(slot: usize) -> usize {
     shadow::CASCADES + slot
+}
+
+/// What the last executed graph left the renderer-owned import `image` in, as an
+/// [`ImportedImage::initial`].
+///
+/// **[`ResourceState::Undefined`] is the answer to an empty ledger, not a
+/// fallback around one.** The ledger records what a graph *executed*, so nothing
+/// recorded means nothing has run against this image on this pool — a freshly
+/// created image before its first frame, and an image whose pool has been
+/// through [`TransientPool::destroy`] — and `Undefined` is what an image no
+/// barrier has moved is in. It is also the only declaration that lets the
+/// incoming barrier hand the image a layout at all: every other state names an
+/// old layout the image is not in.
+///
+/// The reason this is a lookup and not a field the renderer advances: a graph is
+/// built, then compiled, and [`RenderGraph::compile`] can refuse it. A field
+/// stepped forward while the passes were declared would have moved for a frame
+/// that never reached the GPU, and the next frame's declaration — now wrong —
+/// has no ledger entry to contradict it, so [`InitialClaim::Tracked`] would pass
+/// it through. One source of truth is what removes that gap rather than
+/// narrowing it.
+fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
+    pool.imported_image_use(image)
+        .unwrap_or(ResourceState::Undefined)
 }
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
@@ -953,14 +977,6 @@ pub struct ForwardRenderer {
     /// free ones — so an unheld tile keeps the reversed-Z clear, which reads as
     /// "nothing stored, fully lit" wherever anything did sample it.
     shadow_lights: shadow::Selection,
-    /// What the last frame left [`ForwardRenderer::shadow_atlas`] and its
-    /// placeholder in.
-    ///
-    /// [`ResourceState::Undefined`] until the first frame has declared them,
-    /// which is the honest answer for an image nothing has written — importing
-    /// them as `ShaderRead` from the start would skip the one barrier that gives
-    /// them a layout at all.
-    shadow_imported: ResourceState,
 
     /// Topic 03 §3.6's one permitted readback: the camera cull's statistics, on
     /// a delayed ring — see [`crate::cull_stats`], which is where the shape and
@@ -3606,9 +3622,6 @@ impl ForwardRenderer {
             shadow_groups,
             shadow_selection,
             shadow_lights: shadow::Selection::default(),
-            // Nothing has written either image yet, so the first frame's graph
-            // is what gives them a layout.
-            shadow_imported: ResourceState::Undefined,
             // [`FRAMES_IN_FLIGHT`], the number every other ring here is sized
             // by, so a slot has been through the whole loop before it is read.
             // `culls_clusters` rather than the device's feature bits: what
@@ -4711,9 +4724,24 @@ impl ForwardRenderer {
     /// against the scene depth: the grid is reference chrome, and a grid drawn
     /// before the tonemap would be exposed and tonemapped like geometry, so its
     /// colour would move with how bright the scene is. See [`crate::grid`].
+    ///
+    /// # `pool` is where the shadow atlas's incoming state comes from
+    ///
+    /// It must be the same pool the caller is about to
+    /// [`compile`](RenderGraph::compile) and
+    /// [`execute`](crate::CompiledGraph::execute) against, because the atlas and
+    /// its placeholder are imports this renderer owns across frames and the
+    /// pool's ledger is the record of what the last executed graph left them in
+    /// — [`TransientPool::imported_image_use`], with [`None`] read as
+    /// [`ResourceState::Undefined`]. Reading it here rather than carrying a
+    /// field of our own is what keeps the declaration and the audit
+    /// ([`InitialClaim::Tracked`]) one answer instead of two that drift: a frame
+    /// whose `compile` fails is a frame that never ran, and a field advanced at
+    /// build time would already have moved on without it.
     pub fn add_passes<'a>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
+        pool: &TransientPool,
         target: ImageId,
         extent: (u32, u32),
     ) -> ImageId {
@@ -4801,9 +4829,8 @@ impl ForwardRenderer {
         // about one value rather than about four reads of a field.
         let effects = self.frame_effects;
 
-        let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
         let (shadow_atlas, shadow_draws) =
-            self.add_shadow_pass(graph, imported, &tile_selection, occlusion_placeholder);
+            self.add_shadow_pass(graph, pool, &tile_selection, occlusion_placeholder);
 
         let scene_color =
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
@@ -5296,7 +5323,7 @@ impl ForwardRenderer {
     fn add_shadow_pass(
         &self,
         graph: &mut RenderGraph<'_>,
-        imported: ResourceState,
+        pool: &TransientPool,
         selection: &[BufferId],
         occlusion_placeholder: ImageId,
     ) -> (ImageId, u64) {
@@ -5309,12 +5336,13 @@ impl ForwardRenderer {
                 view: self.shadow_atlas_view,
                 format: Format::D32Float,
                 extent: (atlas_width, atlas_height),
-                // What the previous frame left it in — `Undefined` on the first,
-                // which is what makes the graph give it a layout at all.
-                initial: imported,
-                // The renderer keeps this image, so the pool's ledger has the
-                // answer and a stale `shadow_imported` is refused rather than
-                // barriered against.
+                // What the previous executed frame left it in — `Undefined` on
+                // the first, which is what makes the graph give it a layout at
+                // all.
+                initial: imported_state(pool, self.shadow_atlas),
+                // The renderer keeps this image across frames, so the pool's
+                // ledger is the record of what happened to it and the line above
+                // is that record read back rather than a second copy of it.
                 claim: InitialClaim::Tracked,
                 final_state: ResourceState::ShaderRead,
             },
@@ -5326,7 +5354,12 @@ impl ForwardRenderer {
                 view: self.shadow_placeholder_view,
                 format: Format::D32Float,
                 extent: (1, 1),
-                initial: imported,
+                // **Its own ledger entry, not the atlas's.** The two move
+                // together today — both are imported by this function on every
+                // frame and both are handed back in `ShaderRead` — so one lookup
+                // would answer both, and that is exactly the coincidence a
+                // second declared state here stops depending on.
+                initial: imported_state(pool, self.shadow_placeholder),
                 claim: InitialClaim::Tracked,
                 final_state: ResourceState::ShaderRead,
             },
@@ -9187,8 +9220,8 @@ mod tests {
                 .expect("write");
             let mut graph = crate::RenderGraph::new(queue);
             let target = graph.import_image("target", imported);
-            renderer.add_passes(&mut graph, target, (64, 48));
             let pool = crate::TransientPool::new();
+            renderer.add_passes(&mut graph, &pool, target, (64, 48));
             let compiled = graph.compile(&pool).expect("a legal frame");
 
             let clear = &compiled.passes()[0];
@@ -9292,8 +9325,8 @@ mod tests {
         let imported = swapchain_image(device.as_ref());
         let mut graph = crate::RenderGraph::new(queue);
         let target = graph.import_image("target", imported);
-        renderer.add_passes(&mut graph, target, (64, 48));
         let pool = crate::TransientPool::new();
+        renderer.add_passes(&mut graph, &pool, target, (64, 48));
         let compiled = graph.compile(&pool).expect("a legal frame");
 
         let passes: Vec<String> = compiled
@@ -9434,18 +9467,25 @@ mod tests {
     ///
     /// # Why this cannot be read off one frame
     ///
-    /// The atlas is neither a transient nor a swapchain image. The pool has no
-    /// description of it to hand back a state for, and no acquire semaphore sits
-    /// between one frame's use of it and the next — so
-    /// [`ForwardRenderer::add_passes`] *declares* it, out of
-    /// [`ForwardRenderer::shadow_imported`], and the declaration is what makes
-    /// the transition true.
+    /// The atlas is neither a transient nor a swapchain image. The pool never
+    /// hands one out and has no description to size it from, and no acquire
+    /// semaphore sits between one frame's use of it and the next — so
+    /// [`ForwardRenderer::add_passes`] *declares* it, and the declaration is what
+    /// makes the transition true.
     ///
-    /// [`InitialClaim::Tracked`] is that declaration submitting itself for
-    /// audit, and it catches a `shadow_imported` that has drifted from what the
-    /// last graph *executed*. It cannot catch a first frame — there is nothing
-    /// recorded to contradict — and it says nothing about the barriers on either
-    /// side of the declaration, which is what the stream below is for.
+    /// What it declares is [`imported_state`], the pool's record of what the
+    /// last graph to *execute* left the image in, so [`InitialClaim::Tracked`]
+    /// can only ever find the two agreeing for this one import — deliberately,
+    /// because a declaration and an audit reading one value cannot drift apart
+    /// the way a renderer-held copy of it could. The audit still has teeth
+    /// elsewhere in this frame: `ssao-placeholder` and `probes` declare a
+    /// constant, and `the_guard_still_catches_an_engine_import_that_lies` is
+    /// what shows it fires on those.
+    ///
+    /// So neither mechanism says anything about the barriers on either side of
+    /// the declaration — whether the frame that ran actually reached the state
+    /// the ledger now claims, and whether the next frame's first barrier comes
+    /// out of it — which is what the stream below is for.
     ///
     /// Declaring [`ResourceState::Undefined`] on a frame after the first is the
     /// failure this catches. It expands to `srcStageMask = NONE,
@@ -9492,7 +9532,7 @@ mod tests {
                 .expect("write");
             let mut graph = crate::RenderGraph::new(queue);
             let target = graph.import_image("target", imported);
-            renderer.add_passes(&mut graph, target, (64, 48));
+            renderer.add_passes(&mut graph, &pool, target, (64, 48));
             let compiled = graph.compile(&pool).expect("a legal frame");
             let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
                 label: Some("shadow lap"),
@@ -9567,6 +9607,243 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// **A frame the graph refuses leaves the shadow atlas where it was.**
+    ///
+    /// [`RenderGraph::compile`] returns a [`Result`], so a frame can be
+    /// described in full and then thrown away, and
+    /// [`CompiledGraph::execute`](crate::CompiledGraph::execute) — the only
+    /// thing that writes the pool's ledger — never runs. That is the case a
+    /// renderer-held `ResourceState`, stepped forward while the passes were
+    /// declared, gets wrong: it would already say [`ResourceState::ShaderRead`]
+    /// for an image no barrier has touched, and [`InitialClaim::Tracked`] cannot
+    /// object, because with nothing recorded there is nothing to contradict. The
+    /// guard would be silent on precisely the drift it exists to find, which is
+    /// why [`imported_state`] reads the ledger instead of a second copy of it.
+    ///
+    /// The observable is the first barrier the *next* frame records on the
+    /// atlas. `Undefined -> DepthStencilWrite` is the transition an image
+    /// nothing has written needs; `ShaderRead -> DepthStencilWrite` names an old
+    /// layout the image was never in, which is a layout mismatch on every
+    /// backend and a discarded image on some.
+    #[test]
+    fn a_refused_frame_leaves_the_shadow_atlas_where_it_was() {
+        use crcbl_hal::null::Command;
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let atlas = renderer.shadow_atlas();
+        let placeholder = renderer.shadow_placeholder;
+        let mut pool = crate::TransientPool::new();
+        let imported = swapchain_image(device);
+
+        // The refused frame: every pass a real frame declares, and beside them
+        // one transient nothing reads or writes. `compile` answers
+        // `UnusedTransient` and the whole description — the shadow atlas's
+        // import included — is dropped without a command being recorded.
+        renderer
+            .begin_frame(
+                device,
+                &Camera::default(),
+                &DirectionalLight::default(),
+                (64, 48),
+            )
+            .expect("write");
+        {
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, &pool, target, (64, 48));
+            graph.create_image("orphan", TransientImageDesc::scene_color((64, 48)));
+            let refused = graph
+                .compile(&pool)
+                .expect_err("a transient no pass declares");
+            assert!(
+                matches!(refused, crate::GraphError::UnusedTransient { .. }),
+                "the frame has to be refused for the reason this test is about — a graph that \
+                 compiled would go on to execute and the ledger would be written after all: \
+                 {refused:?}"
+            );
+        }
+        assert_eq!(
+            pool.imported_image_use(atlas),
+            None,
+            "nothing executed, so the ledger has nothing to say about the atlas — this is the \
+             emptiness `InitialClaim::Tracked` cannot check against"
+        );
+
+        // And the frame after it, which does run.
+        renderer
+            .begin_frame(
+                device,
+                &Camera::default(),
+                &DirectionalLight::default(),
+                (64, 48),
+            )
+            .expect("write");
+        let mut graph = crate::RenderGraph::new(queue);
+        let target = graph.import_image("target", imported);
+        renderer.add_passes(&mut graph, &pool, target, (64, 48));
+        let compiled = graph.compile(&pool).expect("a legal frame");
+        let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+            label: Some("frame after a refusal"),
+            queue,
+        });
+        compiled
+            .execute(device, &mut pool, encoder.as_mut(), None)
+            .expect("the graph executed");
+        let commands = encoder.finish().expect("recording succeeded");
+
+        // The first barrier each of the two images gets. Only the refused frame
+        // ran before this one and it recorded nothing, so these are the frame's
+        // opening transitions.
+        let mut opened: Vec<(crcbl_hal::ImageHandle, ResourceState, ResourceState)> = Vec::new();
+        for command in recorder.commands() {
+            let Command::Barrier { images, .. } = command else {
+                continue;
+            };
+            for barrier in images {
+                if barrier.image != atlas && barrier.image != placeholder {
+                    continue;
+                }
+                if opened.iter().any(|(image, _, _)| *image == barrier.image) {
+                    continue;
+                }
+                opened.push((barrier.image, barrier.from, barrier.to));
+            }
+        }
+        for (image, from, to) in &opened {
+            assert_eq!(
+                *from,
+                ResourceState::Undefined,
+                "a barrier declared {from:?} -> {to:?} on an image the refused frame never gave a \
+                 layout to. The declaration is what makes the transition true, so one that has \
+                 moved on without an executed frame behind it names a source scope and an old \
+                 layout the image was never in — and the ledger is empty, so nothing refuses it \
+                 either. Image {image:?}"
+            );
+        }
+        // The loop above is silent on an empty list and on a short one, and a
+        // wrong declaration shortens it: an image declared in the state it is
+        // wanted in needs no transition, so it drops out of the stream
+        // altogether rather than appearing with the wrong source.
+        assert_eq!(
+            opened.len(),
+            2,
+            "the atlas and its placeholder are both imported every frame and both are wanted in a \
+             state they are not in, so both have to be barriered: {opened:?}"
+        );
+        assert!(
+            opened
+                .iter()
+                .any(|(image, _, to)| *image == atlas && *to == ResourceState::DepthStencilWrite),
+            "and the atlas's is the shadow pass taking it as a depth attachment: {opened:?}"
+        );
+
+        renderer.destroy(device);
+        device.destroy_command_buffer(commands);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The import audit still refuses an engine site whose declaration is
+    /// wrong**, now that the shadow atlas's is read out of the same ledger it is
+    /// checked against.
+    ///
+    /// That pair is deliberately circular and this test is what keeps it from
+    /// swallowing the guard whole: `shadow-atlas` and `shadow-placeholder` say
+    /// what [`imported_state`] just read, so [`InitialClaim::Tracked`] can only
+    /// ever find them agreeing — their safety comes from there being one answer
+    /// rather than from the check. Every *other* import in the frame declares a
+    /// constant, and `ssao-placeholder` is the one this drives a ledger entry
+    /// away from: uploaded into [`ResourceState::ShaderRead`] at build and
+    /// declared so on every frame, so a graph that leaves it somewhere else is a
+    /// declaration the next `compile` has to refuse.
+    #[test]
+    fn the_guard_still_catches_an_engine_import_that_lies() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let mut pool = crate::TransientPool::new();
+        let imported = swapchain_image(device);
+        let occlusion = renderer.ambient_occlusion_placeholder.image;
+
+        // A graph of this test's own, which moves the renderer's occlusion
+        // placeholder somewhere `add_passes` does not expect. Same image handle,
+        // so the entry it leaves in the ledger is the one the next `compile`
+        // reads for `ssao-placeholder`.
+        let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+            label: Some("move the placeholder"),
+            queue,
+        });
+        {
+            let mut graph = crate::RenderGraph::new(queue);
+            let moved = graph.import_image(
+                "moved-placeholder",
+                ImportedImage {
+                    image: occlusion,
+                    view: renderer.ambient_occlusion_placeholder.view,
+                    format: Format::R8Unorm,
+                    extent: (1, 1),
+                    initial: ResourceState::ShaderRead,
+                    claim: InitialClaim::Tracked,
+                    final_state: ResourceState::TransferSrc,
+                },
+            );
+            graph
+                .add_copy_pass("read the placeholder")
+                .use_image(moved, ResourceState::TransferSrc)
+                .execute(|_| {});
+            graph
+                .compile(&pool)
+                .expect("a legal frame")
+                .execute(device, &mut pool, encoder.as_mut(), None)
+                .expect("the graph executed");
+        }
+        let commands = encoder.finish().expect("recording succeeded");
+        assert_eq!(
+            pool.imported_image_use(occlusion),
+            Some(ResourceState::TransferSrc),
+            "the ledger has to have moved for the frame below to have anything to disagree with"
+        );
+
+        renderer
+            .begin_frame(
+                device,
+                &Camera::default(),
+                &DirectionalLight::default(),
+                (64, 48),
+            )
+            .expect("write");
+        let mut graph = crate::RenderGraph::new(queue);
+        let target = graph.import_image("target", imported);
+        renderer.add_passes(&mut graph, &pool, target, (64, 48));
+        let refused = graph
+            .compile(&pool)
+            .expect_err("`ssao-placeholder` declares a constant the ledger no longer agrees with");
+        let crate::GraphError::ImportStateMismatch {
+            resource,
+            declared,
+            left,
+        } = &refused
+        else {
+            panic!("the audit has to name the import it refused, not merely fail: {refused:?}");
+        };
+        assert_eq!(resource, "ssao-placeholder");
+        assert_eq!(*declared, ResourceState::ShaderRead);
+        assert_eq!(*left, ResourceState::TransferSrc);
+
+        renderer.destroy(device);
+        device.destroy_command_buffer(commands);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
     /// Compiles one frame and names the passes it turned out to be, in order.
     ///
     /// Compiled and not executed: what a pass costs is not the question here,
@@ -9591,7 +9868,7 @@ mod tests {
             .expect("write");
         let mut graph = crate::RenderGraph::new(queue);
         let target = graph.import_image("target", imported);
-        renderer.add_passes(&mut graph, target, (64, 48));
+        renderer.add_passes(&mut graph, pool, target, (64, 48));
         graph
             .compile(pool)
             .expect("a legal frame")
@@ -9902,7 +10179,7 @@ mod tests {
                 .expect("write");
             let mut graph = crate::RenderGraph::new(queue);
             let target = graph.import_image("target", imported);
-            renderer.add_passes(&mut graph, target, (64, 48));
+            renderer.add_passes(&mut graph, pool, target, (64, 48));
             let compiled = graph.compile(pool).expect("a legal frame");
             let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
                 label: Some("wireframe lap"),
@@ -10252,7 +10529,7 @@ mod tests {
                 .expect("write");
             let mut graph = crate::RenderGraph::new(queue);
             let target = graph.import_image("target", imported);
-            renderer.add_passes(&mut graph, target, (64, 48));
+            renderer.add_passes(&mut graph, &pool, target, (64, 48));
             let compiled = graph.compile(&pool).expect("a legal frame");
             if compiled_labels.is_empty() {
                 compiled_labels = compiled
@@ -10392,8 +10669,8 @@ mod tests {
         let imported = swapchain_image(device);
         let mut graph = crate::RenderGraph::new(queue);
         let target = graph.import_image("target", imported);
-        renderer.add_passes(&mut graph, target, (64, 48));
         let mut pool = crate::TransientPool::new();
+        renderer.add_passes(&mut graph, &pool, target, (64, 48));
         let compiled = graph.compile(&pool).expect("a legal frame");
         let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
             label: Some("forward frame"),

@@ -2660,7 +2660,7 @@ impl OffscreenSetup {
                     renderer,
                 } => {
                     renderer.begin_frame(device, camera, light, extent)?;
-                    let _hdr = renderer.add_passes(&mut graph, target, extent);
+                    let _hdr = renderer.add_passes(&mut graph, &self.pool, target, extent);
                 }
                 SceneState::Sprite { renderer, sheets } => {
                     let sprites = sprite_scene(*sheets);

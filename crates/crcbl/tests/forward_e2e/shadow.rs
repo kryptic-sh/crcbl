@@ -211,7 +211,7 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
                 final_state: ResourceState::TransferSrc,
             },
         );
-        let _ = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+        let _ = renderer.add_passes(&mut graph, &pool, target, MESH_EXTENT);
         graph.compile(&pool).expect("a legal frame")
     };
     compiled

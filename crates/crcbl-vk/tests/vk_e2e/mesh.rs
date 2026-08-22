@@ -257,7 +257,7 @@ pub(crate) fn render_mesh(
                 final_state: ResourceState::TransferSrc,
             },
         );
-        let _ = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+        let _ = renderer.add_passes(&mut graph, &*pool, target, MESH_EXTENT);
         // `&*pool`: the same pool the frame is about to be realised
         // against, so the barriers open where the last frame left off.
         graph.compile(&*pool).expect("a legal frame")

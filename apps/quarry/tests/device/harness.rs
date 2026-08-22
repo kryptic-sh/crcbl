@@ -403,7 +403,9 @@ fn frame_body(
                 final_state: ResourceState::TransferSrc,
             },
         );
-        let _hdr = quarry.renderer.add_passes(&mut graph, target, EXTENT);
+        let _hdr = quarry
+            .renderer
+            .add_passes(&mut graph, &quarry.pool, target, EXTENT);
         graph.compile(&quarry.pool).expect("a legal frame")
     };
     let dump = compiled.dump();
