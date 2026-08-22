@@ -14923,3 +14923,30 @@ neither should be fixed on one backend alone.
 The suite that would hold every native backend to an answer already exists
 (`crates/crcbl/tests/hal_seam_e2e.rs`, run by CI on WARP, lavapipe and Metal),
 so these are decisions rather than infrastructure.
+
+**The first question is answered: accepting a second acquire is right, and
+refusing it would have been stricter than every API underneath.** Vulkan permits
+more than one image to be acquired at once — that is what lets a mailbox
+swapchain keep a frame in flight while the next is drawn — and bounds it by the
+ring's size rather than at one; Metal's `nextDrawable` vends from a finite pool
+and blocks when it is empty rather than refusing; WebGPU has no acquire to call
+twice, since `getCurrentTexture` hands back the same texture for the rest of the
+frame; and DXGI has no acquire at all, only a current back-buffer index. A seam
+that refused the second call would forbid on all four what three of them offer,
+and it would turn dx12's own e2e job red for a loop that is not doing anything
+wrong. **So the seam should say an acquire is not exclusive**, and `crcbl-vk`'s
+single `entry.acquired` slot — which overwrites, in `acquire_next_frame` in
+`crcbl-vk/src/device.rs` — is the thing that does not model the ring rather than
+the caller being at fault. Verified in the tree; the per-API statements are from
+the specifications and were not re-read for this note.
+
+**The second question needs no decision at all** — it is a use-after-free, not a
+policy choice. `reconfigure_swapchain` destroys the ring's images and views, so
+presenting a frame acquired before it presents a destroyed image, and every API
+underneath says so in its own words. It is parked rather than open: closing it
+means each backend clearing its outstanding acquire on reconfigure, and two of
+the backends that hold the hole are `crcbl-mtl` and `crcbl-dx12`, which are
+deferred. Doing it on `crcbl-vk` and `crcbl-webgpu` alone would put the agnostic
+suite red on the other two, which is exactly what the deferral says not to
+cause. Pick it up with the deferral, and do the null device at the same time so
+the refusal has a test that needs no ICD.
