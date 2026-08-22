@@ -6145,36 +6145,60 @@ invocation is CI's invocation, and requiring an explicit opt-out to use the real
 GPU. That is probably the better default and was not taken here because it
 changes what an existing command does.
 
-## `ImportedImage::initial` is a contract nothing enforces, and it has been wrong twice
+## What the import-state check does not reach
 
-`crcbl_render::graph`'s `ImportedImage::initial` documents what state an image
-is already in when the frame imports it, and a declaration that lies produces a
-barrier with no source scope — `Undefined` maps to
-`(stage NONE, access NONE, layout UNDEFINED)` — so nothing waits for the
-previous frame's reads. That is a write-after-read hazard, and **CI's validation
-layer is the only thing in this project that reports it**.
+`ImportedImage::initial` is enforced now — `TransientPool` records what each
+executed graph left every `InitialClaim::Tracked` import in, and `compile`
+answers `GraphError::ImportStateMismatch` when the next frame's declaration
+disagrees. Four things it still does not cover.
 
-Got wrong twice now: `crcbl::screenshot`'s readback barriers (fixed earlier this
-session) and `crates/crcbl/tests/forward_e2e/depth_probe.rs`'s 1x1 shadow
-placeholder, which imported `Undefined` on every call while a previous
-`render_probe` had left it in `ShaderRead`. Both were the same shape and neither
-was caught locally.
+- **`ImportedBuffer` has the same hole and was deliberately left out.** It
+  carries the same `initial`/`final_state` pair with nothing checking it. The
+  recorded defects were all images, and widening doubles the call-site churn.
+  The ledger, the error variant and `validate_imports` all generalise directly;
+  this is a scope decision rather than a design problem.
 
-**The enforceable version**: record each imported image's `final_state` in
-`TransientPool` and reject a contradicting `initial` at `compile()`. What stops
-it being a small change is that a swapchain image legitimately declares
-`Undefined` every frame — the acquire semaphore makes it true — so telling a
-legal `Undefined` from a lie needs a new field on `ImportedImage` and an update
-to every construction site, `apps/bare/src/lib.rs` included.
+- **A graph that is built and never executed desynchronises the audit.**
+  `ForwardRenderer::add_passes` advances `shadow_imported` with a `mem::replace`
+  (`forward.rs`, in `add_passes`), while the ledger is only written in
+  `CompiledGraph::execute`. So a graph compiled and dropped leaves
+  `shadow_imported` moved and the ledger untouched, and the next frame declares
+  `ShaderRead` against an absent entry — where the guard is silent, because
+  nothing recorded contradicts it. Making `shadow_imported` read from the pool
+  instead would close it and delete the field.
 
-**Coverage note:** `crcbl_render::forward`'s
-`the_shadow_atlas_enters_each_frame_in_the_state_the_last_one_left_it` now
-replays the null backend's recorded stream over several laps and asserts each
-barrier's `from` equals what the previous one left, so the engine's own atlas is
-guarded on any machine. **Test fixtures are not.** `run-vk-e2e.sh`'s header
-claims the graph-compile suite covers this class; that is true of the engine and
-not of fixtures like `DepthProbe`, which is exactly where the second instance
-lived.
+- **A first frame cannot be checked at all**, by construction: there is nothing
+  recorded to contradict. The check catches drift between frames, not a wrong
+  declaration on the first one.
+
+- **Two virtual images importing one `ImageHandle` in a single graph** get
+  separate compile-time trackers — they are keyed by `ImageId`, not by handle —
+  and the ledger takes whichever executes last. Pre-existing and not introduced
+  by the check; nothing in the tree does it today.
+
+Ledger growth is bounded in practice rather than by anything in the code: one
+entry per distinct tracked `ImageHandle`, pruned only at
+`TransientPool::destroy`. Tracked imports are long-lived (the shadow atlas, the
+placeholders) and `Acquired` swapchain handles are never recorded, so nothing
+here grows it — but an app creating a fresh tracked image every frame would.
+
+**The exemption is the part to watch in review.** `InitialClaim::Acquired` opts
+an import out of the check entirely, so an owned image marked `Acquired` to make
+a struct literal compile is silently unguarded again, which is the exact failure
+the check exists to prevent. There is no way to detect that from inside the
+graph: an acquire semaphore is not something it can see.
+
+**Coverage note, still true:** `crcbl_render::forward`'s
+`the_shadow_atlas_enters_each_frame_in_the_state_the_last_one_left_it` replays
+the null backend's recorded stream over several laps and asserts each barrier's
+`from` equals what the previous one left, so the engine's own atlas is guarded
+on any machine without a GPU.
+
+**Naming, unresolved:** `InitialClaim::Tracked` shares a word with the private
+`Tracked` struct in `graph.rs`, which is the per-physical-resource compile
+tracker. The compiler never confuses them, but a reader of `graph.rs` meets the
+word in two senses. Rename either side when something else is already in that
+file.
 
 ## This machine's validation layer cannot see the two-submission hazard
 
